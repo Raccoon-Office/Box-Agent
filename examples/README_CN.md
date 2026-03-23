@@ -112,7 +112,7 @@ python examples/04_full_agent.py
 # 复制配置模板
 cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 
-# 编辑配置文件，填入你的 MiniMax API Key
+# 编辑配置文件，填入你的 API Key
 vim box_agent/config/config.yaml
 ```
 
@@ -176,7 +176,7 @@ python examples/02_simple_agent.py
 ```
 ❌ API key not configured in config.yaml
 ```
-**解决**: 确保在 `box_agent/config/config.yaml` 中配置了有效的 MiniMax API Key
+**解决**: 确保在 `box_agent/config/config.yaml` 中配置了有效的 API Key
 
 ### 找不到 config.yaml
 ```
@@ -209,7 +209,7 @@ cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 如果你有好的使用示例，欢迎提交 PR！
 
 建议的新示例方向：
-- Web 搜索集成示例（使用 MiniMax Search MCP）
+- Web 搜索集成示例（使用 Search MCP）
 - Skills 使用示例（文档处理、设计等）
 - 自定义工具开发示例
 - 错误处理和重试机制示例

@@ -51,7 +51,7 @@ if (Test-Path $CONFIG_DIR) {
 Write-ColorOutput "[2/2] Downloading configuration files..." -Color "Blue"
 
 $FILES_COPIED = 0
-$GITHUB_RAW_URL = "https://raw.githubusercontent.com/MiniMax-AI/Box-Agent/main/box_agent/config"
+$GITHUB_RAW_URL = "https://raw.githubusercontent.com/Raccoon-Office/Box-Agent/main/box_agent/config"
 
 # Download config-example.yaml as config.yaml
 try {
@@ -110,10 +110,10 @@ Write-Host ""
 Write-ColorOutput "Next Steps:" -Color "Yellow"
 Write-Host ""
 Write-ColorOutput "1. Install Box Agent:" -Color "Yellow"
-Write-ColorOutput "   pipx install git+https://github.com/MiniMax-AI/Box-Agent.git" -Color "Green"
+Write-ColorOutput "   pipx install git+https://github.com/Raccoon-Office/Box-Agent.git" -Color "Green"
 Write-Host ""
 Write-ColorOutput "2. Configure your API Key:" -Color "Yellow"
-Write-Host "   Edit config.yaml and add your MiniMax API Key:"
+Write-Host "   Edit config.yaml and add your API Key:"
 Write-ColorOutput "   notepad $CONFIG_DIR\config.yaml" -Color "Green"
 Write-ColorOutput "   code $CONFIG_DIR\config.yaml" -Color "Green"
 Write-Host ""

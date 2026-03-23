@@ -2,7 +2,7 @@
 
 English | [中文](./README_CN.md)
 
-**Box Agent** is a minimal yet professional demo project that showcases the best practices for building agents with the MiniMax M2.5 model. Leveraging an Anthropic-compatible API, it fully supports interleaved thinking to unlock M2's powerful reasoning capabilities for long, complex tasks.
+**Box Agent** is a minimal yet professional agent framework that supports multiple LLM providers (Anthropic, OpenAI-compatible, and more). It features interleaved thinking, tool calling, and a robust agent loop for complex tasks.
 
 This project comes packed with features designed for a robust and intelligent agent development experience:
 
@@ -44,20 +44,19 @@ This project comes packed with features designed for a robust and intelligent ag
 
 ### 1. Get API Key
 
-MiniMax provides both global and China platforms. Choose based on your network environment:
+Get an API key from your preferred LLM provider:
 
-| Version    | Platform                                                       | API Base                   |
-| ---------- | -------------------------------------------------------------- | -------------------------- |
-| **Global** | [https://platform.minimax.io](https://platform.minimax.io)     | `https://api.minimax.io`   |
-| **China**  | [https://platform.minimaxi.com](https://platform.minimaxi.com) | `https://api.minimaxi.com` |
+| Provider       | Platform                                                                 | API Base                          |
+| -------------- | ------------------------------------------------------------------------ | --------------------------------- |
+| **Anthropic**  | [https://console.anthropic.com](https://console.anthropic.com)           | `https://api.anthropic.com`       |
+| **OpenAI**     | [https://platform.openai.com](https://platform.openai.com)              | `https://api.openai.com/v1`       |
+| **DeepSeek**   | [https://platform.deepseek.com](https://platform.deepseek.com)          | `https://api.deepseek.com`        |
+| **SiliconFlow** | [https://siliconflow.cn](https://siliconflow.cn)                       | `https://api.siliconflow.cn/v1`   |
 
-**Steps to get API Key:**
-1. Visit the corresponding platform to register and login
-2. Go to **Account Management > API Keys**
-3. Click **"Create New Key"**
-4. Copy and save it securely (key is only shown once)
-
-> 💡 **Tip**: Remember the API Base address corresponding to your chosen platform, you'll need it for configuration
+**Steps:**
+1. Visit the provider's platform to register and login
+2. Navigate to API Key management
+3. Create a new key and save it securely
 
 ### 2. Choose Your Usage Mode
 
@@ -88,7 +87,7 @@ Perfect for users who want to quickly try Box Agent without cloning the reposito
 
 ```bash
 # 1. Install directly from GitHub
-uv tool install git+https://github.com/MiniMax-AI/Box-Agent.git
+uv tool install git+https://github.com/Raccoon-Office/Box-Agent.git
 
 # 2. Run interactive setup wizard (creates config and guides you through provider/key setup)
 box-agent setup
@@ -108,10 +107,10 @@ box-agent config --edit   # Open config file in your editor
 Fill in your API Key and corresponding API Base:
 
 ```yaml
-api_key: "YOUR_API_KEY_HERE"          # API Key from step 1
-api_base: "https://api.minimax.io"  # Global
-# api_base: "https://api.minimaxi.com"  # China
-model: "MiniMax-M2.5"
+api_key: "YOUR_API_KEY_HERE"
+api_base: "https://api.anthropic.com"
+model: "claude-sonnet-4-20250514"
+provider: "anthropic"
 ```
 
 **Start Using:**
@@ -136,7 +135,7 @@ For developers who need to modify code, add features, or debug.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/MiniMax-AI/Box-Agent.git
+git clone https://github.com/Raccoon-Office/Box-Agent.git
 cd Box-Agent
 
 # 2. Install uv (if you haven't)
@@ -176,10 +175,10 @@ vim box_agent/config/config.yaml  # Or use your preferred editor
 Fill in your API Key and corresponding API Base:
 
 ```yaml
-api_key: "YOUR_API_KEY_HERE"          # API Key from step 1
-api_base: "https://api.minimax.io"  # Global
-# api_base: "https://api.minimaxi.com"  # China
-model: "MiniMax-M2.5"
+api_key: "YOUR_API_KEY_HERE"
+api_base: "https://api.anthropic.com"
+model: "claude-sonnet-4-20250514"
+provider: "anthropic"
 max_steps: 100
 workspace_dir: "./workspace"
 ```
@@ -310,12 +309,6 @@ python -m box_agent.cli
 - [Development Guide](docs/DEVELOPMENT_GUIDE.md) - Detailed development and configuration guidance
 - [Production Guide](docs/PRODUCTION_GUIDE.md) - Best practices for production deployment
 
-## Community
-
-Join the MiniMax official community to get help, share ideas, and stay updated:
-
-- **WeChat Group**: Scan the QR code on [Contact Us](https://platform.minimaxi.com/docs/faq/contact-us) page to join
-
 ## Contributing
 
 Issues and Pull Requests are welcome!
@@ -329,9 +322,8 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## References
 
-- MiniMax API: https://platform.minimax.io/docs
-- MiniMax-M2: https://github.com/MiniMax-AI/MiniMax-M2
 - Anthropic API: https://docs.anthropic.com/claude/reference
+- OpenAI API: https://platform.openai.com/docs/api-reference
 - Claude Skills: https://github.com/anthropics/skills
 - MCP Servers: https://github.com/modelcontextprotocol/servers
 

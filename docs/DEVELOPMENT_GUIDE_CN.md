@@ -10,7 +10,7 @@
     - [2.1 交互式命令](#21-交互式命令)
     - [2.2 已集成的 MCP 工具](#22-已集成的-mcp-工具)
       - [Memory - 知识图谱记忆系统](#memory---知识图谱记忆系统)
-      - [MiniMax Search - 网页搜索与浏览](#minimax-search---网页搜索与浏览)
+      - [Web Search - 网页搜索与浏览](#web-search---网页搜索与浏览)
   - [3. 扩展能力](#3-扩展能力)
     - [3.1 添加自定义工具](#31-添加自定义工具)
       - [步骤](#步骤)
@@ -83,7 +83,7 @@ box-agent/
 
 ---
 
-#### MiniMax Search - 网页搜索与浏览
+#### Web Search - 网页搜索与浏览
 
 **功能**：提供三大强大工具：
 - `search` - 网页搜索
@@ -97,12 +97,11 @@ box-agent/
 ```json
 {
   "mcpServers": {
-    "minimax_search": {
+    "web_search": {
       "disabled": false,
       "env": {
         "JINA_API_KEY": "your-jina-api-key",
-        "SERPER_API_KEY": "your-serper-api-key",
-        "MINIMAX_API_KEY": "your-minimax-token"
+        "SERPER_API_KEY": "your-serper-api-key"
       }
     }
   }

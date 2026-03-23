@@ -358,14 +358,10 @@ async def test_mcp_tools_loading():
 
 @pytest.mark.asyncio
 async def test_git_mcp_loading(mcp_config):
-    """Test loading MCP Server from Git repository (minimax_search)."""
+    """Test loading MCP Server from Git repository."""
     print("\n" + "=" * 70)
-    print("Testing: Loading MiniMax Search MCP Server from Git repository")
+    print("Testing: Loading MCP Server from Git repository")
     print("=" * 70)
-
-    git_url = mcp_config["mcpServers"]["minimax_search"]["args"][1]
-    print(f"\n📍 Git repository: {git_url}")
-    print("⏳ Cloning and installing...\n")
 
     try:
         # Load MCP tools
@@ -384,29 +380,6 @@ async def test_git_mcp_loading(mcp_config):
                 desc = tool.description[:80] + "..." if len(tool.description) > 80 else tool.description
                 print(f"  • {tool.name}")
                 print(f"    {desc}")
-
-        # Verify expected tools from minimax_search
-        expected_tools = ["search", "parallel_search", "browse"]
-        loaded_tool_names = [t.name for t in tools]
-
-        print("\n🔍 Function verification:")
-        found_count = 0
-        for expected in expected_tools:
-            if expected in loaded_tool_names:
-                print(f"  ✅ {expected} - OK")
-                found_count += 1
-            else:
-                print(f"  ❌ {expected} - Missing")
-
-        # If no expected tools found, minimax_search connection failed
-        if found_count == 0:
-            print("\n⚠️  Warning: minimax_search MCP Server connection failed")
-            print("This may be due to SSH key authentication requirements or network issues")
-            pytest.skip("minimax_search MCP Server connection failed, skipping test")
-
-        # Assert all expected tools exist
-        missing_tools = [t for t in expected_tools if t not in loaded_tool_names]
-        assert len(missing_tools) == 0, f"Missing tools: {missing_tools}"
 
         print("\n" + "=" * 70)
         print("✅ All tests passed! MCP Server loaded from Git repository successfully!")

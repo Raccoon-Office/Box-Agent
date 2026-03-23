@@ -34,7 +34,7 @@
 
 ### 2.2 模型回退机制
 
-当前 Demo 固定使用单一模型（MiniMax-M2.5），调用失败时会直接报错。
+当前 Demo 固定使用单一模型，调用失败时会直接报错。
 
 - **建立模型池**：配置多个模型账号，建立模型池以提高服务可用性。
 - **引入高可用策略**：为模型池引入自动健康检测、故障节点切换、熔断等高可用策略。
@@ -129,7 +129,7 @@ RUN groupadd -r agent && useradd -r -g agent agent
 WORKDIR /app
 
 # 方案1：从 Git 仓库克隆（适用于公开仓库）
-RUN git clone https://github.com/MiniMax-AI/agent-demo.git . && \
+RUN git clone https://github.com/Raccoon-Office/Box-Agent.git . && \
     chown -R agent:agent /app
 
 # 方案2：从本地复制代码（适用于私有部署）

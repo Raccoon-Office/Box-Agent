@@ -34,7 +34,7 @@ This project is a **teaching-level demo** that demonstrates the core concepts an
 
 ### 2.2 Model Fallback Mechanism
 
-Currently using a single fixed model (MiniMax-M2.5), which will directly report errors on failure.
+Currently using a single fixed model, which will directly report errors on failure.
 
 - Introduce a model pool by configuring multiple model accounts to improve availability
 - Introduce automatic health checks, failure removal, circuit breaker strategies for the model pool
@@ -129,7 +129,7 @@ RUN groupadd -r agent && useradd -r -g agent agent
 WORKDIR /app
 
 # Option 1: Clone from Git repository (for public repos)
-RUN git clone https://github.com/MiniMax-AI/agent-demo.git . && \
+RUN git clone https://github.com/Raccoon-Office/Box-Agent.git . && \
     chown -R agent:agent /app
 
 # Option 2: Copy code from local (for private deployments)

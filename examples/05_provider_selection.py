@@ -27,7 +27,7 @@ async def demo_anthropic_provider():
     client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.ANTHROPIC,  # Specify Anthropic provider
-        model=config.get("model", "MiniMax-M2.5"),
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     print(f"Provider: {client.provider}")
@@ -62,7 +62,7 @@ async def demo_openai_provider():
     client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.OPENAI,  # Specify OpenAI provider
-        model=config.get("model", "MiniMax-M2.5"),
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     print(f"Provider: {client.provider}")
@@ -96,7 +96,7 @@ async def demo_default_provider():
     # Initialize client without specifying provider (defaults to Anthropic)
     client = LLMClient(
         api_key=config["api_key"],
-        model=config.get("model", "MiniMax-M2.5"),
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     print(f"Provider (default): {client.provider}")
@@ -129,13 +129,13 @@ async def demo_provider_comparison():
     anthropic_client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.ANTHROPIC,
-        model=config.get("model", "MiniMax-M2.5"),
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     openai_client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.OPENAI,
-        model=config.get("model", "MiniMax-M2.5"),
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     # Same question for both

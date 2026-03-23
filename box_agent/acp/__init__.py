@@ -68,7 +68,7 @@ class SessionState:
     cancelled: bool = False
 
 
-class MiniMaxACPAgent:
+class BoxACPAgent:
     """Minimal ACP adapter wrapping the existing Agent runtime."""
 
     def __init__(
@@ -186,7 +186,7 @@ async def run_acp_server(config: Config | None = None) -> None:
     rcfg = config.llm.retry
     llm = LLMClient(api_key=config.llm.api_key, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
     reader, writer = await stdio_streams()
-    AgentSideConnection(lambda conn: MiniMaxACPAgent(conn, config, llm, base_tools, system_prompt), writer, reader)
+    AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt), writer, reader)
     logger.info("Box-Agent ACP server running")
     await asyncio.Event().wait()
 
@@ -195,4 +195,4 @@ def main() -> None:
     asyncio.run(run_acp_server())
 
 
-__all__ = ["MiniMaxACPAgent", "run_acp_server", "main"]
+__all__ = ["BoxACPAgent", "run_acp_server", "main"]

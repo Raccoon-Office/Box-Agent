@@ -32,7 +32,7 @@ If you have an idea for a new feature, please create an Issue first to discuss i
 1. Fork this repository.
 2. Clone your fork:
    ```bash
-   git clone https://github.com/MiniMax-AI/Box-Agent box-agent
+   git clone https://github.com/Raccoon-Office/Box-Agent box-agent
    cd box-agent
    ```
 

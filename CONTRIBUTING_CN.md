@@ -32,7 +32,7 @@
 1. Fork 本仓库
 2. 克隆你的 fork：
    ```bash
-   git clone https://github.com/MiniMax-AI/Box-Agent box-agent
+   git clone https://github.com/Raccoon-Office/Box-Agent box-agent
    cd box-agent
    ```
 

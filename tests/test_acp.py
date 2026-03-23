@@ -1,10 +1,10 @@
-"""Integration tests for the MiniMax ACP adapter."""
+"""Integration tests for the Box ACP adapter."""
 
 from types import SimpleNamespace
 
 import pytest
 
-from box_agent.acp import MiniMaxACPAgent
+from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
 from box_agent.schema import FunctionCall, LLMResponse, ToolCall
 from box_agent.tools.base import Tool, ToolResult
@@ -65,7 +65,7 @@ def acp_agent(tmp_path):
         tools=ToolsConfig(),
     )
     conn = DummyConn()
-    agent = MiniMaxACPAgent(conn, config, DummyLLM(), [EchoTool()], "system")
+    agent = BoxACPAgent(conn, config, DummyLLM(), [EchoTool()], "system")
     return agent, conn
 
 

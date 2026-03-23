@@ -40,9 +40,9 @@ box-agent = "box_agent.cli:main"
 box-agent-acp = "box_agent.acp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/MiniMax-AI/Mini-Agent"
-Repository = "https://github.com/MiniMax-AI/Mini-Agent"
-Issues = "https://github.com/MiniMax-AI/Mini-Agent/issues"
+Homepage = "https://github.com/Raccoon-Office/Box-Agent"
+Repository = "https://github.com/Raccoon-Office/Box-Agent"
+Issues = "https://github.com/Raccoon-Office/Box-Agent/issues"
 
 [project.optional-dependencies]
 dev = [

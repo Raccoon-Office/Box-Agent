@@ -9,7 +9,7 @@
     - [2.1 Interactive Commands](#21-interactive-commands)
     - [2.2 Integrated MCP Tools](#22-integrated-mcp-tools)
       - [Memory - Knowledge Graph Memory System](#memory---knowledge-graph-memory-system)
-      - [MiniMax Search - Web Search and Browse](#minimax-search---web-search-and-browse)
+      - [Web Search - Web Search and Browse](#web-search---web-search-and-browse)
   - [3. Extended Abilities](#3-extended-abilities)
     - [3.1 Adding Custom Tools](#31-adding-custom-tools)
       - [Steps](#steps)
@@ -82,7 +82,7 @@ This project comes with pre-configured MCP (Model Context Protocol) tools that e
 
 ---
 
-#### MiniMax Search - Web Search and Browse
+#### Web Search - Web Search and Browse
 
 **Function**: Provides three powerful tools:
 - `search` - Web search capability
@@ -96,12 +96,11 @@ This project comes with pre-configured MCP (Model Context Protocol) tools that e
 ```json
 {
   "mcpServers": {
-    "minimax_search": {
+    "web_search": {
       "disabled": false,
       "env": {
         "JINA_API_KEY": "your-jina-api-key",
-        "SERPER_API_KEY": "your-serper-api-key",
-        "MINIMAX_TOKEN": "your-minimax-token"
+        "SERPER_API_KEY": "your-serper-api-key"
       }
     }
   }

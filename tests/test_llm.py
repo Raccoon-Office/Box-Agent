@@ -202,7 +202,7 @@ async def main():
     print("=" * 80)
     print("Running LLM Wrapper Tests")
     print("=" * 80)
-    print("\nNote: These tests require a valid MiniMax API key in config.yaml")
+    print("\nNote: These tests require a valid API key in config.yaml")
 
     results = []
 

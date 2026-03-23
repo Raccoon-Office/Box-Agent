@@ -32,8 +32,8 @@ async def test_anthropic_simple_completion():
     # Create Anthropic client
     client = AnthropicClient(
         api_key=config["api_key"],
-        api_base="https://api.minimaxi.com/anthropic",
-        model=config.get("model", "MiniMax-M2.5"),
+        api_base="https://api.anthropic.com",
+        model=config.get("model", "claude-sonnet-4-20250514"),
         retry_config=RetryConfig(enabled=True, max_retries=2),
     )
 
@@ -73,8 +73,8 @@ async def test_openai_simple_completion():
     # Create OpenAI client
     client = OpenAIClient(
         api_key=config["api_key"],
-        api_base="https://api.minimaxi.com/v1",
-        model=config.get("model", "MiniMax-M2.5"),
+        api_base="https://api.anthropic.com",
+        model=config.get("model", "claude-sonnet-4-20250514"),
         retry_config=RetryConfig(enabled=True, max_retries=2),
     )
 
@@ -114,8 +114,8 @@ async def test_anthropic_tool_calling():
     # Create Anthropic client
     client = AnthropicClient(
         api_key=config["api_key"],
-        api_base="https://api.minimaxi.com/anthropic",
-        model=config.get("model", "MiniMax-M2.5"),
+        api_base="https://api.anthropic.com",
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     # Define tool using dict format
@@ -174,8 +174,8 @@ async def test_openai_tool_calling():
     # Create OpenAI client
     client = OpenAIClient(
         api_key=config["api_key"],
-        api_base="https://api.minimaxi.com/v1",
-        model=config.get("model", "MiniMax-M2.5"),
+        api_base="https://api.anthropic.com",
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     # Define tool using dict format (will be converted internally for OpenAI)
@@ -234,8 +234,8 @@ async def test_multi_turn_conversation():
     # Test with Anthropic client
     client = AnthropicClient(
         api_key=config["api_key"],
-        api_base="https://api.minimaxi.com/anthropic",
-        model=config.get("model", "MiniMax-M2.5"),
+        api_base="https://api.anthropic.com",
+        model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
     # Define tool using dict format
@@ -309,7 +309,7 @@ async def main():
     print("=" * 80)
     print("Running LLM Client Tests")
     print("=" * 80)
-    print("\nNote: These tests require a valid MiniMax API key in config.yaml")
+    print("\nNote: These tests require a valid API key in config.yaml")
 
     results = []
 

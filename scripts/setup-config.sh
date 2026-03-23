@@ -38,7 +38,7 @@ fi
 echo -e "${BLUE}[2/2]${NC} Downloading configuration files..."
 
 FILES_COPIED=0
-GITHUB_RAW_URL="https://raw.githubusercontent.com/MiniMax-AI/Box-Agent/main/box_agent/config"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/Raccoon-Office/Box-Agent/main/box_agent/config"
 
 # Download config-example.yaml as config.yaml
 if curl -fsSL "$GITHUB_RAW_URL/config-example.yaml" -o "$CONFIG_DIR/config.yaml" 2>/dev/null; then
@@ -82,10 +82,10 @@ echo ""
 echo -e "${YELLOW}Next Steps:${NC}"
 echo ""
 echo -e "${YELLOW}1. Install Box Agent:${NC}"
-echo -e "   ${GREEN}pipx install git+https://github.com/MiniMax-AI/Box-Agent.git${NC}"
+echo -e "   ${GREEN}pipx install git+https://github.com/Raccoon-Office/Box-Agent.git${NC}"
 echo ""
 echo -e "${YELLOW}2. Configure your API Key:${NC}"
-echo -e "   Edit config.yaml and add your MiniMax API Key:"
+echo -e "   Edit config.yaml and add your API Key:"
 echo -e "   ${GREEN}nano $CONFIG_DIR/config.yaml${NC}"
 echo -e "   ${GREEN}vim $CONFIG_DIR/config.yaml${NC}"
 echo -e "   ${GREEN}code $CONFIG_DIR/config.yaml${NC}"

@@ -24,8 +24,8 @@ class LLMConfig(BaseModel):
     """LLM configuration"""
 
     api_key: str
-    api_base: str = "https://api.minimax.io"
-    model: str = "MiniMax-M2.5"
+    api_base: str = "https://api.anthropic.com"
+    model: str = "claude-sonnet-4-20250514"
     provider: str = "anthropic"  # "anthropic" or "openai"
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
@@ -123,8 +123,8 @@ class Config(BaseModel):
 
         llm_config = LLMConfig(
             api_key=data["api_key"],
-            api_base=data.get("api_base", "https://api.minimax.io"),
-            model=data.get("model", "MiniMax-M2.5"),
+            api_base=data.get("api_base", "https://api.anthropic.com"),
+            model=data.get("model", "claude-sonnet-4-20250514"),
             provider=data.get("provider", "anthropic"),
             retry=retry_config,
         )
@@ -243,8 +243,8 @@ class Config(BaseModel):
                 '# Box Agent Configuration\n'
                 '# Edit this file to add your API key and base URL\n'
                 'api_key: "YOUR_API_KEY_HERE"\n'
-                'api_base: "https://api.minimax.io"\n'
-                'model: "MiniMax-M2.5"\n'
+                'api_base: "https://api.anthropic.com"\n'
+                'model: "claude-sonnet-4-20250514"\n'
                 'provider: "anthropic"\n',
                 encoding="utf-8",
             )

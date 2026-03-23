@@ -166,7 +166,7 @@ async def main():
     print("=" * 80)
     print("Running Agent Integration Tests")
     print("=" * 80)
-    print("\nNote: These tests require a valid MiniMax API key in config.yaml")
+    print("\nNote: These tests require a valid API key in config.yaml")
     print("These tests will actually call the LLM API and may take some time.\n")
 
     # Test simple file task

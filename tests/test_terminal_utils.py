@@ -187,7 +187,7 @@ class TestRealWorldScenarios:
 
     def test_session_info_model(self):
         """Test Session Info model line."""
-        model = "minimax-01"
+        model = "claude-sonnet-4-20250514"
         line = f"Model: {model}"
         width = calculate_display_width(line)
         # Should calculate correctly regardless of model name

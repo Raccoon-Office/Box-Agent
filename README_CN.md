@@ -2,7 +2,7 @@
 
 [English](./README.md) | 中文
 
-**Box Agent** 是一个极简但专业的演示项目，旨在展示使用 MiniMax M2.5 模型构建 Agent 的最佳实践。项目通过兼容 Anthropic 的 API，完全支持交错思维（interleaved thinking），从而解锁 M2 模型在处理长而复杂的任务时强大的推理能力。
+**Box Agent** 是一个极简但专业的 Agent 框架，支持多种 LLM 提供商（Anthropic、OpenAI 兼容等）。项目支持交错思维（interleaved thinking）、工具调用和完整的 Agent 循环，适用于处理复杂任务。
 
 该项目具备一系列为稳健、智能的 Agent 开发而设计的特性：
 
@@ -44,20 +44,19 @@
 
 ### 1. 获取 API Key
 
-MiniMax 提供国内和海外两个平台，请根据您的网络环境选择：
+从您选择的 LLM 提供商获取 API Key：
 
-| 版本       | 平台地址                                                       | API Base                   |
-| ---------- | -------------------------------------------------------------- | -------------------------- |
-| **国内版** | [https://platform.minimaxi.com](https://platform.minimaxi.com) | `https://api.minimaxi.com` |
-| **海外版** | [https://platform.minimax.io](https://platform.minimax.io)     | `https://api.minimax.io`   |
+| 提供商         | 平台地址                                                                 | API Base                          |
+| -------------- | ------------------------------------------------------------------------ | --------------------------------- |
+| **Anthropic**  | [https://console.anthropic.com](https://console.anthropic.com)           | `https://api.anthropic.com`       |
+| **OpenAI**     | [https://platform.openai.com](https://platform.openai.com)              | `https://api.openai.com/v1`       |
+| **DeepSeek**   | [https://platform.deepseek.com](https://platform.deepseek.com)          | `https://api.deepseek.com`        |
+| **SiliconFlow** | [https://siliconflow.cn](https://siliconflow.cn)                       | `https://api.siliconflow.cn/v1`   |
 
 **获取步骤：**
 1. 访问相应平台注册并登录
-2. 进入 **账户管理 > API 密钥**
-3. 点击 **"创建新密钥"**
-4. 复制并妥善保存（密钥仅显示一次）
-
-> 💡 **提示**：请记住您所选平台对应的 API Base 地址，后续配置时会用到。
+2. 进入 API Key 管理页面
+3. 创建新密钥并妥善保存
 
 ### 2. 选择使用模式
 
@@ -88,7 +87,7 @@ source ~/.bashrc  # 或 ~/.zshrc (macOS/Linux)
 
 ```bash
 # 1. 直接从 GitHub 安装
-uv tool install git+https://github.com/MiniMax-AI/Box-Agent.git
+uv tool install git+https://github.com/Raccoon-Office/Box-Agent.git
 
 # 2. 运行交互式配置向导（自动创建配置文件并引导设置 Provider/API Key）
 box-agent setup
@@ -108,10 +107,10 @@ box-agent config --edit   # 用编辑器打开配置文件
 填入您的 API Key 和对应的 API Base：
 
 ```yaml
-api_key: "YOUR_API_KEY_HERE"          # 填入第 1 步获取的 API Key
-api_base: "https://api.minimaxi.com"  # 国内版
-# api_base: "https://api.minimax.io"  # 海外版（如使用海外平台，请取消本行注释）
-model: "MiniMax-M2.5"
+api_key: "YOUR_API_KEY_HERE"
+api_base: "https://api.anthropic.com"
+model: "claude-sonnet-4-20250514"
+provider: "anthropic"
 ```
 
 **开始使用：**
@@ -136,7 +135,7 @@ uv tool list                                  # 查看所有已安装的工具
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/MiniMax-AI/Box-Agent.git
+git clone https://github.com/Raccoon-Office/Box-Agent.git
 cd Box-Agent
 
 # 2. 安装 uv（如果尚未安装）
@@ -176,10 +175,10 @@ vim box_agent/config/config.yaml  # 或使用您偏好的编辑器
 填入您的 API Key 和对应的 API Base：
 
 ```yaml
-api_key: "YOUR_API_KEY_HERE"          # 填入第 1 步获取的 API Key
-api_base: "https://api.minimaxi.com"  # 国内版
-# api_base: "https://api.minimax.io"  # 海外版（如使用海外平台，请修改此行）
-model: "MiniMax-M2.5"
+api_key: "YOUR_API_KEY_HERE"
+api_base: "https://api.anthropic.com"
+model: "claude-sonnet-4-20250514"
+provider: "anthropic"
 max_steps: 100
 workspace_dir: "./workspace"
 ```
@@ -311,12 +310,6 @@ python -m box_agent.cli
 - [开发指南](docs/DEVELOPMENT_GUIDE_CN.md) - 详细的开发和配置指引
 - [生产环境指南](docs/PRODUCTION_GUIDE_CN.md) - 生产部署最佳实践
 
-## 社区
-
-加入 MiniMax 官方社区，获取帮助、分享想法、了解最新动态：
-
-- **微信交流群**：扫描 [联系我们](https://platform.minimaxi.com/docs/faq/contact-us) 页面的二维码加入官方交流群
-
 ## 贡献
 
 我们欢迎并鼓励您提交 Issue 和 Pull Request！
@@ -330,9 +323,8 @@ python -m box_agent.cli
 
 ## 参考资源
 
-- MiniMax API: https://platform.minimaxi.com/docs
-- MiniMax-M2: https://github.com/MiniMax-AI/MiniMax-M2
 - Anthropic API: https://docs.anthropic.com/claude/reference
+- OpenAI API: https://platform.openai.com/docs/api-reference
 - Claude Skills: https://github.com/anthropics/skills
 - MCP Servers: https://github.com/modelcontextprotocol/servers
 

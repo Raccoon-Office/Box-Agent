@@ -166,7 +166,7 @@ async def demo_tool_schemas():
     client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.ANTHROPIC,
-        model="MiniMax-M2.5",
+        model="claude-sonnet-4-20250514",
     )
 
     # Test with a query that should trigger weather tool
@@ -215,7 +215,7 @@ async def demo_multiple_tools():
     client = LLMClient(
         api_key=config["api_key"],
         provider=LLMProvider.ANTHROPIC,
-        model="MiniMax-M2.5",
+        model="claude-sonnet-4-20250514",
     )
 
     messages = [Message(role="user", content="Calculate 15 * 23 for me")]

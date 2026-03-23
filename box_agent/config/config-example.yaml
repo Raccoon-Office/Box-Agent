@@ -8,19 +8,19 @@
 # Fill in your API key and customize settings as needed
 
 # ===== LLM Configuration =====
-# MiniMax API Configuration
-# MiniMax provides both global and China platforms:
-# - Global: https://platform.minimax.io -> api_base: https://api.minimax.io
-# - China: https://platform.minimaxi.com -> api_base: https://api.minimaxi.com
-# Please choose based on your network environment and get API key from corresponding platform
-api_key: "YOUR_API_KEY_HERE"  # Replace with your MiniMax API Key
-api_base: "https://api.minimax.io"   # Global users (default)
-# api_base: "https://api.minimaxi.com"  # China users
-model: "MiniMax-M2.5"
-# LLM provider: "anthropic" or "openai"
-# For MiniMax API, the suffix (/anthropic or /v1) is auto-appended based on provider.
-# For third-party APIs (e.g., https://api.siliconflow.cn/v1), api_base is used as-is.
-provider: "anthropic"  # Default: anthropic
+# Supported providers:
+#   "anthropic" — Anthropic-compatible APIs (Anthropic, etc.)
+#   "openai"    — OpenAI-compatible APIs (OpenAI, DeepSeek, SiliconFlow, etc.)
+#
+# Example api_base values:
+#   Anthropic   : https://api.anthropic.com
+#   OpenAI      : https://api.openai.com/v1
+#   DeepSeek    : https://api.deepseek.com
+#   SiliconFlow : https://api.siliconflow.cn/v1
+api_key: "YOUR_API_KEY_HERE"
+api_base: "https://api.anthropic.com"
+model: "claude-sonnet-4-20250514"
+provider: "anthropic"
 
 # ===== Retry Configuration =====
 retry:

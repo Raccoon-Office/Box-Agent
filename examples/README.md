@@ -112,7 +112,7 @@ python examples/04_full_agent.py
 # Copy configuration template
 cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 
-# Edit config file and fill in your MiniMax API Key
+# Edit config file and fill in your API Key
 vim box_agent/config/config.yaml
 ```
 
@@ -176,7 +176,7 @@ These examples are all refined from test cases in the `tests/` directory:
 ```
 ❌ API key not configured in config.yaml
 ```
-**Solution**: Ensure you've configured a valid MiniMax API Key in `box_agent/config/config.yaml`
+**Solution**: Ensure you've configured a valid API Key in `box_agent/config/config.yaml`
 
 ### config.yaml Not Found
 ```
@@ -209,7 +209,7 @@ cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 If you have good usage examples, PRs are welcome!
 
 Suggested new example directions:
-- Web search integration examples (using MiniMax Search MCP)
+- Web search integration examples (using Search MCP)
 - Skills usage examples (document processing, design, etc.)
 - Custom tool development examples
 - Error handling and retry mechanism examples

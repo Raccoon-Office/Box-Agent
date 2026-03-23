@@ -56,8 +56,8 @@ def run_setup_wizard(config_path: Path) -> bool:
     print()
 
     # Step 1: Choose provider
-    print(f"{Colors.BRIGHT_YELLOW}[1/3] Choose LLM provider:{Colors.RESET}")
-    print(f"  {Colors.BRIGHT_GREEN}1){Colors.RESET} Anthropic-compatible (MiniMax, Anthropic, etc.)")
+    print(f"{Colors.BRIGHT_YELLOW}[1/4] Choose LLM provider:{Colors.RESET}")
+    print(f"  {Colors.BRIGHT_GREEN}1){Colors.RESET} Anthropic-compatible (Anthropic, etc.)")
     print(f"  {Colors.BRIGHT_GREEN}2){Colors.RESET} OpenAI-compatible (OpenAI, DeepSeek, SiliconFlow, etc.)")
     print()
 
@@ -75,13 +75,11 @@ def run_setup_wizard(config_path: Path) -> bool:
 
     # Step 2: API Base URL with sensible defaults
     if provider == "anthropic":
-        default_base = "https://api.minimax.io"
+        default_base = "https://api.anthropic.com"
         examples = (
-            f"  {Colors.DIM}MiniMax Global : https://api.minimax.io{Colors.RESET}\n"
-            f"  {Colors.DIM}MiniMax China  : https://api.minimaxi.com{Colors.RESET}\n"
-            f"  {Colors.DIM}Anthropic      : https://api.anthropic.com{Colors.RESET}"
+            f"  {Colors.DIM}Anthropic : https://api.anthropic.com{Colors.RESET}"
         )
-        default_model = "MiniMax-M2.5"
+        default_model = "claude-sonnet-4-20250514"
     else:
         default_base = "https://api.openai.com/v1"
         examples = (
@@ -91,7 +89,7 @@ def run_setup_wizard(config_path: Path) -> bool:
         )
         default_model = "gpt-4o"
 
-    print(f"\n{Colors.BRIGHT_YELLOW}[2/3] API Base URL:{Colors.RESET}")
+    print(f"\n{Colors.BRIGHT_YELLOW}[2/4] API Base URL:{Colors.RESET}")
     print(examples)
     print()
     try:
@@ -102,8 +100,18 @@ def run_setup_wizard(config_path: Path) -> bool:
     if not api_base:
         api_base = default_base
 
-    # Step 3: API Key
-    print(f"\n{Colors.BRIGHT_YELLOW}[3/3] API Key:{Colors.RESET}")
+    # Step 3: Model
+    print(f"\n{Colors.BRIGHT_YELLOW}[3/4] Model:{Colors.RESET}")
+    try:
+        model = input(f"{Colors.BRIGHT_CYAN}Model [{default_model}]: {Colors.RESET}").strip()
+    except (KeyboardInterrupt, EOFError):
+        print(f"\n{Colors.YELLOW}Setup cancelled.{Colors.RESET}\n")
+        return False
+    if not model:
+        model = default_model
+
+    # Step 4: API Key
+    print(f"\n{Colors.BRIGHT_YELLOW}[4/4] API Key:{Colors.RESET}")
     try:
         api_key = input(f"{Colors.BRIGHT_CYAN}API Key: {Colors.RESET}").strip()
     except (KeyboardInterrupt, EOFError):
@@ -122,7 +130,7 @@ def run_setup_wizard(config_path: Path) -> bool:
     data["api_key"] = api_key
     data["api_base"] = api_base
     data["provider"] = provider
-    data["model"] = data.get("model", default_model)
+    data["model"] = model
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -854,7 +862,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         system_prompt = system_prompt_path.read_text(encoding="utf-8")
         print(f"{Colors.GREEN}✅ Loaded system prompt (from: {system_prompt_path}){Colors.RESET}")
     else:
-        system_prompt = "You are Box-Agent, an intelligent assistant powered by MiniMax M2.5 that can help users complete various tasks."
+        system_prompt = "You are Box-Agent, an intelligent assistant that can help users complete various tasks."
         print(f"{Colors.YELLOW}⚠️  System prompt not found, using default{Colors.RESET}")
 
     # 6. Inject Skills Metadata into System Prompt (Progressive Disclosure - Level 1)
