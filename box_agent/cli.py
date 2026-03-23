@@ -840,15 +840,51 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         print(f"{Colors.RED}FAILED{Colors.RESET}")
         print(f"\n{Colors.RED}❌ API connection failed: {err_str}{Colors.RESET}")
         print()
-        print(f"{Colors.BRIGHT_CYAN}Please check your configuration:{Colors.RESET}")
-        print(f"  {Colors.BRIGHT_GREEN}{config_path}{Colors.RESET}")
-        print()
         print(f"{Colors.DIM}  api_key:    {config.llm.api_key[:8]}...{Colors.RESET}")
         print(f"{Colors.DIM}  api_base:   {config.llm.api_base}{Colors.RESET}")
         print(f"{Colors.DIM}  provider:   {config.llm.provider}{Colors.RESET}")
         print(f"{Colors.DIM}  model:      {config.llm.model}{Colors.RESET}")
         print()
-        return
+        # Offer to re-run setup wizard
+        try:
+            answer = input(f"{Colors.BRIGHT_CYAN}Would you like to reconfigure? [Y/n]: {Colors.RESET}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if answer in ("", "y", "yes"):
+            if run_setup_wizard(config_path):
+                # Retry loading config and verifying
+                try:
+                    config = Config.from_yaml(config_path)
+                    provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
+                    llm_client = LLMClient(
+                        api_key=config.llm.api_key,
+                        provider=provider,
+                        api_base=config.llm.api_base,
+                        model=config.llm.model,
+                        retry_config=retry_config if config.llm.retry.enabled else None,
+                    )
+                    if config.llm.retry.enabled:
+                        llm_client.retry_callback = on_retry
+                    print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
+                    _verify_client2 = LLMClient(
+                        api_key=config.llm.api_key,
+                        provider=provider,
+                        api_base=config.llm.api_base,
+                        model=config.llm.model,
+                        retry_config=VerifyRetryConfig(enabled=False),
+                    )
+                    await _verify_client2.generate(messages=[Msg(role="user", content="hi")])
+                    print(f"{Colors.GREEN}OK{Colors.RESET}")
+                except Exception as e2:
+                    print(f"{Colors.RED}FAILED{Colors.RESET}")
+                    print(f"\n{Colors.RED}❌ API connection still failed: {e2}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}Please check your configuration: {config_path}{Colors.RESET}")
+                    return
+            else:
+                return
+        else:
+            return
 
     # 3. Initialize base tools (independent of workspace)
     tools, skill_loader = await initialize_base_tools(config)
@@ -1226,6 +1262,19 @@ def main():
     if args.command == "doctor":
         asyncio.run(cmd_doctor())
         return
+
+    # Ensure user config exists; run setup wizard on first launch
+    config_path = Config._ensure_user_config()
+    try:
+        config_check = Config.from_yaml(config_path)
+        # If key is still the placeholder, treat as unconfigured
+        if config_check.llm.api_key in ("YOUR_API_KEY_HERE", ""):
+            print(f"{Colors.BRIGHT_CYAN}First-time setup detected. Let's configure Box Agent.{Colors.RESET}\n")
+            run_setup_wizard(config_path)
+    except Exception:
+        # Config can't be parsed or key is missing — run wizard
+        print(f"{Colors.BRIGHT_CYAN}First-time setup detected. Let's configure Box Agent.{Colors.RESET}\n")
+        run_setup_wizard(config_path)
 
     # Determine workspace directory
     # Expand ~ to user home directory for portability
