@@ -10,14 +10,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mini_agent.llm import AnthropicClient, OpenAIClient
-from mini_agent.retry import RetryConfig
-from mini_agent.schema import Message
+from box_agent.llm import AnthropicClient, OpenAIClient
+from box_agent.retry import RetryConfig
+from box_agent.schema import Message
 
 
 def load_config():
     """Load config from config.yaml."""
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 

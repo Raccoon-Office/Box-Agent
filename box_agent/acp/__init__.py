@@ -1,4 +1,4 @@
-"""ACP (Agent Client Protocol) bridge for Mini-Agent."""
+"""ACP (Agent Client Protocol) bridge for Box-Agent."""
 
 from __future__ import annotations
 
@@ -31,12 +31,13 @@ from acp import (
 from pydantic import field_validator
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
-from mini_agent.agent import Agent
-from mini_agent.cli import add_workspace_tools, initialize_base_tools
-from mini_agent.config import Config
-from mini_agent.llm import LLMClient
-from mini_agent.retry import RetryConfig as RetryConfigBase
-from mini_agent.schema import Message
+from box_agent import __version__
+from box_agent.agent import Agent
+from box_agent.cli import add_workspace_tools, initialize_base_tools
+from box_agent.config import Config
+from box_agent.llm import LLMClient
+from box_agent.retry import RetryConfig as RetryConfigBase
+from box_agent.schema import Message
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class MiniMaxACPAgent:
         return InitializeResponse(
             protocolVersion=PROTOCOL_VERSION,
             agentCapabilities=AgentCapabilities(loadSession=False),
-            agentInfo=Implementation(name="mini-agent", title="Mini-Agent", version="0.1.0"),
+            agentInfo=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
 
     async def newSession(self, params: NewSessionRequest) -> NewSessionResponse:
@@ -169,7 +170,7 @@ class MiniMaxACPAgent:
 
 
 async def run_acp_server(config: Config | None = None) -> None:
-    """Run Mini-Agent as an ACP-compatible stdio server."""
+    """Run Box-Agent as an ACP-compatible stdio server."""
     config = config or Config.load()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     base_tools, skill_loader = await initialize_base_tools(config)
@@ -186,7 +187,7 @@ async def run_acp_server(config: Config | None = None) -> None:
     llm = LLMClient(api_key=config.llm.api_key, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
     reader, writer = await stdio_streams()
     AgentSideConnection(lambda conn: MiniMaxACPAgent(conn, config, llm, base_tools, system_prompt), writer, reader)
-    logger.info("Mini-Agent ACP server running")
+    logger.info("Box-Agent ACP server running")
     await asyncio.Event().wait()
 
 

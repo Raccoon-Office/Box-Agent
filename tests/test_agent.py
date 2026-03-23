@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent import LLMClient
-from mini_agent.agent import Agent
-from mini_agent.config import Config
-from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
+from box_agent import LLMClient
+from box_agent.agent import Agent
+from box_agent.config import Config
+from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 
 
 @pytest.mark.asyncio
@@ -18,7 +18,7 @@ async def test_agent_simple_task():
     print("\n=== Testing Agent with Simple File Task ===")
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     config = Config.from_yaml(config_path)
 
     # Create temp workspace
@@ -26,7 +26,7 @@ async def test_agent_simple_task():
         print(f"Using workspace: {workspace_dir}")
 
         # Load system prompt (Agent will auto-inject workspace info)
-        system_prompt_path = Path("mini_agent/config/system_prompt.md")
+        system_prompt_path = Path("box_agent/config/system_prompt.md")
         if system_prompt_path.exists():
             system_prompt = system_prompt_path.read_text(encoding="utf-8")
         else:
@@ -100,7 +100,7 @@ async def test_agent_bash_task():
     print("\n=== Testing Agent with Bash Task ===")
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     config = Config.from_yaml(config_path)
 
     # Create temp workspace
@@ -108,7 +108,7 @@ async def test_agent_bash_task():
         print(f"Using workspace: {workspace_dir}")
 
         # Load system prompt (Agent will auto-inject workspace info)
-        system_prompt_path = Path("mini_agent/config/system_prompt.md")
+        system_prompt_path = Path("box_agent/config/system_prompt.md")
         if system_prompt_path.exists():
             system_prompt = system_prompt_path.read_text(encoding="utf-8")
         else:

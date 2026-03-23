@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mini_agent.llm import LLMClient
-from mini_agent.schema import LLMProvider, Message
+from box_agent.llm import LLMClient
+from box_agent.schema import LLMProvider, Message
 
 
 @pytest.mark.asyncio
@@ -16,7 +16,7 @@ async def test_wrapper_anthropic_provider():
     print("\n=== Testing LLM Wrapper (Anthropic Provider) ===")
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -33,7 +33,7 @@ async def test_wrapper_anthropic_provider():
     # Simple messages
     messages = [
         Message(role="system", content="You are a helpful assistant."),
-        Message(role="user", content="Say 'Hello, Mini Agent!' and nothing else."),
+        Message(role="user", content="Say 'Hello, Box Agent!' and nothing else."),
     ]
 
     try:
@@ -63,7 +63,7 @@ async def test_wrapper_openai_provider():
     print("\n=== Testing LLM Wrapper (OpenAI Provider) ===")
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -79,7 +79,7 @@ async def test_wrapper_openai_provider():
     # Simple messages
     messages = [
         Message(role="system", content="You are a helpful assistant."),
-        Message(role="user", content="Say 'Hello, Mini Agent!' and nothing else."),
+        Message(role="user", content="Say 'Hello, Box Agent!' and nothing else."),
     ]
 
     try:
@@ -109,7 +109,7 @@ async def test_wrapper_default_provider():
     print("\n=== Testing LLM Wrapper (Default Provider) ===")
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -130,7 +130,7 @@ async def test_wrapper_tool_calling():
     print("\n=== Testing LLM Wrapper Tool Calling ===")
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 

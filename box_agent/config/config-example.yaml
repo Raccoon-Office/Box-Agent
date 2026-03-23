@@ -1,14 +1,11 @@
-# Mini Agent Configuration Example
-# 
-# Configuration File Locations (in priority order):
-# 1) mini_agent/config/config.yaml - Development mode (current directory)
-# 2) ~/.mini-agent/config/config.yaml - User config directory
-# 3) <package>/mini_agent/config/config.yaml - Package installation directory
+# Box Agent Configuration
 #
-# To use this config:
-# - Copy this file to one of the above locations as config.yaml
-# - Fill in your API key and customize settings as needed
-# - All config files (config.yaml, mcp.json, system_prompt.md) are in the same directory
+# Configuration File Locations (in priority order):
+# 1) box_agent/config/config.yaml - Development mode (current directory)
+# 2) ~/.box-agent/config/config.yaml - User config directory
+# 3) <package>/box_agent/config/config.yaml - Package installation directory
+#
+# Fill in your API key and customize settings as needed
 
 # ===== LLM Configuration =====
 # MiniMax API Configuration
@@ -44,11 +41,11 @@ tools:
   enable_file_tools: true  # File read/write/edit tools (ReadTool, WriteTool, EditTool)
   enable_bash: true        # Bash command execution tool
   enable_note: true        # Session note tool (SessionNoteTool)
-  
+
   # Claude Skills
   enable_skills: true      # Enable Skills
   skills_dir: "./skills"   # Skills directory path
-  
+
   # MCP Tools
   enable_mcp: true         # Enable MCP tools
   mcp_config_path: "mcp.json"  # MCP configuration file (same config directory)

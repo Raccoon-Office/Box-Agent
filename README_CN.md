@@ -1,8 +1,8 @@
-# Mini Agent
+# Box Agent
 
 [English](./README.md) | 中文
 
-**Mini Agent** 是一个极简但专业的演示项目，旨在展示使用 MiniMax M2.5 模型构建 Agent 的最佳实践。项目通过兼容 Anthropic 的 API，完全支持交错思维（interleaved thinking），从而解锁 M2 模型在处理长而复杂的任务时强大的推理能力。
+**Box Agent** 是一个极简但专业的演示项目，旨在展示使用 MiniMax M2.5 模型构建 Agent 的最佳实践。项目通过兼容 Anthropic 的 API，完全支持交错思维（interleaved thinking），从而解锁 M2 模型在处理长而复杂的任务时强大的推理能力。
 
 该项目具备一系列为稳健、智能的 Agent 开发而设计的特性：
 
@@ -16,7 +16,7 @@
 
 ## 目录
 
-- [Mini Agent](#mini-agent)
+- [Box Agent](#box-agent)
   - [目录](#目录)
   - [快速开始](#快速开始)
     - [1. 获取 API Key](#1-获取-api-key)
@@ -82,32 +82,27 @@ source ~/.bashrc  # 或 ~/.zshrc (macOS/Linux)
 
 #### 🚀 快速上手模式（推荐新手）
 
-此模式适合希望快速体验 Mini Agent，而无需克隆代码仓库或修改代码的用户。
+此模式适合希望快速体验 Box Agent，而无需克隆代码仓库或修改代码的用户。
 
 **安装步骤：**
 
 ```bash
 # 1. 直接从 GitHub 安装
-uv tool install git+https://github.com/MiniMax-AI/Mini-Agent.git
+uv tool install git+https://github.com/MiniMax-AI/Box-Agent.git
 
-# 2. 运行配置脚本（自动创建配置文件）
-# macOS/Linux:
-curl -fsSL https://raw.githubusercontent.com/MiniMax-AI/Mini-Agent/main/scripts/setup-config.sh | bash
-
-# Windows (PowerShell):
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MiniMax-AI/Mini-Agent/main/scripts/setup-config.ps1" -OutFile "$env:TEMP\setup-config.ps1"
-powershell -ExecutionPolicy Bypass -File "$env:TEMP\setup-config.ps1"
+# 2. 运行交互式配置向导（自动创建配置文件并引导设置 Provider/API Key）
+box-agent setup
 ```
 
 > 💡 **提示**：如果您希望在本地进行开发或修改代码，请使用下方的"开发模式"。
 
 **配置步骤：**
 
-配置脚本会在 `~/.mini-agent/config/` 目录下创建配置文件，请编辑该文件：
+配置向导会在 `~/.box-agent/config/` 目录下创建配置文件，您可以随时查看或编辑：
 
 ```bash
-# 编辑配置文件
-nano ~/.mini-agent/config/config.yaml
+box-agent config          # 查看当前配置
+box-agent config --edit   # 用编辑器打开配置文件
 ```
 
 填入您的 API Key 和对应的 API Base：
@@ -122,13 +117,14 @@ model: "MiniMax-M2.5"
 **开始使用：**
 
 ```bash
-mini-agent                                    # 使用当前目录作为工作空间
-mini-agent --workspace /path/to/your/project  # 指定工作空间目录
-mini-agent --version                          # 查看版本信息
+box-agent                                    # 使用当前目录作为工作空间
+box-agent --workspace /path/to/your/project  # 指定工作空间目录
+box-agent doctor                             # 检查环境与连通性
+box-agent --version                          # 查看版本信息
 
 # 管理命令
-uv tool upgrade mini-agent                    # 升级到最新版本
-uv tool uninstall mini-agent                  # 卸载工具（如需要）
+uv tool upgrade box-agent                    # 升级到最新版本
+uv tool uninstall box-agent                  # 卸载工具（如需要）
 uv tool list                                  # 查看所有已安装的工具
 ```
 
@@ -140,8 +136,8 @@ uv tool list                                  # 查看所有已安装的工具
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/MiniMax-AI/Mini-Agent.git
-cd Mini-Agent
+git clone https://github.com/MiniMax-AI/Box-Agent.git
+cd Box-Agent
 
 # 2. 安装 uv（如果尚未安装）
 # macOS/Linux:
@@ -166,15 +162,15 @@ git submodule update --init --recursive
 
 **macOS/Linux:**
 ```bash
-cp mini_agent/config/config-example.yaml mini_agent/config/config.yaml
+cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 ```
 
 **Windows:**
 ```powershell
-Copy-Item mini_agent\config\config-example.yaml mini_agent\config\config.yaml
+Copy-Item box_agent\config\config-example.yaml box_agent\config\config.yaml
 
 # 6. 编辑配置文件
-vim mini_agent/config/config.yaml  # 或使用您偏好的编辑器
+vim box_agent/config/config.yaml  # 或使用您偏好的编辑器
 ```
 
 填入您的 API Key 和对应的 API Base：
@@ -188,7 +184,7 @@ max_steps: 100
 workspace_dir: "./workspace"
 ```
 
-> 📖 完整的配置指南，请参阅 [config-example.yaml](mini_agent/config/config-example.yaml)
+> 📖 完整的配置指南，请参阅 [config-example.yaml](box_agent/config/config-example.yaml)
 
 **运行方式：**
 
@@ -196,13 +192,13 @@ workspace_dir: "./workspace"
 
 ```bash
 # 方式 1：作为模块直接运行（适合调试）
-uv run python -m mini_agent.cli
+uv run python -m box_agent.cli
 
 # 方式 2：以可编辑模式安装（推荐）
 uv tool install -e .
 # 安装后，您可以在任何路径下运行，且代码更改会立即生效
-mini-agent
-mini-agent --workspace /path/to/your/project
+box-agent
+box-agent --workspace /path/to/your/project
 ```
 
 > 📖 更多开发指引，请参阅 [开发指南](docs/DEVELOPMENT_GUIDE_CN.md)
@@ -211,35 +207,35 @@ mini-agent --workspace /path/to/your/project
 
 ## ACP & Zed Editor 集成（可选）
 
-Mini Agent 支持 [Agent Communication Protocol (ACP)](https://github.com/modelcontextprotocol/protocol)，可与 Zed 等代码编辑器集成。
+Box Agent 支持 [Agent Communication Protocol (ACP)](https://github.com/modelcontextprotocol/protocol)，可与 Zed 等代码编辑器集成。
 
 **在 Zed Editor 中设置：**
 
-1. 以开发模式或工具模式安装 Mini Agent
+1. 以开发模式或工具模式安装 Box Agent
 2. 在您的 Zed `settings.json` 中添加：
 
 ```json
 {
   "agent_servers": {
-    "mini-agent": {
-      "command": "/path/to/mini-agent-acp"
+    "box-agent": {
+      "command": "/path/to/box-agent-acp"
     }
   }
 }
 ```
 
 命令路径应为：
-- 通过 `uv tool install` 安装：使用 `which mini-agent-acp` 的输出结果
-- 开发模式：`./mini_agent/acp/server.py`
+- 通过 `uv tool install` 安装：使用 `which box-agent-acp` 的输出结果
+- 开发模式：`./box_agent/acp/server.py`
 
 **使用方法：**
 - 使用 `Ctrl+Shift+P` → "Agent: Toggle Panel" 打开 Zed 的 Agent 面板
-- 从 Agent 下拉列表中选择 "mini-agent"
-- 直接在编辑器中开始与 Mini Agent 对话
+- 从 Agent 下拉列表中选择 "box-agent"
+- 直接在编辑器中开始与 Box Agent 对话
 
 ## 使用示例
 
-这里有几个 Mini Agent 能力的演示。
+这里有几个 Box Agent 能力的演示。
 
 ### 任务执行
 
@@ -288,7 +284,7 @@ pytest tests/test_agent.py tests/test_note_tool.py -v
 
 如果遇到 `[SSL: CERTIFICATE_VERIFY_FAILED]` 错误:
 
-**测试环境快速修复** (修改 `mini_agent/llm.py`):
+**测试环境快速修复** (修改 `box_agent/llm.py`):
 ```python
 # 第 50 行: 给 AsyncClient 添加 verify=False
 async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
@@ -306,8 +302,8 @@ pip install --upgrade certifi
 
 确保从项目目录运行:
 ```bash
-cd Mini-Agent
-python -m mini_agent.cli
+cd Box-Agent
+python -m box_agent.cli
 ```
 
 ## 相关文档

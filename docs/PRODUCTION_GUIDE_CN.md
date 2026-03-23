@@ -142,7 +142,7 @@ USER agent
 RUN uv sync
 
 # 启动应用
-CMD ["uv", "run", "mini-agent"]
+CMD ["uv", "run", "box-agent"]
 ```
 
 #### 3.3.2 文件系统权限

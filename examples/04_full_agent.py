@@ -13,25 +13,25 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from mini_agent import LLMClient
-from mini_agent.agent import Agent
-from mini_agent.config import Config
-from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
-from mini_agent.tools.mcp_loader import load_mcp_tools_async
-from mini_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
+from box_agent import LLMClient
+from box_agent.agent import Agent
+from box_agent.config import Config
+from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
+from box_agent.tools.mcp_loader import load_mcp_tools_async
+from box_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 
 
 async def demo_full_agent():
     """Demo: Full-featured agent with all capabilities."""
     print("\n" + "=" * 60)
-    print("Full Mini Agent - All Features Enabled")
+    print("Full Box Agent - All Features Enabled")
     print("=" * 60)
 
     # Load configuration
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     if not config_path.exists():
         print("❌ config.yaml not found. Please run:")
-        print("   cp mini_agent/config/config-example.yaml mini_agent/config/config.yaml")
+        print("   cp box_agent/config/config-example.yaml box_agent/config/config.yaml")
         return
 
     config = Config.from_yaml(config_path)
@@ -46,7 +46,7 @@ async def demo_full_agent():
         print(f"📁 Workspace: {workspace_dir}")
 
         # Load system prompt (Agent will auto-inject workspace info)
-        system_prompt_path = Path("mini_agent/config/system_prompt.md")
+        system_prompt_path = Path("box_agent/config/system_prompt.md")
         if system_prompt_path.exists():
             system_prompt = system_prompt_path.read_text(encoding="utf-8")
         else:
@@ -90,7 +90,7 @@ You have record_note and recall_notes tools. Use them to:
 
         # Load MCP tools (if configured)
         try:
-            mcp_tools = await load_mcp_tools_async(config_path="mini_agent/config/mcp.json")
+            mcp_tools = await load_mcp_tools_async(config_path="box_agent/config/mcp.json")
             if mcp_tools:
                 tools.extend(mcp_tools)
                 print(f"✓ Loaded {len(mcp_tools)} MCP tools")
@@ -186,13 +186,13 @@ You have record_note and recall_notes tools. Use them to:
 async def demo_interactive_mode():
     """Demo: Interactive conversation with agent."""
     print("\n" + "=" * 60)
-    print("Interactive Mini Agent")
+    print("Interactive Box Agent")
     print("=" * 60)
     print("\nThis demo shows multi-turn conversation.")
-    print("(In production, use `mini-agent` for full interactive mode)")
+    print("(In production, use `box-agent` for full interactive mode)")
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     if not config_path.exists():
         print("❌ config.yaml not found")
         return
@@ -269,7 +269,7 @@ async def main():
     print("All demos completed! ✅")
     print("=" * 60)
     print("\n💡 Next step: Try the interactive mode with:")
-    print("   mini-agent\n")
+    print("   box-agent\n")
 
 
 if __name__ == "__main__":

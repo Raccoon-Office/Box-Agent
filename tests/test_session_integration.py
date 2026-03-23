@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mini_agent import LLMClient
-from mini_agent.agent import Agent
-from mini_agent.schema import LLMResponse, Message
-from mini_agent.tools.bash_tool import BashTool
-from mini_agent.tools.file_tools import ReadTool, WriteTool
-from mini_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
+from box_agent import LLMClient
+from box_agent.agent import Agent
+from box_agent.schema import LLMResponse, Message
+from box_agent.tools.bash_tool import BashTool
+from box_agent.tools.file_tools import ReadTool, WriteTool
+from box_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 
 
 @pytest.fixture

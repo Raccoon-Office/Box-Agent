@@ -35,8 +35,8 @@
 ## 1. Project Architecture
 
 ```
-mini-agent/
-├── mini_agent/              # Core source code
+box-agent/
+├── box_agent/              # Core source code
 │   ├── agent.py             # Main agent loop
 │   ├── llm.py               # LLM client
 │   ├── cli.py               # Command-line interface
@@ -53,7 +53,7 @@ mini-agent/
 
 ### 2.1 Interactive Commands
 
-When running the agent in interactive mode (`mini-agent`), the following commands are available:
+When running the agent in interactive mode (`box-agent`), the following commands are available:
 
 | Command                | Description                                                 |
 | ---------------------- | ----------------------------------------------------------- |
@@ -114,7 +114,7 @@ This project comes with pre-configured MCP (Model Context Protocol) tools that e
 
 #### Steps
 
-1.  Create a new tool file under `mini_agent/tools/`.
+1.  Create a new tool file under `box_agent/tools/`.
 2.  Inherit from the `Tool` base class.
 3.  Implement the required properties and methods.
 4.  Register the tool during Agent initialization.
@@ -122,8 +122,8 @@ This project comes with pre-configured MCP (Model Context Protocol) tools that e
 #### Example
 
 ```python
-# mini_agent/tools/my_tool.py
-from mini_agent.tools.base import Tool, ToolResult
+# box_agent/tools/my_tool.py
+from box_agent.tools.base import Tool, ToolResult
 from typing import Dict, Any
 
 class MyTool(Tool):
@@ -182,7 +182,7 @@ class MyTool(Tool):
             )
 
 # In cli.py or agent initialization code
-from mini_agent.tools.my_tool import MyTool
+from box_agent.tools.my_tool import MyTool
 
 # Add the new tool when creating the Agent
 tools = [

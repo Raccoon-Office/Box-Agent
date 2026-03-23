@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.tools.skill_loader import SkillLoader
-from mini_agent.tools.skill_tool import GetSkillTool, create_skill_tools
+from box_agent.tools.skill_loader import SkillLoader
+from box_agent.tools.skill_tool import GetSkillTool, create_skill_tools
 
 
 def create_test_skill(skill_dir: Path, name: str, description: str, content: str):

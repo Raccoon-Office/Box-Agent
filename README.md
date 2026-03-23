@@ -1,8 +1,8 @@
-# Mini Agent
+# Box Agent
 
 English | [中文](./README_CN.md)
 
-**Mini Agent** is a minimal yet professional demo project that showcases the best practices for building agents with the MiniMax M2.5 model. Leveraging an Anthropic-compatible API, it fully supports interleaved thinking to unlock M2's powerful reasoning capabilities for long, complex tasks.
+**Box Agent** is a minimal yet professional demo project that showcases the best practices for building agents with the MiniMax M2.5 model. Leveraging an Anthropic-compatible API, it fully supports interleaved thinking to unlock M2's powerful reasoning capabilities for long, complex tasks.
 
 This project comes packed with features designed for a robust and intelligent agent development experience:
 
@@ -16,7 +16,7 @@ This project comes packed with features designed for a robust and intelligent ag
 
 ## Table of Contents
 
-- [Mini Agent](#mini-agent)
+- [Box Agent](#box-agent)
   - [Table of Contents](#table-of-contents)
   - [Quick Start](#quick-start)
     - [1. Get API Key](#1-get-api-key)
@@ -82,32 +82,27 @@ We offer two usage modes - choose based on your needs:
 
 #### 🚀 Quick Start Mode (Recommended for Beginners)
 
-Perfect for users who want to quickly try Mini Agent without cloning the repository or modifying code.
+Perfect for users who want to quickly try Box Agent without cloning the repository or modifying code.
 
 **Installation:**
 
 ```bash
 # 1. Install directly from GitHub
-uv tool install git+https://github.com/MiniMax-AI/Mini-Agent.git
+uv tool install git+https://github.com/MiniMax-AI/Box-Agent.git
 
-# 2. Run setup script (automatically creates config files)
-# macOS/Linux:
-curl -fsSL https://raw.githubusercontent.com/MiniMax-AI/Mini-Agent/main/scripts/setup-config.sh | bash
-
-# Windows (PowerShell):
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/MiniMax-AI/Mini-Agent/main/scripts/setup-config.ps1" -OutFile "$env:TEMP\setup-config.ps1"
-powershell -ExecutionPolicy Bypass -File "$env:TEMP\setup-config.ps1"
+# 2. Run interactive setup wizard (creates config and guides you through provider/key setup)
+box-agent setup
 ```
 
 > 💡 **Tip**: If you want to develop locally or modify code, use "Development Mode" below
 
 **Configuration:**
 
-The setup script creates config files in `~/.mini-agent/config/`. Edit the config file:
+The setup wizard creates config files in `~/.box-agent/config/`. You can review or edit them anytime:
 
 ```bash
-# Edit config file
-nano ~/.mini-agent/config/config.yaml
+box-agent config          # Show current configuration
+box-agent config --edit   # Open config file in your editor
 ```
 
 Fill in your API Key and corresponding API Base:
@@ -122,13 +117,14 @@ model: "MiniMax-M2.5"
 **Start Using:**
 
 ```bash
-mini-agent                                    # Use current directory as workspace
-mini-agent --workspace /path/to/your/project  # Specify workspace directory
-mini-agent --version                          # Check version
+box-agent                                    # Use current directory as workspace
+box-agent --workspace /path/to/your/project  # Specify workspace directory
+box-agent doctor                             # Check environment and connectivity
+box-agent --version                          # Check version
 
 # Management commands
-uv tool upgrade mini-agent                    # Upgrade to latest version
-uv tool uninstall mini-agent                  # Uninstall if needed
+uv tool upgrade box-agent                    # Upgrade to latest version
+uv tool uninstall box-agent                  # Uninstall if needed
 uv tool list                                  # View all installed tools
 ```
 
@@ -140,8 +136,8 @@ For developers who need to modify code, add features, or debug.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/MiniMax-AI/Mini-Agent.git
-cd Mini-Agent
+git clone https://github.com/MiniMax-AI/Box-Agent.git
+cd Box-Agent
 
 # 2. Install uv (if you haven't)
 # macOS/Linux:
@@ -166,15 +162,15 @@ git submodule update --init --recursive
 
 **macOS/Linux:**
 ```bash
-cp mini_agent/config/config-example.yaml mini_agent/config/config.yaml
+cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 ```
 
 **Windows:**
 ```powershell
-Copy-Item mini_agent\config\config-example.yaml mini_agent\config\config.yaml
+Copy-Item box_agent\config\config-example.yaml box_agent\config\config.yaml
 
 # 6. Edit config file
-vim mini_agent/config/config.yaml  # Or use your preferred editor
+vim box_agent/config/config.yaml  # Or use your preferred editor
 ```
 
 Fill in your API Key and corresponding API Base:
@@ -188,7 +184,7 @@ max_steps: 100
 workspace_dir: "./workspace"
 ```
 
-> 📖 Full configuration guide: See [config-example.yaml](mini_agent/config/config-example.yaml)
+> 📖 Full configuration guide: See [config-example.yaml](box_agent/config/config-example.yaml)
 
 **Run Methods:**
 
@@ -196,13 +192,13 @@ Choose your preferred run method:
 
 ```bash
 # Method 1: Run as module directly (good for debugging)
-uv run python -m mini_agent.cli
+uv run python -m box_agent.cli
 
 # Method 2: Install in editable mode (recommended)
 uv tool install -e .
 # After installation, run from anywhere and code changes take effect immediately
-mini-agent
-mini-agent --workspace /path/to/your/project
+box-agent
+box-agent --workspace /path/to/your/project
 ```
 
 > 📖 For more development guidance, see [Development Guide](docs/DEVELOPMENT_GUIDE.md)
@@ -211,35 +207,35 @@ mini-agent --workspace /path/to/your/project
 
 ## ACP & Zed Editor Integration(optional)
 
-Mini Agent supports the [Agent Communication Protocol (ACP)](https://github.com/modelcontextprotocol/protocol) for integration with code editors like Zed.
+Box Agent supports the [Agent Communication Protocol (ACP)](https://github.com/modelcontextprotocol/protocol) for integration with code editors like Zed.
 
 **Setup in Zed Editor:**
 
-1. Install Mini Agent in development mode or as a tool
+1. Install Box Agent in development mode or as a tool
 2. Add to your Zed `settings.json`:
 
 ```json
 {
   "agent_servers": {
-    "mini-agent": {
-      "command": "/path/to/mini-agent-acp"
+    "box-agent": {
+      "command": "/path/to/box-agent-acp"
     }
   }
 }
 ```
 
 The command path should be:
-- If installed via `uv tool install`: Use the output of `which mini-agent-acp`
-- If in development mode: `./mini_agent/acp/server.py`
+- If installed via `uv tool install`: Use the output of `which box-agent-acp`
+- If in development mode: `./box_agent/acp/server.py`
 
 **Usage:**
 - Open Zed's agent panel with `Ctrl+Shift+P` → "Agent: Toggle Panel"
-- Select "mini-agent" from the agent dropdown
-- Start conversations with Mini Agent directly in your editor
+- Select "box-agent" from the agent dropdown
+- Start conversations with Box Agent directly in your editor
 
 ## Usage Examples
 
-Here are a few examples of what Mini Agent can do.
+Here are a few examples of what Box Agent can do.
 
 ### Task Execution
 
@@ -287,7 +283,7 @@ pytest tests/test_agent.py tests/test_note_tool.py -v
 
 If you encounter `[SSL: CERTIFICATE_VERIFY_FAILED]` error:
 
-**Quick fix for testing** (modify `mini_agent/llm.py`):
+**Quick fix for testing** (modify `box_agent/llm.py`):
 ```python
 # Line 50: Add verify=False to AsyncClient
 async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
@@ -305,8 +301,8 @@ pip install --upgrade certifi
 
 Make sure you're running from the project directory:
 ```bash
-cd Mini-Agent
-python -m mini_agent.cli
+cd Box-Agent
+python -m box_agent.cli
 ```
 
 ## Related Documentation

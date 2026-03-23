@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from mini_agent.acp import MiniMaxACPAgent
-from mini_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from mini_agent.schema import FunctionCall, LLMResponse, ToolCall
-from mini_agent.tools.base import Tool, ToolResult
+from box_agent.acp import MiniMaxACPAgent
+from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.schema import FunctionCall, LLMResponse, ToolCall
+from box_agent.tools.base import Tool, ToolResult
 
 
 class DummyConn:

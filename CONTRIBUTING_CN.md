@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你对 Mini Agent 项目的兴趣！我们欢迎各种形式的贡献。
+感谢你对 Box Agent 项目的兴趣！我们欢迎各种形式的贡献。
 
 ## 如何贡献
 
@@ -32,8 +32,8 @@
 1. Fork 本仓库
 2. 克隆你的 fork：
    ```bash
-   git clone https://github.com/MiniMax-AI/Mini-Agent mini-agent
-   cd mini-agent
+   git clone https://github.com/MiniMax-AI/Box-Agent box-agent
+   cd box-agent
    ```
 
 3. 创建新分支：
@@ -168,7 +168,7 @@ async def process_messages(
 
 ```python
 import pytest
-from mini_agent.tools.my_tool import MyTool
+from box_agent.tools.my_tool import MyTool
 
 @pytest.mark.asyncio
 async def test_my_tool():

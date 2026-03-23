@@ -1,6 +1,6 @@
-# Mini Agent Examples
+# Box Agent Examples
 
-This directory contains a series of progressive examples to help you understand how to use the Mini Agent framework.
+This directory contains a series of progressive examples to help you understand how to use the Box Agent framework.
 
 ## 📚 Example List
 
@@ -48,7 +48,7 @@ python examples/02_simple_agent.py
 - Task completion criteria
 
 **Prerequisites**:
-- API key configured in `mini_agent/config/config.yaml`
+- API key configured in `box_agent/config/config.yaml`
 
 ---
 
@@ -110,10 +110,10 @@ python examples/04_full_agent.py
 
 ```bash
 # Copy configuration template
-cp mini_agent/config/config-example.yaml mini_agent/config/config.yaml
+cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 
 # Edit config file and fill in your MiniMax API Key
-vim mini_agent/config/config.yaml
+vim box_agent/config/config.yaml
 ```
 
 ### 2. Run Your First Example
@@ -154,12 +154,12 @@ These examples are all refined from test cases in the `tests/` directory:
 ### Path 1: Quick Start
 1. Run `01_basic_tools.py` - Learn about tools
 2. Run `02_simple_agent.py` - Run your first Agent
-3. Go directly to interactive mode with `mini-agent`
+3. Go directly to interactive mode with `box-agent`
 
 ### Path 2: Deep Understanding
 1. Read and run all examples (01 → 04)
 2. Read corresponding test cases (`tests/`)
-3. Read core implementation code (`mini_agent/`)
+3. Read core implementation code (`box_agent/`)
 4. Try modifying examples to implement your own features
 
 ### Path 3: Production Application
@@ -176,7 +176,7 @@ These examples are all refined from test cases in the `tests/` directory:
 ```
 ❌ API key not configured in config.yaml
 ```
-**Solution**: Ensure you've configured a valid MiniMax API Key in `mini_agent/config/config.yaml`
+**Solution**: Ensure you've configured a valid MiniMax API Key in `box_agent/config/config.yaml`
 
 ### config.yaml Not Found
 ```
@@ -184,7 +184,7 @@ These examples are all refined from test cases in the `tests/` directory:
 ```
 **Solution**:
 ```bash
-cp mini_agent/config/config-example.yaml mini_agent/config/config.yaml
+cp box_agent/config/config-example.yaml box_agent/config/config.yaml
 ```
 
 ### MCP Tools Loading Failed
@@ -199,7 +199,7 @@ cp mini_agent/config/config-example.yaml mini_agent/config/config.yaml
 
 - [Main Project README](../README.md) - Complete project documentation
 - [Test Cases](../tests/) - More usage examples
-- [Core Implementation](../mini_agent/) - Source code
+- [Core Implementation](../box_agent/) - Source code
 - [Production Guide](../docs/PRODUCTION_GUIDE.md) - Deployment guide
 
 ---

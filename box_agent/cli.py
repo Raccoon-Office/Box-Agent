@@ -1,13 +1,13 @@
 """
-Mini Agent - Interactive Runtime Example
+Box Agent - Interactive Runtime Example
 
 Usage:
-    mini-agent [--workspace DIR] [--task TASK]
+    box-agent [--workspace DIR] [--task TASK]
 
 Examples:
-    mini-agent                              # Use current directory as workspace (interactive mode)
-    mini-agent --workspace /path/to/dir     # Use specific workspace directory (interactive mode)
-    mini-agent --task "create a file"       # Execute a task non-interactively
+    box-agent                              # Use current directory as workspace (interactive mode)
+    box-agent --workspace /path/to/dir     # Use specific workspace directory (interactive mode)
+    box-agent --task "create a file"       # Execute a task non-interactively
 """
 
 import argparse
@@ -27,17 +27,110 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
-from mini_agent import LLMClient
-from mini_agent.agent import Agent
-from mini_agent.config import Config
-from mini_agent.schema import LLMProvider
-from mini_agent.tools.base import Tool
-from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
-from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
-from mini_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
-from mini_agent.tools.note_tool import SessionNoteTool
-from mini_agent.tools.skill_tool import create_skill_tools
-from mini_agent.utils import calculate_display_width
+from box_agent import LLMClient, __version__
+from box_agent.agent import Agent
+from box_agent.config import Config
+from box_agent.schema import LLMProvider
+from box_agent.tools.base import Tool
+from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
+from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
+from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
+from box_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
+from box_agent.tools.note_tool import SessionNoteTool
+from box_agent.tools.skill_tool import create_skill_tools
+from box_agent.utils import calculate_display_width
+
+
+def run_setup_wizard(config_path: Path) -> bool:
+    """Interactive first-run setup wizard.
+
+    Prompts the user to choose a provider and enter API credentials,
+    then writes the result to config_path.
+
+    Returns:
+        True if setup completed successfully, False if cancelled.
+    """
+    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}╔{'═' * 48}╗{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}║  🚀 Box Agent - First Run Setup               ║{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}╚{'═' * 48}╝{Colors.RESET}")
+    print()
+
+    # Step 1: Choose provider
+    print(f"{Colors.BRIGHT_YELLOW}[1/3] Choose LLM provider:{Colors.RESET}")
+    print(f"  {Colors.BRIGHT_GREEN}1){Colors.RESET} Anthropic-compatible (MiniMax, Anthropic, etc.)")
+    print(f"  {Colors.BRIGHT_GREEN}2){Colors.RESET} OpenAI-compatible (OpenAI, DeepSeek, SiliconFlow, etc.)")
+    print()
+
+    while True:
+        try:
+            choice = input(f"{Colors.BRIGHT_CYAN}Enter choice (1/2): {Colors.RESET}").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n{Colors.YELLOW}Setup cancelled.{Colors.RESET}\n")
+            return False
+        if choice in ("1", "2"):
+            break
+        print(f"{Colors.RED}  Please enter 1 or 2{Colors.RESET}")
+
+    provider = "anthropic" if choice == "1" else "openai"
+
+    # Step 2: API Base URL with sensible defaults
+    if provider == "anthropic":
+        default_base = "https://api.minimax.io"
+        examples = (
+            f"  {Colors.DIM}MiniMax Global : https://api.minimax.io{Colors.RESET}\n"
+            f"  {Colors.DIM}MiniMax China  : https://api.minimaxi.com{Colors.RESET}\n"
+            f"  {Colors.DIM}Anthropic      : https://api.anthropic.com{Colors.RESET}"
+        )
+        default_model = "MiniMax-M2.5"
+    else:
+        default_base = "https://api.openai.com/v1"
+        examples = (
+            f"  {Colors.DIM}OpenAI      : https://api.openai.com/v1{Colors.RESET}\n"
+            f"  {Colors.DIM}DeepSeek    : https://api.deepseek.com{Colors.RESET}\n"
+            f"  {Colors.DIM}SiliconFlow : https://api.siliconflow.cn/v1{Colors.RESET}"
+        )
+        default_model = "gpt-4o"
+
+    print(f"\n{Colors.BRIGHT_YELLOW}[2/3] API Base URL:{Colors.RESET}")
+    print(examples)
+    print()
+    try:
+        api_base = input(f"{Colors.BRIGHT_CYAN}API Base URL [{default_base}]: {Colors.RESET}").strip()
+    except (KeyboardInterrupt, EOFError):
+        print(f"\n{Colors.YELLOW}Setup cancelled.{Colors.RESET}\n")
+        return False
+    if not api_base:
+        api_base = default_base
+
+    # Step 3: API Key
+    print(f"\n{Colors.BRIGHT_YELLOW}[3/3] API Key:{Colors.RESET}")
+    try:
+        api_key = input(f"{Colors.BRIGHT_CYAN}API Key: {Colors.RESET}").strip()
+    except (KeyboardInterrupt, EOFError):
+        print(f"\n{Colors.YELLOW}Setup cancelled.{Colors.RESET}\n")
+        return False
+    if not api_key:
+        print(f"{Colors.RED}  API key cannot be empty.{Colors.RESET}\n")
+        return False
+
+    # Write config
+    import yaml
+
+    with open(config_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    data["api_key"] = api_key
+    data["api_base"] = api_base
+    data["provider"] = provider
+    data["model"] = data.get("model", default_model)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    print(f"\n{Colors.GREEN}✅ Configuration saved to: {config_path}{Colors.RESET}")
+    print(f"{Colors.DIM}   provider: {provider}, api_base: {api_base}{Colors.RESET}")
+    print()
+    return True
 
 
 # ANSI color codes
@@ -77,7 +170,7 @@ class Colors:
 
 def get_log_directory() -> Path:
     """Get the log directory path."""
-    return Path.home() / ".mini-agent" / "log"
+    return Path.home() / ".box-agent" / "log"
 
 
 def show_log_directory(open_file_manager: bool = True) -> None:
@@ -171,7 +264,7 @@ def read_log_file(filename: str) -> None:
 def print_banner():
     """Print welcome banner with proper alignment"""
     BOX_WIDTH = 58
-    banner_text = f"{Colors.BOLD}🤖 Mini Agent - Multi-turn Interactive Session{Colors.RESET}"
+    banner_text = f"{Colors.BOLD}🤖 Box Agent - Multi-turn Interactive Session{Colors.RESET}"
     banner_width = calculate_display_width(banner_text)
 
     # Center the text with proper padding
@@ -193,9 +286,11 @@ def print_help():
     help_text = f"""
 {Colors.BOLD}{Colors.BRIGHT_YELLOW}Available Commands:{Colors.RESET}
   {Colors.BRIGHT_GREEN}/help{Colors.RESET}      - Show this help message
-  {Colors.BRIGHT_GREEN}/clear{Colors.RESET}     - Clear session history (keep system prompt)
+  {Colors.BRIGHT_GREEN}/clear{Colors.RESET}     - Clear session history (keep system prompt, sandbox intact)
+  {Colors.BRIGHT_GREEN}/clear_all{Colors.RESET}  - Clear session history AND shutdown sandbox kernel
   {Colors.BRIGHT_GREEN}/history{Colors.RESET}   - Show current session message count
   {Colors.BRIGHT_GREEN}/stats{Colors.RESET}     - Show session statistics
+  {Colors.BRIGHT_GREEN}/sandbox_status{Colors.RESET} - Show sandbox session status
   {Colors.BRIGHT_GREEN}/log{Colors.RESET}       - Show log directory and recent files
   {Colors.BRIGHT_GREEN}/log <file>{Colors.RESET} - Read a specific log file
   {Colors.BRIGHT_GREEN}/exit{Colors.RESET}      - Exit program (also: exit, quit, q)
@@ -213,7 +308,8 @@ def print_help():
 {Colors.BOLD}{Colors.BRIGHT_YELLOW}Usage:{Colors.RESET}
   - Enter your task directly, Agent will help you complete it
   - Agent remembers all conversation content in this session
-  - Use {Colors.BRIGHT_GREEN}/clear{Colors.RESET} to start a new session
+  - Use {Colors.BRIGHT_GREEN}/clear{Colors.RESET} to start a new session (sandbox variables persist)
+  - Use {Colors.BRIGHT_GREEN}/clear_all{Colors.RESET} to start completely fresh (kills sandbox kernel)
   - Press {Colors.BRIGHT_CYAN}Enter{Colors.RESET} to submit your message
   - Use {Colors.BRIGHT_CYAN}Ctrl+J{Colors.RESET} to insert line breaks within your message
 """
@@ -289,14 +385,18 @@ def parse_args() -> argparse.Namespace:
         Parsed arguments
     """
     parser = argparse.ArgumentParser(
-        description="Mini Agent - AI assistant with file tools and MCP support",
+        description="Box Agent - AI assistant with file tools and MCP support",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  mini-agent                              # Use current directory as workspace
-  mini-agent --workspace /path/to/dir     # Use specific workspace directory
-  mini-agent log                          # Show log directory and recent files
-  mini-agent log agent_run_xxx.log        # Read a specific log file
+  box-agent                              # Use current directory as workspace
+  box-agent --workspace /path/to/dir     # Use specific workspace directory
+  box-agent setup                        # Run first-time setup wizard
+  box-agent config                       # Show current configuration
+  box-agent config --edit                # Open config file in editor
+  box-agent doctor                       # Check environment and connectivity
+  box-agent log                          # Show log directory and recent files
+  box-agent log agent_run_xxx.log        # Read a specific log file
         """,
     )
     parser.add_argument(
@@ -317,7 +417,12 @@ Examples:
         "--version",
         "-v",
         action="version",
-        version="mini-agent 0.1.0",
+        version=f"box-agent {__version__}",
+    )
+    parser.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="Disable Jupyter sandbox mode (sandbox is enabled by default)",
     )
 
     # Subcommands
@@ -332,7 +437,132 @@ Examples:
         help="Log filename to read (optional, shows directory if omitted)",
     )
 
+    # setup subcommand
+    subparsers.add_parser("setup", help="Run first-time setup wizard")
+
+    # config subcommand
+    config_parser = subparsers.add_parser("config", help="Show or edit configuration")
+    config_parser.add_argument(
+        "--edit",
+        "-e",
+        action="store_true",
+        help="Open config file in editor",
+    )
+
+    # doctor subcommand
+    subparsers.add_parser("doctor", help="Check environment and connectivity")
+
     return parser.parse_args()
+
+
+def cmd_setup():
+    """Run the first-time setup wizard."""
+    config_path = Config._ensure_user_config()
+    print(f"{Colors.DIM}Config file: {config_path}{Colors.RESET}\n")
+    run_setup_wizard(config_path)
+
+
+def cmd_config(edit: bool = False):
+    """Show current configuration or open it in an editor."""
+    config_path = Config.find_config_file("config.yaml")
+    if not config_path:
+        print(f"{Colors.YELLOW}No config.yaml found. Run `box-agent setup` first.{Colors.RESET}")
+        return
+
+    print(f"{Colors.BOLD}Config file:{Colors.RESET} {config_path}\n")
+
+    # Show key settings
+    try:
+        config = Config.from_yaml(config_path)
+        masked_key = config.llm.api_key[:4] + "****" + config.llm.api_key[-4:] if len(config.llm.api_key) > 8 else "****"
+        print(f"  api_base : {config.llm.api_base}")
+        print(f"  provider : {config.llm.provider}")
+        print(f"  model    : {config.llm.model}")
+        print(f"  api_key  : {masked_key}")
+    except Exception as e:
+        print(f"{Colors.RED}  (could not parse config: {e}){Colors.RESET}")
+
+    if edit:
+        import os
+
+        editor = os.environ.get("EDITOR")
+        if not editor:
+            editor = "open" if platform.system() == "Darwin" else "vi"
+        print(f"\n{Colors.DIM}Opening with {editor}...{Colors.RESET}")
+        subprocess.run([editor, str(config_path)])
+
+
+async def cmd_doctor():
+    """Check environment health: config, API, sandbox, MCP."""
+    print(f"{Colors.BOLD}Box Agent Doctor{Colors.RESET}\n")
+
+    # 1. Config
+    config_path = Config.find_config_file("config.yaml")
+    config = None
+    if not config_path:
+        print(f"  ❌ Config    — config.yaml not found (run `box-agent setup`)")
+    else:
+        try:
+            config = Config.from_yaml(config_path)
+            print(f"  ✅ Config    — {config_path}")
+        except Exception as e:
+            print(f"  ❌ Config    — parse error: {e}")
+
+    # 2. API connectivity
+    if config:
+        try:
+            from box_agent.retry import RetryConfig as DoctorRetryConfig
+            from box_agent.schema import LLMProvider as LP, Message
+
+            provider = LP.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LP.OPENAI
+            no_retry = DoctorRetryConfig(enabled=False, max_retries=0)
+            client = LLMClient(
+                api_key=config.llm.api_key,
+                provider=provider,
+                api_base=config.llm.api_base,
+                model=config.llm.model,
+                retry_config=no_retry,
+            )
+            from box_agent.schema import Message
+
+            messages = [Message(role="user", content="hi")]
+            response = await client.generate(messages)
+            if response and response.content:
+                print(f"  ✅ API       — {config.llm.api_base} ({config.llm.model})")
+            else:
+                print(f"  ❌ API       — empty response from {config.llm.api_base}")
+        except Exception as e:
+            print(f"  ❌ API       — {e}")
+    else:
+        print(f"  ⏭️  API       — skipped (no valid config)")
+
+    # 3. Sandbox (Jupyter)
+    try:
+        import jupyter_client  # noqa: F401
+
+        kernel_dir = Path.home() / "Library" / "Jupyter" / "kernels" / "mini-agent-sandbox"
+        if not kernel_dir.exists():
+            # Try the generic jupyter data path
+            try:
+                specs = jupyter_client.kernelspec.find_kernel_specs()
+                kernel_dir = specs.get("mini-agent-sandbox")
+            except Exception:
+                kernel_dir = None
+        if kernel_dir:
+            print(f"  ✅ Sandbox   — jupyter_client OK, kernel spec found")
+        else:
+            print(f"  ⚠️  Sandbox   — jupyter_client OK, but kernel spec 'mini-agent-sandbox' not found")
+    except ImportError:
+        print(f"  ❌ Sandbox   — jupyter_client not installed")
+
+    # 4. MCP
+    mcp_path = Config.find_config_file("mcp.json")
+    if mcp_path:
+        print(f"  ✅ MCP       — {mcp_path}")
+    else:
+        print(f"  ⚠️  MCP       — mcp.json not found (optional)")
+
+    print()
 
 
 async def initialize_base_tools(config: Config):
@@ -373,12 +603,12 @@ async def initialize_base_tools(config: Config):
                 skills_dir = str(skills_path)
             else:
                 # Search in priority order:
-                # 1. Current directory (dev mode: ./skills or ./mini_agent/skills)
-                # 2. Package directory (installed: site-packages/mini_agent/skills)
+                # 1. Current directory (dev mode: ./skills or ./box_agent/skills)
+                # 2. Package directory (installed: site-packages/box_agent/skills)
                 search_paths = [
                     skills_path,  # ./skills for backward compatibility
-                    Path("mini_agent") / skills_path,  # ./mini_agent/skills
-                    Config.get_package_dir() / skills_path,  # site-packages/mini_agent/skills
+                    Path("box_agent") / skills_path,  # ./box_agent/skills
+                    Config.get_package_dir() / skills_path,  # site-packages/box_agent/skills
                 ]
 
                 # Find first existing path
@@ -431,7 +661,7 @@ async def initialize_base_tools(config: Config):
     return tools, skill_loader
 
 
-def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
+def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -440,6 +670,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
         tools: Existing tools list to add to
         config: Configuration object
         workspace_dir: Workspace directory path
+        sandbox_mode: If True, enable Jupyter sandbox mode
     """
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -466,6 +697,17 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
         tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
         print(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
 
+    # Jupyter sandbox tool - Python code execution environment
+    if sandbox_mode:
+        sandbox_tool = JupyterSandboxTool(workspace_dir=str(workspace_dir))
+        tools.append(sandbox_tool)
+        # Also add sandbox status tool
+        status_tool = SandboxStatusTool()
+        SandboxStatusTool.set_sandbox_tool(sandbox_tool)
+        tools.append(status_tool)
+        print(f"{Colors.GREEN}✅ Loaded Jupyter sandbox tool (execute_code){Colors.RESET}")
+        print(f"{Colors.GREEN}✅ Loaded sandbox status tool{Colors.RESET}")
+
 
 async def _quiet_cleanup():
     """Clean up MCP connections, suppressing noisy asyncgen teardown tracebacks."""
@@ -481,14 +723,20 @@ async def _quiet_cleanup():
         await cleanup_mcp_connections()
     except Exception:
         pass
+    # Shutdown Jupyter kernel sessions
+    try:
+        await JupyterSandboxTool.shutdown_all()
+    except Exception:
+        pass
 
 
-async def run_agent(workspace_dir: Path, task: str = None):
+async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = True):
     """Run Agent in interactive or non-interactive mode.
 
     Args:
         workspace_dir: Workspace directory path
         task: If provided, execute this task and exit (non-interactive mode)
+        sandbox_mode: If True (default), enable Jupyter sandbox for Python code execution
     """
     session_start = datetime.now()
 
@@ -496,30 +744,8 @@ async def run_agent(workspace_dir: Path, task: str = None):
     config_path = Config.get_default_config_path()
 
     if not config_path.exists():
-        print(f"{Colors.RED}❌ Configuration file not found{Colors.RESET}")
-        print()
-        print(f"{Colors.BRIGHT_CYAN}📦 Configuration Search Path:{Colors.RESET}")
-        print(f"  {Colors.DIM}1) mini_agent/config/config.yaml{Colors.RESET} (development)")
-        print(f"  {Colors.DIM}2) ~/.mini-agent/config/config.yaml{Colors.RESET} (user)")
-        print(f"  {Colors.DIM}3) <package>/config/config.yaml{Colors.RESET} (installed)")
-        print()
-        print(f"{Colors.BRIGHT_YELLOW}🚀 Quick Setup (Recommended):{Colors.RESET}")
-        print(
-            f"  {Colors.BRIGHT_GREEN}curl -fsSL https://raw.githubusercontent.com/MiniMax-AI/Mini-Agent/main/scripts/setup-config.sh | bash{Colors.RESET}"
-        )
-        print()
-        print(f"{Colors.DIM}  This will automatically:{Colors.RESET}")
-        print(f"{Colors.DIM}    • Create ~/.mini-agent/config/{Colors.RESET}")
-        print(f"{Colors.DIM}    • Download configuration files{Colors.RESET}")
-        print(f"{Colors.DIM}    • Guide you to add your API Key{Colors.RESET}")
-        print()
-        print(f"{Colors.BRIGHT_YELLOW}📝 Manual Setup:{Colors.RESET}")
-        user_config_dir = Path.home() / ".mini-agent" / "config"
-        example_config = Config.get_package_dir() / "config" / "config-example.yaml"
-        print(f"  {Colors.DIM}mkdir -p {user_config_dir}{Colors.RESET}")
-        print(f"  {Colors.DIM}cp {example_config} {user_config_dir}/config.yaml{Colors.RESET}")
-        print(f"  {Colors.DIM}# Then edit {user_config_dir}/config.yaml to add your API Key{Colors.RESET}")
-        print()
+        # This shouldn't happen after _ensure_user_config, but just in case
+        print(f"{Colors.RED}❌ Configuration file not found: {config_path}{Colors.RESET}")
         return
 
     try:
@@ -528,15 +754,28 @@ async def run_agent(workspace_dir: Path, task: str = None):
         print(f"{Colors.RED}❌ Error: Configuration file not found: {config_path}{Colors.RESET}")
         return
     except ValueError as e:
-        print(f"{Colors.RED}❌ Error: {e}{Colors.RESET}")
-        print(f"{Colors.YELLOW}Please check the configuration file format{Colors.RESET}")
-        return
+        error_msg = str(e)
+        if "API Key" in error_msg or "api_key" in error_msg or "empty" in error_msg.lower():
+            # First-run or unconfigured — launch interactive setup
+            if run_setup_wizard(config_path):
+                # Retry loading after setup
+                try:
+                    config = Config.from_yaml(config_path)
+                except Exception as e2:
+                    print(f"{Colors.RED}❌ Error: {e2}{Colors.RESET}")
+                    return
+            else:
+                return
+        else:
+            print(f"{Colors.RED}❌ Error: {e}{Colors.RESET}")
+            print(f"{Colors.YELLOW}Please check: {config_path}{Colors.RESET}")
+            return
     except Exception as e:
         print(f"{Colors.RED}❌ Error: Failed to load configuration file: {e}{Colors.RESET}")
         return
 
     # 2. Initialize LLM client
-    from mini_agent.retry import RetryConfig as RetryConfigBase
+    from box_agent.retry import RetryConfig as RetryConfigBase
 
     # Convert configuration format
     retry_config = RetryConfigBase(
@@ -571,11 +810,43 @@ async def run_agent(workspace_dir: Path, task: str = None):
         llm_client.retry_callback = on_retry
         print(f"{Colors.GREEN}✅ LLM retry mechanism enabled (max {config.llm.retry.max_retries} retries){Colors.RESET}")
 
+    # 2.5 Verify API connectivity with a lightweight test call (no retry)
+    print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
+    try:
+        from box_agent.retry import RetryConfig as VerifyRetryConfig
+        from box_agent.schema import Message as Msg
+        # Use a temporary client with retry disabled to avoid long waits
+        _verify_client = LLMClient(
+            api_key=config.llm.api_key,
+            provider=provider,
+            api_base=config.llm.api_base,
+            model=config.llm.model,
+            retry_config=VerifyRetryConfig(enabled=False),
+        )
+        await _verify_client.generate(
+            messages=[Msg(role="user", content="hi")],
+        )
+        print(f"{Colors.GREEN}OK{Colors.RESET}")
+    except Exception as e:
+        err_str = str(e)
+        print(f"{Colors.RED}FAILED{Colors.RESET}")
+        print(f"\n{Colors.RED}❌ API connection failed: {err_str}{Colors.RESET}")
+        print()
+        print(f"{Colors.BRIGHT_CYAN}Please check your configuration:{Colors.RESET}")
+        print(f"  {Colors.BRIGHT_GREEN}{config_path}{Colors.RESET}")
+        print()
+        print(f"{Colors.DIM}  api_key:    {config.llm.api_key[:8]}...{Colors.RESET}")
+        print(f"{Colors.DIM}  api_base:   {config.llm.api_base}{Colors.RESET}")
+        print(f"{Colors.DIM}  provider:   {config.llm.provider}{Colors.RESET}")
+        print(f"{Colors.DIM}  model:      {config.llm.model}{Colors.RESET}")
+        print()
+        return
+
     # 3. Initialize base tools (independent of workspace)
     tools, skill_loader = await initialize_base_tools(config)
 
     # 4. Add workspace-dependent tools
-    add_workspace_tools(tools, config, workspace_dir)
+    add_workspace_tools(tools, config, workspace_dir, sandbox_mode=sandbox_mode)
 
     # 5. Load System Prompt (with priority search)
     system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
@@ -583,7 +854,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
         system_prompt = system_prompt_path.read_text(encoding="utf-8")
         print(f"{Colors.GREEN}✅ Loaded system prompt (from: {system_prompt_path}){Colors.RESET}")
     else:
-        system_prompt = "You are Mini-Agent, an intelligent assistant powered by MiniMax M2.5 that can help users complete various tasks."
+        system_prompt = "You are Box-Agent, an intelligent assistant powered by MiniMax M2.5 that can help users complete various tasks."
         print(f"{Colors.YELLOW}⚠️  System prompt not found, using default{Colors.RESET}")
 
     # 6. Inject Skills Metadata into System Prompt (Progressive Disclosure - Level 1)
@@ -599,6 +870,35 @@ async def run_agent(workspace_dir: Path, task: str = None):
     else:
         # Remove placeholder if skills not enabled
         system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+
+    # 6.5 Inject Sandbox info if enabled
+    if sandbox_mode:
+        sandbox_info = """
+## Sandbox Execution Mode (Enabled)
+
+You have access to the `execute_code` tool which runs Python code in an isolated Jupyter kernel.
+
+**When to use execute_code:**
+- Data analysis and visualization (pandas, matplotlib, seaborn)
+- Processing files (CSV, Excel, JSON, images)
+- Running Python scripts with persistent state
+- Complex calculations requiring multiple steps
+
+**Sandbox workspace:** Code runs in an isolated directory. Files saved are stored in the sandbox workspace.
+
+**Best practices:**
+- Break complex analysis into smaller code blocks
+- Use print() to output intermediate results
+- Clean up large data structures when done
+- Check for errors after each step
+
+**Available packages:** pandas, numpy, matplotlib, scikit-learn, pillow, and more via standard library.
+"""
+        system_prompt = system_prompt.replace("{SANDBOX_INFO}", sandbox_info)
+        print(f"{Colors.GREEN}✅ Sandbox mode enabled with execute_code tool{Colors.RESET}")
+    else:
+        # Remove placeholder if sandbox not enabled
+        system_prompt = system_prompt.replace("{SANDBOX_INFO}", "")
 
     # 7. Create Agent
     agent = Agent(
@@ -632,7 +932,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
     # 9. Setup prompt_toolkit session
     # Command completer
     command_completer = WordCompleter(
-        ["/help", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"],
+        ["/help", "/clear", "/clear_all", "/history", "/stats", "/sandbox_status", "/log", "/exit", "/quit", "/q"],
         ignore_case=True,
         sentence=True,
     )
@@ -665,7 +965,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
     # Create prompt session with history and auto-suggest
     # Use FileHistory for persistent history across sessions (stored in user's home directory)
-    history_file = Path.home() / ".mini-agent" / ".history"
+    history_file = Path.home() / ".box-agent" / ".history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
     session = PromptSession(
         history=FileHistory(str(history_file)),
@@ -678,12 +978,33 @@ async def run_agent(workspace_dir: Path, task: str = None):
     # 10. Interactive loop
     while True:
         try:
-            # Get user input using prompt_toolkit
-            user_input = await session.prompt_async(
-                [
+            # Build prompt with optional sandbox session_id
+            if sandbox_mode:
+                # Try to get current session_id from sandbox tool
+                sandbox_session_id = None
+                for tool in tools:
+                    if isinstance(tool, JupyterSandboxTool):
+                        sandbox_session_id = tool._session_id
+                        break
+                if sandbox_session_id:
+                    prompt_parts = [
+                        ("class:prompt", f"You [{sandbox_session_id}]"),
+                        ("", " › "),
+                    ]
+                else:
+                    prompt_parts = [
+                        ("class:prompt", "You"),
+                        ("", " › "),
+                    ]
+            else:
+                prompt_parts = [
                     ("class:prompt", "You"),
                     ("", " › "),
-                ],
+                ]
+
+            # Get user input using prompt_toolkit
+            user_input = await session.prompt_async(
+                prompt_parts,
                 multiline=False,
                 enable_history_search=True,
             )
@@ -697,7 +1018,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
                 command = user_input.lower()
 
                 if command in ["/exit", "/quit", "/q"]:
-                    print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Mini Agent{Colors.RESET}\n")
+                    print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
                     print_stats(agent, session_start)
                     break
 
@@ -710,6 +1031,20 @@ async def run_agent(workspace_dir: Path, task: str = None):
                     old_count = len(agent.messages)
                     agent.messages = [agent.messages[0]]  # Keep only system message
                     print(f"{Colors.GREEN}✅ Cleared {old_count - 1} messages, starting new session{Colors.RESET}\n")
+                    if sandbox_mode:
+                        print(f"{Colors.YELLOW}⚠️  Note: /clear does not clear sandbox state.{Colors.RESET}")
+                        print(f"{Colors.DIM}   Use /clear_all to clear both messages and sandbox.{Colors.RESET}\n")
+                    continue
+
+                elif command == "/clear_all":
+                    # Clear both message history AND sandbox kernel
+                    old_count = len(agent.messages)
+                    agent.messages = [agent.messages[0]]  # Keep only system message
+                    if sandbox_mode:
+                        await JupyterSandboxTool.shutdown_all()
+                        print(f"{Colors.GREEN}✅ Cleared {old_count - 1} messages and shut down sandbox kernel{Colors.RESET}\n")
+                    else:
+                        print(f"{Colors.GREEN}✅ Cleared {old_count - 1} messages{Colors.RESET}\n")
                     continue
 
                 elif command == "/history":
@@ -718,6 +1053,21 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
                 elif command == "/stats":
                     print_stats(agent, session_start)
+                    continue
+
+                elif command == "/sandbox_status":
+                    if sandbox_mode:
+                        # Find the sandbox status tool and execute it
+                        for tool in tools:
+                            if isinstance(tool, SandboxStatusTool):
+                                result = await tool.execute()
+                                if result.success:
+                                    print(f"\n{Colors.BRIGHT_CYAN}{result.content}{Colors.RESET}\n")
+                                else:
+                                    print(f"{Colors.RED}❌ {result.error}{Colors.RESET}\n")
+                                break
+                    else:
+                        print(f"{Colors.YELLOW}⚠️  Sandbox mode not enabled{Colors.RESET}\n")
                     continue
 
                 elif command == "/log" or command.startswith("/log "):
@@ -739,7 +1089,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
             # Normal conversation - exit check
             if user_input.lower() in ["exit", "quit", "q"]:
-                print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Mini Agent{Colors.RESET}\n")
+                print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
                 print_stats(agent, session_start)
                 break
 
@@ -854,6 +1204,21 @@ def main():
             show_log_directory(open_file_manager=True)
         return
 
+    # Handle setup subcommand
+    if args.command == "setup":
+        cmd_setup()
+        return
+
+    # Handle config subcommand
+    if args.command == "config":
+        cmd_config(edit=args.edit)
+        return
+
+    # Handle doctor subcommand
+    if args.command == "doctor":
+        asyncio.run(cmd_doctor())
+        return
+
     # Determine workspace directory
     # Expand ~ to user home directory for portability
     if args.workspace:
@@ -866,7 +1231,7 @@ def main():
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Run the agent (config always loaded from package directory)
-    asyncio.run(run_agent(workspace_dir, task=args.task))
+    asyncio.run(run_agent(workspace_dir, task=args.task, sandbox_mode=not args.no_sandbox))
 
 
 if __name__ == "__main__":

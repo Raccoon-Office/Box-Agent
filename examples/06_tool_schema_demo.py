@@ -9,14 +9,14 @@ from typing import Any
 
 import yaml
 
-from mini_agent import LLMClient, LLMProvider
-from mini_agent.schema import Message
-from mini_agent.tools.base import Tool, ToolResult
+from box_agent import LLMClient, LLMProvider
+from box_agent.schema import Message
+from box_agent.tools.base import Tool, ToolResult
 
 
 def load_config():
     """Load config from config.yaml."""
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 

@@ -1,4 +1,4 @@
-"""Schema definitions for Mini-Agent."""
+"""Schema definitions for Box-Agent."""
 
 from .schema import (
     FunctionCall,

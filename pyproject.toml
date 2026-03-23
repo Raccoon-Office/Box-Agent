@@ -1,32 +1,48 @@
 [project]
-name = "mini-agent"
+name = "box-agent"
 version = "0.1.0"
-description = "Minimal single agent demo with basic file tools and MCP support"
+description = "Minimal AI agent framework with sandbox execution, tool calling, and MCP support"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    {name = "Mini Agent Team"}
+    {name = "Box Agent Team"}
 ]
 license = {text = "MIT"}
+keywords = ["agent", "ai", "llm", "sandbox", "mcp", "tool-calling"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
     "httpx>=0.27.0",
     "mcp>=1.0.0",
-    "pytest>=8.4.2",
     "requests>=2.31.0",
     "tiktoken>=0.5.0",
     "prompt-toolkit>=3.0.0",
-    "pip>=25.3",
-    "pipx>=1.8.0",
     "anthropic>=0.39.0",
     "openai>=1.57.4",
     "agent-client-protocol>=0.6.0",
+    "jupyter-client>=8.6.0",
+    "ipykernel>=6.29.0",
 ]
 
 [project.scripts]
-mini-agent = "mini_agent.cli:main"
-mini-agent-acp = "mini_agent.acp.server:main"
+box-agent = "box_agent.cli:main"
+box-agent-acp = "box_agent.acp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/MiniMax-AI/Mini-Agent"
+Repository = "https://github.com/MiniMax-AI/Mini-Agent"
+Issues = "https://github.com/MiniMax-AI/Mini-Agent/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -42,13 +58,13 @@ build-backend = "setuptools.build_meta"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["mini_agent*"]
+include = ["box_agent*"]
 exclude = ["tests*"]
 
 # Include skills directory (git submodule) as package data
-# After moving submodule to mini_agent/skills
+# After moving submodule to box_agent/skills
 [tool.setuptools.package-data]
-mini_agent = ["skills/**/*"]
+box_agent = ["skills/**/*", "config/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

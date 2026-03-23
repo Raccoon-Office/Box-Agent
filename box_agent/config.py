@@ -3,6 +3,7 @@
 Provides unified configuration loading and management functionality
 """
 
+import shutil
 from pathlib import Path
 
 import yaml
@@ -75,7 +76,7 @@ class Config(BaseModel):
         """Load configuration from the default search path."""
         config_path = cls.get_default_config_path()
         if not config_path.exists():
-            raise FileNotFoundError("Configuration file not found. Run scripts/setup-config.sh or place config.yaml in mini_agent/config/.")
+            raise FileNotFoundError("Configuration file not found. Run scripts/setup-config.sh or place config.yaml in box_agent/config/.")
         return cls.from_yaml(config_path)
 
     @classmethod
@@ -168,7 +169,7 @@ class Config(BaseModel):
         """Get the package installation directory
 
         Returns:
-            Path to the mini_agent package directory
+            Path to the box_agent package directory
         """
         # Get the directory where this config.py file is located
         return Path(__file__).parent
@@ -178,9 +179,9 @@ class Config(BaseModel):
         """Find configuration file with priority order
 
         Search for config file in the following order of priority:
-        1) mini_agent/config/{filename} in current directory (development mode)
-        2) ~/.mini-agent/config/{filename} in user home directory
-        3) {package}/mini_agent/config/{filename} in package installation directory
+        1) box_agent/config/{filename} in current directory (development mode)
+        2) ~/.box-agent/config/{filename} in user home directory
+        3) {package}/box_agent/config/{filename} in package installation directory
 
         Args:
             filename: Configuration file name (e.g., "config.yaml", "mcp.json", "system_prompt.md")
@@ -189,12 +190,12 @@ class Config(BaseModel):
             Path to found config file, or None if not found
         """
         # Priority 1: Development mode - current directory's config/ subdirectory
-        dev_config = Path.cwd() / "mini_agent" / "config" / filename
+        dev_config = Path.cwd() / "box_agent" / "config" / filename
         if dev_config.exists():
             return dev_config
 
         # Priority 2: User config directory
-        user_config = Path.home() / ".mini-agent" / "config" / filename
+        user_config = Path.home() / ".box-agent" / "config" / filename
         if user_config.exists():
             return user_config
 
@@ -207,7 +208,10 @@ class Config(BaseModel):
 
     @classmethod
     def get_default_config_path(cls) -> Path:
-        """Get the default config file path with priority search
+        """Get the default config file path with priority search.
+
+        If no config.yaml exists anywhere, auto-initializes one from the
+        bundled example so that first-run users get a working file.
 
         Returns:
             Path to config.yaml (prioritizes: dev config/ > user config/ > package config/)
@@ -216,5 +220,33 @@ class Config(BaseModel):
         if config_path:
             return config_path
 
-        # Fallback to package config directory for error message purposes
-        return cls.get_package_dir() / "config" / "config.yaml"
+        # No config.yaml found anywhere — bootstrap from example
+        return cls._ensure_user_config()
+
+    @classmethod
+    def _ensure_user_config(cls) -> Path:
+        """Copy config-example.yaml to ~/.box-agent/config/config.yaml.
+
+        Returns:
+            Path to the newly created config.yaml
+        """
+        user_config_dir = Path.home() / ".box-agent" / "config"
+        user_config_dir.mkdir(parents=True, exist_ok=True)
+        target = user_config_dir / "config.yaml"
+
+        example = cls.get_package_dir() / "config" / "config-example.yaml"
+        if example.exists():
+            shutil.copy2(example, target)
+        else:
+            # Fallback: write a minimal config
+            target.write_text(
+                '# Box Agent Configuration\n'
+                '# Edit this file to add your API key and base URL\n'
+                'api_key: "YOUR_API_KEY_HERE"\n'
+                'api_base: "https://api.minimax.io"\n'
+                'model: "MiniMax-M2.5"\n'
+                'provider: "anthropic"\n',
+                encoding="utf-8",
+            )
+
+        return target

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Mini Agent Configuration Setup Script
-# This script helps you set up Mini Agent configuration files
+# Box Agent Configuration Setup Script
+# This script helps you set up Box Agent configuration files
 
 set -e
 
@@ -13,10 +13,10 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration directory
-CONFIG_DIR="$HOME/.mini-agent/config"
+CONFIG_DIR="$HOME/.box-agent/config"
 
 echo -e "${CYAN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║   Mini Agent Configuration Setup              ║${NC}"
+echo -e "${CYAN}║   Box Agent Configuration Setup              ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -24,7 +24,7 @@ echo ""
 echo -e "${BLUE}[1/2]${NC} Creating configuration directory..."
 if [ -d "$CONFIG_DIR" ]; then
     # Auto backup existing config
-    BACKUP_DIR="$HOME/.mini-agent/config.backup.$(date +%Y%m%d_%H%M%S)"
+    BACKUP_DIR="$HOME/.box-agent/config.backup.$(date +%Y%m%d_%H%M%S)"
     echo -e "${YELLOW}   Configuration directory exists, backing up to:${NC}"
     echo -e "${YELLOW}   $BACKUP_DIR${NC}"
     cp -r "$CONFIG_DIR" "$BACKUP_DIR"
@@ -38,7 +38,7 @@ fi
 echo -e "${BLUE}[2/2]${NC} Downloading configuration files..."
 
 FILES_COPIED=0
-GITHUB_RAW_URL="https://raw.githubusercontent.com/MiniMax-AI/Mini-Agent/main/mini_agent/config"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/MiniMax-AI/Box-Agent/main/box_agent/config"
 
 # Download config-example.yaml as config.yaml
 if curl -fsSL "$GITHUB_RAW_URL/config-example.yaml" -o "$CONFIG_DIR/config.yaml" 2>/dev/null; then
@@ -81,8 +81,8 @@ ls -1 "$CONFIG_DIR" 2>/dev/null | sed 's/^/  📄 /' || echo "  (no files yet)"
 echo ""
 echo -e "${YELLOW}Next Steps:${NC}"
 echo ""
-echo -e "${YELLOW}1. Install Mini Agent:${NC}"
-echo -e "   ${GREEN}pipx install git+https://github.com/MiniMax-AI/Mini-Agent.git${NC}"
+echo -e "${YELLOW}1. Install Box Agent:${NC}"
+echo -e "   ${GREEN}pipx install git+https://github.com/MiniMax-AI/Box-Agent.git${NC}"
 echo ""
 echo -e "${YELLOW}2. Configure your API Key:${NC}"
 echo -e "   Edit config.yaml and add your MiniMax API Key:"
@@ -90,8 +90,8 @@ echo -e "   ${GREEN}nano $CONFIG_DIR/config.yaml${NC}"
 echo -e "   ${GREEN}vim $CONFIG_DIR/config.yaml${NC}"
 echo -e "   ${GREEN}code $CONFIG_DIR/config.yaml${NC}"
 echo ""
-echo -e "${YELLOW}3. Start using Mini Agent:${NC}"
-echo -e "   ${GREEN}mini-agent${NC}                              # Use current directory"
-echo -e "   ${GREEN}mini-agent --workspace /path/to/project${NC} # Specify workspace"
-echo -e "   ${GREEN}mini-agent --help${NC}                      # Show help"
+echo -e "${YELLOW}3. Start using Box Agent:${NC}"
+echo -e "   ${GREEN}box-agent${NC}                              # Use current directory"
+echo -e "   ${GREEN}box-agent --workspace /path/to/project${NC} # Specify workspace"
+echo -e "   ${GREEN}box-agent --help${NC}                      # Show help"
 echo ""

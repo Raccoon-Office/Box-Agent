@@ -1,5 +1,5 @@
-# Mini Agent Configuration Setup Script for Windows
-# This script helps you set up Mini Agent configuration files
+# Box Agent Configuration Setup Script for Windows
+# This script helps you set up Box Agent configuration files
 
 # Error handling
 $ErrorActionPreference = "Stop"
@@ -24,10 +24,10 @@ function Write-ColorOutput {
 }
 
 # Configuration directory
-$CONFIG_DIR = Join-Path $env:USERPROFILE ".mini-agent\config"
+$CONFIG_DIR = Join-Path $env:USERPROFILE ".box-agent\config"
 
 Write-ColorOutput "==================================================" -Color "Cyan"
-Write-ColorOutput "   Mini Agent Configuration Setup" -Color "Cyan"
+Write-ColorOutput "   Box Agent Configuration Setup" -Color "Cyan"
 Write-ColorOutput "==================================================" -Color "Cyan"
 Write-Host ""
 
@@ -37,7 +37,7 @@ Write-ColorOutput "[1/2] Creating configuration directory..." -Color "Blue"
 if (Test-Path $CONFIG_DIR) {
     # Auto backup existing config
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $BACKUP_DIR = Join-Path $env:USERPROFILE ".mini-agent\config.backup.$timestamp"
+    $BACKUP_DIR = Join-Path $env:USERPROFILE ".box-agent\config.backup.$timestamp"
     Write-ColorOutput "   Configuration directory exists, backing up to:" -Color "Yellow"
     Write-ColorOutput "   $BACKUP_DIR" -Color "Yellow"
     Copy-Item -Path $CONFIG_DIR -Destination $BACKUP_DIR -Recurse
@@ -51,7 +51,7 @@ if (Test-Path $CONFIG_DIR) {
 Write-ColorOutput "[2/2] Downloading configuration files..." -Color "Blue"
 
 $FILES_COPIED = 0
-$GITHUB_RAW_URL = "https://raw.githubusercontent.com/MiniMax-AI/Mini-Agent/main/mini_agent/config"
+$GITHUB_RAW_URL = "https://raw.githubusercontent.com/MiniMax-AI/Box-Agent/main/box_agent/config"
 
 # Download config-example.yaml as config.yaml
 try {
@@ -109,16 +109,16 @@ Get-ChildItem $CONFIG_DIR -ErrorAction SilentlyContinue | ForEach-Object {
 Write-Host ""
 Write-ColorOutput "Next Steps:" -Color "Yellow"
 Write-Host ""
-Write-ColorOutput "1. Install Mini Agent:" -Color "Yellow"
-Write-ColorOutput "   pipx install git+https://github.com/MiniMax-AI/Mini-Agent.git" -Color "Green"
+Write-ColorOutput "1. Install Box Agent:" -Color "Yellow"
+Write-ColorOutput "   pipx install git+https://github.com/MiniMax-AI/Box-Agent.git" -Color "Green"
 Write-Host ""
 Write-ColorOutput "2. Configure your API Key:" -Color "Yellow"
 Write-Host "   Edit config.yaml and add your MiniMax API Key:"
 Write-ColorOutput "   notepad $CONFIG_DIR\config.yaml" -Color "Green"
 Write-ColorOutput "   code $CONFIG_DIR\config.yaml" -Color "Green"
 Write-Host ""
-Write-ColorOutput "3. Start using Mini Agent:" -Color "Yellow"
-Write-ColorOutput "   mini-agent                              # Use current directory" -Color "Green"
-Write-ColorOutput "   mini-agent --workspace C:\path\to\project # Specify workspace" -Color "Green"
-Write-ColorOutput "   mini-agent --help                      # Show help" -Color "Green"
+Write-ColorOutput "3. Start using Box Agent:" -Color "Yellow"
+Write-ColorOutput "   box-agent                              # Use current directory" -Color "Green"
+Write-ColorOutput "   box-agent --workspace C:\path\to\project # Specify workspace" -Color "Green"
+Write-ColorOutput "   box-agent --help                      # Show help" -Color "Green"
 Write-Host ""

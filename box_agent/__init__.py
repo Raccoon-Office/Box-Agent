@@ -1,4 +1,4 @@
-"""Mini Agent - Minimal single agent with basic tools and MCP support."""
+"""Box Agent - Minimal single agent with basic tools and MCP support."""
 
 from .agent import Agent
 from .llm import LLMClient

@@ -11,11 +11,11 @@ import json
 import tempfile
 from pathlib import Path
 
-from mini_agent import LLMClient
-from mini_agent.agent import Agent
-from mini_agent.config import Config
-from mini_agent.tools import BashTool, ReadTool, WriteTool
-from mini_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
+from box_agent import LLMClient
+from box_agent.agent import Agent
+from box_agent.config import Config
+from box_agent.tools import BashTool, ReadTool, WriteTool
+from box_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 
 
 async def demo_direct_note_usage():
@@ -42,7 +42,7 @@ async def demo_direct_note_usage():
         print(f"  ✓ {result.content}")
 
         result = await record_tool.execute(
-            content="Project name: mini-agent, Tech: Python 3.12 + async",
+            content="Project name: box-agent, Tech: Python 3.12 + async",
             category="project_info",
         )
         print(f"  ✓ {result.content}")
@@ -81,7 +81,7 @@ async def demo_agent_with_notes():
     print("=" * 60)
 
     # Load configuration
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     if not config_path.exists():
         print("❌ config.yaml not found")
         return
@@ -96,7 +96,7 @@ async def demo_agent_with_notes():
         print(f"📁 Workspace: {workspace_dir}\n")
 
         # Load system prompt (Agent will auto-inject workspace info)
-        system_prompt_path = Path("mini_agent/config/system_prompt.md")
+        system_prompt_path = Path("box_agent/config/system_prompt.md")
         if system_prompt_path.exists():
             system_prompt = system_prompt_path.read_text(encoding="utf-8")
         else:
@@ -152,7 +152,7 @@ Guidelines:
         task1 = """
         Hello! Let me introduce myself:
         - I'm Alex, a senior Python developer
-        - I'm building an AI agent framework called "mini-agent"
+        - I'm building an AI agent framework called "box-agent"
         - I use Python 3.12 with asyncio
         - I prefer type hints and comprehensive docstrings
         - My coding style: clean, functional, well-tested

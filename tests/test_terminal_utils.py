@@ -2,7 +2,7 @@
 
 import pytest
 
-from mini_agent.utils import (
+from box_agent.utils import (
     calculate_display_width,
     pad_to_width,
     truncate_with_ellipsis,
@@ -203,7 +203,7 @@ class TestRealWorldScenarios:
 
     def test_banner_text(self):
         """Test banner text from cli.py."""
-        banner = "🤖 Mini Agent - Multi-turn Interactive Session"
+        banner = "🤖 Box Agent - Multi-turn Interactive Session"
         width = calculate_display_width(banner)
-        # "🤖" (2) + " Mini Agent - Multi-turn Interactive Session" (44) = 46
-        assert width == 46
+        # "🤖" (2) + " Box Agent - Multi-turn Interactive Session" (43) = 45
+        assert width == 45

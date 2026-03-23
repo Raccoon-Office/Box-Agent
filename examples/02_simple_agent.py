@@ -10,10 +10,10 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from mini_agent import LLMClient
-from mini_agent.agent import Agent
-from mini_agent.config import Config
-from mini_agent.tools import BashTool, EditTool, ReadTool, WriteTool
+from box_agent import LLMClient
+from box_agent.agent import Agent
+from box_agent.config import Config
+from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 
 
 async def demo_file_creation():
@@ -23,10 +23,10 @@ async def demo_file_creation():
     print("=" * 60)
 
     # Load configuration
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     if not config_path.exists():
         print("❌ config.yaml not found. Please set up your API key first.")
-        print("   Run: cp mini_agent/config/config-example.yaml mini_agent/config/config.yaml")
+        print("   Run: cp box_agent/config/config-example.yaml box_agent/config/config.yaml")
         return
 
     config = Config.from_yaml(config_path)
@@ -41,7 +41,7 @@ async def demo_file_creation():
         print(f"📁 Workspace: {workspace_dir}\n")
 
         # Load system prompt (Agent will auto-inject workspace info)
-        system_prompt_path = Path("mini_agent/config/system_prompt.md")
+        system_prompt_path = Path("box_agent/config/system_prompt.md")
         if system_prompt_path.exists():
             system_prompt = system_prompt_path.read_text(encoding="utf-8")
         else:
@@ -76,7 +76,7 @@ async def demo_file_creation():
         Create a Python file named 'hello.py' that:
         1. Defines a function called greet(name)
         2. The function prints "Hello, {name}!"
-        3. Calls the function with name="Mini Agent"
+        3. Calls the function with name="Box Agent"
         """
 
         print("📝 Task:")
@@ -119,7 +119,7 @@ async def demo_bash_task():
     print("=" * 60)
 
     # Load configuration
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     if not config_path.exists():
         print("❌ config.yaml not found")
         return
@@ -134,7 +134,7 @@ async def demo_bash_task():
         print(f"📁 Workspace: {workspace_dir}\n")
 
         # Load system prompt (Agent will auto-inject workspace info)
-        system_prompt_path = Path("mini_agent/config/system_prompt.md")
+        system_prompt_path = Path("box_agent/config/system_prompt.md")
         if system_prompt_path.exists():
             system_prompt = system_prompt_path.read_text(encoding="utf-8")
         else:

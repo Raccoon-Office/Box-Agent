@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from mini_agent import LLMClient, LLMProvider, Message
+from box_agent import LLMClient, LLMProvider, Message
 
 
 async def demo_anthropic_provider():
@@ -19,7 +19,7 @@ async def demo_anthropic_provider():
     print("=" * 60)
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -54,7 +54,7 @@ async def demo_openai_provider():
     print("=" * 60)
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -89,7 +89,7 @@ async def demo_default_provider():
     print("=" * 60)
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -121,7 +121,7 @@ async def demo_provider_comparison():
     print("=" * 60)
 
     # Load config
-    config_path = Path("mini_agent/config/config.yaml")
+    config_path = Path("box_agent/config/config.yaml")
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 

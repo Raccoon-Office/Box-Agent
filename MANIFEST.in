@@ -1,5 +1,9 @@
-recursive-include mini_agent/skills *
-include mini_agent/skills/README.md
-include mini_agent/skills/THIRD_PARTY_NOTICES.md
-include mini_agent/skills/agent_skills_spec.md
+recursive-include box_agent/skills *
+include box_agent/skills/README.md
+include box_agent/skills/THIRD_PARTY_NOTICES.md
+include box_agent/skills/agent_skills_spec.md
 
+recursive-include box_agent/config *
+include box_agent/config/config-example.yaml
+include box_agent/config/mcp-example.json
+include box_agent/config/system_prompt.md
