@@ -669,7 +669,8 @@ async def initialize_base_tools(config: Config):
     return tools, skill_loader
 
 
-def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False):
+def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
+                        allow_full_access: bool = True, non_interactive: bool = False):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -679,13 +680,19 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         config: Configuration object
         workspace_dir: Workspace directory path
         sandbox_mode: If True, enable Jupyter sandbox mode
+        allow_full_access: If True, tools can access full system; if False, restricted to workspace
+        non_interactive: If True, dangerous commands are rejected without prompting
     """
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Bash tool - needs workspace as cwd for command execution
     if config.tools.enable_bash:
-        bash_tool = BashTool(workspace_dir=str(workspace_dir))
+        bash_tool = BashTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            non_interactive=non_interactive,
+        )
         tools.append(bash_tool)
         print(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {workspace_dir}){Colors.RESET}")
 
@@ -693,9 +700,9 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     if config.tools.enable_file_tools:
         tools.extend(
             [
-                ReadTool(workspace_dir=str(workspace_dir)),
-                WriteTool(workspace_dir=str(workspace_dir)),
-                EditTool(workspace_dir=str(workspace_dir)),
+                ReadTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access),
+                WriteTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access),
+                EditTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access),
             ]
         )
         print(f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}")
@@ -890,7 +897,19 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     tools, skill_loader = await initialize_base_tools(config)
 
     # 4. Add workspace-dependent tools
-    add_workspace_tools(tools, config, workspace_dir, sandbox_mode=sandbox_mode)
+    non_interactive = task is not None
+    allow_full_access = config.tools.allow_full_access
+    add_workspace_tools(
+        tools, config, workspace_dir,
+        sandbox_mode=sandbox_mode,
+        allow_full_access=allow_full_access,
+        non_interactive=non_interactive,
+    )
+
+    if not allow_full_access:
+        print(f"{Colors.YELLOW}🔒 Safety mode: tools restricted to workspace ({workspace_dir}){Colors.RESET}")
+    if non_interactive:
+        print(f"{Colors.YELLOW}🔒 Non-interactive mode: dangerous commands will be rejected{Colors.RESET}")
 
     # 5. Load System Prompt (with priority search)
     system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
@@ -1277,7 +1296,7 @@ def main():
         run_setup_wizard(config_path)
 
     # Determine workspace directory
-    # Expand ~ to user home directory for portability
+    # Priority: CLI --workspace > current working directory
     if args.workspace:
         workspace_dir = Path(args.workspace).expanduser().absolute()
     else:

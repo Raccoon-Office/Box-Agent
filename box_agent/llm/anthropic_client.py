@@ -213,7 +213,7 @@ class AnthropicClient(LLMClientBase):
         thinking_content = ""
         tool_calls = []
 
-        for block in response.content:
+        for block in (response.content or []):
             if block.type == "text":
                 text_content += block.text
             elif block.type == "thinking":

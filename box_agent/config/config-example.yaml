@@ -37,6 +37,9 @@ system_prompt_path: "system_prompt.md"  # System prompt file (same config direct
 
 # ===== Tools Configuration =====
 tools:
+  # Safety: restrict tools to workspace directory only
+  allow_full_access: false  # true: tools can access full system; false: restricted to workspace
+
   # Basic tool switches
   enable_file_tools: true  # File read/write/edit tools (ReadTool, WriteTool, EditTool)
   enable_bash: true        # Bash command execution tool

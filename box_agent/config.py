@@ -54,6 +54,9 @@ class ToolsConfig(BaseModel):
     enable_bash: bool = True
     enable_note: bool = True
 
+    # Safety
+    allow_full_access: bool = False  # When False, tools are restricted to workspace
+
     # Skills
     enable_skills: bool = True
     skills_dir: str = "./skills"
@@ -151,6 +154,7 @@ class Config(BaseModel):
             enable_file_tools=tools_data.get("enable_file_tools", True),
             enable_bash=tools_data.get("enable_bash", True),
             enable_note=tools_data.get("enable_note", True),
+            allow_full_access=tools_data.get("allow_full_access", False),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),
             enable_mcp=tools_data.get("enable_mcp", True),
@@ -233,6 +237,10 @@ class Config(BaseModel):
         user_config_dir = Path.home() / ".box-agent" / "config"
         user_config_dir.mkdir(parents=True, exist_ok=True)
         target = user_config_dir / "config.yaml"
+
+        # Don't overwrite existing config
+        if target.exists():
+            return target
 
         example = cls.get_package_dir() / "config" / "config-example.yaml"
         if example.exists():

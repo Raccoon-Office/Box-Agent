@@ -13,6 +13,13 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from .base import Tool, ToolResult
+from .safety import (
+    ask_user_confirmation,
+    backup_file,
+    detect_dangerous_command,
+    detect_scope_escape,
+    extract_rm_targets,
+)
 
 
 class BashOutputResult(ToolResult):
@@ -222,17 +229,21 @@ class BashTool(Tool):
     - Unix/Linux/macOS: bash
     """
 
-    def __init__(self, workspace_dir: str | None = None):
+    def __init__(self, workspace_dir: str | None = None, allow_full_access: bool = True, non_interactive: bool = False):
         """Initialize BashTool with OS-specific shell detection.
 
         Args:
             workspace_dir: Working directory for command execution.
                            If provided, all commands run in this directory.
                            If None, commands run in the process's cwd.
+            allow_full_access: If False, block commands that escape the workspace.
+            non_interactive: If True, dangerous commands are rejected without prompting.
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
         self.workspace_dir = workspace_dir
+        self.allow_full_access = allow_full_access
+        self.non_interactive = non_interactive
 
     @property
     def name(self) -> str:
@@ -324,6 +335,57 @@ Examples:
         """
 
         try:
+            # --- Safety checks ---
+
+            # 1. Dangerous command detection (always active)
+            danger_reason = detect_dangerous_command(command)
+            if danger_reason:
+                if self.non_interactive:
+                    return BashOutputResult(
+                        success=False,
+                        error=f"Dangerous command blocked (non-interactive mode): {danger_reason}\nCommand: {command}",
+                        stdout="",
+                        stderr=f"Blocked: {danger_reason}",
+                        exit_code=-1,
+                    )
+                confirmed = await ask_user_confirmation(
+                    f"Dangerous command detected: {danger_reason}\nCommand: {command}"
+                )
+                if not confirmed:
+                    return BashOutputResult(
+                        success=False,
+                        error=(
+                            f"Command rejected by user: {danger_reason}. "
+                            f"IMPORTANT: Do NOT retry this operation with alternative commands. "
+                            f"Inform the user the operation was cancelled and ask how to proceed."
+                        ),
+                        stdout="",
+                        stderr=f"Rejected: {danger_reason}",
+                        exit_code=-1,
+                    )
+                # User confirmed — try to backup rm targets before execution
+                if "rm" in command or "rmdir" in command:
+                    for target in extract_rm_targets(command, self.workspace_dir):
+                        backup_file(target)
+
+            # 2. Scope control (only when allow_full_access is False)
+            if not self.allow_full_access:
+                escape_reason = detect_scope_escape(command)
+                if escape_reason:
+                    return BashOutputResult(
+                        success=False,
+                        error=(
+                            f"Command blocked: {escape_reason}. "
+                            f"Tools are restricted to workspace ({self.workspace_dir}). "
+                            f"Set 'allow_full_access: true' in config to allow full system access."
+                        ),
+                        stdout="",
+                        stderr=f"Blocked: {escape_reason}",
+                        exit_code=-1,
+                    )
+
+            # --- End safety checks ---
+
             # Validate timeout
             if timeout > 600:
                 timeout = 600

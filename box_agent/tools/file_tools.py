@@ -6,6 +6,7 @@ from typing import Any
 import tiktoken
 
 from .base import Tool, ToolResult
+from .safety import backup_file, validate_path_in_workspace
 
 
 def truncate_text_by_tokens(
@@ -63,13 +64,15 @@ def truncate_text_by_tokens(
 class ReadTool(Tool):
     """Read file content."""
 
-    def __init__(self, workspace_dir: str = "."):
+    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True):
         """Initialize ReadTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
+            allow_full_access: If False, restrict reads to workspace directory
         """
         self.workspace_dir = Path(workspace_dir).absolute()
+        self.allow_full_access = allow_full_access
 
     @property
     def name(self) -> str:
@@ -113,6 +116,12 @@ class ReadTool(Tool):
             if not file_path.is_absolute():
                 file_path = self.workspace_dir / file_path
 
+            # Path validation
+            if not self.allow_full_access:
+                error = validate_path_in_workspace(file_path, self.workspace_dir)
+                if error:
+                    return ToolResult(success=False, content="", error=error)
+
             if not file_path.exists():
                 return ToolResult(
                     success=False,
@@ -155,13 +164,15 @@ class ReadTool(Tool):
 class WriteTool(Tool):
     """Write content to a file."""
 
-    def __init__(self, workspace_dir: str = "."):
+    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True):
         """Initialize WriteTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
+            allow_full_access: If False, restrict writes to workspace directory
         """
         self.workspace_dir = Path(workspace_dir).absolute()
+        self.allow_full_access = allow_full_access
 
     @property
     def name(self) -> str:
@@ -200,6 +211,15 @@ class WriteTool(Tool):
             if not file_path.is_absolute():
                 file_path = self.workspace_dir / file_path
 
+            # Path validation
+            if not self.allow_full_access:
+                error = validate_path_in_workspace(file_path, self.workspace_dir)
+                if error:
+                    return ToolResult(success=False, content="", error=error)
+
+            # Backup existing file before overwrite
+            backup_file(file_path)
+
             # Create parent directories if they don't exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -212,13 +232,15 @@ class WriteTool(Tool):
 class EditTool(Tool):
     """Edit file by replacing text."""
 
-    def __init__(self, workspace_dir: str = "."):
+    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True):
         """Initialize EditTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
+            allow_full_access: If False, restrict edits to workspace directory
         """
         self.workspace_dir = Path(workspace_dir).absolute()
+        self.allow_full_access = allow_full_access
 
     @property
     def name(self) -> str:
@@ -261,6 +283,12 @@ class EditTool(Tool):
             if not file_path.is_absolute():
                 file_path = self.workspace_dir / file_path
 
+            # Path validation
+            if not self.allow_full_access:
+                error = validate_path_in_workspace(file_path, self.workspace_dir)
+                if error:
+                    return ToolResult(success=False, content="", error=error)
+
             if not file_path.exists():
                 return ToolResult(
                     success=False,
@@ -276,6 +304,9 @@ class EditTool(Tool):
                     content="",
                     error=f"Text not found in file: {old_str}",
                 )
+
+            # Backup before editing
+            backup_file(file_path)
 
             new_content = content.replace(old_str, new_str)
             file_path.write_text(new_content, encoding="utf-8")

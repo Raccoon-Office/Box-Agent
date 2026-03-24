@@ -4,7 +4,7 @@ from .agent import Agent
 from .llm import LLMClient
 from .schema import FunctionCall, LLMProvider, LLMResponse, Message, ToolCall
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 __all__ = [
     "Agent",
