@@ -46,6 +46,8 @@ box-agent-acp
 
 **Tool system** (`tools/`): Abstract `Tool` base class with `to_schema()` (Anthropic format) and `to_openai_schema()`. Built-in tools: `ReadTool`, `WriteTool`, `EditTool`, `BashTool`, `BashOutputTool`, `BashKillTool`, `SessionNoteTool`. MCP tools loaded via `mcp_loader.py`. Skills loaded from `SKILL.md` files with YAML frontmatter via `skill_loader.py`.
 
+**Safety layer** (`tools/safety.py`): Dangerous command detection (rm, sudo, kill, etc.) with user confirmation prompt (supports Chinese). Workspace path validation blocks access outside workspace when `allow_full_access: false`. Auto-backup to `~/.box-agent/trash/{timestamp}/` before file modifications. Non-interactive mode (`--task`) rejects dangerous commands outright.
+
 **Config** (`config.py`): Pydantic models. Load priority: `box_agent/config/` (dev) → `~/.box-agent/config/` (installed) → package directory (fallback). Main files: `config.yaml`, `system_prompt.md`, `mcp.json`.
 
 **CLI** (`cli.py`): Interactive mode with prompt_toolkit. In-session commands: `/help`, `/clear`, `/history`, `/stats`, `/log`, `/exit`. Subcommands: `setup`, `config`, `doctor`, `log`. Auto-launches setup wizard on first run or when API connection fails.
@@ -56,8 +58,9 @@ box-agent-acp
 - Retry with exponential backoff (`retry.py`, `@async_retry` decorator)
 - Tools return `ToolResult` (Pydantic model with success/content/error)
 - Skills use progressive disclosure: YAML metadata loaded first, full content on-demand
-- Agent workspace defaults to `./workspace`; logs go to `~/.box-agent/log/`
+- Agent workspace defaults to CWD; logs go to `~/.box-agent/log/`
 - `asyncio_mode = "auto"` in pytest config — async tests work without markers
+- Safety: dangerous commands require confirmation; workspace scope enforced by default; files auto-backed up before modification
 
 ## Configuration
 

@@ -7,12 +7,11 @@ requires-python = ">=3.10"
 authors = [
     {name = "Box Agent Team"}
 ]
-license = {text = "MIT"}
-keywords = ["agent", "ai", "llm", "sandbox", "mcp", "tool-calling"]
+license = "MIT"
+keywords = ["agent", "ai", "llm", "sandbox", "mcp", "tool-calling", "safety"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -42,7 +41,9 @@ box-agent-acp = "box_agent.acp.server:main"
 [project.urls]
 Homepage = "https://github.com/Raccoon-Office/Box-Agent"
 Repository = "https://github.com/Raccoon-Office/Box-Agent"
+Documentation = "https://github.com/Raccoon-Office/Box-Agent#readme"
 Issues = "https://github.com/Raccoon-Office/Box-Agent/issues"
+Changelog = "https://github.com/Raccoon-Office/Box-Agent/releases"
 
 [project.optional-dependencies]
 dev = [
