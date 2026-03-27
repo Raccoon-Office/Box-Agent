@@ -53,6 +53,7 @@ class ToolsConfig(BaseModel):
     enable_file_tools: bool = True
     enable_bash: bool = True
     enable_note: bool = True
+    enable_web_search: bool = True  # Fallback web search when no MCP search service
 
     # Safety
     allow_full_access: bool = False  # When False, tools are restricted to workspace

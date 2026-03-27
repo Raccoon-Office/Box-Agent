@@ -4,6 +4,7 @@ from .base import Tool, ToolResult
 from .bash_tool import BashTool
 from .file_tools import EditTool, ReadTool, WriteTool
 from .note_tool import RecallNoteTool, SessionNoteTool
+from .web_search_tool import WebSearchTool
 
 __all__ = [
     "Tool",
@@ -14,4 +15,5 @@ __all__ = [
     "BashTool",
     "SessionNoteTool",
     "RecallNoteTool",
+    "WebSearchTool",
 ]

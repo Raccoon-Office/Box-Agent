@@ -38,6 +38,7 @@ from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from box_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.note_tool import SessionNoteTool
 from box_agent.tools.skill_tool import create_skill_tools
+from box_agent.tools.web_search_tool import WebSearchTool
 from box_agent.utils import calculate_display_width
 
 
@@ -599,6 +600,11 @@ async def initialize_base_tools(config: Config):
         bash_kill_tool = BashKillTool()
         tools.append(bash_kill_tool)
         print(f"{Colors.GREEN}✅ Loaded Bash Kill tool{Colors.RESET}")
+
+    # 2. Web search tool (fallback when no MCP search service)
+    if config.tools.enable_web_search:
+        tools.append(WebSearchTool())
+        print(f"{Colors.GREEN}✅ Loaded Web Search tool (web_search){Colors.RESET}")
 
     # 3. Claude Skills (loaded from package directory)
     if config.tools.enable_skills:
