@@ -158,6 +158,7 @@ class BoxACPAgent:
             sandbox_mode=True,
             allow_full_access=self._config.tools.allow_full_access,
             non_interactive=True,  # ACP cannot do interactive terminal prompts
+            output=lambda msg: sys.stderr.write(msg + "\n"),
         )
         agent = Agent(llm_client=self._llm, system_prompt=self._system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
         # Sandbox workspace is a stable subdirectory under the workspace
@@ -298,8 +299,13 @@ async def run_acp_server(config: Config | None = None) -> None:
 
     log.info("server/start", message=f"Box-Agent ACP server starting v{__version__}")
 
+    # Redirect tool-loading status messages to stderr (stdout is ACP-only)
+    def _stderr_print(msg: str) -> None:
+        sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
+
     try:
-        base_tools, skill_loader = await initialize_base_tools(config)
+        base_tools, skill_loader = await initialize_base_tools(config, output=_stderr_print)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)
         if prompt_path and prompt_path.exists():
             system_prompt = prompt_path.read_text(encoding="utf-8")

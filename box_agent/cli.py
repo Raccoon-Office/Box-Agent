@@ -574,7 +574,7 @@ async def cmd_doctor():
     print()
 
 
-async def initialize_base_tools(config: Config):
+async def initialize_base_tools(config: Config, output=None):
     """Initialize base tools (independent of workspace)
 
     These tools are loaded from package configuration and don't depend on workspace.
@@ -582,10 +582,13 @@ async def initialize_base_tools(config: Config):
 
     Args:
         config: Configuration object
+        output: Callable for status messages (default: print). Pass a stderr
+                writer when stdout must stay clean (e.g. ACP mode).
 
     Returns:
         Tuple of (list of tools, skill loader if skills enabled)
     """
+    _out = output or print
 
     tools = []
     skill_loader = None
@@ -595,20 +598,20 @@ async def initialize_base_tools(config: Config):
     if config.tools.enable_bash:
         bash_output_tool = BashOutputTool()
         tools.append(bash_output_tool)
-        print(f"{Colors.GREEN}✅ Loaded Bash Output tool{Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded Bash Output tool{Colors.RESET}")
 
         bash_kill_tool = BashKillTool()
         tools.append(bash_kill_tool)
-        print(f"{Colors.GREEN}✅ Loaded Bash Kill tool{Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded Bash Kill tool{Colors.RESET}")
 
     # 2. Web search tool (fallback when no MCP search service)
     if config.tools.enable_web_search:
         tools.append(WebSearchTool())
-        print(f"{Colors.GREEN}✅ Loaded Web Search tool (web_search){Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded Web Search tool (web_search){Colors.RESET}")
 
     # 3. Claude Skills (loaded from package directory)
     if config.tools.enable_skills:
-        print(f"{Colors.BRIGHT_CYAN}Loading Claude Skills...{Colors.RESET}")
+        _out(f"{Colors.BRIGHT_CYAN}Loading Claude Skills...{Colors.RESET}")
         try:
             # Resolve skills directory with priority search
             # Expand ~ to user home directory for portability
@@ -635,15 +638,15 @@ async def initialize_base_tools(config: Config):
             skill_tools, skill_loader = create_skill_tools(skills_dir)
             if skill_tools:
                 tools.extend(skill_tools)
-                print(f"{Colors.GREEN}✅ Loaded Skill tool (get_skill){Colors.RESET}")
+                _out(f"{Colors.GREEN}✅ Loaded Skill tool (get_skill){Colors.RESET}")
             else:
-                print(f"{Colors.YELLOW}⚠️  No available Skills found{Colors.RESET}")
+                _out(f"{Colors.YELLOW}⚠️  No available Skills found{Colors.RESET}")
         except Exception as e:
-            print(f"{Colors.YELLOW}⚠️  Failed to load Skills: {e}{Colors.RESET}")
+            _out(f"{Colors.YELLOW}⚠️  Failed to load Skills: {e}{Colors.RESET}")
 
     # 4. MCP tools (loaded with priority search)
     if config.tools.enable_mcp:
-        print(f"{Colors.BRIGHT_CYAN}Loading MCP tools...{Colors.RESET}")
+        _out(f"{Colors.BRIGHT_CYAN}Loading MCP tools...{Colors.RESET}")
         try:
             # Apply MCP timeout configuration from config.yaml
             mcp_config = config.tools.mcp
@@ -652,7 +655,7 @@ async def initialize_base_tools(config: Config):
                 execute_timeout=mcp_config.execute_timeout,
                 sse_read_timeout=mcp_config.sse_read_timeout,
             )
-            print(
+            _out(
                 f"{Colors.DIM}  MCP timeouts: connect={mcp_config.connect_timeout}s, "
                 f"execute={mcp_config.execute_timeout}s, sse_read={mcp_config.sse_read_timeout}s{Colors.RESET}"
             )
@@ -663,20 +666,20 @@ async def initialize_base_tools(config: Config):
                 mcp_tools = await load_mcp_tools_async(str(mcp_config_path))
                 if mcp_tools:
                     tools.extend(mcp_tools)
-                    print(f"{Colors.GREEN}✅ Loaded {len(mcp_tools)} MCP tools (from: {mcp_config_path}){Colors.RESET}")
+                    _out(f"{Colors.GREEN}✅ Loaded {len(mcp_tools)} MCP tools (from: {mcp_config_path}){Colors.RESET}")
                 else:
-                    print(f"{Colors.YELLOW}⚠️  No available MCP tools found{Colors.RESET}")
+                    _out(f"{Colors.YELLOW}⚠️  No available MCP tools found{Colors.RESET}")
             else:
-                print(f"{Colors.YELLOW}⚠️  MCP config file not found: {config.tools.mcp_config_path}{Colors.RESET}")
+                _out(f"{Colors.YELLOW}⚠️  MCP config file not found: {config.tools.mcp_config_path}{Colors.RESET}")
         except Exception as e:
-            print(f"{Colors.YELLOW}⚠️  Failed to load MCP tools: {e}{Colors.RESET}")
+            _out(f"{Colors.YELLOW}⚠️  Failed to load MCP tools: {e}{Colors.RESET}")
 
-    print()  # Empty line separator
+    _out("")  # Empty line separator
     return tools, skill_loader
 
 
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
-                        allow_full_access: bool = True, non_interactive: bool = False):
+                        allow_full_access: bool = True, non_interactive: bool = False, output=None):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -688,7 +691,9 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         sandbox_mode: If True, enable Jupyter sandbox mode
         allow_full_access: If True, tools can access full system; if False, restricted to workspace
         non_interactive: If True, dangerous commands are rejected without prompting
+        output: Callable for status messages (default: print)
     """
+    _out = output or print
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -700,7 +705,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             non_interactive=non_interactive,
         )
         tools.append(bash_tool)
-        print(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {workspace_dir}){Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {workspace_dir}){Colors.RESET}")
 
     # File tools - need workspace to resolve relative paths
     if config.tools.enable_file_tools:
@@ -711,12 +716,12 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                 EditTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access),
             ]
         )
-        print(f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}")
 
     # Session note tool - needs workspace to store memory file
     if config.tools.enable_note:
         tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
-        print(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:
@@ -726,8 +731,8 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         status_tool = SandboxStatusTool()
         SandboxStatusTool.set_sandbox_tool(sandbox_tool)
         tools.append(status_tool)
-        print(f"{Colors.GREEN}✅ Loaded Jupyter sandbox tool (execute_code){Colors.RESET}")
-        print(f"{Colors.GREEN}✅ Loaded sandbox status tool{Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded Jupyter sandbox tool (execute_code){Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded sandbox status tool{Colors.RESET}")
 
 
 async def _quiet_cleanup():

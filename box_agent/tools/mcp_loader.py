@@ -371,7 +371,8 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
         mcp_servers = config.get("mcpServers", {})
 
         if not mcp_servers:
-            print("No MCP servers configured")
+            import sys as _sys
+            _sys.stderr.write("No MCP servers configured\n")
             return []
 
         all_tools = []
