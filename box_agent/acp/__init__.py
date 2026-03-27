@@ -250,16 +250,19 @@ class BoxACPAgent:
 
                     case ArtifactEvent(tool_call_id=tid, artifact_type=atype, filename=fname, path=fpath, mime_type=mime, size_bytes=sz):
                         log.info("artifact", session_id=session_id, tool_call_id=tid, artifact_type=atype, artifact_path=fpath, filename=fname, mime_type=mime, size_bytes=sz)
-                        meta = _json.dumps({
-                            "type": "artifact",
-                            "artifact_type": atype,
-                            "filename": fname,
-                            "path": fpath,
-                            "mime_type": mime,
-                            "size_bytes": sz,
-                            "sandbox_workspace": state.sandbox_workspace,
-                        })
-                        await self._send(session_id, update_agent_message(text_block(meta)))
+                        artifact_update = {
+                            "kind": "artifact",
+                            "artifact": {
+                                "type": "artifact",
+                                "artifact_type": atype,
+                                "filename": fname,
+                                "path": fpath,
+                                "mime_type": mime,
+                                "size_bytes": sz,
+                                "sandbox_workspace": state.sandbox_workspace,
+                            },
+                        }
+                        await self._send(session_id, artifact_update)
 
                     case ErrorEvent(message=msg, is_fatal=True):
                         log.error("error", session_id=session_id, message=msg, is_fatal=True)
