@@ -25,6 +25,7 @@ This project comes packed with features designed for a robust and intelligent ag
       - [🚀 Quick Start Mode (Recommended for Beginners)](#-quick-start-mode-recommended-for-beginners)
       - [🔧 Development Mode](#-development-mode)
   - [ACP \& Zed Editor Integration(optional)](#acp--zed-editor-integrationoptional)
+  - [Standalone Runtime (Electron Integration)](#standalone-runtime-electron-integration)
   - [Usage Examples](#usage-examples)
     - [Task Execution](#task-execution)
     - [Using a Claude Skill (e.g., PDF Generation)](#using-a-claude-skill-eg-pdf-generation)
@@ -232,6 +233,57 @@ The command path should be:
 - Open Zed's agent panel with `Ctrl+Shift+P` → "Agent: Toggle Panel"
 - Select "box-agent" from the agent dropdown
 - Start conversations with Box Agent directly in your editor
+
+## Standalone Runtime (Electron Integration)
+
+Box Agent can be packaged as a **standalone binary** for embedding in Electron apps or other host processes. The binary bundles Python and all dependencies — no external Python installation required.
+
+### Pre-built Downloads
+
+Download platform-specific runtime artifacts from [GitHub Releases](https://github.com/Raccoon-Office/Box-Agent/releases):
+
+```bash
+# Download via gh CLI
+gh release download v0.4.2 --repo Raccoon-Office/Box-Agent \
+  --pattern "box-agent-runtime-*.tar.gz"
+```
+
+Available platforms: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`
+
+### Runtime Structure
+
+```
+box-agent-runtime/
+├── manifest.json          # {"name","version","platform","arch","entry","mode"}
+├── VERSION                # Plain text version
+└── bin/
+    ├── box-agent-acp      # Entry binary
+    └── _internal/         # Bundled Python + dependencies
+```
+
+### Integration Protocol
+
+The runtime binary communicates via **ACP JSON-RPC over stdio**:
+- **stdin**: JSON-RPC requests from host process
+- **stdout**: JSON-RPC responses only (zero diagnostic output)
+- **stderr**: All logs, diagnostics, tool loading status
+
+Environment variables for debug logging:
+- `BOX_AGENT_LOG_LEVEL`: `DEBUG` | `INFO` | `WARN` | `ERROR` (default: `INFO`)
+- `BOX_AGENT_LOG_FILE`: Path to log file (in addition to stderr)
+- `BOX_AGENT_LOG_FORMAT`: `text` | `json` (default: `text`)
+
+### Build from Source
+
+```bash
+# Install build dependencies
+uv sync --group dev
+
+# Build for current platform (reads version from __version__)
+uv run python scripts/build_runtime.py
+
+# Output: dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz
+```
 
 ## Usage Examples
 

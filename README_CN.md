@@ -25,6 +25,7 @@
       - [🚀 快速上手模式（推荐新手）](#-快速上手模式推荐新手)
       - [🔧 开发模式](#-开发模式)
   - [ACP \& Zed Editor 集成（可选）](#acp--zed-editor-集成可选)
+  - [独立运行时（Electron 集成）](#独立运行时electron-集成)
   - [使用示例](#使用示例)
     - [任务执行](#任务执行)
     - [使用 Claude Skill（例如：PDF 生成）](#使用-claude-skill例如pdf-生成)
@@ -232,6 +233,57 @@ Box Agent 支持 [Agent Communication Protocol (ACP)](https://github.com/modelco
 - 使用 `Ctrl+Shift+P` → "Agent: Toggle Panel" 打开 Zed 的 Agent 面板
 - 从 Agent 下拉列表中选择 "box-agent"
 - 直接在编辑器中开始与 Box Agent 对话
+
+## 独立运行时（Electron 集成）
+
+Box Agent 可以打包为**独立二进制文件**，用于嵌入 Electron 应用或其他宿主进程。二进制文件内置了 Python 和所有依赖 — 无需额外安装 Python。
+
+### 下载预构建包
+
+从 [GitHub Releases](https://github.com/Raccoon-Office/Box-Agent/releases) 下载平台对应的 runtime 包：
+
+```bash
+# 通过 gh CLI 下载
+gh release download v0.4.2 --repo Raccoon-Office/Box-Agent \
+  --pattern "box-agent-runtime-*.tar.gz"
+```
+
+可用平台：`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`
+
+### Runtime 目录结构
+
+```
+box-agent-runtime/
+├── manifest.json          # {"name","version","platform","arch","entry","mode"}
+├── VERSION                # 纯文本版本号
+└── bin/
+    ├── box-agent-acp      # 入口二进制
+    └── _internal/         # 内置 Python + 依赖
+```
+
+### 集成协议
+
+Runtime 二进制通过 **ACP JSON-RPC over stdio** 通信：
+- **stdin**：宿主进程发送的 JSON-RPC 请求
+- **stdout**：仅 JSON-RPC 响应（零诊断输出）
+- **stderr**：所有日志、诊断信息、工具加载状态
+
+调试日志环境变量：
+- `BOX_AGENT_LOG_LEVEL`：`DEBUG` | `INFO` | `WARN` | `ERROR`（默认：`INFO`）
+- `BOX_AGENT_LOG_FILE`：日志文件路径（同时写入 stderr）
+- `BOX_AGENT_LOG_FORMAT`：`text` | `json`（默认：`text`）
+
+### 从源码构建
+
+```bash
+# 安装构建依赖
+uv sync --group dev
+
+# 为当前平台构建（自动读取 __version__）
+uv run python scripts/build_runtime.py
+
+# 产物：dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz
+```
 
 ## 使用示例
 

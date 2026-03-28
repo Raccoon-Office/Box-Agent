@@ -7,6 +7,11 @@
 - [1. Demo Features](#1-demo-features)
 - [2. Upgrade Directions](#2-upgrade-directions)
 - [3. Production Deployment](#3-production-deployment)
+  - [3.1 Standalone Runtime (Electron / Desktop Apps)](#31-standalone-runtime-electron--desktop-apps)
+  - [3.2 (Reserved)](#32-reserved)
+  - [3.3 Container Deployment](#33-container-deployment-recommendations)
+  - [3.4 Resource Limits](#34-resource-limit-configuration)
+  - [3.5 Linux Permissions](#35-linux-account-permission-restrictions)
 
 ---
 
@@ -48,7 +53,82 @@ Currently directly trusts model output without validation mechanism
 
 ## 3. Production Deployment
 
-### 3.1 Container Deployment Recommendations
+### 3.1 Standalone Runtime (Electron / Desktop Apps)
+
+For embedding Box Agent in Electron or other desktop applications, use the standalone runtime binary. It bundles Python and all dependencies — no external Python installation required.
+
+#### Downloading
+
+```bash
+# From GitHub Releases
+gh release download v0.4.2 --repo Raccoon-Office/Box-Agent \
+  --pattern "box-agent-runtime-*.tar.gz"
+
+# Or direct URL
+# https://github.com/Raccoon-Office/Box-Agent/releases/download/v0.4.2/box-agent-runtime-v0.4.2-darwin-arm64.tar.gz
+```
+
+#### Directory Structure
+
+After extraction:
+```
+box-agent-runtime/
+├── manifest.json     # Machine-readable metadata
+├── VERSION           # Plain text version string
+└── bin/
+    ├── box-agent-acp # Main executable
+    └── _internal/    # Bundled Python runtime + packages
+```
+
+#### Spawning from Host Process
+
+```typescript
+// Example: Node.js / Electron
+import { spawn } from 'child_process';
+
+const proc = spawn('build-resources/box-agent-runtime/bin/box-agent-acp', [], {
+  stdio: ['pipe', 'pipe', 'pipe'],
+  env: {
+    ...process.env,
+    BOX_AGENT_LOG_LEVEL: 'INFO',
+    BOX_AGENT_LOG_FILE: '/tmp/box-agent.log',
+  },
+});
+
+// stdin/stdout: ACP JSON-RPC protocol (pure, no stray bytes)
+// stderr: diagnostic logs (safe to pipe to host logger)
+```
+
+#### Key Constraints
+
+| Channel | Content | Rule |
+|---------|---------|------|
+| **stdout** | ACP JSON-RPC only | Zero diagnostic output. Any stray byte breaks the protocol. |
+| **stderr** | Logs, tool loading status, warnings | Safe to capture for debugging. |
+| **stdin** | ACP JSON-RPC requests | Host sends `initialize`, `newSession`, `prompt`, `cancel`. |
+
+#### Debug Logging
+
+Control via environment variables:
+
+| Variable | Values | Default |
+|----------|--------|---------|
+| `BOX_AGENT_LOG_LEVEL` | `DEBUG`, `INFO`, `WARN`, `ERROR` | `INFO` |
+| `BOX_AGENT_LOG_FILE` | File path | *(stderr only)* |
+| `BOX_AGENT_LOG_FORMAT` | `text`, `json` | `text` |
+
+#### Building from Source
+
+```bash
+uv sync --group dev
+uv run python scripts/build_runtime.py [--version X.Y.Z] [--output dist/runtime]
+```
+
+Produces `dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz`.
+
+Supported platforms: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`.
+
+### 3.3 Container Deployment Recommendations
 
 We recommend using K8s/Docker environments for Agent deployment. Containerized deployment has the following advantages:
 
@@ -57,9 +137,9 @@ We recommend using K8s/Docker environments for Agent deployment. Containerized d
 - **Version Management**: Easy rollback and canary releases
 - **Environment Consistency**: Development, testing, and production environments are completely consistent
 
-### 3.2 Resource Limit Configuration
+### 3.4 Resource Limit Configuration
 
-#### 3.2.1 CPU and Memory Limits
+#### 3.4.1 CPU and Memory Limits
 
 To prevent the Agent from consuming excessive CPU/Memory resources and affecting the host, CPU and memory limits must be set:
 
@@ -79,7 +159,7 @@ services:
           memory: 512M     # Guarantee at least 512MB
 ```
 
-#### 3.2.2 Disk Limits
+#### 3.4.2 Disk Limits
 
 Agents may generate large amounts of temporary files and log files, so disk usage needs to be limited:
 
@@ -102,9 +182,9 @@ services:
 ```
 
 
-### 3.3 Linux Account Permission Restrictions
+### 3.5 Linux Account Permission Restrictions
 
-#### 3.3.1 Principle of Least Privilege
+#### 3.5.1 Principle of Least Privilege
 
 **Never run the Agent as root user**, as this poses serious security risks.
 
@@ -145,7 +225,7 @@ RUN uv sync
 CMD ["uv", "run", "box-agent"]
 ```
 
-#### 3.3.2 File System Permissions
+#### 3.5.2 File System Permissions
 
 Restrict the Agent to only access necessary directories:
 

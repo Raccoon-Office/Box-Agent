@@ -76,8 +76,26 @@ Run `box-agent setup` for interactive configuration, or manually copy `box_agent
 # Bump version in pyproject.toml and box_agent/__init__.py
 uv build
 uvx twine upload dist/box_agent-<version>*
-gh release create v<version> dist/box_agent-<version>* --title "v<version>"
+gh release create v<version> dist/box_agent-<version>* --repo Raccoon-Office/Box-Agent --title "v<version>"
 ```
+
+### Standalone Runtime Build
+
+```bash
+# Build PyInstaller binary for current platform
+uv run python scripts/build_runtime.py
+# Output: dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz
+
+# Upload runtime artifact to the same GitHub Release
+gh release upload v<version> dist/runtime/box-agent-runtime-*.tar.gz --repo Raccoon-Office/Box-Agent
+```
+
+Runtime structure: `box-agent-runtime/{manifest.json, VERSION, bin/box-agent-acp}`. The binary communicates via ACP JSON-RPC over stdio. Hard constraint: stdout = pure ACP protocol, all diagnostics go to stderr.
+
+Key files:
+- `scripts/build_runtime.py` — PyInstaller build script, auto-detects platform
+- `box_agent/acp/runtime_entry.py` — Clean entry point for standalone binary
+- `box_agent/acp/debug_logger.py` — Structured logger (stderr + optional file, env-var controlled)
 
 PyPI: https://pypi.org/project/box-agent/
 GitHub: https://github.com/Raccoon-Office/Box-Agent
