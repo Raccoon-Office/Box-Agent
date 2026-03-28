@@ -2,17 +2,33 @@
 
 [English](./README.md) | 中文
 
-**Box Agent** 是一个极简但专业的 Agent 框架，支持多种 LLM 提供商（Anthropic、OpenAI 兼容等）。项目支持交错思维（interleaved thinking）、工具调用和完整的 Agent 循环，适用于处理复杂任务。
+**Box Agent** 是一个专业的 AI Agent 框架，支持多种 LLM 提供商（Anthropic、OpenAI 兼容、DeepSeek、SiliconFlow 及任何第三方 API）。项目支持交错思维（interleaved thinking）、工具调用、沙箱代码执行、数据分析和完整的 Agent 循环，适用于处理复杂任务。
 
 该项目具备一系列为稳健、智能的 Agent 开发而设计的特性：
 
+**核心 Agent**
 *   ✅ **完整的 Agent 执行循环**：一个完整可靠的执行框架，配备了文件系统和 Shell 操作的基础工具集。
-*   ✅ **持久化记忆**：通过内置的 **Session Note Tool**，Agent 能够在多个会话中保留关键信息。
+*   ✅ **多 Provider 支持**：开箱即用支持 Anthropic、OpenAI 兼容、DeepSeek、SiliconFlow 及任何第三方 API 端点。
 *   ✅ **智能上下文管理**：自动对会话历史进行摘要，可处理长达可配置 Token 上限的上下文，从而支持无限长的任务。
-*   ✅ **集成 Claude Skills**：内置 15 种专业技能，涵盖文档处理、设计、测试和开发等领域。
+*   ✅ **持久化记忆**：通过内置的 **Session Note Tool**，Agent 能够在多个会话中保留关键信息。
+*   ✅ **非交互模式**：通过 `--task` 参数支持无头运行，适用于 CI/CD 流水线和自动化脚本。
+
+**沙箱与数据分析**
+*   ✅ **Jupyter 沙箱执行**：隔离的 `execute_code` 工具在独立 venv 中运行 Python，拥有独立 Kernel，与宿主环境完全隔离。
+*   ✅ **内置数据分析**：沙箱中预装 `pandas`、`numpy`、`matplotlib`、`openpyxl`、`scikit-learn`，开箱即可进行 CSV/XLSX 分析和图表生成。
+*   ✅ **自动安装缺失包**：运行时检测 `ModuleNotFoundError`，自动 `pip install` 缺失的包（sklearn → scikit-learn, cv2 → opencv-python, PIL → Pillow 等），并自动重试。
+*   ✅ **结构化 Artifact 事件**：代码执行生成的文件（PNG、CSV、XLSX、PDF）通过前后快照检测，以结构化 `ArtifactEvent` 发送给下游消费者。
+
+**集成与部署**
+*   ✅ **ACP 协议桥接**：完整的 [Agent Communication Protocol](https://github.com/nichochar/agent-client-protocol) 支持 — 可与 Zed Editor、Electron 应用及任何 ACP 兼容宿主通过 stdio JSON-RPC 集成。
+*   ✅ **独立运行时**：PyInstaller 打包的二进制文件，内含 Python 及所有依赖。无需外部 Python — 下载即用。支持 macOS (arm64/x64) 和 Linux。
 *   ✅ **集成 MCP 工具**：原生支持 MCP 协议，可轻松接入知识图谱、网页搜索等工具。
-*   ✅ **全面的日志记录**：为每个请求、响应和工具执行提供详细日志，便于调试。
-*   ✅ **安全防护层**：危险命令确认、工作区范围控制、文件修改前自动备份。
+*   ✅ **集成 Claude Skills**：内置 11 种专业技能，涵盖文档处理、设计、测试和开发等领域。
+
+**安全与质量**
+*   ✅ **安全防护层**：危险命令检测与确认、工作区范围控制、文件修改前自动备份到 `~/.box-agent/trash/`。
+*   ✅ **健壮的文件处理**：对非 UTF-8 文件（GBK CSV、Latin-1 文本等）使用 `errors='replace'` 容错读取。
+*   ✅ **全面的日志记录**：为每个请求、响应和工具执行提供详细日志。独立运行时支持环境变量控制的结构化调试日志。
 *   ✅ **简洁明了的设计**：美观的命令行界面和易于理解的代码库，使其成为构建高级 Agent 的理想起点。
 
 ## 目录
