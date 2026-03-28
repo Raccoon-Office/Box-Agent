@@ -255,41 +255,24 @@ class JupyterKernelSession:
         from jupyter_client.kernelspec import KernelSpec
         kernel_spec = KernelSpec.from_resource_dir(str(kernel_spec_dir))
 
+        # Patch provisioner factory BEFORE start_kernel().
+        # In PyInstaller packaged runtime, entry-point metadata is missing or
+        # broken: the entry point for 'local-provisioner' either doesn't exist
+        # or .load() returns the *module* instead of the *class*, causing
+        # "local-provisioner is not found" or "TypeError: 'module' object is
+        # not callable".  We monkey-patch the factory to bypass entry points.
+        self._patch_provisioner_factory()
+
         # Create KernelManager with our custom spec
         km = jupyter_client.KernelManager()
         km._kernel_spec = kernel_spec  # Override the kernel spec
-
-        try:
-            km.start_kernel()
-        except Exception as e:
-            err_msg = str(e)
-            # Fallback for packaged runtime: entry-point-based provisioner
-            # lookup fails because PyInstaller doesn't preserve dist-info.
-            # Monkey-patch the provisioner factory to use LocalProvisioner.
-            if "local-provisioner" in err_msg or "not callable" in err_msg or "provisioner" in err_msg.lower():
-                from jupyter_client.provisioning.local_provisioner import LocalProvisioner
-
-                _orig_create = getattr(km, '_async_provisioner_factory', None)
-
-                class _DirectProvisioner(LocalProvisioner):
-                    """LocalProvisioner that skips entry-point lookup."""
-                    pass
-
-                # Patch: set provisioner class directly on the manager
-                km.provisioner_class = _DirectProvisioner
-                # Some versions use kernel_provisioner_factory
-                if hasattr(km, 'kernel_provisioner_factory'):
-                    km.kernel_provisioner_factory = None
-
-                km.start_kernel()
-            else:
-                raise
+        km.start_kernel()
         self._km = km
         self._kc = km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
 
-        # Run setup
+        # Run setup code in the kernel
         setup_code = f"""
 import os
 os.chdir(r'{self.workspace}')
@@ -313,6 +296,61 @@ except ImportError:
                     break
         except Exception:
             pass
+
+    _provisioner_patched = False
+
+    @classmethod
+    def _patch_provisioner_factory(cls):
+        """Monkey-patch KernelProvisionerFactory for PyInstaller compatibility.
+
+        In a PyInstaller frozen environment, importlib.metadata entry points
+        are missing or broken.  The factory's create_provisioner_instance()
+        calls ``self.provisioners['local-provisioner'].load()`` which either
+        raises (entry point not found) or returns the *module* object instead
+        of the LocalProvisioner *class* (→ TypeError: 'module' object is not
+        callable).
+
+        This patch replaces create_provisioner_instance() with a version that
+        directly instantiates LocalProvisioner, skipping entry-point lookup.
+        The patch is applied once and is a no-op in non-frozen environments
+        where the original factory works correctly.
+        """
+        if cls._provisioner_patched:
+            return
+
+        from jupyter_client.provisioning.factory import KernelProvisionerFactory
+        from jupyter_client.provisioning.local_provisioner import LocalProvisioner
+
+        factory = KernelProvisionerFactory.instance()
+
+        # Quick check: does the existing factory work?
+        try:
+            ep = factory.provisioners.get("local-provisioner")
+            if ep is not None:
+                loaded = ep.load()
+                # Verify it loaded the CLASS, not the module.
+                # A module object is not a type — isinstance(mod, type) is False.
+                if isinstance(loaded, type):
+                    cls._provisioner_patched = True
+                    return
+        except Exception:
+            pass
+
+        # Patch: replace create_provisioner_instance entirely
+        _orig_create = factory.create_provisioner_instance
+
+        def _patched_create(kernel_id, kernel_spec, parent):
+            provisioner_cfg = factory._get_provisioner_config(kernel_spec)
+            provisioner_config = provisioner_cfg.get("config", {})
+            return LocalProvisioner(
+                kernel_id=kernel_id,
+                kernel_spec=kernel_spec,
+                parent=parent,
+                **provisioner_config,
+            )
+
+        factory.create_provisioner_instance = _patched_create
+        cls._provisioner_patched = True
 
     def is_alive(self) -> bool:
         """Check if kernel is alive."""

@@ -380,7 +380,7 @@ Examples:
 
             # 2. Scope control (only when allow_full_access is False)
             if not self.allow_full_access:
-                escape_reason = detect_scope_escape(command)
+                escape_reason = detect_scope_escape(command, workspace_dir=self.workspace_dir)
                 if escape_reason:
                     return BashOutputResult(
                         success=False,

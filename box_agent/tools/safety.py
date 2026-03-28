@@ -61,20 +61,50 @@ def detect_dangerous_command(command: str) -> str | None:
     return None
 
 
-def detect_scope_escape(command: str) -> str | None:
+def detect_scope_escape(command: str, workspace_dir: str | None = None) -> str | None:
     """Check if a shell command attempts to escape the workspace.
 
     This is a heuristic check — not a security sandbox. It catches common
     patterns like `cd /`, absolute path references, etc.
 
+    If ``workspace_dir`` is provided, absolute paths that stay within the
+    workspace are allowed (e.g. ``cd /mnt/workspace/subdir`` when the
+    workspace is ``/mnt/workspace``).
+
     Args:
         command: The shell command string to check.
+        workspace_dir: Absolute path to the current workspace (optional).
 
     Returns:
         A reason string if escape is detected, or None if the command looks safe.
     """
     for pattern, reason in _ESCAPE_PATTERNS:
-        if pattern.search(command):
+        match = pattern.search(command)
+        if match:
+            # If workspace_dir is set, check whether the absolute path
+            # is inside the workspace — if so, it's not an escape.
+            if workspace_dir:
+                # Extract the absolute path from the command.
+                # Strategy: find the first absolute path (starting with /)
+                # in the matched region and onwards.
+                path_token = None
+                matched_text = command[match.start():]
+                abs_match = re.search(r'(/[^\s;|&]*)', matched_text)
+                if abs_match:
+                    path_token = abs_match.group(1)
+                # For "cd" specifically, grab the argument directly
+                if reason.startswith("cd"):
+                    cd_match = re.search(r'\bcd\s+([^\s;|&]+)', command)
+                    if cd_match:
+                        path_token = cd_match.group(1)
+                if path_token:
+                    try:
+                        resolved = str(Path(path_token).resolve())
+                        ws_resolved = str(Path(workspace_dir).resolve())
+                        if resolved == ws_resolved or resolved.startswith(ws_resolved + "/"):
+                            continue  # path is within workspace — not an escape
+                    except Exception:
+                        pass
             return reason
     return None
 
