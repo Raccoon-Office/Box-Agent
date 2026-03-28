@@ -130,8 +130,15 @@ class ReadTool(Tool):
                 )
 
             # Read file content with line numbers
-            with open(file_path, encoding="utf-8") as f:
-                lines = f.readlines()
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    lines = f.readlines()
+            except UnicodeDecodeError:
+                with open(file_path, encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                # Prepend a warning that will appear before the content
+                lines.insert(0, "[Warning: File contains non-UTF-8 bytes, some characters replaced with \ufffd. "
+                              "For data files, consider using execute_code with pd.read_csv() or pd.read_excel().]\n")
 
             # Apply offset and limit
             start = (offset - 1) if offset else 0

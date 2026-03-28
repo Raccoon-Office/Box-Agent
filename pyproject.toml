@@ -1,6 +1,6 @@
 [project]
 name = "box-agent"
-version = "0.4.2"
+version = "0.4.3"
 description = "Minimal AI agent framework with sandbox execution, tool calling, and MCP support"
 readme = "README.md"
 requires-python = ">=3.10"

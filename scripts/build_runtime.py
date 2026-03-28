@@ -115,7 +115,11 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "mcp",
         "acp",
         "jupyter_client",
+        "jupyter_client.provisioning",
+        "jupyter_client.provisioning.local_provisioner",
         "ipykernel",
+        "ipykernel_launcher",
+        "jupyter_core",
     ]
     hidden_args = []
     for imp in hidden_imports:
@@ -133,6 +137,9 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         *hidden_args,
         "--collect-all", "tiktoken",
         "--collect-all", "tiktoken_ext",
+        "--collect-all", "jupyter_client",
+        "--collect-all", "ipykernel",
+        "--collect-all", "jupyter_core",
         str(entry_point),
     ]
 

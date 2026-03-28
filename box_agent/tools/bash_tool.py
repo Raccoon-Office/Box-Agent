@@ -4,6 +4,7 @@ Supports both bash (Unix/Linux/macOS) and PowerShell (Windows).
 """
 
 import asyncio
+import os
 import platform
 import re
 import time
@@ -229,7 +230,8 @@ class BashTool(Tool):
     - Unix/Linux/macOS: bash
     """
 
-    def __init__(self, workspace_dir: str | None = None, allow_full_access: bool = True, non_interactive: bool = False):
+    def __init__(self, workspace_dir: str | None = None, allow_full_access: bool = True, non_interactive: bool = False,
+                 sandbox_venv_path: str | None = None):
         """Initialize BashTool with OS-specific shell detection.
 
         Args:
@@ -238,12 +240,20 @@ class BashTool(Tool):
                            If None, commands run in the process's cwd.
             allow_full_access: If False, block commands that escape the workspace.
             non_interactive: If True, dangerous commands are rejected without prompting.
+            sandbox_venv_path: If set, prepend venv bin to PATH and set VIRTUAL_ENV
+                               so subprocess commands use the sandbox Python.
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
         self.workspace_dir = workspace_dir
         self.allow_full_access = allow_full_access
         self.non_interactive = non_interactive
+        self._subprocess_env = None
+        if sandbox_venv_path:
+            self._subprocess_env = os.environ.copy()
+            self._subprocess_env["VIRTUAL_ENV"] = sandbox_venv_path
+            venv_bin = os.path.join(sandbox_venv_path, "bin")
+            self._subprocess_env["PATH"] = venv_bin + os.pathsep + self._subprocess_env.get("PATH", "")
 
     @property
     def name(self) -> str:
@@ -411,6 +421,7 @@ Examples:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
                         cwd=self.workspace_dir,
+                        env=self._subprocess_env,
                     )
                 else:
                     process = await asyncio.create_subprocess_shell(
@@ -418,6 +429,7 @@ Examples:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
                         cwd=self.workspace_dir,
+                        env=self._subprocess_env,
                     )
 
                 # Create background shell and add to manager
@@ -448,6 +460,7 @@ Examples:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         cwd=self.workspace_dir,
+                        env=self._subprocess_env,
                     )
                 else:
                     process = await asyncio.create_subprocess_shell(
@@ -455,6 +468,7 @@ Examples:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         cwd=self.workspace_dir,
+                        env=self._subprocess_env,
                     )
 
                 try:

@@ -68,6 +68,10 @@ class SandboxEnvironment:
 
         # Install ipykernel in sandbox venv (needed for kernel)
         await self._ensure_ipykernel(on_progress)
+
+        # Verify all required packages are importable
+        await self._verify_packages(on_progress)
+
         self._ready = True
 
     async def _create_venv(self, on_progress: Any = None) -> None:
@@ -142,6 +146,46 @@ class SandboxEnvironment:
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to install ipykernel in sandbox: {stderr.decode()}")
 
+    async def _verify_packages(self, on_progress: Any = None) -> None:
+        """Verify required packages are importable and auto-install missing ones."""
+        required_modules = {
+            "ipykernel": "ipykernel",
+            "pandas": "pandas",
+            "numpy": "numpy",
+            "matplotlib": "matplotlib",
+            "openpyxl": "openpyxl",
+        }
+        missing = []
+        for module_name, pip_name in required_modules.items():
+            proc = await asyncio.create_subprocess_exec(
+                str(self.python_path), "-c", f"import {module_name}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            if proc.returncode != 0:
+                missing.append(pip_name)
+
+        if not missing:
+            return
+
+        if on_progress:
+            on_progress(f"Re-installing missing packages: {', '.join(missing)}...")
+
+        proc = await asyncio.create_subprocess_exec(
+            str(self.python_path), "-m", "pip", "install",
+            "--quiet", *missing,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            if on_progress:
+                on_progress(f"Warning: failed to install some packages: {', '.join(missing)}")
+        else:
+            if on_progress:
+                on_progress(f"Re-installed: {', '.join(missing)}")
+
     def get_kernel_spec(self) -> dict:
         """Get kernel spec that uses the sandbox venv Python."""
         return {
@@ -214,7 +258,32 @@ class JupyterKernelSession:
         # Create KernelManager with our custom spec
         km = jupyter_client.KernelManager()
         km._kernel_spec = kernel_spec  # Override the kernel spec
-        km.start_kernel()
+
+        try:
+            km.start_kernel()
+        except Exception as e:
+            err_msg = str(e)
+            # Fallback for packaged runtime: entry-point-based provisioner
+            # lookup fails because PyInstaller doesn't preserve dist-info.
+            # Monkey-patch the provisioner factory to use LocalProvisioner.
+            if "local-provisioner" in err_msg or "not callable" in err_msg or "provisioner" in err_msg.lower():
+                from jupyter_client.provisioning.local_provisioner import LocalProvisioner
+
+                _orig_create = getattr(km, '_async_provisioner_factory', None)
+
+                class _DirectProvisioner(LocalProvisioner):
+                    """LocalProvisioner that skips entry-point lookup."""
+                    pass
+
+                # Patch: set provisioner class directly on the manager
+                km.provisioner_class = _DirectProvisioner
+                # Some versions use kernel_provisioner_factory
+                if hasattr(km, 'kernel_provisioner_factory'):
+                    km.kernel_provisioner_factory = None
+
+                km.start_kernel()
+            else:
+                raise
         self._km = km
         self._kc = km.client()
         self._kc.start_channels()

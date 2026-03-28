@@ -34,7 +34,7 @@ from box_agent.schema import LLMProvider
 from box_agent.tools.base import Tool
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
-from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
+from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
 from box_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.note_tool import SessionNoteTool
 from box_agent.tools.skill_tool import create_skill_tools
@@ -699,10 +699,14 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # Bash tool - needs workspace as cwd for command execution
     if config.tools.enable_bash:
+        sandbox_venv_path = None
+        if sandbox_mode:
+            sandbox_venv_path = str(SandboxEnvironment().venv_dir)
         bash_tool = BashTool(
             workspace_dir=str(workspace_dir),
             allow_full_access=allow_full_access,
             non_interactive=non_interactive,
+            sandbox_venv_path=sandbox_venv_path,
         )
         tools.append(bash_tool)
         _out(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {workspace_dir}){Colors.RESET}")
