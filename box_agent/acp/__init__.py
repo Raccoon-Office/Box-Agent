@@ -250,19 +250,26 @@ class BoxACPAgent:
 
                     case ArtifactEvent(tool_call_id=tid, artifact_type=atype, filename=fname, path=fpath, mime_type=mime, size_bytes=sz):
                         log.info("artifact", session_id=session_id, tool_call_id=tid, artifact_type=atype, artifact_path=fpath, filename=fname, mime_type=mime, size_bytes=sz)
-                        artifact_update = {
-                            "kind": "artifact",
-                            "artifact": {
-                                "type": "artifact",
-                                "artifact_type": atype,
-                                "filename": fname,
-                                "path": fpath,
-                                "mime_type": mime,
-                                "size_bytes": sz,
-                                "sandbox_workspace": state.sandbox_workspace,
-                            },
+                        # ACP SessionUpdate is a strict union — no "artifact" variant exists.
+                        # Send artifact metadata as a tool_call_update with rawOutput carrying
+                        # the structured artifact info, so officev3 can pick it up from there.
+                        artifact_meta = {
+                            "type": "artifact",
+                            "artifact_type": atype,
+                            "filename": fname,
+                            "path": fpath,
+                            "mime_type": mime,
+                            "size_bytes": sz,
+                            "sandbox_workspace": state.sandbox_workspace,
                         }
-                        await self._send(session_id, artifact_update)
+                        log.debug("artifact/payload", session_id=session_id, tool_call_id=tid, payload=artifact_meta)
+                        try:
+                            await self._send(
+                                session_id,
+                                update_tool_call(tid, raw_output=artifact_meta),
+                            )
+                        except Exception as exc:
+                            log.exception("artifact/send_error", exc, session_id=session_id, tool_call_id=tid, payload=artifact_meta)
 
                     case ErrorEvent(message=msg, is_fatal=True):
                         log.error("error", session_id=session_id, message=msg, is_fatal=True)
