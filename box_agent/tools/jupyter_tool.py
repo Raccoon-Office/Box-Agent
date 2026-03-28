@@ -25,6 +25,7 @@ SANDBOX_DEFAULT_PACKAGES = [
     "seaborn",
     "requests",
     "openpyxl",  # Excel support for pandas
+    "scikit-learn",  # ML/data analysis
 ]
 
 SANDBOX_BASE_DIR = Path.home() / ".box-agent" / "sandbox"
@@ -154,6 +155,7 @@ class SandboxEnvironment:
             "numpy": "numpy",
             "matplotlib": "matplotlib",
             "openpyxl": "openpyxl",
+            "sklearn": "scikit-learn",
         }
         missing = []
         for module_name, pip_name in required_modules.items():
@@ -435,11 +437,6 @@ except ImportError:
                 else:
                     all_output = stderr_text
 
-        # Check for matplotlib images
-        for ext in ["png", "jpg", "jpeg"]:
-            for img in self.workspace.glob(f"*.{ext}"):
-                images.append(f"[{img.name}]")
-
         return all_output, images, None
 
     async def stop(self):
@@ -517,8 +514,8 @@ class JupyterSandboxTool(Tool):
 
 This tool runs Python code in a **real Jupyter kernel** with its own isolated environment:
 - Variables, functions, classes, imports all persist between calls
-- Pre-installed packages: pandas, numpy, matplotlib, seaborn, requests, openpyxl
-- Install more packages with: %pip install <package>
+- Pre-installed packages: pandas, numpy, matplotlib, seaborn, scikit-learn, requests, openpyxl
+- Missing packages are auto-installed on first use (no need to %pip install common packages)
 - Ideal for data analysis: load once, analyze many times
 
 Example workflow:
@@ -630,9 +627,23 @@ Output formats:
 
         session = self._sessions[session_id]
 
+        # Snapshot files in workspace BEFORE execution to detect new ones
+        workspace = session.workspace
+        pre_files = set(workspace.iterdir()) if workspace.exists() else set()
+
         # Execute code
         try:
             stdout, images, error = session.execute(code, timeout)
+
+            # Auto-install missing modules and retry once
+            if error and "ModuleNotFoundError" in error:
+                pkg = self._extract_missing_module(error)
+                if pkg:
+                    env = self._get_sandbox_env()
+                    pip_name = self._MODULE_TO_PIP.get(pkg, pkg)
+                    ok, _ = await env.install_packages([pip_name])
+                    if ok:
+                        stdout, images, error = session.execute(code, timeout)
 
             if error:
                 return ToolResult(
@@ -640,6 +651,16 @@ Output formats:
                     content="",
                     error=self._simplify_error(error),
                 )
+
+            # Detect NEW files created during execution
+            post_files = set(workspace.iterdir()) if workspace.exists() else set()
+            new_files = post_files - pre_files
+            artifact_exts = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".csv", ".xlsx", ".html"}
+            for f in sorted(new_files):
+                if f.is_file() and f.suffix.lower() in artifact_exts:
+                    tag = f"[{f.name}]"
+                    if tag not in "\n".join(images):
+                        images.append(tag)
 
             content_parts = []
             if stdout.strip():
@@ -657,11 +678,40 @@ Output formats:
                 error=f"Execution failed: {str(e)}",
             )
 
+    # Common module name → pip package name mapping
+    _MODULE_TO_PIP = {
+        "sklearn": "scikit-learn",
+        "cv2": "opencv-python",
+        "PIL": "Pillow",
+        "bs4": "beautifulsoup4",
+        "yaml": "PyYAML",
+        "skimage": "scikit-image",
+        "dateutil": "python-dateutil",
+        "lxml": "lxml",
+        "xlrd": "xlrd",
+        "sqlalchemy": "SQLAlchemy",
+        "dotenv": "python-dotenv",
+    }
+
     def _get_workspace(self, session_id: str) -> Path:
-        """Get workspace directory for a session."""
+        """Get workspace directory for a session.
+
+        Returns the workspace root directly so that uploaded files
+        (materialized by the client into workspace root) are accessible
+        via relative paths like ``pd.read_csv('data.csv')``.
+        """
         if self.workspace_dir:
-            return Path(self.workspace_dir) / "sandbox" / session_id
+            return Path(self.workspace_dir)
         return SANDBOX_BASE_DIR / "sessions" / session_id
+
+    @staticmethod
+    def _extract_missing_module(error: str) -> str | None:
+        """Extract module name from ModuleNotFoundError message."""
+        # Patterns: "No module named 'sklearn'" or "No module named 'sklearn.ensemble'"
+        m = re.search(r"No module named ['\"]([^'\"]+)['\"]", error)
+        if m:
+            return m.group(1).split(".")[0]
+        return None
 
     def _is_valid_code(self, code: str) -> bool:
         """Check if code is valid."""
