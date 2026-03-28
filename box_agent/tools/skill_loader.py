@@ -5,11 +5,16 @@ Supports loading skills from SKILL.md files and providing them to Agent
 """
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import yaml
+
+def _warn(msg: str) -> None:
+    """Write diagnostic message to stderr (never stdout)."""
+    sys.stderr.write(msg + "\n")
 
 
 @dataclass
@@ -74,7 +79,7 @@ class SkillLoader:
             frontmatter_match = re.match(r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL)
 
             if not frontmatter_match:
-                print(f"⚠️  {skill_path} missing YAML frontmatter")
+                _warn(f"⚠️  {skill_path} missing YAML frontmatter")
                 return None
 
             frontmatter_text = frontmatter_match.group(1)
@@ -84,12 +89,12 @@ class SkillLoader:
             try:
                 frontmatter = yaml.safe_load(frontmatter_text)
             except yaml.YAMLError as e:
-                print(f"❌ Failed to parse YAML frontmatter: {e}")
+                _warn(f"❌ Failed to parse YAML frontmatter: {e}")
                 return None
 
             # Required fields
             if "name" not in frontmatter or "description" not in frontmatter:
-                print(f"⚠️  {skill_path} missing required fields (name or description)")
+                _warn(f"⚠️  {skill_path} missing required fields (name or description)")
                 return None
 
             # Get skill directory (parent of SKILL.md)
@@ -113,7 +118,7 @@ class SkillLoader:
             return skill
 
         except Exception as e:
-            print(f"❌ Failed to load skill ({skill_path}): {e}")
+            _warn(f"❌ Failed to load skill ({skill_path}): {e}")
             return None
 
     def _process_skill_paths(self, content: str, skill_dir: Path) -> str:
@@ -201,7 +206,7 @@ class SkillLoader:
         skills = []
 
         if not self.skills_dir.exists():
-            print(f"⚠️  Skills directory does not exist: {self.skills_dir}")
+            _warn(f"⚠️  Skills directory does not exist: {self.skills_dir}")
             return skills
 
         # Recursively find all SKILL.md files

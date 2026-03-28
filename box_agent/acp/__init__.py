@@ -175,7 +175,7 @@ class BoxACPAgent:
         if not state:
             # Auto-create session if not found (compatibility with clients that skip newSession)
             log.warn("session/prompt", session_id=session_id, message="Session not found, auto-creating")
-            new_session = await self.newSession(NewSessionRequest(cwd=None))
+            new_session = await self.newSession(NewSessionRequest(cwd=".", mcpServers=[]))
             session_id = new_session.sessionId  # use the NEW session id from here on
             state = self._sessions.get(session_id)
             if not state:
