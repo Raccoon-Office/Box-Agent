@@ -7,10 +7,16 @@ Recalculates all formulas in an Excel file using LibreOffice
 import json
 import sys
 import subprocess
+import shutil
 import os
 import platform
 from pathlib import Path
 from openpyxl import load_workbook
+
+
+def _soffice_available() -> bool:
+    """Check if LibreOffice (soffice) is installed and reachable."""
+    return shutil.which("soffice") is not None
 
 
 def setup_libreoffice_macro():
@@ -28,8 +34,11 @@ def setup_libreoffice_macro():
                 return True
     
     if not os.path.exists(macro_dir):
-        subprocess.run(['soffice', '--headless', '--terminate_after_init'], 
-                      capture_output=True, timeout=10)
+        try:
+            subprocess.run(['soffice', '--headless', '--terminate_after_init'],
+                          capture_output=True, timeout=10)
+        except FileNotFoundError:
+            return False
         os.makedirs(macro_dir, exist_ok=True)
     
     macro_content = '''<?xml version="1.0" encoding="UTF-8"?>
@@ -63,9 +72,31 @@ def recalc(filename, timeout=30):
     """
     if not Path(filename).exists():
         return {'error': f'File {filename} does not exist'}
-    
+
     abs_path = str(Path(filename).absolute())
-    
+
+    # Check if LibreOffice is available before attempting anything
+    if not _soffice_available():
+        # Count formulas for context, then return recoverable status
+        try:
+            wb = load_workbook(filename, data_only=False)
+            formula_count = 0
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                for row in ws.iter_rows():
+                    for cell in row:
+                        if cell.value and isinstance(cell.value, str) and cell.value.startswith('='):
+                            formula_count += 1
+            wb.close()
+        except Exception:
+            formula_count = -1
+        return {
+            'status': 'skipped',
+            'reason': 'soffice_not_found',
+            'message': 'LibreOffice (soffice) is not installed. The file was saved but formulas were not recalculated. Formula strings are preserved and will compute when opened in Excel or Google Sheets.',
+            'total_formulas': formula_count,
+        }
+
     if not setup_libreoffice_macro():
         return {'error': 'Failed to setup LibreOffice macro'}
     

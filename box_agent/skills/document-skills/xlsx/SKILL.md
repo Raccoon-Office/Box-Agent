@@ -68,7 +68,7 @@ A user may ask you to create, edit, or analyze the contents of an .xlsx file. Yo
 
 ## Important Requirements
 
-**LibreOffice Required for Formula Recalculation**: You can assume LibreOffice is installed for recalculating formula values using the `recalc.py` script. The script automatically configures LibreOffice on first run
+**Excel Export**: Use Python-native libraries (`pandas`, `openpyxl`) as the default for creating and editing `.xlsx` files. LibreOffice (`soffice`) is a **system-level dependency** that may or may not be installed — never assume it is available. Only attempt LibreOffice-based recalculation when formula values must be baked into the file, and always check for `soffice` availability first via `recalc.py` (which handles the check gracefully)
 
 ## Reading and analyzing data
 
@@ -131,10 +131,11 @@ This applies to ALL calculations - totals, percentages, ratios, differences, etc
 2. **Create/Load**: Create new workbook or load existing file
 3. **Modify**: Add/edit data, formulas, and formatting
 4. **Save**: Write to file
-5. **Recalculate formulas (MANDATORY IF USING FORMULAS)**: Use the recalc.py script
+5. **Recalculate formulas (only if formula values must be baked in)**: Use the recalc.py script — it will gracefully handle the case where LibreOffice is not installed
    ```bash
    python recalc.py output.xlsx
    ```
+   If `soffice` is not available, recalc.py returns a recoverable status — deliver the file without recalculated values and inform the user.
 6. **Verify and fix any errors**: 
    - The script returns JSON with error details
    - If `status` is `errors_found`, check `error_summary` for specific error types and locations
@@ -203,7 +204,7 @@ wb.save('modified.xlsx')
 
 ## Recalculating formulas
 
-Excel files created or modified by openpyxl contain formulas as strings but not calculated values. Use the provided `recalc.py` script to recalculate formulas:
+Excel files created or modified by openpyxl contain formulas as strings but not calculated values. If the user needs baked-in formula results (not just formula strings), use the provided `recalc.py` script. The script **checks for LibreOffice availability** and returns a recoverable result if `soffice` is not installed — it will never crash the task.
 
 ```bash
 python recalc.py <excel_file> [timeout_seconds]
@@ -215,11 +216,15 @@ python recalc.py output.xlsx 30
 ```
 
 The script:
-- Automatically sets up LibreOffice macro on first run
+- **Checks if `soffice` is installed** before attempting recalculation
+- If `soffice` is not found, returns `{"status": "skipped", "reason": "soffice_not_found", ...}` — not a fatal error
+- Automatically sets up LibreOffice macro on first run (when `soffice` is available)
 - Recalculates all formulas in all sheets
 - Scans ALL cells for Excel errors (#REF!, #DIV/0!, etc.)
 - Returns JSON with detailed error locations and counts
 - Works on both Linux and macOS
+
+**When to skip recalculation entirely**: If the spreadsheet only contains data (no formulas), or if the user doesn't need computed values baked in, skip `recalc.py` and deliver the file directly.
 
 ## Formula Verification Checklist
 

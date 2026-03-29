@@ -35,3 +35,12 @@ Prefer these well-known libraries (install with `uv pip install` if needed):
 - When producing tables, format them clearly (markdown or pandas DataFrame display)
 - When producing charts, always save to file AND display inline
 - Proactively suggest follow-up analyses the user might find valuable
+
+### Excel Export Rules
+When generating `.xlsx` files:
+1. Prefer Python-native generation (`pandas`, `openpyxl`) first.
+2. Do not use LibreOffice / `soffice` unless formula recalculation is truly necessary.
+3. Before invoking any LibreOffice-based workflow, check whether `soffice` is available.
+4. If `soffice` is unavailable, do not fail the whole task — deliver the file without recalculated formula values.
+5. If formulas are not required, save the workbook directly without LibreOffice.
+6. If formulas are required but LibreOffice is unavailable, clearly explain that the file was generated without formula recalculation, or fall back to a non-formula export when appropriate.
