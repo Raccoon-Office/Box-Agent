@@ -62,7 +62,7 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
 from box_agent.agent import Agent
-from box_agent.cli import add_workspace_tools, initialize_base_tools
+from box_agent.tools.setup import add_workspace_tools, initialize_base_tools
 from box_agent.config import Config
 from box_agent.core import run_agent_loop
 from box_agent.events import (
