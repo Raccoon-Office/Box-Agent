@@ -655,7 +655,12 @@ Output formats:
             # Detect NEW files created during execution
             post_files = set(workspace.iterdir()) if workspace.exists() else set()
             new_files = post_files - pre_files
-            artifact_exts = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".csv", ".xlsx", ".html"}
+            artifact_exts = {
+                ".png", ".jpg", ".jpeg", ".gif", ".svg",
+                ".pdf", ".csv", ".xlsx", ".xls", ".html",
+                ".json", ".txt", ".md", ".zip",
+                ".docx", ".pptx",
+            }
             for f in sorted(new_files):
                 if f.is_file() and f.suffix.lower() in artifact_exts:
                     tag = f"[{f.name}]"

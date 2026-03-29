@@ -111,6 +111,7 @@ class SessionState:
     agent: Agent
     cancelled: bool = False
     sandbox_workspace: str | None = None  # stable sandbox workspace path for this session
+    session_mode: str | None = None  # e.g. "data_analysis" for /analysis pages
 
 
 class BoxACPAgent:
@@ -147,7 +148,17 @@ class BoxACPAgent:
         if not workspace.is_absolute():
             workspace = workspace.resolve()
 
-        log.info("session/new", session_id=session_id, message=f"Creating session, workspace={workspace}")
+        # Extract session_mode from _meta (ACP extension point)
+        # Pydantic aliases _meta to field_meta
+        session_mode = None
+        meta = getattr(params, "field_meta", None) or {}
+        if isinstance(meta, dict):
+            session_mode = meta.get("session_mode")
+
+        log.info("session/new", session_id=session_id, message=f"Creating session, workspace={workspace}, session_mode={session_mode}")
+
+        # Build per-session system prompt with conditional mode injection
+        system_prompt = self._build_session_prompt(session_mode)
 
         tools = list(self._base_tools)
         # Enable sandbox mode and restrict to workspace for ACP sessions
@@ -160,14 +171,39 @@ class BoxACPAgent:
             non_interactive=True,  # ACP cannot do interactive terminal prompts
             output=lambda msg: sys.stderr.write(msg + "\n"),
         )
-        agent = Agent(llm_client=self._llm, system_prompt=self._system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
+        agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
         # Sandbox workspace is a stable subdirectory under the workspace
         sandbox_ws = str(workspace / "sandbox")
-        self._sessions[session_id] = SessionState(agent=agent, sandbox_workspace=sandbox_ws)
+        self._sessions[session_id] = SessionState(agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode)
 
         tool_names = [t.name for t in tools]
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
         return NewSessionResponse(sessionId=session_id)
+
+    def _build_session_prompt(self, session_mode: str | None) -> str:
+        """Build system prompt with conditional mode-specific injection.
+
+        Prompt structure:
+            base system_prompt
+            + [if session_mode == "data_analysis"] analysis_prompt
+            + skills metadata  (already appended in run_acp_server)
+
+        The base prompt (with skills metadata) is stored in self._system_prompt.
+        Mode-specific prompts are injected between the base and the skills section.
+        """
+        if session_mode != "data_analysis":
+            return self._system_prompt
+
+        # Load analysis prompt via config priority search
+        analysis_path = Config.find_config_file(self._config.agent.analysis_prompt_path)
+        if analysis_path and analysis_path.exists():
+            analysis_prompt = analysis_path.read_text(encoding="utf-8").strip()
+            # Insert analysis prompt before the skills metadata section
+            # The base system_prompt already has skills metadata appended at the end
+            return f"{self._system_prompt.rstrip()}\n\n{analysis_prompt}"
+
+        log.warn("session/prompt", message=f"analysis_prompt not found: {self._config.agent.analysis_prompt_path}")
+        return self._system_prompt
 
     async def prompt(self, params: PromptRequest) -> PromptResponse:
         session_id = params.sessionId

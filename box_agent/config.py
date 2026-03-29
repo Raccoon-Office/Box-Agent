@@ -36,6 +36,7 @@ class AgentConfig(BaseModel):
     max_steps: int = 50
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
+    analysis_prompt_path: str = "analysis_prompt.md"
 
 
 class MCPConfig(BaseModel):

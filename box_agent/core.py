@@ -15,6 +15,7 @@ import mimetypes
 import re
 import traceback
 from collections.abc import AsyncIterator
+from pathlib import Path
 from time import perf_counter
 from typing import Callable
 
@@ -45,7 +46,7 @@ from .tools.base import Tool, ToolResult
 CancelChecker = Callable[[], bool]
 
 # Regex to match sandbox file references like [foo.png] or [PNG Image]
-_ARTIFACT_REF_RE = re.compile(r"\[([^\]]+\.(?:png|jpg|jpeg|gif|svg|pdf|csv|xlsx|html))\]", re.IGNORECASE)
+_ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
 
 # Image extensions for artifact_type classification
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg"}
@@ -92,6 +93,74 @@ def _detect_artifacts(
                     size_bytes=candidate.stat().st_size,
                 ))
                 break  # found, no need to check other candidates
+
+    return artifacts
+
+
+# ── Workspace diff-based artifact detection ─────────────────────
+
+# Directories to skip when scanning the workspace
+_IGNORE_DIRS = {".git", "__pycache__", ".venv", "node_modules", ".ipynb_checkpoints"}
+
+
+def _snapshot_workspace(workspace_dir: str) -> set[Path]:
+    """Snapshot files in workspace root (1 level) + sandbox/ subtree.
+
+    Skips directories in ``_IGNORE_DIRS`` to avoid expensive traversal.
+    """
+    ws = Path(workspace_dir)
+    if not ws.is_dir():
+        return set()
+
+    files: set[Path] = set()
+
+    # Workspace root — 1 level only (non-recursive)
+    for entry in ws.iterdir():
+        if entry.is_file():
+            files.add(entry)
+
+    # sandbox/ subtree — recursive
+    sandbox = ws / "sandbox"
+    if sandbox.is_dir():
+        for entry in sandbox.rglob("*"):
+            if entry.is_file() and not any(p in entry.parts for p in _IGNORE_DIRS):
+                files.add(entry)
+
+    return files
+
+
+def _detect_new_files(
+    tool_call_id: str,
+    pre_files: set[Path],
+    post_files: set[Path],
+    already_emitted: set[str],
+    workspace_dir: str,
+) -> list[ArtifactEvent]:
+    """Create ArtifactEvents for files that appeared after tool execution."""
+    new_files = post_files - pre_files
+    if not new_files:
+        return []
+
+    artifacts: list[ArtifactEvent] = []
+    for fpath in sorted(new_files):
+        # Skip dotfiles and temp files
+        if fpath.name.startswith(".") or fpath.name.startswith("~") or fpath.suffix == ".tmp":
+            continue
+        # Skip if already emitted by regex detection
+        if str(fpath) in already_emitted:
+            continue
+
+        ext = fpath.suffix.lower()
+        art_type = "image" if ext in _IMAGE_EXTS else "file"
+        mime, _ = mimetypes.guess_type(str(fpath))
+        artifacts.append(ArtifactEvent(
+            tool_call_id=tool_call_id,
+            artifact_type=art_type,
+            filename=fpath.name,
+            path=str(fpath),
+            mime_type=mime or "application/octet-stream",
+            size_bytes=fpath.stat().st_size,
+        ))
 
     return artifacts
 
@@ -375,6 +444,11 @@ async def run_agent_loop(
 
             yield ToolCallStart(tool_call_id=tc_id, tool_name=fn_name, arguments=fn_args)
 
+            # Snapshot workspace before tool execution for diff-based artifact detection
+            pre_files: set[Path] = set()
+            if workspace_dir:
+                pre_files = _snapshot_workspace(workspace_dir)
+
             if fn_name not in tools:
                 result = ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
             else:
@@ -409,7 +483,14 @@ async def run_agent_loop(
 
             # Detect and yield structured artifacts (images, files) from tool output
             if result.success and workspace_dir:
-                for artifact in _detect_artifacts(tc_id, fn_name, result.content, workspace_dir):
+                # Regex-based: detect [filename.ext] references in output
+                regex_artifacts = _detect_artifacts(tc_id, fn_name, result.content, workspace_dir)
+                for artifact in regex_artifacts:
+                    yield artifact
+                # Diff-based: catch files not referenced in output text
+                post_files = _snapshot_workspace(workspace_dir)
+                already = {a.path for a in regex_artifacts}
+                for artifact in _detect_new_files(tc_id, pre_files, post_files, already, workspace_dir):
                     yield artifact
 
             # Append tool message
