@@ -132,6 +132,9 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "ipykernel.inprocess.manager",
         "ipykernel_launcher",
         "jupyter_core",
+        # debugpy (ipykernel dependency, has _vendored/pydevd subtree)
+        "debugpy",
+        "debugpy._vendored",
         # Data science (runtime extras)
         "pandas",
         "numpy",
@@ -169,6 +172,7 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "--collect-all", "jupyter_client",
         "--collect-all", "ipykernel",
         "--collect-all", "jupyter_core",
+        "--collect-all", "debugpy",
         "--collect-all", "matplotlib",
         "--collect-submodules", "pandas",
         "--collect-submodules", "seaborn",
