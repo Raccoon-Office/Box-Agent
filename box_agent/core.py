@@ -38,7 +38,7 @@ from .events import (
     ToolCallStart,
 )
 from .logger import AgentLogger
-from .schema import LLMResponse, Message
+from .schema import LLMResponse, Message, StreamEvent
 from .tools.base import Tool, ToolResult
 
 # Type alias — consumers supply a zero-arg callable that returns True
@@ -375,13 +375,50 @@ async def run_agent_loop(
         # ── Step start ──────────────────────────────────────
         yield StepStart(step=step + 1, max_steps=max_steps)
 
-        # ── LLM call ───────────────────────────────────────
+        # ── LLM call (streaming) ──────────────────────────────
         tool_list = list(tools.values())
         if logger:
             logger.log_request(messages=messages, tools=tool_list)
 
         try:
-            response: LLMResponse = await llm.generate(messages=messages, tools=tool_list)
+            # Stream thinking/text deltas, accumulate for final response
+            text_content = ""
+            thinking_content = ""
+            finish_event: StreamEvent | None = None
+            thinking_header_yielded = False
+            content_header_yielded = False
+
+            async for chunk in llm.generate_stream(messages=messages, tools=tool_list):
+                if chunk.type == "thinking":
+                    if not thinking_header_yielded:
+                        yield ThinkingEvent(content="", _streaming=True, _header=True)
+                        thinking_header_yielded = True
+                    thinking_content += chunk.delta
+                    yield ThinkingEvent(content=chunk.delta, _streaming=True)
+                elif chunk.type == "text":
+                    if not content_header_yielded:
+                        yield ContentEvent(content="", _streaming=True, _header=True)
+                        content_header_yielded = True
+                    text_content += chunk.delta
+                    yield ContentEvent(content=chunk.delta, _streaming=True)
+                elif chunk.type == "finish":
+                    finish_event = chunk
+
+            if finish_event is None:
+                msg = "LLM stream ended without a finish event"
+                yield ErrorEvent(message=msg, is_fatal=True)
+                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                return
+
+            # Build LLMResponse equivalent from streamed data
+            response = LLMResponse(
+                content=text_content,
+                thinking=thinking_content if thinking_content else None,
+                tool_calls=finish_event.tool_calls,
+                finish_reason=finish_event.finish_reason or "stop",
+                usage=finish_event.usage,
+            )
+
         except Exception as exc:
             from .retry import RetryExhaustedError
 
@@ -415,12 +452,6 @@ async def run_agent_loop(
             tool_calls=response.tool_calls,
         )
         messages.append(assistant_msg)
-
-        # ── Yield LLM outputs ──────────────────────────────
-        if response.thinking:
-            yield ThinkingEvent(content=response.thinking)
-        if response.content:
-            yield ContentEvent(content=response.content)
 
         # ── No tool calls → done ───────────────────────────
         if not response.tool_calls:

@@ -1,12 +1,13 @@
 """Anthropic LLM client implementation."""
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import anthropic
 
 from ..retry import RetryConfig, async_retry
-from ..schema import FunctionCall, LLMResponse, Message, TokenUsage, ToolCall
+from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from .base import LLMClientBase
 
 logger = logging.getLogger(__name__)
@@ -291,3 +292,117 @@ class AnthropicClient(LLMClientBase):
 
         # Parse and return response
         return self._parse_response(response)
+
+    async def generate_stream(
+        self,
+        messages: list[Message],
+        tools: list[Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Generate streaming response from Anthropic LLM.
+
+        Yields thinking/text deltas as they arrive. Tool calls are accumulated
+        and emitted in the final "finish" event along with token usage.
+        """
+        request_params = self._prepare_request(messages, tools)
+
+        params: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": 16384,
+            "messages": request_params["api_messages"],
+        }
+        if request_params["system_message"]:
+            params["system"] = request_params["system_message"]
+        if request_params["tools"]:
+            params["tools"] = self._convert_tools(request_params["tools"])
+
+        # Accumulators for the finish event
+        text_content = ""
+        thinking_content = ""
+        tool_calls: list[ToolCall] = []
+        finish_reason = "stop"
+
+        # Token tracking
+        input_tokens = 0
+        output_tokens = 0
+        cache_read_tokens = 0
+        cache_create_tokens = 0
+
+        # Track current tool_use block being streamed
+        current_tool_id: str | None = None
+        current_tool_name: str | None = None
+        current_tool_json = ""
+
+        async with self.client.messages.stream(**params) as stream:
+            async for event in stream:
+                # ── Message start (input token usage) ──
+                if event.type == "message_start":
+                    msg = event.message
+                    if hasattr(msg, "usage") and msg.usage:
+                        input_tokens = msg.usage.input_tokens or 0
+                        cache_read_tokens = getattr(msg.usage, "cache_read_input_tokens", 0) or 0
+                        cache_create_tokens = getattr(msg.usage, "cache_creation_input_tokens", 0) or 0
+
+                # ── Content block start ──
+                elif event.type == "content_block_start":
+                    block = event.content_block
+                    if block.type == "tool_use":
+                        current_tool_id = block.id
+                        current_tool_name = block.name
+                        current_tool_json = ""
+
+                # ── Content block delta ──
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+                    if delta.type == "thinking_delta":
+                        thinking_content += delta.thinking
+                        yield StreamEvent(type="thinking", delta=delta.thinking)
+                    elif delta.type == "text_delta":
+                        text_content += delta.text
+                        yield StreamEvent(type="text", delta=delta.text)
+                    elif delta.type == "input_json_delta":
+                        current_tool_json += delta.partial_json
+
+                # ── Content block stop ──
+                elif event.type == "content_block_stop":
+                    if current_tool_id is not None:
+                        import json
+
+                        try:
+                            arguments = json.loads(current_tool_json) if current_tool_json else {}
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        tool_calls.append(
+                            ToolCall(
+                                id=current_tool_id,
+                                type="function",
+                                function=FunctionCall(
+                                    name=current_tool_name or "",
+                                    arguments=arguments,
+                                ),
+                            )
+                        )
+                        current_tool_id = None
+                        current_tool_name = None
+                        current_tool_json = ""
+
+                # ── Message delta (stop reason + output tokens) ──
+                elif event.type == "message_delta":
+                    if hasattr(event, "delta") and hasattr(event.delta, "stop_reason"):
+                        finish_reason = event.delta.stop_reason or "stop"
+                    if hasattr(event, "usage") and event.usage:
+                        output_tokens = getattr(event.usage, "output_tokens", 0) or 0
+
+        # Build final usage
+        total_input = input_tokens + cache_read_tokens + cache_create_tokens
+        usage = TokenUsage(
+            prompt_tokens=total_input,
+            completion_tokens=output_tokens,
+            total_tokens=total_input + output_tokens,
+        )
+
+        yield StreamEvent(
+            type="finish",
+            finish_reason=finish_reason,
+            usage=usage,
+            tool_calls=tool_calls if tool_calls else None,
+        )

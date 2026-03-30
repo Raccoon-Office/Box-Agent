@@ -6,7 +6,7 @@ import pytest
 
 from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from box_agent.schema import FunctionCall, LLMResponse, ToolCall
+from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 
 
@@ -38,6 +38,25 @@ class DummyLLM:
                 finish_reason="tool",
             )
         return LLMResponse(content="done", thinking=None, tool_calls=None, finish_reason="stop")
+
+    async def generate_stream(self, messages, tools):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(type="thinking", delta="calling echo")
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool",
+                tool_calls=[
+                    ToolCall(
+                        id="tool1",
+                        type="function",
+                        function=FunctionCall(name="echo", arguments={"text": "ping"}),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
 
 
 class EchoTool(Tool):

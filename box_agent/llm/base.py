@@ -1,10 +1,11 @@
 """Base class for LLM clients."""
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..retry import RetryConfig
-from ..schema import LLMResponse, Message
+from ..schema import LLMResponse, Message, StreamEvent
 
 
 class LLMClientBase(ABC):
@@ -53,6 +54,29 @@ class LLMClientBase(ABC):
             LLMResponse containing the generated content, thinking, and tool calls
         """
         pass
+
+    @abstractmethod
+    async def generate_stream(
+        self,
+        messages: list[Message],
+        tools: list[Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Generate streaming response from LLM.
+
+        Yields StreamEvent chunks for thinking/text deltas as they arrive.
+        The final event has type="finish" and carries tool_calls + usage.
+
+        Args:
+            messages: List of conversation messages
+            tools: Optional list of Tool objects or dicts
+
+        Yields:
+            StreamEvent chunks
+        """
+        pass
+        # Make it a valid async generator
+        if False:  # pragma: no cover
+            yield  # type: ignore[misc]
 
     @abstractmethod
     def _prepare_request(

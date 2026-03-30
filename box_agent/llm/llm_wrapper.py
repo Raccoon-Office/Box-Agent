@@ -5,9 +5,10 @@ This module provides a unified interface for different LLM providers
 """
 
 import logging
+from collections.abc import AsyncIterator
 
 from ..retry import RetryConfig
-from ..schema import LLMProvider, LLMResponse, Message
+from ..schema import LLMProvider, LLMResponse, Message, StreamEvent
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
 from .openai_client import OpenAIClient
@@ -95,3 +96,23 @@ class LLMClient:
             LLMResponse containing the generated content
         """
         return await self._client.generate(messages, tools)
+
+    async def generate_stream(
+        self,
+        messages: list[Message],
+        tools: list | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Generate streaming response from LLM.
+
+        Yields StreamEvent chunks for thinking/text deltas as they arrive.
+        The final event has type="finish" and carries tool_calls + usage.
+
+        Args:
+            messages: List of conversation messages
+            tools: Optional list of Tool objects or dicts
+
+        Yields:
+            StreamEvent chunks
+        """
+        async for event in self._client.generate_stream(messages, tools):
+            yield event

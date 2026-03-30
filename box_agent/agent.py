@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Optional
@@ -97,6 +98,7 @@ class Agent:
         self.messages: list[Message] = [Message(role="system", content=system_prompt)]
         self.logger = AgentLogger()
         self.api_total_tokens: int = 0
+        self._streaming_active: bool = False  # Track if streaming output needs trailing newline
 
     def add_user_message(self, content: str):
         """Add a user message to history."""
@@ -154,6 +156,16 @@ class Agent:
 
     def _render_event(self, event: AgentEvent) -> None:  # noqa: C901 — intentionally flat
         """Translate an ``AgentEvent`` into terminal output."""
+
+        # End streaming line before non-streaming events
+        is_streaming = (
+            isinstance(event, (ThinkingEvent, ContentEvent))
+            and getattr(event, "_streaming", False)
+        )
+        if not is_streaming and self._streaming_active:
+            print()  # newline to end the streaming line
+            self._streaming_active = False
+
         match event:
             case LogFileEvent(path=p):
                 print(f"{Colors.DIM}📝 Log file: {p}{Colors.RESET}")
@@ -174,9 +186,23 @@ class Agent:
                 print(f"{Colors.DIM}│{Colors.RESET} {step_text}{' ' * padding}{Colors.DIM}│{Colors.RESET}")
                 print(f"{Colors.DIM}╰{'─' * BOX_WIDTH}╯{Colors.RESET}")
 
+            case ThinkingEvent() if event._streaming:
+                if event._header:
+                    print(f"\n{Colors.BOLD}{Colors.MAGENTA}🧠 Thinking:{Colors.RESET}")
+                else:
+                    print(f"{Colors.DIM}{event.content}{Colors.RESET}", end="", flush=True)
+                    self._streaming_active = True
+
             case ThinkingEvent(content=text):
                 print(f"\n{Colors.BOLD}{Colors.MAGENTA}🧠 Thinking:{Colors.RESET}")
                 print(f"{Colors.DIM}{text}{Colors.RESET}")
+
+            case ContentEvent() if event._streaming:
+                if event._header:
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
+                else:
+                    print(f"{event.content}", end="", flush=True)
+                    self._streaming_active = True
 
             case ContentEvent(content=text):
                 print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")

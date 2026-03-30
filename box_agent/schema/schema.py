@@ -11,6 +11,24 @@ class LLMProvider(str, Enum):
     OPENAI = "openai"
 
 
+class StreamEvent(BaseModel):
+    """A single chunk from the LLM streaming response.
+
+    Attributes:
+        type: "thinking", "text", or "finish".
+        delta: Incremental text for thinking/text chunks. Empty on finish.
+        finish_reason: Only set when type == "finish" (e.g. "end_turn", "tool_use").
+        usage: Token usage, only set on the finish event.
+        tool_calls: Accumulated tool calls, only set on the finish event.
+    """
+
+    type: str  # "thinking" | "text" | "finish"
+    delta: str = ""
+    finish_reason: str | None = None
+    usage: "TokenUsage | None" = None
+    tool_calls: "list[ToolCall] | None" = None
+
+
 class FunctionCall(BaseModel):
     """Function call details."""
 

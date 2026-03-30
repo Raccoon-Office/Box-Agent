@@ -17,7 +17,7 @@ from box_agent.events import (
     ToolCallResult,
     ToolCallStart,
 )
-from box_agent.schema import FunctionCall, LLMResponse, Message, ToolCall
+from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 
 
@@ -35,6 +35,20 @@ class MockLLM:
         resp = self._responses[self._idx]
         self._idx += 1
         return resp
+
+    async def generate_stream(self, messages, tools=None):
+        resp = self._responses[self._idx]
+        self._idx += 1
+        if resp.thinking:
+            yield StreamEvent(type="thinking", delta=resp.thinking)
+        if resp.content:
+            yield StreamEvent(type="text", delta=resp.content)
+        yield StreamEvent(
+            type="finish",
+            finish_reason=resp.finish_reason,
+            usage=resp.usage,
+            tool_calls=resp.tool_calls,
+        )
 
 
 class EchoTool(Tool):
@@ -109,8 +123,10 @@ async def test_thinking_event():
     events = await collect(run_agent_loop(llm=llm, messages=_msgs(), tools={}, max_steps=5))
 
     thinking = [e for e in events if isinstance(e, ThinkingEvent)]
-    assert len(thinking) == 1
-    assert thinking[0].content == "let me think"
+    assert len(thinking) >= 1
+    # With streaming, thinking content is in delta events
+    thinking_text = "".join(e.content for e in thinking)
+    assert "let me think" in thinking_text
 
 
 @pytest.mark.asyncio
@@ -260,6 +276,10 @@ async def test_llm_error():
     class FailLLM:
         async def generate(self, messages, tools=None):
             raise ConnectionError("network down")
+
+        async def generate_stream(self, messages, tools=None):
+            raise ConnectionError("network down")
+            yield  # make it a valid async generator  # noqa: E501
 
     events = await collect(run_agent_loop(llm=FailLLM(), messages=_msgs(), tools={}, max_steps=5))
 

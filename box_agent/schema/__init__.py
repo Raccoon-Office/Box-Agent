@@ -5,6 +5,7 @@ from .schema import (
     LLMProvider,
     LLMResponse,
     Message,
+    StreamEvent,
     TokenUsage,
     ToolCall,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "LLMProvider",
     "LLMResponse",
     "Message",
+    "StreamEvent",
     "TokenUsage",
     "ToolCall",
 ]

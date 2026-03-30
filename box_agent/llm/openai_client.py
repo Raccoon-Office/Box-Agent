@@ -2,12 +2,13 @@
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from openai import AsyncOpenAI
 
 from ..retry import RetryConfig, async_retry
-from ..schema import FunctionCall, LLMResponse, Message, TokenUsage, ToolCall
+from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from .base import LLMClientBase
 
 logger = logging.getLogger(__name__)
@@ -293,3 +294,111 @@ class OpenAIClient(LLMClientBase):
 
         # Parse and return response
         return self._parse_response(response)
+
+    async def generate_stream(
+        self,
+        messages: list[Message],
+        tools: list[Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Generate streaming response from OpenAI LLM.
+
+        Yields thinking/text deltas as they arrive. Tool calls are accumulated
+        and emitted in the final "finish" event along with token usage.
+        """
+        request_params = self._prepare_request(messages, tools)
+
+        params: dict[str, Any] = {
+            "model": self.model,
+            "messages": request_params["api_messages"],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if request_params["tools"]:
+            params["tools"] = self._convert_tools(request_params["tools"])
+
+        # Accumulators
+        text_content = ""
+        thinking_content = ""
+        usage: TokenUsage | None = None
+        finish_reason = "stop"
+
+        # Tool call accumulators: {index: {id, name, arguments_str}}
+        tool_acc: dict[int, dict[str, str]] = {}
+
+        response_stream = await self.client.chat.completions.create(**params)
+
+        async for chunk in response_stream:
+            # Usage info (sent in the final chunk with choices=[])
+            if hasattr(chunk, "usage") and chunk.usage:
+                usage = TokenUsage(
+                    prompt_tokens=chunk.usage.prompt_tokens or 0,
+                    completion_tokens=chunk.usage.completion_tokens or 0,
+                    total_tokens=chunk.usage.total_tokens or 0,
+                )
+
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+
+            # Finish reason
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+            delta = choice.delta
+            if delta is None:
+                continue
+
+            # Reasoning / thinking content (DeepSeek, o1, etc.)
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                thinking_content += delta.reasoning_content
+                yield StreamEvent(type="thinking", delta=delta.reasoning_content)
+
+            # Text content
+            if delta.content:
+                text_content += delta.content
+                yield StreamEvent(type="text", delta=delta.content)
+
+            # Tool call deltas
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_acc:
+                        tool_acc[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                            "arguments": "",
+                        }
+                    else:
+                        if tc_delta.id:
+                            tool_acc[idx]["id"] = tc_delta.id
+                        if tc_delta.function and tc_delta.function.name:
+                            tool_acc[idx]["name"] = tc_delta.function.name
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tool_acc[idx]["arguments"] += tc_delta.function.arguments
+
+        # Build tool calls
+        tool_calls: list[ToolCall] = []
+        for idx in sorted(tool_acc):
+            entry = tool_acc[idx]
+            try:
+                arguments = json.loads(entry["arguments"]) if entry["arguments"] else {}
+            except json.JSONDecodeError:
+                arguments = {}
+            tool_calls.append(
+                ToolCall(
+                    id=entry["id"],
+                    type="function",
+                    function=FunctionCall(
+                        name=entry["name"],
+                        arguments=arguments,
+                    ),
+                )
+            )
+
+        yield StreamEvent(
+            type="finish",
+            finish_reason=finish_reason,
+            usage=usage,
+            tool_calls=tool_calls if tool_calls else None,
+        )

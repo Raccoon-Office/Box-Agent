@@ -49,6 +49,8 @@ class ThinkingEvent:
     """Extended thinking content from the LLM."""
 
     content: str
+    _streaming: bool = False
+    _header: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class ContentEvent:
     """Text response content from the LLM."""
 
     content: str
+    _streaming: bool = False
+    _header: bool = False
 
 
 @dataclass(frozen=True)
