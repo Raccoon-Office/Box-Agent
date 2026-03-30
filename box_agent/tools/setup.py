@@ -7,6 +7,7 @@ interactive-CLI surface.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import List
 
@@ -167,7 +168,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Bash tool - needs workspace as cwd for command execution
     if config.tools.enable_bash:
         sandbox_venv_path = None
-        if sandbox_mode:
+        if sandbox_mode and not getattr(sys, "frozen", False):
             sandbox_venv_path = str(SandboxEnvironment().venv_dir)
         bash_tool = BashTool(
             workspace_dir=str(workspace_dir),

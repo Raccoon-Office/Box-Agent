@@ -60,6 +60,16 @@ def build_runtime(version: str, output_dir: Path) -> Path:
     print(f"Building box-agent-runtime v{version} for {plat}-{arch}")
     print(f"Project root: {project_root}")
 
+    # ── Step 0: Install runtime extras into current env ─────
+    print("\nInstalling runtime extras (data science packages)...")
+    extras_cmd = [
+        sys.executable, "-m", "pip", "install", "--quiet",
+        f"{project_root}[runtime]",
+    ]
+    result = subprocess.run(extras_cmd, cwd=str(project_root))
+    if result.returncode != 0:
+        print("Warning: failed to install runtime extras", file=sys.stderr)
+
     # ── Step 1: PyInstaller ──────────────────────────────────
     dist_dir = output_dir / "pyinstaller_out"
     dist_dir.mkdir(parents=True, exist_ok=True)
@@ -118,8 +128,27 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "jupyter_client.provisioning",
         "jupyter_client.provisioning.local_provisioner",
         "ipykernel",
+        "ipykernel.inprocess",
+        "ipykernel.inprocess.manager",
         "ipykernel_launcher",
         "jupyter_core",
+        # Data science (runtime extras)
+        "pandas",
+        "numpy",
+        "matplotlib",
+        "matplotlib.backends",
+        "matplotlib.backends.backend_agg",
+        "seaborn",
+        "openpyxl",
+        "sklearn",
+        "sklearn.cluster",
+        "sklearn.linear_model",
+        "sklearn.preprocessing",
+        # pip (used as library in frozen mode for runtime package installs)
+        "pip",
+        "pip._internal",
+        "pip._internal.cli",
+        "pip._internal.cli.main",
     ]
     hidden_args = []
     for imp in hidden_imports:
@@ -140,6 +169,12 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "--collect-all", "jupyter_client",
         "--collect-all", "ipykernel",
         "--collect-all", "jupyter_core",
+        "--collect-all", "matplotlib",
+        "--collect-submodules", "pandas",
+        "--collect-submodules", "seaborn",
+        "--collect-submodules", "openpyxl",
+        "--collect-submodules", "sklearn",
+        "--collect-submodules", "pip",
         str(entry_point),
     ]
 

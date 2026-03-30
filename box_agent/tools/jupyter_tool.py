@@ -8,6 +8,7 @@ environment, so user-installed packages don't pollute the tool's dependencies.
 
 import asyncio
 import json
+import platform
 import re
 import subprocess
 import sys
@@ -16,6 +17,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .base import Tool, ToolResult
+
+# True when running inside a PyInstaller frozen binary
+IS_FROZEN = getattr(sys, "frozen", False)
 
 # Default packages installed in the sandbox venv on first startup
 SANDBOX_DEFAULT_PACKAGES = [
@@ -29,6 +33,34 @@ SANDBOX_DEFAULT_PACKAGES = [
 ]
 
 SANDBOX_BASE_DIR = Path.home() / ".box-agent" / "sandbox"
+
+# User-level directory for packages installed at runtime in frozen mode.
+# Survives across sessions; kept separate from the frozen binary itself.
+RUNTIME_PACKAGES_DIR = Path.home() / ".box-agent" / "runtime-packages"
+
+# Whitelist of pip package names allowed for on-demand installation in
+# frozen/runtime mode.  Packages NOT in this set are rejected with a clear
+# error.  The set uses **lowercased** names for case-insensitive matching.
+ALLOWED_RUNTIME_PACKAGES: set[str] = {
+    # Core data science
+    "pandas", "numpy", "scipy", "statsmodels",
+    # Visualization
+    "matplotlib", "seaborn", "plotly", "bokeh", "altair",
+    # ML
+    "scikit-learn", "scikit-image", "joblib",
+    # Excel / tabular I/O
+    "openpyxl", "xlrd", "xlsxwriter", "pyarrow", "fastparquet", "tabulate",
+    # Web / scraping
+    "requests", "beautifulsoup4", "lxml",
+    # Images
+    "pillow", "opencv-python",
+    # Utilities
+    "python-dateutil", "python-dotenv", "pyyaml", "chardet", "tqdm", "rich",
+    # Database
+    "sqlalchemy",
+    # Network / graph
+    "networkx", "sympy",
+}
 
 
 class SandboxEnvironment:
@@ -53,10 +85,19 @@ class SandboxEnvironment:
     async def ensure_ready(self, on_progress: Any = None) -> None:
         """Ensure the sandbox venv is created and has default packages.
 
+        In frozen (PyInstaller) mode, venv creation is skipped — packages are
+        bundled inside the binary and an in-process kernel is used instead.
+
         Args:
             on_progress: Optional callback(message: str) for progress updates.
         """
         if self._ready:
+            return
+
+        if IS_FROZEN:
+            if on_progress:
+                on_progress("Runtime mode: using bundled packages (no venv).")
+            self._ready = True
             return
 
         if not self.is_created:
@@ -210,14 +251,23 @@ class SandboxEnvironment:
         return spec_dir
 
     async def install_packages(self, packages: list[str]) -> tuple[bool, str]:
-        """Install additional packages into the sandbox venv.
+        """Install additional packages into the sandbox environment.
+
+        In frozen mode, installs to ~/.box-agent/runtime-packages/ via pip
+        library (no subprocess Python needed).  Only whitelisted packages are
+        allowed; others are rejected with PACKAGE_NOT_ALLOWED.
+
+        In normal mode, installs into the sandbox venv via subprocess pip.
 
         Args:
-            packages: List of package names to install.
+            packages: List of pip package names to install.
 
         Returns:
             (success, message) tuple.
         """
+        if IS_FROZEN:
+            return await self._frozen_install(packages)
+
         proc = await asyncio.create_subprocess_exec(
             str(self.python_path), "-m", "pip", "install",
             *packages,
@@ -229,6 +279,72 @@ class SandboxEnvironment:
         if proc.returncode == 0:
             return True, output
         return False, output
+
+    async def _frozen_install(self, packages: list[str]) -> tuple[bool, str]:
+        """Install packages in frozen mode to the runtime-packages directory.
+
+        Checks packages against ALLOWED_RUNTIME_PACKAGES, then uses pip as a
+        library (no subprocess Python needed) to install into
+        ~/.box-agent/runtime-packages/.
+        """
+        # Whitelist check
+        allowed_lower = {p.lower() for p in ALLOWED_RUNTIME_PACKAGES}
+        blocked = [p for p in packages if p.lower() not in allowed_lower]
+        if blocked:
+            return False, (
+                f"PACKAGE_NOT_ALLOWED: {', '.join(blocked)} not in allowed list. "
+                f"Allowed packages: {', '.join(sorted(ALLOWED_RUNTIME_PACKAGES))}"
+            )
+
+        # Run synchronous pip in a thread to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._frozen_pip_install_sync, packages
+        )
+
+    @staticmethod
+    def _frozen_pip_install_sync(packages: list[str]) -> tuple[bool, str]:
+        """Synchronous pip install to RUNTIME_PACKAGES_DIR.
+
+        Uses pip as a library so we don't need a subprocess Python.
+        The target directory is added to sys.path so the in-process kernel
+        can import newly installed packages immediately.
+        """
+        target = RUNTIME_PACKAGES_DIR
+        target.mkdir(parents=True, exist_ok=True)
+
+        # Ensure the directory is on sys.path for immediate importability
+        target_str = str(target)
+        if target_str not in sys.path:
+            sys.path.insert(0, target_str)
+
+        try:
+            from pip._internal.cli.main import main as pip_main
+        except ImportError:
+            return False, (
+                "PACKAGE_NOT_AVAILABLE: pip is not bundled in this runtime. "
+                f"Cannot install: {', '.join(packages)}"
+            )
+
+        args = [
+            "install",
+            "--target", target_str,
+            "--quiet",
+            "--disable-pip-version-check",
+            "--no-warn-script-location",
+            *packages,
+        ]
+
+        try:
+            exit_code = pip_main(args)
+        except SystemExit as e:
+            exit_code = e.code if isinstance(e.code, int) else 1
+        except Exception as e:
+            return False, f"pip install error: {e}"
+
+        if exit_code == 0:
+            return True, f"Installed {', '.join(packages)} to {target}"
+        return False, f"pip install failed (exit code {exit_code}) for: {', '.join(packages)}"
 
 
 class JupyterKernelSession:
@@ -455,6 +571,209 @@ except ImportError:
             self._km = None
 
 
+class InProcessKernelSession:
+    """A Jupyter in-process kernel session for frozen (PyInstaller) environments.
+
+    Uses ipykernel.inprocess so the kernel runs inside the box-agent process
+    itself, avoiding the need for a subprocess, venv, or kernel spec.  The
+    public interface mirrors JupyterKernelSession: start(), execute(), stop(),
+    is_alive().
+    """
+
+    _diagnostics_logged = False
+
+    def __init__(self, session_id: str, workspace: Path):
+        self.session_id = session_id
+        self.workspace = workspace
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self._km = None
+        self._kc = None
+
+    @classmethod
+    def _log_diagnostics(cls):
+        """Log one-time diagnostic banner to stderr on first init."""
+        if cls._diagnostics_logged:
+            return
+        cls._diagnostics_logged = True
+
+        try:
+            from box_agent import __version__
+        except Exception:
+            __version__ = "unknown"
+
+        plat = f"{sys.platform}-{platform.machine()}"
+        lines = [
+            f"[SANDBOX] Runtime: frozen=True, version={__version__}, platform={plat}",
+            "[SANDBOX] Mode: in-process kernel (no subprocess, no venv)",
+        ]
+
+        # Report bundled package versions
+        pkg_versions = []
+        for pkg in ("pandas", "numpy", "matplotlib", "seaborn", "openpyxl", "sklearn"):
+            try:
+                mod = __import__(pkg)
+                ver = getattr(mod, "__version__", "?")
+                pkg_versions.append(f"{pkg}={ver}")
+            except ImportError:
+                pkg_versions.append(f"{pkg}=N/A")
+        lines.append(f"[SANDBOX] Packages: {', '.join(pkg_versions)}")
+
+        for line in lines:
+            print(line, file=sys.stderr)
+
+    async def start(self):
+        """Start an in-process kernel."""
+        self._log_diagnostics()
+
+        try:
+            from ipykernel.inprocess.manager import InProcessKernelManager
+        except ImportError as exc:
+            raise RuntimeError(
+                "KERNEL_START_FAILED: ipykernel.inprocess not available"
+            ) from exc
+
+        km = InProcessKernelManager()
+        km.start_kernel()
+        self._km = km
+
+        kc = km.client()
+        kc.start_channels()
+        # InProcess wait_for_ready() does not accept timeout
+        kc.wait_for_ready()
+        self._kc = kc
+
+        # Run setup code — add runtime-packages to path so previously
+        # installed packages are importable, then set up workspace + matplotlib
+        setup_code = f"""
+import sys, os
+
+# Prepend user-installed runtime packages directory
+_rt_pkg = r'{RUNTIME_PACKAGES_DIR}'
+if _rt_pkg not in sys.path:
+    sys.path.insert(0, _rt_pkg)
+
+os.chdir(r'{self.workspace}')
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams['figure.figsize'] = (10, 6)
+    plt.rcParams['savefig.dpi'] = 100
+except ImportError:
+    pass
+"""
+        self._kc.execute(setup_code)
+        # Wait for setup to complete
+        try:
+            while True:
+                msg = self._kc.get_iopub_msg(timeout=10)
+                if (
+                    msg.get("msg_type") == "status"
+                    and msg.get("content", {}).get("execution_state") == "idle"
+                ):
+                    break
+        except Exception:
+            pass
+
+    def is_alive(self) -> bool:
+        """Check if kernel is alive."""
+        if self._km is None:
+            return False
+        try:
+            return self._km.is_alive()
+        except Exception:
+            return False
+
+    def execute(self, code: str, timeout: int = 60) -> tuple[str, list[str], Optional[str]]:
+        """Execute code and return (stdout, images, error).
+
+        Same interface as JupyterKernelSession.execute().
+        """
+        if self._kc is None:
+            return "", [], "Kernel not initialized"
+
+        # Drain pending IOPub messages
+        while True:
+            try:
+                self._kc.get_iopub_msg(timeout=0.1)
+            except Exception:
+                break
+
+        stdout_parts = []
+        stderr_parts = []
+        error_parts = []
+        images = []
+
+        try:
+            msg_id = self._kc.execute(code, silent=False)
+
+            idle_received = False
+            while not idle_received:
+                try:
+                    msg = self._kc.get_iopub_msg(timeout=timeout)
+                    msg_type = msg.get("msg_type")
+                    content = msg.get("content", {})
+
+                    if msg_type == "status":
+                        if content.get("execution_state") == "idle":
+                            idle_received = True
+
+                    elif msg_type == "stream":
+                        name = content.get("name", "")
+                        text = content.get("text", "")
+                        text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+                        if name == "stdout":
+                            stdout_parts.append(text)
+                        elif name == "stderr":
+                            stderr_parts.append(text)
+
+                    elif msg_type == "error":
+                        error_parts.append(
+                            f"{content.get('ename')}: {content.get('evalue')}"
+                        )
+
+                    elif msg_type in ("display_data", "execute_result"):
+                        data = content.get("data", {})
+                        if "image/png" in data:
+                            images.append("[PNG Image]")
+
+                except Exception:
+                    break
+
+            if error_parts:
+                return "", [], "\n".join(error_parts)
+
+        except Exception as e:
+            return "", [], f"Execution failed: {str(e)}"
+
+        all_output = "".join(stdout_parts)
+        if stderr_parts:
+            stderr_text = "".join(stderr_parts).strip()
+            if stderr_text:
+                if all_output:
+                    all_output += "\n" + stderr_text
+                else:
+                    all_output = stderr_text
+
+        return all_output, images, None
+
+    async def stop(self):
+        """Stop the in-process kernel."""
+        if self._kc:
+            try:
+                self._kc.stop_channels()
+            except Exception:
+                pass
+            self._kc = None
+        if self._km:
+            try:
+                self._km.shutdown_kernel()
+            except Exception:
+                pass
+            self._km = None
+
+
 class JupyterSandboxTool(Tool):
     """Execute Python code in a persistent Jupyter kernel sandbox.
 
@@ -466,7 +785,7 @@ class JupyterSandboxTool(Tool):
     - %pip install support for additional packages
     """
 
-    _sessions: dict[str, JupyterKernelSession] = {}
+    _sessions: dict[str, "JupyterKernelSession | InProcessKernelSession"] = {}
     _sandbox_env: SandboxEnvironment | None = None
 
     def __init__(self, workspace_dir: str | None = None):
@@ -496,13 +815,24 @@ class JupyterSandboxTool(Tool):
                 "workspace": str(session.workspace),
             })
 
-        return {
+        status: dict[str, Any] = {
             "current_session_id": self._session_id,
             "sessions": sessions_info,
             "total_sessions": len(self._sessions),
-            "venv_path": str(env.venv_dir),
-            "venv_exists": env.is_created,
+            "frozen": IS_FROZEN,
         }
+        if not IS_FROZEN:
+            status["venv_path"] = str(env.venv_dir)
+            status["venv_exists"] = env.is_created
+        return status
+
+    def _create_session(
+        self, session_id: str, workspace: Path, env: SandboxEnvironment
+    ) -> "JupyterKernelSession | InProcessKernelSession":
+        """Create the appropriate kernel session for the current environment."""
+        if IS_FROZEN:
+            return InProcessKernelSession(session_id, workspace)
+        return JupyterKernelSession(session_id, workspace, env)
 
     @property
     def name(self) -> str:
@@ -592,7 +922,7 @@ Output formats:
             return ToolResult(
                 success=False,
                 content="",
-                error=f"Failed to initialize sandbox environment: {e}",
+                error=f"SANDBOX_INIT_FAILED: {e}",
             )
 
         # Create or get session
@@ -609,20 +939,27 @@ Output formats:
             session_id = str(uuid.uuid4())[:8]
             self._session_id = session_id
             workspace = self._get_workspace(session_id)
-            session = JupyterKernelSession(session_id, workspace, env)
+            session = self._create_session(session_id, workspace, env)
             await session.start()
             self._sessions[session_id] = session
             return ToolResult(
                 success=False,
                 content="",
-                error=f"Sandbox kernel died (old session={old_session_id}). Auto-restarted with new session={session_id}. Please retry your code.",
+                error=f"KERNEL_DIED: Sandbox kernel died (old session={old_session_id}). Auto-restarted with new session={session_id}. Please retry your code.",
             )
 
         # Get or create kernel session
         if session_id not in self._sessions:
             workspace = self._get_workspace(session_id)
-            session = JupyterKernelSession(session_id, workspace, env)
-            await session.start()
+            session = self._create_session(session_id, workspace, env)
+            try:
+                await session.start()
+            except RuntimeError as e:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=f"KERNEL_START_FAILED: {e}",
+                )
             self._sessions[session_id] = session
 
         session = self._sessions[session_id]
@@ -799,11 +1136,15 @@ and sandbox venv status.
         status = self._sandbox_tool.get_status()
 
         lines = [
-            f"Sandbox venv: {status['venv_path']}",
-            f"Venv exists: {status['venv_exists']}",
+            f"Mode: {'in-process (frozen)' if status.get('frozen') else 'subprocess + venv'}",
+        ]
+        if not status.get("frozen"):
+            lines.append(f"Sandbox venv: {status.get('venv_path', 'N/A')}")
+            lines.append(f"Venv exists: {status.get('venv_exists', False)}")
+        lines.extend([
             f"Current session: {status['current_session_id'] or 'none'}",
             f"Total sessions: {status['total_sessions']}",
-        ]
+        ])
 
         if status['sessions']:
             lines.append("\nSessions:")
