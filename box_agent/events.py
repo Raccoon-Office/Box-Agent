@@ -179,6 +179,18 @@ class DoneEvent:
     final_content: str
 
 
+# ── Memory ─────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MemoryEvent:
+    """Memory operation event."""
+
+    action: str  # "recall" | "save_summary" | "update_manual"
+    session_id: str = ""
+    detail: str = ""
+
+
 # ── Union type ──────────────────────────────────────────────────
 
 AgentEvent = Union[
@@ -192,6 +204,7 @@ AgentEvent = Union[
     ArtifactEvent,
     ConfirmationRequired,
     SummarizationEvent,
+    MemoryEvent,
     ErrorEvent,
     LogFileEvent,
     DoneEvent,

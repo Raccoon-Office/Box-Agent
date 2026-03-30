@@ -37,6 +37,10 @@ class AgentConfig(BaseModel):
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
+    # Memory
+    enable_memory: bool = True
+    memory_dir: str = "~/.box-agent/memory"
+    memory_recall_days: int = 3
 
 
 class MCPConfig(BaseModel):
@@ -139,6 +143,9 @@ class Config(BaseModel):
             max_steps=data.get("max_steps", 50),
             workspace_dir=data.get("workspace_dir", "./workspace"),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
+            enable_memory=data.get("enable_memory", True),
+            memory_dir=data.get("memory_dir", "~/.box-agent/memory"),
+            memory_recall_days=data.get("memory_recall_days", 3),
         )
 
         # Parse tools configuration

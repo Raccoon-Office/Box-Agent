@@ -77,6 +77,7 @@ from box_agent.events import (
     ToolCallStart,
 )
 from box_agent.llm import LLMClient
+from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.schema import Message
 
@@ -131,6 +132,13 @@ class BoxACPAgent:
         self._base_tools = base_tools
         self._system_prompt = system_prompt
         self._sessions: dict[str, SessionState] = {}
+        # Shared memory manager (created once, reused across sessions)
+        self._memory: MemoryManager | None = None
+        if config.agent.enable_memory:
+            self._memory = MemoryManager(
+                memory_dir=config.agent.memory_dir,
+                recall_days=config.agent.memory_recall_days,
+            )
 
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:  # noqa: ARG002
         log.info("initialize", message="ACP initialize request received")
@@ -159,6 +167,13 @@ class BoxACPAgent:
 
         # Build per-session system prompt with conditional mode injection
         system_prompt = self._build_session_prompt(session_mode)
+
+        # Inject memory context
+        if self._memory:
+            memory_block = self._memory.recall()
+            if memory_block:
+                system_prompt = f"{system_prompt.rstrip()}\n\n{memory_block}"
+                log.info("session/memory", session_id=session_id, message="Memory context injected")
 
         tools = list(self._base_tools)
         # Enable sandbox mode and restrict to workspace for ACP sessions
@@ -228,6 +243,17 @@ class BoxACPAgent:
         prompt_start = perf_counter()
         stop_reason = await self._run_turn(state, session_id)
         duration_ms = int((perf_counter() - prompt_start) * 1000)
+
+        # Save session summary in background (best-effort)
+        if self._memory:
+            try:
+                await self._memory.generate_session_summary(
+                    llm=self._llm,
+                    messages=state.agent.messages,
+                    session_id=session_id,
+                )
+            except Exception:
+                log.warn("session/memory", session_id=session_id, message="Failed to save session summary")
 
         log.info("session/done", session_id=session_id, stop_reason=stop_reason, duration_ms=duration_ms)
         return PromptResponse(stopReason=stop_reason)

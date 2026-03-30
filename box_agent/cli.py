@@ -808,6 +808,20 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         # Remove placeholder if sandbox not enabled
         system_prompt = system_prompt.replace("{SANDBOX_INFO}", "")
 
+    # 6.6 Inject Memory context
+    memory_mgr = None
+    if config.agent.enable_memory:
+        from box_agent.memory import MemoryManager
+
+        memory_mgr = MemoryManager(
+            memory_dir=config.agent.memory_dir,
+            recall_days=config.agent.memory_recall_days,
+        )
+        memory_block = memory_mgr.recall()
+        if memory_block:
+            system_prompt = f"{system_prompt.rstrip()}\n\n{memory_block}"
+            print(f"{Colors.GREEN}✅ Loaded memory context{Colors.RESET}")
+
     # 7. Create Agent
     agent = Agent(
         llm_client=llm_client,
@@ -831,6 +845,15 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         except Exception as e:
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
         finally:
+            # Save session summary
+            if memory_mgr and len(agent.messages) > 1:
+                try:
+                    session_id = f"cli-{session_start.strftime('%H%M%S')}"
+                    await memory_mgr.generate_session_summary(
+                        llm=llm_client, messages=agent.messages, session_id=session_id,
+                    )
+                except Exception:
+                    pass
             print_stats(agent, session_start)
 
         # Cleanup MCP connections
@@ -926,6 +949,16 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                 command = user_input.lower()
 
                 if command in ["/exit", "/quit", "/q"]:
+                    # Save session summary before exit
+                    if memory_mgr and len(agent.messages) > 1:
+                        try:
+                            session_id = f"cli-{session_start.strftime('%H%M%S')}"
+                            await memory_mgr.generate_session_summary(
+                                llm=llm_client, messages=agent.messages, session_id=session_id,
+                            )
+                            print(f"{Colors.GREEN}✅ Session summary saved{Colors.RESET}")
+                        except Exception:
+                            pass
                     print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
                     print_stats(agent, session_start)
                     break
@@ -1087,6 +1120,15 @@ You have access to the `execute_code` tool which runs Python code in an isolated
             print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
 
         except KeyboardInterrupt:
+            # Save session summary before exit
+            if memory_mgr and len(agent.messages) > 1:
+                try:
+                    session_id = f"cli-{session_start.strftime('%H%M%S')}"
+                    await memory_mgr.generate_session_summary(
+                        llm=llm_client, messages=agent.messages, session_id=session_id,
+                    )
+                except Exception:
+                    pass
             print(f"\n\n{Colors.BRIGHT_YELLOW}👋 Interrupt signal detected, exiting...{Colors.RESET}\n")
             print_stats(agent, session_start)
             break
