@@ -35,6 +35,11 @@ max_steps: 100  # Maximum execution steps
 workspace_dir: "./workspace"  # Working directory
 system_prompt_path: "system_prompt.md"  # System prompt file (same config directory)
 
+# ===== Memory Configuration =====
+enable_memory: true                    # Enable cross-session memory system
+memory_dir: "~/.box-agent/memory"      # Memory storage directory
+memory_recall_days: 3                  # How many days of session history to recall
+
 # ===== Tools Configuration =====
 tools:
   # Safety: restrict tools to workspace directory only
