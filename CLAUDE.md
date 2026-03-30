@@ -50,6 +50,8 @@ box-agent-acp
 
 **Tool system** (`tools/`): Abstract `Tool` base class with `to_schema()` (Anthropic format) and `to_openai_schema()`. Built-in tools: `ReadTool`, `WriteTool`, `EditTool`, `BashTool`, `BashOutputTool`, `BashKillTool`, `SessionNoteTool`. MCP tools loaded via `mcp_loader.py`. Skills loaded from `SKILL.md` files with YAML frontmatter via `skill_loader.py`.
 
+**Sandbox** (`tools/jupyter_tool.py`): Dual-mode execution environment. In normal mode: subprocess kernel in isolated venv (`SandboxEnvironment` + `JupyterKernelSession`). In frozen/runtime mode: in-process kernel (`InProcessKernelSession` via `ipykernel.inprocess`) with bundled packages. `IS_FROZEN` flag (from `sys.frozen`) selects the mode. Runtime package installs go to `~/.box-agent/runtime-packages/` via pip-as-library, gated by `ALLOWED_RUNTIME_PACKAGES` whitelist. Structured error codes: `SANDBOX_INIT_FAILED`, `KERNEL_START_FAILED`, `KERNEL_DIED`, `PACKAGE_NOT_ALLOWED`, `PACKAGE_NOT_AVAILABLE`.
+
 **Safety layer** (`tools/safety.py`): Dangerous command detection (rm, sudo, kill, etc.) with user confirmation prompt (supports Chinese). Workspace path validation blocks access outside workspace when `allow_full_access: false`. Auto-backup to `~/.box-agent/trash/{timestamp}/` before file modifications. Non-interactive mode (`--task`) rejects dangerous commands outright.
 
 **Config** (`config.py`): Pydantic models. Load priority: `box_agent/config/` (dev) → `~/.box-agent/config/` (installed) → package directory (fallback). Main files: `config.yaml`, `system_prompt.md`, `analysis_prompt.md`, `mcp.json`.
@@ -67,6 +69,7 @@ box-agent-acp
 - Safety: dangerous commands require confirmation; workspace scope enforced by default; files auto-backed up before modification
 - Artifact detection: two-layer approach — regex scans tool output for `[filename.ext]` references, workspace diff detects files created by any tool (including bash). Both emit `ArtifactEvent` with mime_type, size_bytes, and absolute path
 - LibreOffice (`soffice`) is a system dependency, NOT auto-installed. Excel export defaults to pandas + openpyxl. `recalc.py` gracefully handles missing soffice
+- Frozen/runtime mode: `IS_FROZEN` flag selects in-process kernel, skips venv creation, routes package installs through whitelist + `~/.box-agent/runtime-packages/`
 
 ## Configuration
 
