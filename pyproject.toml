@@ -57,6 +57,7 @@ runtime = [
     "seaborn",
     "openpyxl",
     "scikit-learn",
+    "pip",
 ]
 
 [build-system]
