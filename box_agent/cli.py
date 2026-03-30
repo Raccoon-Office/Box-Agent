@@ -738,8 +738,18 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         else:
             return
 
-    # 3. Initialize base tools (independent of workspace)
-    tools, skill_loader = await initialize_base_tools(config)
+    # 3. Initialize memory manager (before base tools, so tools get the reference)
+    memory_mgr = None
+    if config.agent.enable_memory:
+        from box_agent.memory import MemoryManager
+
+        memory_mgr = MemoryManager(
+            memory_dir=config.agent.memory_dir,
+            recall_days=config.agent.memory_recall_days,
+        )
+
+    # 3.5 Initialize base tools (independent of workspace)
+    tools, skill_loader = await initialize_base_tools(config, memory_manager=memory_mgr)
 
     # 4. Add workspace-dependent tools
     non_interactive = task is not None
@@ -809,14 +819,7 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         system_prompt = system_prompt.replace("{SANDBOX_INFO}", "")
 
     # 6.6 Inject Memory context
-    memory_mgr = None
-    if config.agent.enable_memory:
-        from box_agent.memory import MemoryManager
-
-        memory_mgr = MemoryManager(
-            memory_dir=config.agent.memory_dir,
-            recall_days=config.agent.memory_recall_days,
-        )
+    if memory_mgr:
         memory_block = memory_mgr.recall()
         if memory_block:
             system_prompt = f"{system_prompt.rstrip()}\n\n{memory_block}"

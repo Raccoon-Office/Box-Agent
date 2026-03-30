@@ -125,6 +125,7 @@ class BoxACPAgent:
         llm: LLMClient,
         base_tools: list,
         system_prompt: str,
+        memory_manager: MemoryManager | None = None,
     ):
         self._conn = conn
         self._config = config
@@ -132,13 +133,7 @@ class BoxACPAgent:
         self._base_tools = base_tools
         self._system_prompt = system_prompt
         self._sessions: dict[str, SessionState] = {}
-        # Shared memory manager (created once, reused across sessions)
-        self._memory: MemoryManager | None = None
-        if config.agent.enable_memory:
-            self._memory = MemoryManager(
-                memory_dir=config.agent.memory_dir,
-                recall_days=config.agent.memory_recall_days,
-            )
+        self._memory = memory_manager
 
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:  # noqa: ARG002
         log.info("initialize", message="ACP initialize request received")
@@ -377,7 +372,15 @@ async def run_acp_server(config: Config | None = None) -> None:
         sys.stderr.flush()
 
     try:
-        base_tools, skill_loader = await initialize_base_tools(config, output=_stderr_print)
+        # Create memory manager if enabled
+        memory_mgr = None
+        if config.agent.enable_memory:
+            memory_mgr = MemoryManager(
+                memory_dir=config.agent.memory_dir,
+                recall_days=config.agent.memory_recall_days,
+            )
+
+        base_tools, skill_loader = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)
         if prompt_path and prompt_path.exists():
             system_prompt = prompt_path.read_text(encoding="utf-8")
@@ -394,7 +397,7 @@ async def run_acp_server(config: Config | None = None) -> None:
         log.info("server/start", message=f"Tools loaded: {len(base_tools)} base tools")
 
         reader, writer = await stdio_streams()
-        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt), writer, reader)
+        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr), writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         await asyncio.Event().wait()

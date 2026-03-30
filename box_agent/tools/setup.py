@@ -16,6 +16,7 @@ from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
+from box_agent.tools.memory_tool import MemoryReadTool, MemoryWriteTool
 from box_agent.tools.note_tool import SessionNoteTool
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.web_search_tool import WebSearchTool
@@ -33,7 +34,7 @@ class Colors:
     RESET = "\033[0m"
 
 
-async def initialize_base_tools(config: Config, output=None):
+async def initialize_base_tools(config: Config, output=None, memory_manager=None):
     """Initialize base tools (independent of workspace)
 
     These tools are loaded from package configuration and don't depend on workspace.
@@ -43,6 +44,7 @@ async def initialize_base_tools(config: Config, output=None):
         config: Configuration object
         output: Callable for status messages (default: print). Pass a stderr
                 writer when stdout must stay clean (e.g. ACP mode).
+        memory_manager: Optional MemoryManager instance for memory tools.
 
     Returns:
         Tuple of (list of tools, skill loader if skills enabled)
@@ -51,6 +53,12 @@ async def initialize_base_tools(config: Config, output=None):
 
     tools = []
     skill_loader = None
+
+    # 0. Memory tools (cross-session, workspace-independent)
+    if memory_manager is not None:
+        tools.append(MemoryReadTool(memory_manager))
+        tools.append(MemoryWriteTool(memory_manager))
+        _out(f"{Colors.GREEN}✅ Loaded memory tools (memory_read, memory_write){Colors.RESET}")
 
     # 1. Bash auxiliary tools (output monitoring and kill)
     # Note: BashTool itself is created in add_workspace_tools() with workspace_dir as cwd
