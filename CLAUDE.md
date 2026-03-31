@@ -40,7 +40,7 @@ box-agent-acp
 
 ## Architecture
 
-**Execution core** (`core.py`): `run_agent_loop()` is the single source of truth for the agent loop. It is an `AsyncGenerator[AgentEvent, None]` that yields structured events (`StepStart`, `ThinkingEvent`, `ContentEvent`, `ToolCallStart`, `ToolCallResult`, `DoneEvent`, `ArtifactEvent`, etc.) defined in `events.py`. No `print()` or `input()` calls — all I/O is delegated to consumers. Includes token-aware summarization (80k default, cl100k_base), cancellation support, and universal artifact detection (regex-based + workspace diff-based).
+**Execution core** (`core.py`): `run_agent_loop()` is the single source of truth for the agent loop. It is an `AsyncGenerator[AgentEvent, None]` that yields structured events (`StepStart`, `ThinkingEvent`, `ContentEvent`, `ToolCallStart`, `ToolCallResult`, `DoneEvent`, `ArtifactEvent`, etc.) defined in `events.py`. No `print()` or `input()` calls — all I/O is delegated to consumers. Two-layer context compression: Layer 1 micro-compact (zero-cost, replaces old tool results with placeholders every step) + Layer 2 token-aware summarization (LLM summary at 80k threshold). Cancellation support and universal artifact detection (regex-based + workspace diff-based).
 
 **Agent** (`agent.py`): Public API wrapper. `Agent.run_events()` returns the raw event stream; `Agent.run()` is a backward-compatible method that consumes events and renders them to the terminal via `_render_event()`.
 
@@ -48,7 +48,7 @@ box-agent-acp
 
 **LLM layer** (`llm/`): Multi-provider via `LLMClient` wrapper. `AnthropicClient` handles Anthropic-protocol APIs; `OpenAIClient` handles OpenAI-protocol APIs. Both implement `LLMClientBase`. The `api_base` is used as-is (no automatic URL suffix), so any third-party endpoint works directly.
 
-**Tool system** (`tools/`): Abstract `Tool` base class with `to_schema()` (Anthropic format) and `to_openai_schema()`. Built-in tools: `ReadTool`, `WriteTool`, `EditTool`, `BashTool`, `BashOutputTool`, `BashKillTool`, `SessionNoteTool`. MCP tools loaded via `mcp_loader.py`. Skills loaded from `SKILL.md` files with YAML frontmatter via `skill_loader.py`.
+**Tool system** (`tools/`): Abstract `Tool` base class with `to_schema()` (Anthropic format), `to_openai_schema()`, and `parallel_safe` attribute. Built-in tools: `ReadTool`, `WriteTool`, `EditTool`, `BashTool`, `BashOutputTool`, `BashKillTool`, `SessionNoteTool`, `TodoWriteTool`, `TodoReadTool`, `SubAgentTool`. MCP tools loaded via `mcp_loader.py`. Skills loaded from `SKILL.md` files with YAML frontmatter via `skill_loader.py`.
 
 **Sandbox** (`tools/jupyter_tool.py`): Dual-mode execution environment. In normal mode: subprocess kernel in isolated venv (`SandboxEnvironment` + `JupyterKernelSession`). In frozen/runtime mode: in-process kernel (`InProcessKernelSession` via `ipykernel.inprocess`) with bundled packages. `IS_FROZEN` flag (from `sys.frozen`) selects the mode. Runtime package installs go to `~/.box-agent/runtime-packages/` via pip-as-library, gated by `ALLOWED_RUNTIME_PACKAGES` whitelist. Structured error codes: `SANDBOX_INIT_FAILED`, `KERNEL_START_FAILED`, `KERNEL_DIED`, `PACKAGE_NOT_ALLOWED`, `PACKAGE_NOT_AVAILABLE`.
 
@@ -70,6 +70,9 @@ box-agent-acp
 - Artifact detection: two-layer approach — regex scans tool output for `[filename.ext]` references, workspace diff detects files created by any tool (including bash). Both emit `ArtifactEvent` with mime_type, size_bytes, and absolute path
 - LibreOffice (`soffice`) is a system dependency, NOT auto-installed. Excel export defaults to pandas + openpyxl. `recalc.py` gracefully handles missing soffice
 - Frozen/runtime mode: `IS_FROZEN` flag selects in-process kernel, skips venv creation, routes package installs through whitelist + `~/.box-agent/runtime-packages/`
+- Sub-agent: `SubAgentTool` runs tasks in isolated message contexts via `run_agent_loop()`. Child tools exclude `sub_agent` itself (no recursion). Multiple sub-agents execute in parallel via `asyncio.gather` (tools with `parallel_safe = True`)
+- Context compression: Layer 1 `_micro_compact()` runs every step, replaces tool results older than last 3 with `[Previous result from {tool}: {first_line}...]`. Layer 2 `_maybe_summarize()` triggers LLM summary when tokens exceed 80k. Logger captures originals — no data loss
+- ACP stdout guard: `sys.stdout` is redirected to `sys.stderr` in ACP mode. Real stdout is restored only for `stdio_streams()` transport, then re-guarded. All diagnostics and third-party output go to stderr
 
 ## Configuration
 
