@@ -392,7 +392,21 @@ async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
     config = config or Config.load()
 
+    # ── Stdout guard ────────────────────────────────────────
+    # ACP protocol owns stdout exclusively.  Redirect sys.stdout to
+    # stderr BEFORE any import or library init can install a handler
+    # on the real stdout.  The original stdout fd is preserved via
+    # _real_stdout for the ACP transport (stdio_streams reads
+    # sys.stdout at call-time, so we must save it first).
+    import io
+    _real_stdout = sys.stdout  # keep for ACP transport
+    sys.stdout = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", line_buffering=True
+    )
+
     # Route stdlib logging to stderr only (never stdout)
+    # Clear any pre-existing handlers first to prevent stdout leaks
+    logging.root.handlers.clear()
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.root.addHandler(stderr_handler)
@@ -430,7 +444,12 @@ async def run_acp_server(config: Config | None = None) -> None:
         log.info("server/start", message=f"LLM: {config.llm.model}, provider: {config.llm.provider}")
         log.info("server/start", message=f"Tools loaded: {len(base_tools)} base tools")
 
+        # Restore real stdout for ACP transport, then re-guard sys.stdout
+        sys.stdout = _real_stdout
         reader, writer = await stdio_streams()
+        sys.stdout = io.TextIOWrapper(
+            sys.stderr.buffer, encoding="utf-8", line_buffering=True
+        )
         AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr), writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")

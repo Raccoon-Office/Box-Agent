@@ -13,7 +13,7 @@ def main() -> None:
     # stdlib print() calls to stderr before importing anything else.
     import io
     sys.stdout = io.TextIOWrapper(
-        sys.stdout.buffer, encoding="utf-8", line_buffering=True
+        sys.stderr.buffer, encoding="utf-8", line_buffering=True
     )
 
     # Now safe to import and run
