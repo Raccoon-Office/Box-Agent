@@ -72,7 +72,7 @@ box-agent-acp
 - Frozen/runtime mode: `IS_FROZEN` flag selects in-process kernel, skips venv creation, routes package installs through whitelist + `~/.box-agent/runtime-packages/`
 - Sub-agent: `SubAgentTool` runs tasks in isolated message contexts via `run_agent_loop()`. Child tools exclude `sub_agent` itself (no recursion). Multiple sub-agents execute in parallel via `asyncio.gather` (tools with `parallel_safe = True`)
 - Context compression: Layer 1 `_micro_compact()` runs every step, replaces tool results older than last 3 with `[Previous result from {tool}: {first_line}...]`. Layer 2 `_maybe_summarize()` triggers LLM summary when tokens exceed 80k. Logger captures originals — no data loss
-- ACP stdout guard: `sys.stdout` is redirected to `sys.stderr` in ACP mode. Real stdout is restored only for `stdio_streams()` transport, then re-guarded. All diagnostics and third-party output go to stderr
+- ACP stdout guard: `sys.stdout = sys.stderr` in ACP mode (must use direct assignment, NOT `TextIOWrapper(sys.stderr.buffer)` which destroys stderr on GC). `_real_stdout = sys.__stdout__` (not `sys.stdout`, which may be pre-guarded by `runtime_entry.py`). Real stdout restored only for `stdio_streams()` transport, then re-guarded. All diagnostics and third-party output go to stderr
 
 ## Configuration
 
