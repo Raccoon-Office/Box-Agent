@@ -20,6 +20,7 @@ from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_con
 from box_agent.tools.memory_tool import MemoryReadTool, MemoryWriteTool
 from box_agent.tools.note_tool import SessionNoteTool
 from box_agent.tools.skill_tool import create_skill_tools
+from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
 from box_agent.tools.web_search_tool import WebSearchTool
 
 
@@ -194,6 +195,13 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     if config.tools.enable_note:
         tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
         _out(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
+
+    # Todo tool - task tracking for multi-step workflows
+    if config.tools.enable_todo:
+        store = TodoStore()
+        tools.append(TodoWriteTool(store))
+        tools.append(TodoReadTool(store))
+        _out(f"{Colors.GREEN}✅ Loaded todo tools (todo_write, todo_read){Colors.RESET}")
 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:

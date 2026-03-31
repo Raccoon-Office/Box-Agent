@@ -58,6 +58,7 @@ class ToolsConfig(BaseModel):
     enable_file_tools: bool = True
     enable_bash: bool = True
     enable_note: bool = True
+    enable_todo: bool = True  # Task tracking for multi-step workflows
     enable_web_search: bool = True  # Fallback web search when no MCP search service
 
     # Safety
@@ -163,6 +164,7 @@ class Config(BaseModel):
             enable_file_tools=tools_data.get("enable_file_tools", True),
             enable_bash=tools_data.get("enable_bash", True),
             enable_note=tools_data.get("enable_note", True),
+            enable_todo=tools_data.get("enable_todo", True),
             allow_full_access=tools_data.get("allow_full_access", False),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),

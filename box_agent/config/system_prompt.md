@@ -33,7 +33,7 @@ Skills are loaded dynamically using **Progressive Disclosure**:
 
 ### Task Execution
 1. **Analyze** the request and identify if a skill can help
-2. **Break down** complex tasks into clear, executable steps
+2. **Break down** complex tasks into clear, executable steps — when a task has 3+ steps, use `todo_write` to create a checklist, then update each item as you progress
 3. **Use skills** when appropriate for specialized guidance
 4. **Execute** tools systematically and check results
 5. **Report** progress and any issues encountered
