@@ -351,3 +351,102 @@ def test_artifact_detect_multiple(tmp_path):
     assert len(arts) == 2
     names = {a.filename for a in arts}
     assert names == {"a.png", "b.pdf"}
+
+
+# ── Micro-compact tests ──────────────────────────────────────────
+
+
+from box_agent.core import _micro_compact, _KEEP_RECENT_TOOL_RESULTS, _MIN_COMPACT_LEN
+
+
+def _make_tool_msg(name: str, content: str, tc_id: str = "tc-0") -> Message:
+    return Message(role="tool", content=content, tool_call_id=tc_id, name=name)
+
+
+def test_micro_compact_no_op_when_few_tool_msgs():
+    """Should not compact when tool messages <= KEEP_RECENT."""
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="ok"),
+        _make_tool_msg("bash", "x" * 500, "tc-1"),
+        _make_tool_msg("bash", "y" * 500, "tc-2"),
+        _make_tool_msg("bash", "z" * 500, "tc-3"),
+    ]
+    assert _micro_compact(msgs) == 0
+    # Content should be unchanged
+    assert msgs[3].content == "x" * 500
+
+
+def test_micro_compact_replaces_old_tool_results():
+    """Old tool results beyond KEEP_RECENT should be compacted."""
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="analyze data"),
+        Message(role="assistant", content="calling tools"),
+        _make_tool_msg("execute_code", "DataFrame with 1000 rows\n" + "x" * 500, "tc-1"),
+        _make_tool_msg("execute_code", "Statistical summary\n" + "y" * 500, "tc-2"),
+        Message(role="assistant", content="more analysis"),
+        _make_tool_msg("bash", "file list\n" + "z" * 500, "tc-3"),
+        _make_tool_msg("execute_code", "Final chart\n" + "w" * 500, "tc-4"),
+        _make_tool_msg("read", "recent content\n" + "v" * 500, "tc-5"),
+        _make_tool_msg("execute_code", "latest result\n" + "u" * 500, "tc-6"),
+    ]
+    # 6 tool messages, keep last 3 → compact first 3
+    compacted = _micro_compact(msgs)
+    assert compacted == 3
+
+    # First 3 tool messages should be compacted
+    assert msgs[3].content.startswith("[Previous result from execute_code:")
+    assert msgs[4].content.startswith("[Previous result from execute_code:")
+    assert msgs[6].content.startswith("[Previous result from bash:")
+
+    # Last 3 tool messages should be intact
+    assert msgs[7].content.startswith("Final chart")
+    assert msgs[8].content.startswith("recent content")
+    assert msgs[9].content.startswith("latest result")
+
+
+def test_micro_compact_preserves_short_content():
+    """Tool results shorter than MIN_COMPACT_LEN should not be compacted."""
+    msgs = [
+        Message(role="system", content="sys"),
+        _make_tool_msg("bash", "short", "tc-1"),  # short, should be skipped
+        _make_tool_msg("execute_code", "x" * 500, "tc-2"),  # long, should be compacted
+        _make_tool_msg("bash", "z" * 500, "tc-3"),
+        _make_tool_msg("read", "a" * 500, "tc-4"),
+        _make_tool_msg("execute_code", "b" * 500, "tc-5"),
+    ]
+    compacted = _micro_compact(msgs)
+    # First 2 are candidates; tc-1 is short so only tc-2 gets compacted
+    assert compacted == 1
+    assert msgs[1].content == "short"  # preserved
+    assert msgs[2].content.startswith("[Previous result from execute_code:")
+
+
+def test_micro_compact_preserves_tool_call_id():
+    """Compacted messages must keep tool_call_id and name for protocol correctness."""
+    msgs = [
+        Message(role="system", content="sys"),
+        _make_tool_msg("bash", "x" * 500, "tc-42"),
+        _make_tool_msg("read", "y" * 500, "tc-43"),
+        _make_tool_msg("bash", "z" * 500, "tc-44"),
+        _make_tool_msg("read", "w" * 500, "tc-45"),
+    ]
+    _micro_compact(msgs)
+    # First message should be compacted but retain metadata
+    assert msgs[1].tool_call_id == "tc-42"
+    assert msgs[1].name == "bash"
+
+
+def test_micro_compact_first_line_hint():
+    """Compacted placeholder should include the first line as a hint."""
+    msgs = [
+        Message(role="system", content="sys"),
+        _make_tool_msg("execute_code", "Revenue: $1.2M\nRow 1: ...\n" + "x" * 500, "tc-1"),
+        _make_tool_msg("bash", "ok", "tc-2"),
+        _make_tool_msg("read", "a" * 500, "tc-3"),
+        _make_tool_msg("bash", "b" * 500, "tc-4"),
+    ]
+    _micro_compact(msgs)
+    assert "Revenue: $1.2M" in msgs[1].content

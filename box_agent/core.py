@@ -296,6 +296,51 @@ async def _maybe_summarize(
     return new_messages, True, estimated
 
 
+# ── Micro-compact (Layer 1) ─────────────────────────────────
+
+# Number of recent tool messages to keep intact.
+_KEEP_RECENT_TOOL_RESULTS = 3
+# Tool results shorter than this are not worth compacting.
+_MIN_COMPACT_LEN = 200
+
+
+def _micro_compact(messages: list[Message]) -> int:
+    """Replace old tool-result content with short placeholders.
+
+    Walks the message list, finds tool-role messages, keeps the last
+    ``_KEEP_RECENT_TOOL_RESULTS`` intact, and replaces earlier ones
+    whose content exceeds ``_MIN_COMPACT_LEN`` with a one-liner.
+
+    This is a cheap, zero-LLM-call operation that runs every step.
+
+    Returns:
+        Number of messages compacted.
+    """
+    # Collect indices of tool messages
+    tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
+    if len(tool_indices) <= _KEEP_RECENT_TOOL_RESULTS:
+        return 0
+
+    compacted = 0
+    for idx in tool_indices[:-_KEEP_RECENT_TOOL_RESULTS]:
+        msg = messages[idx]
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        if len(content) <= _MIN_COMPACT_LEN:
+            continue
+        tool_name = msg.name or "unknown"
+        # Preserve the first line as a hint (often contains the key result)
+        first_line = content.split("\n", 1)[0][:100]
+        messages[idx] = Message(
+            role="tool",
+            content=f"[Previous result from {tool_name}: {first_line}...]",
+            tool_call_id=msg.tool_call_id,
+            name=msg.name,
+        )
+        compacted += 1
+
+    return compacted
+
+
 # ── Cleanup helper ──────────────────────────────────────────────
 
 
@@ -364,7 +409,11 @@ async def run_agent_loop(
 
         step_start = perf_counter()
 
-        # ── Summarization ───────────────────────────────────
+        # ── Micro-compact (Layer 1) ────────────────────────
+        # Cheap: replace old tool results with placeholders
+        _micro_compact(messages)
+
+        # ── Summarization (Layer 2) ────────────────────────
         result = await _maybe_summarize(llm, messages, token_limit, api_total_tokens, skip_next_token_check)
         new_msgs, skip_next_token_check, est_before = result
         if new_msgs is not None:
