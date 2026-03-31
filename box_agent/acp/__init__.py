@@ -395,11 +395,10 @@ async def run_acp_server(config: Config | None = None) -> None:
     # ── Stdout guard ────────────────────────────────────────
     # ACP protocol owns stdout exclusively.  Redirect sys.stdout to
     # stderr so stray print() calls don't corrupt the ACP stream.
-    # We assign sys.stderr directly (NOT a new TextIOWrapper around
-    # sys.stderr.buffer) because TextIOWrapper.__del__ closes its
-    # underlying buffer, which would destroy sys.stderr when the
-    # guard object is garbage-collected.
-    _real_stdout = sys.stdout  # keep for ACP transport
+    # Use sys.__stdout__ (the interpreter-original fd 1) because
+    # runtime_entry.py may have already set sys.stdout = sys.stderr
+    # before we get here, so sys.stdout would be stderr at this point.
+    _real_stdout = sys.__stdout__  # always fd 1, even if pre-guarded
     sys.stdout = sys.stderr
 
     # Route stdlib logging to stderr only (never stdout)
