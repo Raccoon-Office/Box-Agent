@@ -11,10 +11,10 @@ import sys
 def main() -> None:
     # Ensure stdout is only used for ACP protocol — redirect any stray
     # stdlib print() calls to stderr before importing anything else.
-    import io
-    sys.stdout = io.TextIOWrapper(
-        sys.stderr.buffer, encoding="utf-8", line_buffering=True
-    )
+    # Use sys.stderr directly (NOT TextIOWrapper(sys.stderr.buffer))
+    # because TextIOWrapper.__del__ closes the underlying buffer,
+    # which would destroy sys.stderr when the wrapper is GC'd.
+    sys.stdout = sys.stderr
 
     # Now safe to import and run
     import asyncio

@@ -394,15 +394,13 @@ async def run_acp_server(config: Config | None = None) -> None:
 
     # ── Stdout guard ────────────────────────────────────────
     # ACP protocol owns stdout exclusively.  Redirect sys.stdout to
-    # stderr BEFORE any import or library init can install a handler
-    # on the real stdout.  The original stdout fd is preserved via
-    # _real_stdout for the ACP transport (stdio_streams reads
-    # sys.stdout at call-time, so we must save it first).
-    import io
+    # stderr so stray print() calls don't corrupt the ACP stream.
+    # We assign sys.stderr directly (NOT a new TextIOWrapper around
+    # sys.stderr.buffer) because TextIOWrapper.__del__ closes its
+    # underlying buffer, which would destroy sys.stderr when the
+    # guard object is garbage-collected.
     _real_stdout = sys.stdout  # keep for ACP transport
-    sys.stdout = io.TextIOWrapper(
-        sys.stderr.buffer, encoding="utf-8", line_buffering=True
-    )
+    sys.stdout = sys.stderr
 
     # Route stdlib logging to stderr only (never stdout)
     # Clear any pre-existing handlers first to prevent stdout leaks
@@ -447,9 +445,7 @@ async def run_acp_server(config: Config | None = None) -> None:
         # Restore real stdout for ACP transport, then re-guard sys.stdout
         sys.stdout = _real_stdout
         reader, writer = await stdio_streams()
-        sys.stdout = io.TextIOWrapper(
-            sys.stderr.buffer, encoding="utf-8", line_buffering=True
-        )
+        sys.stdout = sys.stderr
         AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr), writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
