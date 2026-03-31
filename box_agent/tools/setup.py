@@ -20,6 +20,7 @@ from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_con
 from box_agent.tools.memory_tool import MemoryReadTool, MemoryWriteTool
 from box_agent.tools.note_tool import SessionNoteTool
 from box_agent.tools.skill_tool import create_skill_tools
+from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
 from box_agent.tools.web_search_tool import WebSearchTool
 
@@ -148,7 +149,8 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
 
 
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
-                        allow_full_access: bool = True, non_interactive: bool = False, output=None):
+                        allow_full_access: bool = True, non_interactive: bool = False, output=None,
+                        llm=None):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -161,6 +163,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         allow_full_access: If True, tools can access full system; if False, restricted to workspace
         non_interactive: If True, dangerous commands are rejected without prompting
         output: Callable for status messages (default: print)
+        llm: LLM client instance (needed for sub_agent tool)
     """
     _out = output or print
     # Ensure workspace directory exists
@@ -213,3 +216,14 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         tools.append(status_tool)
         _out(f"{Colors.GREEN}✅ Loaded Jupyter sandbox tool (execute_code){Colors.RESET}")
         _out(f"{Colors.GREEN}✅ Loaded sandbox status tool{Colors.RESET}")
+
+    # Sub-agent tool — must be registered last so it can reference all other tools
+    if config.tools.enable_sub_agent and llm is not None:
+        parent_tools = {t.name: t for t in tools}
+        sub_agent_tool = SubAgentTool(
+            llm=llm,
+            parent_tools=parent_tools,
+            workspace_dir=str(workspace_dir),
+        )
+        tools.append(sub_agent_tool)
+        _out(f"{Colors.GREEN}✅ Loaded sub-agent tool (sub_agent){Colors.RESET}")

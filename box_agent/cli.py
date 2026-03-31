@@ -759,6 +759,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         sandbox_mode=sandbox_mode,
         allow_full_access=allow_full_access,
         non_interactive=non_interactive,
+        llm=llm_client,
     )
 
     if not allow_full_access:

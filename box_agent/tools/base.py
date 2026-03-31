@@ -16,6 +16,8 @@ class ToolResult(BaseModel):
 class Tool:
     """Base class for all tools."""
 
+    parallel_safe: bool = False
+
     @property
     def name(self) -> str:
         """Tool name."""

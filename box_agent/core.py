@@ -468,7 +468,18 @@ async def run_agent_loop(
             return
 
         # ── Execute tool calls ──────────────────────────────
+        # Split into regular (sequential) and parallel_safe groups.
+        regular_calls = []
+        parallel_calls = []
         for tc in response.tool_calls:
+            fn_name = tc.function.name
+            if fn_name in tools and getattr(tools[fn_name], "parallel_safe", False):
+                parallel_calls.append(tc)
+            else:
+                regular_calls.append(tc)
+
+        # 1. Sequential execution for regular tools (preserves ordering)
+        for tc in regular_calls:
             tc_id = tc.id
             fn_name = tc.function.name
             fn_args = tc.function.arguments
@@ -538,6 +549,66 @@ async def run_agent_loop(
                 _cleanup_incomplete_messages(messages)
                 yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 return
+
+        # 2. Parallel execution for parallel_safe tools (e.g. sub_agent)
+        if parallel_calls:
+            # Emit all ToolCallStart events first
+            for tc in parallel_calls:
+                yield ToolCallStart(
+                    tool_call_id=tc.id,
+                    tool_name=tc.function.name,
+                    arguments=tc.function.arguments,
+                )
+
+            async def _run_parallel(tc):
+                fn_name = tc.function.name
+                fn_args = tc.function.arguments
+                if fn_name not in tools:
+                    return tc, ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
+                try:
+                    r = await tools[fn_name].execute(**fn_args)
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}: {exc!s}"
+                    trace = traceback.format_exc()
+                    r = ToolResult(
+                        success=False,
+                        content="",
+                        error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
+                    )
+                return tc, r
+
+            gathered = await asyncio.gather(*[_run_parallel(tc) for tc in parallel_calls])
+
+            for tc, result in gathered:
+                tc_id = tc.id
+                fn_name = tc.function.name
+                fn_args = tc.function.arguments
+
+                if logger:
+                    logger.log_tool_result(
+                        tool_name=fn_name,
+                        arguments=fn_args,
+                        result_success=result.success,
+                        result_content=result.content if result.success else None,
+                        result_error=result.error if not result.success else None,
+                    )
+
+                yield ToolCallResult(
+                    tool_call_id=tc_id,
+                    tool_name=fn_name,
+                    success=result.success,
+                    content=result.content,
+                    error=result.error,
+                )
+
+                # Append tool message
+                tool_msg = Message(
+                    role="tool",
+                    content=result.content if result.success else f"Error: {result.error}",
+                    tool_call_id=tc_id,
+                    name=fn_name,
+                )
+                messages.append(tool_msg)
 
         # ── Step end ────────────────────────────────────────
         elapsed = perf_counter() - step_start

@@ -180,6 +180,7 @@ class BoxACPAgent:
             allow_full_access=self._config.tools.allow_full_access,
             non_interactive=True,  # ACP cannot do interactive terminal prompts
             output=lambda msg: sys.stderr.write(msg + "\n"),
+            llm=self._llm,
         )
         agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
         # Sandbox workspace is a stable subdirectory under the workspace

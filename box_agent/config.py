@@ -59,6 +59,7 @@ class ToolsConfig(BaseModel):
     enable_bash: bool = True
     enable_note: bool = True
     enable_todo: bool = True  # Task tracking for multi-step workflows
+    enable_sub_agent: bool = True  # Sub-agent for isolated context execution
     enable_web_search: bool = True  # Fallback web search when no MCP search service
 
     # Safety
@@ -165,6 +166,7 @@ class Config(BaseModel):
             enable_bash=tools_data.get("enable_bash", True),
             enable_note=tools_data.get("enable_note", True),
             enable_todo=tools_data.get("enable_todo", True),
+            enable_sub_agent=tools_data.get("enable_sub_agent", True),
             allow_full_access=tools_data.get("allow_full_access", False),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),
