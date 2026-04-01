@@ -52,38 +52,13 @@ python examples/02_simple_agent.py
 
 ---
 
-### 03_session_notes.py - Session Note 工具
-
-**难度**: ⭐⭐⭐ 中级
-
-**内容**:
-- 直接使用 Session Note 工具（record_note, recall_notes）
-- Agent 使用 Session Note 保持跨会话记忆
-- 演示两个 Agent 实例如何共享记忆
-
-**运行**:
-```bash
-python examples/03_session_notes.py
-```
-
-**学习要点**:
-- Session Note 的工作原理
-- 笔记的分类管理（category）
-- 如何在 system prompt 中引导 Agent 使用笔记
-- 跨会话记忆的实现方式
-
-**亮点**:
-这是本项目的核心特性之一！展示了一种轻量但有效的会话记忆管理方案。
-
----
-
 ### 04_full_agent.py - 完整功能 Agent
 
 **难度**: ⭐⭐⭐⭐ 高级
 
 **内容**:
 - 包含所有功能的完整 Agent 设置
-- 集成基础工具 + Session Notes + MCP 工具
+- 集成基础工具 + MCP 工具
 - 复杂任务的完整执行流程
 - 多轮对话示例
 
@@ -144,7 +119,6 @@ python examples/02_simple_agent.py
 | ------------------- | ---------------------------------------------------- | --------------------- |
 | 01_basic_tools.py   | tests/test_tools.py                                  | 基础工具单元测试      |
 | 02_simple_agent.py  | tests/test_agent.py                                  | Agent 基本功能测试    |
-| 03_session_notes.py | tests/test_note_tool.py<br>tests/test_integration.py | Session Note 工具测试 |
 | 04_full_agent.py    | tests/test_integration.py                            | 完整集成测试          |
 
 ---

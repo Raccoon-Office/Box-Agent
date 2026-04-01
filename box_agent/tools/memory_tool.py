@@ -1,7 +1,7 @@
 """Memory Tool - Let agent read and write long-term memory.
 
 Provides persistent cross-session memory that survives beyond individual
-sessions (unlike SessionNoteTool which is workspace-scoped).
+sessions.
 """
 
 from __future__ import annotations

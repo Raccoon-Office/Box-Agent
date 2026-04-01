@@ -222,49 +222,7 @@ Edit `mcp.json` to add a new MCP Server:
 }
 ```
 
-### 3.3 Customizing Note Storage
-
-To replace the storage backend for the `SessionNoteTool`:
-
-```python
-# Current implementation: JSON file
-class SessionNoteTool:
-    def __init__(self, memory_file: str = "./workspace/.agent_memory.json"):
-        self.memory_file = Path(memory_file)
-    
-    async def _save_notes(self, notes: List[Dict]):
-        with open(self.memory_file, 'w') as f:
-            json.dump(notes, f, indent=2, ensure_ascii=False)
-
-# Example extension: PostgreSQL
-class PostgresNoteTool(Tool):
-    def __init__(self, db_url: str):
-        self.db = PostgresDB(db_url)
-    
-    async def _save_notes(self, notes: List[Dict]):
-        await self.db.execute(
-            "INSERT INTO notes (content, category, timestamp) VALUES ($1, $2, $3)",
-            notes
-        )
-
-# Example extension: Vector Database
-class MilvusNoteTool(Tool):
-    def __init__(self, milvus_host: str):
-        self.vector_db = MilvusClient(host=milvus_host)
-    
-    async def _save_notes(self, notes: List[Dict]):
-        # Generate embeddings
-        embeddings = await self.get_embeddings([n["content"] for n in notes])
-        
-        # Store in the vector database
-        await self.vector_db.insert(
-            collection="agent_notes",
-            data=notes,
-            embeddings=embeddings
-        )
-```
-
-### 3.4 Initialize Claude Skills (Recommended) 
+### 3.3 Initialize Claude Skills (Recommended)
 
 This project integrates Claude's official skills repository via git submodule. Initialize it after first clone:
 

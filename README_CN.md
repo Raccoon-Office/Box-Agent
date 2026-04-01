@@ -335,7 +335,7 @@ uv run python scripts/build_runtime.py
 pytest tests/ -v
 
 # 仅运行核心功能测试
-pytest tests/test_agent.py tests/test_note_tool.py -v
+pytest tests/test_agent.py -v
 ```
 
 ### 测试覆盖范围

@@ -18,7 +18,6 @@ from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.memory_tool import MemoryReadTool, MemoryWriteTool
-from box_agent.tools.note_tool import SessionNoteTool
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
@@ -193,11 +192,6 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             ]
         )
         _out(f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}")
-
-    # Session note tool - needs workspace to store memory file
-    if config.tools.enable_note:
-        tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
-        _out(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
 
     # Todo tool - task tracking for multi-step workflows
     if config.tools.enable_todo:

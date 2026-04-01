@@ -223,49 +223,7 @@ agent = Agent(
 }
 ```
 
-### 3.3 自定义存储
-
-您可以替换 `SessionNoteTool` 的默认存储实现，以对接不同的数据后端：
-
-```python
-# 默认实现：JSON 文件
-class SessionNoteTool:
-    def __init__(self, memory_file: str = "./workspace/.agent_memory.json"):
-        self.memory_file = Path(memory_file)
-    
-    async def _save_notes(self, notes: List[Dict]):
-        with open(self.memory_file, 'w') as f:
-            json.dump(notes, f, indent=2, ensure_ascii=False)
-
-# 扩展示例：使用 PostgreSQL 存储
-class PostgresNoteTool(Tool):
-    def __init__(self, db_url: str):
-        self.db = PostgresDB(db_url)
-    
-    async def _save_notes(self, notes: List[Dict]):
-        await self.db.execute(
-            "INSERT INTO notes (content, category, timestamp) VALUES ($1, $2, $3)",
-            notes
-        )
-
-# 扩展示例：使用向量数据库存储
-class MilvusNoteTool(Tool):
-    def __init__(self, milvus_host: str):
-        self.vector_db = MilvusClient(host=milvus_host)
-    
-    async def _save_notes(self, notes: List[Dict]):
-        # 生成内容的嵌入向量
-        embeddings = await self.get_embeddings([n["content"] for n in notes])
-        
-        # 将笔记和向量存入向量数据库
-        await self.vector_db.insert(
-            collection="agent_notes",
-            data=notes,
-            embeddings=embeddings
-        )
-```
-
-### 3.4 初始化 Claude Skills（推荐）
+### 3.3 初始化 Claude Skills（推荐）
 
 本项目通过 Git Submodule 的方式集成了 Claude 官方技能库。首次克隆项目后，请执行以下命令来初始化技能库：
 

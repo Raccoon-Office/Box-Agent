@@ -3,7 +3,6 @@
 from .base import Tool, ToolResult
 from .bash_tool import BashTool
 from .file_tools import EditTool, ReadTool, WriteTool
-from .note_tool import RecallNoteTool, SessionNoteTool
 from .setup import add_workspace_tools, initialize_base_tools
 from .todo_tool import TodoReadTool, TodoStore, TodoWriteTool
 from .web_search_tool import WebSearchTool
@@ -15,8 +14,6 @@ __all__ = [
     "WriteTool",
     "EditTool",
     "BashTool",
-    "SessionNoteTool",
-    "RecallNoteTool",
     "TodoStore",
     "TodoWriteTool",
     "TodoReadTool",

@@ -12,7 +12,7 @@ Use `uv` for local development.
 - `uv run python -m box_agent.cli`: run the CLI in development mode.
 - `uv tool install -e .`: install `box-agent` and `box-agent-acp` as editable local commands.
 - `pytest tests/ -v`: run the full test suite.
-- `pytest tests/test_agent.py tests/test_note_tool.py -v`: run a focused subset while iterating.
+- `pytest tests/test_agent.py -v`: run a focused subset while iterating.
 
 If you need bundled skills, run `git submodule update --init --recursive` before testing skill-related changes.
 

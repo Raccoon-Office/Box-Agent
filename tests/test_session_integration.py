@@ -13,7 +13,6 @@ from box_agent.agent import Agent
 from box_agent.schema import LLMResponse, Message
 from box_agent.tools.bash_tool import BashTool
 from box_agent.tools.file_tools import ReadTool, WriteTool
-from box_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 
 
 @pytest.fixture
@@ -37,7 +36,6 @@ def test_multi_turn_conversation(mock_llm_client, temp_workspace):
     tools = [
         ReadTool(workspace_dir=temp_workspace),
         WriteTool(workspace_dir=temp_workspace),
-        SessionNoteTool(),
     ]
 
     # Create agent
@@ -120,25 +118,6 @@ def test_get_history(mock_llm_client, temp_workspace):
     history.append(Message(role="user", content="New message"))
     assert len(agent.messages) == 2  # Original messages unchanged
     assert len(history) == 3  # Copy changed
-
-
-@pytest.mark.asyncio
-async def test_session_note_persistence(temp_workspace):
-    """Test SessionNoteTool persistence functionality"""
-    memory_file = Path(temp_workspace) / "memory.json"
-
-    # Create first tool instance and record note
-    record_tool = SessionNoteTool(memory_file=str(memory_file))
-    result1 = await record_tool.execute(content="Test note", category="test")
-    assert result1.success
-
-    # Create second tool instance (simulating new session)
-    recall_tool = RecallNoteTool(memory_file=str(memory_file))
-
-    # Verify ability to read previous notes
-    result2 = await recall_tool.execute()
-    assert result2.success
-    assert "Test note" in result2.content
 
 
 def test_message_statistics(mock_llm_client, temp_workspace):

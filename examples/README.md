@@ -52,38 +52,13 @@ python examples/02_simple_agent.py
 
 ---
 
-### 03_session_notes.py - Session Note Tool
-
-**Difficulty**: ⭐⭐⭐ Intermediate
-
-**Content**:
-- Direct usage of Session Note tools (record_note, recall_notes)
-- Agent using Session Notes to maintain cross-session memory
-- Demonstrate how two Agent instances share memory
-
-**Run**:
-```bash
-python examples/03_session_notes.py
-```
-
-**Key Learnings**:
-- How Session Notes work
-- Note categorization management (category)
-- How to guide Agent to use notes in system prompt
-- Cross-session memory implementation
-
-**Highlight**:
-This is one of the core features of this project! Shows a lightweight but effective session memory management solution.
-
----
-
 ### 04_full_agent.py - Full-Featured Agent
 
 **Difficulty**: ⭐⭐⭐⭐ Advanced
 
 **Content**:
 - Complete Agent setup with all features
-- Integration of basic tools + Session Notes + MCP tools
+- Integration of basic tools + MCP tools
 - Full execution flow for complex tasks
 - Multi-turn conversation examples
 
@@ -144,7 +119,6 @@ These examples are all refined from test cases in the `tests/` directory:
 | ------------------- | ---------------------------------------------------- | ------------------------------- |
 | 01_basic_tools.py   | tests/test_tools.py                                  | Basic tool unit tests           |
 | 02_simple_agent.py  | tests/test_agent.py                                  | Agent basic functionality tests |
-| 03_session_notes.py | tests/test_note_tool.py<br>tests/test_integration.py | Session Note tool tests         |
 | 04_full_agent.py    | tests/test_integration.py                            | Complete integration tests      |
 
 ---

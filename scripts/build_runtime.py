@@ -109,7 +109,6 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "box_agent.tools.file_tools",
         "box_agent.tools.jupyter_tool",
         "box_agent.tools.mcp_loader",
-        "box_agent.tools.note_tool",
         "box_agent.tools.skill_tool",
         "box_agent.tools.web_search_tool",
         "box_agent.utils",
