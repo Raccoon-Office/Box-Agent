@@ -31,6 +31,7 @@ from .events import (
     StepEnd,
     StepStart,
     StopReason,
+    SubAgentEvent,
     SummarizationEvent,
     ThinkingEvent,
     TokenUsageEvent,
@@ -601,6 +602,8 @@ async def run_agent_loop(
 
         # 2. Parallel execution for parallel_safe tools (e.g. sub_agent)
         if parallel_calls:
+            from .tools.sub_agent_tool import SubAgentTool
+
             # Emit all ToolCallStart events first
             for tc in parallel_calls:
                 yield ToolCallStart(
@@ -608,6 +611,16 @@ async def run_agent_loop(
                     tool_name=tc.function.name,
                     arguments=tc.function.arguments,
                 )
+
+            # Wire a shared event queue onto SubAgentTool instances
+            event_queue: asyncio.Queue[SubAgentEvent] = asyncio.Queue()
+            sub_agent_tools: list[SubAgentTool] = []
+            for tc in parallel_calls:
+                tool = tools.get(tc.function.name)
+                if isinstance(tool, SubAgentTool):
+                    tool._event_queue = event_queue
+                    tool._parent_tool_call_id = tc.id
+                    sub_agent_tools.append(tool)
 
             async def _run_parallel(tc):
                 fn_name = tc.function.name
@@ -626,7 +639,35 @@ async def run_agent_loop(
                     )
                 return tc, r
 
-            gathered = await asyncio.gather(*[_run_parallel(tc) for tc in parallel_calls])
+            # Run gather in a background task; drain the queue in the
+            # foreground generator loop so events are yielded in real-time.
+            gather_done = asyncio.Event()
+
+            async def _gather_wrapper():
+                try:
+                    return await asyncio.gather(*[_run_parallel(tc) for tc in parallel_calls])
+                finally:
+                    gather_done.set()
+
+            gather_task = asyncio.create_task(_gather_wrapper())
+
+            # Yield sub-agent events as they arrive (real-time)
+            while not gather_done.is_set() or not event_queue.empty():
+                try:
+                    evt = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    yield evt
+                except (asyncio.TimeoutError, TimeoutError):
+                    continue
+            # Drain any stragglers enqueued between the last get() and now
+            while not event_queue.empty():
+                yield event_queue.get_nowait()
+
+            gathered = await gather_task  # already done
+
+            # Clean up queue references
+            for tool in sub_agent_tools:
+                tool._event_queue = None
+                tool._parent_tool_call_id = ""
 
             for tc, result in gathered:
                 tc_id = tc.id

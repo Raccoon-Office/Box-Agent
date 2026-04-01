@@ -195,6 +195,22 @@ class MemoryEvent:
     detail: str = ""
 
 
+# ── Sub-agent progress ─────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SubAgentEvent:
+    """Progress event from a running sub-agent.
+
+    Wraps a nested ``AgentEvent`` with metadata identifying which
+    sub-agent produced it, so consumers can render indented progress.
+    """
+
+    parent_tool_call_id: str
+    task_preview: str  # first ~80 chars of the task
+    event: AgentEvent  # the nested event
+
+
 # ── Union type ──────────────────────────────────────────────────
 
 AgentEvent = Union[
@@ -212,4 +228,5 @@ AgentEvent = Union[
     ErrorEvent,
     LogFileEvent,
     DoneEvent,
+    SubAgentEvent,
 ]

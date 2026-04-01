@@ -1,236 +1,211 @@
-# Box Agent
+<p align="center">
+  <h1 align="center">Box Agent</h1>
+  <p align="center">通用 AI Agent 框架，支持沙箱代码执行、子 Agent 并行和多 LLM 提供商。</p>
+</p>
 
-[English](./README.md) | 中文
+<p align="center">
+  <a href="https://pypi.org/project/box-agent/"><img src="https://img.shields.io/pypi/v/box-agent?color=orange" alt="PyPI"></a>
+  <a href="https://pypi.org/project/box-agent/"><img src="https://img.shields.io/pypi/dm/box-agent?color=brightgreen" alt="Downloads"></a>
+  <a href="https://pypi.org/project/box-agent/"><img src="https://img.shields.io/pypi/pyversions/box-agent?color=blue" alt="Python"></a>
+  <a href="https://github.com/Raccoon-Office/Box-Agent/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Raccoon-Office/Box-Agent?color=green" alt="License"></a>
+  <a href="https://github.com/Raccoon-Office/Box-Agent/releases"><img src="https://img.shields.io/github/v/release/Raccoon-Office/Box-Agent?color=blue" alt="Release"></a>
+</p>
 
-**Box Agent** 是一个专业的 AI Agent 框架，支持多种 LLM 提供商（Anthropic、OpenAI 兼容、DeepSeek、SiliconFlow 及任何第三方 API）。项目支持交错思维（interleaved thinking）、工具调用、沙箱代码执行、数据分析和完整的 Agent 循环，适用于处理复杂任务。
+<p align="center">
+  <a href="./README.md">English</a> | 中文
+</p>
 
-该项目具备一系列为稳健、智能的 Agent 开发而设计的特性：
+---
 
-**核心 Agent**
-*   ✅ **完整的 Agent 执行循环**：一个完整可靠的执行框架，配备了文件系统和 Shell 操作的基础工具集。
-*   ✅ **多 Provider 支持**：开箱即用支持 Anthropic、OpenAI 兼容、DeepSeek、SiliconFlow 及任何第三方 API 端点。
-*   ✅ **智能上下文管理**：自动对会话历史进行摘要，可处理长达可配置 Token 上限的上下文，从而支持无限长的任务。
-*   ✅ **持久化记忆**：通过内置的 **Session Note Tool**，Agent 能够在多个会话中保留关键信息。
-*   ✅ **非交互模式**：通过 `--task` 参数支持无头运行，适用于 CI/CD 流水线和自动化脚本。
-
-**沙箱与数据分析**
-*   ✅ **Jupyter 沙箱执行**：隔离的 `execute_code` 工具在独立 venv 中运行 Python，拥有独立 Kernel，与宿主环境完全隔离。在独立运行时模式下，使用进程内 Kernel 和内置包 — 无需外部 Python。
-*   ✅ **内置数据分析**：沙箱中预装 `pandas`、`numpy`、`matplotlib`、`openpyxl`、`scikit-learn`，开箱即可进行 CSV/XLSX 分析和图表生成。
-*   ✅ **自动安装缺失包**：运行时检测 `ModuleNotFoundError`，自动 `pip install` 缺失的包（sklearn → scikit-learn, cv2 → opencv-python, PIL → Pillow 等），并自动重试。运行时模式下安装到 `~/.box-agent/runtime-packages/`，支持白名单控制。
-*   ✅ **结构化 Artifact 事件**：代码执行生成的文件（PNG、CSV、XLSX、PDF）通过前后快照检测，以结构化 `ArtifactEvent` 发送给下游消费者。
-
-**集成与部署**
-*   ✅ **ACP 协议桥接**：完整的 [Agent Communication Protocol](https://github.com/nichochar/agent-client-protocol) 支持 — 可与 Zed Editor、Electron 应用及任何 ACP 兼容宿主通过 stdio JSON-RPC 集成。
-*   ✅ **独立运行时**：PyInstaller 打包的二进制文件，内含 Python 及所有依赖，包括数据分析包（pandas、numpy、matplotlib、scikit-learn）和 pip（支持按需安装）。无需外部 Python — 下载即用。支持 macOS (arm64/x64) 和 Linux。
-*   ✅ **集成 MCP 工具**：原生支持 MCP 协议，可轻松接入知识图谱、网页搜索等工具。
-*   ✅ **集成 Claude Skills**：内置 11 种专业技能，涵盖文档处理、设计、测试和开发等领域。
-
-**安全与质量**
-*   ✅ **安全防护层**：危险命令检测与确认、工作区范围控制、文件修改前自动备份到 `~/.box-agent/trash/`。
-*   ✅ **健壮的文件处理**：对非 UTF-8 文件（GBK CSV、Latin-1 文本等）使用 `errors='replace'` 容错读取。
-*   ✅ **全面的日志记录**：为每个请求、响应和工具执行提供详细日志。独立运行时支持环境变量控制的结构化调试日志。
-*   ✅ **简洁明了的设计**：美观的命令行界面和易于理解的代码库，使其成为构建高级 Agent 的理想起点。
-
-## 目录
-
-- [Box Agent](#box-agent)
-  - [目录](#目录)
-  - [快速开始](#快速开始)
-    - [1. 获取 API Key](#1-获取-api-key)
-    - [2. 选择使用模式](#2-选择使用模式)
-      - [🚀 快速上手模式（推荐新手）](#-快速上手模式推荐新手)
-      - [🔧 开发模式](#-开发模式)
-  - [ACP \& Zed Editor 集成（可选）](#acp--zed-editor-集成可选)
-  - [独立运行时（Electron 集成）](#独立运行时electron-集成)
-  - [使用示例](#使用示例)
-    - [任务执行](#任务执行)
-    - [使用 Claude Skill（例如：PDF 生成）](#使用-claude-skill例如pdf-生成)
-    - [网页搜索与摘要（MCP 工具）](#网页搜索与摘要mcp-工具)
-  - [测试](#测试)
-    - [快速运行](#快速运行)
-    - [测试覆盖范围](#测试覆盖范围)
-  - [常见问题](#常见问题)
-    - [SSL 证书错误](#ssl-证书错误)
-    - [模块未找到错误](#模块未找到错误)
-  - [相关文档](#相关文档)
-  - [社区](#社区)
-  - [贡献](#贡献)
-  - [许可证](#许可证)
-  - [参考资源](#参考资源)
-
-## 快速开始
-
-### 1. 获取 API Key
-
-从您选择的 LLM 提供商获取 API Key：
-
-| 提供商         | 平台地址                                                                 | API Base                          |
-| -------------- | ------------------------------------------------------------------------ | --------------------------------- |
-| **Anthropic**  | [https://console.anthropic.com](https://console.anthropic.com)           | `https://api.anthropic.com`       |
-| **OpenAI**     | [https://platform.openai.com](https://platform.openai.com)              | `https://api.openai.com/v1`       |
-| **DeepSeek**   | [https://platform.deepseek.com](https://platform.deepseek.com)          | `https://api.deepseek.com`        |
-| **SiliconFlow** | [https://siliconflow.cn](https://siliconflow.cn)                       | `https://api.siliconflow.cn/v1`   |
-
-**获取步骤：**
-1. 访问相应平台注册并登录
-2. 进入 API Key 管理页面
-3. 创建新密钥并妥善保存
-
-### 2. 选择使用模式
-
-**前置要求：安装 uv**
-
-两种使用模式都需要 uv。如果您尚未安装：
+**30 秒快速上手：**
 
 ```bash
-# macOS/Linux/WSL
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (PowerShell)
-python -m pip install --user pipx
-python -m pipx ensurepath
-# 安装后需要重启 PowerShell
-
-# 安装完成后，重启终端或运行：
-source ~/.bashrc  # 或 ~/.zshrc (macOS/Linux)
+uv tool install box-agent   # 或: pip install box-agent (需 Python 3.10+)
+box-agent setup              # 交互式配置向导
+box-agent                    # 开始对话
 ```
 
-我们提供两种使用模式，请根据您的需求选择：
-
-#### 🚀 快速上手模式（推荐新手）
-
-此模式适合希望快速体验 Box Agent，而无需克隆代码仓库或修改代码的用户。
-
-**安装步骤：**
+或执行单次任务：
 
 ```bash
-# 1. 直接从 GitHub 安装
-uv tool install git+https://github.com/Raccoon-Office/Box-Agent.git
-
-# 2. 运行交互式配置向导（自动创建配置文件并引导设置 Provider/API Key）
-box-agent setup
+box-agent --task "分析 sales.csv — 按收入展示前 10 名产品的柱状图"
 ```
 
-> 💡 **提示**：如果您希望在本地进行开发或修改代码，请使用下方的"开发模式"。
+---
 
-**配置步骤：**
+## 为什么选择 Box Agent？
 
-配置向导会在 `~/.box-agent/config/` 目录下创建配置文件，您可以随时查看或编辑：
+大多数 Agent 框架要么太简单（无沙箱、无工具），要么太复杂（依赖臃肿、架构僵化）。Box Agent 恰好取得了平衡：
 
-```bash
-box-agent config          # 查看当前配置
-box-agent config --edit   # 用编辑器打开配置文件
+| 特性 | Box Agent | Open Interpreter | Aider |
+|------|-----------|-----------------|-------|
+| 沙箱代码执行 | 隔离 venv 中的 Jupyter 内核 | 在宿主 Python 中运行 | 不支持 |
+| 子 Agent 并行 | 多个子 Agent 并发运行 | 不支持 | 不支持 |
+| 多 LLM 提供商 | Anthropic、OpenAI、DeepSeek、SiliconFlow 及任何 API | OpenAI + 少量其他 | OpenAI + Anthropic |
+| MCP 工具集成 | 原生支持 | 不支持 | 不支持 |
+| ACP 协议（嵌入应用） | 完整支持 | 不支持 | 不支持 |
+| 独立二进制 | PyInstaller 运行时，无需 Python | 不支持 | 不支持 |
+| 上下文压缩 | 双层自动（微压缩 + LLM 摘要） | 手动 | 基于 Git |
+
+## 核心特性
+
+### 子 Agent 并行
+
+将任务委派给隔离的子 Agent 并发运行。每个子 Agent 拥有独立上下文 — 只返回摘要结果。非常适合多文件分析。
+
+```
+用户: "分别分析 data1.csv、data2.csv 和 data3.csv，然后给出综合总结"
+
+┌─ 子 Agent 1 ──────┐  ┌─ 子 Agent 2 ──────┐  ┌─ 子 Agent 3 ──────┐
+│ 读取 data1.csv      │  │ 读取 data2.csv      │  │ 读取 data3.csv      │
+│ 运行统计分析        │  │ 运行统计分析        │  │ 运行统计分析        │
+│ 生成图表            │  │ 生成图表            │  │ 生成图表            │
+│ → 摘要: ...         │  │ → 摘要: ...         │  │ → 摘要: ...         │
+└─────────────────────┘  └─────────────────────┘  └─────────────────────┘
+                              ↓ 并行 ↓
+                    ┌─ 父 Agent ────────────┐
+                    │ 汇总 3 份摘要          │
+                    │ 生成最终报告           │
+                    └─────────────────────────┘
 ```
 
-填入您的 API Key 和对应的 API Base：
+### 沙箱代码执行
+Python 运行在隔离的 Jupyter 内核中，预装数据科学包（`pandas`、`numpy`、`matplotlib`、`scikit-learn`、`openpyxl`、`xlrd`）。生成的文件（图表、CSV、PDF）会被自动检测并以结构化 Artifact 呈现。
+
+### 多 LLM 提供商
+一份配置，任意切换：
 
 ```yaml
-api_key: "YOUR_API_KEY_HERE"
+# Anthropic
 api_base: "https://api.anthropic.com"
-model: "claude-sonnet-4-20250514"
 provider: "anthropic"
+model: "claude-sonnet-4-20250514"
+
+# DeepSeek
+api_base: "https://api.deepseek.com"
+provider: "openai"
+model: "deepseek-chat"
+
+# 任何 OpenAI 兼容端点
+api_base: "https://your-api.example.com/v1"
+provider: "openai"
+model: "your-model"
 ```
 
-**开始使用：**
+### 双层上下文压缩
+- **第一层 — 微压缩**：每一步自动将旧工具结果（3+ 轮之前）替换为简短占位符。零成本，无需 LLM 调用。
+- **第二层 — 自动摘要**：当 Token 数超过阈值（默认 80k）时，由 LLM 对对话进行摘要。原始数据保留在日志中。
+
+### 更多特性
+- **MCP 工具**：接入任何 [MCP 服务器](https://github.com/modelcontextprotocol/servers) — 网页搜索、知识图谱、数据库
+- **Claude Skills**：11 种内置技能，涵盖文档处理（DOCX、PDF、PPTX、XLSX）、画布设计、Web 应用测试等
+- **ACP 协议**：通过 JSON-RPC over stdio 将 Box Agent 嵌入 Electron 应用、Zed 编辑器或任何 ACP 兼容宿主
+- **独立运行时**：PyInstaller 二进制打包 Python 及所有依赖。无需外部 Python — 下载即用
+- **跨会话记忆**：持久化记忆让 Agent 在多次对话间保留关键信息
+- **安全防护**：危险命令检测、工作区范围控制、文件修改前自动备份
+- **任务追踪**：内置 Todo 工具，支持多步骤任务分解与进度跟踪
+
+## 演示
+
+### 任务执行
+*Agent 创建网页并在浏览器中打开。*
+
+![演示: 任务执行](docs/assets/demo1-task-execution.gif)
+
+### Claude Skill — PDF 生成
+*Agent 使用技能创建专业文档。*
+
+![演示: Claude Skill](docs/assets/demo2-claude-skill.gif)
+
+### MCP 网页搜索
+*Agent 搜索网页并总结结果。*
+
+![演示: 网页搜索](docs/assets/demo3-web-search.gif)
+
+## 安装
+
+> **需要 Python 3.10+。** 如果系统 Python 版本较低（如 3.9），请使用 `uv tool install` — 它会自动管理 Python 版本。
+
+### 快速安装（uv，推荐）
+
+[uv](https://docs.astral.sh/uv/) 会自动管理 Python 版本，无需升级系统 Python：
 
 ```bash
-box-agent                                    # 使用当前目录作为工作空间
-box-agent --workspace /path/to/your/project  # 指定工作空间目录
-box-agent doctor                             # 检查环境与连通性
-box-agent --version                          # 查看版本信息
+# 安装 uv（如尚未安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 管理命令
-uv tool upgrade box-agent                    # 升级到最新版本
-uv tool uninstall box-agent                  # 卸载工具（如需要）
-uv tool list                                  # 查看所有已安装的工具
+# 安装 box-agent（如需要会自动下载 Python 3.10+）
+uv tool install box-agent
+box-agent setup    # 交互式配置向导
+box-agent          # 开始对话
+
+# 后续升级
+uv tool upgrade box-agent
 ```
 
-#### 🔧 开发模式
+### 快速安装（pip）
 
-此模式适合需要修改代码、添加功能或进行调试的开发者。
-
-**安装与配置步骤：**
+如果已有 Python 3.10+：
 
 ```bash
-# 1. 克隆仓库
+pip install box-agent
+box-agent setup
+box-agent
+```
+
+### 从源码安装
+
+```bash
 git clone https://github.com/Raccoon-Office/Box-Agent.git
 cd Box-Agent
-
-# 2. 安装 uv（如果尚未安装）
-# macOS/Linux:
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# Windows (PowerShell):
-irm https://astral.sh/uv/install.ps1 | iex
-# 安装后需要重启终端
-
-# 3. 同步依赖
 uv sync
-
-# 替代方案: 手动安装依赖（如果不使用 uv）
-# pip install -r requirements.txt
-# 或者安装必需的包:
-# pip install tiktoken pyyaml httpx pydantic requests prompt-toolkit mcp
-
-# 4. 初始化 Claude Skills（可选）
-git submodule update --init --recursive
-
-# 5. 复制配置模板
+git submodule update --init --recursive   # 可选：加载技能
+uv run python -m box_agent.cli
 ```
 
-**macOS/Linux:**
-```bash
-cp box_agent/config/config-example.yaml box_agent/config/config.yaml
-```
+### 配置
 
-**Windows:**
-```powershell
-Copy-Item box_agent\config\config-example.yaml box_agent\config\config.yaml
-
-# 6. 编辑配置文件
-vim box_agent/config/config.yaml  # 或使用您偏好的编辑器
-```
-
-填入您的 API Key 和对应的 API Base：
+运行 `box-agent setup` 后，配置文件位于 `~/.box-agent/config/config.yaml`：
 
 ```yaml
-api_key: "YOUR_API_KEY_HERE"
+api_key: "your-api-key"
 api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
-provider: "anthropic"
-max_steps: 100
-workspace_dir: "./workspace"
+provider: "anthropic"           # "anthropic" 或 "openai"
+max_steps: 50
 ```
-
-> 📖 完整的配置指南，请参阅 [config-example.yaml](box_agent/config/config-example.yaml)
-
-**运行方式：**
-
-选择您偏好的方式运行：
 
 ```bash
-# 方式 1：作为模块直接运行（适合调试）
-uv run python -m box_agent.cli
-
-# 方式 2：以可编辑模式安装（推荐）
-uv tool install -e .
-# 安装后，您可以在任何路径下运行，且代码更改会立即生效
-box-agent
-box-agent --workspace /path/to/your/project
+box-agent config           # 查看当前配置
+box-agent config --edit    # 用编辑器打开配置
+box-agent doctor           # 检查环境与 API 连通性
 ```
 
-> 📖 更多开发指引，请参阅 [开发指南](docs/DEVELOPMENT_GUIDE_CN.md)
+## CLI 用法
 
-> 📖 更多生产部署指引，请参阅 [生产指南](docs/PRODUCTION_GUIDE_CN.md)
+```bash
+# 交互模式
+box-agent
+box-agent --workspace /path/to/project
+box-agent --sandbox              # 启用 Jupyter 沙箱
 
-## ACP & Zed Editor 集成（可选）
+# 非交互模式（CI/CD、脚本）
+box-agent --task "分析 data.csv 并生成报告"
 
-Box Agent 支持 [Agent Communication Protocol (ACP)](https://github.com/modelcontextprotocol/protocol)，可与 Zed 等代码编辑器集成。
+# 子命令
+box-agent setup     # 配置向导
+box-agent config    # 查看/编辑配置
+box-agent doctor    # 健康检查
+box-agent log       # 打开日志目录
+```
 
-**在 Zed Editor 中设置：**
+会话内命令：`/help`、`/clear`、`/history`、`/stats`、`/log`、`/exit`
 
-1. 以开发模式或工具模式安装 Box Agent
-2. 在您的 Zed `settings.json` 中添加：
+## ACP 与编辑器集成
 
+Box Agent 支持 [Agent Communication Protocol](https://github.com/nichochar/agent-client-protocol)，可嵌入编辑器和应用。
+
+**Zed Editor** — 在 `settings.json` 中添加：
 ```json
 {
   "agent_servers": {
@@ -241,162 +216,44 @@ Box Agent 支持 [Agent Communication Protocol (ACP)](https://github.com/modelco
 }
 ```
 
-命令路径应为：
-- 通过 `uv tool install` 安装：使用 `which box-agent-acp` 的输出结果
-- 开发模式：`./box_agent/acp/server.py`
-
-**使用方法：**
-- 使用 `Ctrl+Shift+P` → "Agent: Toggle Panel" 打开 Zed 的 Agent 面板
-- 从 Agent 下拉列表中选择 "box-agent"
-- 直接在编辑器中开始与 Box Agent 对话
-
-## 独立运行时（Electron 集成）
-
-Box Agent 可以打包为**独立二进制文件**，用于嵌入 Electron 应用或其他宿主进程。二进制文件内置了 Python 和所有依赖 — 无需额外安装 Python。
-
-### 下载预构建包
-
-从 [GitHub Releases](https://github.com/Raccoon-Office/Box-Agent/releases) 下载平台对应的 runtime 包：
-
+**独立运行时** — 用于 Electron 应用和其他宿主：
 ```bash
-# 通过 gh CLI 下载
-gh release download v0.5.0 --repo Raccoon-Office/Box-Agent \
-  --pattern "box-agent-runtime-*.tar.gz"
-```
+# 下载预构建二进制
+gh release download v0.6.7 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
 
-可用平台：`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`
-
-### Runtime 目录结构
-
-```
-box-agent-runtime/
-├── manifest.json          # {"name","version","platform","arch","entry","mode"}
-├── VERSION                # 纯文本版本号
-└── bin/
-    ├── box-agent-acp      # 入口二进制
-    └── _internal/         # 内置 Python + 依赖
-```
-
-### 集成协议
-
-Runtime 二进制通过 **ACP JSON-RPC over stdio** 通信：
-- **stdin**：宿主进程发送的 JSON-RPC 请求
-- **stdout**：仅 JSON-RPC 响应（零诊断输出）
-- **stderr**：所有日志、诊断信息、工具加载状态
-
-调试日志环境变量：
-- `BOX_AGENT_LOG_LEVEL`：`DEBUG` | `INFO` | `WARN` | `ERROR`（默认：`INFO`）
-- `BOX_AGENT_LOG_FILE`：日志文件路径（同时写入 stderr）
-- `BOX_AGENT_LOG_FORMAT`：`text` | `json`（默认：`text`）
-
-### 从源码构建
-
-```bash
-# 安装构建依赖
-uv sync --group dev
-
-# 为当前平台构建（自动读取 __version__）
+# 或从源码构建
 uv run python scripts/build_runtime.py
-
-# 产物：dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz
 ```
 
-## 使用示例
-
-这里有几个 Box Agent 能力的演示。
-
-### 任务执行
-
-*在这个演示中，我们要求 Agent 创建一个简洁美观的网页并在浏览器中显示它，以此展示基础的工具使用循环。*
-
-![演示动图 1: 基础任务执行](docs/assets/demo1-task-execution.gif "基础任务执行演示")
-
-### 使用 Claude Skill（例如：PDF 生成）
-
-*这里，Agent 利用 Claude Skill 根据用户请求创建专业文档（如 PDF 或 DOCX），展示了其强大的高级能力。*
-
-![演示动图 2: Claude Skill 使用](docs/assets/demo2-claude-skill.gif "Claude Skill 使用演示")
-
-### 网页搜索与摘要（MCP 工具）
-
-*此演示展示了 Agent 如何使用其网页搜索工具在线查找最新信息，并为用户进行总结。*
-
-![演示动图 3: 网页搜索](docs/assets/demo3-web-search.gif "网页搜索演示")
-
+运行时通过 JSON-RPC over stdio 通信。stdout = 纯协议数据，stderr = 诊断信息。
 
 ## 测试
 
-项目包含了覆盖单元测试、功能测试和集成测试的全面测试用例。
-
-### 快速运行
-
 ```bash
-# 运行所有测试
-pytest tests/ -v
-
-# 仅运行核心功能测试
-pytest tests/test_agent.py -v
+pytest tests/ -v          # 所有测试
+pytest tests/test_core.py -v   # 核心 + 上下文压缩
+pytest --cov              # 带覆盖率
 ```
-
-### 测试覆盖范围
-
-- ✅ **单元测试** - 工具类、LLM 客户端
-- ✅ **功能测试** - Session Note Tool、MCP 加载
-- ✅ **集成测试** - Agent 端到端执行
-- ✅ **外部服务** - Git MCP 服务器加载
-
 
 ## 常见问题
 
-### SSL 证书错误
+**SSL 证书错误**：`pip install --upgrade certifi` 或在测试环境设置 `verify=False`。
 
-如果遇到 `[SSL: CERTIFICATE_VERIFY_FAILED]` 错误:
-
-**测试环境快速修复** (修改 `box_agent/llm.py`):
-```python
-# 第 50 行: 给 AsyncClient 添加 verify=False
-async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
-```
-
-**生产环境解决方案**:
-```bash
-# 更新证书
-pip install --upgrade certifi
-
-# 或配置系统代理/证书
-```
-
-### 模块未找到错误
-
-确保从项目目录运行:
-```bash
-cd Box-Agent
-python -m box_agent.cli
-```
-
-## 相关文档
-
-- [开发指南](docs/DEVELOPMENT_GUIDE_CN.md) - 详细的开发和配置指引
-- [生产环境指南](docs/PRODUCTION_GUIDE_CN.md) - 生产部署最佳实践
+**模块未找到**：确保在项目目录下运行：`cd Box-Agent && uv run python -m box_agent.cli`
 
 ## 贡献
 
-我们欢迎并鼓励您提交 Issue 和 Pull Request！
-
-- [贡献指南](CONTRIBUTING.md) - 如何为项目做贡献
-- [行为准则](CODE_OF_CONDUCT.md) - 社区行为准则
+欢迎提交 Issue 和 Pull Request！详见 [贡献指南](CONTRIBUTING.md)。
 
 ## 许可证
 
-本项目采用 [MIT 许可证](LICENSE) 授权。
+[MIT](LICENSE)
 
-## 参考资源
+## 链接
 
-- Anthropic API: https://docs.anthropic.com/claude/reference
-- OpenAI API: https://platform.openai.com/docs/api-reference
-- Claude Skills: https://github.com/anthropics/skills
-- MCP Servers: https://github.com/modelcontextprotocol/servers
+- [PyPI](https://pypi.org/project/box-agent/) · [GitHub](https://github.com/Raccoon-Office/Box-Agent) · [Releases](https://github.com/Raccoon-Office/Box-Agent/releases)
+- [Anthropic API](https://docs.anthropic.com/claude/reference) · [MCP Servers](https://github.com/modelcontextprotocol/servers) · [ACP Protocol](https://github.com/nichochar/agent-client-protocol)
 
 ---
 
-**⭐ 如果这个项目对您有帮助，请给它一个 Star！**
+**如果这个项目对你有帮助，请给它一个 ⭐！**

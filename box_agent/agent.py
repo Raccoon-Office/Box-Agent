@@ -25,6 +25,7 @@ from .events import (
     StepEnd,
     StepStart,
     StopReason,
+    SubAgentEvent,
     SummarizationEvent,
     ThinkingEvent,
     TokenUsageEvent,
@@ -227,6 +228,22 @@ class Agent:
 
             case ArtifactEvent(artifact_type=atype, filename=fname, path=fpath):
                 print(f"{Colors.BRIGHT_CYAN}📎 Artifact ({atype}):{Colors.RESET} {fname} → {fpath}")
+
+            case SubAgentEvent(task_preview=preview, event=inner):
+                label = preview[:40] + "..." if len(preview) > 40 else preview
+                prefix = f"{Colors.DIM}  ┊ [{label}]{Colors.RESET}"
+                match inner:
+                    case StepStart(step=s, max_steps=mx):
+                        print(f"{prefix}{Colors.DIM} Step {s}/{mx}{Colors.RESET}")
+                    case ToolCallStart(tool_name=name):
+                        print(f"{prefix}{Colors.DIM} 🔧 {name}{Colors.RESET}")
+                    case ToolCallResult(tool_name=name, success=ok):
+                        mark = "✓" if ok else "✗"
+                        print(f"{prefix}{Colors.DIM} {mark} {name}{Colors.RESET}")
+                    case ArtifactEvent(filename=fname):
+                        print(f"{prefix}{Colors.DIM} 📎 {fname}{Colors.RESET}")
+                    case ErrorEvent(message=msg):
+                        print(f"{prefix}{Colors.DIM} ❌ {msg}{Colors.RESET}")
 
             case ErrorEvent(message=msg):
                 print(f"\n{Colors.BRIGHT_RED}❌ Error:{Colors.RESET} {msg}")

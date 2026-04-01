@@ -10,9 +10,18 @@ concurrently via ``asyncio.gather`` in the core loop.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from ..events import DoneEvent
+from ..events import (
+    ArtifactEvent,
+    DoneEvent,
+    ErrorEvent,
+    StepStart,
+    SubAgentEvent,
+    ToolCallResult,
+    ToolCallStart,
+)
 from ..schema import Message
 from .base import Tool, ToolResult
 
@@ -55,6 +64,9 @@ class SubAgentTool(Tool):
         self._workspace_dir = workspace_dir
         self._max_steps = max_steps
         self._token_limit = token_limit
+        # Set by core.py before parallel execution to collect progress events.
+        self._event_queue: asyncio.Queue | None = None
+        self._parent_tool_call_id: str = ""
 
     @property
     def name(self) -> str:
@@ -90,6 +102,9 @@ class SubAgentTool(Tool):
             "required": ["task"],
         }
 
+    # Event types worth surfacing to the parent.
+    _FORWARD_TYPES = (StepStart, ToolCallStart, ToolCallResult, ArtifactEvent, ErrorEvent)
+
     async def execute(self, task: str) -> ToolResult:  # type: ignore[override]
         # Import here to avoid circular dependency (core → tools → core).
         from ..core import run_agent_loop
@@ -98,6 +113,10 @@ class SubAgentTool(Tool):
             Message(role="system", content=_SUB_AGENT_SYSTEM_PROMPT),
             Message(role="user", content=task),
         ]
+
+        queue = self._event_queue
+        # Single-line preview: collapse whitespace, truncate
+        task_preview = " ".join(task.split())[:50]
 
         final_content = ""
         try:
@@ -111,6 +130,14 @@ class SubAgentTool(Tool):
             ):
                 if isinstance(event, DoneEvent):
                     final_content = event.final_content
+                elif queue is not None and isinstance(event, self._FORWARD_TYPES):
+                    queue.put_nowait(
+                        SubAgentEvent(
+                            parent_tool_call_id=self._parent_tool_call_id,
+                            task_preview=task_preview,
+                            event=event,
+                        )
+                    )
         except Exception as exc:
             return ToolResult(
                 success=False,

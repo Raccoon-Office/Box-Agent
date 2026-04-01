@@ -71,10 +71,12 @@ from box_agent.events import (
     DoneEvent,
     ErrorEvent,
     StepEnd,
+    StepStart,
     StopReason,
+    SubAgentEvent,
     ThinkingEvent,
-    ToolCallResult,
-    ToolCallStart,
+    ToolCallResult as ToolCallResultEvent,
+    ToolCallStart as ToolCallStartEvent,
 )
 from box_agent.llm import LLMClient
 from box_agent.memory import MemoryManager
@@ -298,7 +300,7 @@ class BoxACPAgent:
                         log.debug("content", session_id=session_id, content=text)
                         await self._send(session_id, update_agent_message(text_block(text)))
 
-                    case ToolCallStart(tool_call_id=tid, tool_name=name, arguments=args):
+                    case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args):
                         # Flush accumulated streaming content before tool calls
                         if thinking_acc:
                             log.debug("thinking", session_id=session_id, content=thinking_acc)
@@ -317,7 +319,7 @@ class BoxACPAgent:
                         label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
                         await self._send(session_id, start_tool_call(tid, label, kind="execute", raw_input=args))
 
-                    case ToolCallResult(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err):
+                    case ToolCallResultEvent(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err):
                         if ok:
                             log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text)
                         else:
@@ -374,6 +376,47 @@ class BoxACPAgent:
                             content_acc = ""
                         log.debug("done", session_id=session_id, stop_reason=reason.value)
                         return reason.value
+
+                    case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner):
+                        # Send structured progress so officev3 can render sub-agent activity
+                        progress: dict = {
+                            "type": "sub_agent_progress",
+                            "task_preview": preview,
+                        }
+                        match inner:
+                            case StepStart(step=s, max_steps=mx):
+                                progress["event"] = "step_start"
+                                progress["step"] = s
+                                progress["max_steps"] = mx
+                            case ToolCallStartEvent(tool_name=name):
+                                progress["event"] = "tool_start"
+                                progress["tool_name"] = name
+                            case ToolCallResultEvent(tool_name=name, success=ok):
+                                progress["event"] = "tool_result"
+                                progress["tool_name"] = name
+                                progress["success"] = ok
+                            case ArtifactEvent(artifact_type=atype, filename=fname, path=fpath, mime_type=mime, size_bytes=sz):
+                                progress["event"] = "artifact"
+                                progress["artifact_type"] = atype
+                                progress["filename"] = fname
+                                progress["path"] = fpath
+                                progress["mime_type"] = mime
+                                progress["size_bytes"] = sz
+                                if state.sandbox_workspace:
+                                    progress["sandbox_workspace"] = state.sandbox_workspace
+                            case ErrorEvent(message=msg):
+                                progress["event"] = "error"
+                                progress["message"] = msg
+                            case _:
+                                progress["event"] = type(inner).__name__
+                        log.debug("sub_agent/progress", session_id=session_id, tool_call_id=tid, progress=progress)
+                        try:
+                            await self._send(
+                                session_id,
+                                update_tool_call(tid, raw_output=progress),
+                            )
+                        except Exception as exc:
+                            log.exception("sub_agent/send_error", exc, session_id=session_id, tool_call_id=tid)
 
                     case _:
                         pass  # StepStart, SummarizationEvent, etc.

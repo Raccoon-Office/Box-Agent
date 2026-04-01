@@ -20,9 +20,9 @@
 **Get started in 30 seconds:**
 
 ```bash
-pip install box-agent
-box-agent setup        # interactive config wizard
-box-agent              # start chatting
+uv tool install box-agent   # or: pip install box-agent (Python 3.10+)
+box-agent setup              # interactive config wizard
+box-agent                    # start chatting
 ```
 
 Or run a one-shot task:
@@ -69,7 +69,7 @@ You: "Analyze data1.csv, data2.csv, and data3.csv separately, then give me a com
 ```
 
 ### Sandboxed Code Execution
-Python runs in an isolated Jupyter kernel with pre-installed data science packages (`pandas`, `numpy`, `matplotlib`, `scikit-learn`, `openpyxl`). Generated files (charts, CSVs, PDFs) are automatically detected and surfaced as structured artifacts.
+Python runs in an isolated Jupyter kernel with pre-installed data science packages (`pandas`, `numpy`, `matplotlib`, `scikit-learn`, `openpyxl`, `xlrd`). Generated files (charts, CSVs, PDFs) are automatically detected and surfaced as structured artifacts.
 
 ### Multi-Provider LLM
 One config, any provider:
@@ -100,6 +100,7 @@ model: "your-model"
 - **Claude Skills**: 11 built-in skills for documents (DOCX, PDF, PPTX, XLSX), canvas design, web app testing, and more
 - **ACP Protocol**: Embed Box Agent in Electron apps, Zed Editor, or any ACP-compatible host via JSON-RPC over stdio
 - **Standalone Runtime**: PyInstaller binary bundles Python + all dependencies. No external Python needed — download and run
+- **Cross-session Memory**: Persistent memory lets the agent retain key information across conversations
 - **Safety Layer**: Dangerous command detection, workspace scope control, auto-backup before file modifications
 - **Task Tracking**: Built-in todo tool for multi-step task decomposition and progress tracking
 
@@ -122,12 +123,33 @@ model: "your-model"
 
 ## Installation
 
+> **Requires Python 3.10+.** If your system Python is older (e.g. 3.9), use `uv tool install` — it manages Python automatically.
+
+### Quick Start (uv, recommended)
+
+[uv](https://docs.astral.sh/uv/) handles Python version management for you — no need to upgrade your system Python:
+
+```bash
+# Install uv (if not already)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install box-agent (auto-downloads Python 3.10+ if needed)
+uv tool install box-agent
+box-agent setup    # interactive config wizard
+box-agent          # start chatting
+
+# Upgrade later
+uv tool upgrade box-agent
+```
+
 ### Quick Start (pip)
+
+If you already have Python 3.10+:
 
 ```bash
 pip install box-agent
-box-agent setup    # interactive config wizard
-box-agent          # start chatting
+box-agent setup
+box-agent
 ```
 
 ### From Source
@@ -196,7 +218,7 @@ Box Agent supports the [Agent Communication Protocol](https://github.com/nichoch
 **Standalone Runtime** — for Electron apps and other hosts:
 ```bash
 # Download pre-built binary
-gh release download v0.6.2 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
+gh release download v0.6.7 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
 
 # Or build from source
 uv run python scripts/build_runtime.py

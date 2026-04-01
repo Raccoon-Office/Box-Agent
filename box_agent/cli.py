@@ -1198,7 +1198,10 @@ def main():
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Run the agent (config always loaded from package directory)
-    asyncio.run(run_agent(workspace_dir, task=args.task, sandbox_mode=not args.no_sandbox))
+    try:
+        asyncio.run(run_agent(workspace_dir, task=args.task, sandbox_mode=not args.no_sandbox))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
