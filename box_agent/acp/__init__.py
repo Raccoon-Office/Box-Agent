@@ -254,7 +254,16 @@ class BoxACPAgent:
                 log.warn("session/memory", session_id=session_id, message="Failed to save session summary")
 
         log.info("session/done", session_id=session_id, stop_reason=stop_reason, duration_ms=duration_ms)
-        return PromptResponse(stopReason=stop_reason)
+        # Map box-agent stop reasons to ACP-valid StopReason values.
+        # ACP only accepts: "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"
+        _ACP_STOP_REASON_MAP = {
+            "end_turn": "end_turn",
+            "cancelled": "cancelled",
+            "max_steps": "max_turn_requests",
+            "error": "end_turn",
+        }
+        acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")
+        return PromptResponse(stopReason=acp_stop_reason)
 
     async def cancel(self, params: CancelNotification) -> None:
         state = self._sessions.get(params.sessionId)
