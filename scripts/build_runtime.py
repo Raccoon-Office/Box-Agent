@@ -143,6 +143,7 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "matplotlib.backends.backend_agg",
         "seaborn",
         "openpyxl",
+        "xlrd",
         "sklearn",
         "sklearn.cluster",
         "sklearn.linear_model",

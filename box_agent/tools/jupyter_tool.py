@@ -28,7 +28,8 @@ SANDBOX_DEFAULT_PACKAGES = [
     "matplotlib",
     "seaborn",
     "requests",
-    "openpyxl",  # Excel support for pandas
+    "openpyxl",  # .xlsx support for pandas
+    "xlrd",      # .xls support for pandas
     "scikit-learn",  # ML/data analysis
 ]
 
