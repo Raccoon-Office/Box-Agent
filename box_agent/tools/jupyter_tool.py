@@ -274,7 +274,12 @@ class SandboxEnvironment:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, f"pip install timed out (120s) for: {', '.join(packages)}"
         output = stdout.decode() + stderr.decode()
         if proc.returncode == 0:
             return True, output
@@ -298,9 +303,13 @@ class SandboxEnvironment:
 
         # Run synchronous pip in a thread to avoid blocking the event loop
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self._frozen_pip_install_sync, packages
-        )
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self._frozen_pip_install_sync, packages),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            return False, f"pip install timed out (120s) for: {', '.join(packages)}"
 
     @staticmethod
     def _frozen_pip_install_sync(packages: list[str]) -> tuple[bool, str]:
@@ -968,9 +977,16 @@ Output formats:
         workspace = session.workspace
         pre_files = set(workspace.iterdir()) if workspace.exists() else set()
 
-        # Execute code
+        # Execute code — run synchronous kernel execute in a thread to avoid
+        # blocking the event loop (pip installs inside %pip or auto-install can
+        # take minutes).  Wrap with an overall timeout as a safety net.
+        _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
+        loop = asyncio.get_event_loop()
         try:
-            stdout, images, error = session.execute(code, timeout)
+            stdout, images, error = await asyncio.wait_for(
+                loop.run_in_executor(None, session.execute, code, timeout),
+                timeout=_EXEC_TIMEOUT,
+            )
 
             # Auto-install missing modules and retry once
             if error and "ModuleNotFoundError" in error:
@@ -980,7 +996,10 @@ Output formats:
                     pip_name = self._MODULE_TO_PIP.get(pkg, pkg)
                     ok, _ = await env.install_packages([pip_name])
                     if ok:
-                        stdout, images, error = session.execute(code, timeout)
+                        stdout, images, error = await asyncio.wait_for(
+                            loop.run_in_executor(None, session.execute, code, timeout),
+                            timeout=_EXEC_TIMEOUT,
+                        )
 
             if error:
                 return ToolResult(
@@ -1013,14 +1032,19 @@ Output formats:
             content = "\n".join(content_parts) if content_parts else "(No output)"
             return ToolResult(success=True, content=content)
 
+        except (asyncio.TimeoutError, TimeoutError):
+            return ToolResult(
+                success=False,
+                content="",
+                error=f"Code execution timed out ({_EXEC_TIMEOUT}s). "
+                      "If installing packages, try running %pip install separately first.",
+            )
         except Exception as e:
             return ToolResult(
                 success=False,
                 content="",
                 error=f"Execution failed: {str(e)}",
             )
-
-    # Common module name → pip package name mapping
     _MODULE_TO_PIP = {
         "sklearn": "scikit-learn",
         "cv2": "opencv-python",
