@@ -152,9 +152,14 @@ class PPTOutlineTool(EventEmittingTool):
     @property
     def description(self) -> str:
         return (
-            "Emit a structured PPT outline event to the client. Use this tool to "
-            "signal stage transitions, stream outline text deltas, output structured "
-            "outline data, or deliver the final outline result."
+            "Emit a structured PPT outline event to the client.\n\n"
+            "Four event types:\n"
+            "- 'ppt_outline_stage': Stage transition. data: {stage, stage_text}\n"
+            "- 'ppt_outline_delta': Text stream. data: {stage, delta}\n"
+            "- 'ppt_outline_structured': Structured data. data: {key, value} where key is 'confirmed_pages' or 'page_style'\n"
+            "- 'ppt_outline_result': Final result. data: {title, outline, confirmed_pages, page_style}. "
+            "CRITICAL: outline must be a JSON STRING (stringified), using old page-keyed format "
+            "{\"page_1\": {...}, \"page_2\": {...}}, NOT a pages array or raw object."
         )
 
     @property
@@ -173,14 +178,20 @@ class PPTOutlineTool(EventEmittingTool):
                     "description": (
                         "Event type discriminator. "
                         "'ppt_outline_stage' — stage transition (analyze, generate, generate_image, page_style). "
-                        "'ppt_outline_delta' — incremental text delta for streaming display. "
-                        "'ppt_outline_structured' — structured outline data (confirmed_pages, page_style). "
-                        "'ppt_outline_result' — final complete outline JSON."
+                        "'ppt_outline_delta' — incremental JSON text delta with stage. "
+                        "'ppt_outline_structured' — key/value data (confirmed_pages or page_style). "
+                        "'ppt_outline_result' — final complete result with stringified outline."
                     ),
                 },
                 "data": {
                     "type": "object",
-                    "description": "Event payload. Structure depends on 'type'.",
+                    "description": (
+                        "Event payload. "
+                        "For ppt_outline_stage: {stage: str, stage_text: str}. "
+                        "For ppt_outline_delta: {stage: str, delta: str}. "
+                        "For ppt_outline_structured: {key: 'confirmed_pages'|'page_style', value: any}. "
+                        "For ppt_outline_result: {title: str, outline: str (JSON string!), confirmed_pages: obj, page_style: str}."
+                    ),
                 },
             },
             "required": ["type", "data"],
@@ -199,6 +210,40 @@ class PPTOutlineTool(EventEmittingTool):
                 content="",
                 error=f"Invalid type '{type}'. Must be one of: {', '.join(sorted(allowed))}",
             )
+
+        # Validate ppt_outline_result structure
+        if type == "ppt_outline_result":
+            for field in ("title", "outline", "confirmed_pages", "page_style"):
+                if field not in data:
+                    return ToolResult(
+                        success=False,
+                        content="",
+                        error=f"ppt_outline_result missing required field: '{field}'. "
+                        f"Required: title, outline (JSON string), confirmed_pages, page_style.",
+                    )
+            # outline must be a string (stringified JSON), not a dict/list
+            if not isinstance(data["outline"], str):
+                import json as _json
+                # Auto-fix: if dict/list, stringify it
+                try:
+                    data = {**data, "outline": _json.dumps(data["outline"], ensure_ascii=False)}
+                except Exception:
+                    return ToolResult(
+                        success=False,
+                        content="",
+                        error="ppt_outline_result 'outline' must be a JSON string (stringified). "
+                        "Use json.dumps() format, e.g. '{\"page_1\":{...}}'.",
+                    )
+
+        # Validate ppt_outline_structured
+        if type == "ppt_outline_structured":
+            if "key" not in data or "value" not in data:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error="ppt_outline_structured must contain 'key' and 'value' fields.",
+                )
+
         self._emit({"type": type, **data})
         return ToolResult(success=True, content=f"[{type}] event emitted")
 
