@@ -5,7 +5,7 @@ from .events import AgentEvent, StopReason
 from .llm import LLMClient
 from .schema import FunctionCall, LLMProvider, LLMResponse, Message, ToolCall
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 __all__ = [
     "Agent",
