@@ -28,12 +28,14 @@ class PPTPlanChatTool(EventEmittingTool):
         return (
             "Emit a structured PPT plan event to the client.\n\n"
             "Three event types:\n"
-            "- 'ppt_plan_json': Output the plan. data MUST contain {done, data: {title, description, goals[]}}. "
-            "goals[] use {id, description, actions[]}. actions[] use {id, description, details, status, result, dependencies[]}.\n"
+            "- 'ppt_plan_json': Output the thinking task plan. data MUST contain {done, data: {title, description, goals[]}}. "
+            "goals[] use {id, description, actions[]}. actions[] use {id, description, details, status, result, dependencies[]}. "
+            "dependencies[] lists action IDs that must complete first — use this to build a DAG for parallel execution. "
+            "Goals are thinking/analysis tasks (NOT page operations like 'add cover page').\n"
             "- 'ppt_ask_user': Ask a clarifying question. data MUST contain {question, goal_id, action_id}. "
             "goal_id and action_id MUST be non-empty strings — create a preliminary goal/action if needed. "
             "Do NOT include options/choices/buttons. After emitting, end your turn immediately.\n"
-            "- 'ppt_execution_event': Signal action progress. data contains {event, goal_id, action_id}."
+            "- 'ppt_execution_event': Signal action progress. data contains {event (start_action/end_action), goal_id, action_id, result (for end_action)}."
         )
 
     @property
