@@ -211,6 +211,22 @@ class SubAgentEvent:
     event: AgentEvent  # the nested event
 
 
+# ── PPT structured progress ───────────────────────────────────
+
+
+@dataclass(frozen=True)
+class PPTProgressEvent:
+    """Structured progress event from a PPT tool.
+
+    ``payload["type"]`` is the discriminator for officev3 dispatch
+    (e.g. ``ppt_plan_json``, ``ppt_outline_delta``,
+    ``ppt_editor_standard_html_result``).
+    """
+
+    parent_tool_call_id: str
+    payload: dict  # {"type": "ppt_plan_json", ...} etc.
+
+
 # ── Union type ──────────────────────────────────────────────────
 
 AgentEvent = Union[
@@ -229,4 +245,5 @@ AgentEvent = Union[
     LogFileEvent,
     DoneEvent,
     SubAgentEvent,
+    PPTProgressEvent,
 ]

@@ -23,7 +23,7 @@ from ..events import (
     ToolCallStart,
 )
 from ..schema import Message
-from .base import Tool, ToolResult
+from .base import EventEmittingTool, Tool, ToolResult
 
 _SUB_AGENT_SYSTEM_PROMPT = """\
 You are a focused sub-agent executing a specific task delegated by the main agent.
@@ -38,7 +38,7 @@ results.  Include key numbers, conclusions, and any file paths produced.
 """
 
 
-class SubAgentTool(Tool):
+class SubAgentTool(EventEmittingTool):
     """Run a task in an isolated agent context.
 
     The child agent shares the same LLM client and tool instances (so
@@ -58,15 +58,13 @@ class SubAgentTool(Tool):
         max_steps: int = 20,
         token_limit: int = 40_000,
     ):
+        super().__init__()
         self._llm = llm
         # Exclude ourselves to prevent recursive sub-agent spawning.
         self._child_tools = {n: t for n, t in parent_tools.items() if n != self.name}
         self._workspace_dir = workspace_dir
         self._max_steps = max_steps
         self._token_limit = token_limit
-        # Set by core.py before parallel execution to collect progress events.
-        self._event_queue: asyncio.Queue | None = None
-        self._parent_tool_call_id: str = ""
 
     @property
     def name(self) -> str:

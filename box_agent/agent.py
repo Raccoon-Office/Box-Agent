@@ -22,6 +22,7 @@ from .events import (
     DoneEvent,
     ErrorEvent,
     LogFileEvent,
+    PPTProgressEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -247,6 +248,10 @@ class Agent:
 
             case ErrorEvent(message=msg):
                 print(f"\n{Colors.BRIGHT_RED}❌ Error:{Colors.RESET} {msg}")
+
+            case PPTProgressEvent(payload=p):
+                ptype = p.get("type", "unknown")
+                print(f"{Colors.DIM}  📊 PPT: {ptype}{Colors.RESET}")
 
             case StepEnd(step=s, elapsed_seconds=el, total_elapsed_seconds=tot):
                 print(f"\n{Colors.DIM}⏱️  Step {s} completed in {el:.2f}s (total: {tot:.2f}s){Colors.RESET}")

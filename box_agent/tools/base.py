@@ -1,5 +1,8 @@
 """Base tool classes."""
 
+from __future__ import annotations
+
+import asyncio
 from typing import Any
 
 from pydantic import BaseModel
@@ -55,3 +58,30 @@ class Tool:
                 "parameters": self.parameters,
             },
         }
+
+
+class EventEmittingTool(Tool):
+    """Tool that can emit progress events during execution.
+
+    Subclasses call ``_emit(payload)`` to push structured events to a
+    shared ``asyncio.Queue``.  The core loop wires the queue before
+    execution and drains it in the foreground generator so events are
+    yielded to consumers in real-time.
+    """
+
+    def __init__(self) -> None:
+        # Set by core.py before execution to collect progress events.
+        self._event_queue: asyncio.Queue | None = None
+        self._parent_tool_call_id: str = ""
+
+    def _emit(self, payload: dict) -> None:
+        """Push a progress event onto the shared queue."""
+        if self._event_queue is not None:
+            from ..events import PPTProgressEvent
+
+            self._event_queue.put_nowait(
+                PPTProgressEvent(
+                    parent_tool_call_id=self._parent_tool_call_id,
+                    payload=payload,
+                )
+            )

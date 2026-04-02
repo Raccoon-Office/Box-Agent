@@ -70,6 +70,7 @@ from box_agent.events import (
     ContentEvent,
     DoneEvent,
     ErrorEvent,
+    PPTProgressEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -185,6 +186,17 @@ class BoxACPAgent:
             llm=self._llm,
         )
         agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
+
+        # Conditionally add PPT tools based on session_mode
+        if session_mode in ("ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"):
+            from box_agent.tools.ppt_tools import PPTEditorHTMLTool, PPTOutlineTool, PPTPlanChatTool
+            ppt_tool_map = {
+                "ppt_plan_chat": PPTPlanChatTool,
+                "ppt_outline": PPTOutlineTool,
+                "ppt_editor_standard_html": PPTEditorHTMLTool,
+            }
+            ppt_tool = ppt_tool_map[session_mode]()
+            agent.tools[ppt_tool.name] = ppt_tool
         # Sandbox workspace is a stable subdirectory under the workspace
         sandbox_ws = str(workspace / "sandbox")
         self._sessions[session_id] = SessionState(agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode)
@@ -198,24 +210,34 @@ class BoxACPAgent:
 
         Prompt structure:
             base system_prompt
-            + [if session_mode == "data_analysis"] analysis_prompt
+            + [if session_mode matches] mode-specific prompt
             + skills metadata  (already appended in run_acp_server)
 
         The base prompt (with skills metadata) is stored in self._system_prompt.
         Mode-specific prompts are injected between the base and the skills section.
         """
-        if session_mode != "data_analysis":
+        # Map session_mode → config attribute holding the prompt filename
+        _MODE_PROMPT_MAP = {
+            "data_analysis": "analysis_prompt_path",
+            "ppt_plan_chat": "ppt_plan_chat_prompt_path",
+            "ppt_outline": "ppt_outline_prompt_path",
+            "ppt_editor_standard_html": "ppt_editor_prompt_path",
+        }
+
+        attr = _MODE_PROMPT_MAP.get(session_mode or "")
+        if not attr:
             return self._system_prompt
 
-        # Load analysis prompt via config priority search
-        analysis_path = Config.find_config_file(self._config.agent.analysis_prompt_path)
-        if analysis_path and analysis_path.exists():
-            analysis_prompt = analysis_path.read_text(encoding="utf-8").strip()
-            # Insert analysis prompt before the skills metadata section
-            # The base system_prompt already has skills metadata appended at the end
-            return f"{self._system_prompt.rstrip()}\n\n{analysis_prompt}"
+        prompt_filename = getattr(self._config.agent, attr, None)
+        if not prompt_filename:
+            return self._system_prompt
 
-        log.warn("session/prompt", message=f"analysis_prompt not found: {self._config.agent.analysis_prompt_path}")
+        mode_path = Config.find_config_file(prompt_filename)
+        if mode_path and mode_path.exists():
+            mode_prompt = mode_path.read_text(encoding="utf-8").strip()
+            return f"{self._system_prompt.rstrip()}\n\n{mode_prompt}"
+
+        log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
         return self._system_prompt
 
     async def prompt(self, params: PromptRequest) -> PromptResponse:
@@ -426,6 +448,16 @@ class BoxACPAgent:
                             )
                         except Exception as exc:
                             log.exception("sub_agent/send_error", exc, session_id=session_id, tool_call_id=tid)
+
+                    case PPTProgressEvent(parent_tool_call_id=tid, payload=payload):
+                        log.debug("ppt/progress", session_id=session_id, tool_call_id=tid, payload=payload)
+                        try:
+                            await self._send(
+                                session_id,
+                                update_tool_call(tid, raw_output=payload),
+                            )
+                        except Exception as exc:
+                            log.exception("ppt/send_error", exc, session_id=session_id, tool_call_id=tid)
 
                     case _:
                         pass  # StepStart, SummarizationEvent, etc.

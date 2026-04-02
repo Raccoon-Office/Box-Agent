@@ -28,6 +28,7 @@ from .events import (
     DoneEvent,
     ErrorEvent,
     LogFileEvent,
+    PPTProgressEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -40,7 +41,7 @@ from .events import (
 )
 from .logger import AgentLogger
 from .schema import LLMResponse, Message, StreamEvent
-from .tools.base import Tool, ToolResult
+from .tools.base import EventEmittingTool, Tool, ToolResult
 
 # Type alias — consumers supply a zero-arg callable that returns True
 # when the execution should be cancelled.
@@ -544,16 +545,55 @@ async def run_agent_loop(
             if fn_name not in tools:
                 result = ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
             else:
-                try:
-                    result = await tools[fn_name].execute(**fn_args)
-                except Exception as exc:
-                    detail = f"{type(exc).__name__}: {exc!s}"
-                    trace = traceback.format_exc()
-                    result = ToolResult(
-                        success=False,
-                        content="",
-                        error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
-                    )
+                tool = tools[fn_name]
+                if isinstance(tool, EventEmittingTool):
+                    # Wire queue, run in background, drain in foreground
+                    event_queue: asyncio.Queue = asyncio.Queue()
+                    tool._event_queue = event_queue
+                    tool._parent_tool_call_id = tc_id
+
+                    exec_done = asyncio.Event()
+                    exec_result: ToolResult | None = None
+
+                    async def _seq_exec(t=tool, a=fn_args):
+                        nonlocal exec_result
+                        try:
+                            exec_result = await t.execute(**a)
+                        except Exception as exc:
+                            detail = f"{type(exc).__name__}: {exc!s}"
+                            trace = traceback.format_exc()
+                            exec_result = ToolResult(
+                                success=False,
+                                content="",
+                                error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
+                            )
+                        finally:
+                            exec_done.set()
+
+                    exec_task = asyncio.create_task(_seq_exec())
+                    while not exec_done.is_set() or not event_queue.empty():
+                        try:
+                            evt = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                            yield evt
+                        except (asyncio.TimeoutError, TimeoutError):
+                            continue
+                    while not event_queue.empty():
+                        yield event_queue.get_nowait()
+                    await exec_task
+                    tool._event_queue = None
+                    tool._parent_tool_call_id = ""
+                    result = exec_result  # type: ignore[assignment]
+                else:
+                    try:
+                        result = await tools[fn_name].execute(**fn_args)
+                    except Exception as exc:
+                        detail = f"{type(exc).__name__}: {exc!s}"
+                        trace = traceback.format_exc()
+                        result = ToolResult(
+                            success=False,
+                            content="",
+                            error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
+                        )
 
             # Log tool result
             if logger:
@@ -600,10 +640,8 @@ async def run_agent_loop(
                 yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 return
 
-        # 2. Parallel execution for parallel_safe tools (e.g. sub_agent)
+        # 2. Parallel execution for parallel_safe tools (e.g. sub_agent, ppt_emit_html)
         if parallel_calls:
-            from .tools.sub_agent_tool import SubAgentTool
-
             # Emit all ToolCallStart events first
             for tc in parallel_calls:
                 yield ToolCallStart(
@@ -612,15 +650,15 @@ async def run_agent_loop(
                     arguments=tc.function.arguments,
                 )
 
-            # Wire a shared event queue onto SubAgentTool instances
-            event_queue: asyncio.Queue[SubAgentEvent] = asyncio.Queue()
-            sub_agent_tools: list[SubAgentTool] = []
+            # Wire a shared event queue onto EventEmittingTool instances
+            par_event_queue: asyncio.Queue[SubAgentEvent | PPTProgressEvent] = asyncio.Queue()
+            emitting_tools: list[EventEmittingTool] = []
             for tc in parallel_calls:
                 tool = tools.get(tc.function.name)
-                if isinstance(tool, SubAgentTool):
-                    tool._event_queue = event_queue
+                if isinstance(tool, EventEmittingTool):
+                    tool._event_queue = par_event_queue
                     tool._parent_tool_call_id = tc.id
-                    sub_agent_tools.append(tool)
+                    emitting_tools.append(tool)
 
             async def _run_parallel(tc):
                 fn_name = tc.function.name
@@ -651,21 +689,21 @@ async def run_agent_loop(
 
             gather_task = asyncio.create_task(_gather_wrapper())
 
-            # Yield sub-agent events as they arrive (real-time)
-            while not gather_done.is_set() or not event_queue.empty():
+            # Yield progress events as they arrive (real-time)
+            while not gather_done.is_set() or not par_event_queue.empty():
                 try:
-                    evt = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    evt = await asyncio.wait_for(par_event_queue.get(), timeout=0.1)
                     yield evt
                 except (asyncio.TimeoutError, TimeoutError):
                     continue
             # Drain any stragglers enqueued between the last get() and now
-            while not event_queue.empty():
-                yield event_queue.get_nowait()
+            while not par_event_queue.empty():
+                yield par_event_queue.get_nowait()
 
             gathered = await gather_task  # already done
 
             # Clean up queue references
-            for tool in sub_agent_tools:
+            for tool in emitting_tools:
                 tool._event_queue = None
                 tool._parent_tool_call_id = ""
 

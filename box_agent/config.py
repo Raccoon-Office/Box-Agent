@@ -37,6 +37,9 @@ class AgentConfig(BaseModel):
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
+    ppt_plan_chat_prompt_path: str = "ppt_plan_chat_prompt.md"
+    ppt_outline_prompt_path: str = "ppt_outline_prompt.md"
+    ppt_editor_prompt_path: str = "ppt_editor_standard_html_prompt.md"
     # Memory
     enable_memory: bool = True
     memory_dir: str = "~/.box-agent/memory"
