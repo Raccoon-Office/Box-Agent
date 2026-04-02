@@ -79,9 +79,9 @@ When you need more information from the user, emit this event and then **immedia
 ```
 
 Field requirements:
+- `goal_id`: string — **REQUIRED, must not be empty**. Set to the goal this question relates to. If asking before any plan exists, first create a preliminary goal (e.g. `"goal_1"`) that the question is about, then reference it here.
+- `action_id`: string — **REQUIRED, must not be empty**. Set to the action this question will affect. If asking before detailed actions exist, create a placeholder action (e.g. `"action_1"`) under the goal, then reference it here. The frontend uses both `goal_id` and `action_id` to locate the AskUserBox in the UI — empty strings break the UI placement.
 - `question`: string — the question to display in the AskUserBox (plain text, no markdown)
-- `goal_id`: string — which goal this question relates to (optional, use `""` if not goal-specific)
-- `action_id`: string — which action this question relates to (optional, use `""` if not action-specific)
 
 **Do NOT include**: `options`, `choices`, `buttons`, or any selection UI. The frontend only supports free-text input.
 

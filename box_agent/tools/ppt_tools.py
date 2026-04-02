@@ -31,6 +31,7 @@ class PPTPlanChatTool(EventEmittingTool):
             "- 'ppt_plan_json': Output the plan. data MUST contain {done, data: {title, description, goals[]}}. "
             "goals[] use {id, description, actions[]}. actions[] use {id, description, details, status, result, dependencies[]}.\n"
             "- 'ppt_ask_user': Ask a clarifying question. data MUST contain {question, goal_id, action_id}. "
+            "goal_id and action_id MUST be non-empty strings — create a preliminary goal/action if needed. "
             "Do NOT include options/choices/buttons. After emitting, end your turn immediately.\n"
             "- 'ppt_execution_event': Signal action progress. data contains {event, goal_id, action_id}."
         )
@@ -115,6 +116,16 @@ class PPTPlanChatTool(EventEmittingTool):
                     content="",
                     error="ppt_ask_user data must contain 'question' field",
                 )
+            # goal_id and action_id must be non-empty strings
+            for field in ("goal_id", "action_id"):
+                val = data.get(field, "")
+                if not val or not isinstance(val, str) or not val.strip():
+                    return ToolResult(
+                        success=False,
+                        content="",
+                        error=f"ppt_ask_user '{field}' must be a non-empty string (e.g. 'goal_1'/'action_1'). "
+                        f"Create a preliminary goal/action if none exists yet, then reference it here.",
+                    )
             # Reject options/choices/buttons
             for forbidden in ("options", "choices", "buttons", "selection_schema"):
                 if forbidden in data:
