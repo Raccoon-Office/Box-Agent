@@ -297,10 +297,6 @@ class BoxACPAgent:
         """Consume the shared execution core and translate events to ACP updates."""
         agent = state.agent
 
-        # Accumulators for streaming events
-        thinking_acc = ""
-        content_acc = ""
-
         async for event in run_agent_loop(
             llm=agent.llm,
             messages=agent.messages,
@@ -314,34 +310,24 @@ class BoxACPAgent:
             try:
                 match event:
                     case ThinkingEvent() if event._streaming:
-                        # Accumulate streaming thinking deltas
-                        if not event._header:
-                            thinking_acc += event.content
+                        # Stream thinking deltas in real-time
+                        if not event._header and event.content:
+                            await self._send(session_id, update_agent_thought(text_block(event.content)))
 
                     case ThinkingEvent(content=text):
                         log.debug("thinking", session_id=session_id, content=text)
                         await self._send(session_id, update_agent_thought(text_block(text)))
 
                     case ContentEvent() if event._streaming:
-                        # Accumulate streaming content deltas
-                        if not event._header:
-                            content_acc += event.content
+                        # Stream content deltas in real-time
+                        if not event._header and event.content:
+                            await self._send(session_id, update_agent_message(text_block(event.content)))
 
                     case ContentEvent(content=text):
                         log.debug("content", session_id=session_id, content=text)
                         await self._send(session_id, update_agent_message(text_block(text)))
 
                     case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args):
-                        # Flush accumulated streaming content before tool calls
-                        if thinking_acc:
-                            log.debug("thinking", session_id=session_id, content=thinking_acc)
-                            await self._send(session_id, update_agent_thought(text_block(thinking_acc)))
-                            thinking_acc = ""
-                        if content_acc:
-                            log.debug("content", session_id=session_id, content=content_acc)
-                            await self._send(session_id, update_agent_message(text_block(content_acc)))
-                            content_acc = ""
-
                         log.info("tool/start", session_id=session_id, tool_call_id=tid, tool_name=name, arguments=args)
                         args_preview = (
                             ", ".join(f"{k}={repr(v)[:50]}" for k, v in list(args.items())[:2])
@@ -396,15 +382,6 @@ class BoxACPAgent:
                         log.debug("step/end", session_id=session_id, step=s, duration_ms=int(el * 1000), total_ms=int(tot * 1000))
 
                     case DoneEvent(stop_reason=reason):
-                        # Flush any remaining accumulated streaming content
-                        if thinking_acc:
-                            log.debug("thinking", session_id=session_id, content=thinking_acc)
-                            await self._send(session_id, update_agent_thought(text_block(thinking_acc)))
-                            thinking_acc = ""
-                        if content_acc:
-                            log.debug("content", session_id=session_id, content=content_acc)
-                            await self._send(session_id, update_agent_message(text_block(content_acc)))
-                            content_acc = ""
                         log.debug("done", session_id=session_id, stop_reason=reason.value)
                         return reason.value
 
