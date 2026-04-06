@@ -28,8 +28,26 @@ Prefer these well-known libraries (install with `uv pip install` if needed):
 - `numpy` — numerical operations
 - `matplotlib` / `seaborn` — visualization
 - `scipy` — statistical analysis
-- `openpyxl` — Excel file handling
+- `openpyxl` — Excel file handling (.xlsx read/write)
+- `xlrd` — Excel file handling (.xls read)
+- `python-docx` — Word document processing
+- `pypdf` — PDF manipulation (merge/split)
+- `pdfplumber` — PDF text/table extraction
+- `reportlab` — PDF creation
+- `python-pptx` — PowerPoint processing
 - `chardet` — encoding detection for CSV files
+
+### Document Processing in Sandbox
+**Always prefer sandbox Python packages for document operations:**
+- **Excel**: Use `pandas.read_excel()` / `df.to_excel()` with `openpyxl` engine. For `.xls` files, use `xlrd` engine.
+- **Word**: Use `python-docx` (`Document()` class) for reading paragraphs, tables, and writing new content.
+- **PDF**: Use `pdfplumber.open()` for text/table extraction, `pypdf.PdfReader/PdfWriter` for merge/split, `reportlab` for creation.
+- **PowerPoint**: Use `python-pptx` (`Presentation()` class) for reading slides, shapes, and creating presentations.
+
+**Only use external tools (pandoc, LibreOffice, command-line utilities) when:**
+- Format conversion between incompatible types (e.g., .docx → .pdf via pandoc)
+- Formula recalculation in Excel (LibreOffice `soffice`)
+- Complex OOXML manipulation beyond library capabilities
 
 ### Output Expectations
 - When producing tables, format them clearly (markdown or pandas DataFrame display)

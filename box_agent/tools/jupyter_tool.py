@@ -28,9 +28,14 @@ SANDBOX_DEFAULT_PACKAGES = [
     "matplotlib",
     "seaborn",
     "requests",
-    "openpyxl",  # .xlsx support for pandas
-    "xlrd",      # .xls support for pandas
+    "openpyxl",      # .xlsx support for pandas
+    "xlrd",          # .xls support for pandas
     "scikit-learn",  # ML/data analysis
+    "python-docx",   # Word (.docx) read/write
+    "pypdf",         # PDF read/merge/split
+    "pdfplumber",    # PDF table/text extraction
+    "reportlab",     # PDF creation
+    "python-pptx",   # PowerPoint (.pptx) read/write
 ]
 
 SANDBOX_BASE_DIR = Path.home() / ".box-agent" / "sandbox"
@@ -51,6 +56,8 @@ ALLOWED_RUNTIME_PACKAGES: set[str] = {
     "scikit-learn", "scikit-image", "joblib",
     # Excel / tabular I/O
     "openpyxl", "xlrd", "xlsxwriter", "pyarrow", "fastparquet", "tabulate",
+    # Document processing
+    "python-docx", "pypdf", "pdfplumber", "reportlab", "python-pptx",
     # Web / scraping
     "requests", "beautifulsoup4", "lxml",
     # Images

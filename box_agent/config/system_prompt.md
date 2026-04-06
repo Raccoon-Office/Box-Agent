@@ -65,6 +65,17 @@ Skills are loaded dynamically using **Progressive Disclosure**:
 
 **Python-based skills:** pdf, pptx, docx, xlsx, canvas-design, algorithmic-art
 
+### Document Processing Priority
+**For Excel/Word/PDF/PowerPoint files, prefer sandbox Python packages over external tools:**
+- **Excel (.xlsx, .xls)**: Use `pandas` + `openpyxl` (read/write), `xlrd` (.xls read). Avoid LibreOffice unless formula recalculation is required.
+- **Word (.docx)**: Use `python-docx` for reading/writing. Avoid `pandoc` unless format conversion is needed.
+- **PDF**: Use `pypdf` (merge/split), `pdfplumber` (text/table extraction), `reportlab` (creation). Avoid command-line tools.
+- **PowerPoint (.pptx)**: Use `python-pptx` for reading/writing. Avoid external scripts unless complex layout is required.
+
+**When to use Skills vs Sandbox:**
+- **Sandbox first**: Data extraction, simple edits, format conversion, table processing
+- **Skills second**: Complex layouts, OOXML manipulation, template-based generation, formula recalculation
+
 {SANDBOX_INFO} 
 
 ### Communication

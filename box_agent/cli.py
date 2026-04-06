@@ -800,6 +800,7 @@ You have access to the `execute_code` tool which runs Python code in an isolated
 **When to use execute_code:**
 - Data analysis and visualization (pandas, matplotlib, seaborn)
 - Processing files (CSV, Excel, JSON, images)
+- Document operations (Excel, Word, PDF, PowerPoint)
 - Running Python scripts with persistent state
 - Complex calculations requiring multiple steps
 
@@ -811,7 +812,7 @@ You have access to the `execute_code` tool which runs Python code in an isolated
 - Clean up large data structures when done
 - Check for errors after each step
 
-**Available packages:** pandas, numpy, matplotlib, scikit-learn, pillow, and more via standard library.
+**Available packages:** pandas, numpy, matplotlib, seaborn, scikit-learn, openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx, and more via standard library.
 """
         system_prompt = system_prompt.replace("{SANDBOX_INFO}", sandbox_info)
         print(f"{Colors.GREEN}✅ Sandbox mode enabled with execute_code tool{Colors.RESET}")

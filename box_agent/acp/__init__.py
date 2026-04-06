@@ -492,6 +492,32 @@ async def run_acp_server(config: Config | None = None) -> None:
             system_prompt = prompt_path.read_text(encoding="utf-8")
         else:
             system_prompt = "You are a helpful AI assistant."
+
+        # Inject SANDBOX_INFO (ACP always enables sandbox)
+        sandbox_info = """
+## Sandbox Execution Mode (Enabled)
+
+You have access to the `execute_code` tool which runs Python code in an isolated Jupyter kernel.
+
+**When to use execute_code:**
+- Data analysis and visualization (pandas, matplotlib, seaborn)
+- Processing files (CSV, Excel, JSON, images)
+- Document operations (Excel, Word, PDF, PowerPoint)
+- Running Python scripts with persistent state
+- Complex calculations requiring multiple steps
+
+**Sandbox workspace:** Code runs in an isolated directory. Files saved are stored in the sandbox workspace.
+
+**Best practices:**
+- Break complex analysis into smaller code blocks
+- Use print() to output intermediate results
+- Clean up large data structures when done
+- Check for errors after each step
+
+**Available packages:** pandas, numpy, matplotlib, seaborn, scikit-learn, openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx, and more via standard library.
+"""
+        system_prompt = system_prompt.replace("{SANDBOX_INFO}", sandbox_info)
+
         if skill_loader:
             meta = skill_loader.get_skills_metadata_prompt()
             if meta:

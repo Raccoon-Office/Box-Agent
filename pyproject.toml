@@ -58,6 +58,11 @@ runtime = [
     "openpyxl",
     "xlrd",
     "scikit-learn",
+    "python-docx",
+    "pypdf",
+    "pdfplumber",
+    "reportlab",
+    "python-pptx",
     "pip",
 ]
 
