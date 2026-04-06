@@ -147,6 +147,14 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "sklearn",
         "sklearn.cluster",
         "sklearn.linear_model",
+        # Document processing (runtime extras)
+        "docx",  # python-docx imports as 'docx'
+        "pypdf",
+        "pdfplumber",
+        "reportlab",
+        "reportlab.pdfgen",
+        "reportlab.lib",
+        "pptx",  # python-pptx imports as 'pptx'
         "sklearn.preprocessing",
         # pip (used as library in frozen mode for runtime package installs)
         "pip",
