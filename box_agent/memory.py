@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .schema import Message
+    from .tools.permissions import PermissionEngine
 
 logger = logging.getLogger(__name__)
 
@@ -82,19 +83,52 @@ class MemoryManager:
 
     # ── Recall ─────────────────────────────────────────────────
 
-    def recall(self, query: str = "") -> str:  # noqa: ARG002 — query reserved for future semantic search
+    def recall(self, query: str = "", permission_engine: PermissionEngine | None = None) -> str:  # noqa: ARG002 — query reserved for future semantic search
         """Build a memory block for system-prompt injection.
 
         Returns an empty string when there is nothing to recall.
+
+        Args:
+            query: Reserved for future semantic search.
+            permission_engine: If provided, checks memory.openclaw_import capability
+                               before reading OpenClaw memory.
         """
         manual = self.read_manual_memory()
         sessions = self._list_recent_sessions()
-        return self.build_memory_block(manual, sessions)
+
+        # OpenClaw memory import (only when permission engine is present and allows it)
+        openclaw_block = ""
+        if permission_engine is not None:
+            from .tools.permissions import MEMORY_OPENCLAW_IMPORT
+            decision = permission_engine.check(MEMORY_OPENCLAW_IMPORT, {"source": "openclaw"})
+            if decision.allowed:
+                openclaw_block = self._read_openclaw_memory()
+
+        return self.build_memory_block(manual, sessions, openclaw_block)
+
+    def _read_openclaw_memory(self) -> str:
+        """Read MEMORY.md files from ~/.openclaw/**/MEMORY.md.
+
+        Returns combined content or empty string if none found.
+        """
+        openclaw_dir = Path.home() / ".openclaw"
+        if not openclaw_dir.is_dir():
+            return ""
+
+        parts: list[str] = []
+        for memory_file in sorted(openclaw_dir.rglob("MEMORY.md")):
+            try:
+                content = memory_file.read_text(encoding="utf-8").strip()
+                if content:
+                    parts.append(content)
+            except Exception:
+                logger.debug("Failed to read OpenClaw memory: %s", memory_file)
+        return "\n\n".join(parts)
 
     @staticmethod
-    def build_memory_block(manual: str, sessions: list[dict]) -> str:
-        """Format manual memory + recent sessions into a prompt block."""
-        if not manual and not sessions:
+    def build_memory_block(manual: str, sessions: list[dict], openclaw: str = "") -> str:
+        """Format manual memory + recent sessions + openclaw into a prompt block."""
+        if not manual and not sessions and not openclaw:
             return ""
 
         parts: list[str] = ["--- MEMORY START ---"]
@@ -103,6 +137,11 @@ class MemoryManager:
             parts.append("")
             parts.append("[Manual Memory]")
             parts.append(manual)
+
+        if openclaw:
+            parts.append("")
+            parts.append("[OpenClaw Memory]")
+            parts.append(openclaw)
 
         if sessions:
             parts.append("")

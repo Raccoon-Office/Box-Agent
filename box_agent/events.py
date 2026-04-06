@@ -227,6 +227,36 @@ class PPTProgressEvent:
     payload: dict  # {"type": "ppt_plan_json", ...} etc.
 
 
+# ── Permission requests ──────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class PermissionRequestEvent:
+    """Capability permission request from a tool.
+
+    Payload mirrors the canonical ``permission_request`` protocol
+    defined in box-agent-permissions.md:
+
+        {
+            "type": "permission_request",
+            "scope": "filesystem",
+            "requested_scope": "user_home",
+            "path": "/Users/.../file",   # filesystem only; empty for memory
+            "reason": "...",
+            "temporary_supported": true,
+            "persistent_supported": true
+        }
+    """
+
+    tool_call_id: str
+    scope: str            # capability namespace: "filesystem" | "memory"
+    requested_scope: str  # e.g. "user_home" | "openclaw_import"
+    reason: str
+    path: str = ""        # absolute path; empty for non-filesystem capabilities
+    temporary_supported: bool = True
+    persistent_supported: bool = True
+
+
 # ── Union type ──────────────────────────────────────────────────
 
 AgentEvent = Union[
@@ -246,4 +276,5 @@ AgentEvent = Union[
     DoneEvent,
     SubAgentEvent,
     PPTProgressEvent,
+    PermissionRequestEvent,
 ]

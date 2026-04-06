@@ -23,6 +23,7 @@ from .events import (
     ErrorEvent,
     LogFileEvent,
     PPTProgressEvent,
+    PermissionRequestEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -252,6 +253,12 @@ class Agent:
             case PPTProgressEvent(payload=p):
                 ptype = p.get("type", "unknown")
                 print(f"{Colors.DIM}  📊 PPT: {ptype}{Colors.RESET}")
+
+            case PermissionRequestEvent(scope=scope, requested_scope=req_scope, path=path, reason=reason):
+                print(f"\n{Colors.BRIGHT_YELLOW}🔒 Permission required: {scope} → {req_scope}{Colors.RESET}")
+                if path:
+                    print(f"   Path: {path}")
+                print(f"   Reason: {reason}")
 
             case StepEnd(step=s, elapsed_seconds=el, total_elapsed_seconds=tot):
                 print(f"\n{Colors.DIM}⏱️  Step {s} completed in {el:.2f}s (total: {tot:.2f}s){Colors.RESET}")

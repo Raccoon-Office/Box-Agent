@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import List
+from typing import TYPE_CHECKING, List
 
 from box_agent.config import Config
 from box_agent.tools.base import Tool
@@ -22,6 +22,9 @@ from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
 from box_agent.tools.web_search_tool import WebSearchTool
+
+if TYPE_CHECKING:
+    from box_agent.tools.permissions import PermissionEngine
 
 
 # Minimal color constants used in status messages.
@@ -149,7 +152,7 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
 
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
                         allow_full_access: bool = True, non_interactive: bool = False, output=None,
-                        llm=None):
+                        llm=None, permission_engine: PermissionEngine | None = None):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -163,6 +166,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         non_interactive: If True, dangerous commands are rejected without prompting
         output: Callable for status messages (default: print)
         llm: LLM client instance (needed for sub_agent tool)
+        permission_engine: If provided, tools use capability-based permission checks
     """
     _out = output or print
     # Ensure workspace directory exists
@@ -178,6 +182,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             allow_full_access=allow_full_access,
             non_interactive=non_interactive,
             sandbox_venv_path=sandbox_venv_path,
+            permission_engine=permission_engine,
         )
         tools.append(bash_tool)
         _out(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {workspace_dir}){Colors.RESET}")
@@ -186,9 +191,9 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     if config.tools.enable_file_tools:
         tools.extend(
             [
-                ReadTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access),
-                WriteTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access),
-                EditTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access),
+                ReadTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access, permission_engine=permission_engine),
+                WriteTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access, permission_engine=permission_engine),
+                EditTool(workspace_dir=str(workspace_dir), allow_full_access=allow_full_access, permission_engine=permission_engine),
             ]
         )
         _out(f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}")

@@ -71,6 +71,7 @@ from box_agent.events import (
     DoneEvent,
     ErrorEvent,
     PPTProgressEvent,
+    PermissionRequestEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -83,6 +84,7 @@ from box_agent.llm import LLMClient
 from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.schema import Message
+from box_agent.tools.permissions import CapabilityPolicy, PermissionEngine
 
 from .debug_logger import acp_logger as log
 
@@ -116,6 +118,7 @@ class SessionState:
     cancelled: bool = False
     sandbox_workspace: str | None = None  # stable sandbox workspace path for this session
     session_mode: str | None = None  # e.g. "data_analysis" for /analysis pages
+    permission_engine: PermissionEngine | None = None
 
 
 class BoxACPAgent:
@@ -163,17 +166,44 @@ class BoxACPAgent:
 
         log.info("session/new", session_id=session_id, message=f"Creating session, workspace={workspace}, session_mode={session_mode}")
 
+        # Build PermissionEngine via policy composition if officev3 block is configured
+        perm_engine = None
+        if self._has_officev3_policy():
+            try:
+                base_policy = CapabilityPolicy.from_config(self._config)
+
+                # Apply session-level overrides to produce effective policy
+                effective_policy = base_policy
+                permission_overrides = meta.get("officev3_permissions_override") if isinstance(meta, dict) else None
+                if permission_overrides and isinstance(permission_overrides, dict):
+                    effective_policy = base_policy.with_overrides(permission_overrides)
+
+                perm_engine = PermissionEngine(effective_policy, workspace)
+                log.info("session/permissions", session_id=session_id,
+                         message=f"PermissionEngine created: scope={effective_policy.filesystem_scope}, "
+                                 f"openclaw={effective_policy.openclaw_import_enabled}")
+            except Exception as exc:
+                log.error("permission/init", message=f"Failed to build PermissionEngine: {exc}")
+                # Use a restrictive fallback engine (session_workspace scope, no openclaw)
+                fallback_policy = CapabilityPolicy(
+                    session_workspace_root=str(workspace),
+                )
+                perm_engine = PermissionEngine(fallback_policy, workspace)
+
         # Build per-session system prompt with conditional mode injection
         system_prompt = self._build_session_prompt(session_mode)
 
         # Inject memory context
         if self._memory:
-            memory_block = self._memory.recall()
+            memory_block = self._memory.recall(permission_engine=perm_engine)
             if memory_block:
                 system_prompt = f"{system_prompt.rstrip()}\n\n{memory_block}"
                 log.info("session/memory", session_id=session_id, message="Memory context injected")
 
         tools = list(self._base_tools)
+        if perm_engine is None:
+            log.info("session/permissions", session_id=session_id,
+                     message="No officev3 policy — using legacy allow_full_access mode")
         # Enable sandbox mode and restrict to workspace for ACP sessions
         add_workspace_tools(
             tools,
@@ -184,6 +214,7 @@ class BoxACPAgent:
             non_interactive=True,  # ACP cannot do interactive terminal prompts
             output=lambda msg: sys.stderr.write(msg + "\n"),
             llm=self._llm,
+            permission_engine=perm_engine,
         )
         agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
 
@@ -199,7 +230,10 @@ class BoxACPAgent:
             agent.tools[ppt_tool.name] = ppt_tool
         # Sandbox workspace is a stable subdirectory under the workspace
         sandbox_ws = str(workspace / "sandbox")
-        self._sessions[session_id] = SessionState(agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode)
+        self._sessions[session_id] = SessionState(
+            agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode,
+            permission_engine=perm_engine,
+        )
 
         tool_names = [t.name for t in tools]
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
@@ -239,6 +273,10 @@ class BoxACPAgent:
 
         log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
         return self._system_prompt
+
+    def _has_officev3_policy(self) -> bool:
+        """Check if officev3 capability policy is configured (not just defaults)."""
+        return getattr(self._config.officev3, "_present", False)
 
     async def prompt(self, params: PromptRequest) -> PromptResponse:
         session_id = params.sessionId
@@ -435,6 +473,25 @@ class BoxACPAgent:
                             )
                         except Exception as exc:
                             log.exception("ppt/send_error", exc, session_id=session_id, tool_call_id=tid)
+
+                    case PermissionRequestEvent() as evt:
+                        payload = {
+                            "type": "permission_request",
+                            "scope": evt.scope,
+                            "requested_scope": evt.requested_scope,
+                            "path": evt.path,
+                            "reason": evt.reason,
+                            "temporary_supported": evt.temporary_supported,
+                            "persistent_supported": evt.persistent_supported,
+                        }
+                        log.info("permission/request", session_id=session_id, tool_call_id=evt.tool_call_id, payload=payload)
+                        try:
+                            await self._send(
+                                session_id,
+                                update_tool_call(evt.tool_call_id, raw_output=payload),
+                            )
+                        except Exception as exc:
+                            log.exception("permission/send_error", exc, session_id=session_id, tool_call_id=evt.tool_call_id)
 
                     case _:
                         pass  # StepStart, SummarizationEvent, etc.

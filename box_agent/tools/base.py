@@ -14,6 +14,7 @@ class ToolResult(BaseModel):
     success: bool
     content: str = ""
     error: str | None = None
+    permission_request: dict | None = None  # capability request payload
 
 
 class Tool:

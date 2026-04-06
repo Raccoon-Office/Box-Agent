@@ -29,6 +29,7 @@ from .events import (
     ErrorEvent,
     LogFileEvent,
     PPTProgressEvent,
+    PermissionRequestEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -613,6 +614,11 @@ async def run_agent_loop(
                 error=result.error,
             )
 
+            # Emit permission request event if tool was denied with escalation info
+            if not result.success and result.permission_request:
+                pr = {k: v for k, v in result.permission_request.items() if k != "type"}
+                yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
+
             # Detect and yield structured artifacts (images, files) from tool output
             if result.success and workspace_dir:
                 # Regex-based: detect [filename.ext] references in output
@@ -728,6 +734,11 @@ async def run_agent_loop(
                     content=result.content,
                     error=result.error,
                 )
+
+                # Emit permission request event if tool was denied with escalation info
+                if not result.success and result.permission_request:
+                    pr = {k: v for k, v in result.permission_request.items() if k != "type"}
+                    yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
 
                 # Append tool message
                 tool_msg = Message(

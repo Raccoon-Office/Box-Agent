@@ -3,13 +3,15 @@
 Supports both bash (Unix/Linux/macOS) and PowerShell (Windows).
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import platform
 import re
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, model_validator
 
@@ -21,6 +23,9 @@ from .safety import (
     detect_scope_escape,
     extract_rm_targets,
 )
+
+if TYPE_CHECKING:
+    from .permissions import PermissionEngine
 
 
 class BashOutputResult(ToolResult):
@@ -231,7 +236,7 @@ class BashTool(Tool):
     """
 
     def __init__(self, workspace_dir: str | None = None, allow_full_access: bool = True, non_interactive: bool = False,
-                 sandbox_venv_path: str | None = None):
+                 sandbox_venv_path: str | None = None, permission_engine: PermissionEngine | None = None):
         """Initialize BashTool with OS-specific shell detection.
 
         Args:
@@ -242,12 +247,14 @@ class BashTool(Tool):
             non_interactive: If True, dangerous commands are rejected without prompting.
             sandbox_venv_path: If set, prepend venv bin to PATH and set VIRTUAL_ENV
                                so subprocess commands use the sandbox Python.
+            permission_engine: If provided, use capability-based permission checks.
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
         self.workspace_dir = workspace_dir
         self.allow_full_access = allow_full_access
         self.non_interactive = non_interactive
+        self._perm = permission_engine
         self._subprocess_env = None
         if sandbox_venv_path:
             self._subprocess_env = os.environ.copy()
@@ -378,8 +385,56 @@ Examples:
                     for target in extract_rm_targets(command, self.workspace_dir):
                         backup_file(target)
 
-            # 2. Scope control (only when allow_full_access is False)
-            if not self.allow_full_access:
+            # 2. Scope control (capability-based or legacy)
+            if self._perm:
+                escape_reason = detect_scope_escape(command, workspace_dir=self.workspace_dir)
+                if escape_reason:
+                    from .permissions import FILESYSTEM_READ, FILESYSTEM_WRITE, extract_absolute_paths
+
+                    abs_paths = extract_absolute_paths(command)
+
+                    # CONSERVATIVE: if no absolute paths extracted, we cannot verify safety.
+                    # deny the command rather than silently allowing it.
+                    # This covers: relative paths, $HOME/~, shell expansion, embedded
+                    # interpreters (python -c), heredocs, variable-based paths (phase 1 limit).
+                    if not abs_paths:
+                        return BashOutputResult(
+                            success=False,
+                            error=(
+                                f"Command blocked (phase 1 permission engine): {escape_reason}. "
+                                f"Cannot verify path permissions for this command pattern. "
+                                f"Use absolute paths or request broader access."
+                            ),
+                            stdout="",
+                            stderr=f"Blocked: {escape_reason}",
+                            exit_code=1,
+                        )
+
+                    # Determine if this is a write operation based on command patterns
+                    _write_ops = re.search(
+                        r"\b(cp|mv|rsync|tee|dd|install|scp|tar\s+.*-x|sed\s+-i)\b"
+                        r"|[>]{1,2}(?!/dev/null)",  # redirect but not >/dev/null
+                        command,
+                    )
+
+                    for p in abs_paths:
+                        # Use write capability for write-looking commands, read otherwise
+                        cap = FILESYSTEM_WRITE if _write_ops else FILESYSTEM_READ
+                        decision = self._perm.check(
+                            capability=cap,
+                            resource={"path": p},
+                            tool_name="bash",
+                        )
+                        if not decision.allowed:
+                            return BashOutputResult(
+                                success=False,
+                                error=decision.reason,
+                                stdout="",
+                                stderr=decision.reason or "Permission denied",
+                                exit_code=1,
+                                permission_request=decision.permission_request,
+                            )
+            elif not self.allow_full_access:
                 escape_reason = detect_scope_escape(command, workspace_dir=self.workspace_dir)
                 if escape_reason:
                     return BashOutputResult(

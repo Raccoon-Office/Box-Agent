@@ -1,12 +1,17 @@
 """File operation tools."""
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import tiktoken
 
 from .base import Tool, ToolResult
 from .safety import backup_file, validate_path_in_workspace
+
+if TYPE_CHECKING:
+    from .permissions import PermissionEngine
 
 
 def truncate_text_by_tokens(
@@ -64,15 +69,18 @@ def truncate_text_by_tokens(
 class ReadTool(Tool):
     """Read file content."""
 
-    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True):
+    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True,
+                 permission_engine: PermissionEngine | None = None):
         """Initialize ReadTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
             allow_full_access: If False, restrict reads to workspace directory
+            permission_engine: If provided, use capability-based permission checks
         """
         self.workspace_dir = Path(workspace_dir).absolute()
         self.allow_full_access = allow_full_access
+        self._perm = permission_engine
 
     @property
     def name(self) -> str:
@@ -117,7 +125,19 @@ class ReadTool(Tool):
                 file_path = self.workspace_dir / file_path
 
             # Path validation
-            if not self.allow_full_access:
+            if self._perm:
+                decision = self._perm.check(
+                    capability="filesystem.read",
+                    resource={"path": str(file_path)},
+                    tool_name=self.name,
+                )
+                if not decision.allowed:
+                    return ToolResult(
+                        success=False,
+                        error=decision.reason,
+                        permission_request=decision.permission_request,
+                    )
+            elif not self.allow_full_access:
                 error = validate_path_in_workspace(file_path, self.workspace_dir)
                 if error:
                     return ToolResult(success=False, content="", error=error)
@@ -171,15 +191,18 @@ class ReadTool(Tool):
 class WriteTool(Tool):
     """Write content to a file."""
 
-    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True):
+    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True,
+                 permission_engine: PermissionEngine | None = None):
         """Initialize WriteTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
             allow_full_access: If False, restrict writes to workspace directory
+            permission_engine: If provided, use capability-based permission checks
         """
         self.workspace_dir = Path(workspace_dir).absolute()
         self.allow_full_access = allow_full_access
+        self._perm = permission_engine
 
     @property
     def name(self) -> str:
@@ -219,7 +242,19 @@ class WriteTool(Tool):
                 file_path = self.workspace_dir / file_path
 
             # Path validation
-            if not self.allow_full_access:
+            if self._perm:
+                decision = self._perm.check(
+                    capability="filesystem.write",
+                    resource={"path": str(file_path)},
+                    tool_name=self.name,
+                )
+                if not decision.allowed:
+                    return ToolResult(
+                        success=False,
+                        error=decision.reason,
+                        permission_request=decision.permission_request,
+                    )
+            elif not self.allow_full_access:
                 error = validate_path_in_workspace(file_path, self.workspace_dir)
                 if error:
                     return ToolResult(success=False, content="", error=error)
@@ -239,15 +274,18 @@ class WriteTool(Tool):
 class EditTool(Tool):
     """Edit file by replacing text."""
 
-    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True):
+    def __init__(self, workspace_dir: str = ".", allow_full_access: bool = True,
+                 permission_engine: PermissionEngine | None = None):
         """Initialize EditTool with workspace directory.
 
         Args:
             workspace_dir: Base directory for resolving relative paths
             allow_full_access: If False, restrict edits to workspace directory
+            permission_engine: If provided, use capability-based permission checks
         """
         self.workspace_dir = Path(workspace_dir).absolute()
         self.allow_full_access = allow_full_access
+        self._perm = permission_engine
 
     @property
     def name(self) -> str:
@@ -291,7 +329,19 @@ class EditTool(Tool):
                 file_path = self.workspace_dir / file_path
 
             # Path validation
-            if not self.allow_full_access:
+            if self._perm:
+                decision = self._perm.check(
+                    capability="filesystem.write",
+                    resource={"path": str(file_path)},
+                    tool_name=self.name,
+                )
+                if not decision.allowed:
+                    return ToolResult(
+                        success=False,
+                        error=decision.reason,
+                        permission_request=decision.permission_request,
+                    )
+            elif not self.allow_full_access:
                 error = validate_path_in_workspace(file_path, self.workspace_dir)
                 if error:
                     return ToolResult(success=False, content="", error=error)

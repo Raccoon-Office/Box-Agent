@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class RetryConfig(BaseModel):
@@ -77,12 +77,50 @@ class ToolsConfig(BaseModel):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
 
+class FilesystemPermissions(BaseModel):
+    """Filesystem capability permissions.
+
+    Canonical field is ``scope`` (maps to officev3 ``fileAccessScope``).
+    Read and write share the same scope — no protocol-level read/write split.
+    """
+
+    scope: str = "session_workspace"
+
+
+class MemoryPermissions(BaseModel):
+    """Memory capability permissions."""
+
+    openclaw_import: bool = True
+
+
+class Officev3Permissions(BaseModel):
+    """Officev3 permission settings."""
+
+    filesystem: FilesystemPermissions = Field(default_factory=FilesystemPermissions)
+    memory: MemoryPermissions = Field(default_factory=MemoryPermissions)
+
+
+class Officev3Paths(BaseModel):
+    """Officev3 path settings."""
+
+    session_workspace_root: str = ""
+
+
+class Officev3Config(BaseModel):
+    """Officev3 configuration block."""
+
+    _present: bool = PrivateAttr(default=False)  # True if officev3 block exists in config.yaml
+    permissions: Officev3Permissions = Field(default_factory=Officev3Permissions)
+    paths: Officev3Paths = Field(default_factory=Officev3Paths)
+
+
 class Config(BaseModel):
     """Main configuration class"""
 
     llm: LLMConfig
     agent: AgentConfig
     tools: ToolsConfig
+    officev3: Officev3Config = Field(default_factory=Officev3Config)
 
     @classmethod
     def load(cls) -> "Config":
@@ -176,10 +214,38 @@ class Config(BaseModel):
             mcp=mcp_config,
         )
 
+        # Parse officev3 configuration
+        officev3_data = data.get("officev3")
+        officev3_config = Officev3Config()
+        if officev3_data is not None and isinstance(officev3_data, dict):
+            officev3_config._present = True
+            perms_data = officev3_data.get("permissions", {})
+            paths_data = officev3_data.get("paths", {})
+
+            fs_data = perms_data.get("filesystem", {}) if isinstance(perms_data, dict) else {}
+            mem_data = perms_data.get("memory", {}) if isinstance(perms_data, dict) else {}
+
+            fs_perms = FilesystemPermissions(
+                scope=fs_data.get("scope", "session_workspace"),
+            ) if isinstance(fs_data, dict) else FilesystemPermissions()
+
+            mem_perms = MemoryPermissions(
+                openclaw_import=mem_data.get("openclaw_import", True),
+            ) if isinstance(mem_data, dict) else MemoryPermissions()
+
+            officev3_config = Officev3Config(
+                permissions=Officev3Permissions(filesystem=fs_perms, memory=mem_perms),
+                paths=Officev3Paths(
+                    session_workspace_root=paths_data.get("session_workspace_root", "") if isinstance(paths_data, dict) else "",
+                ),
+            )
+            officev3_config._present = True
+
         return cls(
             llm=llm_config,
             agent=agent_config,
             tools=tools_config,
+            officev3=officev3_config,
         )
 
     @staticmethod
