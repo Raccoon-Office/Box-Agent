@@ -255,19 +255,44 @@ class PermissionEngine:
 
 
 _ABS_PATH_RE = re.compile(r'(?:^|\s|["\'])(\/(?:[^\s"\'\\]|\\.)+)')
+_TILDE_PATH_RE = re.compile(r'(?:^|\s|["\';=])(~(?:/[^\s"\'\\;|&]*)?)')
+_HOME_VAR_RE = re.compile(r'(\$HOME(?:/[^\s"\'\\;|&]*)?)')
 
 
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute paths from a shell command (best-effort).
 
-    Does NOT handle shell expansion ($HOME, ~), heredocs, or embedded
-    interpreters. Phase 1 limitation.
+    Handles literal absolute paths (/...), tilde paths (~/...), and
+    $HOME paths ($HOME/...). Tilde and $HOME are expanded to the real
+    home directory. Deduplicates results.
     """
+    seen: set[str] = set()
     paths: list[str] = []
+
     for m in _ABS_PATH_RE.finditer(command):
         p = m.group(1).rstrip(";")
-        # Skip common non-path patterns
         if p in ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"):
             continue
-        paths.append(p)
+        if p not in seen:
+            seen.add(p)
+            paths.append(p)
+
+    home = str(Path.home())
+
+    for m in _TILDE_PATH_RE.finditer(command):
+        raw = m.group(1)  # e.g. "~" or "~/Downloads"
+        suffix = raw[1:]  # strip leading ~
+        expanded = home + suffix
+        if expanded not in seen:
+            seen.add(expanded)
+            paths.append(expanded)
+
+    for m in _HOME_VAR_RE.finditer(command):
+        raw = m.group(1)  # e.g. "$HOME" or "$HOME/file.txt"
+        suffix = raw[5:]  # strip leading $HOME
+        expanded = home + suffix
+        if expanded not in seen:
+            seen.add(expanded)
+            paths.append(expanded)
+
     return paths

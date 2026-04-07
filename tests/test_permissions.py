@@ -281,16 +281,59 @@ class TestExtractAbsolutePaths:
         assert extract_absolute_paths("cat ./foo.txt ../bar.txt") == []
 
     def test_shell_expansion_not_extracted(self):
-        """$HOME and ~ are NOT extracted — phase 1 limitation."""
+        """~ paths are expanded to real home directory."""
         result = extract_absolute_paths("cat ~/Desktop/file.txt")
-        for p in result:
-            assert not p.startswith("~")
+        home = str(Path.home())
+        assert f"{home}/Desktop/file.txt" in result
 
     def test_home_var_not_extracted(self):
-        """$HOME expansion not extracted."""
+        """$HOME paths are expanded to real home directory."""
         result = extract_absolute_paths("cat $HOME/file.txt")
+        home = str(Path.home())
+        assert f"{home}/file.txt" in result
+
+    def test_tilde_path_extracted(self):
+        """ls ~/Downloads expands to home/Downloads."""
+        home = str(Path.home())
+        result = extract_absolute_paths("ls ~/Downloads")
+        assert f"{home}/Downloads" in result
+
+    def test_bare_tilde_extracted(self):
+        """ls ~ expands to home directory."""
+        home = str(Path.home())
+        result = extract_absolute_paths("ls ~")
+        assert home in result
+
+    def test_home_var_path_extracted(self):
+        """cat $HOME/file.txt expands to home/file.txt."""
+        home = str(Path.home())
+        result = extract_absolute_paths("cat $HOME/file.txt")
+        assert f"{home}/file.txt" in result
+
+    def test_bare_home_var_extracted(self):
+        """echo $HOME expands to home directory."""
+        home = str(Path.home())
+        result = extract_absolute_paths("echo $HOME")
+        assert home in result
+
+    def test_tilde_not_in_word(self):
+        """file~bak should not be matched as a tilde path."""
+        result = extract_absolute_paths("cat file~bak")
+        home = str(Path.home())
         for p in result:
-            assert "$" not in p
+            assert not p.startswith(home)
+
+    def test_mixed_paths(self):
+        """Command with both absolute and tilde paths returns both."""
+        home = str(Path.home())
+        result = extract_absolute_paths("cp /etc/hosts ~/backup/hosts")
+        assert "/etc/hosts" in result
+        assert f"{home}/backup/hosts" in result
+
+    def test_deduplication(self):
+        """Duplicate paths are deduplicated."""
+        result = extract_absolute_paths("cat /etc/hosts /etc/hosts")
+        assert result.count("/etc/hosts") == 1
 
 
 # ── Config YAML parsing ─────────────────────────────────────
@@ -518,15 +561,34 @@ class TestBashPermissionPhase1:
         assert result.success is False
 
     async def test_tilde_path_conservatively_denied(self, workspace: Path):
-        """Command with cd ~ (no extractable absolute path) is conservatively denied.
+        """Command with ~ triggers permission engine with proper permission_request.
 
-        Note: detect_scope_escape only catches 'cd ~', not 'cat ~' — a known
-        phase 1 limitation. We test 'cd ~' which IS caught.
+        Now that ~ is expanded, commands like 'cd ~' and 'ls ~' are properly
+        handled by the permission engine with extractable paths.
         """
         eng = self._make_engine(workspace)
         result = await self._run_bash("cd ~ && ls", eng)
         assert result.success is False
-        assert "phase 1" in result.error.lower() or "cannot verify" in result.error.lower()
+
+    async def test_tilde_path_denied_with_permission_request(self, workspace: Path):
+        """ls ~/Downloads triggers permission engine, returns permission_request."""
+        eng = self._make_engine(workspace)
+        result = await self._run_bash("ls ~/Downloads", eng)
+        assert result.success is False
+        assert result.permission_request is not None
+        assert result.permission_request["type"] == "permission_request"
+        assert result.permission_request["scope"] == "filesystem"
+        assert result.permission_request["requested_scope"] == "user_home"
+
+    async def test_home_var_denied_with_permission_request(self, workspace: Path):
+        """cat $HOME/file triggers permission engine, returns permission_request."""
+        eng = self._make_engine(workspace)
+        result = await self._run_bash("cat $HOME/file.txt", eng)
+        assert result.success is False
+        assert result.permission_request is not None
+        assert result.permission_request["type"] == "permission_request"
+        assert result.permission_request["scope"] == "filesystem"
+        assert result.permission_request["requested_scope"] == "user_home"
 
     async def test_write_command_uses_write_capability(self, workspace: Path):
         """cp/mv-like commands outside workspace are denied using write capability."""

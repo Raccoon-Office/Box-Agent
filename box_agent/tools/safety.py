@@ -43,6 +43,9 @@ _ESCAPE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'(?:^|\s|;|&&|\|\|)(?:cat|less|head|tail|grep|awk|sed)\s+/'), "read from absolute path"),
     (re.compile(r'(?:^|\s|;|&&|\|\|)(?:cp|mv|ln)\s+.*/'), "file operation with absolute path"),
     (re.compile(r'>\s*/'), "redirect to absolute path"),
+    # Home directory references: ~ and $HOME anywhere as path tokens
+    (re.compile(r'(?<!\w)~(?=/|\s|;|"|\'|&|\||$)'), "command references home directory via ~"),
+    (re.compile(r'\$HOME\b'), "command references home directory via $HOME"),
 ]
 
 
@@ -84,19 +87,33 @@ def detect_scope_escape(command: str, workspace_dir: str | None = None) -> str |
             # If workspace_dir is set, check whether the absolute path
             # is inside the workspace — if so, it's not an escape.
             if workspace_dir:
-                # Extract the absolute path from the command.
-                # Strategy: find the first absolute path (starting with /)
-                # in the matched region and onwards.
+                # Extract the path token from the command for workspace check.
                 path_token = None
                 matched_text = command[match.start():]
+
+                # Try absolute path first
                 abs_match = re.search(r'(/[^\s;|&]*)', matched_text)
                 if abs_match:
                     path_token = abs_match.group(1)
+
                 # For "cd" specifically, grab the argument directly
                 if reason.startswith("cd"):
                     cd_match = re.search(r'\bcd\s+([^\s;|&]+)', command)
                     if cd_match:
                         path_token = cd_match.group(1)
+
+                # For ~ and $HOME patterns, extract and expand the path
+                if path_token is None or path_token.startswith("~") or "$HOME" in (path_token or ""):
+                    home_str = str(Path.home())
+                    tilde_match = re.search(r'(?<!\w)(~(?:/[^\s;|&"\']*)?)', matched_text)
+                    home_var_match = re.search(r'(\$HOME(?:/[^\s;|&"\']*)?)', matched_text)
+                    if tilde_match:
+                        suffix = tilde_match.group(1)[1:]  # strip leading ~
+                        path_token = home_str + suffix
+                    elif home_var_match:
+                        suffix = home_var_match.group(1)[5:]  # strip leading $HOME
+                        path_token = home_str + suffix
+
                 if path_token:
                     try:
                         resolved = str(Path(path_token).resolve())
