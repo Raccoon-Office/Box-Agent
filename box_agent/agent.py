@@ -86,6 +86,7 @@ class Agent:
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         self.cancel_event: Optional[asyncio.Event] = None
+        self._permission_negotiator = None  # set by CLI/ACP when permission engine is active
 
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +135,7 @@ class Agent:
             is_cancelled=self._check_cancelled,
             logger=self.logger,
             workspace_dir=str(self.workspace_dir),
+            permission_negotiator=self._permission_negotiator,
         ):
             # Track token usage on Agent instance for backward compat
             if isinstance(event, TokenUsageEvent):

@@ -95,9 +95,15 @@ class PermissionEngine:
     and a workspace_dir. Never mutated in place.
     """
 
-    def __init__(self, policy: CapabilityPolicy, workspace_dir: Path):
+    def __init__(
+        self,
+        policy: CapabilityPolicy,
+        workspace_dir: Path,
+        grant_store: GrantStore | None = None,
+    ):
         self._policy = policy
         self._workspace_dir = workspace_dir.resolve()
+        self._grant_store = grant_store
         if policy.session_workspace_root:
             self._session_workspace_root = Path(policy.session_workspace_root).resolve()
         else:
@@ -144,6 +150,11 @@ class PermissionEngine:
     def _check_filesystem(
         self, path: Path, scope: str, operation: str
     ) -> PermissionDecision:
+        # Elevate scope if grant store has a broader grant
+        if self._grant_store and scope == "session_workspace":
+            if self._grant_store.has_grant("filesystem", "user_home"):
+                scope = "user_home"
+
         resolved = self._resolve_for_check(path)
 
         if self._path_allowed_by_scope(resolved, scope):
@@ -237,6 +248,9 @@ class PermissionEngine:
     def _check_memory_openclaw(self) -> PermissionDecision:
         if self._policy.openclaw_import_enabled:
             return PermissionDecision(allowed=True)
+        # Check grant store override
+        if self._grant_store and self._grant_store.has_grant("memory", "openclaw_import"):
+            return PermissionDecision(allowed=True)
         return PermissionDecision(
             allowed=False,
             reason="OpenClaw memory import is disabled by officev3 policy.",
@@ -249,6 +263,34 @@ class PermissionEngine:
                 "persistent_supported": True,
             },
         )
+
+class GrantStore:
+    """Tracks in-band permission grants at prompt and session scope.
+
+    Keys are ``(scope, requested_scope)`` tuples, e.g.
+    ``("filesystem", "user_home")``.  Prompt grants are cleared between
+    prompts; session grants persist for the ACP session lifetime.
+    """
+
+    def __init__(self) -> None:
+        self._session_grants: set[tuple[str, str]] = set()
+        self._prompt_grants: set[tuple[str, str]] = set()
+
+    def has_grant(self, scope: str, requested_scope: str) -> bool:
+        key = (scope, requested_scope)
+        return key in self._session_grants or key in self._prompt_grants
+
+    def add_grant(self, scope: str, requested_scope: str, grant_scope: str) -> None:
+        """Record a grant.  *grant_scope* is ``"prompt"`` or ``"session"``."""
+        key = (scope, requested_scope)
+        if grant_scope == "session":
+            self._session_grants.add(key)
+        else:
+            self._prompt_grants.add(key)
+
+    def clear_prompt_grants(self) -> None:
+        """Called at the start of each prompt to reset prompt-level grants."""
+        self._prompt_grants.clear()
 
 
 # ── Bash helper ──

@@ -71,7 +71,6 @@ from box_agent.events import (
     DoneEvent,
     ErrorEvent,
     PPTProgressEvent,
-    PermissionRequestEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -84,7 +83,7 @@ from box_agent.llm import LLMClient
 from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.schema import Message
-from box_agent.tools.permissions import CapabilityPolicy, PermissionEngine
+from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
 
 from .debug_logger import acp_logger as log
 
@@ -119,6 +118,7 @@ class SessionState:
     sandbox_workspace: str | None = None  # stable sandbox workspace path for this session
     session_mode: str | None = None  # e.g. "data_analysis" for /analysis pages
     permission_engine: PermissionEngine | None = None
+    grant_store: GrantStore | None = None  # in-band permission grants
 
 
 class BoxACPAgent:
@@ -168,17 +168,28 @@ class BoxACPAgent:
 
         # Build PermissionEngine via policy composition if officev3 block is configured
         perm_engine = None
+        grant_store = None
         if self._has_officev3_policy():
             try:
                 base_policy = CapabilityPolicy.from_config(self._config)
 
-                # Apply session-level overrides to produce effective policy
-                effective_policy = base_policy
+                # officev3_permissions_override is DEPRECATED — kept for parsing only.
+                # In-band permission/request negotiation handles escalation now.
                 permission_overrides = meta.get("officev3_permissions_override") if isinstance(meta, dict) else None
-                if permission_overrides and isinstance(permission_overrides, dict):
-                    effective_policy = base_policy.with_overrides(permission_overrides)
+                if permission_overrides:
+                    log.warn(
+                        "session/permissions",
+                        session_id=session_id,
+                        message=(
+                            "officev3_permissions_override is deprecated and has no effect; "
+                            "use in-band permission/request negotiation instead"
+                        ),
+                    )
+                # Always use the base policy — overrides no longer applied
+                effective_policy = base_policy
 
-                perm_engine = PermissionEngine(effective_policy, workspace)
+                grant_store = GrantStore()
+                perm_engine = PermissionEngine(effective_policy, workspace, grant_store=grant_store)
                 log.info("session/permissions", session_id=session_id,
                          message=f"PermissionEngine created: scope={effective_policy.filesystem_scope}, "
                                  f"openclaw={effective_policy.openclaw_import_enabled}")
@@ -188,7 +199,8 @@ class BoxACPAgent:
                 fallback_policy = CapabilityPolicy(
                     session_workspace_root=str(workspace),
                 )
-                perm_engine = PermissionEngine(fallback_policy, workspace)
+                grant_store = GrantStore()
+                perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
 
         # Build per-session system prompt with conditional mode injection
         system_prompt = self._build_session_prompt(session_mode)
@@ -232,7 +244,7 @@ class BoxACPAgent:
         sandbox_ws = str(workspace / "sandbox")
         self._sessions[session_id] = SessionState(
             agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode,
-            permission_engine=perm_engine,
+            permission_engine=perm_engine, grant_store=grant_store,
         )
 
         tool_names = [t.name for t in tools]
@@ -335,6 +347,19 @@ class BoxACPAgent:
         """Consume the shared execution core and translate events to ACP updates."""
         agent = state.agent
 
+        # Clear prompt-level grants at the start of each prompt
+        if state.grant_store:
+            state.grant_store.clear_prompt_grants()
+
+        # Build permission negotiator if engine is available
+        negotiator = None
+        if state.permission_engine and state.grant_store:
+            negotiator = _PermissionNegotiator(
+                conn=self._conn,
+                session_id=session_id,
+                grant_store=state.grant_store,
+            )
+
         async for event in run_agent_loop(
             llm=agent.llm,
             messages=agent.messages,
@@ -344,6 +369,7 @@ class BoxACPAgent:
             is_cancelled=lambda: state.cancelled,
             logger=None,  # ACP uses its own logging via the connection
             workspace_dir=str(agent.workspace_dir),
+            permission_negotiator=negotiator,
         ):
             try:
                 match event:
@@ -474,27 +500,11 @@ class BoxACPAgent:
                         except Exception as exc:
                             log.exception("ppt/send_error", exc, session_id=session_id, tool_call_id=tid)
 
-                    case PermissionRequestEvent() as evt:
-                        payload = {
-                            "type": "permission_request",
-                            "scope": evt.scope,
-                            "requested_scope": evt.requested_scope,
-                            "path": evt.path,
-                            "reason": evt.reason,
-                            "temporary_supported": evt.temporary_supported,
-                            "persistent_supported": evt.persistent_supported,
-                        }
-                        log.info("permission/request", session_id=session_id, tool_call_id=evt.tool_call_id, payload=payload)
-                        try:
-                            await self._send(
-                                session_id,
-                                update_tool_call(evt.tool_call_id, raw_output=payload),
-                            )
-                        except Exception as exc:
-                            log.exception("permission/send_error", exc, session_id=session_id, tool_call_id=evt.tool_call_id)
+                    # PermissionRequestEvent: handled inline in core.py via negotiator.
+                    # Falls through to case _: pass (no ACP notification sent).
 
                     case _:
-                        pass  # StepStart, SummarizationEvent, etc.
+                        pass  # StepStart, SummarizationEvent, PermissionRequestEvent, etc.
 
             except Exception as exc:
                 log.exception("event/error", exc, session_id=session_id, event=type(event).__name__)
@@ -504,6 +514,119 @@ class BoxACPAgent:
 
     async def _send(self, session_id: str, update: Any) -> None:
         await self._conn.sessionUpdate(session_notification(session_id, update))
+
+
+class _PermissionNegotiator:
+    """In-band permission negotiation via ACP ``session/request_permission`` reverse RPC.
+
+    Wraps the ACP ``AgentSideConnection.requestPermission()`` call with:
+    - Grant-table deduplication (same scope only asked once per prompt)
+    - 120-second timeout (timeout treated as denial)
+    - Grant-scope mapping: optionId → "prompt" or "session"
+    """
+
+    _OPTION_TO_SCOPE: dict[str, str] = {
+        "approve": "prompt",
+        "approve_session": "session",
+    }
+
+    def __init__(
+        self,
+        conn: AgentSideConnection,
+        session_id: str,
+        grant_store: GrantStore,
+    ) -> None:
+        self._conn = conn
+        self._session_id = session_id
+        self._store = grant_store
+
+    async def negotiate(self, permission_request: dict) -> bool:
+        """Negotiate a permission request.  Returns ``True`` if granted."""
+        scope = permission_request.get("scope", "")
+        requested_scope = permission_request.get("requested_scope", "")
+
+        # Grant-table dedup: already granted in this prompt or session?
+        if self._store.has_grant(scope, requested_scope):
+            log.info(
+                "permission/grant_hit",
+                scope=scope,
+                requested_scope=requested_scope,
+                message="Grant table hit — skipping RPC",
+            )
+            return True
+
+        # Build ACP RequestPermissionRequest
+        from acp.schema import (
+            AllowedOutcome,
+            PermissionOption,
+            RequestPermissionRequest,
+            ToolCall,
+        )
+
+        path_hint = permission_request.get("path", "")
+        reason = permission_request.get("reason", "")
+        description = reason + (f": {path_hint}" if path_hint else "")
+        tool_call = ToolCall(
+            toolCallId=f"perm-{scope}-{requested_scope}",
+            rawInput=permission_request,
+        )
+        options = [
+            PermissionOption(optionId="approve", name="仅本次允许", kind="allow_once"),
+            PermissionOption(optionId="approve_session", name="始终允许", kind="allow_always"),
+            PermissionOption(optionId="reject", name="拒绝", kind="reject_once"),
+        ]
+        request = RequestPermissionRequest(
+            sessionId=self._session_id,
+            toolCall=tool_call,
+            options=options,
+        )
+
+        log.info(
+            "permission/request",
+            scope=scope,
+            requested_scope=requested_scope,
+            description=description,
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self._conn.requestPermission(request),
+                timeout=120.0,
+            )
+        except asyncio.TimeoutError:
+            log.warn(
+                "permission/timeout",
+                scope=scope,
+                requested_scope=requested_scope,
+                message="Timed out waiting for user decision — treating as denial",
+            )
+            return False
+        except Exception as exc:
+            log.warn(
+                "permission/error",
+                scope=scope,
+                requested_scope=requested_scope,
+                message=f"requestPermission failed: {exc}",
+            )
+            return False
+
+        if isinstance(response.outcome, AllowedOutcome):
+            grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId, "prompt")
+            self._store.add_grant(scope, requested_scope, grant_scope)
+            log.info(
+                "permission/granted",
+                scope=scope,
+                requested_scope=requested_scope,
+                grant_scope=grant_scope,
+            )
+            return True
+
+        log.info(
+            "permission/denied",
+            scope=scope,
+            requested_scope=requested_scope,
+        )
+        return False
 
 
 async def run_acp_server(config: Config | None = None) -> None:

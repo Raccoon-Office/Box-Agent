@@ -754,12 +754,23 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     # 4. Add workspace-dependent tools
     non_interactive = task is not None
     allow_full_access = config.tools.allow_full_access
+
+    # Build PermissionEngine + GrantStore for CLI (parity with ACP)
+    perm_engine = None
+    grant_store = None
+    if not allow_full_access:
+        from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
+        grant_store = GrantStore()
+        policy = CapabilityPolicy(session_workspace_root=str(workspace_dir))
+        perm_engine = PermissionEngine(policy, workspace_dir, grant_store=grant_store)
+
     add_workspace_tools(
         tools, config, workspace_dir,
         sandbox_mode=sandbox_mode,
         allow_full_access=allow_full_access,
         non_interactive=non_interactive,
         llm=llm_client,
+        permission_engine=perm_engine,
     )
 
     if not allow_full_access:
@@ -835,6 +846,11 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
     )
+
+    # Wire CLI permission negotiator (parity with ACP in-band negotiation)
+    if grant_store is not None and not non_interactive:
+        from box_agent.cli_permissions import CLIPermissionNegotiator
+        agent._permission_negotiator = CLIPermissionNegotiator(grant_store)
 
     # 8. Display welcome information
     if not task:

@@ -17,7 +17,7 @@ import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable
 
 import tiktoken
 
@@ -374,6 +374,7 @@ async def run_agent_loop(
     is_cancelled: CancelChecker | None = None,
     logger: AgentLogger | None = None,
     workspace_dir: str | None = None,
+    permission_negotiator: Any | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -390,6 +391,12 @@ async def run_agent_loop(
         is_cancelled: Optional callable — return ``True`` to stop.
         logger: Optional ``AgentLogger`` for file-based logging.
         workspace_dir: Workspace directory for artifact detection.
+        permission_negotiator: Optional negotiator (has async
+            ``negotiate(permission_request)`` method) for in-band
+            permission escalation.  When present, denied tool calls
+            with ``permission_request`` are negotiated with the host
+            and retried on grant.  When absent, ``PermissionRequestEvent``
+            is yielded for backward compatibility.
     """
     cancelled = is_cancelled or (lambda: False)
 
@@ -606,6 +613,30 @@ async def run_agent_loop(
                     result_error=result.error if not result.success else None,
                 )
 
+            # ── Permission negotiation + retry ──────────────
+            if not result.success and result.permission_request and permission_negotiator:
+                granted = await permission_negotiator.negotiate(result.permission_request)
+                if granted:
+                    try:
+                        result = await tools[fn_name].execute(**fn_args)
+                    except Exception as exc:
+                        detail = f"{type(exc).__name__}: {exc!s}"
+                        trace = traceback.format_exc()
+                        result = ToolResult(
+                            success=False,
+                            content="",
+                            error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
+                        )
+                    # Re-log after retry
+                    if logger:
+                        logger.log_tool_result(
+                            tool_name=fn_name,
+                            arguments=fn_args,
+                            result_success=result.success,
+                            result_content=result.content if result.success else None,
+                            result_error=result.error if not result.success else None,
+                        )
+
             yield ToolCallResult(
                 tool_call_id=tc_id,
                 tool_name=fn_name,
@@ -615,7 +646,8 @@ async def run_agent_loop(
             )
 
             # Emit permission request event if tool was denied with escalation info
-            if not result.success and result.permission_request:
+            # (only for legacy consumers without a negotiator)
+            if not result.success and result.permission_request and not permission_negotiator:
                 pr = {k: v for k, v in result.permission_request.items() if k != "type"}
                 yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
 
@@ -727,6 +759,29 @@ async def run_agent_loop(
                         result_error=result.error if not result.success else None,
                     )
 
+                # ── Permission negotiation + retry ──────────────
+                if not result.success and result.permission_request and permission_negotiator:
+                    granted = await permission_negotiator.negotiate(result.permission_request)
+                    if granted:
+                        try:
+                            result = await tools[fn_name].execute(**fn_args)
+                        except Exception as exc:
+                            detail = f"{type(exc).__name__}: {exc!s}"
+                            trace = traceback.format_exc()
+                            result = ToolResult(
+                                success=False,
+                                content="",
+                                error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
+                            )
+                        if logger:
+                            logger.log_tool_result(
+                                tool_name=fn_name,
+                                arguments=fn_args,
+                                result_success=result.success,
+                                result_content=result.content if result.success else None,
+                                result_error=result.error if not result.success else None,
+                            )
+
                 yield ToolCallResult(
                     tool_call_id=tc_id,
                     tool_name=fn_name,
@@ -736,7 +791,8 @@ async def run_agent_loop(
                 )
 
                 # Emit permission request event if tool was denied with escalation info
-                if not result.success and result.permission_request:
+                # (only for legacy consumers without a negotiator)
+                if not result.success and result.permission_request and not permission_negotiator:
                     pr = {k: v for k, v in result.permission_request.items() if k != "type"}
                     yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
 
