@@ -67,6 +67,7 @@ box-agent-acp
 - Agent workspace defaults to CWD; logs go to `~/.box-agent/log/`
 - `asyncio_mode = "auto"` in pytest config — async tests work without markers
 - Safety: dangerous commands require confirmation; workspace scope enforced by default; files auto-backed up before modification
+- Permission negotiation: in-band blocking flow for out-of-workspace access. `GrantStore` tracks grants at prompt/session scope; `PermissionEngine` consults grant store before policy check. `run_agent_loop()` accepts `permission_negotiator` — on tool denial with `permission_request`, negotiator is called and tool retried on grant. CLI uses interactive terminal prompt (`cli_permissions.py`, `termios`+`run_in_executor`); ACP uses `session/request_permission` reverse RPC (`_PermissionNegotiator` in `acp/__init__.py`, 120s timeout). `officev3_permissions_override` in `session/new._meta` is deprecated (parsed but ignored)
 - Artifact detection: two-layer approach — regex scans tool output for `[filename.ext]` references, workspace diff detects files created by any tool (including bash). Both emit `ArtifactEvent` with mime_type, size_bytes, and absolute path
 - LibreOffice (`soffice`) is a system dependency, NOT auto-installed. Excel export defaults to pandas + openpyxl. `recalc.py` gracefully handles missing soffice
 - Frozen/runtime mode: `IS_FROZEN` flag selects in-process kernel, skips venv creation, routes package installs through whitelist + `~/.box-agent/runtime-packages/`

@@ -101,7 +101,7 @@ model: "your-model"
 - **ACP Protocol**: Embed Box Agent in Electron apps, Zed Editor, or any ACP-compatible host via JSON-RPC over stdio
 - **Standalone Runtime**: PyInstaller binary bundles Python + all dependencies. No external Python needed — download and run
 - **Cross-session Memory**: Persistent memory lets the agent retain key information across conversations
-- **Safety Layer**: Dangerous command detection, workspace scope control, auto-backup before file modifications
+- **Safety Layer**: Dangerous command detection, workspace scope control, auto-backup before file modifications. Interactive permission negotiation for out-of-workspace access (CLI prompts user, ACP sends reverse RPC to host)
 - **Task Tracking**: Built-in todo tool for multi-step task decomposition and progress tracking
 
 ## Demos
