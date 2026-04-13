@@ -27,6 +27,25 @@ from .safety import (
 if TYPE_CHECKING:
     from .permissions import PermissionEngine
 
+# Shells whose syntax is POSIX-compatible (supports &&, ||, for/do/done, etc.)
+_POSIX_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "ash"})
+
+
+def _resolve_login_shell() -> str:
+    """Return a POSIX-compatible login shell path.
+
+    Uses ``$SHELL`` if it names a known POSIX shell **and** the path exists
+    and is executable; otherwise walks a fallback chain.  This avoids
+    failures from stale paths (Nix store, shell upgrades, devcontainers).
+    """
+    shell = os.environ.get("SHELL", "")
+    if shell and os.path.basename(shell) in _POSIX_SHELLS and os.access(shell, os.X_OK):
+        return shell
+    for fallback in ("/bin/bash", "/bin/sh"):
+        if os.access(fallback, os.X_OK):
+            return fallback
+    return "/bin/sh"  # last resort — always present on Unix
+
 
 class BashOutputResult(ToolResult):
     """Bash command execution result with separated stdout and stderr.
@@ -251,16 +270,58 @@ class BashTool(Tool):
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
+        # Unix: resolve login shell so subprocess inherits user's PATH.
+        # Only trust known POSIX-compatible shells; fall back to /bin/bash
+        # for fish, csh, and other non-POSIX shells whose syntax is
+        # incompatible with the commands the LLM generates.
+        if not self.is_windows:
+            self._login_shell = _resolve_login_shell()
         self.workspace_dir = workspace_dir
         self.allow_full_access = allow_full_access
         self.non_interactive = non_interactive
         self._perm = permission_engine
         self._subprocess_env = None
+        self._use_login_shell = True
         if sandbox_venv_path:
             self._subprocess_env = os.environ.copy()
             self._subprocess_env["VIRTUAL_ENV"] = sandbox_venv_path
             venv_bin = os.path.join(sandbox_venv_path, "bin")
             self._subprocess_env["PATH"] = venv_bin + os.pathsep + self._subprocess_env.get("PATH", "")
+            # Don't use login shell when sandbox venv is active — profile
+            # scripts (pyenv, asdf, conda) would override the venv PATH.
+            self._use_login_shell = False
+
+    async def _create_subprocess(
+        self, command: str, *, merge_stderr: bool = False,
+    ) -> asyncio.subprocess.Process:
+        """Create subprocess with platform-appropriate shell.
+
+        On Windows uses PowerShell; on Unix uses the user's login shell
+        (``$SHELL -l -c``) so that PATH from profile scripts is inherited.
+        When a sandbox venv is active, ``-l`` is omitted to keep the venv
+        PATH authoritative.
+        """
+        stderr = asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE
+        if self.is_windows:
+            return await asyncio.create_subprocess_exec(
+                "powershell.exe", "-NoProfile", "-Command", command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=stderr,
+                cwd=self.workspace_dir,
+                env=self._subprocess_env,
+            )
+        else:
+            args = [self._login_shell]
+            if self._use_login_shell:
+                args.append("-l")
+            args.extend(["-c", command])
+            return await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=stderr,
+                cwd=self.workspace_dir,
+                env=self._subprocess_env,
+            )
 
     @property
     def name(self) -> str:
@@ -457,35 +518,11 @@ Examples:
             elif timeout < 1:
                 timeout = 120
 
-            # Prepare shell-specific command execution
-            if self.is_windows:
-                # Windows: Use PowerShell with appropriate encoding
-                shell_cmd = ["powershell.exe", "-NoProfile", "-Command", command]
-            else:
-                # Unix/Linux/macOS: Use bash
-                shell_cmd = command
-
             if run_in_background:
                 # Background execution: Create isolated process
                 bash_id = str(uuid.uuid4())[:8]
 
-                # Start background process with combined stdout/stderr
-                if self.is_windows:
-                    process = await asyncio.create_subprocess_exec(
-                        *shell_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
-                        cwd=self.workspace_dir,
-                        env=self._subprocess_env,
-                    )
-                else:
-                    process = await asyncio.create_subprocess_shell(
-                        shell_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
-                        cwd=self.workspace_dir,
-                        env=self._subprocess_env,
-                    )
+                process = await self._create_subprocess(command, merge_stderr=True)
 
                 # Create background shell and add to manager
                 bg_shell = BackgroundShell(bash_id=bash_id, command=command, process=process, start_time=time.time())
@@ -509,22 +546,7 @@ Examples:
 
             else:
                 # Foreground execution: Create isolated process
-                if self.is_windows:
-                    process = await asyncio.create_subprocess_exec(
-                        *shell_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=self.workspace_dir,
-                        env=self._subprocess_env,
-                    )
-                else:
-                    process = await asyncio.create_subprocess_shell(
-                        shell_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=self.workspace_dir,
-                        env=self._subprocess_env,
-                    )
+                process = await self._create_subprocess(command, merge_stderr=False)
 
                 try:
                     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)

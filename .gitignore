@@ -58,3 +58,4 @@ docs/assets/backup/
 docs/assets/preview.html
 
 .agent_memory.json
+.omx/

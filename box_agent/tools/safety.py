@@ -48,6 +48,13 @@ _ESCAPE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'\$HOME\b'), "command references home directory via $HOME"),
 ]
 
+# /dev/ special files that are safe to redirect to / read from.
+# Only sinks and standard streams — NOT unbounded sources like
+# /dev/zero, /dev/random, /dev/urandom which can OOM via communicate().
+_DEV_ALLOWLIST = re.compile(
+    r"^/dev/(null|stdin|stdout|stderr)$"
+)
+
 
 def detect_dangerous_command(command: str) -> str | None:
     """Check if a shell command contains dangerous patterns.
@@ -62,6 +69,81 @@ def detect_dangerous_command(command: str) -> str | None:
         if pattern.search(command):
             return reason
     return None
+
+
+def _extract_path_token(command: str, match: re.Match, reason: str) -> str | None:
+    """Extract the path token from a scope-escape match.
+
+    Handles absolute paths, ``cd`` arguments, ``~`` and ``$HOME`` expansion.
+    Factored out so both the /dev/ allowlist and workspace check can use it
+    regardless of whether ``workspace_dir`` is set.
+    """
+    path_token = None
+    matched_text = command[match.start():]
+
+    # Try absolute path first
+    abs_match = re.search(r'(/[^\s;|&]*)', matched_text)
+    if abs_match:
+        path_token = abs_match.group(1)
+
+    # For "cd" specifically, grab the argument directly
+    if reason.startswith("cd"):
+        cd_match = re.search(r'\bcd\s+([^\s;|&]+)', command)
+        if cd_match:
+            path_token = cd_match.group(1)
+
+    # For ~ and $HOME patterns, extract and expand the path
+    if path_token is None or path_token.startswith("~") or "$HOME" in (path_token or ""):
+        home_str = str(Path.home())
+        tilde_match = re.search(r'(?<!\w)(~(?:/[^\s;|&"\']*)?)', matched_text)
+        home_var_match = re.search(r'(\$HOME(?:/[^\s;|&"\']*)?)', matched_text)
+        if tilde_match:
+            path_token = home_str + tilde_match.group(1)[1:]  # strip leading ~
+        elif home_var_match:
+            path_token = home_str + home_var_match.group(1)[5:]  # strip leading $HOME
+
+    return path_token
+
+
+# Regex to extract literal absolute paths from a command string.
+# Excludes URL schemes (://path) and protocol-relative (//host) patterns.
+_ABS_PATH_SCAN_RE = re.compile(r'(?<![:/])(/(?!/)[^\s;|&"\']+)')
+
+# URL pattern stripped before scanning for filesystem paths.
+_URL_RE = re.compile(r'https?://[^\s;|&"\']+')
+
+
+def _path_is_safe(path: str, workspace_dir: str | None) -> bool:
+    """Return True if *path* is a /dev/ special file or inside the workspace."""
+    if _DEV_ALLOWLIST.match(path):
+        return True
+    if workspace_dir:
+        try:
+            resolved = str(Path(path).resolve())
+            ws_resolved = str(Path(workspace_dir).resolve())
+            if resolved == ws_resolved or resolved.startswith(ws_resolved + "/"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _command_has_unsafe_paths(command: str, workspace_dir: str | None) -> bool:
+    """Scan *command* for absolute paths that are not /dev/ and not in workspace.
+
+    This is used as a secondary check when the primary matched path is
+    allowlisted — the command may still reference other unsafe paths
+    (e.g. ``cat /dev/null /etc/passwd``).
+
+    URLs (``https://...``) are stripped before scanning so their path
+    components are not misclassified as filesystem paths.
+    """
+    cleaned = _URL_RE.sub("", command)
+    for m in _ABS_PATH_SCAN_RE.finditer(cleaned):
+        p = m.group(1).rstrip(";")
+        if not _path_is_safe(p, workspace_dir):
+            return True
+    return False
 
 
 def detect_scope_escape(command: str, workspace_dir: str | None = None) -> str | None:
@@ -84,44 +166,17 @@ def detect_scope_escape(command: str, workspace_dir: str | None = None) -> str |
     for pattern, reason in _ESCAPE_PATTERNS:
         match = pattern.search(command)
         if match:
-            # If workspace_dir is set, check whether the absolute path
-            # is inside the workspace — if so, it's not an escape.
-            if workspace_dir:
-                # Extract the path token from the command for workspace check.
-                path_token = None
-                matched_text = command[match.start():]
+            path_token = _extract_path_token(command, match, reason)
 
-                # Try absolute path first
-                abs_match = re.search(r'(/[^\s;|&]*)', matched_text)
-                if abs_match:
-                    path_token = abs_match.group(1)
+            # If the primary matched path is safe (/dev/ or workspace),
+            # still scan the full command for other unsafe absolute paths
+            # before skipping — prevents bypass via mixed paths like
+            # ``cat /dev/null /etc/passwd``.
+            if path_token and _path_is_safe(path_token, workspace_dir):
+                if not _command_has_unsafe_paths(command, workspace_dir):
+                    continue  # all paths in command are safe
+                # Fall through — other unsafe paths exist
 
-                # For "cd" specifically, grab the argument directly
-                if reason.startswith("cd"):
-                    cd_match = re.search(r'\bcd\s+([^\s;|&]+)', command)
-                    if cd_match:
-                        path_token = cd_match.group(1)
-
-                # For ~ and $HOME patterns, extract and expand the path
-                if path_token is None or path_token.startswith("~") or "$HOME" in (path_token or ""):
-                    home_str = str(Path.home())
-                    tilde_match = re.search(r'(?<!\w)(~(?:/[^\s;|&"\']*)?)', matched_text)
-                    home_var_match = re.search(r'(\$HOME(?:/[^\s;|&"\']*)?)', matched_text)
-                    if tilde_match:
-                        suffix = tilde_match.group(1)[1:]  # strip leading ~
-                        path_token = home_str + suffix
-                    elif home_var_match:
-                        suffix = home_var_match.group(1)[5:]  # strip leading $HOME
-                        path_token = home_str + suffix
-
-                if path_token:
-                    try:
-                        resolved = str(Path(path_token).resolve())
-                        ws_resolved = str(Path(workspace_dir).resolve())
-                        if resolved == ws_resolved or resolved.startswith(ws_resolved + "/"):
-                            continue  # path is within workspace — not an escape
-                    except Exception:
-                        pass
             return reason
     return None
 

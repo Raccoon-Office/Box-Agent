@@ -602,6 +602,22 @@ class TestBashPermissionPhase1:
         result = await self._run_bash(f"ls {workspace}", eng)
         assert result.permission_request is None
 
+    async def test_stderr_redirect_not_blocked(self, workspace: Path):
+        """2>/dev/null should not trigger the permission engine."""
+        eng = self._make_engine(workspace)
+        result = await self._run_bash("echo test 2>/dev/null", eng)
+        assert result.success is True
+
+    async def test_dev_null_plus_outside_binary_still_denied(self, workspace: Path):
+        """Absolute binary path + 2>/dev/null: /dev/null is safe but /bin/echo is not.
+
+        The full-command scan detects /bin/echo as an unsafe path, so the
+        escape check correctly fires and the permission engine denies it.
+        """
+        eng = self._make_engine(workspace)
+        result = await self._run_bash("/bin/echo hello 2>/dev/null", eng)
+        assert result.success is False
+
 
 # ── ACP override integration ─────────────────────────────────
 

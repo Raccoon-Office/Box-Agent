@@ -82,6 +82,45 @@ class TestDetectScopeEscape:
     def test_redirect_to_absolute(self):
         assert detect_scope_escape("> /tmp/output.txt") is not None
 
+    def test_stderr_redirect_to_dev_null_allowed(self):
+        """2>/dev/null should NOT trigger scope escape."""
+        assert detect_scope_escape("node --version 2>/dev/null") is None
+        assert detect_scope_escape("cmd 2>/dev/null || echo fallback") is None
+        assert detect_scope_escape("cmd 2> /dev/null") is None
+
+    def test_dev_special_files_allowed(self):
+        """/dev/stdin, /dev/stdout, /dev/stderr should NOT trigger scope escape."""
+        assert detect_scope_escape("echo test > /dev/stderr") is None
+
+    def test_unbounded_dev_sources_blocked(self):
+        """/dev/zero, /dev/random, /dev/urandom are unbounded sources — must be blocked."""
+        assert detect_scope_escape("cat /dev/urandom | head -c 32") is not None
+        assert detect_scope_escape("cat /dev/zero | head -c 1024 > local.bin") is not None
+
+    def test_url_with_dev_null_redirect_allowed(self):
+        """URLs + 2>/dev/null should NOT trigger scope escape."""
+        assert detect_scope_escape("curl https://example.com/api 2>/dev/null") is None
+        assert detect_scope_escape("wget http://server.io/file.tar.gz 2>/dev/null") is None
+        assert detect_scope_escape("curl https://example.com 2>/dev/null || echo fail") is None
+
+    def test_redirect_to_real_absolute_path_still_blocked(self):
+        """Redirects to real absolute paths should still be caught."""
+        assert detect_scope_escape("> /tmp/output.txt") is not None
+        assert detect_scope_escape("echo data > /var/log/app.log") is not None
+
+    def test_mixed_dev_and_outside_path_blocked(self):
+        """Commands mixing /dev/ allowlisted path with an outside path must be caught."""
+        assert detect_scope_escape("cat /dev/null /etc/passwd") is not None
+        assert detect_scope_escape("echo x >/dev/null >/tmp/outside") is not None
+
+    def test_mixed_workspace_and_outside_path_blocked(self):
+        """Workspace path + outside path in the same command must be caught."""
+        assert detect_scope_escape("cat /ws/file /etc/passwd", workspace_dir="/ws") is not None
+
+    def test_all_paths_in_workspace_allowed(self):
+        """Multiple paths all inside workspace should be allowed."""
+        assert detect_scope_escape("cat /ws/a /ws/b", workspace_dir="/ws") is None
+
     def test_safe_commands(self):
         assert detect_scope_escape("ls -la") is None
         assert detect_scope_escape("cat local_file.txt") is None

@@ -1,6 +1,7 @@
 """Test cases for Bash Tool."""
 
 import asyncio
+import unittest.mock
 
 import pytest
 
@@ -270,3 +271,103 @@ async def test_timeout_validation():
     result = await bash_tool.execute(command="echo 'test'", timeout=0)
     assert result.success
     print("Timeout < 1 handled correctly")
+
+
+@pytest.mark.asyncio
+async def test_unix_login_shell_attribute():
+    """On Unix, BashTool should have _login_shell from $SHELL."""
+    import platform
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    bash_tool = BashTool()
+    assert hasattr(bash_tool, "_login_shell")
+    assert bash_tool._login_shell  # non-empty
+
+
+@pytest.mark.asyncio
+async def test_unix_login_shell_execution():
+    """On Unix, commands should run through the login shell."""
+    import os
+    import platform
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    bash_tool = BashTool()
+    # The login shell should provide a functional environment
+    result = await bash_tool.execute(command="echo ok")
+    assert result.success
+    assert "ok" in result.stdout
+
+
+def test_resolve_login_shell_posix():
+    """Known POSIX shells that exist should be used directly."""
+    import os
+    import platform
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    from box_agent.tools.bash_tool import _resolve_login_shell
+
+    # Only test shells that actually exist on this system
+    for shell in ("/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/sh", "/bin/dash"):
+        if os.access(shell, os.X_OK):
+            with unittest.mock.patch.dict(os.environ, {"SHELL": shell}):
+                assert _resolve_login_shell() == shell
+
+
+def test_resolve_login_shell_non_posix_falls_back():
+    """Non-POSIX shells (fish, csh, etc.) should fall back."""
+    import os
+    import platform
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    from box_agent.tools.bash_tool import _resolve_login_shell
+
+    for shell in ("/usr/bin/fish", "/bin/csh", "/bin/tcsh"):
+        with unittest.mock.patch.dict(os.environ, {"SHELL": shell}):
+            result = _resolve_login_shell()
+            assert result in ("/bin/bash", "/bin/sh")
+
+
+def test_resolve_login_shell_stale_path_falls_back():
+    """Stale/nonexistent $SHELL path should fall back to /bin/bash or /bin/sh."""
+    import os
+    import platform
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    from box_agent.tools.bash_tool import _resolve_login_shell
+
+    with unittest.mock.patch.dict(os.environ, {"SHELL": "/nix/store/xxx-bash-5.2/bin/bash"}):
+        result = _resolve_login_shell()
+        assert result in ("/bin/bash", "/bin/sh")
+
+
+def test_sandbox_venv_skips_login_shell():
+    """When sandbox_venv_path is set, login shell flag must be disabled."""
+    import platform
+    import tempfile
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    with tempfile.TemporaryDirectory() as venv_dir:
+        # Create a fake bin dir so the path looks real
+        import os
+        os.makedirs(os.path.join(venv_dir, "bin"), exist_ok=True)
+
+        tool = BashTool(sandbox_venv_path=venv_dir)
+        assert tool._use_login_shell is False
+        assert tool._subprocess_env is not None
+        assert tool._subprocess_env["VIRTUAL_ENV"] == venv_dir
+
+
+def test_no_sandbox_uses_login_shell():
+    """Without sandbox_venv_path, login shell flag should be enabled."""
+    import platform
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    tool = BashTool()
+    assert tool._use_login_shell is True
