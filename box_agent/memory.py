@@ -280,7 +280,7 @@ class MemoryExtractor:
 
         Args:
             messages: Current conversation messages.
-            trigger: ``"pre_summarize"`` | ``"step_interval"`` | ``"session_end"``
+            trigger: ``"pre_summarize"`` | ``"step_interval"`` | ``"loop_end"``
 
         Returns:
             True if extraction was actually performed.
@@ -296,7 +296,7 @@ class MemoryExtractor:
         elif trigger == "pre_summarize":
             if now - self._last_time < self._cooldown:
                 return False
-        # "session_end" always runs — no cooldown check
+        # "loop_end" always runs — no cooldown check
 
         try:
             await self._extract(messages)

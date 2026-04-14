@@ -127,7 +127,7 @@ async def test_extract_additions(mgr: MemoryManager):
         Message(role="assistant", content="Got it!"),
     ]
 
-    result = await extractor.maybe_extract(messages, "session_end")
+    result = await extractor.maybe_extract(messages, "loop_end")
     assert result is True
     auto = mgr.read_section("Auto Memory")
     assert "user name is Alice" in auto
@@ -150,7 +150,7 @@ async def test_extract_merges(mgr: MemoryManager):
         Message(role="assistant", content="Updated!"),
     ]
 
-    await extractor.maybe_extract(messages, "session_end")
+    await extractor.maybe_extract(messages, "loop_end")
     auto = mgr.read_section("Auto Memory")
     assert "Alice Zhang" in auto
     assert auto.count("Alice") == 1  # old entry replaced, not duplicated
@@ -164,7 +164,7 @@ async def test_extract_empty_output_no_change(mgr: MemoryManager):
     extractor = _make_extractor(mgr, '{"additions": [], "merges": []}')
     messages = [Message(role="user", content="What time is it?")]
 
-    await extractor.maybe_extract(messages, "session_end")
+    await extractor.maybe_extract(messages, "loop_end")
     assert mgr.read_section("Auto Memory") == "- existing fact"
 
 
@@ -179,7 +179,7 @@ async def test_extract_does_not_touch_manual(mgr: MemoryManager):
     )
     messages = [Message(role="user", content="Something interesting")]
 
-    await extractor.maybe_extract(messages, "session_end")
+    await extractor.maybe_extract(messages, "loop_end")
     assert mgr.read_section("Manual Memory") == "- user wrote this manually"
     assert "auto extracted fact" in mgr.read_section("Auto Memory")
 
@@ -196,8 +196,8 @@ async def test_cooldown_prevents_repeated_extraction(mgr: MemoryManager):
     )
     messages = [Message(role="user", content="test")]
 
-    # First call succeeds (session_end ignores cooldown)
-    assert await extractor.maybe_extract(messages, "session_end") is True
+    # First call succeeds (loop_end ignores cooldown)
+    assert await extractor.maybe_extract(messages, "loop_end") is True
 
     # Subsequent step_interval call is blocked by cooldown
     assert await extractor.maybe_extract(messages, "step_interval") is False
@@ -223,8 +223,8 @@ async def test_step_interval_counting(mgr: MemoryManager):
     assert await extractor.maybe_extract(messages, "step_interval") is True
 
 
-async def test_session_end_ignores_cooldown(mgr: MemoryManager):
-    """session_end trigger always runs regardless of cooldown."""
+async def test_loop_end_ignores_cooldown(mgr: MemoryManager):
+    """loop_end trigger always runs regardless of cooldown."""
     from box_agent.schema import Message
 
     extractor = _make_extractor(
@@ -234,10 +234,10 @@ async def test_session_end_ignores_cooldown(mgr: MemoryManager):
     )
     messages = [Message(role="user", content="test")]
 
-    # First session_end
-    assert await extractor.maybe_extract(messages, "session_end") is True
-    # Second session_end immediately — still runs
-    assert await extractor.maybe_extract(messages, "session_end") is True
+    # First loop_end
+    assert await extractor.maybe_extract(messages, "loop_end") is True
+    # Second loop_end immediately — still runs
+    assert await extractor.maybe_extract(messages, "loop_end") is True
 
 
 async def test_invalid_json_from_llm(mgr: MemoryManager):
@@ -248,7 +248,7 @@ async def test_invalid_json_from_llm(mgr: MemoryManager):
     messages = [Message(role="user", content="test")]
 
     # Should not crash, should return True (extraction ran but no updates)
-    result = await extractor.maybe_extract(messages, "session_end")
+    result = await extractor.maybe_extract(messages, "loop_end")
     assert result is True
     assert mgr.read_section("Auto Memory") == ""
 
@@ -263,7 +263,7 @@ async def test_extract_with_markdown_fences(mgr: MemoryManager):
     )
     messages = [Message(role="user", content="test")]
 
-    await extractor.maybe_extract(messages, "session_end")
+    await extractor.maybe_extract(messages, "loop_end")
     assert "from fenced output" in mgr.read_section("Auto Memory")
 
 
@@ -280,7 +280,7 @@ async def test_merge_ambiguous_skipped(mgr: MemoryManager):
     )
     messages = [Message(role="user", content="test")]
 
-    await extractor.maybe_extract(messages, "session_end")
+    await extractor.maybe_extract(messages, "loop_end")
     auto = mgr.read_section("Auto Memory")
     # Both lines should be untouched — ambiguous merge rejected
     assert auto.count("- uses Python") == 2
@@ -298,7 +298,7 @@ async def test_merge_no_match_ignored(mgr: MemoryManager):
     )
     messages = [Message(role="user", content="test")]
 
-    await extractor.maybe_extract(messages, "session_end")
+    await extractor.maybe_extract(messages, "loop_end")
     assert mgr.read_section("Auto Memory") == "- existing fact"
 
 
@@ -313,7 +313,7 @@ async def test_merge_substring_does_not_match(mgr: MemoryManager):
     )
     messages = [Message(role="user", content="test")]
 
-    await extractor.maybe_extract(messages, "session_end")
+    await extractor.maybe_extract(messages, "loop_end")
     # "Alice" is a substring, not an exact line — should not be replaced
     assert "Alice Zhang" in mgr.read_section("Auto Memory")
     assert "Bob" not in mgr.read_section("Auto Memory")

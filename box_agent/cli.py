@@ -882,12 +882,6 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         except Exception as e:
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
         finally:
-            # Extract memory at session end
-            if memory_extractor and len(agent.messages) > 1:
-                try:
-                    await memory_extractor.maybe_extract(agent.messages, "session_end")
-                except Exception:
-                    pass
             print_stats(agent, session_start)
 
         # Cleanup MCP connections
@@ -983,12 +977,6 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                 command = user_input.lower()
 
                 if command in ["/exit", "/quit", "/q"]:
-                    # Extract memory before exit
-                    if memory_extractor and len(agent.messages) > 1:
-                        try:
-                            await memory_extractor.maybe_extract(agent.messages, "session_end")
-                        except Exception:
-                            pass
                     print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
                     print_stats(agent, session_start)
                     break
@@ -1150,12 +1138,6 @@ You have access to the `execute_code` tool which runs Python code in an isolated
             print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
 
         except KeyboardInterrupt:
-            # Extract memory before exit
-            if memory_extractor and len(agent.messages) > 1:
-                try:
-                    await memory_extractor.maybe_extract(agent.messages, "session_end")
-                except Exception:
-                    pass
             print(f"\n\n{Colors.BRIGHT_YELLOW}👋 Interrupt signal detected, exiting...{Colors.RESET}\n")
             print_stats(agent, session_start)
             break

@@ -331,13 +331,6 @@ class BoxACPAgent:
         stop_reason = await self._run_turn(state, session_id)
         duration_ms = int((perf_counter() - prompt_start) * 1000)
 
-        # Extract memory and save session summary (best-effort)
-        if state.memory_extractor:
-            try:
-                await state.memory_extractor.maybe_extract(state.agent.messages, "session_end")
-            except Exception:
-                log.warn("session/memory", session_id=session_id, message="Failed to extract memory")
-
         log.info("session/done", session_id=session_id, stop_reason=stop_reason, duration_ms=duration_ms)
         # Map box-agent stop reasons to ACP-valid StopReason values.
         # ACP only accepts: "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"

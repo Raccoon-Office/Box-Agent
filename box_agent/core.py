@@ -552,6 +552,9 @@ async def run_agent_loop(
             if hook_mgr.hooks:
                 await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                 await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=response.content)
+            # Extract memory at agent loop end
+            if memory_extractor:
+                await memory_extractor.maybe_extract(messages, "loop_end")
             yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
             yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
             return
@@ -889,6 +892,8 @@ async def run_agent_loop(
 
     # ── Max steps exhausted ─────────────────────────────────
     msg = f"Task couldn't be completed after {max_steps} steps."
+    if memory_extractor:
+        await memory_extractor.maybe_extract(messages, "loop_end")
     if hook_mgr.hooks:
         await hook_mgr.fire_done(stop_reason=StopReason.MAX_STEPS, final_content=msg)
     yield DoneEvent(stop_reason=StopReason.MAX_STEPS, final_content=msg)
