@@ -2,19 +2,23 @@
 
 from .agent import Agent
 from .events import AgentEvent, StopReason
+from .hooks import BaseHook, HookManager, load_hooks
 from .llm import LLMClient
 from .schema import FunctionCall, LLMProvider, LLMResponse, Message, ToolCall
 
-__version__ = "0.8.4"
+__version__ = "0.8.5"
 
 __all__ = [
     "Agent",
     "AgentEvent",
-    "StopReason",
+    "BaseHook",
+    "FunctionCall",
+    "HookManager",
     "LLMClient",
     "LLMProvider",
-    "Message",
     "LLMResponse",
+    "Message",
+    "StopReason",
     "ToolCall",
-    "FunctionCall",
+    "load_hooks",
 ]
