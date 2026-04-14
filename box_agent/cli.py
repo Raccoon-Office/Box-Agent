@@ -745,7 +745,14 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
 
         memory_mgr = MemoryManager(memory_dir=config.agent.memory_dir)
 
-    # 3.4 Memory extractor (lifecycle-triggered auto memory)
+    # 3.4 One-time OpenClaw import
+    if memory_mgr:
+        try:
+            await memory_mgr.import_openclaw(llm_client)
+        except Exception:
+            pass
+
+    # 3.5 Memory extractor (lifecycle-triggered auto memory)
     memory_extractor = None
     if memory_mgr and config.agent.enable_memory_extraction:
         from box_agent.memory import MemoryExtractor

@@ -17,7 +17,7 @@ from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
-from box_agent.tools.memory_tool import MemoryReadTool, MemoryWriteTool
+from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
@@ -63,7 +63,8 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
     if memory_manager is not None:
         tools.append(MemoryReadTool(memory_manager))
         tools.append(MemoryWriteTool(memory_manager))
-        _out(f"{Colors.GREEN}✅ Loaded memory tools (memory_read, memory_write){Colors.RESET}")
+        tools.append(MemorySearchTool(memory_manager))
+        _out(f"{Colors.GREEN}✅ Loaded memory tools (memory_read, memory_write, memory_search){Colors.RESET}")
 
     # 1. Bash auxiliary tools (output monitoring and kill)
     # Note: BashTool itself is created in add_workspace_tools() with workspace_dir as cwd

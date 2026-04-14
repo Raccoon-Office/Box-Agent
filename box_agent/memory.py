@@ -1,9 +1,10 @@
-"""Memory system for cross-session recall and auto-extraction.
+"""Memory system for cross-session recall, search, and auto-extraction.
 
 Directory layout::
 
     ~/.box-agent/memory/
-    └── MEMORY.md          # Persistent memory (Manual + Auto sections)
+    ├── MEMORY.md          # Core memory (always injected into system prompt)
+    └── CONTEXT.md         # Searchable context (retrieved on demand)
 """
 
 from __future__ import annotations
@@ -16,193 +17,228 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .schema import Message
-    from .tools.permissions import PermissionEngine
 
 logger = logging.getLogger(__name__)
 
 
 class MemoryManager:
-    """Markdown-file-based memory with manual notes and session summaries.
+    """Dual-file memory: MEMORY.md (core) + CONTEXT.md (searchable).
 
-    MEMORY.md is organized into three sections:
+    - **MEMORY.md** — user identity, preferences, writing style.
+      Always injected into the system prompt via ``recall()``.
+      Written by LLM via ``memory_write(category="core")``.
 
-    - ``## Manual Memory`` — written by the LLM via ``memory_write`` tool
-      when the user explicitly asks to remember something.
-    - ``## OpenClaw Memory`` — imported read-only from ``~/.openclaw/``.
-    - ``## Auto Memory`` — written only by ``MemoryExtractor`` at lifecycle
-      trigger points (pre-summarize, step interval, session end).
-
-    ``recall()`` returns all three sections for system-prompt injection.
+    - **CONTEXT.md** — project context, task patterns, behavioral feedback.
+      Retrieved on demand via ``memory_search`` tool.
+      Written by ``memory_write(category="context")`` and ``MemoryExtractor``.
     """
 
-    _SECTIONS = ("Manual Memory", "Auto Memory")
-
-    def __init__(self, memory_dir: str = "~/.box-agent/memory", recall_days: int = 3):  # noqa: ARG002 — recall_days kept for backward compat
+    def __init__(self, memory_dir: str = "~/.box-agent/memory", **_kwargs):
         self.memory_dir = Path(memory_dir).expanduser()
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── MEMORY.md file ──────────────────────────────────────────
+    # ── File paths ──────────────────────────────────────────────
 
     @property
     def memory_file(self) -> Path:
+        """MEMORY.md — core memory, always injected."""
         return self.memory_dir / "MEMORY.md"
 
-    def read_all(self) -> str:
-        """Read full MEMORY.md content (all sections). Returns empty string if missing."""
+    @property
+    def context_file(self) -> Path:
+        """CONTEXT.md — searchable context, retrieved on demand."""
+        return self.memory_dir / "CONTEXT.md"
+
+    # ── Core memory (MEMORY.md) ─────────────────────────────────
+
+    def read_core(self) -> str:
+        """Read MEMORY.md content. Returns empty string if missing."""
         if not self.memory_file.exists():
             return ""
         return self.memory_file.read_text(encoding="utf-8").strip()
 
-    def write_all(self, content: str) -> None:
-        """Overwrite entire MEMORY.md with *content*."""
+    def write_core(self, content: str) -> None:
+        """Overwrite MEMORY.md with *content*."""
         self.memory_file.write_text(content.strip() + "\n", encoding="utf-8")
 
-    # Legacy aliases — used by existing callers and tests
-    read_manual_memory = read_all
-    write_manual_memory = write_all
-
-    # ── Section-based read/write ────────────────────────────────
-
-    def _parse_sections(self) -> dict[str, str]:
-        """Parse MEMORY.md into ``{section_heading: body}`` dict.
-
-        Sections start with ``## Heading``.  Content before the first
-        ``##`` heading is stored under the key ``"_preamble"``.
-        """
-        raw = self.read_all()
-        if not raw:
-            return {}
-
-        sections: dict[str, str] = {}
-        current_key = "_preamble"
-        lines: list[str] = []
-
-        for line in raw.splitlines():
-            if line.startswith("## "):
-                # Flush previous section
-                sections[current_key] = "\n".join(lines).strip()
-                current_key = line[3:].strip()
-                lines = []
-            else:
-                lines.append(line)
-
-        sections[current_key] = "\n".join(lines).strip()
-        # Remove empty preamble
-        if not sections.get("_preamble"):
-            sections.pop("_preamble", None)
-        return sections
-
-    def _write_sections(self, sections: dict[str, str]) -> None:
-        """Serialize sections dict back to MEMORY.md, preserving order."""
-        parts: list[str] = []
-
-        # Preamble first (if any)
-        preamble = sections.get("_preamble", "").strip()
-        if preamble:
-            parts.append(preamble)
-
-        # Known sections in canonical order, then any extras
-        ordered = list(self._SECTIONS)
-        for key in sections:
-            if key != "_preamble" and key not in ordered:
-                ordered.append(key)
-
-        for heading in ordered:
-            body = sections.get(heading, "").strip()
-            if body:
-                parts.append(f"## {heading}\n{body}")
-
-        self.write_all("\n\n".join(parts))
-
-    def read_section(self, section: str) -> str:
-        """Read content under a ``## {section}`` heading. Returns empty string if absent."""
-        return self._parse_sections().get(section, "")
-
-    def write_section(self, section: str, content: str) -> None:
-        """Overwrite *only* the given section, preserving all other sections."""
-        sections = self._parse_sections()
-        sections[section] = content.strip()
-        self._write_sections(sections)
-
-    def append_to_section(self, section: str, content: str) -> None:
-        """Append content to an existing section (or create it)."""
-        existing = self.read_section(section)
+    def append_core(self, content: str) -> None:
+        """Append to MEMORY.md."""
+        existing = self.read_core()
         if existing:
-            new_content = f"{existing}\n{content.strip()}"
+            self.write_core(f"{existing}\n{content.strip()}")
         else:
-            new_content = content.strip()
-        self.write_section(section, new_content)
+            self.write_core(content)
 
-    # ── Recall ─────────────────────────────────────────────────
+    # Legacy aliases — backward compat for existing callers/tests
+    read_all = read_core
+    write_all = write_core
+    read_manual_memory = read_core
+    write_manual_memory = write_core
 
-    def recall(self, query: str = "", permission_engine: PermissionEngine | None = None) -> str:  # noqa: ARG002 — query reserved for future semantic search
+    # ── Context memory (CONTEXT.md) ─────────────────────────────
+
+    def read_context(self) -> str:
+        """Read CONTEXT.md content. Returns empty string if missing."""
+        if not self.context_file.exists():
+            return ""
+        return self.context_file.read_text(encoding="utf-8").strip()
+
+    def write_context(self, content: str) -> None:
+        """Overwrite CONTEXT.md with *content*."""
+        self.context_file.write_text(content.strip() + "\n", encoding="utf-8")
+
+    def append_context(self, content: str) -> None:
+        """Append to CONTEXT.md, skipping lines already present in Core."""
+        core = self.read_core()
+        core_lines = {line.strip().lower() for line in core.splitlines() if line.strip()} if core else set()
+
+        # Filter out lines that duplicate Core content
+        filtered = []
+        for line in content.strip().splitlines():
+            if line.strip() and line.strip().lower() not in core_lines:
+                filtered.append(line)
+
+        if not filtered:
+            return
+
+        new_content = "\n".join(filtered)
+        existing = self.read_context()
+        if existing:
+            self.write_context(f"{existing}\n{new_content}")
+        else:
+            self.write_context(new_content)
+
+    # ── Search ──────────────────────────────────────────────────
+
+    def search(self, query: str) -> list[str]:
+        """Keyword search across CONTEXT.md entries.
+
+        Splits content into lines, returns lines containing *query*
+        (case-insensitive).  Returns an empty list on no match.
+        """
+        context = self.read_context()
+        if not context or not query:
+            return []
+
+        query_lower = query.lower()
+        return [
+            line for line in context.splitlines()
+            if line.strip() and query_lower in line.lower()
+        ]
+
+    # ── Recall (system prompt injection) ────────────────────────
+
+    def recall(self, **_kwargs) -> str:
         """Build a memory block for system-prompt injection.
 
-        Returns an empty string when there is nothing to recall.
-        All sections (Manual, Auto, OpenClaw) are included.
+        Only injects MEMORY.md (core).  CONTEXT.md is accessed on demand
+        via ``memory_search`` tool.
         """
-        manual = self.read_section("Manual Memory")
-        auto = self.read_section("Auto Memory")
+        core = self.read_core()
+        if not core:
+            return ""
+        return self.build_memory_block(core)
 
-        # Legacy fallback: if no sections exist but file has content,
-        # treat the entire file as manual memory.
-        if not manual and not auto:
-            raw = self.read_all()
-            if raw and "## " not in raw:
-                manual = raw
+    # ── OpenClaw import ─────────────────────────────────────────
 
-        # OpenClaw memory import (only when permission engine is present and allows it)
-        openclaw_block = ""
-        if permission_engine is not None:
-            from .tools.permissions import MEMORY_OPENCLAW_IMPORT
-            decision = permission_engine.check(MEMORY_OPENCLAW_IMPORT, {"source": "openclaw"})
-            if decision.allowed:
-                openclaw_block = self._read_openclaw_memory()
+    @property
+    def _openclaw_imported_marker(self) -> Path:
+        return self.memory_dir / ".openclaw_imported"
 
-        return self.build_memory_block(manual, openclaw_block, auto)
-
-    def _read_openclaw_memory(self) -> str:
-        """Read MEMORY.md files from ~/.openclaw/**/MEMORY.md.
-
-        Returns combined content or empty string if none found.
-        """
+    def _read_openclaw_raw(self) -> str:
+        """Read MEMORY.md and USER.md files from ~/.openclaw/. Returns empty if none."""
         openclaw_dir = Path.home() / ".openclaw"
         if not openclaw_dir.is_dir():
             return ""
 
         parts: list[str] = []
+
+        # USER.md — user identity and preferences
+        for user_file in sorted(openclaw_dir.rglob("USER.md")):
+            try:
+                content = user_file.read_text(encoding="utf-8").strip()
+                if content:
+                    parts.append(f"[Source: {user_file.relative_to(openclaw_dir)}]\n{content}")
+            except Exception:
+                logger.debug("Failed to read OpenClaw file: %s", user_file)
+
+        # MEMORY.md — session memories
         for memory_file in sorted(openclaw_dir.rglob("MEMORY.md")):
             try:
                 content = memory_file.read_text(encoding="utf-8").strip()
                 if content:
-                    parts.append(content)
+                    parts.append(f"[Source: {memory_file.relative_to(openclaw_dir)}]\n{content}")
             except Exception:
-                logger.debug("Failed to read OpenClaw memory: %s", memory_file)
+                logger.debug("Failed to read OpenClaw file: %s", memory_file)
+
         return "\n\n".join(parts)
 
+    async def import_openclaw(self, llm) -> str:
+        """One-time LLM-filtered import of OpenClaw data into Core.
+
+        Reads ``~/.openclaw/**/USER.md`` and ``**/MEMORY.md``, asks LLM
+        to extract useful user info (identity, preferences, habits),
+        appends to MEMORY.md, and marks as imported so it won't run again.
+
+        Returns the imported content, or empty string if nothing to import.
+        """
+        if self._openclaw_imported_marker.exists():
+            return ""
+
+        raw = self._read_openclaw_raw()
+        if not raw:
+            self._openclaw_imported_marker.write_text("no-content\n", encoding="utf-8")
+            return ""
+
+        existing_core = self.read_core()
+
+        from .schema import Message as Msg
+
+        prompt = (
+            "Extract ONLY the useful user information from the following content.\n\n"
+            "Keep:\n"
+            "- User identity (name, role, department, company)\n"
+            "- Preferences (language, writing style, tools)\n"
+            "- Work habits and behavioral patterns\n\n"
+            "Discard:\n"
+            "- Ephemeral task details, file paths, code snippets\n"
+            "- Session logs, timestamps, debugging info\n"
+            "- Anything already present in existing memory\n\n"
+            f"Existing core memory:\n{existing_core or '(empty)'}\n\n"
+            f"Content to filter:\n{raw[:8000]}\n\n"
+            "Output ONLY the useful bullet points (markdown format), nothing else. "
+            "If nothing is useful, output exactly: (empty)"
+        )
+
+        try:
+            response = await llm.generate(
+                messages=[
+                    Msg(role="system", content="You extract structured user information from raw notes."),
+                    Msg(role="user", content=prompt),
+                ]
+            )
+            filtered = response.content.strip()
+        except Exception:
+            logger.exception("Failed to filter OpenClaw memory via LLM")
+            return ""
+
+        if filtered and filtered != "(empty)":
+            self.append_core(filtered)
+            logger.info("Imported OpenClaw memory into core: %d chars", len(filtered))
+
+        self._openclaw_imported_marker.write_text("done\n", encoding="utf-8")
+        return filtered
+
     @staticmethod
-    def build_memory_block(manual: str, openclaw: str = "", auto: str = "") -> str:
-        """Format all memory sections into a prompt block for system-prompt injection."""
-        if not manual and not openclaw and not auto:
+    def build_memory_block(core: str) -> str:
+        """Format core memory into a prompt block."""
+        if not core:
             return ""
 
         parts: list[str] = ["--- MEMORY START ---"]
-
-        if manual:
-            parts.append("")
-            parts.append("[Manual Memory]")
-            parts.append(manual)
-
-        if auto:
-            parts.append("")
-            parts.append("[Auto Memory]")
-            parts.append(auto)
-
-        if openclaw:
-            parts.append("")
-            parts.append("[OpenClaw Memory]")
-            parts.append(openclaw)
-
+        parts.append("")
+        parts.append("[Core Memory]")
+        parts.append(core)
         parts.append("")
         parts.append("--- MEMORY END ---")
         return "\n".join(parts)
@@ -234,19 +270,21 @@ Categories to look for:
 - Project context: goals, constraints, key decisions, deadlines
 - Behavioral feedback: corrections the user made, approaches that worked
 
-Existing memory (all sections — do NOT duplicate what's already here):
-{existing_memory}
+Existing core memory (MEMORY.md — do NOT duplicate):
+{core_memory}
+
+Existing context memory (CONTEXT.md — check for duplicates before adding):
+{context_memory}
 
 Recent conversation:
 {transcript}
 
 Rules:
 1. Only extract cross-session-valuable information. Ignore ephemeral task details.
-2. If new info updates or refines something in Auto Memory, output a merge.
+2. If new info updates or refines something in context memory, output a merge.
 3. If info is genuinely new, output an addition.
-4. Do NOT touch Manual Memory or OpenClaw Memory content.
-5. Do NOT record code details, git operations, file paths, or anything derivable from the codebase.
-6. If there is nothing worth remembering, return empty arrays.
+4. Do NOT record code details, git operations, file paths, or anything derivable from the codebase.
+5. If there is nothing worth remembering, return empty arrays.
 
 Output ONLY valid JSON (no markdown fences):
 {{"additions": ["- bullet point 1", "- bullet point 2"], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
@@ -257,7 +295,7 @@ class MemoryExtractor:
 
     Called at key points in the agent loop to extract cross-session
     knowledge before information is lost (e.g. before context compression).
-    Only modifies the ``## Auto Memory`` section of MEMORY.md.
+    Writes to CONTEXT.md.
     """
 
     def __init__(
@@ -308,7 +346,7 @@ class MemoryExtractor:
             return False
 
     async def _extract(self, messages: list[Message]) -> None:
-        """Use LLM to analyze messages and update Auto Memory section."""
+        """Use LLM to analyze messages and update CONTEXT.md."""
         from .schema import Message as Msg
 
         transcript = MemoryManager._build_transcript(messages, max_chars_per_msg=1500)
@@ -317,10 +355,20 @@ class MemoryExtractor:
 
         transcript = transcript[-6000:]  # Keep last ~6k chars
 
-        existing_memory = self._mgr.read_all() or "(empty)"
+        core_memory = self._mgr.read_core() or "(empty)"
+
+        # Only send last ~100 lines of Context for dedup reference (not the whole file).
+        # Code-level dedup in append_context() handles Core overlap regardless.
+        context_raw = self._mgr.read_context()
+        if context_raw:
+            context_lines = context_raw.splitlines()
+            context_memory = "\n".join(context_lines[-100:])
+        else:
+            context_memory = "(empty)"
 
         prompt = _EXTRACTION_USER_PROMPT.format(
-            existing_memory=existing_memory,
+            core_memory=core_memory,
+            context_memory=context_memory,
             transcript=transcript,
         )
 
@@ -334,7 +382,7 @@ class MemoryExtractor:
         self._apply_updates(response.content)
 
     def _apply_updates(self, llm_output: str) -> None:
-        """Parse LLM JSON output and apply to Auto Memory section."""
+        """Parse LLM JSON output and apply to CONTEXT.md."""
         # Strip markdown fences if present
         text = llm_output.strip()
         if text.startswith("```"):
@@ -355,17 +403,16 @@ class MemoryExtractor:
         if not additions and not merges:
             return
 
-        auto_memory = self._mgr.read_section("Auto Memory")
+        context = self._mgr.read_context()
 
         # Apply merges (line-level exact match only)
         if merges:
-            lines = auto_memory.splitlines()
+            lines = context.splitlines()
             for merge in merges:
                 old = merge.get("old", "").strip()
                 new = merge.get("new", "").strip()
                 if not old or not new:
                     continue
-                # Find exact line matches; require exactly one to avoid ambiguity
                 indices = [i for i, line in enumerate(lines) if line.strip() == old]
                 if len(indices) == 1:
                     lines[indices[0]] = new
@@ -373,14 +420,18 @@ class MemoryExtractor:
                     logger.warning("Ambiguous memory merge skipped (%d matches): %s", len(indices), old[:80])
                 else:
                     logger.debug("Memory merge target not found: %s", old[:80])
-            auto_memory = "\n".join(lines)
+            context = "\n".join(lines)
 
-        # Apply additions
+        # Apply additions (skip lines that duplicate Core)
         if additions:
-            addition_text = "\n".join(additions)
-            if auto_memory:
-                auto_memory = f"{auto_memory}\n{addition_text}"
-            else:
-                auto_memory = addition_text
+            core = self._mgr.read_core()
+            core_lines = {l.strip().lower() for l in core.splitlines() if l.strip()} if core else set()
+            deduped = [a for a in additions if a.strip().lower() not in core_lines]
+            if deduped:
+                addition_text = "\n".join(deduped)
+                if context:
+                    context = f"{context}\n{addition_text}"
+                else:
+                    context = addition_text
 
-        self._mgr.write_section("Auto Memory", auto_memory)
+        self._mgr.write_context(context)

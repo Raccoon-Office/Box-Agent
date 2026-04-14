@@ -211,7 +211,7 @@ class BoxACPAgent:
 
         # Inject memory context
         if self._memory:
-            memory_block = self._memory.recall(permission_engine=perm_engine)
+            memory_block = self._memory.recall()
             if memory_block:
                 system_prompt = f"{system_prompt.rstrip()}\n\n{memory_block}"
                 log.info("session/memory", session_id=session_id, message="Memory context injected")
@@ -670,6 +670,13 @@ async def run_acp_server(config: Config | None = None) -> None:
         memory_mgr = None
         if config.agent.enable_memory:
             memory_mgr = MemoryManager(memory_dir=config.agent.memory_dir)
+
+        # One-time OpenClaw import (LLM-filtered into Core)
+        if memory_mgr:
+            try:
+                await memory_mgr.import_openclaw(llm)
+            except Exception:
+                log.warn("server/start", message="OpenClaw import failed (non-fatal)")
 
         base_tools, skill_loader = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)

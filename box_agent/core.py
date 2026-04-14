@@ -445,9 +445,10 @@ async def run_agent_loop(
         result = await _maybe_summarize(llm, messages, token_limit, api_total_tokens, skip_next_token_check)
         new_msgs, skip_next_token_check, est_before = result
         if new_msgs is not None:
-            # Extract memory before compression discards old messages
+            # Snapshot messages before compression, then extract in background
             if memory_extractor:
-                await memory_extractor.maybe_extract(messages, "pre_summarize")
+                _snapshot = list(messages)
+                asyncio.create_task(memory_extractor.maybe_extract(_snapshot, "pre_summarize"))
             yield SummarizationEvent(estimated_tokens=est_before, api_tokens=api_total_tokens, token_limit=token_limit)
             messages.clear()
             messages.extend(new_msgs)
@@ -552,9 +553,9 @@ async def run_agent_loop(
             if hook_mgr.hooks:
                 await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                 await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=response.content)
-            # Extract memory at agent loop end
+            # Extract memory at agent loop end (background)
             if memory_extractor:
-                await memory_extractor.maybe_extract(messages, "loop_end")
+                asyncio.create_task(memory_extractor.maybe_extract(messages, "loop_end"))
             yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
             yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
             return
@@ -886,14 +887,14 @@ async def run_agent_loop(
         if hook_mgr.hooks:
             await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
 
-        # ── Periodic memory extraction ─────────────────────
+        # ── Periodic memory extraction (background) ──────────
         if memory_extractor:
-            await memory_extractor.maybe_extract(messages, "step_interval")
+            asyncio.create_task(memory_extractor.maybe_extract(messages, "step_interval"))
 
     # ── Max steps exhausted ─────────────────────────────────
     msg = f"Task couldn't be completed after {max_steps} steps."
     if memory_extractor:
-        await memory_extractor.maybe_extract(messages, "loop_end")
+        asyncio.create_task(memory_extractor.maybe_extract(messages, "loop_end"))
     if hook_mgr.hooks:
         await hook_mgr.fire_done(stop_reason=StopReason.MAX_STEPS, final_content=msg)
     yield DoneEvent(stop_reason=StopReason.MAX_STEPS, final_content=msg)
