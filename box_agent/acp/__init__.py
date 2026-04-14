@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -711,6 +712,27 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         # Restore real stdout for ACP transport, then re-guard sys.stdout
         sys.stdout = _real_stdout
         reader, writer = await stdio_streams()
+
+        # Windows fix: the ACP dependency's _StdoutTransport.write() resolves
+        # sys.stdout.buffer dynamically at each call.  After re-guarding
+        # (sys.stdout = sys.stderr below), all protocol responses would be
+        # routed to stderr and the client would never receive them.
+        # Pin the real stdout buffer on the transport before re-guard.
+        if platform.system() == "Windows":
+            _stdout_buf = sys.stdout.buffer
+            _win_transport = writer.transport
+
+            def _pinned_write(data: bytes) -> None:
+                if _win_transport._is_closing:
+                    return
+                try:
+                    _stdout_buf.write(data)
+                    _stdout_buf.flush()
+                except Exception:
+                    logging.exception("Error writing to stdout")
+
+            _win_transport.write = _pinned_write  # type: ignore[method-assign]
+
         sys.stdout = sys.stderr
         AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr), writer, reader)
 
