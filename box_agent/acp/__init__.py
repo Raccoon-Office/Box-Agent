@@ -83,7 +83,7 @@ from box_agent.events import (
 from box_agent.llm import LLMClient
 from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
-from box_agent.schema import Message
+from box_agent.schema import LLMProvider, Message
 from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
 
 from .debug_logger import acp_logger as log
@@ -704,7 +704,8 @@ You have access to the `execute_code` tool which runs Python code in an isolated
             if meta:
                 system_prompt = f"{system_prompt.rstrip()}\n\n{meta}"
         rcfg = config.llm.retry
-        llm = LLMClient(api_key=config.llm.api_key, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
+        provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
+        llm = LLMClient(api_key=config.llm.api_key, provider=provider, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
 
         log.info("server/start", message=f"LLM: {config.llm.model}, provider: {config.llm.provider}")
         log.info("server/start", message=f"Tools loaded: {len(base_tools)} base tools")
