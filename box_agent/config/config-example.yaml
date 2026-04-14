@@ -38,7 +38,11 @@ system_prompt_path: "system_prompt.md"  # System prompt file (same config direct
 # ===== Memory Configuration =====
 enable_memory: true                    # Enable cross-session memory system
 memory_dir: "~/.box-agent/memory"      # Memory storage directory
-memory_recall_days: 3                  # How many days of session history to recall
+
+# ===== Memory Auto-Extraction =====
+enable_memory_extraction: true         # Auto-extract memories at lifecycle points
+memory_extraction_cooldown: 300        # Seconds between extractions (prevents LLM spam)
+memory_extraction_step_interval: 10    # Extract every N agent steps
 
 # ===== Tools Configuration =====
 tools:

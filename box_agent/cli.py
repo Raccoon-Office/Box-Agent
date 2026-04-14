@@ -743,9 +743,18 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     if config.agent.enable_memory:
         from box_agent.memory import MemoryManager
 
-        memory_mgr = MemoryManager(
-            memory_dir=config.agent.memory_dir,
-            recall_days=config.agent.memory_recall_days,
+        memory_mgr = MemoryManager(memory_dir=config.agent.memory_dir)
+
+    # 3.4 Memory extractor (lifecycle-triggered auto memory)
+    memory_extractor = None
+    if memory_mgr and config.agent.enable_memory_extraction:
+        from box_agent.memory import MemoryExtractor
+
+        memory_extractor = MemoryExtractor(
+            llm=llm_client,
+            memory_manager=memory_mgr,
+            cooldown=config.agent.memory_extraction_cooldown,
+            step_interval=config.agent.memory_extraction_step_interval,
         )
 
     # 3.5 Initialize base tools (independent of workspace)
@@ -839,18 +848,25 @@ You have access to the `execute_code` tool which runs Python code in an isolated
             print(f"{Colors.GREEN}✅ Loaded memory context{Colors.RESET}")
 
     # 7. Create Agent
+    from box_agent.hooks import load_hooks
+    hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
     agent = Agent(
         llm_client=llm_client,
         system_prompt=system_prompt,
         tools=tools,
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
+        hooks=hooks,
     )
 
     # Wire CLI permission negotiator (parity with ACP in-band negotiation)
     if grant_store is not None and not non_interactive:
         from box_agent.cli_permissions import CLIPermissionNegotiator
         agent._permission_negotiator = CLIPermissionNegotiator(grant_store)
+
+    # Wire memory extractor
+    if memory_extractor:
+        agent._memory_extractor = memory_extractor
 
     # 8. Display welcome information
     if not task:
@@ -866,13 +882,10 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         except Exception as e:
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
         finally:
-            # Save session summary
-            if memory_mgr and len(agent.messages) > 1:
+            # Extract memory at session end
+            if memory_extractor and len(agent.messages) > 1:
                 try:
-                    session_id = f"cli-{session_start.strftime('%H%M%S')}"
-                    await memory_mgr.generate_session_summary(
-                        llm=llm_client, messages=agent.messages, session_id=session_id,
-                    )
+                    await memory_extractor.maybe_extract(agent.messages, "session_end")
                 except Exception:
                     pass
             print_stats(agent, session_start)
@@ -970,14 +983,10 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                 command = user_input.lower()
 
                 if command in ["/exit", "/quit", "/q"]:
-                    # Save session summary before exit
-                    if memory_mgr and len(agent.messages) > 1:
+                    # Extract memory before exit
+                    if memory_extractor and len(agent.messages) > 1:
                         try:
-                            session_id = f"cli-{session_start.strftime('%H%M%S')}"
-                            await memory_mgr.generate_session_summary(
-                                llm=llm_client, messages=agent.messages, session_id=session_id,
-                            )
-                            print(f"{Colors.GREEN}✅ Session summary saved{Colors.RESET}")
+                            await memory_extractor.maybe_extract(agent.messages, "session_end")
                         except Exception:
                             pass
                     print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
@@ -1141,13 +1150,10 @@ You have access to the `execute_code` tool which runs Python code in an isolated
             print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
 
         except KeyboardInterrupt:
-            # Save session summary before exit
-            if memory_mgr and len(agent.messages) > 1:
+            # Extract memory before exit
+            if memory_extractor and len(agent.messages) > 1:
                 try:
-                    session_id = f"cli-{session_start.strftime('%H%M%S')}"
-                    await memory_mgr.generate_session_summary(
-                        llm=llm_client, messages=agent.messages, session_id=session_id,
-                    )
+                    await memory_extractor.maybe_extract(agent.messages, "session_end")
                 except Exception:
                     pass
             print(f"\n\n{Colors.BRIGHT_YELLOW}👋 Interrupt signal detected, exiting...{Colors.RESET}\n")

@@ -190,7 +190,7 @@ class DoneEvent:
 class MemoryEvent:
     """Memory operation event."""
 
-    action: str  # "recall" | "save_summary" | "update_manual"
+    action: str  # "recall" | "update_manual" | "auto_extract"
     session_id: str = ""
     detail: str = ""
 

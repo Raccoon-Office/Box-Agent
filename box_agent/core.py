@@ -40,6 +40,7 @@ from .events import (
     ToolCallResult,
     ToolCallStart,
 )
+from .hooks import HookManager
 from .logger import AgentLogger
 from .schema import LLMResponse, Message, StreamEvent
 from .tools.base import EventEmittingTool, Tool, ToolResult
@@ -375,6 +376,8 @@ async def run_agent_loop(
     logger: AgentLogger | None = None,
     workspace_dir: str | None = None,
     permission_negotiator: Any | None = None,
+    hooks: list | None = None,
+    memory_extractor: Any | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -397,14 +400,27 @@ async def run_agent_loop(
             with ``permission_request`` are negotiated with the host
             and retried on grant.  When absent, ``PermissionRequestEvent``
             is yielded for backward compatibility.
+        hooks: Optional list of lifecycle hook objects.  Each hook may
+            implement any subset of the ``BaseHook`` interface.  Hooks
+            are called at key lifecycle points (step start/end, tool
+            start/result, done, error).  Loaded identically by CLI
+            and ACP from ``config.yaml``.
+        memory_extractor: Optional ``MemoryExtractor`` instance for
+            lifecycle-triggered memory extraction.  When present,
+            extraction is attempted before context compression and
+            every N steps.
     """
     cancelled = is_cancelled or (lambda: False)
+    hook_mgr = HookManager(hooks)
 
     if logger:
         logger.start_new_run()
         log_path = logger.get_log_file_path()
         if log_path:
             yield LogFileEvent(path=str(log_path))
+
+    if hook_mgr.hooks:
+        await hook_mgr.fire_agent_start(messages=messages, tools=tools, max_steps=max_steps)
 
     api_total_tokens = 0
     skip_next_token_check = False
@@ -414,6 +430,8 @@ async def run_agent_loop(
         # ── Cancellation check (top of step) ────────────────
         # No cleanup needed here — messages are consistent at step boundaries.
         if cancelled():
+            if hook_mgr.hooks:
+                await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
             yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
             return
 
@@ -427,12 +445,17 @@ async def run_agent_loop(
         result = await _maybe_summarize(llm, messages, token_limit, api_total_tokens, skip_next_token_check)
         new_msgs, skip_next_token_check, est_before = result
         if new_msgs is not None:
+            # Extract memory before compression discards old messages
+            if memory_extractor:
+                await memory_extractor.maybe_extract(messages, "pre_summarize")
             yield SummarizationEvent(estimated_tokens=est_before, api_tokens=api_total_tokens, token_limit=token_limit)
             messages.clear()
             messages.extend(new_msgs)
 
         # ── Step start ──────────────────────────────────────
         yield StepStart(step=step + 1, max_steps=max_steps)
+        if hook_mgr.hooks:
+            await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps)
 
         # ── LLM call (streaming) ──────────────────────────────
         tool_list = list(tools.values())
@@ -465,6 +488,9 @@ async def run_agent_loop(
 
             if finish_event is None:
                 msg = "LLM stream ended without a finish event"
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
                 yield ErrorEvent(message=msg, is_fatal=True)
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return
@@ -485,6 +511,9 @@ async def run_agent_loop(
                 msg = f"LLM call failed after {exc.attempts} retries\nLast error: {exc.last_exception!s}"
             else:
                 msg = f"LLM call failed: {exc!s}"
+            if hook_mgr.hooks:
+                await hook_mgr.fire_error(message=msg, is_fatal=True, exception=exc)
+                await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
             yield ErrorEvent(message=msg, is_fatal=True, exception=exc)
             yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
             return
@@ -493,6 +522,10 @@ async def run_agent_loop(
         if response.usage:
             api_total_tokens = response.usage.total_tokens
             yield TokenUsageEvent(total_tokens=api_total_tokens)
+
+        # ── Hook: LLM response ─────────────────────────────
+        if hook_mgr.hooks:
+            await hook_mgr.fire_llm_response(response=response)
 
         # ── Log response ────────────────────────────────────
         if logger:
@@ -516,6 +549,9 @@ async def run_agent_loop(
         if not response.tool_calls:
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
+            if hook_mgr.hooks:
+                await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=response.content)
             yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
             yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
             return
@@ -523,6 +559,8 @@ async def run_agent_loop(
         # ── Cancellation check (before tools) ──────────────
         if cancelled():
             _cleanup_incomplete_messages(messages)
+            if hook_mgr.hooks:
+                await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
             yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
             return
 
@@ -544,6 +582,12 @@ async def run_agent_loop(
             fn_args = tc.function.arguments
 
             yield ToolCallStart(tool_call_id=tc_id, tool_name=fn_name, arguments=fn_args)
+
+            # Hook: tool start (interceptor — may modify arguments)
+            if hook_mgr.hooks:
+                fn_args = await hook_mgr.fire_tool_start(
+                    tool_call_id=tc_id, tool_name=fn_name, arguments=fn_args,
+                )
 
             # Snapshot workspace before tool execution for diff-based artifact detection
             pre_files: set[Path] = set()
@@ -637,12 +681,21 @@ async def run_agent_loop(
                             result_error=result.error if not result.success else None,
                         )
 
+            # Hook: tool result (interceptor — may modify content/error)
+            tc_content = result.content
+            tc_error = result.error
+            if hook_mgr.hooks:
+                tc_content, tc_error = await hook_mgr.fire_tool_result(
+                    tool_call_id=tc_id, tool_name=fn_name,
+                    success=result.success, content=tc_content, error=tc_error,
+                )
+
             yield ToolCallResult(
                 tool_call_id=tc_id,
                 tool_name=fn_name,
                 success=result.success,
-                content=result.content,
-                error=result.error,
+                content=tc_content,
+                error=tc_error,
             )
 
             # Emit permission request event if tool was denied with escalation info
@@ -654,7 +707,7 @@ async def run_agent_loop(
             # Detect and yield structured artifacts (images, files) from tool output
             if result.success and workspace_dir:
                 # Regex-based: detect [filename.ext] references in output
-                regex_artifacts = _detect_artifacts(tc_id, fn_name, result.content, workspace_dir)
+                regex_artifacts = _detect_artifacts(tc_id, fn_name, tc_content, workspace_dir)
                 for artifact in regex_artifacts:
                     yield artifact
                 # Diff-based: catch files not referenced in output text
@@ -663,10 +716,10 @@ async def run_agent_loop(
                 for artifact in _detect_new_files(tc_id, pre_files, post_files, already, workspace_dir):
                     yield artifact
 
-            # Append tool message
+            # Append tool message (use possibly-modified content from hooks)
             tool_msg = Message(
                 role="tool",
-                content=result.content if result.success else f"Error: {result.error}",
+                content=tc_content if result.success else f"Error: {tc_error}",
                 tool_call_id=tc_id,
                 name=fn_name,
             )
@@ -675,18 +728,27 @@ async def run_agent_loop(
             # Cancellation check after each tool
             if cancelled():
                 _cleanup_incomplete_messages(messages)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 return
 
         # 2. Parallel execution for parallel_safe tools (e.g. sub_agent, ppt_emit_html)
         if parallel_calls:
-            # Emit all ToolCallStart events first
+            # Emit all ToolCallStart events and apply hook interceptors
+            par_args_map: dict[str, dict[str, Any]] = {}  # tc.id → (possibly modified) args
             for tc in parallel_calls:
                 yield ToolCallStart(
                     tool_call_id=tc.id,
                     tool_name=tc.function.name,
                     arguments=tc.function.arguments,
                 )
+                par_fn_args = tc.function.arguments
+                if hook_mgr.hooks:
+                    par_fn_args = await hook_mgr.fire_tool_start(
+                        tool_call_id=tc.id, tool_name=tc.function.name, arguments=par_fn_args,
+                    )
+                par_args_map[tc.id] = par_fn_args
 
             # Wire a shared event queue onto EventEmittingTool instances
             par_event_queue: asyncio.Queue[SubAgentEvent | PPTProgressEvent] = asyncio.Queue()
@@ -700,7 +762,7 @@ async def run_agent_loop(
 
             async def _run_parallel(tc):
                 fn_name = tc.function.name
-                fn_args = tc.function.arguments
+                fn_args = par_args_map[tc.id]
                 if fn_name not in tools:
                     return tc, ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
                 try:
@@ -782,12 +844,21 @@ async def run_agent_loop(
                                 result_error=result.error if not result.success else None,
                             )
 
+                # Hook: tool result (interceptor)
+                par_content = result.content
+                par_error = result.error
+                if hook_mgr.hooks:
+                    par_content, par_error = await hook_mgr.fire_tool_result(
+                        tool_call_id=tc_id, tool_name=fn_name,
+                        success=result.success, content=par_content, error=par_error,
+                    )
+
                 yield ToolCallResult(
                     tool_call_id=tc_id,
                     tool_name=fn_name,
                     success=result.success,
-                    content=result.content,
-                    error=result.error,
+                    content=par_content,
+                    error=par_error,
                 )
 
                 # Emit permission request event if tool was denied with escalation info
@@ -796,10 +867,10 @@ async def run_agent_loop(
                     pr = {k: v for k, v in result.permission_request.items() if k != "type"}
                     yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
 
-                # Append tool message
+                # Append tool message (use possibly-modified content from hooks)
                 tool_msg = Message(
                     role="tool",
-                    content=result.content if result.success else f"Error: {result.error}",
+                    content=par_content if result.success else f"Error: {par_error}",
                     tool_call_id=tc_id,
                     name=fn_name,
                 )
@@ -809,7 +880,15 @@ async def run_agent_loop(
         elapsed = perf_counter() - step_start
         total = perf_counter() - run_start
         yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+        if hook_mgr.hooks:
+            await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+
+        # ── Periodic memory extraction ─────────────────────
+        if memory_extractor:
+            await memory_extractor.maybe_extract(messages, "step_interval")
 
     # ── Max steps exhausted ─────────────────────────────────
     msg = f"Task couldn't be completed after {max_steps} steps."
+    if hook_mgr.hooks:
+        await hook_mgr.fire_done(stop_reason=StopReason.MAX_STEPS, final_content=msg)
     yield DoneEvent(stop_reason=StopReason.MAX_STEPS, final_content=msg)

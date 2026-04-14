@@ -29,8 +29,9 @@ class MemoryWriteTool(Tool):
             "Write to long-term memory that persists across sessions. "
             "Use this to save user preferences, important facts, project context, "
             "or anything that should be remembered in future sessions. "
+            "Content is written to the Manual Memory section. "
             "The content is appended to existing memory. "
-            "To replace all memory, set mode to 'overwrite'."
+            "To replace manual memory, set mode to 'overwrite'."
         )
 
     @property
@@ -48,7 +49,7 @@ class MemoryWriteTool(Tool):
                 "mode": {
                     "type": "string",
                     "enum": ["append", "overwrite"],
-                    "description": "Write mode: 'append' adds to existing memory (default), 'overwrite' replaces all memory.",
+                    "description": "Write mode: 'append' adds to existing manual memory (default), 'overwrite' replaces manual memory section.",
                 },
             },
             "required": ["content"],
@@ -57,18 +58,14 @@ class MemoryWriteTool(Tool):
     async def execute(self, content: str, mode: str = "append") -> ToolResult:
         try:
             if mode == "overwrite":
-                self._mgr.write_manual_memory(content)
+                self._mgr.write_section("Manual Memory", content)
             else:
-                existing = self._mgr.read_manual_memory()
-                if existing:
-                    new_content = f"{existing}\n{content}"
-                else:
-                    new_content = content
-                self._mgr.write_manual_memory(new_content)
+                self._mgr.append_to_section("Manual Memory", content)
 
+            current = self._mgr.read_section("Manual Memory")
             return ToolResult(
                 success=True,
-                content=f"Memory updated ({mode}). Current memory:\n{self._mgr.read_manual_memory()}",
+                content=f"Memory updated ({mode}). Current manual memory:\n{current}",
             )
         except Exception as e:
             return ToolResult(success=False, content="", error=f"Failed to write memory: {e}")
@@ -102,9 +99,9 @@ class MemoryReadTool(Tool):
 
     async def execute(self) -> ToolResult:
         try:
-            content = self._mgr.read_manual_memory()
+            content = self._mgr.read_all()
             if not content:
                 return ToolResult(success=True, content="No long-term memory saved yet.")
-            return ToolResult(success=True, content=f"Long-term memory:\n{content}")
+            return ToolResult(success=True, content=f"Long-term memory (all sections):\n{content}")
         except Exception as e:
             return ToolResult(success=False, content="", error=f"Failed to read memory: {e}")

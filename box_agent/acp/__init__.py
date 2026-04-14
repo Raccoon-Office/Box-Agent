@@ -120,6 +120,7 @@ class SessionState:
     session_mode: str | None = None  # e.g. "data_analysis" for /analysis pages
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None  # in-band permission grants
+    memory_extractor: Any | None = None  # per-session instance to avoid cross-session state leaks
 
 
 class BoxACPAgent:
@@ -133,6 +134,7 @@ class BoxACPAgent:
         base_tools: list,
         system_prompt: str,
         memory_manager: MemoryManager | None = None,
+        hooks: list | None = None,
     ):
         self._conn = conn
         self._config = config
@@ -141,6 +143,7 @@ class BoxACPAgent:
         self._system_prompt = system_prompt
         self._sessions: dict[str, SessionState] = {}
         self._memory = memory_manager
+        self._hooks = hooks
 
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:  # noqa: ARG002
         log.info("initialize", message="ACP initialize request received")
@@ -243,9 +246,22 @@ class BoxACPAgent:
             agent.tools[ppt_tool.name] = ppt_tool
         # Sandbox workspace is a stable subdirectory under the workspace
         sandbox_ws = str(workspace / "sandbox")
+
+        # Per-session MemoryExtractor to avoid cross-session state leaks
+        session_extractor = None
+        if self._memory and self._config.agent.enable_memory_extraction:
+            from box_agent.memory import MemoryExtractor
+            session_extractor = MemoryExtractor(
+                llm=self._llm,
+                memory_manager=self._memory,
+                cooldown=self._config.agent.memory_extraction_cooldown,
+                step_interval=self._config.agent.memory_extraction_step_interval,
+            )
+
         self._sessions[session_id] = SessionState(
             agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode,
             permission_engine=perm_engine, grant_store=grant_store,
+            memory_extractor=session_extractor,
         )
 
         tool_names = [t.name for t in tools]
@@ -315,16 +331,12 @@ class BoxACPAgent:
         stop_reason = await self._run_turn(state, session_id)
         duration_ms = int((perf_counter() - prompt_start) * 1000)
 
-        # Save session summary in background (best-effort)
-        if self._memory:
+        # Extract memory and save session summary (best-effort)
+        if state.memory_extractor:
             try:
-                await self._memory.generate_session_summary(
-                    llm=self._llm,
-                    messages=state.agent.messages,
-                    session_id=session_id,
-                )
+                await state.memory_extractor.maybe_extract(state.agent.messages, "session_end")
             except Exception:
-                log.warn("session/memory", session_id=session_id, message="Failed to save session summary")
+                log.warn("session/memory", session_id=session_id, message="Failed to extract memory")
 
         log.info("session/done", session_id=session_id, stop_reason=stop_reason, duration_ms=duration_ms)
         # Map box-agent stop reasons to ACP-valid StopReason values.
@@ -371,6 +383,8 @@ class BoxACPAgent:
             logger=None,  # ACP uses its own logging via the connection
             workspace_dir=str(agent.workspace_dir),
             permission_negotiator=negotiator,
+            hooks=self._hooks,
+            memory_extractor=state.memory_extractor,
         ):
             try:
                 match event:
@@ -662,10 +676,7 @@ async def run_acp_server(config: Config | None = None) -> None:
         # Create memory manager if enabled
         memory_mgr = None
         if config.agent.enable_memory:
-            memory_mgr = MemoryManager(
-                memory_dir=config.agent.memory_dir,
-                recall_days=config.agent.memory_recall_days,
-            )
+            memory_mgr = MemoryManager(memory_dir=config.agent.memory_dir)
 
         base_tools, skill_loader = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)
@@ -734,8 +745,11 @@ You have access to the `execute_code` tool which runs Python code in an isolated
 
             _win_transport.write = _pinned_write  # type: ignore[method-assign]
 
+        from box_agent.hooks import load_hooks
+        _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
+
         sys.stdout = sys.stderr
-        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr), writer, reader)
+        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks), writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         await asyncio.Event().wait()

@@ -79,6 +79,7 @@ class Agent:
         max_steps: int = 50,
         workspace_dir: str = "./workspace",
         token_limit: int = 80000,
+        hooks: list | None = None,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -87,6 +88,8 @@ class Agent:
         self.workspace_dir = Path(workspace_dir)
         self.cancel_event: Optional[asyncio.Event] = None
         self._permission_negotiator = None  # set by CLI/ACP when permission engine is active
+        self._hooks = hooks
+        self._memory_extractor = None  # set by CLI/ACP when memory extraction is enabled
 
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +139,8 @@ class Agent:
             logger=self.logger,
             workspace_dir=str(self.workspace_dir),
             permission_negotiator=self._permission_negotiator,
+            hooks=self._hooks,
+            memory_extractor=self._memory_extractor,
         ):
             # Track token usage on Agent instance for backward compat
             if isinstance(event, TokenUsageEvent):

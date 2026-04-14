@@ -43,7 +43,10 @@ class AgentConfig(BaseModel):
     # Memory
     enable_memory: bool = True
     memory_dir: str = "~/.box-agent/memory"
-    memory_recall_days: int = 3
+    # Memory auto-extraction
+    enable_memory_extraction: bool = True
+    memory_extraction_cooldown: int = 300  # seconds between extractions
+    memory_extraction_step_interval: int = 10  # extract every N agent steps
 
 
 class MCPConfig(BaseModel):
@@ -114,6 +117,17 @@ class Officev3Config(BaseModel):
     paths: Officev3Paths = Field(default_factory=Officev3Paths)
 
 
+class HooksConfig(BaseModel):
+    """Lifecycle hooks configuration.
+
+    Each entry is a fully-qualified Python class path that will be
+    imported and instantiated at startup.  The same list is loaded
+    by both CLI and ACP for consistent behaviour.
+    """
+
+    hooks: list[str] = Field(default_factory=list)
+
+
 class Config(BaseModel):
     """Main configuration class"""
 
@@ -121,6 +135,7 @@ class Config(BaseModel):
     agent: AgentConfig
     tools: ToolsConfig
     officev3: Officev3Config = Field(default_factory=Officev3Config)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
 
     @classmethod
     def load(cls) -> "Config":
@@ -187,7 +202,9 @@ class Config(BaseModel):
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
             enable_memory=data.get("enable_memory", True),
             memory_dir=data.get("memory_dir", "~/.box-agent/memory"),
-            memory_recall_days=data.get("memory_recall_days", 3),
+            enable_memory_extraction=data.get("enable_memory_extraction", True),
+            memory_extraction_cooldown=data.get("memory_extraction_cooldown", 300),
+            memory_extraction_step_interval=data.get("memory_extraction_step_interval", 10),
         )
 
         # Parse tools configuration
@@ -241,11 +258,18 @@ class Config(BaseModel):
             )
             officev3_config._present = True
 
+        # Parse hooks configuration
+        hooks_data = data.get("hooks", [])
+        if not isinstance(hooks_data, list):
+            hooks_data = []
+        hooks_config = HooksConfig(hooks=hooks_data)
+
         return cls(
             llm=llm_config,
             agent=agent_config,
             tools=tools_config,
             officev3=officev3_config,
+            hooks=hooks_config,
         )
 
     @staticmethod
