@@ -257,6 +257,16 @@ class PermissionRequestEvent:
     persistent_supported: bool = True
 
 
+# ── In-stream injection ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class InjectedMessageEvent:
+    """A user message was injected into the running agent loop."""
+
+    content: str
+
+
 # ── Union type ──────────────────────────────────────────────────
 
 AgentEvent = Union[
@@ -277,4 +287,5 @@ AgentEvent = Union[
     SubAgentEvent,
     PPTProgressEvent,
     PermissionRequestEvent,
+    InjectedMessageEvent,
 ]

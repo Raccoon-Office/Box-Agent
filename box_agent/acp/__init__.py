@@ -33,7 +33,7 @@ import json as _json
 import logging
 import platform
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -71,6 +71,7 @@ from box_agent.events import (
     ContentEvent,
     DoneEvent,
     ErrorEvent,
+    InjectedMessageEvent,
     PPTProgressEvent,
     StepEnd,
     StepStart,
@@ -121,6 +122,8 @@ class SessionState:
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None  # in-band permission grants
     memory_extractor: Any | None = None  # per-session instance to avoid cross-session state leaks
+    inject_queue: asyncio.Queue = field(default_factory=asyncio.Queue)  # in-stream message injection
+    turn_active: bool = False  # True while _run_turn is executing; guards inject_queue
 
 
 class BoxACPAgent:
@@ -327,8 +330,17 @@ class BoxACPAgent:
 
         state.agent.messages.append(Message(role="user", content=user_text))
 
+        # Drain any stale injections from a previous turn
+        while not state.inject_queue.empty():
+            stale = state.inject_queue.get_nowait()
+            log.warn("session/inject_stale", session_id=session_id, text=stale[:80])
+
         prompt_start = perf_counter()
-        stop_reason = await self._run_turn(state, session_id)
+        state.turn_active = True
+        try:
+            stop_reason = await self._run_turn(state, session_id)
+        finally:
+            state.turn_active = False
         duration_ms = int((perf_counter() - prompt_start) * 1000)
 
         log.info("session/done", session_id=session_id, stop_reason=stop_reason, duration_ms=duration_ms)
@@ -348,6 +360,23 @@ class BoxACPAgent:
         if state:
             state.cancelled = True
             log.info("session/cancel", session_id=params.sessionId, message="Cancel requested")
+
+    async def extMethod(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle custom ACP extension methods (called as ``_<method>``)."""
+        if method == "inject":
+            session_id = params.get("sessionId", "")
+            text = params.get("text", "")
+            state = self._sessions.get(session_id)
+            if not state:
+                return {"error": "session_not_found"}
+            if not text:
+                return {"error": "empty_text"}
+            if not state.turn_active:
+                return {"error": "no_active_turn"}
+            state.inject_queue.put_nowait(text)
+            log.info("session/inject", session_id=session_id, text=text[:80])
+            return {"ok": True}
+        return {"error": f"unknown_method: {method}"}
 
     async def _run_turn(self, state: SessionState, session_id: str) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
@@ -378,6 +407,7 @@ class BoxACPAgent:
             permission_negotiator=negotiator,
             hooks=self._hooks,
             memory_extractor=state.memory_extractor,
+            inject_queue=state.inject_queue,
         ):
             try:
                 match event:
@@ -449,6 +479,10 @@ class BoxACPAgent:
                         await self._send(session_id, update_agent_message(text_block(f"Error: {msg}")))
                         # Don't return yet — let the loop consume the subsequent DoneEvent
                         # so the async generator is properly exhausted.
+
+                    case InjectedMessageEvent(content=text):
+                        log.info("session/injected", session_id=session_id, text=text[:80])
+                        await self._send(session_id, update_agent_message(text_block(f"[Injected] {text}")))
 
                     case StepEnd(step=s, elapsed_seconds=el, total_elapsed_seconds=tot):
                         log.debug("step/end", session_id=session_id, step=s, duration_ms=int(el * 1000), total_ms=int(tot * 1000))

@@ -27,6 +27,7 @@ from .events import (
     ContentEvent,
     DoneEvent,
     ErrorEvent,
+    InjectedMessageEvent,
     LogFileEvent,
     PPTProgressEvent,
     PermissionRequestEvent,
@@ -378,6 +379,7 @@ async def run_agent_loop(
     permission_negotiator: Any | None = None,
     hooks: list | None = None,
     memory_extractor: Any | None = None,
+    inject_queue: asyncio.Queue[str] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -409,6 +411,10 @@ async def run_agent_loop(
             lifecycle-triggered memory extraction.  When present,
             extraction is attempted before context compression and
             every N steps.
+        inject_queue: Optional queue for in-stream message injection.
+            When present, queued user messages are drained at each
+            step boundary and appended to the conversation before
+            the next LLM call.
     """
     cancelled = is_cancelled or (lambda: False)
     hook_mgr = HookManager(hooks)
@@ -436,6 +442,13 @@ async def run_agent_loop(
             return
 
         step_start = perf_counter()
+
+        # ── Drain inject queue (in-stream injection) ───────
+        if inject_queue:
+            while not inject_queue.empty():
+                injected_text = inject_queue.get_nowait()
+                messages.append(Message(role="user", content=injected_text))
+                yield InjectedMessageEvent(content=injected_text)
 
         # ── Micro-compact (Layer 1) ────────────────────────
         # Cheap: replace old tool results with placeholders
@@ -546,8 +559,18 @@ async def run_agent_loop(
         )
         messages.append(assistant_msg)
 
-        # ── No tool calls → done ───────────────────────────
+        # ── No tool calls → done (or continue if injected) ──
         if not response.tool_calls:
+            # Check inject queue — if messages are pending, continue
+            # the loop so the LLM sees them on the next iteration.
+            if inject_queue and not inject_queue.empty():
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                continue
+
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:

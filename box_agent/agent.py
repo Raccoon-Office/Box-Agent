@@ -21,6 +21,7 @@ from .events import (
     ContentEvent,
     DoneEvent,
     ErrorEvent,
+    InjectedMessageEvent,
     LogFileEvent,
     PPTProgressEvent,
     PermissionRequestEvent,
@@ -87,6 +88,7 @@ class Agent:
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         self.cancel_event: Optional[asyncio.Event] = None
+        self.inject_queue: asyncio.Queue[str] = asyncio.Queue()
         self._permission_negotiator = None  # set by CLI/ACP when permission engine is active
         self._hooks = hooks
         self._memory_extractor = None  # set by CLI/ACP when memory extraction is enabled
@@ -110,6 +112,14 @@ class Agent:
     def add_user_message(self, content: str):
         """Add a user message to history."""
         self.messages.append(Message(role="user", content=content))
+
+    def inject(self, content: str) -> None:
+        """Inject a user message into the running agent loop.
+
+        The message is queued and will be appended to the conversation
+        at the next step boundary.  Safe to call from any thread.
+        """
+        self.inject_queue.put_nowait(content)
 
     def _check_cancelled(self) -> bool:
         if self.cancel_event is not None and self.cancel_event.is_set():
@@ -141,6 +151,7 @@ class Agent:
             permission_negotiator=self._permission_negotiator,
             hooks=self._hooks,
             memory_extractor=self._memory_extractor,
+            inject_queue=self.inject_queue,
         ):
             # Track token usage on Agent instance for backward compat
             if isinstance(event, TokenUsageEvent):
@@ -266,6 +277,10 @@ class Agent:
                 if path:
                     print(f"   Path: {path}")
                 print(f"   Reason: {reason}")
+
+            case InjectedMessageEvent(content=text):
+                preview = text[:80] + "..." if len(text) > 80 else text
+                print(f"\n{Colors.DIM}💉 Injected:{Colors.RESET} {Colors.BRIGHT_WHITE}{preview}{Colors.RESET}")
 
             case StepEnd(step=s, elapsed_seconds=el, total_elapsed_seconds=tot):
                 print(f"\n{Colors.DIM}⏱️  Step {s} completed in {el:.2f}s (total: {tot:.2f}s){Colors.RESET}")
