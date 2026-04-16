@@ -56,6 +56,24 @@ _ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
 # Image extensions for artifact_type classification
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg"}
 
+# Pattern to match <!--PLOT_DATA:...--> markers embedded by code execution.
+# These carry interactive chart payloads already sent to the frontend via SSE;
+# they must NOT be fed back into the model context.
+_PLOT_DATA_RE = re.compile(r"<!--PLOT_DATA:.+?-->", re.DOTALL)
+
+
+def _strip_plot_data(text: str) -> str:
+    """Remove ``<!--PLOT_DATA:...-->`` markers from code-execution stdout.
+
+    The markers contain chart data already delivered to the frontend through
+    SSE events.  Keeping them in the model context wastes tokens and can
+    cause context-length issues.
+
+    Returns a short placeholder when stripping leaves the string empty.
+    """
+    cleaned = _PLOT_DATA_RE.sub("", text).strip()
+    return cleaned if cleaned else "图表已生成"
+
 
 def _detect_artifacts(
     tool_call_id: str,
@@ -743,10 +761,13 @@ async def run_agent_loop(
                 for artifact in _detect_new_files(tc_id, pre_files, post_files, already, workspace_dir):
                     yield artifact
 
-            # Append tool message (use possibly-modified content from hooks)
+            # Append tool message (use possibly-modified content from hooks).
+            # Strip <!--PLOT_DATA:--> markers so chart payloads (already sent
+            # to the frontend via SSE) don't bloat the model context.
+            msg_content = _strip_plot_data(tc_content) if result.success else f"Error: {tc_error}"
             tool_msg = Message(
                 role="tool",
-                content=tc_content if result.success else f"Error: {tc_error}",
+                content=msg_content,
                 tool_call_id=tc_id,
                 name=fn_name,
             )
@@ -894,10 +915,12 @@ async def run_agent_loop(
                     pr = {k: v for k, v in result.permission_request.items() if k != "type"}
                     yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
 
-                # Append tool message (use possibly-modified content from hooks)
+                # Append tool message — strip <!--PLOT_DATA:--> markers from
+                # model context (same rationale as the sequential block above).
+                msg_content = _strip_plot_data(par_content) if result.success else f"Error: {par_error}"
                 tool_msg = Message(
                     role="tool",
-                    content=par_content if result.success else f"Error: {par_error}",
+                    content=msg_content,
                     tool_call_id=tc_id,
                     name=fn_name,
                 )
