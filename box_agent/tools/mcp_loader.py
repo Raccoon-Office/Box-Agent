@@ -3,10 +3,29 @@
 import asyncio
 import json
 import sys
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+
+
+# Python 3.10 compatibility: asyncio.timeout was added in 3.11
+if sys.version_info >= (3, 11):
+    _timeout = asyncio.timeout
+else:
+
+    @asynccontextmanager
+    async def _timeout(delay: float):  # type: ignore[misc]
+        """Minimal asyncio.timeout shim for Python 3.10."""
+        task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        handle = loop.call_later(delay, task.cancel)  # type: ignore[union-attr]
+        try:
+            yield
+        except asyncio.CancelledError:
+            raise TimeoutError(f"Timed out after {delay}s")
+        finally:
+            handle.cancel()
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
@@ -98,7 +117,7 @@ class MCPTool(Tool):
 
         try:
             # Wrap call_tool with timeout
-            async with asyncio.timeout(timeout):
+            async with _timeout(timeout):
                 result = await self._session.call_tool(self._name, arguments=kwargs)
 
             # MCP tool results are a list of content items
@@ -182,7 +201,7 @@ class MCPServerConnection:
             self.exit_stack = AsyncExitStack()
 
             # Wrap connection with timeout
-            async with asyncio.timeout(connect_timeout):
+            async with _timeout(connect_timeout):
                 if self.connection_type == "stdio":
                     read_stream, write_stream = await self._connect_stdio()
                 elif self.connection_type == "sse":

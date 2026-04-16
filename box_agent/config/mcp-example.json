@@ -1,5 +1,11 @@
 {
     "mcpServers": {
+        "tavily": {
+            "description": "Tavily - Web search and content extraction",
+            "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_API_KEY",
+            "type": "streamable_http",
+            "disabled": true
+        },
         "memory": {
             "description": "Memory - Knowledge graph memory system (long-term memory based on graph database)",
             "command": "npx",
