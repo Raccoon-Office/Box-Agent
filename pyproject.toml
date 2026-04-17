@@ -1,6 +1,6 @@
 [project]
 name = "box-agent"
-version = "0.8.12"
+version = "0.8.13"
 description = "AI agent framework with Jupyter sandbox, data analysis, MCP tools, ACP protocol, multi-provider LLM, and standalone runtime packaging"
 readme = "README.md"
 requires-python = ">=3.10"

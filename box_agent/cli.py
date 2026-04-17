@@ -34,7 +34,7 @@ from box_agent.schema import LLMProvider
 from box_agent.tools.base import Tool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from box_agent.tools.mcp_loader import cleanup_mcp_connections
-from box_agent.tools.setup import add_workspace_tools, initialize_base_tools
+from box_agent.tools.setup import add_workspace_tools, await_mcp_tools, initialize_base_tools
 from box_agent.utils import calculate_display_width
 
 
@@ -765,8 +765,8 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
             step_interval=config.agent.memory_extraction_step_interval,
         )
 
-    # 3.5 Initialize base tools (independent of workspace)
-    tools, skill_loader = await initialize_base_tools(config, memory_manager=memory_mgr)
+    # 3.5 Initialize base tools (independent of workspace). MCP loads in the background.
+    tools, skill_loader, mcp_task = await initialize_base_tools(config, memory_manager=memory_mgr)
 
     # 4. Add workspace-dependent tools
     non_interactive = task is not None
@@ -884,6 +884,9 @@ You have access to the `execute_code` tool which runs Python code in an isolated
     # 8.5 Non-interactive mode: execute task and exit
     if task:
         print(f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n")
+        # Block on MCP only when user is actually about to run
+        for t in await await_mcp_tools(mcp_task):
+            agent.tools.setdefault(t.name, t)
         agent.add_user_message(task)
         try:
             await agent.run()
@@ -1061,6 +1064,10 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                 break
 
             # Run Agent with cancellation + in-stream injection support
+            # Ensure background-loaded MCP tools are registered (no-op after first call)
+            for t in await await_mcp_tools(mcp_task):
+                agent.tools.setdefault(t.name, t)
+            mcp_task = None  # clear so we don't re-await the cached result each turn
             agent.add_user_message(user_input)
 
             # Create cancellation event

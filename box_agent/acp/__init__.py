@@ -63,7 +63,7 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
 from box_agent.agent import Agent
-from box_agent.tools.setup import add_workspace_tools, initialize_base_tools
+from box_agent.tools.setup import add_workspace_tools, await_mcp_tools, initialize_base_tools
 from box_agent.config import Config
 from box_agent.core import run_agent_loop
 from box_agent.events import (
@@ -139,6 +139,7 @@ class BoxACPAgent:
         memory_manager: MemoryManager | None = None,
         hooks: list | None = None,
         skill_loader: Any | None = None,
+        mcp_task: asyncio.Task | None = None,
     ):
         self._conn = conn
         self._config = config
@@ -149,6 +150,25 @@ class BoxACPAgent:
         self._memory = memory_manager
         self._hooks = hooks
         self._skill_loader = skill_loader
+        self._mcp_task = mcp_task  # background-loaded MCP tools; awaited on first prompt
+        self._mcp_loaded = mcp_task is None  # True once MCP has been injected
+
+    async def _ensure_mcp_loaded(self) -> None:
+        """Await background MCP loading (first caller blocks, rest are no-ops)."""
+        if self._mcp_loaded:
+            return
+        mcp_tools = await await_mcp_tools(self._mcp_task)
+        # Inject into base tool list so future sessions pick them up
+        existing_names = {t.name for t in self._base_tools}
+        for t in mcp_tools:
+            if t.name not in existing_names:
+                self._base_tools.append(t)
+        # Also inject into any already-created sessions
+        for state in self._sessions.values():
+            for t in mcp_tools:
+                state.agent.tools.setdefault(t.name, t)
+        self._mcp_loaded = True
+        log.info("mcp/ready", count=len(mcp_tools))
 
     def _skills_meta(self) -> list[dict] | None:
         """Return current skills metadata for ACP _meta payload, reloading if changed."""
@@ -350,6 +370,9 @@ class BoxACPAgent:
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
 
         log.info("session/prompt", session_id=session_id, message=user_text)
+
+        # Ensure background-loaded MCP tools are available before running the turn
+        await self._ensure_mcp_loaded()
 
         # Refresh skills so officev3-authored skills are available mid-session
         if self._skill_loader:
@@ -748,7 +771,7 @@ async def run_acp_server(config: Config | None = None) -> None:
             except Exception:
                 log.warn("server/start", message="OpenClaw import failed (non-fatal)")
 
-        base_tools, skill_loader = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr)
+        base_tools, skill_loader, mcp_task = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)
         if prompt_path and prompt_path.exists():
             system_prompt = prompt_path.read_text(encoding="utf-8")
@@ -819,7 +842,7 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
 
         sys.stdout = sys.stderr
-        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader), writer, reader)
+        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader, mcp_task=mcp_task), writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         await asyncio.Event().wait()

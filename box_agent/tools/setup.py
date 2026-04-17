@@ -7,9 +7,10 @@ interactive-CLI surface.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 from box_agent.config import Config
 from box_agent.tools.base import Tool
@@ -52,7 +53,10 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
         memory_manager: Optional MemoryManager instance for memory tools.
 
     Returns:
-        Tuple of (list of tools, skill loader if skills enabled)
+        Tuple of (tools, skill_loader, mcp_task). The MCP task loads in the
+        background — call ``await_mcp_tools(mcp_task)`` before running an
+        agent turn to ensure MCP tools are available. ``mcp_task`` is
+        ``None`` when MCP is disabled.
     """
     _out = output or print
 
@@ -129,38 +133,55 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
         except Exception as e:
             _out(f"{Colors.YELLOW}⚠️  Failed to load Skills: {e}{Colors.RESET}")
 
-    # 4. MCP tools (loaded with priority search)
+    # 4. MCP tools (loaded with priority search, in background to avoid blocking startup)
+    mcp_task: Optional[asyncio.Task] = None
     if config.tools.enable_mcp:
-        _out(f"{Colors.BRIGHT_CYAN}Loading MCP tools...{Colors.RESET}")
-        try:
-            # Apply MCP timeout configuration from config.yaml
-            mcp_config = config.tools.mcp
-            set_mcp_timeout_config(
-                connect_timeout=mcp_config.connect_timeout,
-                execute_timeout=mcp_config.execute_timeout,
-                sse_read_timeout=mcp_config.sse_read_timeout,
-            )
+        mcp_config = config.tools.mcp
+        set_mcp_timeout_config(
+            connect_timeout=mcp_config.connect_timeout,
+            execute_timeout=mcp_config.execute_timeout,
+            sse_read_timeout=mcp_config.sse_read_timeout,
+        )
+        mcp_config_path = Config.find_config_file(config.tools.mcp_config_path)
+        if mcp_config_path:
+            _out(f"{Colors.BRIGHT_CYAN}Loading MCP tools in background (from: {mcp_config_path})...{Colors.RESET}")
             _out(
                 f"{Colors.DIM}  MCP timeouts: connect={mcp_config.connect_timeout}s, "
                 f"execute={mcp_config.execute_timeout}s, sse_read={mcp_config.sse_read_timeout}s{Colors.RESET}"
             )
 
-            # Use priority search for mcp.json
-            mcp_config_path = Config.find_config_file(config.tools.mcp_config_path)
-            if mcp_config_path:
-                mcp_tools = await load_mcp_tools_async(str(mcp_config_path))
-                if mcp_tools:
-                    tools.extend(mcp_tools)
-                    _out(f"{Colors.GREEN}✅ Loaded {len(mcp_tools)} MCP tools (from: {mcp_config_path}){Colors.RESET}")
-                else:
-                    _out(f"{Colors.YELLOW}⚠️  No available MCP tools found{Colors.RESET}")
-            else:
-                _out(f"{Colors.YELLOW}⚠️  MCP config file not found: {config.tools.mcp_config_path}{Colors.RESET}")
-        except Exception as e:
-            _out(f"{Colors.YELLOW}⚠️  Failed to load MCP tools: {e}{Colors.RESET}")
+            async def _load() -> List[Tool]:
+                try:
+                    loaded = await load_mcp_tools_async(str(mcp_config_path))
+                    if loaded:
+                        _out(f"{Colors.GREEN}✅ Loaded {len(loaded)} MCP tools (from: {mcp_config_path}){Colors.RESET}")
+                    else:
+                        _out(f"{Colors.YELLOW}⚠️  No available MCP tools found{Colors.RESET}")
+                    return loaded
+                except Exception as e:
+                    _out(f"{Colors.YELLOW}⚠️  Failed to load MCP tools: {e}{Colors.RESET}")
+                    return []
+
+            mcp_task = asyncio.create_task(_load(), name="mcp-background-load")
+        else:
+            _out(f"{Colors.YELLOW}⚠️  MCP config file not found: {config.tools.mcp_config_path}{Colors.RESET}")
 
     _out("")  # Empty line separator
-    return tools, skill_loader
+    return tools, skill_loader, mcp_task
+
+
+async def await_mcp_tools(mcp_task: Optional[asyncio.Task]) -> List[Tool]:
+    """Await the background MCP loading task (no-op if already awaited or absent).
+
+    Safe to call multiple times — asyncio.Task results are cached.
+    Returns the list of loaded MCP tools, or [] if none/failed.
+    """
+    if mcp_task is None:
+        return []
+    try:
+        return await mcp_task
+    except Exception:
+        return []
 
 
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
