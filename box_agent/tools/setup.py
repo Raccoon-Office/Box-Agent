@@ -86,11 +86,10 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
     if config.tools.enable_skills:
         _out(f"{Colors.BRIGHT_CYAN}Loading Claude Skills...{Colors.RESET}")
         try:
-            # Resolve skills directory with priority search
-            # Expand ~ to user home directory for portability
+            # Resolve builtin skills directory with priority search
             skills_path = Path(config.tools.skills_dir).expanduser()
             if skills_path.is_absolute():
-                skills_dir = str(skills_path)
+                builtin_dir = skills_path
             else:
                 # Search in priority order:
                 # 1. Current directory (dev mode: ./skills or ./box_agent/skills)
@@ -101,17 +100,30 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
                     Config.get_package_dir() / skills_path,  # site-packages/box_agent/skills
                 ]
 
-                # Find first existing path
-                skills_dir = str(skills_path)  # default
+                builtin_dir = skills_path  # default
                 for path in search_paths:
                     if path.exists():
-                        skills_dir = str(path.resolve())
+                        builtin_dir = path.resolve()
                         break
 
-            skill_tools, skill_loader = create_skill_tools(skills_dir)
+            # User skills directory: ~/.box-agent/skills/
+            # Auto-created so officev3 can drop new skills in and we pick them up on mtime change.
+            user_skills_dir = Path.home() / ".box-agent" / "skills"
+            user_skills_dir.mkdir(parents=True, exist_ok=True)
+
+            # User skills take priority over builtin on name conflict
+            sources = [
+                (user_skills_dir, "user"),
+                (builtin_dir, "builtin"),
+            ]
+
+            skill_tools, skill_loader = create_skill_tools(sources=sources)
             if skill_tools:
                 tools.extend(skill_tools)
-                _out(f"{Colors.GREEN}✅ Loaded Skill tool (get_skill){Colors.RESET}")
+                _out(
+                    f"{Colors.GREEN}✅ Loaded Skill tool (get_skill) — "
+                    f"user: {user_skills_dir}, builtin: {builtin_dir}{Colors.RESET}"
+                )
             else:
                 _out(f"{Colors.YELLOW}⚠️  No available Skills found{Colors.RESET}")
         except Exception as e:

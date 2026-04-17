@@ -4,10 +4,13 @@ Skill Tool - Tool for Agent to load Skills on-demand
 Implements Progressive Disclosure (Level 2): Load full skill content when needed
 """
 
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from .base import Tool, ToolResult
 from .skill_loader import SkillLoader
+
+SkillSource = Literal["builtin", "user"]
 
 
 class GetSkillTool(Tool):
@@ -39,6 +42,9 @@ class GetSkillTool(Tool):
 
     async def execute(self, skill_name: str) -> ToolResult:
         """Get detailed information about specified skill"""
+        # Auto-reload if the user skills directory has been touched since last scan
+        self.skill_loader.maybe_reload()
+
         skill = self.skill_loader.get_skill(skill_name)
 
         if not skill:
@@ -49,37 +55,33 @@ class GetSkillTool(Tool):
                 error=f"Skill '{skill_name}' does not exist. Available skills: {available}",
             )
 
-        # Return complete skill content
         result = skill.to_prompt()
         return ToolResult(success=True, content=result)
 
 
 def create_skill_tools(
-    skills_dir: str = "./skills",
+    skills_dir: Optional[str] = None,
+    sources: Optional[List[Tuple[str | Path, SkillSource]]] = None,
 ) -> tuple[List[Tool], Optional[SkillLoader]]:
-    """
-    Create skill tool for Progressive Disclosure
-
-    Only provides get_skill tool - the agent uses metadata in system prompt
-    to know what skills are available, then loads them on-demand.
+    """Create skill tool for Progressive Disclosure.
 
     Args:
-        skills_dir: Skills directory path
+        skills_dir: Legacy single-directory entry (treated as builtin).
+        sources: Ordered list of (directory, source_label) tuples. Earlier entries
+            win on name conflicts (e.g. user → builtin).
 
     Returns:
-        Tuple of (list of tools, skill loader)
+        Tuple of (list of tools, skill loader).
     """
-    # Create skill loader
-    loader = SkillLoader(skills_dir)
+    if sources is not None:
+        loader = SkillLoader(sources=sources)
+    else:
+        loader = SkillLoader(skills_dir=skills_dir or "./skills")
 
-    # Discover and load skills
     skills = loader.discover_skills()
     import sys as _sys
+
     _sys.stderr.write(f"✅ Discovered {len(skills)} Claude Skills\n")
 
-    # Create only the get_skill tool (Progressive Disclosure Level 2)
-    tools = [
-        GetSkillTool(loader),
-    ]
-
+    tools: List[Tool] = [GetSkillTool(loader)]
     return tools, loader

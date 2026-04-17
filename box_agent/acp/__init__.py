@@ -138,6 +138,7 @@ class BoxACPAgent:
         system_prompt: str,
         memory_manager: MemoryManager | None = None,
         hooks: list | None = None,
+        skill_loader: Any | None = None,
     ):
         self._conn = conn
         self._config = config
@@ -147,15 +148,32 @@ class BoxACPAgent:
         self._sessions: dict[str, SessionState] = {}
         self._memory = memory_manager
         self._hooks = hooks
+        self._skill_loader = skill_loader
+
+    def _skills_meta(self) -> list[dict] | None:
+        """Return current skills metadata for ACP _meta payload, reloading if changed."""
+        if not self._skill_loader:
+            return None
+        try:
+            self._skill_loader.maybe_reload()
+            return self._skill_loader.list_skills_metadata()
+        except Exception as exc:
+            log.warn("skills/meta_error", message=f"Failed to build skills metadata: {exc}")
+            return None
 
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:  # noqa: ARG002
         log.info("initialize", message="ACP initialize request received")
-        resp = InitializeResponse(
+        kwargs: dict[str, Any] = dict(
             protocolVersion=PROTOCOL_VERSION,
             agentCapabilities=AgentCapabilities(loadSession=False),
             agentInfo=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
-        log.info("initialize", message=f"Initialized box-agent v{__version__}")
+        skills = self._skills_meta()
+        if skills is not None:
+            # Pydantic alias: _meta ↔ field_meta
+            kwargs["field_meta"] = {"skills": skills}
+        resp = InitializeResponse(**kwargs)
+        log.info("initialize", message=f"Initialized box-agent v{__version__}, skills={len(skills) if skills else 0}")
         return resp
 
     async def newSession(self, params: NewSessionRequest) -> NewSessionResponse:
@@ -269,7 +287,12 @@ class BoxACPAgent:
 
         tool_names = [t.name for t in tools]
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
-        return NewSessionResponse(sessionId=session_id)
+
+        kwargs: dict[str, Any] = {"sessionId": session_id}
+        skills = self._skills_meta()
+        if skills is not None:
+            kwargs["field_meta"] = {"skills": skills}
+        return NewSessionResponse(**kwargs)
 
     def _build_session_prompt(self, session_mode: str | None) -> str:
         """Build system prompt with conditional mode-specific injection.
@@ -328,6 +351,13 @@ class BoxACPAgent:
 
         log.info("session/prompt", session_id=session_id, message=user_text)
 
+        # Refresh skills so officev3-authored skills are available mid-session
+        if self._skill_loader:
+            try:
+                self._skill_loader.maybe_reload()
+            except Exception as exc:
+                log.warn("skills/reload_error", session_id=session_id, message=str(exc))
+
         state.agent.messages.append(Message(role="user", content=user_text))
 
         # Drain any stale injections from a previous turn
@@ -376,6 +406,12 @@ class BoxACPAgent:
             state.inject_queue.put_nowait(text)
             log.info("session/inject", session_id=session_id, text=text[:80])
             return {"ok": True}
+        if method == "list_skills":
+            skills = self._skills_meta()
+            if skills is None:
+                return {"skills": []}
+            log.info("skills/list", count=len(skills))
+            return {"skills": skills}
         return {"error": f"unknown_method: {method}"}
 
     async def _run_turn(self, state: SessionState, session_id: str) -> str:
@@ -783,7 +819,7 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
 
         sys.stdout = sys.stderr
-        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks), writer, reader)
+        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader), writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         await asyncio.Event().wait()
