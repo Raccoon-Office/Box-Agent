@@ -398,6 +398,7 @@ async def run_agent_loop(
     hooks: list | None = None,
     memory_extractor: Any | None = None,
     inject_queue: asyncio.Queue[str] | None = None,
+    thinking_enabled: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -502,7 +503,9 @@ async def run_agent_loop(
             thinking_header_yielded = False
             content_header_yielded = False
 
-            async for chunk in llm.generate_stream(messages=messages, tools=tool_list):
+            async for chunk in llm.generate_stream(
+                messages=messages, tools=tool_list, thinking_enabled=thinking_enabled
+            ):
                 if chunk.type == "thinking":
                     if not thinking_header_yielded:
                         yield ThinkingEvent(content="", _streaming=True, _header=True)

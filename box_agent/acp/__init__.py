@@ -126,6 +126,7 @@ class SessionState:
     turn_active: bool = False  # True while _run_turn is executing; guards inject_queue
     auto_classify_pending: bool = False  # True when caller didn't supply session_mode; classify on first prompt
     memory_block: str | None = None  # cached memory recall, re-applied when mode switches
+    thinking_enabled: bool = False  # extended thinking toggle from _meta.deep_think
 
 
 class BoxACPAgent:
@@ -207,11 +208,13 @@ class BoxACPAgent:
         # Extract session_mode from _meta (ACP extension point)
         # Pydantic aliases _meta to field_meta
         session_mode = None
+        deep_think = False
         meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
             session_mode = meta.get("session_mode")
+            deep_think = bool(meta.get("deep_think", False))
 
-        log.info("session/new", session_id=session_id, message=f"Creating session, workspace={workspace}, session_mode={session_mode}")
+        log.info("session/new", session_id=session_id, message=f"Creating session, workspace={workspace}, session_mode={session_mode}, deep_think={deep_think}")
 
         # Build PermissionEngine via policy composition if officev3 block is configured
         perm_engine = None
@@ -277,7 +280,7 @@ class BoxACPAgent:
             llm=self._llm,
             permission_engine=perm_engine,
         )
-        agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace))
+        agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace), thinking_enabled=deep_think)
 
         # Conditionally add PPT tools based on session_mode
         if session_mode in ("ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"):
@@ -309,6 +312,7 @@ class BoxACPAgent:
             memory_extractor=session_extractor,
             auto_classify_pending=(session_mode is None),
             memory_block=memory_block,
+            thinking_enabled=deep_think,
         )
 
         tool_names = [t.name for t in tools]

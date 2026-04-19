@@ -12,6 +12,11 @@ from .base import LLMClientBase
 
 logger = logging.getLogger(__name__)
 
+# Hard-coded budget for extended thinking. Kept intentionally low — budgets
+# larger than this rarely improve answer quality for agentic workflows and
+# waste tokens. Tune here if we ever expose it as config.
+_THINKING_BUDGET = 8000
+
 
 class AnthropicClient(LLMClientBase):
     """LLM client using Anthropic's protocol.
@@ -51,6 +56,8 @@ class AnthropicClient(LLMClientBase):
         system_message: str | None,
         api_messages: list[dict[str, Any]],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> anthropic.types.Message:
         """Execute API request (core method that can be retried).
 
@@ -58,6 +65,8 @@ class AnthropicClient(LLMClientBase):
             system_message: Optional system message
             api_messages: List of messages in Anthropic format
             tools: Optional list of tools
+            thinking_enabled: When True, add ``thinking`` config with an
+                8000-token budget (Anthropic native extended thinking).
 
         Returns:
             Anthropic Message response
@@ -65,7 +74,7 @@ class AnthropicClient(LLMClientBase):
         Raises:
             Exception: API call failed
         """
-        params = {
+        params: dict[str, Any] = {
             "model": self.model,
             "max_tokens": 16384,
             "messages": api_messages,
@@ -76,6 +85,9 @@ class AnthropicClient(LLMClientBase):
 
         if tools:
             params["tools"] = self._convert_tools(tools)
+
+        if thinking_enabled:
+            params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
 
         # Use Anthropic SDK's async messages.create
         response = await self.client.messages.create(**params)
@@ -259,12 +271,15 @@ class AnthropicClient(LLMClientBase):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> LLMResponse:
         """Generate response from Anthropic LLM.
 
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
+            thinking_enabled: Enable Anthropic extended thinking.
 
         Returns:
             LLMResponse containing the generated content
@@ -281,6 +296,7 @@ class AnthropicClient(LLMClientBase):
                 request_params["system_message"],
                 request_params["api_messages"],
                 request_params["tools"],
+                thinking_enabled=thinking_enabled,
             )
         else:
             # Don't use retry
@@ -288,6 +304,7 @@ class AnthropicClient(LLMClientBase):
                 request_params["system_message"],
                 request_params["api_messages"],
                 request_params["tools"],
+                thinking_enabled=thinking_enabled,
             )
 
         # Parse and return response
@@ -297,6 +314,8 @@ class AnthropicClient(LLMClientBase):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Generate streaming response from Anthropic LLM.
 
@@ -314,6 +333,8 @@ class AnthropicClient(LLMClientBase):
             params["system"] = request_params["system_message"]
         if request_params["tools"]:
             params["tools"] = self._convert_tools(request_params["tools"])
+        if thinking_enabled:
+            params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
 
         # Accumulators for the finish event
         text_content = ""

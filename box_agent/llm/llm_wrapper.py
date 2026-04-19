@@ -85,22 +85,27 @@ class LLMClient:
         self,
         messages: list[Message],
         tools: list | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> LLMResponse:
         """Generate response from LLM.
 
         Args:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
+            thinking_enabled: Enable provider-native extended thinking.
 
         Returns:
             LLMResponse containing the generated content
         """
-        return await self._client.generate(messages, tools)
+        return await self._client.generate(messages, tools, thinking_enabled=thinking_enabled)
 
     async def generate_stream(
         self,
         messages: list[Message],
         tools: list | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Generate streaming response from LLM.
 
@@ -110,9 +115,12 @@ class LLMClient:
         Args:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
+            thinking_enabled: Enable provider-native extended thinking.
 
         Yields:
             StreamEvent chunks
         """
-        async for event in self._client.generate_stream(messages, tools):
+        async for event in self._client.generate_stream(
+            messages, tools, thinking_enabled=thinking_enabled
+        ):
             yield event

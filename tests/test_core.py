@@ -36,7 +36,7 @@ class MockLLM:
         self._idx += 1
         return resp
 
-    async def generate_stream(self, messages, tools=None):
+    async def generate_stream(self, messages, tools=None, **_):
         resp = self._responses[self._idx]
         self._idx += 1
         if resp.thinking:
@@ -277,7 +277,7 @@ async def test_llm_error():
         async def generate(self, messages, tools=None):
             raise ConnectionError("network down")
 
-        async def generate_stream(self, messages, tools=None):
+        async def generate_stream(self, messages, tools=None, **_):
             raise ConnectionError("network down")
             yield  # make it a valid async generator  # noqa: E501
 

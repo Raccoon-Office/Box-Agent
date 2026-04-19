@@ -35,7 +35,7 @@ class MockLLM:
         self._responses = list(responses)
         self._idx = 0
 
-    async def generate_stream(self, messages, tools=None):
+    async def generate_stream(self, messages, tools=None, **_):
         resp = self._responses[self._idx]
         self._idx += 1
         from box_agent.schema import StreamEvent

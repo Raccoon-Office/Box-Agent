@@ -39,7 +39,7 @@ class DummyLLM:
             )
         return LLMResponse(content="done", thinking=None, tool_calls=None, finish_reason="stop")
 
-    async def generate_stream(self, messages, tools):
+    async def generate_stream(self, messages, tools, **_):
         self.calls += 1
         if self.calls == 1:
             yield StreamEvent(type="thinking", delta="calling echo")

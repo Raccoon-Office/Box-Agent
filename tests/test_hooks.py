@@ -30,7 +30,7 @@ class MockLLM:
         self._responses = list(responses)
         self._idx = 0
 
-    async def generate_stream(self, messages, tools=None):
+    async def generate_stream(self, messages, tools=None, **_):
         resp = self._responses[self._idx]
         self._idx += 1
         if resp.thinking:
@@ -197,7 +197,7 @@ async def test_hook_error():
     hook = RecordingHook()
 
     class BrokenLLM:
-        async def generate_stream(self, messages, tools=None):
+        async def generate_stream(self, messages, tools=None, **_):
             raise RuntimeError("LLM exploded")
             yield  # make it a generator  # noqa: E501
 

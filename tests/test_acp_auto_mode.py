@@ -43,7 +43,7 @@ class _TrackingLLM:
         self.main_calls += 1
         return LLMResponse(content="ok", finish_reason="stop")
 
-    async def generate_stream(self, messages, tools=None):
+    async def generate_stream(self, messages, tools=None, **_):
         self.main_calls += 1
         from box_agent.schema import StreamEvent
         yield StreamEvent(type="text", delta="ok")

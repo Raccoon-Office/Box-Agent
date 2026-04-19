@@ -81,6 +81,7 @@ class Agent:
         workspace_dir: str = "./workspace",
         token_limit: int = 80000,
         hooks: list | None = None,
+        thinking_enabled: bool = False,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -92,6 +93,7 @@ class Agent:
         self._permission_negotiator = None  # set by CLI/ACP when permission engine is active
         self._hooks = hooks
         self._memory_extractor = None  # set by CLI/ACP when memory extraction is enabled
+        self.thinking_enabled = thinking_enabled
 
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -152,6 +154,7 @@ class Agent:
             hooks=self._hooks,
             memory_extractor=self._memory_extractor,
             inject_queue=self.inject_queue,
+            thinking_enabled=self.thinking_enabled,
         ):
             # Track token usage on Agent instance for backward compat
             if isinstance(event, TokenUsageEvent):

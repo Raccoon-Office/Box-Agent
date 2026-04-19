@@ -43,12 +43,18 @@ class LLMClientBase(ABC):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> LLMResponse:
         """Generate response from LLM.
 
         Args:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
+            thinking_enabled: When True, request extended thinking from the
+                provider (Anthropic native, or Qwen-style ``enable_thinking``
+                for OpenAI-compatible endpoints). Silent no-op for providers
+                that don't support it.
 
         Returns:
             LLMResponse containing the generated content, thinking, and tool calls
@@ -60,6 +66,8 @@ class LLMClientBase(ABC):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Generate streaming response from LLM.
 
@@ -69,6 +77,7 @@ class LLMClientBase(ABC):
         Args:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
+            thinking_enabled: See ``generate()``.
 
         Yields:
             StreamEvent chunks

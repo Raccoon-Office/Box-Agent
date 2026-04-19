@@ -29,7 +29,7 @@ class MockLLM:
         self._responses = list(responses)
         self._idx = 0
 
-    async def generate_stream(self, messages, tools=None):
+    async def generate_stream(self, messages, tools=None, **_):
         resp = self._responses[self._idx]
         self._idx += 1
         if resp.thinking:
@@ -122,7 +122,7 @@ async def test_no_tool_calls_continues_with_injection():
             self._idx = 0
             self._queue = inject_queue
 
-        async def generate_stream(self, messages, tools=None):
+        async def generate_stream(self, messages, tools=None, **_):
             resp = self._responses[self._idx]
             self._idx += 1
             if resp.content:

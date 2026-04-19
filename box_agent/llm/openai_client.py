@@ -13,6 +13,9 @@ from .base import LLMClientBase
 
 logger = logging.getLogger(__name__)
 
+# Hard-coded budget for extended thinking on Qwen-style endpoints.
+_THINKING_BUDGET = 8000
+
 
 class OpenAIClient(LLMClientBase):
     """LLM client using OpenAI's protocol.
@@ -50,12 +53,17 @@ class OpenAIClient(LLMClientBase):
         self,
         api_messages: list[dict[str, Any]],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> Any:
         """Execute API request (core method that can be retried).
 
         Args:
             api_messages: List of messages in OpenAI format
             tools: Optional list of tools
+            thinking_enabled: When True, inject Qwen-compatible
+                ``extra_body.enable_thinking``. Providers that don't
+                recognize the key typically ignore it.
 
         Returns:
             OpenAI ChatCompletion response (full response including usage)
@@ -63,12 +71,21 @@ class OpenAIClient(LLMClientBase):
         Raises:
             Exception: API call failed
         """
-        params = {
+        params: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
-            # Enable reasoning_split to separate thinking content
-            "extra_body": {"reasoning_split": True},
         }
+
+        if thinking_enabled:
+            # Belt-and-suspenders: OpenAI/Azure honor top-level ``reasoning_effort``
+            # (GPT-5, o1, o3); Qwen/DashScope honor ``extra_body.enable_thinking``
+            # + ``thinking_budget``. Unknown fields are silently ignored by every
+            # other OpenAI-protocol provider we've seen, so sending both is safe.
+            params["reasoning_effort"] = "medium"
+            params["extra_body"] = {
+                "enable_thinking": True,
+                "thinking_budget": _THINKING_BUDGET,
+            }
 
         if tools:
             params["tools"] = self._convert_tools(tools)
@@ -263,12 +280,15 @@ class OpenAIClient(LLMClientBase):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> LLMResponse:
         """Generate response from OpenAI LLM.
 
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
+            thinking_enabled: Enable Qwen-style extended thinking.
 
         Returns:
             LLMResponse containing the generated content
@@ -284,12 +304,14 @@ class OpenAIClient(LLMClientBase):
             response = await api_call(
                 request_params["api_messages"],
                 request_params["tools"],
+                thinking_enabled=thinking_enabled,
             )
         else:
             # Don't use retry
             response = await self._make_api_request(
                 request_params["api_messages"],
                 request_params["tools"],
+                thinking_enabled=thinking_enabled,
             )
 
         # Parse and return response
@@ -299,6 +321,8 @@ class OpenAIClient(LLMClientBase):
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
+        *,
+        thinking_enabled: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Generate streaming response from OpenAI LLM.
 
@@ -315,6 +339,12 @@ class OpenAIClient(LLMClientBase):
         }
         if request_params["tools"]:
             params["tools"] = self._convert_tools(request_params["tools"])
+        if thinking_enabled:
+            params["reasoning_effort"] = "medium"
+            params["extra_body"] = {
+                "enable_thinking": True,
+                "thinking_budget": _THINKING_BUDGET,
+            }
 
         # Accumulators
         text_content = ""
