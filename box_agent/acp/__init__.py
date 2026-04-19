@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Final
 from uuid import uuid4
 
 from acp import (
@@ -124,6 +124,8 @@ class SessionState:
     memory_extractor: Any | None = None  # per-session instance to avoid cross-session state leaks
     inject_queue: asyncio.Queue = field(default_factory=asyncio.Queue)  # in-stream message injection
     turn_active: bool = False  # True while _run_turn is executing; guards inject_queue
+    auto_classify_pending: bool = False  # True when caller didn't supply session_mode; classify on first prompt
+    memory_block: str | None = None  # cached memory recall, re-applied when mode switches
 
 
 class BoxACPAgent:
@@ -251,9 +253,11 @@ class BoxACPAgent:
         system_prompt = self._build_session_prompt(session_mode)
 
         # Inject memory context
+        memory_block: str | None = None
         if self._memory:
-            memory_block = self._memory.recall()
-            if memory_block:
+            recalled = self._memory.recall()
+            if recalled:
+                memory_block = recalled
                 system_prompt = f"{system_prompt.rstrip()}\n\n{memory_block}"
                 log.info("session/memory", session_id=session_id, message="Memory context injected")
 
@@ -303,6 +307,8 @@ class BoxACPAgent:
             agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode,
             permission_engine=perm_engine, grant_store=grant_store,
             memory_extractor=session_extractor,
+            auto_classify_pending=(session_mode is None),
+            memory_block=memory_block,
         )
 
         tool_names = [t.name for t in tools]
@@ -349,6 +355,59 @@ class BoxACPAgent:
         log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
         return self._system_prompt
 
+    _PPT_TOOL_MODES: Final[frozenset[str]] = frozenset(
+        {"ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"}
+    )
+
+    def _apply_session_mode(self, state: SessionState, mode: str | None) -> None:
+        """Retroactively apply a ``session_mode`` to an existing session.
+
+        Used when the caller did not supply ``_meta.session_mode`` and we
+        auto-classified the user's first message. Rewrites the agent's system
+        message (preserving the workspace-info footer injected by
+        ``Agent.__init__``) and registers the mode-specific PPT tool if any.
+        Safe to call when ``mode`` resolves to the general agent (``None``) —
+        the session already runs as general, so the call is a no-op in that
+        case.
+        """
+        if mode is None or mode == state.session_mode:
+            state.session_mode = mode
+            return
+
+        # Recompose system prompt: base + mode + memory + preserved workspace info
+        new_prompt = self._build_session_prompt(mode)
+        if state.memory_block:
+            new_prompt = f"{new_prompt.rstrip()}\n\n{state.memory_block}"
+        workspace_info = (
+            f"\n\n## Current Workspace\n"
+            f"You are currently working in: `{state.agent.workspace_dir.absolute()}`\n"
+            f"All relative paths will be resolved relative to this directory."
+        )
+        if "Current Workspace" not in new_prompt:
+            new_prompt = new_prompt + workspace_info
+
+        state.agent.system_prompt = new_prompt
+        if state.agent.messages and state.agent.messages[0].role == "system":
+            state.agent.messages[0] = Message(role="system", content=new_prompt)
+        else:
+            state.agent.messages.insert(0, Message(role="system", content=new_prompt))
+
+        if mode in self._PPT_TOOL_MODES:
+            from box_agent.tools.ppt_tools import (
+                PPTEditorHTMLTool,
+                PPTOutlineTool,
+                PPTPlanChatTool,
+            )
+            ppt_tool_map = {
+                "ppt_plan_chat": PPTPlanChatTool,
+                "ppt_outline": PPTOutlineTool,
+                "ppt_editor_standard_html": PPTEditorHTMLTool,
+            }
+            ppt_tool = ppt_tool_map[mode]()
+            state.agent.tools.setdefault(ppt_tool.name, ppt_tool)
+
+        state.session_mode = mode
+
     def _has_officev3_policy(self) -> bool:
         """Check if officev3 capability policy is configured (not just defaults)."""
         return getattr(self._config.officev3, "_present", False)
@@ -380,6 +439,22 @@ class BoxACPAgent:
                 self._skill_loader.maybe_reload()
             except Exception as exc:
                 log.warn("skills/reload_error", session_id=session_id, message=str(exc))
+
+        # Auto-classify session_mode if the caller did not supply one.
+        # Runs once per session, before the user message is appended so that the
+        # classifier sees only the raw first prompt. Failures fall back to the
+        # general agent — never blocks the turn.
+        if state.auto_classify_pending and user_text.strip():
+            from .intent_classifier import classify_session_mode
+            classified = await classify_session_mode(self._llm, user_text)
+            self._apply_session_mode(state, classified)
+            state.auto_classify_pending = False
+            log.info(
+                "session/mode_resolved",
+                session_id=session_id,
+                mode=state.session_mode or "general",
+                source="auto",
+            )
 
         state.agent.messages.append(Message(role="user", content=user_text))
 

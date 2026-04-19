@@ -91,7 +91,11 @@ def acp_agent(tmp_path):
 @pytest.mark.asyncio
 async def test_acp_turn_executes_tool(acp_agent):
     agent, conn = acp_agent
-    session = await agent.newSession(SimpleNamespace(cwd=None))
+    # Explicit session_mode skips auto-classification so DummyLLM's first
+    # response is consumed by the main agent loop as designed.
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
     prompt = SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
     response = await agent.prompt(prompt)
     assert response.stopReason == "end_turn"
@@ -104,7 +108,12 @@ async def test_acp_turn_executes_tool(acp_agent):
 async def test_acp_invalid_session(acp_agent):
     """Auto-creates session when sessionId is not found (compatibility)."""
     agent, _ = acp_agent
+    # Provide an explicit mode via the auto-created session by monkeypatching
+    # the default newSession call path — not available here, so we instead
+    # ensure the DummyLLM is resilient: the classifier's first response is
+    # the tool-call one, which parses to no mode → general. The main loop
+    # then sees a fresh LLM (second) call returning "done", so there's no
+    # tool invocation to assert on. We only check stopReason.
     prompt = SimpleNamespace(sessionId="missing", prompt=[{"text": "?"}])
     response = await agent.prompt(prompt)
-    # Auto-creation succeeds, so the agent runs and returns end_turn
     assert response.stopReason == "end_turn"
