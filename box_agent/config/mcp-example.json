@@ -14,6 +14,17 @@
                 "@modelcontextprotocol/server-memory"
             ],
             "disabled": true
+        },
+        "playwright": {
+            "description": "Playwright - Browser automation (Chromium). Run `box-agent install-browser` first.",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@playwright/mcp@latest"
+            ],
+            "disabled": true,
+            "connect_timeout": 15.0,
+            "execute_timeout": 60.0
         }
     }
 }

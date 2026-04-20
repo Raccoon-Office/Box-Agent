@@ -814,6 +814,17 @@ async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
     config = config or Config.load()
 
+    # ── Playwright default cache path ──────────────────────
+    # Host (e.g. officev3) can override by exporting PLAYWRIGHT_BROWSERS_PATH
+    # before launching box-agent-acp. Otherwise we default to the shared
+    # ~/.box-agent/browsers/ directory — same location `box-agent install-browser`
+    # populates — so CLI installs are reusable from ACP.
+    import os as _os
+    _os.environ.setdefault(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        str(Path.home() / ".box-agent" / "browsers"),
+    )
+
     # ── Stdout guard ────────────────────────────────────────
     # ACP protocol owns stdout exclusively.  Redirect sys.stdout to
     # stderr so stray print() calls don't corrupt the ACP stream.

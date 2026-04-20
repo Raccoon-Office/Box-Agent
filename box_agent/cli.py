@@ -457,6 +457,12 @@ Examples:
     # doctor subcommand
     subparsers.add_parser("doctor", help="Check environment and connectivity")
 
+    # install-browser subcommand
+    subparsers.add_parser(
+        "install-browser",
+        help="Install Chromium for Playwright MCP browser tools (~200MB)",
+    )
+
     return parser.parse_args()
 
 
@@ -567,7 +573,132 @@ async def cmd_doctor():
     else:
         print(f"  ⚠️  MCP       — mcp.json not found (optional)")
 
+    # 5. Browser runtime (Playwright)
+    _doctor_check_browser()
+
     print()
+
+
+def _default_browsers_path() -> Path:
+    """Default Chromium cache directory shared by CLI install and ACP runtime."""
+    return Path.home() / ".box-agent" / "browsers"
+
+
+def _playwright_env() -> dict[str, str]:
+    """Environment dict with PLAYWRIGHT_BROWSERS_PATH pinned to our default,
+    unless the caller already set it explicitly."""
+    import os
+    env = os.environ.copy()
+    env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_default_browsers_path()))
+    return env
+
+
+def _doctor_check_browser() -> None:
+    """Check whether Node.js (npx) and Playwright Chromium are available."""
+    npx = shutil.which("npx")
+    if not npx:
+        print(f"  ⚠️  Browser   — Node.js/npx not found (optional; needed for Playwright MCP)")
+        return
+
+    try:
+        dry_run = subprocess.run(
+            [npx, "-y", "playwright", "install", "--dry-run", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_playwright_env(),
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  ⚠️  Browser   — playwright dry-run timed out")
+        return
+
+    combined = (dry_run.stdout or "") + (dry_run.stderr or "")
+    browsers_path = _playwright_env()["PLAYWRIGHT_BROWSERS_PATH"]
+    # Playwright prints "browser: chromium ... <install location>" and omits
+    # the "Install location" section when already installed. Use "Download url"
+    # presence as the "needs download" signal.
+    if dry_run.returncode == 0 and "Download url" not in combined:
+        print(f"  ✅ Browser   — Chromium installed ({browsers_path})")
+    else:
+        print(f"  ⚠️  Browser   — Chromium not installed in {browsers_path}")
+        print(f"                 (run `box-agent install-browser`)")
+
+
+async def cmd_install_browser() -> None:
+    """Install Chromium for Playwright MCP, then enable the playwright entry in mcp.json."""
+    print(f"{Colors.BOLD}Box Agent · Install Browser Runtime{Colors.RESET}\n")
+
+    npx = shutil.which("npx")
+    if not npx:
+        print(f"{Colors.RED}❌ `npx` not found.{Colors.RESET}")
+        print(f"{Colors.DIM}Install Node.js ≥ 18 first: https://nodejs.org/{Colors.RESET}")
+        sys.exit(1)
+
+    browsers_path = _default_browsers_path()
+    browsers_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"{Colors.DIM}Target: {browsers_path}{Colors.RESET}")
+    print(f"{Colors.DIM}Running: npx -y playwright install chromium (~200MB){Colors.RESET}\n")
+    try:
+        result = subprocess.run(
+            [npx, "-y", "playwright", "install", "chromium"],
+            check=False,
+            env=_playwright_env(),
+        )
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}⚠️  Interrupted.{Colors.RESET}")
+        sys.exit(130)
+
+    if result.returncode != 0:
+        print(f"\n{Colors.RED}❌ Chromium install failed (exit {result.returncode}).{Colors.RESET}")
+        sys.exit(result.returncode)
+
+    print(f"\n{Colors.GREEN}✅ Chromium installed.{Colors.RESET}")
+
+    # Enable the playwright server in the user's mcp.json
+    mcp_path = _ensure_user_mcp_config()
+    try:
+        _enable_playwright_in_mcp(mcp_path)
+        print(f"{Colors.GREEN}✅ Enabled `playwright` MCP server in:{Colors.RESET} {mcp_path}")
+    except Exception as e:
+        print(f"{Colors.YELLOW}⚠️  Could not auto-enable playwright in mcp.json: {e}{Colors.RESET}")
+        print(f"{Colors.DIM}   Manually set `mcpServers.playwright.disabled = false` in {mcp_path}.{Colors.RESET}")
+
+    print(f"\n{Colors.DIM}Restart box-agent to load the browser tools.{Colors.RESET}\n")
+
+
+def _ensure_user_mcp_config() -> Path:
+    """Return path to the user-writable mcp.json, copying the example if needed."""
+    user_dir = Path.home() / ".box-agent" / "config"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    target = user_dir / "mcp.json"
+    if target.exists():
+        return target
+
+    example = Config.get_package_dir() / "config" / "mcp-example.json"
+    if example.exists():
+        shutil.copy2(example, target)
+    else:
+        target.write_text('{\n    "mcpServers": {}\n}\n', encoding="utf-8")
+    return target
+
+
+def _enable_playwright_in_mcp(mcp_path: Path) -> None:
+    """Flip `mcpServers.playwright.disabled` to false, adding the entry if missing."""
+    import json
+
+    data = json.loads(mcp_path.read_text(encoding="utf-8"))
+    servers = data.setdefault("mcpServers", {})
+    entry = servers.get("playwright")
+    if entry is None:
+        example_path = Config.get_package_dir() / "config" / "mcp-example.json"
+        example = json.loads(example_path.read_text(encoding="utf-8"))
+        entry = example.get("mcpServers", {}).get("playwright")
+        if entry is None:
+            raise RuntimeError("playwright entry missing from mcp-example.json")
+        servers["playwright"] = entry
+    entry["disabled"] = False
+    mcp_path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 async def _quiet_cleanup():
@@ -1269,6 +1400,11 @@ def main():
     # Handle doctor subcommand
     if args.command == "doctor":
         asyncio.run(cmd_doctor())
+        return
+
+    # Handle install-browser subcommand
+    if args.command == "install-browser":
+        asyncio.run(cmd_install_browser())
         return
 
     # Ensure user config exists; run setup wizard on first launch

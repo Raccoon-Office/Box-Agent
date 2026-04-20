@@ -196,7 +196,20 @@ box-agent setup     # config wizard
 box-agent config    # show/edit config
 box-agent doctor    # health check
 box-agent log       # open log directory
+box-agent install-browser   # install Chromium for Playwright MCP (~200MB)
 ```
+
+### Browser automation (optional)
+
+Box-Agent ships with a disabled [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) entry. To enable browser tools locally:
+
+```bash
+box-agent install-browser   # downloads Chromium and flips the entry to enabled
+```
+
+Requires Node.js ≥ 18 on `PATH`. Chromium lands in `~/.box-agent/browsers/` (shared by CLI and ACP runtime) and `mcpServers.playwright.disabled` in `~/.box-agent/config/mcp.json` is set to `false`.
+
+**ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to the same `~/.box-agent/browsers/` path. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp` (our setdefault won't override it).
 
 In-session commands: `/help`, `/clear`, `/history`, `/stats`, `/log`, `/exit`
 
