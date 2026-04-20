@@ -546,6 +546,7 @@ class BoxACPAgent:
             hooks=self._hooks,
             memory_extractor=state.memory_extractor,
             inject_queue=state.inject_queue,
+            thinking_enabled=agent.thinking_enabled,
         ):
             try:
                 match event:

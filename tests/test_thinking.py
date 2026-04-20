@@ -201,3 +201,58 @@ async def test_acp_new_session_default_no_deep_think(tmp_path):
     state = agent._sessions[session.sessionId]
     assert state.thinking_enabled is False
     assert state.agent.thinking_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_acp_run_turn_forwards_thinking_to_core(tmp_path, monkeypatch):
+    """Regression: ACP must pass ``agent.thinking_enabled`` into ``run_agent_loop``.
+
+    A prior bug wired ``deep_think`` into ``Agent.thinking_enabled`` but the ACP
+    turn-runner called ``run_agent_loop`` directly and dropped the flag — the
+    HTTP body never carried ``thinking``. This test asserts the kwarg reaches
+    core unchanged for the deep-think=True path.
+    """
+    from box_agent.events import DoneEvent, StopReason
+    from box_agent import acp as acp_mod
+
+    class _Conn:
+        async def sessionUpdate(self, payload):
+            pass
+
+    class _LLM:
+        async def generate(self, *args, **kwargs):
+            from box_agent.schema import LLMResponse
+            return LLMResponse(content="general", finish_reason="stop")
+
+    config = Config(
+        llm=LLMConfig(api_key="k"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    agent = BoxACPAgent(_Conn(), config, _LLM(), [], "base")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={"session_mode": "general", "deep_think": True},
+        )
+    )
+
+    captured: dict = {}
+
+    async def fake_loop(**kwargs):
+        captured.update(kwargs)
+        yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="ok")
+
+    monkeypatch.setattr(acp_mod, "run_agent_loop", fake_loop)
+
+    await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"type": "text", "text": "hi"}],
+        )
+    )
+
+    assert captured.get("thinking_enabled") is True, (
+        "ACP dropped thinking_enabled on the way to run_agent_loop"
+    )
