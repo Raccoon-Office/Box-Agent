@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 
 from .tools.permissions import GrantStore
 
@@ -12,9 +13,13 @@ class CLIPermissionNegotiator:
     """In-band permission negotiation via interactive terminal prompt.
 
     When a tool is denied with a ``permission_request``, this negotiator
-    asks the user in the terminal whether to grant access.  The grant is
-    recorded in the shared ``GrantStore`` so that subsequent tool calls
-    with the same scope are auto-approved without prompting again.
+    asks the user in the terminal whether to grant access.
+
+    Filesystem grants are recorded at directory granularity (parent of the
+    requested path, or the path itself when it is already a directory) —
+    mirroring the ACP negotiator and matching the spec: "approve / allow
+    once" only opens the *containing directory*, not the entire user_home.
+    Memory grants continue to use the capability-level grant table.
     """
 
     def __init__(self, grant_store: GrantStore) -> None:
@@ -23,12 +28,20 @@ class CLIPermissionNegotiator:
     async def negotiate(self, permission_request: dict) -> bool:
         scope = permission_request.get("scope", "")
         requested_scope = permission_request.get("requested_scope", "")
+        path = permission_request.get("path", "")
 
-        # Dedup: already granted in this prompt or session?
-        if self._store.has_grant(scope, requested_scope):
+        # Dedup: filesystem requests look up directory grants; other
+        # capabilities use the legacy (scope, requested_scope) table.
+        if scope == "filesystem" and path:
+            try:
+                target = Path(path).expanduser().resolve()
+            except (OSError, RuntimeError):
+                target = None
+            if target is not None and self._store.has_filesystem_dir_grant(target):
+                return True
+        elif self._store.has_grant(scope, requested_scope):
             return True
 
-        path = permission_request.get("path", "")
         reason = permission_request.get("reason", "")
 
         print()
@@ -43,17 +56,37 @@ class CLIPermissionNegotiator:
 
         choice = await _prompt_choice()
 
-        if choice == "1":
-            self._store.add_grant(scope, requested_scope, "prompt")
-            print("\033[32m   ✓ 已允许（仅本次）\033[0m\n")
+        if choice in ("1", "2"):
+            grant_lifetime = "prompt" if choice == "1" else "session"
+            label = "仅本次" if choice == "1" else "本次会话"
+            if scope == "filesystem" and path:
+                grant_dir = _derive_grant_dir(path)
+                if grant_dir is None:
+                    print("\033[31m   ✗ 无法解析路径，已拒绝\033[0m\n")
+                    return False
+                self._store.add_filesystem_dir_grant(grant_dir, grant_lifetime)
+            else:
+                self._store.add_grant(scope, requested_scope, grant_lifetime)
+            print(f"\033[32m   ✓ 已允许（{label}）\033[0m\n")
             return True
-        elif choice == "2":
-            self._store.add_grant(scope, requested_scope, "session")
-            print("\033[32m   ✓ 已允许（本次会话）\033[0m\n")
-            return True
-        else:
-            print("\033[31m   ✗ 已拒绝\033[0m\n")
-            return False
+        print("\033[31m   ✗ 已拒绝\033[0m\n")
+        return False
+
+
+def _derive_grant_dir(path: str) -> Path | None:
+    """Return the directory that should be opened by a filesystem grant.
+
+    For an existing directory, that directory itself; otherwise the
+    parent of the resolved target. ``None`` if the path cannot be
+    resolved (rare — bad characters or filesystem error).
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    if resolved.is_dir():
+        return resolved
+    return resolved.parent
 
 
 def _read_with_echo() -> str:

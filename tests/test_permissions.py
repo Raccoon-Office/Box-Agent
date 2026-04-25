@@ -669,3 +669,246 @@ class TestAcpPermissionOverride:
         decision = engine.check(FILESYSTEM_READ, {"path": "/etc/passwd"})
         assert decision.allowed is False
         assert decision.permission_request is None
+
+
+# ── Allowed directories + custom/user_home scopes ────────────
+
+
+class TestAllowedDirectories:
+    """Spec-driven tests for the new scope semantics.
+
+    The four scenarios mirror box-agent-acp section 6 of the user's request:
+    session_workspace + allowed_directories, custom + allowed_directories,
+    user_home, and path safety (symlinks + sibling false-positive).
+    """
+
+    @pytest.fixture
+    def downloads(self, tmp_path: Path) -> Path:
+        d = tmp_path / "Downloads"
+        d.mkdir()
+        return d
+
+    @pytest.fixture
+    def documents(self, tmp_path: Path) -> Path:
+        d = tmp_path / "Documents"
+        d.mkdir()
+        return d
+
+    @pytest.fixture
+    def workspace(self, tmp_path: Path) -> Path:
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        return ws
+
+    def _engine(
+        self, workspace: Path, scope: str, allowed_dirs: list[str], home: Path | None = None
+    ) -> PermissionEngine:
+        policy = CapabilityPolicy(
+            filesystem_scope=scope,
+            allowed_directories=tuple(allowed_dirs),
+            session_workspace_root=str(workspace),
+        )
+        eng = PermissionEngine(policy, workspace)
+        if home is not None:
+            eng._home_dir = home.resolve()
+        return eng
+
+    # ── 1. session_workspace + allowed_directories ──
+
+    def test_session_workspace_allows_listed_dir(self, workspace: Path, downloads: Path):
+        eng = self._engine(workspace, "session_workspace", [str(downloads)])
+        f = downloads / "a.pdf"
+        f.touch()
+        assert eng.check(FILESYSTEM_READ, {"path": str(f)}).allowed is True
+
+    def test_session_workspace_denies_unlisted_dir(
+        self, workspace: Path, downloads: Path, documents: Path, tmp_path: Path
+    ):
+        # Treat tmp_path as the "home" so Documents looks like a home subdir
+        # → the engine suggests user_home escalation.
+        eng = self._engine(
+            workspace, "session_workspace", [str(downloads)], home=tmp_path
+        )
+        f = documents / "a.pdf"
+        f.touch()
+        decision = eng.check(FILESYSTEM_READ, {"path": str(f)})
+        assert decision.allowed is False
+        assert decision.permission_request is not None
+        assert decision.permission_request["requested_scope"] == "user_home"
+        assert decision.permission_request["persistent_label"] == "始终允许此目录"
+
+    # ── 2. custom + allowed_directories ──
+
+    def test_custom_scope_allows_workspace(self, workspace: Path, downloads: Path):
+        eng = self._engine(workspace, "custom", [str(downloads)])
+        f = workspace / "report.csv"
+        assert eng.check(FILESYSTEM_WRITE, {"path": str(f)}).allowed is True
+
+    def test_custom_scope_allows_listed_dir(self, workspace: Path, downloads: Path):
+        eng = self._engine(workspace, "custom", [str(downloads)])
+        f = downloads / "a.pdf"
+        f.touch()
+        assert eng.check(FILESYSTEM_READ, {"path": str(f)}).allowed is True
+
+    def test_custom_scope_denies_other_home_subdir(
+        self, workspace: Path, downloads: Path, documents: Path, tmp_path: Path
+    ):
+        eng = self._engine(workspace, "custom", [str(downloads)], home=tmp_path)
+        f = documents / "secret.txt"
+        f.touch()
+        decision = eng.check(FILESYSTEM_READ, {"path": str(f)})
+        assert decision.allowed is False
+        # Documents sits under fake "home" (tmp_path) so escalation is offered.
+        assert decision.permission_request is not None
+        assert decision.permission_request["requested_scope"] == "user_home"
+
+    # ── 3. user_home scope ──
+
+    def test_user_home_allows_desktop(self, workspace: Path):
+        eng = self._engine(workspace, "user_home", [])
+        f = Path.home() / "Desktop" / "a.txt"
+        assert eng.check(FILESYSTEM_READ, {"path": str(f)}).allowed is True
+
+    def test_user_home_allows_documents(self, workspace: Path):
+        eng = self._engine(workspace, "user_home", [])
+        f = Path.home() / "Documents" / "a.txt"
+        assert eng.check(FILESYSTEM_READ, {"path": str(f)}).allowed is True
+
+    def test_user_home_denies_etc(self, workspace: Path):
+        eng = self._engine(workspace, "user_home", [])
+        decision = eng.check(FILESYSTEM_READ, {"path": "/etc/passwd"})
+        assert decision.allowed is False
+        assert decision.permission_request is None  # no escalation past user_home
+
+    # ── 4. Path safety ──
+
+    def test_symlink_escape_denied(self, workspace: Path, downloads: Path, tmp_path: Path):
+        """A symlink inside an allowed dir pointing OUT of allowed scope must
+        be denied (resolved real path is what the engine checks)."""
+        import os
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.txt"
+        secret.write_text("private")
+
+        link = downloads / "escape"
+        try:
+            os.symlink(str(secret), str(link))
+        except (OSError, PermissionError):
+            pytest.skip("Cannot create symlink in this environment")
+
+        eng = self._engine(
+            workspace, "session_workspace", [str(downloads)], home=tmp_path
+        )
+        # Reading via the symlink resolves to the real `outside` path, which
+        # is not in the allow-list. The engine must deny.
+        decision = eng.check(FILESYSTEM_READ, {"path": str(link)})
+        assert decision.allowed is False
+
+    def test_sibling_prefix_false_positive_blocked(self, workspace: Path, tmp_path: Path):
+        """`/Users/x/Download` must NOT be matched by allowed `/Users/x/Downloads`."""
+        downloads = tmp_path / "Downloads"
+        downloads.mkdir()
+        sibling = tmp_path / "Downloads2"
+        sibling.mkdir()
+        f = sibling / "a.pdf"
+        f.touch()
+
+        eng = self._engine(
+            workspace, "session_workspace", [str(downloads)], home=tmp_path
+        )
+        decision = eng.check(FILESYSTEM_READ, {"path": str(f)})
+        assert decision.allowed is False
+
+    # ── Tilde expansion of allowed_directories ──
+
+    def test_tilde_in_allowed_directories_expanded(self, workspace: Path):
+        """Entries like `~/Downloads` must be expanded before storage."""
+        policy = CapabilityPolicy(
+            filesystem_scope="session_workspace",
+            allowed_directories=("~/Downloads",),
+            session_workspace_root=str(workspace),
+        )
+        eng = PermissionEngine(policy, workspace)
+        # The engine should treat the literal string "~/Downloads" as
+        # the resolved user-home subdirectory.
+        expected = (Path.home() / "Downloads").resolve()
+        assert expected in eng._allowed_dirs
+
+
+# ── GrantStore directory-level grants ────────────────────────
+
+
+class TestDirectoryGrants:
+    """Verify the dir-grant table introduced for spec section 4."""
+
+    def test_dir_grant_allows_files_under_dir(self, tmp_path: Path):
+        from box_agent.tools.permissions import GrantStore
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        f = elsewhere / "a.pdf"
+        f.touch()
+
+        store = GrantStore()
+        policy = CapabilityPolicy(
+            filesystem_scope="session_workspace",
+            session_workspace_root=str(ws),
+        )
+        eng = PermissionEngine(policy, ws, grant_store=store)
+        eng._home_dir = tmp_path.resolve()  # so escalation is offered
+
+        # Without grant — denied with escalation.
+        assert eng.check(FILESYSTEM_READ, {"path": str(f)}).allowed is False
+
+        # Grant the directory.
+        store.add_filesystem_dir_grant(elsewhere, "prompt")
+
+        # Now allowed.
+        assert eng.check(FILESYSTEM_READ, {"path": str(f)}).allowed is True
+
+        # Sibling file outside the granted dir is still denied.
+        sibling_dir = tmp_path / "other"
+        sibling_dir.mkdir()
+        sibling = sibling_dir / "x.pdf"
+        sibling.touch()
+        assert eng.check(FILESYSTEM_READ, {"path": str(sibling)}).allowed is False
+
+    def test_prompt_dir_grant_cleared(self, tmp_path: Path):
+        from box_agent.tools.permissions import GrantStore
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        d = tmp_path / "d"
+        d.mkdir()
+
+        store = GrantStore()
+        store.add_filesystem_dir_grant(d, "prompt")
+        assert store.has_filesystem_dir_grant(d)
+
+        store.clear_prompt_grants()
+        assert not store.has_filesystem_dir_grant(d)
+
+    def test_session_dir_grant_persists_across_clear(self, tmp_path: Path):
+        from box_agent.tools.permissions import GrantStore
+        d = tmp_path / "d"
+        d.mkdir()
+
+        store = GrantStore()
+        store.add_filesystem_dir_grant(d, "session")
+        store.clear_prompt_grants()
+        assert store.has_filesystem_dir_grant(d)
+
+    def test_dir_grant_does_not_match_sibling_prefix(self, tmp_path: Path):
+        """Granting `/x/Downloads` must not allow `/x/Downloads2`."""
+        from box_agent.tools.permissions import GrantStore
+        a = tmp_path / "Downloads"
+        a.mkdir()
+        b = tmp_path / "Downloads2"
+        b.mkdir()
+        f = b / "x.txt"
+        f.touch()
+
+        store = GrantStore()
+        store.add_filesystem_dir_grant(a, "prompt")
+        assert not store.has_filesystem_dir_grant(f.resolve())

@@ -45,9 +45,14 @@ class CapabilityPolicy(BaseModel):
     Canonical config field is a single ``filesystem_scope`` (maps to
     ``officev3.permissions.filesystem.scope``). Read and write share the same
     scope — no read/write split in the protocol.
+
+    ``allowed_directories`` is an additive whitelist that extends
+    ``session_workspace`` and ``custom`` scopes (the spec treats these two
+    semantically identically).
     """
 
     filesystem_scope: str = "session_workspace"
+    allowed_directories: tuple[str, ...] = ()
     openclaw_import_enabled: bool = True
     session_workspace_root: str = ""
 
@@ -56,6 +61,7 @@ class CapabilityPolicy(BaseModel):
         o = config.officev3
         return cls(
             filesystem_scope=o.permissions.filesystem.scope,
+            allowed_directories=tuple(o.permissions.filesystem.allowed_directories),
             openclaw_import_enabled=o.permissions.memory.openclaw_import,
             session_workspace_root=o.paths.session_workspace_root,
         )
@@ -105,7 +111,7 @@ class PermissionEngine:
         self._workspace_dir = workspace_dir.resolve()
         self._grant_store = grant_store
         if policy.session_workspace_root:
-            self._session_workspace_root = Path(policy.session_workspace_root).resolve()
+            self._session_workspace_root = Path(policy.session_workspace_root).expanduser().resolve()
         else:
             log.warning(
                 "permission/no_session_workspace_root: "
@@ -116,6 +122,16 @@ class PermissionEngine:
             )
             self._session_workspace_root = self._workspace_dir
         self._home_dir = Path.home().resolve()
+        # Pre-resolve the allow-list once. Skip entries that fail to resolve
+        # (e.g. the user typed garbage into config) so a single bad entry
+        # doesn't disable the whole engine.
+        resolved_dirs: list[Path] = []
+        for d in policy.allowed_directories:
+            try:
+                resolved_dirs.append(Path(d).expanduser().resolve())
+            except (OSError, RuntimeError) as exc:
+                log.warning("permission/bad_allowed_dir", extra={"path": d, "error": str(exc)})
+        self._allowed_dirs: tuple[Path, ...] = tuple(resolved_dirs)
 
     @property
     def policy(self) -> CapabilityPolicy:
@@ -150,12 +166,21 @@ class PermissionEngine:
     def _check_filesystem(
         self, path: Path, scope: str, operation: str
     ) -> PermissionDecision:
-        # Elevate scope if grant store has a broader grant
+        resolved = self._resolve_for_check(path)
+
+        # Directory-level grants take precedence over scope checks. These are
+        # recorded by the negotiator after the user approves a permission
+        # request; subsequent reads under the granted directory must succeed
+        # without another round-trip.
+        if self._grant_store and self._grant_store.has_filesystem_dir_grant(resolved):
+            return PermissionDecision(allowed=True)
+
+        # Legacy elevation: an ACP caller (or a test) may still record a
+        # broad ("filesystem", "user_home") grant via add_grant(). Honor it
+        # by elevating the working scope for this check only.
         if self._grant_store and scope == "session_workspace":
             if self._grant_store.has_grant("filesystem", "user_home"):
                 scope = "user_home"
-
-        resolved = self._resolve_for_check(path)
 
         if self._path_allowed_by_scope(resolved, scope):
             return PermissionDecision(allowed=True)
@@ -187,6 +212,7 @@ class PermissionEngine:
                 "reason": f"Path is outside {scope}",
                 "temporary_supported": True,
                 "persistent_supported": True,
+                "persistent_label": "始终允许此目录",
             },
         )
 
@@ -194,17 +220,31 @@ class PermissionEngine:
         """Determine which scope escalation would grant access, or None.
 
         Only suggest escalation when the target path actually falls
-        within a broader scope that could be granted.
+        within a broader scope that could be granted. ``user_home`` is
+        currently the only escalation target: even when the base scope
+        is ``custom`` (or future variants), the protocol-level
+        ``requested_scope`` stays ``user_home``.
         """
-        if current_scope == "session_workspace":
+        if current_scope in ("session_workspace", "custom"):
             if self._is_under_home(resolved):
                 return "user_home"
         return None
 
+    def _is_inside(self, target: Path, root: Path) -> bool:
+        """True if ``target`` equals or is contained within ``root``.
+
+        Both paths must already be resolved. Uses ``Path.relative_to`` for
+        component-wise containment so ``/Users/x/Download`` does not match
+        ``/Users/x/Downloads`` (the bug spec section 6 calls out).
+        """
+        try:
+            target.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
     def _is_under_home(self, resolved: Path) -> bool:
-        h = str(self._home_dir)
-        r = str(resolved)
-        return r == h or r.startswith(h + "/")
+        return self._is_inside(resolved, self._home_dir)
 
     def _resolve_for_check(self, path: Path) -> Path:
         """Resolve a path for permission checking.
@@ -229,19 +269,26 @@ class PermissionEngine:
         return resolved_parent
 
     def _path_allowed_by_scope(self, resolved: Path, scope: str) -> bool:
-        ws = str(self._workspace_dir)
-        r = str(resolved)
-
         # workspace_dir is always allowed regardless of scope
-        if r == ws or r.startswith(ws + "/"):
+        if self._is_inside(resolved, self._workspace_dir):
             return True
 
         if scope == "user_home":
             return self._is_under_home(resolved)
 
-        # session_workspace: allow session_workspace_root + workspace_dir
-        sws = str(self._session_workspace_root)
-        return r == sws or r.startswith(sws + "/")
+        # session_workspace and custom share the same semantics:
+        # session_workspace_root + workspace_dir + allowed_directories.
+        if scope in ("session_workspace", "custom"):
+            if self._is_inside(resolved, self._session_workspace_root):
+                return True
+            for allowed in self._allowed_dirs:
+                if self._is_inside(resolved, allowed):
+                    return True
+            return False
+
+        # Unknown scope — fail closed.
+        log.warning("permission/unknown_scope", extra={"scope": scope})
+        return False
 
     # ── memory ──
 
@@ -267,14 +314,26 @@ class PermissionEngine:
 class GrantStore:
     """Tracks in-band permission grants at prompt and session scope.
 
-    Keys are ``(scope, requested_scope)`` tuples, e.g.
-    ``("filesystem", "user_home")``.  Prompt grants are cleared between
-    prompts; session grants persist for the ACP session lifetime.
+    Two grant tables coexist:
+
+    * Capability grants — keyed by ``(scope, requested_scope)`` tuples, e.g.
+      ``("memory", "openclaw_import")``. Used for non-filesystem capabilities
+      (and as a legacy back-compat path for ``("filesystem", "user_home")``).
+    * Filesystem directory grants — resolved ``Path`` objects. Recorded by the
+      ACP negotiator after the user approves a filesystem request, so
+      subsequent reads under the same directory bypass the prompt.
+
+    Prompt grants are cleared between prompts; session grants persist for the
+    ACP session lifetime.
     """
 
     def __init__(self) -> None:
         self._session_grants: set[tuple[str, str]] = set()
         self._prompt_grants: set[tuple[str, str]] = set()
+        self._session_dirs: set[Path] = set()
+        self._prompt_dirs: set[Path] = set()
+
+    # ── capability-style grants ──
 
     def has_grant(self, scope: str, requested_scope: str) -> bool:
         key = (scope, requested_scope)
@@ -288,9 +347,48 @@ class GrantStore:
         else:
             self._prompt_grants.add(key)
 
+    # ── filesystem directory grants ──
+
+    def add_filesystem_dir_grant(self, directory: Path, grant_scope: str) -> None:
+        """Allow reads/writes under ``directory`` for the lifetime of *grant_scope*.
+
+        ``directory`` is resolved before storage so equality / containment
+        checks are stable against symlinks and ``..`` segments.
+        """
+        resolved = directory.expanduser().resolve()
+        if grant_scope == "session":
+            self._session_dirs.add(resolved)
+        else:
+            self._prompt_dirs.add(resolved)
+
+    def has_filesystem_dir_grant(self, target: Path) -> bool:
+        """True if any granted dir equals or contains *target*.
+
+        ``target`` should already be resolved by the caller (the engine does
+        this via ``_resolve_for_check``).
+        """
+        for d in self._session_dirs:
+            if target == d:
+                return True
+            try:
+                target.relative_to(d)
+                return True
+            except ValueError:
+                pass
+        for d in self._prompt_dirs:
+            if target == d:
+                return True
+            try:
+                target.relative_to(d)
+                return True
+            except ValueError:
+                pass
+        return False
+
     def clear_prompt_grants(self) -> None:
         """Called at the start of each prompt to reset prompt-level grants."""
         self._prompt_grants.clear()
+        self._prompt_dirs.clear()
 
 
 # ── Bash helper ──

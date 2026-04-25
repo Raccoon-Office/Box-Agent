@@ -725,9 +725,24 @@ class _PermissionNegotiator:
         """Negotiate a permission request.  Returns ``True`` if granted."""
         scope = permission_request.get("scope", "")
         requested_scope = permission_request.get("requested_scope", "")
+        path_hint = permission_request.get("path", "")
 
-        # Grant-table dedup: already granted in this prompt or session?
-        if self._store.has_grant(scope, requested_scope):
+        # Dedup: filesystem requests check the directory grant table; other
+        # capabilities (memory) use the legacy (scope, requested_scope) key.
+        if scope == "filesystem" and path_hint:
+            try:
+                target = Path(path_hint).expanduser().resolve()
+            except (OSError, RuntimeError):
+                target = None
+            if target is not None and self._store.has_filesystem_dir_grant(target):
+                log.info(
+                    "permission/grant_hit",
+                    scope=scope,
+                    path=path_hint,
+                    message="Filesystem dir grant hit — skipping RPC",
+                )
+                return True
+        elif self._store.has_grant(scope, requested_scope):
             log.info(
                 "permission/grant_hit",
                 scope=scope,
@@ -744,7 +759,6 @@ class _PermissionNegotiator:
             ToolCall,
         )
 
-        path_hint = permission_request.get("path", "")
         reason = permission_request.get("reason", "")
         description = reason + (f": {path_hint}" if path_hint else "")
         tool_call = ToolCall(
@@ -793,6 +807,28 @@ class _PermissionNegotiator:
 
         if isinstance(response.outcome, AllowedOutcome):
             grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId, "prompt")
+            if scope == "filesystem" and path_hint:
+                # Record at directory granularity. Use the path itself when it
+                # is already a directory; otherwise fall back to its parent.
+                # Spec section 4: only open the requested directory, never the
+                # entire user_home, on a "allow once" / "always allow" choice.
+                grant_dir = self._derive_grant_dir(path_hint)
+                if grant_dir is not None:
+                    self._store.add_filesystem_dir_grant(grant_dir, grant_scope)
+                    log.info(
+                        "permission/granted",
+                        scope=scope,
+                        directory=str(grant_dir),
+                        grant_scope=grant_scope,
+                    )
+                    return True
+                log.warn(
+                    "permission/grant_path_invalid",
+                    scope=scope,
+                    path=path_hint,
+                    message="Could not derive grant directory from path; rejecting",
+                )
+                return False
             self._store.add_grant(scope, requested_scope, grant_scope)
             log.info(
                 "permission/granted",
@@ -808,6 +844,22 @@ class _PermissionNegotiator:
             requested_scope=requested_scope,
         )
         return False
+
+    @staticmethod
+    def _derive_grant_dir(path: str) -> Path | None:
+        """Resolve *path* and return its directory.
+
+        For an existing directory, returns the directory itself. For an
+        existing file or a non-existent target, returns the parent. ``None``
+        means the path could not be resolved.
+        """
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return None
+        if resolved.is_dir():
+            return resolved
+        return resolved.parent
 
 
 async def run_acp_server(config: Config | None = None) -> None:

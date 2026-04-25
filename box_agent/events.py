@@ -244,7 +244,8 @@ class PermissionRequestEvent:
             "path": "/Users/.../file",   # filesystem only; empty for memory
             "reason": "...",
             "temporary_supported": true,
-            "persistent_supported": true
+            "persistent_supported": true,
+            "persistent_label": "始终允许此目录"  # filesystem only, optional UI hint
         }
     """
 
@@ -255,6 +256,7 @@ class PermissionRequestEvent:
     path: str = ""        # absolute path; empty for non-filesystem capabilities
     temporary_supported: bool = True
     persistent_supported: bool = True
+    persistent_label: str = ""  # optional UI label for the "always allow" option
 
 
 # ── In-stream injection ────────────────────────────────────────

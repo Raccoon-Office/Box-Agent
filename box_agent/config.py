@@ -85,9 +85,14 @@ class FilesystemPermissions(BaseModel):
 
     Canonical field is ``scope`` (maps to officev3 ``fileAccessScope``).
     Read and write share the same scope — no protocol-level read/write split.
+
+    ``allowed_directories`` extends ``session_workspace`` and ``custom`` scopes
+    with a whitelist of additional directories (paths may contain ``~`` or
+    ``$HOME`` — expansion happens at engine construction time).
     """
 
     scope: str = "session_workspace"
+    allowed_directories: list[str] = Field(default_factory=list)
 
 
 class MemoryPermissions(BaseModel):
@@ -242,9 +247,19 @@ class Config(BaseModel):
             fs_data = perms_data.get("filesystem", {}) if isinstance(perms_data, dict) else {}
             mem_data = perms_data.get("memory", {}) if isinstance(perms_data, dict) else {}
 
-            fs_perms = FilesystemPermissions(
-                scope=fs_data.get("scope", "session_workspace"),
-            ) if isinstance(fs_data, dict) else FilesystemPermissions()
+            if isinstance(fs_data, dict):
+                allowed_dirs_raw = fs_data.get("allowed_directories", [])
+                allowed_dirs = (
+                    [str(d) for d in allowed_dirs_raw if isinstance(d, str)]
+                    if isinstance(allowed_dirs_raw, list)
+                    else []
+                )
+                fs_perms = FilesystemPermissions(
+                    scope=fs_data.get("scope", "session_workspace"),
+                    allowed_directories=allowed_dirs,
+                )
+            else:
+                fs_perms = FilesystemPermissions()
 
             mem_perms = MemoryPermissions(
                 openclaw_import=mem_data.get("openclaw_import", True),

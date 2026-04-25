@@ -909,7 +909,16 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     if not allow_full_access:
         from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
         grant_store = GrantStore()
-        policy = CapabilityPolicy(session_workspace_root=str(workspace_dir))
+        # Honor officev3.permissions.filesystem (scope + allowed_directories)
+        # when the block is present — same code path the ACP server uses.
+        # Otherwise fall back to a default session_workspace policy rooted at
+        # the workspace directory.
+        if getattr(config.officev3, "_present", False):
+            policy = CapabilityPolicy.from_config(config)
+            if not policy.session_workspace_root:
+                policy = policy.model_copy(update={"session_workspace_root": str(workspace_dir)})
+        else:
+            policy = CapabilityPolicy(session_workspace_root=str(workspace_dir))
         perm_engine = PermissionEngine(policy, workspace_dir, grant_store=grant_store)
 
     add_workspace_tools(

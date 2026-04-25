@@ -67,3 +67,27 @@ tools:
     connect_timeout: 10.0    # Connection timeout in seconds (default: 10)
     execute_timeout: 60.0    # Tool execution timeout in seconds (default: 60)
     sse_read_timeout: 120.0  # SSE read timeout in seconds (default: 120)
+
+# ===== officev3 Permission Settings =====
+# Optional. Only honored when this whole block is present in the loaded
+# config.yaml — otherwise box-agent runs in legacy "allow_full_access" mode.
+# officev3 owns this block: it writes the file then restarts box-agent-acp,
+# so box-agent-acp does NOT mutate it at runtime.
+#
+# officev3:
+#   permissions:
+#     filesystem:
+#       # scope semantics:
+#       #   session_workspace — allow paths.session_workspace_root + workspace + allowed_directories
+#       #   custom            — same as session_workspace (alias used by officev3)
+#       #   user_home         — allow the entire $HOME tree
+#       scope: session_workspace
+#       # Extra directories appended to session_workspace / custom scopes.
+#       # Paths may use ~ or absolute form.
+#       allowed_directories:
+#         - ~/Downloads
+#         - ~/Desktop
+#     memory:
+#       openclaw_import: true  # allow one-time import from ~/.openclaw/
+#   paths:
+#     session_workspace_root: ""  # absolute path; defaults to workspace_dir if empty
