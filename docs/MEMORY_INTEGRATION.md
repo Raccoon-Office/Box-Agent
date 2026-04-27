@@ -1,50 +1,82 @@
 # Memory System Integration Guide
 
-Box-Agent v0.4.11+ 提供跨会话记忆系统，包含两部分：
+Box-Agent provides persistent cross-session memory with two markdown files:
 
-| 类型 | 写入方 | 生命周期 | 存储位置 |
-|------|--------|----------|----------|
-| **长期记忆** (Manual Memory) | Agent 通过 `memory_write` tool | 永久 | `~/.box-agent/memory/MEMORY.md` |
-| **会话摘要** (Session Summary) | 系统自动生成 | 按日期归档 | `~/.box-agent/memory/{date}/{session_id}.md` |
+| Type | Purpose | Recall behavior | Storage |
+|------|---------|-----------------|---------|
+| **Core memory** | User identity, explicit preferences, durable behavioral rules | Automatically injected into the system prompt at session start | `~/.box-agent/memory/MEMORY.md` |
+| **Context memory** | Project context, task templates, historical notes, decisions, deadlines | Searchable on demand via `memory_search`; not automatically injected | `~/.box-agent/memory/CONTEXT.md` |
 
-启动时系统自动召回长期记忆 + 最近 N 天的会话摘要，注入 system prompt。
+This split keeps high-signal user facts always available while preventing project/history notes from bloating every prompt.
 
 ---
 
-## 1. 配置
+## 1. Configuration
 
-在 `config.yaml` 中添加（均有默认值，不配也能用）：
+Add these values to `config.yaml` if you need to override the defaults:
 
 ```yaml
-enable_memory: true                    # 开关，默认 true
-memory_dir: "~/.box-agent/memory"      # 存储目录
-memory_recall_days: 3                  # 召回最近几天的会话摘要
+enable_memory: true                    # Enable memory tools and startup core recall
+memory_dir: "~/.box-agent/memory"      # Memory storage directory
+
+enable_memory_extraction: true         # Auto-extract useful context from agent lifecycle points
+memory_extraction_cooldown: 300        # Seconds between extraction attempts
+memory_extraction_step_interval: 10    # Extract every N agent steps
 ```
 
-设置 `enable_memory: false` 可完全关闭记忆系统（tool 也不会注册）。
+Set `enable_memory: false` to disable the memory manager and memory tools.
 
 ---
 
-## 2. Tool 接口
+## 2. Tool interface
 
-### `memory_write` — 写入长期记忆
+### `memory_write` — write persistent memory
 
 ```json
 {
   "name": "memory_write",
   "arguments": {
-    "content": "- 用户偏好中文回答\n- 项目使用 React + TypeScript",
+    "content": "- 用户偏好中文回答\n- Q2 goal: launch data dashboard by 6/30",
+    "category": "context",
     "mode": "append"
   }
 }
 ```
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `content` | string | 是 | 要写入的内容，建议用 markdown bullet 格式 |
-| `mode` | string | 否 | `append`（默认，追加）或 `overwrite`（覆盖全部） |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `content` | string | Yes | Markdown bullet-style memory content |
+| `category` | `core` or `context` | No | `core` for explicit user identity/preferences/rules; `context` for project/task history. Default: `core` |
+| `mode` | `append` or `overwrite` | No | `append` merges/appends; `overwrite` replaces the target file |
 
-### `memory_read` — 读取长期记忆
+#### Core writes
+
+`category="core"` writes to `MEMORY.md`.
+
+Use core only when the user explicitly states durable personal information or preferences, for example:
+
+```text
+- User prefers concise Chinese responses
+- User is a product manager in the data platform team
+- Do not add emoji in final answers
+```
+
+#### Context writes
+
+`category="context"` writes to `CONTEXT.md`.
+
+When an LLM client is available, append-mode context writes are model-merged with existing memory:
+
+1. Box-Agent sends the candidate memory plus current `MEMORY.md` and `CONTEXT.md` to the LLM.
+2. The LLM returns a structured operation plan: `add`, `replace`, `drop`, or `noop`.
+3. Code applies the plan safely:
+   - `replace` and `drop` require an exact full-line match.
+   - `add` is line-deduped against both Core and Context.
+   - Invalid model JSON falls back to append-with-dedup.
+
+When no LLM is available, context writes use append-with-dedup directly.
+
+### `memory_read` — read all persistent memory
 
 ```json
 {
@@ -53,116 +85,164 @@ memory_recall_days: 3                  # 召回最近几天的会话摘要
 }
 ```
 
-无参数，返回 `MEMORY.md` 全部内容。
+Returns both `MEMORY.md` and `CONTEXT.md` when present.
+
+### `memory_search` — search context memory
+
+```json
+{
+  "name": "memory_search",
+  "arguments": {
+    "query": "weekly report"
+  }
+}
+```
+
+Search is a case-insensitive line-level keyword search over `CONTEXT.md`. Core memory is already present in the prompt, so `memory_search` only searches context memory.
 
 ---
 
-## 3. CLI 接入
+## 3. CLI integration
 
-无需额外代码。`enable_memory: true` 时：
+No additional integration code is needed. When `enable_memory: true`:
 
-- **启动时**：自动召回记忆并注入 system prompt，终端显示 `✅ Loaded memory context`
-- **会话中**：Agent 可调用 `memory_write` / `memory_read`
-- **退出时**（`/exit` 或 Ctrl+C）：自动用 LLM 生成会话摘要并保存
+- **Startup**: `MEMORY.md` is recalled and injected into the system prompt if non-empty.
+- **During a session**: the agent can call `memory_write`, `memory_read`, and `memory_search`.
+- **Lifecycle extraction**: when `enable_memory_extraction: true`, the agent loop periodically asks the LLM to extract cross-session-useful context and writes it to `CONTEXT.md`.
 
-如需手动编辑长期记忆：
+Manual editing is also possible:
 
 ```bash
-# 直接编辑 MEMORY.md
 vim ~/.box-agent/memory/MEMORY.md
+vim ~/.box-agent/memory/CONTEXT.md
 ```
 
 ---
 
-## 4. ACP / Runtime 接入
+## 4. ACP / Runtime integration
 
-memory tools 作为标准 tool 注册，ACP 客户端（如 officev3）通过正常的 tool_call 协议调用。
+Memory tools are registered as normal tools and are available through standard ACP tool calls.
 
-### 4.1 写入记忆
+### 4.1 Writing memory
 
-在 ACP prompt 中让 Agent 调用 tool，或客户端直接构造 tool_call：
+A host can prompt the agent to remember something:
 
 ```python
-# officev3 构造 prompt，让 agent 记住信息
 prompt_text = "请记住：用户偏好简洁的中文回答"
-# Agent 会自行调用 memory_write tool
 ```
 
-Agent 返回的 ACP sessionUpdate 中会包含 tool_call 事件：
+The agent may then call:
 
+```text
+memory_write(content="- 用户偏好简洁的中文回答", category="core", mode="append")
 ```
-tool/start: memory_write(content="- 用户偏好简洁的中文回答", mode="append")
-tool/end:   [OK] Memory updated (append). Current memory: ...
+
+For project context:
+
+```text
+memory_write(content="- Weekly report format: progress/issues/next week", category="context", mode="append")
 ```
 
-### 4.2 自动召回
+With an LLM-backed memory tool, context writes return a strategy label such as:
 
-每次 `newSession` 时，系统自动：
-
-1. 读取 `MEMORY.md`（长期记忆）
-2. 扫描最近 `memory_recall_days` 天的会话摘要
-3. 组装为 memory block 注入 system prompt
-
-注入格式：
-
+```text
+Memory updated (context, applied). Current context memory: ...
+Memory updated (context, no_change). Current context memory: ...
+Memory updated (context, fallback_appended). Current context memory: ...
 ```
+
+### 4.2 Automatic recall
+
+On ACP `newSession`, Box-Agent:
+
+1. Reads `MEMORY.md`.
+2. Builds a memory block if core memory exists.
+3. Appends the block to the session system prompt.
+
+Format:
+
+```text
 --- MEMORY START ---
 
-[Manual Memory]
+[Core Memory]
 - 用户偏好中文回答
 - 用户希望结果简洁
-
-[Recent Session Memory]
-- 2026-03-30 | session_id=sess-0-a1b2c3d4
-  用户上传了 Excel 文件，分析男女身高体重分布，生成了图表。
 
 --- MEMORY END ---
 ```
 
-无记忆时不注入（空字符串）。
-
-### 4.3 自动摘要
-
-每次 `prompt()` 完成后，系统自动调用 LLM 生成会话摘要并保存到 `{date}/{session_id}.md`。这是系统行为，不需要客户端触发。
+`CONTEXT.md` is not injected automatically; use `memory_search` when the agent needs project/task context.
 
 ---
 
-## 5. 存储结构
+## 5. Storage layout
 
-```
+```text
 ~/.box-agent/memory/
-├── MEMORY.md                         # 长期记忆（memory_write 写入）
-├── 2026-03-30/
-│   ├── sess-0-a1b2c3d4.md           # ACP 会话摘要
-│   └── cli-170530.md                # CLI 会话摘要
-└── 2026-03-29/
-    └── sess-1-b2c3d4e5.md
+├── MEMORY.md          # Core memory, always recalled at session start
+├── CONTEXT.md         # Searchable context memory
+└── .openclaw_imported # Marker for one-time OpenClaw import, when applicable
 ```
 
-- `MEMORY.md`：纯文本，建议 bullet point 格式，Agent 通过 tool 读写
-- 日期目录下的 `.md`：自动生成的会话摘要，包含 session_id、日期、任务、摘要、关键结果
+`MEMORY.md` and `CONTEXT.md` are plain UTF-8 markdown files. Bullet points are recommended because model merge and line-level safety checks operate on full lines.
 
 ---
 
-## 6. Python API（直接调用）
+## 6. Automatic context extraction
+
+When `enable_memory_extraction` is enabled, `MemoryExtractor` analyzes recent conversation at lifecycle points:
+
+- before context summarization (`pre_summarize`)
+- every configured step interval (`step_interval`)
+- at loop end (`loop_end`)
+
+The extractor writes only to `CONTEXT.md`; it does not write to `MEMORY.md`. This prevents inferred or task-derived information from polluting core user memory.
+
+---
+
+## 7. One-time OpenClaw import
+
+At startup, if memory is enabled, Box-Agent attempts a one-time import from:
+
+```text
+~/.openclaw/**/USER.md
+~/.openclaw/**/MEMORY.md
+```
+
+The LLM filters those files for durable user identity/preferences/habits and appends useful results to `MEMORY.md`. A `.openclaw_imported` marker prevents repeated imports.
+
+---
+
+## 8. Python API
 
 ```python
 from box_agent.memory import MemoryManager
 
-mgr = MemoryManager(memory_dir="~/.box-agent/memory", recall_days=3)
+mgr = MemoryManager(memory_dir="~/.box-agent/memory")
 
-# 写入长期记忆
-mgr.write_manual_memory("- 用户偏好中文\n- 项目使用 React")
+# Core memory
+mgr.append_core("- 用户偏好中文")
+print(mgr.read_core())
 
-# 读取长期记忆
-print(mgr.read_manual_memory())
+# Context memory
+mgr.append_context("- Weekly report format: progress/issues/next week")
+print(mgr.search("weekly report"))
 
-# 保存会话摘要
-mgr.save_session_summary("sess-0-abc", "# Session...\n## Summary\n...")
-
-# 召回全部记忆（用于注入 system prompt）
+# Startup recall block for system prompt injection
 block = mgr.recall()
 
-# 用 LLM 自动生成摘要
-await mgr.generate_session_summary(llm=llm_client, messages=messages, session_id="sess-0-abc")
+# LLM-assisted context merge
+await mgr.update_context_with_llm(
+    "- Weekly report should include progress, issues, and next-week plan",
+    llm_client,
+)
+```
+
+Legacy aliases remain for compatibility:
+
+```python
+mgr.read_manual_memory()
+mgr.write_manual_memory("- 用户偏好中文")
+mgr.read_all()
+mgr.write_all("- 用户偏好中文")
 ```
