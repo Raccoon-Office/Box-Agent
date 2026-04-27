@@ -15,10 +15,11 @@ from .base import Tool, ToolResult
 class MemoryWriteTool(Tool):
     """Tool for writing entries to long-term memory."""
 
-    def __init__(self, memory_manager):
+    def __init__(self, memory_manager, llm=None):
         from box_agent.memory import MemoryManager
 
         self._mgr: MemoryManager = memory_manager
+        self._llm = llm
 
     @property
     def name(self) -> str:
@@ -31,7 +32,8 @@ class MemoryWriteTool(Tool):
             "Use category='core' ONLY when the user explicitly states personal info "
             "or preferences (e.g. 'my name is...', 'I prefer...'). Never write "
             "summaries or inferences to core. "
-            "Use category='context' for project context, task patterns, and notes."
+            "Use category='context' for project context, task patterns, and notes. "
+            "Context writes are model-merged with existing context when possible."
         )
 
     @property
@@ -68,8 +70,12 @@ class MemoryWriteTool(Tool):
             if category == "context":
                 if mode == "overwrite":
                     self._mgr.write_context(content)
+                    strategy = "overwrite"
+                elif self._llm is not None:
+                    strategy = await self._mgr.update_context_with_llm(content, self._llm)
                 else:
                     self._mgr.append_context(content)
+                    strategy = "append_dedup"
                 current = self._mgr.read_context()
                 label = "context"
             else:
@@ -79,10 +85,11 @@ class MemoryWriteTool(Tool):
                     self._mgr.append_core(content)
                 current = self._mgr.read_core()
                 label = "core"
+                strategy = mode
 
             return ToolResult(
                 success=True,
-                content=f"Memory updated ({label}, {mode}). Current {label} memory:\n{current}",
+                content=f"Memory updated ({label}, {strategy}). Current {label} memory:\n{current}",
             )
         except Exception as e:
             return ToolResult(success=False, content="", error=f"Failed to write memory: {e}")

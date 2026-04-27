@@ -40,7 +40,7 @@ class Colors:
     RESET = "\033[0m"
 
 
-async def initialize_base_tools(config: Config, output=None, memory_manager=None):
+async def initialize_base_tools(config: Config, output=None, memory_manager=None, llm=None):
     """Initialize base tools (independent of workspace)
 
     These tools are loaded from package configuration and don't depend on workspace.
@@ -51,6 +51,7 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
         output: Callable for status messages (default: print). Pass a stderr
                 writer when stdout must stay clean (e.g. ACP mode).
         memory_manager: Optional MemoryManager instance for memory tools.
+        llm: Optional LLM client used to model-merge context memory writes.
 
     Returns:
         Tuple of (tools, skill_loader, mcp_task). The MCP task loads in the
@@ -66,7 +67,7 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
     # 0. Memory tools (cross-session, workspace-independent)
     if memory_manager is not None:
         tools.append(MemoryReadTool(memory_manager))
-        tools.append(MemoryWriteTool(memory_manager))
+        tools.append(MemoryWriteTool(memory_manager, llm=llm))
         tools.append(MemorySearchTool(memory_manager))
         _out(f"{Colors.GREEN}✅ Loaded memory tools (memory_read, memory_write, memory_search){Colors.RESET}")
 

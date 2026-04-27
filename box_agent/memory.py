@@ -88,25 +88,43 @@ class MemoryManager:
         self.context_file.write_text(content.strip() + "\n", encoding="utf-8")
 
     def append_context(self, content: str) -> None:
-        """Append to CONTEXT.md, skipping lines already present in Core."""
-        core = self.read_core()
-        core_lines = {line.strip().lower() for line in core.splitlines() if line.strip()} if core else set()
-
-        # Filter out lines that duplicate Core content
-        filtered = []
-        for line in content.strip().splitlines():
-            if line.strip() and line.strip().lower() not in core_lines:
-                filtered.append(line)
+        """Append to CONTEXT.md, skipping lines already present in Core or Context."""
+        existing = self.read_context()
+        filtered = self._dedupe_context_lines(content, existing_context=existing)
 
         if not filtered:
             return
 
         new_content = "\n".join(filtered)
-        existing = self.read_context()
         if existing:
             self.write_context(f"{existing}\n{new_content}")
         else:
             self.write_context(new_content)
+
+    def _dedupe_context_lines(self, content: str, *, existing_context: str | None = None) -> list[str]:
+        """Return non-empty context lines not already present in Core or Context.
+
+        Deduplication is intentionally line-level and case-insensitive so exact
+        saved facts are not repeated while still allowing a later LLM merge to
+        refine or replace older context lines.
+        """
+        core = self.read_core()
+        existing_context = self.read_context() if existing_context is None else existing_context
+
+        seen = {
+            line.strip().lower()
+            for source in (core, existing_context)
+            for line in source.splitlines()
+            if line.strip()
+        }
+
+        filtered: list[str] = []
+        for line in content.strip().splitlines():
+            normalized = line.strip().lower()
+            if normalized and normalized not in seen:
+                filtered.append(line)
+                seen.add(normalized)
+        return filtered
 
     # ── Search ──────────────────────────────────────────────────
 
@@ -256,6 +274,103 @@ class MemoryManager:
             parts.append(f"{msg.role.capitalize()}: {text[:max_chars_per_msg]}")
         return "\n".join(parts)
 
+    async def update_context_with_llm(self, content: str, llm) -> str:
+        """Ask an LLM how to merge candidate context, then safely apply it.
+
+        The model decides semantic add/replace/drop/noop operations, while this
+        method enforces exact-match mutations and line-level duplicate guards.
+
+        Returns:
+            A short status label: ``"applied"``, ``"no_change"``, or
+            ``"fallback_appended"``.
+        """
+        if not content.strip():
+            return "no_change"
+
+        from .schema import Message as Msg
+
+        context = self.read_context()
+        prompt = _CONTEXT_UPDATE_USER_PROMPT.format(
+            core_memory=self.read_core() or "(empty)",
+            context_memory=context or "(empty)",
+            candidate=content.strip(),
+        )
+
+        try:
+            response = await llm.generate(
+                messages=[
+                    Msg(role="system", content=_CONTEXT_UPDATE_SYSTEM_PROMPT),
+                    Msg(role="user", content=prompt),
+                ]
+            )
+            data = json.loads(_strip_json_fences(response.content))
+        except Exception:
+            logger.exception("Context memory update planning failed; falling back to append")
+            before = self.read_context()
+            self.append_context(content)
+            return "fallback_appended" if self.read_context() != before else "no_change"
+
+        changed = self.apply_context_operations(data.get("operations", []))
+        return "applied" if changed else "no_change"
+
+    def apply_context_operations(self, operations: list[dict]) -> bool:
+        """Safely apply model-planned context memory operations.
+
+        ``replace`` and ``drop`` require exactly one full-line match. ``add``
+        uses the same Core/Context dedupe guard as direct appends.
+        """
+        context = self.read_context()
+        lines = context.splitlines() if context else []
+        changed = False
+
+        for op in operations:
+            action = str(op.get("action", "")).strip().lower()
+
+            if action == "replace":
+                old = str(op.get("old", "")).strip()
+                new = str(op.get("new", "")).strip()
+                if not old or not new:
+                    continue
+                indices = [i for i, line in enumerate(lines) if line.strip() == old]
+                if len(indices) != 1:
+                    if len(indices) > 1:
+                        logger.warning("Ambiguous context memory replace skipped (%d matches): %s", len(indices), old[:80])
+                    else:
+                        logger.debug("Context memory replace target not found: %s", old[:80])
+                    continue
+                candidate_context = "\n".join(line for i, line in enumerate(lines) if i != indices[0])
+                if not self._dedupe_context_lines(new, existing_context=candidate_context):
+                    lines.pop(indices[0])
+                else:
+                    lines[indices[0]] = new
+                changed = True
+
+            elif action == "drop":
+                content = str(op.get("content", "")).strip()
+                if not content:
+                    continue
+                indices = [i for i, line in enumerate(lines) if line.strip() == content]
+                if len(indices) != 1:
+                    if len(indices) > 1:
+                        logger.warning("Ambiguous context memory drop skipped (%d matches): %s", len(indices), content[:80])
+                    continue
+                lines.pop(indices[0])
+                changed = True
+
+            elif action == "add":
+                content = str(op.get("content", "")).strip()
+                additions = self._dedupe_context_lines(content, existing_context="\n".join(lines))
+                if additions:
+                    lines.extend(additions)
+                    changed = True
+
+            elif action == "noop":
+                continue
+
+        if changed:
+            self.write_context("\n".join(lines))
+        return changed
+
 
 # ── Auto Memory Extraction ────────────────────────────────────────
 
@@ -288,6 +403,50 @@ Rules:
 
 Output ONLY valid JSON (no markdown fences):
 {{"additions": ["- bullet point 1", "- bullet point 2"], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
+
+_CONTEXT_UPDATE_SYSTEM_PROMPT = (
+    "You are a long-term memory curator. You update persistent context memory "
+    "by preserving useful project/task context, merging semantic duplicates, "
+    "and discarding ephemeral details."
+)
+
+_CONTEXT_UPDATE_USER_PROMPT = """\
+Decide how to update CONTEXT.md using the candidate memory.
+
+Existing core memory (MEMORY.md — do NOT duplicate into context):
+{core_memory}
+
+Existing context memory (CONTEXT.md):
+{context_memory}
+
+Candidate memory to save:
+{candidate}
+
+Rules:
+1. Keep only cross-session-useful project context, task patterns, decisions, deadlines, or behavioral feedback.
+2. If the candidate duplicates existing context semantically, do not add it.
+3. If the candidate refines an existing line, replace that exact old line with one better line.
+4. Do not duplicate core memory into context.
+5. Do not rewrite the whole file. Prefer minimal add/replace/drop/noop operations.
+6. For replace/drop, old/content MUST exactly match one full existing context line.
+
+Output ONLY valid JSON (no markdown fences):
+{{"operations": [
+  {{"action": "add", "content": "- new memory line", "reason": "why it should be saved"}},
+  {{"action": "replace", "old": "- exact old line", "new": "- improved line", "reason": "why it refines old memory"}},
+  {{"action": "drop", "content": "- exact old line", "reason": "why existing line should be removed"}},
+  {{"action": "noop", "content": "- candidate line", "reason": "why nothing should change"}}
+]}}"""
+
+
+def _strip_json_fences(text: str) -> str:
+    """Strip optional markdown fences around model JSON."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = "\n".join(text.split("\n")[1:])
+    if text.endswith("```"):
+        text = "\n".join(text.split("\n")[:-1])
+    return text.strip()
 
 
 class MemoryExtractor:
@@ -383,13 +542,7 @@ class MemoryExtractor:
 
     def _apply_updates(self, llm_output: str) -> None:
         """Parse LLM JSON output and apply to CONTEXT.md."""
-        # Strip markdown fences if present
-        text = llm_output.strip()
-        if text.startswith("```"):
-            text = "\n".join(text.split("\n")[1:])
-        if text.endswith("```"):
-            text = "\n".join(text.split("\n")[:-1])
-        text = text.strip()
+        text = _strip_json_fences(llm_output)
 
         try:
             data = json.loads(text)
@@ -422,11 +575,9 @@ class MemoryExtractor:
                     logger.debug("Memory merge target not found: %s", old[:80])
             context = "\n".join(lines)
 
-        # Apply additions (skip lines that duplicate Core)
+        # Apply additions (skip lines that duplicate Core or Context)
         if additions:
-            core = self._mgr.read_core()
-            core_lines = {l.strip().lower() for l in core.splitlines() if l.strip()} if core else set()
-            deduped = [a for a in additions if a.strip().lower() not in core_lines]
+            deduped = self._mgr._dedupe_context_lines("\n".join(additions), existing_context=context)
             if deduped:
                 addition_text = "\n".join(deduped)
                 if context:

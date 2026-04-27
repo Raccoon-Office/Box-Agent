@@ -914,7 +914,7 @@ async def run_acp_server(config: Config | None = None) -> None:
             except Exception:
                 log.warn("server/start", message="OpenClaw import failed (non-fatal)")
 
-        base_tools, skill_loader, mcp_task = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr)
+        base_tools, skill_loader, mcp_task = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr, llm=llm)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)
         if prompt_path and prompt_path.exists():
             system_prompt = prompt_path.read_text(encoding="utf-8")

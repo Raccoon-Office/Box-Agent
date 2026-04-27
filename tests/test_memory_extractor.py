@@ -110,6 +110,23 @@ async def test_extract_additions_dedup_against_core(mgr: MemoryManager):
     assert "Alice" not in ctx
 
 
+async def test_extract_additions_dedup_against_context(mgr: MemoryManager):
+    """Additions that duplicate existing Context lines are filtered out."""
+    from box_agent.schema import Message
+
+    mgr.write_context("- Q2 goal: dashboard")
+    extractor = _make_extractor(
+        mgr,
+        '{"additions": ["- q2 goal: dashboard", "- weekly report format: progress/issues/plan"], "merges": []}',
+    )
+    messages = [Message(role="user", content="test")]
+
+    await extractor.maybe_extract(messages, "loop_end")
+    ctx = mgr.read_context()
+    assert ctx.lower().count("q2 goal: dashboard") == 1
+    assert "weekly report format" in ctx
+
+
 async def test_extract_does_not_touch_core(mgr: MemoryManager):
     """Extraction only modifies CONTEXT.md, not MEMORY.md."""
     from box_agent.schema import Message

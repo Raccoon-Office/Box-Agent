@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -94,11 +95,87 @@ def test_append_context_dedup_against_core(mgr: MemoryManager):
     assert "Chinese" not in context
 
 
+def test_append_context_dedup_against_existing_context(mgr: MemoryManager):
+    """Lines already in Context are not appended again."""
+    mgr.write_context("- Q2 goal: dashboard\n- weekly report format: progress/issues/plan")
+    mgr.append_context("- q2 goal: dashboard\n- team lead: Bob\n- weekly report format: progress/issues/plan")
+
+    context = mgr.read_context()
+    assert context.count("Q2 goal") == 1
+    assert context.count("weekly report format") == 1
+    assert "team lead: Bob" in context
+
+
+def test_append_context_dedup_within_single_append(mgr: MemoryManager):
+    """Duplicate lines within one append call are only saved once."""
+    mgr.append_context("- project A\n- Project A\n- project B")
+    context = mgr.read_context()
+    assert context.lower().count("project a") == 1
+    assert "project B" in context
+
+
 def test_append_context_all_filtered(mgr: MemoryManager):
     """If all lines are Core duplicates, nothing is written to Context."""
     mgr.write_core("- user: Alice")
     mgr.append_context("- user: Alice")
     assert mgr.read_context() == ""
+
+
+def test_apply_context_operations_add_replace_drop_noop(mgr: MemoryManager):
+    mgr.write_core("- user: Alice")
+    mgr.write_context("- Q2 goal: dashboard\n- old transient detail")
+
+    changed = mgr.apply_context_operations([
+        {
+            "action": "replace",
+            "old": "- Q2 goal: dashboard",
+            "new": "- Q2 goal: launch dashboard by 6/30",
+        },
+        {"action": "add", "content": "- user: Alice"},
+        {"action": "add", "content": "- weekly report format: progress/issues/plan"},
+        {"action": "drop", "content": "- old transient detail"},
+        {"action": "noop", "content": "- ignored"},
+    ])
+
+    assert changed is True
+    context = mgr.read_context()
+    assert "launch dashboard by 6/30" in context
+    assert "weekly report format" in context
+    assert "old transient detail" not in context
+    assert "user: Alice" not in context
+
+
+async def test_update_context_with_llm_applies_model_plan(mgr: MemoryManager):
+    mgr.write_context("- Q2 goal: dashboard")
+    llm = MagicMock()
+    response = MagicMock()
+    response.content = (
+        '{"operations": ['
+        '{"action": "replace", "old": "- Q2 goal: dashboard", "new": "- Q2 goal: launch dashboard by 6/30", "reason": "more specific"},'
+        '{"action": "add", "content": "- weekly report format: progress/issues/plan", "reason": "new template"}'
+        ']}'
+    )
+    llm.generate = AsyncMock(return_value=response)
+
+    status = await mgr.update_context_with_llm("- Q2 goal is to launch dashboard by 6/30", llm)
+
+    assert status == "applied"
+    context = mgr.read_context()
+    assert "launch dashboard by 6/30" in context
+    assert "weekly report format" in context
+    assert llm.generate.await_count == 1
+
+
+async def test_update_context_with_llm_falls_back_to_append_on_bad_json(mgr: MemoryManager):
+    llm = MagicMock()
+    response = MagicMock()
+    response.content = "not json"
+    llm.generate = AsyncMock(return_value=response)
+
+    status = await mgr.update_context_with_llm("- project deadline: June", llm)
+
+    assert status == "fallback_appended"
+    assert "project deadline: June" in mgr.read_context()
 
 
 # ── Search ────────────────────────────────────────────────────

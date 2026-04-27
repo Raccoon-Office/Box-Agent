@@ -897,7 +897,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         )
 
     # 3.5 Initialize base tools (independent of workspace). MCP loads in the background.
-    tools, skill_loader, mcp_task = await initialize_base_tools(config, memory_manager=memory_mgr)
+    tools, skill_loader, mcp_task = await initialize_base_tools(config, memory_manager=memory_mgr, llm=llm_client)
 
     # 4. Add workspace-dependent tools
     non_interactive = task is not None
