@@ -6,7 +6,7 @@ from .hooks import BaseHook, HookManager, load_hooks
 from .llm import LLMClient
 from .schema import FunctionCall, LLMProvider, LLMResponse, Message, ToolCall
 
-__version__ = "0.8.20"
+__version__ = "0.8.21"
 
 __all__ = [
     "Agent",

@@ -63,9 +63,13 @@ def build_runtime(version: str, output_dir: Path) -> Path:
     # ── Step 0: Install runtime extras into current env ─────
     print("\nInstalling runtime extras (data science packages)...")
     # Try uv first (used in dev), fall back to pip
-    extras_cmd_uv = ["uv", "pip", "install", "--quiet", f"{project_root}[runtime]"]
     extras_cmd_pip = [sys.executable, "-m", "pip", "install", "--quiet", f"{project_root}[runtime]"]
-    result = subprocess.run(extras_cmd_uv, cwd=str(project_root), capture_output=True)
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        extras_cmd_uv = [uv_bin, "pip", "install", "--quiet", f"{project_root}[runtime]"]
+        result = subprocess.run(extras_cmd_uv, cwd=str(project_root), capture_output=True)
+    else:
+        result = subprocess.CompletedProcess(args=["uv"], returncode=1)
     if result.returncode != 0:
         result = subprocess.run(extras_cmd_pip, cwd=str(project_root))
     if result.returncode != 0:

@@ -902,6 +902,10 @@ async def run_acp_server(config: Config | None = None) -> None:
         sys.stderr.flush()
 
     try:
+        rcfg = config.llm.retry
+        provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
+        llm = LLMClient(api_key=config.llm.api_key, provider=provider, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
+
         # Create memory manager if enabled
         memory_mgr = None
         if config.agent.enable_memory:
@@ -950,9 +954,6 @@ You have access to the `execute_code` tool which runs Python code in an isolated
             meta = skill_loader.get_skills_metadata_prompt()
             if meta:
                 system_prompt = f"{system_prompt.rstrip()}\n\n{meta}"
-        rcfg = config.llm.retry
-        provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
-        llm = LLMClient(api_key=config.llm.api_key, provider=provider, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
 
         log.info("server/start", message=f"LLM: {config.llm.model}, provider: {config.llm.provider}")
         log.info("server/start", message=f"Tools loaded: {len(base_tools)} base tools")
