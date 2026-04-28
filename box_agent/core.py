@@ -506,6 +506,8 @@ async def run_agent_loop(
             async for chunk in llm.generate_stream(
                 messages=messages, tools=tool_list, thinking_enabled=thinking_enabled
             ):
+                if cancelled():
+                    break
                 if chunk.type == "thinking":
                     if not thinking_header_yielded:
                         yield ThinkingEvent(content="", _streaming=True, _header=True)
@@ -520,6 +522,13 @@ async def run_agent_loop(
                     yield ContentEvent(content=chunk.delta, _streaming=True)
                 elif chunk.type == "finish":
                     finish_event = chunk
+
+            if cancelled():
+                _cleanup_incomplete_messages(messages)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+                yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+                return
 
             if finish_event is None:
                 msg = "LLM stream ended without a finish event"
