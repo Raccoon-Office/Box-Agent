@@ -5,7 +5,16 @@ from types import SimpleNamespace
 import pytest
 
 from box_agent.acp import BoxACPAgent
-from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.config import (
+    AgentConfig,
+    Config,
+    FilesystemPermissions,
+    LLMConfig,
+    Officev3Config,
+    Officev3Paths,
+    Officev3Permissions,
+    ToolsConfig,
+)
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 
@@ -117,3 +126,38 @@ async def test_acp_invalid_session(acp_agent):
     prompt = SimpleNamespace(sessionId="missing", prompt=[{"text": "?"}])
     response = await agent.prompt(prompt)
     assert response.stopReason == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_lists_officev3_allowed_directories(tmp_path):
+    allowed = tmp_path / "Documents"
+    allowed.mkdir()
+    workspace = tmp_path / "workspace"
+
+    officev3 = Officev3Config(
+        permissions=Officev3Permissions(
+            filesystem=FilesystemPermissions(
+                scope="session_workspace",
+                allowed_directories=[str(allowed)],
+            )
+        ),
+        paths=Officev3Paths(session_workspace_root=str(tmp_path / "office-raccoon")),
+    )
+    officev3._present = True
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(),
+        officev3=officev3,
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    )
+    prompt = agent._sessions[session.sessionId].agent.system_prompt
+
+    assert "## File Access Context" in prompt
+    assert "configured allowed directories are allowed" in prompt
+    assert str(allowed) in prompt
+    assert "Do not claim you can only access the workspace" in prompt

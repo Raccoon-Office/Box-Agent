@@ -71,7 +71,7 @@ Skills are loaded dynamically using **Progressive Disclosure**:
 - **Dangerous commands** (rm, rmdir, kill, sudo, chmod, etc.) will trigger a user confirmation prompt
 - **If a dangerous command is rejected by the user, STOP immediately.** Do NOT retry with alternative commands that achieve the same destructive effect (e.g., don't switch from `rm` to `rmdir`, or use `find -delete`, `mv to /dev/null`, etc.)
 - When a command is rejected, inform the user that the operation was cancelled and ask how they'd like to proceed
-- **Workspace restrictions**: When safety mode is active, tools are restricted to the workspace directory. Do not attempt to access files outside the workspace
+- **Filesystem access**: When safety mode is active, tools are restricted by the runtime filesystem policy. This can include the workspace, the session workspace root, and host-configured allowed directories. Do not assume workspace-only access; use tools to verify access and respect permission errors.
 
 <safety_guardrails>
 **安全与隐私原则**：

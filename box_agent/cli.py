@@ -1203,93 +1203,39 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                 print_stats(agent, session_start)
                 break
 
-            # Run Agent with cancellation + in-stream injection support
+            # Run Agent with Esc cancellation support
             # Ensure background-loaded MCP tools are registered (no-op after first call)
             for t in await await_mcp_tools(mcp_task):
                 agent.tools.setdefault(t.name, t)
             mcp_task = None  # clear so we don't re-await the cached result each turn
+
+            print(
+                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
+                f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
+            )
             agent.add_user_message(user_input)
 
             # Create cancellation event
             cancel_event = asyncio.Event()
             agent.cancel_event = cancel_event
 
-            # ── Terminal split: scroll region + fixed input line ──
-            # Top area (rows 1..N-2): agent output scrolls here
-            # Row N-1: separator
-            # Row N: fixed input line (› prompt)
-            term_rows = shutil.get_terminal_size().lines
-            _ESC = "\033"
-            # Set scroll region, draw separator + input line, move cursor back
-            sys.stdout.write(
-                f"{_ESC}[1;{term_rows - 2}r"       # scroll region: top to N-2
-                f"{_ESC}[{term_rows - 1};1H"        # move to separator row
-                f"{Colors.DIM}{'─' * 60}{Colors.RESET}"
-                f"{_ESC}[{term_rows};1H{_ESC}[2K"   # move to input row, clear it
-                f"{Colors.DIM}› {Colors.RESET}"      # draw input prompt
-                f"{_ESC}[1;1H"                       # cursor back to scroll region top
-            )
-            sys.stdout.flush()
-
-            print(
-                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
-                f"{Colors.DIM}Thinking... (Esc to cancel, type + Enter to inject){Colors.RESET}\n"
-            )
-
-            # ── Key listener thread ─────────────────────────
             esc_listener_stop = threading.Event()
             esc_cancelled = [False]
-            pending_injections: list[str] = []
 
-            def _refresh_input_line(buf: list[str]):
-                """Redraw the fixed bottom input line without disturbing agent output."""
-                text = "".join(buf)
-                # save cursor → jump to input row → clear → draw → restore cursor
-                sys.stdout.write(
-                    f"{_ESC}[s"
-                    f"{_ESC}[{term_rows};1H{_ESC}[2K"
-                    f"{Colors.DIM}› {Colors.RESET}{text}"
-                    f"{_ESC}[u"
-                )
-                sys.stdout.flush()
-
-            def input_listener():
-                input_buf: list[str] = []
-
+            def esc_key_listener():
+                """Listen for Esc key in a separate thread."""
                 if platform.system() == "Windows":
                     try:
                         import msvcrt
 
                         while not esc_listener_stop.is_set():
                             if msvcrt.kbhit():
-                                raw = msvcrt.getch()
-                                if raw == b"\x1b" and not input_buf:
+                                char = msvcrt.getch()
+                                if char == b"\x1b":  # Esc
                                     print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                     esc_cancelled[0] = True
                                     cancel_event.set()
                                     break
-                                elif raw == b"\x1b":
-                                    input_buf.clear()
-                                    _refresh_input_line(input_buf)
-                                elif raw in (b"\r", b"\n"):
-                                    if input_buf:
-                                        text = "".join(input_buf)
-                                        input_buf.clear()
-                                        _refresh_input_line(input_buf)
-                                        pending_injections.append(text)
-                                        print(f"{Colors.DIM}💉 Injected:{Colors.RESET} {Colors.BRIGHT_WHITE}{text}{Colors.RESET}")
-                                elif raw == b"\x08":
-                                    if input_buf:
-                                        input_buf.pop()
-                                        _refresh_input_line(input_buf)
-                                else:
-                                    try:
-                                        ch = raw.decode("utf-8", errors="ignore")
-                                        if ch and ch >= " ":
-                                            input_buf.append(ch)
-                                            _refresh_input_line(input_buf)
-                                    except Exception:
-                                        pass
                             esc_listener_stop.wait(0.05)
                     except Exception:
                         pass
@@ -1310,34 +1256,17 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                             rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
                             if rlist:
                                 char = sys.stdin.read(1)
-                                if char == "\x1b" and not input_buf:
+                                if char == "\x1b":  # Esc
                                     print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                     esc_cancelled[0] = True
                                     cancel_event.set()
                                     break
-                                elif char == "\x1b":
-                                    input_buf.clear()
-                                    _refresh_input_line(input_buf)
-                                elif char in ("\r", "\n"):
-                                    if input_buf:
-                                        text = "".join(input_buf)
-                                        input_buf.clear()
-                                        _refresh_input_line(input_buf)
-                                        pending_injections.append(text)
-                                        print(f"{Colors.DIM}💉 Injected:{Colors.RESET} {Colors.BRIGHT_WHITE}{text}{Colors.RESET}")
-                                elif char == "\x7f":  # Backspace
-                                    if input_buf:
-                                        input_buf.pop()
-                                        _refresh_input_line(input_buf)
-                                elif char >= " ":
-                                    input_buf.append(char)
-                                    _refresh_input_line(input_buf)
                     finally:
                         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 except Exception:
                     pass
 
-            esc_thread = threading.Thread(target=input_listener, daemon=True)
+            esc_thread = threading.Thread(target=esc_key_listener, daemon=True)
             esc_thread.start()
 
             try:
@@ -1346,8 +1275,6 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                 while not agent_task.done():
                     if esc_cancelled[0]:
                         cancel_event.set()
-                    while pending_injections:
-                        agent.inject(pending_injections.pop(0))
                     await asyncio.sleep(0.1)
 
                 _ = agent_task.result()
@@ -1358,14 +1285,6 @@ You have access to the `execute_code` tool which runs Python code in an isolated
                 agent.cancel_event = None
                 esc_listener_stop.set()
                 esc_thread.join(timeout=0.2)
-                # Restore full terminal: reset scroll region, clear bottom lines
-                sys.stdout.write(
-                    f"{_ESC}[r"                          # reset scroll region
-                    f"{_ESC}[{term_rows - 1};1H{_ESC}[2K"  # clear separator
-                    f"{_ESC}[{term_rows};1H{_ESC}[2K"      # clear input line
-                    f"{_ESC}[{term_rows - 1};1H"            # position cursor
-                )
-                sys.stdout.flush()
 
             # Visual separation
             print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")

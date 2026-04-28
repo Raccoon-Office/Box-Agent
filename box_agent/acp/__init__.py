@@ -219,6 +219,7 @@ class BoxACPAgent:
         # Build PermissionEngine via policy composition if officev3 block is configured
         perm_engine = None
         grant_store = None
+        effective_policy: CapabilityPolicy | None = None
         if self._has_officev3_policy():
             try:
                 base_policy = CapabilityPolicy.from_config(self._config)
@@ -249,11 +250,16 @@ class BoxACPAgent:
                 fallback_policy = CapabilityPolicy(
                     session_workspace_root=str(workspace),
                 )
+                effective_policy = fallback_policy
                 grant_store = GrantStore()
                 perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
 
         # Build per-session system prompt with conditional mode injection
-        system_prompt = self._build_session_prompt(session_mode)
+        system_prompt = self._build_session_prompt(
+            session_mode,
+            workspace=workspace,
+            policy=effective_policy,
+        )
 
         # Inject memory context
         memory_block: str | None = None
@@ -324,18 +330,62 @@ class BoxACPAgent:
             kwargs["field_meta"] = {"skills": skills}
         return NewSessionResponse(**kwargs)
 
-    def _build_session_prompt(self, session_mode: str | None) -> str:
-        """Build system prompt with conditional mode-specific injection.
+    def _filesystem_access_prompt(self, workspace: Path, policy: CapabilityPolicy | None) -> str:
+        """Build per-session filesystem guidance for the model.
 
-        Prompt structure:
-            base system_prompt
-            + [if session_mode matches] mode-specific prompt
-            + skills metadata  (already appended in run_acp_server)
-
-        The base prompt (with skills metadata) is stored in self._system_prompt.
-        Mode-specific prompts are injected between the base and the skills section.
+        Tools still enforce permissions. This prompt only prevents the model
+        from assuming workspace-only access when officev3 has granted extra
+        roots such as ~/Documents.
         """
-        # Map session_mode → config attribute holding the prompt filename
+        if policy is None:
+            return (
+                "## File Access Context\n"
+                f"- Current workspace: `{workspace}`\n"
+                "- File tools and bash may access paths allowed by the active runtime policy.\n"
+                "- If a file is outside the allowed scope, the tool will return a permission error; "
+                "try the tool instead of assuming denial."
+            )
+
+        allowed_roots = [workspace]
+        if policy.session_workspace_root:
+            allowed_roots.append(Path(policy.session_workspace_root).expanduser())
+        for directory in policy.allowed_directories:
+            allowed_roots.append(Path(directory).expanduser())
+
+        seen: set[str] = set()
+        root_lines: list[str] = []
+        for root in allowed_roots:
+            root_s = str(root)
+            if root_s not in seen:
+                seen.add(root_s)
+                root_lines.append(f"- `{root_s}`")
+
+        if policy.filesystem_scope == "user_home":
+            scope_line = "- Active filesystem scope: `user_home`; paths under the user home directory are allowed."
+        elif policy.filesystem_scope in ("session_workspace", "custom"):
+            scope_line = (
+                f"- Active filesystem scope: `{policy.filesystem_scope}`; the workspace, "
+                "session workspace root, and configured allowed directories are allowed."
+            )
+        else:
+            scope_line = f"- Active filesystem scope: `{policy.filesystem_scope}`; unknown scopes fail closed in tools."
+
+        return (
+            "## File Access Context\n"
+            f"{scope_line}\n"
+            "- Allowed filesystem roots for this session include:\n"
+            + "\n".join(root_lines)
+            + "\n- Prefer absolute paths when the user names a location such as ~/Documents."
+            + "\n- Do not claim you can only access the workspace unless a tool call actually returns a permission denial."
+        )
+
+    def _build_session_prompt(
+        self,
+        session_mode: str | None,
+        workspace: Path | None = None,
+        policy: CapabilityPolicy | None = None,
+    ) -> str:
+        """Build system prompt with conditional mode-specific injection."""
         _MODE_PROMPT_MAP = {
             "data_analysis": "analysis_prompt_path",
             "ppt_plan_chat": "ppt_plan_chat_prompt_path",
@@ -343,21 +393,25 @@ class BoxACPAgent:
             "ppt_editor_standard_html": "ppt_editor_prompt_path",
         }
 
+        base_prompt = self._system_prompt
+        if workspace is not None:
+            base_prompt = f"{base_prompt.rstrip()}\n\n{self._filesystem_access_prompt(workspace, policy)}"
+
         attr = _MODE_PROMPT_MAP.get(session_mode or "")
         if not attr:
-            return self._system_prompt
+            return base_prompt
 
         prompt_filename = getattr(self._config.agent, attr, None)
         if not prompt_filename:
-            return self._system_prompt
+            return base_prompt
 
         mode_path = Config.find_config_file(prompt_filename)
         if mode_path and mode_path.exists():
             mode_prompt = mode_path.read_text(encoding="utf-8").strip()
-            return f"{self._system_prompt.rstrip()}\n\n{mode_prompt}"
+            return f"{base_prompt.rstrip()}\n\n{mode_prompt}"
 
         log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
-        return self._system_prompt
+        return base_prompt
 
     _PPT_TOOL_MODES: Final[frozenset[str]] = frozenset(
         {"ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"}
@@ -379,7 +433,11 @@ class BoxACPAgent:
             return
 
         # Recompose system prompt: base + mode + memory + preserved workspace info
-        new_prompt = self._build_session_prompt(mode)
+        new_prompt = self._build_session_prompt(
+            mode,
+            workspace=state.agent.workspace_dir,
+            policy=state.permission_engine.policy if state.permission_engine else None,
+        )
         if state.memory_block:
             new_prompt = f"{new_prompt.rstrip()}\n\n{state.memory_block}"
         workspace_info = (
