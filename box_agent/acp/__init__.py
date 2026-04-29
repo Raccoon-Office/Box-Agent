@@ -540,6 +540,7 @@ class BoxACPAgent:
             "end_turn": "end_turn",
             "cancelled": "cancelled",
             "max_steps": "max_turn_requests",
+            "max_tokens": "max_tokens",
             "error": "end_turn",
         }
         acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")

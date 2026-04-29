@@ -451,6 +451,15 @@ async def run_agent_loop(
     skip_next_token_check = False
     run_start = perf_counter()
 
+    # Loop-guard state: detect when the model emits the same tool_call
+    # signature with empty arguments two turns in a row. With a healthy LLM
+    # this should never happen — it's the fingerprint of a relay/provider
+    # bug or a model stuck after seeing "missing required argument" errors,
+    # and continuing burns max_steps without progress.
+    empty_args_signature: tuple[str, ...] | None = None
+    empty_args_repeats = 0
+    EMPTY_ARGS_LIMIT = 2
+
     for step in range(max_steps):
         # ── Cancellation check (top of step) ────────────────
         # No cleanup needed here — messages are consistent at step boundaries.
@@ -589,6 +598,27 @@ async def run_agent_loop(
         )
         messages.append(assistant_msg)
 
+        # ── Output truncated by provider token limit ────────
+        # finish_reason="length" means the LLM was cut off mid-response — for
+        # tool-calling models this often means tool_call arguments are
+        # incomplete (invalid JSON dropped by the client). Continuing would
+        # either feed the model empty/partial args and trigger a retry loop,
+        # or run a tool with the wrong arguments. Abort the turn with a
+        # clear reason instead.
+        if response.finish_reason == "length":
+            msg = (
+                "LLM output truncated by provider max_tokens limit. "
+                "Tool-call arguments may be incomplete. Try a smaller task "
+                "per turn or raise the provider's output token limit."
+            )
+            _cleanup_incomplete_messages(messages)
+            if hook_mgr.hooks:
+                await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                await hook_mgr.fire_done(stop_reason=StopReason.MAX_TOKENS, final_content=msg)
+            yield ErrorEvent(message=msg, is_fatal=True)
+            yield DoneEvent(stop_reason=StopReason.MAX_TOKENS, final_content=msg)
+            return
+
         # ── No tool calls → done (or continue if injected) ──
         if not response.tool_calls:
             # Check inject queue — if messages are pending, continue
@@ -622,6 +652,37 @@ async def run_agent_loop(
             return
 
         # ── Execute tool calls ──────────────────────────────
+        # Loop-guard: bail out if the model emits the same all-empty-args
+        # tool_call set as the previous turn. This is the signature of an
+        # upstream protocol bug (e.g. relay truncation) where empty args
+        # come back, error responses get fed back, and the model just
+        # repeats — without this check the loop runs to max_steps.
+        all_empty = all(not tc.function.arguments for tc in response.tool_calls)
+        if all_empty:
+            sig = tuple(sorted(tc.function.name for tc in response.tool_calls))
+            if sig == empty_args_signature:
+                empty_args_repeats += 1
+            else:
+                empty_args_signature = sig
+                empty_args_repeats = 1
+            if empty_args_repeats >= EMPTY_ARGS_LIMIT:
+                msg = (
+                    f"Aborting: model emitted empty-arguments tool_calls "
+                    f"{empty_args_repeats}x in a row ({list(sig)}). "
+                    "This usually indicates an upstream relay bug or model "
+                    "loop. See logs for the raw stream."
+                )
+                _cleanup_incomplete_messages(messages)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+                yield ErrorEvent(message=msg, is_fatal=True)
+                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                return
+        else:
+            empty_args_signature = None
+            empty_args_repeats = 0
+
         # Split into regular (sequential) and parallel_safe groups.
         regular_calls = []
         parallel_calls = []

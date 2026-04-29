@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 # Hard-coded budget for extended thinking on Qwen-style endpoints.
 _THINKING_BUDGET = 8000
 
+# Default completion-token budget. Many OpenAI-protocol relay/proxy gateways
+# default to 4096, which silently truncates long tool-call argument streams
+# (we observed `finish_reason="length"` cutting JSON mid-string and triggering
+# empty-arguments retry loops). Pin to the same ceiling AnthropicClient uses.
+_DEFAULT_MAX_TOKENS = 16384
+
 
 class OpenAIClient(LLMClientBase):
     """LLM client using OpenAI's protocol.
@@ -74,6 +80,7 @@ class OpenAIClient(LLMClientBase):
         params: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
+            "max_tokens": _DEFAULT_MAX_TOKENS,
         }
 
         if thinking_enabled:
@@ -334,6 +341,7 @@ class OpenAIClient(LLMClientBase):
         params: dict[str, Any] = {
             "model": self.model,
             "messages": request_params["api_messages"],
+            "max_tokens": _DEFAULT_MAX_TOKENS,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -407,14 +415,30 @@ class OpenAIClient(LLMClientBase):
                     if tc_delta.function and tc_delta.function.arguments:
                         tool_acc[idx]["arguments"] += tc_delta.function.arguments
 
-        # Build tool calls
+        # Build tool calls. If a relay truncates output mid-arguments
+        # (`finish_reason="length"`), the accumulated string is invalid JSON
+        # and used to silently fall back to ``{}``, which fed an empty-args
+        # retry loop back to the model. Now we hard-fail: drop broken
+        # tool_calls and force ``finish_reason="length"`` so core.py
+        # terminates the turn with a clear MAX_TOKENS stop reason.
         tool_calls: list[ToolCall] = []
+        truncated_tool = False
         for idx in sorted(tool_acc):
             entry = tool_acc[idx]
+            raw = entry["arguments"]
             try:
-                arguments = json.loads(entry["arguments"]) if entry["arguments"] else {}
-            except json.JSONDecodeError:
-                arguments = {}
+                arguments = json.loads(raw) if raw else {}
+            except json.JSONDecodeError as exc:
+                truncated_tool = True
+                logger.warning(
+                    "Truncated tool_call arguments for %r (idx=%d, len=%d): %s",
+                    entry["name"], idx, len(raw), exc,
+                )
+                continue
+            if not entry["name"]:
+                truncated_tool = True
+                logger.warning("Tool_call idx=%d has no function name; dropping", idx)
+                continue
             tool_calls.append(
                 ToolCall(
                     id=entry["id"],
@@ -425,6 +449,9 @@ class OpenAIClient(LLMClientBase):
                     ),
                 )
             )
+
+        if truncated_tool:
+            finish_reason = "length"
 
         yield StreamEvent(
             type="finish",
