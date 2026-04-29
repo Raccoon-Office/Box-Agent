@@ -33,6 +33,7 @@ class AnthropicClient(LLMClientBase):
         api_base: str = "https://api.anthropic.com",
         model: str = "claude-sonnet-4-20250514",
         retry_config: RetryConfig | None = None,
+        max_output_tokens: int = 64000,
     ):
         """Initialize Anthropic client.
 
@@ -41,8 +42,10 @@ class AnthropicClient(LLMClientBase):
             api_base: Base URL for the API
             model: Model name to use
             retry_config: Optional retry configuration
+            max_output_tokens: Per-request ``max_tokens`` value sent to the API.
         """
         super().__init__(api_key, api_base, model, retry_config)
+        self.max_output_tokens = max_output_tokens
 
         # Initialize Anthropic async client
         self.client = anthropic.AsyncAnthropic(
@@ -76,7 +79,7 @@ class AnthropicClient(LLMClientBase):
         """
         params: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": 16384,
+            "max_tokens": self.max_output_tokens,
             "messages": api_messages,
         }
 
@@ -326,7 +329,7 @@ class AnthropicClient(LLMClientBase):
 
         params: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": 16384,
+            "max_tokens": self.max_output_tokens,
             "messages": request_params["api_messages"],
         }
         if request_params["system_message"]:

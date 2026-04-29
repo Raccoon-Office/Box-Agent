@@ -27,7 +27,19 @@ class LLMConfig(BaseModel):
     api_base: str = "https://api.anthropic.com"
     model: str = "claude-sonnet-4-20250514"
     provider: str = "anthropic"  # "anthropic" or "openai"
+    context_window: int = 190000
+    max_output_tokens: int = 64000
     retry: RetryConfig = Field(default_factory=RetryConfig)
+
+    @property
+    def context_token_limit(self) -> int:
+        """Token threshold that triggers context summarization.
+
+        Derived as 90% of the input budget — i.e. 90% of
+        ``context_window - max_output_tokens``. The 10% headroom absorbs
+        token-estimate drift and the summarization request itself.
+        """
+        return int((self.context_window - self.max_output_tokens) * 0.9)
 
 
 class AgentConfig(BaseModel):
@@ -197,6 +209,8 @@ class Config(BaseModel):
             api_base=data.get("api_base", "https://api.anthropic.com"),
             model=data.get("model", "claude-sonnet-4-20250514"),
             provider=data.get("provider", "anthropic"),
+            context_window=data.get("context_window", 190000),
+            max_output_tokens=data.get("max_output_tokens", 64000),
             retry=retry_config,
         )
 

@@ -31,6 +31,7 @@ class LLMClient:
         api_base: str = "https://api.anthropic.com",
         model: str = "claude-sonnet-4-20250514",
         retry_config: RetryConfig | None = None,
+        max_output_tokens: int = 64000,
     ):
         """Initialize LLM client with specified provider.
 
@@ -40,11 +41,14 @@ class LLMClient:
             api_base: Base URL for the API
             model: Model name to use
             retry_config: Optional retry configuration
+            max_output_tokens: Per-request output token cap forwarded to the
+                underlying provider as ``max_tokens``.
         """
         self.provider = provider
         self.api_key = api_key
         self.model = model
         self.retry_config = retry_config or RetryConfig()
+        self.max_output_tokens = max_output_tokens
 
         # Normalize api_base (remove trailing slash)
         api_base = api_base.rstrip("/")
@@ -58,6 +62,7 @@ class LLMClient:
                 api_base=api_base,
                 model=model,
                 retry_config=retry_config,
+                max_output_tokens=max_output_tokens,
             )
         elif provider == LLMProvider.OPENAI:
             self._client = OpenAIClient(
@@ -65,6 +70,7 @@ class LLMClient:
                 api_base=api_base,
                 model=model,
                 retry_config=retry_config,
+                max_output_tokens=max_output_tokens,
             )
         else:
             raise ValueError(f"Unsupported provider: {provider}")

@@ -286,7 +286,7 @@ class BoxACPAgent:
             llm=self._llm,
             permission_engine=perm_engine,
         )
-        agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace), thinking_enabled=deep_think)
+        agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace), token_limit=self._config.llm.context_token_limit, thinking_enabled=deep_think)
 
         # Conditionally add PPT tools based on session_mode
         if session_mode in ("ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"):
@@ -963,7 +963,7 @@ async def run_acp_server(config: Config | None = None) -> None:
     try:
         rcfg = config.llm.retry
         provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
-        llm = LLMClient(api_key=config.llm.api_key, provider=provider, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
+        llm = LLMClient(api_key=config.llm.api_key, provider=provider, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base), max_output_tokens=config.llm.max_output_tokens)
 
         # Create memory manager if enabled
         memory_mgr = None

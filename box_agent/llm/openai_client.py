@@ -16,11 +16,12 @@ logger = logging.getLogger(__name__)
 # Hard-coded budget for extended thinking on Qwen-style endpoints.
 _THINKING_BUDGET = 8000
 
-# Default completion-token budget. Many OpenAI-protocol relay/proxy gateways
-# default to 4096, which silently truncates long tool-call argument streams
-# (we observed `finish_reason="length"` cutting JSON mid-string and triggering
-# empty-arguments retry loops). Pin to the same ceiling AnthropicClient uses.
-_DEFAULT_MAX_TOKENS = 16384
+# Fallback completion-token budget when no explicit value is supplied.
+# Many OpenAI-protocol relay/proxy gateways default to 4096, which silently
+# truncates long tool-call argument streams (we observed `finish_reason="length"`
+# cutting JSON mid-string and triggering empty-arguments retry loops). Pin a
+# generous default; users can override via ``LLMConfig.max_output_tokens``.
+_DEFAULT_MAX_TOKENS = 64000
 
 
 class OpenAIClient(LLMClientBase):
@@ -38,6 +39,7 @@ class OpenAIClient(LLMClientBase):
         api_base: str = "https://api.openai.com/v1",
         model: str = "gpt-4o",
         retry_config: RetryConfig | None = None,
+        max_output_tokens: int = _DEFAULT_MAX_TOKENS,
     ):
         """Initialize OpenAI client.
 
@@ -46,8 +48,10 @@ class OpenAIClient(LLMClientBase):
             api_base: Base URL for the API
             model: Model name to use
             retry_config: Optional retry configuration
+            max_output_tokens: Per-request ``max_tokens`` value sent to the API.
         """
         super().__init__(api_key, api_base, model, retry_config)
+        self.max_output_tokens = max_output_tokens
 
         # Initialize OpenAI client
         self.client = AsyncOpenAI(
@@ -80,7 +84,7 @@ class OpenAIClient(LLMClientBase):
         params: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
-            "max_tokens": _DEFAULT_MAX_TOKENS,
+            "max_tokens": self.max_output_tokens,
         }
 
         if thinking_enabled:
@@ -341,7 +345,7 @@ class OpenAIClient(LLMClientBase):
         params: dict[str, Any] = {
             "model": self.model,
             "messages": request_params["api_messages"],
-            "max_tokens": _DEFAULT_MAX_TOKENS,
+            "max_tokens": self.max_output_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
         }

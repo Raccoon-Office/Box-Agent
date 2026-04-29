@@ -22,6 +22,13 @@ api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
 provider: "anthropic"
 
+# Model token budget. `context_window` is the total context the model accepts;
+# `max_output_tokens` is the per-request output cap (`max_tokens` on the wire).
+# Defaults target Claude Sonnet 4 (200k window, 64k output). The summarization
+# trigger is derived: 90% of (context_window - max_output_tokens).
+context_window: 190000
+max_output_tokens: 64000
+
 # ===== Retry Configuration =====
 retry:
   enabled: true           # Enable retry mechanism

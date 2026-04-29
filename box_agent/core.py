@@ -390,7 +390,7 @@ async def run_agent_loop(
     messages: list[Message],
     tools: dict[str, Tool],
     max_steps: int = 50,
-    token_limit: int = 80000,
+    token_limit: int = 113400,
     is_cancelled: CancelChecker | None = None,
     logger: AgentLogger | None = None,
     workspace_dir: str | None = None,

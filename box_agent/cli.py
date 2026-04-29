@@ -533,6 +533,7 @@ async def cmd_doctor():
                 api_base=config.llm.api_base,
                 model=config.llm.model,
                 retry_config=no_retry,
+                max_output_tokens=config.llm.max_output_tokens,
             )
             from box_agent.schema import Message
 
@@ -795,6 +796,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         api_base=config.llm.api_base,
         model=config.llm.model,
         retry_config=retry_config if config.llm.retry.enabled else None,
+        max_output_tokens=config.llm.max_output_tokens,
     )
 
     # Set retry callback
@@ -814,6 +816,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
             api_base=config.llm.api_base,
             model=config.llm.model,
             retry_config=VerifyRetryConfig(enabled=False),
+            max_output_tokens=config.llm.max_output_tokens,
         )
         await _verify_client.generate(
             messages=[Msg(role="user", content="hi")],
@@ -847,6 +850,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                         api_base=config.llm.api_base,
                         model=config.llm.model,
                         retry_config=retry_config if config.llm.retry.enabled else None,
+                        max_output_tokens=config.llm.max_output_tokens,
                     )
                     if config.llm.retry.enabled:
                         llm_client.retry_callback = on_retry
@@ -857,6 +861,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                         api_base=config.llm.api_base,
                         model=config.llm.model,
                         retry_config=VerifyRetryConfig(enabled=False),
+                        max_output_tokens=config.llm.max_output_tokens,
                     )
                     await _verify_client2.generate(messages=[Msg(role="user", content="hi")])
                     print(f"{Colors.GREEN}OK{Colors.RESET}")
@@ -1004,6 +1009,7 @@ You have access to the `execute_code` tool which runs Python code in an isolated
         tools=tools,
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
+        token_limit=config.llm.context_token_limit,
         hooks=hooks,
     )
 

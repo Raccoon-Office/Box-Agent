@@ -79,7 +79,7 @@ class Agent:
         tools: list[Tool],
         max_steps: int = 50,
         workspace_dir: str = "./workspace",
-        token_limit: int = 80000,
+        token_limit: int = 113400,
         hooks: list | None = None,
         thinking_enabled: bool = False,
     ):
