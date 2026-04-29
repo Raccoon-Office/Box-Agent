@@ -82,6 +82,12 @@ from box_agent.events import (
     ToolCallStart as ToolCallStartEvent,
 )
 from box_agent.llm import LLMClient
+from box_agent.acp.action_hints import (
+    build_action_hints_prompt,
+    is_memory_scarce,
+    is_playwright_unavailable,
+)
+from box_agent.acp.env_context import EnvContext, build_env_context_prompt
 from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.schema import LLMProvider, Message
@@ -127,6 +133,7 @@ class SessionState:
     auto_classify_pending: bool = False  # True when caller didn't supply session_mode; classify on first prompt
     memory_block: str | None = None  # cached memory recall, re-applied when mode switches
     thinking_enabled: bool = False  # extended thinking toggle from _meta.deep_think
+    env_context: "EnvContext | None" = None  # cached env_context, re-applied when mode switches
 
 
 class BoxACPAgent:
@@ -209,10 +216,12 @@ class BoxACPAgent:
         # Pydantic aliases _meta to field_meta
         session_mode = None
         deep_think = False
+        env_context: EnvContext | None = None
         meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
             session_mode = meta.get("session_mode")
             deep_think = bool(meta.get("deep_think", False))
+            env_context = EnvContext.from_meta(meta.get("env_context"))
 
         log.info("session/new", session_id=session_id, message=f"Creating session, workspace={workspace}, session_mode={session_mode}, deep_think={deep_think}")
 
@@ -259,6 +268,7 @@ class BoxACPAgent:
             session_mode,
             workspace=workspace,
             policy=effective_policy,
+            env_context=env_context,
         )
 
         # Inject memory context
@@ -319,6 +329,7 @@ class BoxACPAgent:
             auto_classify_pending=(session_mode is None),
             memory_block=memory_block,
             thinking_enabled=deep_think,
+            env_context=env_context,
         )
 
         tool_names = [t.name for t in tools]
@@ -379,11 +390,30 @@ class BoxACPAgent:
             + "\n- Do not claim you can only access the workspace unless a tool call actually returns a permission denial."
         )
 
+    def _build_action_hints_prompt(self) -> str:
+        """Detect onboarding / browser-tools scenarios and build the hint contract."""
+        memory_scarce = is_memory_scarce(self._memory.read_core() if self._memory else None)
+
+        try:
+            mcp_path = Config.find_config_file(self._config.tools.mcp_config_path)
+        except Exception:
+            mcp_path = None
+        playwright_unavailable = is_playwright_unavailable(
+            mcp_path,
+            mcp_globally_enabled=self._config.tools.enable_mcp,
+        )
+
+        return build_action_hints_prompt(
+            memory_scarce=memory_scarce,
+            playwright_unavailable=playwright_unavailable,
+        )
+
     def _build_session_prompt(
         self,
         session_mode: str | None,
         workspace: Path | None = None,
         policy: CapabilityPolicy | None = None,
+        env_context: EnvContext | None = None,
     ) -> str:
         """Build system prompt with conditional mode-specific injection."""
         _MODE_PROMPT_MAP = {
@@ -396,6 +426,14 @@ class BoxACPAgent:
         base_prompt = self._system_prompt
         if workspace is not None:
             base_prompt = f"{base_prompt.rstrip()}\n\n{self._filesystem_access_prompt(workspace, policy)}"
+
+        env_prompt = build_env_context_prompt(env_context)
+        if env_prompt:
+            base_prompt = f"{base_prompt.rstrip()}\n\n{env_prompt}"
+
+        hints_prompt = self._build_action_hints_prompt()
+        if hints_prompt:
+            base_prompt = f"{base_prompt.rstrip()}\n\n{hints_prompt}"
 
         attr = _MODE_PROMPT_MAP.get(session_mode or "")
         if not attr:
@@ -437,6 +475,7 @@ class BoxACPAgent:
             mode,
             workspace=state.agent.workspace_dir,
             policy=state.permission_engine.policy if state.permission_engine else None,
+            env_context=state.env_context,
         )
         if state.memory_block:
             new_prompt = f"{new_prompt.rstrip()}\n\n{state.memory_block}"
