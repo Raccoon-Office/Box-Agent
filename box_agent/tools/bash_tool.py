@@ -13,6 +13,7 @@ import re
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, model_validator
@@ -35,6 +36,14 @@ log = logging.getLogger(__name__)
 
 # Shells whose syntax is POSIX-compatible (supports &&, ||, for/do/done, etc.)
 _POSIX_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "ash"})
+
+
+def _is_temp_shell_redirect_path(command: str, path: str) -> bool:
+    """Allow bash-only scratch files written via redirect under temp roots."""
+    if not Path(path).name.startswith("box_agent_"):
+        return False
+    escaped = re.escape(path)
+    return re.search(rf"(^|[\s\d])>{{1,2}}\s*['\"]?{escaped}(?:['\"]|\s|$)", command) is not None
 
 
 def _resolve_login_shell() -> str:
@@ -592,6 +601,8 @@ Examples:
                     )
 
                     for p in abs_paths:
+                        if _is_temp_shell_redirect_path(command, p):
+                            continue
                         # Use write capability for write-looking commands, read otherwise
                         cap = FILESYSTEM_WRITE if _write_ops else FILESYSTEM_READ
                         decision = self._perm.check(

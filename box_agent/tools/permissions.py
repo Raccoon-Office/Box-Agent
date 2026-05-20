@@ -174,22 +174,6 @@ class PermissionEngine:
         except (OSError, RuntimeError):
             self._box_agent_dir = None
 
-        # Shells and many libraries naturally use OS temp roots for transient
-        # command output. Allow those roots so harmless patterns like
-        # `cmd >/tmp/check.txt && tail /tmp/check.txt` do not require a broad
-        # filesystem grant. This does not allow reads from other system paths
-        # referenced in the same command; each extracted path is checked.
-        temp_candidates = ["/tmp", "/var/tmp"]
-        resolved_temp_dirs: list[Path] = []
-        for d in temp_candidates:
-            try:
-                resolved = Path(d).expanduser().resolve()
-            except (OSError, RuntimeError):
-                continue
-            if resolved not in resolved_temp_dirs:
-                resolved_temp_dirs.append(resolved)
-        self._temp_dirs: tuple[Path, ...] = tuple(resolved_temp_dirs)
-
         app_candidates = [
             "/Applications",
             "/System/Applications",
@@ -226,12 +210,14 @@ class PermissionEngine:
                 Path(resource["path"]),
                 self._policy.filesystem_scope,
                 "read",
+                tool_name,
             )
         elif capability == FILESYSTEM_WRITE:
             return self._check_filesystem(
                 Path(resource["path"]),
                 self._policy.filesystem_scope,
                 "write",
+                tool_name,
             )
         elif capability == MEMORY_OPENCLAW_IMPORT:
             return self._check_memory_openclaw()
@@ -242,7 +228,7 @@ class PermissionEngine:
     # ── filesystem ──
 
     def _check_filesystem(
-        self, path: Path, scope: str, operation: str
+        self, path: Path, scope: str, operation: str, tool_name: str | None = None
     ) -> PermissionDecision:
         resolved = self._resolve_for_check(path)
 
@@ -260,7 +246,7 @@ class PermissionEngine:
             if self._grant_store.has_grant("filesystem", "user_home"):
                 scope = "user_home"
 
-        if self._path_allowed_by_scope(resolved, scope, operation):
+        if self._path_allowed_by_scope(resolved, scope, operation, tool_name):
             return PermissionDecision(allowed=True)
 
         escalation = self._compute_escalation(resolved, scope)
@@ -349,7 +335,9 @@ class PermissionEngine:
             resolved_parent = resolved_parent / part
         return resolved_parent
 
-    def _path_allowed_by_scope(self, resolved: Path, scope: str, operation: str) -> bool:
+    def _path_allowed_by_scope(
+        self, resolved: Path, scope: str, operation: str, tool_name: str | None = None
+    ) -> bool:
         # workspace_dir is always allowed regardless of scope
         if self._is_inside(resolved, self._workspace_dir):
             return True
@@ -358,17 +346,22 @@ class PermissionEngine:
         if self._box_agent_dir is not None and self._is_inside(resolved, self._box_agent_dir):
             return True
 
-        # OS temp roots are allowed for transient tool output only. Commands
-        # that also touch protected paths are still denied when those other
-        # paths are checked.
-        for temp_dir in self._temp_dirs:
-            if self._is_inside(resolved, temp_dir):
-                return True
+        # Box-Agent scratch files are allowed under OS temp roots without
+        # granting broad access to arbitrary pytest/user temp directories.
+        if resolved.name.startswith("box_agent_"):
+            for temp_dir in (Path("/tmp"), Path("/var/tmp")):
+                try:
+                    if self._is_inside(resolved, temp_dir.resolve()):
+                        return True
+                except (OSError, RuntimeError):
+                    continue
 
         # Read-only access to common application / executable install roots is
         # allowed so tools can probe or run dependencies such as LibreOffice
-        # without requiring broad user-home access. Writes remain blocked.
-        if operation == "read":
+        # without requiring broad user-home access. Bash command paths stay
+        # gated so absolute binaries like /bin/echo do not bypass negotiation.
+        # Writes remain blocked.
+        if operation == "read" and tool_name != "bash":
             for app_dir in self._app_read_dirs:
                 if self._is_inside(resolved, app_dir):
                     return True
