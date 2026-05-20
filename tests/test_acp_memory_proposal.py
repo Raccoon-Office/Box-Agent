@@ -57,7 +57,7 @@ async def test_memory_proposal_list_returns_eligible_candidates(tmp_path: Path):
         _entry("- already rejected", hits=8, core_status="rejected"),
     ])
 
-    result = await agent.extMethod("memory_proposal_list", {"sessionId": ""})
+    result = await agent.ext_method("memory_proposal_list", {"sessionId": ""})
     contents = {c["content"] for c in result["candidates"]}
 
     assert contents == {"- promote me"}
@@ -78,10 +78,10 @@ async def test_memory_proposal_list_respects_cooldown(tmp_path: Path):
         _entry("- never proposed", hits=10),
     ])
 
-    default = await agent.extMethod("memory_proposal_list", {"sessionId": ""})
+    default = await agent.ext_method("memory_proposal_list", {"sessionId": ""})
     assert {c["content"] for c in default["candidates"]} == {"- never proposed"}
 
-    bypass = await agent.extMethod(
+    bypass = await agent.ext_method(
         "memory_proposal_list", {"sessionId": "", "includeCooldown": True}
     )
     assert {c["content"] for c in bypass["candidates"]} == {"- in cooldown", "- never proposed"}
@@ -90,14 +90,14 @@ async def test_memory_proposal_list_respects_cooldown(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_memory_proposal_list_empty_returns_empty_array(tmp_path: Path):
     agent, _ = _make_agent(tmp_path)
-    result = await agent.extMethod("memory_proposal_list", {"sessionId": ""})
+    result = await agent.ext_method("memory_proposal_list", {"sessionId": ""})
     assert result == {"candidates": []}
 
 
 @pytest.mark.asyncio
 async def test_memory_proposal_list_unknown_session(tmp_path: Path):
     agent, _ = _make_agent(tmp_path)
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_list", {"sessionId": "no-such-session"}
     )
     assert result == {"error": "session_not_found"}
@@ -114,7 +114,7 @@ async def test_memory_proposal_apply_pins_and_returns_core(tmp_path: Path):
     skip = _entry("- skip me", hits=10)
     write_context_file(mgr.context_file, [pin, reject, skip])
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",
@@ -141,7 +141,7 @@ async def test_memory_proposal_apply_ignores_invalid_decisions(tmp_path: Path):
     keep = _entry("- keep me", hits=10)
     write_context_file(mgr.context_file, [keep])
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",
@@ -160,7 +160,7 @@ async def test_memory_proposal_apply_ignores_invalid_decisions(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_memory_proposal_apply_rejects_malformed_payload(tmp_path: Path):
     agent, _ = _make_agent(tmp_path)
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply", {"sessionId": "", "decisions": "not-a-dict"}
     )
     assert result == {"error": "invalid_decisions"}
