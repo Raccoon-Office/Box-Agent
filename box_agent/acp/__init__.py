@@ -719,6 +719,13 @@ class BoxACPAgent:
             return self._memory_proposal_apply(params)
         return {"error": f"unknown_method: {method}"}
 
+    # Backward-compat alias: agent-client-protocol < 0.6.x dispatched extension
+    # methods via camelCase getattr(agent, "extMethod"). Newer (>= 0.6.x) uses
+    # snake_case getattr(agent, "ext_method"). Keep both pointing at the same
+    # handler so the agent works across framework versions without forcing
+    # every consumer to `uv sync` to the latest.
+    extMethod = ext_method
+
     def _memory_proposal_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return CONTEXT.md entries eligible for promotion to core.
 
@@ -1260,9 +1267,23 @@ class _MemoryProposalNegotiator:
             message="Sending memory promotion proposals to host",
         )
 
+        # Resolve outbound extension dispatcher across framework versions.
+        # >= 0.6.x exposes ext_method; older releases exposed extMethod.
+        send_ext = getattr(self._conn, "ext_method", None) or getattr(
+            self._conn, "extMethod", None
+        )
+        if send_ext is None:
+            log.warn(
+                "memory/proposal_error",
+                count=len(candidates),
+                message="conn exposes neither ext_method nor extMethod; "
+                "host does not support session/memory_proposal",
+            )
+            return
+
         try:
             response = await asyncio.wait_for(
-                self._conn.ext_method("session/memory_proposal", payload),
+                send_ext("session/memory_proposal", payload),
                 timeout=120.0,
             )
         except asyncio.TimeoutError:
