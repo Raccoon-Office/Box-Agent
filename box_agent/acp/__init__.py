@@ -692,7 +692,7 @@ class BoxACPAgent:
             state.cancelled = True
             log.info("session/cancel", session_id=params.sessionId, message="Cancel requested")
 
-    async def extMethod(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
         if method == "inject":
             session_id = params.get("sessionId", "")
@@ -1262,7 +1262,7 @@ class _MemoryProposalNegotiator:
 
         try:
             response = await asyncio.wait_for(
-                self._conn.extMethod("session/memory_proposal", payload),
+                self._conn.ext_method("session/memory_proposal", payload),
                 timeout=120.0,
             )
         except asyncio.TimeoutError:
@@ -1276,7 +1276,7 @@ class _MemoryProposalNegotiator:
             log.warn(
                 "memory/proposal_error",
                 count=len(candidates),
-                message=f"extMethod failed (host may not support session/memory_proposal): {exc}",
+                message=f"ext_method failed (host may not support session/memory_proposal): {exc}",
             )
             return
 
