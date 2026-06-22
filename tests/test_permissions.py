@@ -755,7 +755,12 @@ class TestBashPermissionPhase1:
 
     def _make_engine(self, workspace: Path) -> PermissionEngine:
         policy = CapabilityPolicy()  # session_workspace scope
-        return PermissionEngine(policy, workspace)
+        eng = PermissionEngine(policy, workspace)
+        # /usr/bin is in _app_read_dirs; on Linux /bin → /usr/bin symlink makes
+        # absolute binary paths (e.g. /bin/echo) pass the read check. Clear it
+        # so the "outside binary denied" assertion fires correctly.
+        eng._app_read_dirs = ()
+        return eng
 
     async def test_absolute_path_outside_workspace_denied(self, workspace: Path):
         """Command with absolute path outside workspace is denied."""
@@ -927,6 +932,9 @@ class TestAllowedDirectories:
         eng = PermissionEngine(policy, workspace)
         if home is not None:
             eng._home_dir = home.resolve()
+        # pytest's tmp_path is under /tmp which is in _temp_dirs → auto-allowed.
+        # Clear it so deny assertions work correctly in scope-enforcement tests.
+        eng._temp_dirs = ()
         return eng
 
     # ── 1. session_workspace + allowed_directories ──
@@ -1074,6 +1082,7 @@ class TestDirectoryGrants:
         )
         eng = PermissionEngine(policy, ws, grant_store=store)
         eng._home_dir = tmp_path.resolve()  # so escalation is offered
+        eng._temp_dirs = ()  # tmp_path is under /tmp → clear to preserve deny assertions
 
         # Without grant — denied with escalation.
         assert eng.check(FILESYSTEM_READ, {"path": str(f)}).allowed is False
@@ -1187,5 +1196,6 @@ class TestBoxAgentDirAlwaysAllowed:
         eng = self._engine_with_box_dir(workspace, box_dir)
         # Move home outside tmp_path so the sibling doesn't get user_home grant
         eng._home_dir = (tmp_path / "fake-home").resolve()
+        eng._temp_dirs = ()  # tmp_path is under /tmp → clear to preserve deny assertions
         decision = eng.check(FILESYSTEM_READ, {"path": str(sibling)})
         assert decision.allowed is False

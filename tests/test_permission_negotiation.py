@@ -165,6 +165,9 @@ def engine(workspace: Path, grant_store: GrantStore, tmp_path: Path) -> Permissi
     # Override home dir so that outside_file (in tmp_path) is considered "under home"
     # This allows _compute_escalation() to suggest user_home escalation
     eng._home_dir = tmp_path.resolve()
+    # pytest's tmp_path sits under /tmp which is in _temp_dirs → auto-allowed.
+    # Clear it so deny assertions work correctly.
+    eng._temp_dirs = ()
     return eng
 
 
@@ -433,6 +436,7 @@ class TestLegacyPermissionEvent:
         )
         engine = PermissionEngine(policy, workspace, grant_store=store)
         engine._home_dir = tmp_path.resolve()
+        engine._temp_dirs = ()
         tool = PermDeniedTool(engine, outside_file)
 
         llm = _llm_with_tool_call("read_outside", {"path": outside_file})
