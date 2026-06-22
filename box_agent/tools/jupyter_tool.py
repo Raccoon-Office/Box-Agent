@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
 
 # True when running inside a PyInstaller frozen binary
@@ -140,6 +141,16 @@ class SandboxEnvironment:
             return
 
         if self._bundled_override:
+            # win32: skip the per-package import probes entirely. Spawning many
+            # short-lived "python.exe -c import X" processes deadlocks on
+            # Windows under injected security DLLs (e.g. flhhlp.dll) — a single
+            # hung probe blocks ensure_ready forever and execute_code never
+            # returns. The host runtime (provisioned/bundled) already carries
+            # the required packages, and the kernel itself is one long-lived
+            # subprocess that starts fine. macOS keeps the full verify path.
+            if sys.platform == "win32":
+                self._ready = True
+                return
             # Host python already exists — skip venv/_install_defaults, but
             # verify required packages and fall back to RUNTIME_PACKAGES_DIR for
             # any that the interpreter is missing.
@@ -619,6 +630,7 @@ class JupyterKernelSession:
         km._kernel_spec = kernel_spec  # Override the kernel spec
         km.start_kernel()
         self._km = km
+        assign_pid_to_job(getattr(km, "kernel_pid", 0) or 0)
         self._kc = km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
