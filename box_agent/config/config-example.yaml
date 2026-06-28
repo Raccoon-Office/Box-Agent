@@ -70,6 +70,13 @@ system_prompt_path: "system_prompt.md" # System prompt file (same config directo
 analysis_prompt_path: "analysis_prompt.md" # Extra prompt for data_analysis sessions
 code_prompt_path: "code_prompt.md" # Extra prompt for code_agent sessions
 
+# Suspected-truncation continuation: if a reply ends mid-sentence while the
+# provider reports a normal finish (or omits it), inject a one-shot
+# continuation so the answer finishes within the same message. Detection is
+# conservative (only fires on a clearly unfinished ending). Default on.
+retry_on_suspected_truncation: true # Auto-continue a reply cut off mid-sentence
+max_truncation_continuations: 1 # Max continuations per turn (loop guard)
+
 # ===== Memory Configuration =====
 enable_memory: true # Enable cross-session memory system
 memory_dir: "~/.box-agent/memory" # Memory storage directory

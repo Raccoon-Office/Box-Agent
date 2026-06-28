@@ -66,10 +66,13 @@ from .loop_guards import (
     completion_gate_gaps,
     completion_gate_text,
     format_injected_message,
+    looks_like_truncated_output,
     near_limit_wrapup_text,
     no_progress_wrapup_text,
+    reply_is_substantial,
     tool_call_budget_message,
     tool_call_budget_wrapup_text,
+    truncation_continuation_text,
 )
 
 # Re-exported for backward compatibility: ``CompletionGate`` now lives in
@@ -358,10 +361,16 @@ def text_is_short_non_task_reply(text: str) -> bool:
     return compact in _SHORT_NON_TASK_REPLIES
 
 
-def _should_emit_plan_start(messages: list[Message], tools: dict[str, Tool]) -> bool:
+def _should_emit_plan_start(
+    messages: list[Message],
+    tools: dict[str, Tool],
+    *,
+    plan_start_text: str | None = None,
+) -> bool:
     if "plan_write" not in tools:
         return False
-    return text_requests_plan_start(_latest_user_text(messages))
+    candidate = _latest_user_text(messages) if plan_start_text is None else plan_start_text
+    return text_requests_plan_start(candidate)
 
 
 def _plan_approval_is_approved(plan_approval: dict[str, Any] | None) -> bool:
@@ -1006,6 +1015,64 @@ def _detect_new_files(
         artifacts.append(_make_artifact(tool_call_id, fpath, ws))
 
     return artifacts
+
+
+def _detect_regex_artifacts(
+    tool_call_id: str,
+    tool_name: str,
+    content: str,
+    raw_output: Any,
+    workspace_dir: str,
+    artifact_root_dir: str | Path | None,
+) -> tuple[list[ArtifactEvent], set[str]]:
+    """Layer-1 (regex) artifacts for one tool result.
+
+    Returns the regex-detected artifacts plus the set of absolute paths that
+    should be excluded from the later diff layer (those already surfaced here,
+    or carried on a ``type:"artifact"`` ``raw_output``).
+    """
+    regex_artifacts = _detect_artifacts(
+        tool_call_id,
+        tool_name,
+        content,
+        workspace_dir,
+        artifact_root_dir,
+    )
+    already = {a.abs_path for a in regex_artifacts}
+    if isinstance(raw_output, dict) and raw_output.get("type") == "artifact":
+        for key in ("abs_path", "absolute_path"):
+            raw_path = raw_output.get(key)
+            if isinstance(raw_path, str) and raw_path.strip():
+                already.add(str(Path(raw_path).expanduser().resolve()))
+    return regex_artifacts, already
+
+
+def _detect_tool_artifacts(
+    tool_call_id: str,
+    tool_name: str,
+    content: str,
+    raw_output: Any,
+    pre_files: set[Path],
+    post_files: set[Path],
+    workspace_dir: str,
+    artifact_root_dir: str | Path | None,
+) -> list[ArtifactEvent]:
+    """Two-layer artifact detection for a single tool result (sequential path).
+
+    Layer 1 (regex): scan ``content`` for ``[filename.ext]`` references that
+    resolve under the artifact root. Layer 2 (diff): catch files created by the
+    tool that weren't referenced in the output text, using a per-tool pre/post
+    workspace snapshot. The parallel branch can't take per-tool snapshots under
+    concurrency, so it composes :func:`_detect_regex_artifacts` per result with
+    a single diff pass instead (see the parallel block in ``run_agent_loop``).
+    """
+    regex_artifacts, already = _detect_regex_artifacts(
+        tool_call_id, tool_name, content, raw_output, workspace_dir, artifact_root_dir
+    )
+    diff_artifacts = _detect_new_files(
+        tool_call_id, pre_files, post_files, already, workspace_dir
+    )
+    return [*regex_artifacts, *diff_artifacts]
 
 
 # ── Token estimation helpers ────────────────────────────────────
@@ -1655,10 +1722,13 @@ async def run_agent_loop(
     force_plan_start: bool = False,
     require_plan_approval: bool = False,
     plan_approval: dict[str, Any] | None = None,
+    plan_start_text: str | None = None,
     pause_after_plan_write: bool = False,
     no_progress_limit: int | None = None,
     max_parallel_tools: int = 8,
     completion_gate: CompletionGate | None = None,
+    truncation_continuation_enabled: bool = True,
+    max_truncation_continuations: int = 1,
     artifact_detection_enabled: bool = True,
     artifact_root_dir: str | Path | None = None,
 ) -> AsyncIterator[AgentEvent]:
@@ -1703,12 +1773,20 @@ async def run_agent_loop(
             carries an approved decision.
         plan_approval: Host-supplied decision metadata for a previously
             published plan.
+        plan_start_text: Optional host-sanitized latest user request for
+            plan-start detection. When omitted, the latest user message is used.
         pause_after_plan_write: If True, an organic ``plan_write`` call also
             becomes an approval boundary: the plan is published with pending
             approval and the turn ends before sibling or later tools execute.
         artifact_detection_enabled: If False, skip output-directory artifact
             snapshotting and detection for sessions that edit an existing
             project tree directly.
+        truncation_continuation_enabled: If True (default), re-prompt the
+            model once when a reply ends mid-sentence while the provider
+            reported a normal finish, so the answer completes in the same
+            message. See ``loop_guards.looks_like_truncated_output``.
+        max_truncation_continuations: Per-turn cap on truncation
+            continuations (loop guard against repeated false positives).
         artifact_root_dir: Optional explicit artifact directory supplied by a
             host session. Defaults to ``{workspace_dir}/output``.
     """
@@ -1846,6 +1924,12 @@ async def run_agent_loop(
     succeeded_tools: set[str] = set()
     gate_continuations = 0
 
+    # Suspected-truncation continuation (opt-in via
+    # ``truncation_continuation_enabled``). Bounds how many times the loop
+    # may re-prompt the model to finish a reply that ended mid-sentence
+    # while the provider reported a normal finish.
+    truncation_continuations = 0
+
     # Per-turn guard for tools that can be repeatedly requested by the model
     # after it already has enough evidence. Once a budget is reached, later
     # calls are answered with synthetic tool errors so the protocol remains
@@ -1934,7 +2018,8 @@ async def run_agent_loop(
             )
 
         if not plan_start_emitted and (
-            force_plan_for_turn or _should_emit_plan_start(messages, tools)
+            force_plan_for_turn
+            or _should_emit_plan_start(messages, tools, plan_start_text=plan_start_text)
         ):
             plan_start_emitted = True
             approval = (
@@ -2158,6 +2243,33 @@ async def run_agent_loop(
                 provider_request_id=provider_request_id,
             )
 
+        # ── Suspected-truncation diagnostic (always on) ─────
+        # A normal finish ("stop"/"end_turn"/None) with no tool calls but a
+        # body that ends mid-thought means the provider likely clipped the
+        # turn without admitting it (vs the honest "length" path below).
+        # Logged unconditionally — independent of the continuation feature —
+        # so the frequency is visible in box-agent-stderr.log for triage.
+        if (
+            not response.tool_calls
+            and response.finish_reason in (None, "stop", "end_turn")
+            and response.content
+            and reply_is_substantial(
+                len(response.content),
+                response.usage.completion_tokens if response.usage else None,
+            )
+            and looks_like_truncated_output(response.content)
+        ):
+            _tail = response.content.rstrip()[-40:]
+            _log.warning(
+                "suspected_truncation: finish_reason=%r completion_tokens=%s "
+                "content_len=%d request_id=%s tail=%r",
+                response.finish_reason,
+                response.usage.completion_tokens if response.usage else None,
+                len(response.content),
+                provider_request_id,
+                _tail,
+            )
+
         # ── Append assistant message ────────────────────────
         assistant_msg = Message(
             role="assistant",
@@ -2283,6 +2395,36 @@ async def run_agent_loop(
                         await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                     yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                     continue
+
+            # ── Suspected-truncation continuation (opt-in) ──
+            # The provider reported a normal finish with no tool calls, but
+            # the body ends mid-thought. Re-prompt once (bounded) to finish
+            # the reply in the *same* message: the truncated assistant text
+            # is already appended above, and we do NOT emit a DoneEvent, so
+            # the continuation streams into the same prompt turn. Skipped for
+            # short replies (legitimately end without punctuation).
+            if (
+                truncation_continuation_enabled
+                and truncation_continuations < max_truncation_continuations
+                and response.finish_reason in (None, "stop", "end_turn")
+                and response.content.strip()
+                and reply_is_substantial(
+                    len(response.content),
+                    response.usage.completion_tokens if response.usage else None,
+                )
+                and looks_like_truncated_output(response.content)
+            ):
+                truncation_continuations += 1
+                tail = response.content.rstrip()[-40:]
+                cont_text = truncation_continuation_text(tail)
+                messages.append(Message(role="user", content=cont_text))
+                yield InjectedMessageEvent(content=cont_text, injection_id=None, user_visible=False)
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                continue
 
             if (
                 visible_tool_call_total > FINAL_SUMMARY_TOOL_CALL_THRESHOLD
@@ -2685,25 +2827,17 @@ async def run_agent_loop(
 
             # Detect and yield structured artifacts (images, files) from tool output
             if artifact_detection_enabled and result.success and workspace_dir:
-                # Regex-based: detect [filename.ext] references in output
-                regex_artifacts = _detect_artifacts(
+                post_files = _snapshot_workspace(workspace_dir, artifact_root_dir)
+                for artifact in _detect_tool_artifacts(
                     tc_id,
                     fn_name,
                     tc_content,
+                    result.raw_output,
+                    pre_files,
+                    post_files,
                     workspace_dir,
                     artifact_root_dir,
-                )
-                for artifact in regex_artifacts:
-                    yield artifact
-                # Diff-based: catch files not referenced in output text
-                post_files = _snapshot_workspace(workspace_dir, artifact_root_dir)
-                already = {a.abs_path for a in regex_artifacts}
-                if isinstance(result.raw_output, dict) and result.raw_output.get("type") == "artifact":
-                    for key in ("abs_path", "absolute_path"):
-                        raw_path = result.raw_output.get(key)
-                        if isinstance(raw_path, str) and raw_path.strip():
-                            already.add(str(Path(raw_path).expanduser().resolve()))
-                for artifact in _detect_new_files(tc_id, pre_files, post_files, already, workspace_dir):
+                ):
                     yield artifact
 
             # Cancellation check after each tool
@@ -2716,6 +2850,12 @@ async def run_agent_loop(
 
         # 2. Parallel execution for parallel_safe tools (e.g. sub_agent)
         if parallel_calls:
+            # Snapshot the workspace BEFORE any parallel tool runs. Per-tool
+            # snapshots are impossible under concurrency, so the diff layer uses
+            # one pre/post pair for the whole batch (see after the result loop).
+            par_pre_files: set[Path] = set()
+            if artifact_detection_enabled and workspace_dir:
+                par_pre_files = _snapshot_workspace(workspace_dir, artifact_root_dir)
             # Emit all ToolCallStart events and apply hook interceptors
             par_args_map: dict[str, dict[str, Any]] = {}  # tc.id → (possibly modified) args
             par_budget_errors: dict[str, str] = {}
@@ -2859,6 +2999,11 @@ async def run_agent_loop(
             for tool in emitting_tools:
                 tool._event_queue = None
                 tool._parent_tool_call_id = ""
+
+            # Accumulates absolute paths surfaced by the per-result regex layer
+            # (and artifact raw_outputs), so the single post-batch diff pass
+            # below doesn't re-emit them.
+            par_already_emitted: set[str] = set()
 
             for tc, result in gathered:
                 tc_id = tc.id
@@ -3020,6 +3165,31 @@ async def run_agent_loop(
                         tool_call_id=tc_id,
                         **_permission_event_kwargs(result.permission_request),
                     )
+
+                # Artifact detection — layer 1 (regex) per result. The diff
+                # layer runs once after the loop (single batch snapshot).
+                if artifact_detection_enabled and result.success and tool_user_visible and workspace_dir:
+                    regex_artifacts, regex_already = _detect_regex_artifacts(
+                        tc_id, fn_name, par_content, result.raw_output,
+                        workspace_dir, artifact_root_dir,
+                    )
+                    for artifact in regex_artifacts:
+                        yield artifact
+                    par_already_emitted |= regex_already
+
+            # Artifact detection — layer 2 (diff), once for the whole batch.
+            # Concurrency rules out per-tool snapshots, so new files are
+            # attributed to the first parallel call's id.
+            if artifact_detection_enabled and workspace_dir and parallel_calls:
+                par_post_files = _snapshot_workspace(workspace_dir, artifact_root_dir)
+                for artifact in _detect_new_files(
+                    parallel_calls[0].id,
+                    par_pre_files,
+                    par_post_files,
+                    par_already_emitted,
+                    workspace_dir,
+                ):
+                    yield artifact
 
             # Cancellation check after all parallel results emitted — every
             # tool message is now appended, so the message list is in a

@@ -23,6 +23,13 @@ from .base import Tool, ToolResult
 # True when running inside a PyInstaller frozen binary
 IS_FROZEN = getattr(sys, "frozen", False)
 
+# Error sentinel returned by a kernel session's execute() when the IOPub idle
+# message never arrives within the per-call timeout (the kernel is still busy
+# running the code). The outer JupyterSandboxTool.execute treats this as a hard
+# timeout: it discards the (now busy, un-reusable) session so a fresh kernel is
+# built next time, instead of silently returning success with partial/no output.
+KERNEL_EXEC_TIMEOUT = "KERNEL_EXEC_TIMEOUT"
+
 # Default packages installed in the sandbox venv on first startup
 SANDBOX_DEFAULT_PACKAGES = [
     "pandas",
@@ -791,7 +798,14 @@ except ImportError:
                             images.append("[PNG Image]")
 
                 except Exception:
+                    # No IOPub message within `timeout` and we never saw the
+                    # idle status: the kernel is still busy running the code.
+                    # Signal a hard timeout so the caller discards this session
+                    # (a busy kernel reused next call corrupts output).
                     break
+
+            if not idle_received:
+                return "", [], KERNEL_EXEC_TIMEOUT
 
             # Only report errors from explicit error messages (not stderr)
             # stderr often contains warnings, pip notices, etc.
@@ -997,7 +1011,13 @@ except ImportError:
                             images.append("[PNG Image]")
 
                 except Exception:
+                    # No IOPub message within `timeout` and we never saw the
+                    # idle status: the kernel is still busy. Signal a hard
+                    # timeout so the caller discards this session.
                     break
+
+            if not idle_received:
+                return "", [], KERNEL_EXEC_TIMEOUT
 
             if error_parts:
                 return "", [], "\n".join(error_parts)
@@ -1104,6 +1124,27 @@ class JupyterSandboxTool(Tool):
             status["venv_path"] = str(env.venv_dir)
             status["venv_exists"] = env.is_created
         return status
+
+    async def _discard_session(self, session_id: str) -> None:
+        """Tear down and forget a kernel session.
+
+        Used when an execution times out: the synchronous ``session.execute``
+        is still blocked inside a thread-pool worker (``run_in_executor`` cannot
+        be cancelled), leaving the kernel in a busy state. Reusing it on the
+        next call interleaves IOPub messages and corrupts output. Stopping the
+        kernel (``shutdown_kernel``) unblocks that worker, and removing the
+        session forces a fresh kernel to be built next time. Best-effort —
+        never raises.
+        """
+        session = self._sessions.pop(session_id, None)
+        if session is None:
+            return
+        try:
+            await session.stop()
+        except Exception:
+            # Cleanup is best-effort; the session is already removed from the
+            # map so it will be rebuilt regardless.
+            pass
 
     def _create_session(
         self, session_id: str, workspace: Path, env: SandboxEnvironment
@@ -1323,6 +1364,20 @@ Output formats:
                             timeout=_EXEC_TIMEOUT,
                         )
 
+            # Hard kernel timeout: the session's IOPub idle never arrived within
+            # the per-call timeout, so the kernel is still busy. Discard the
+            # session (it would corrupt the next call's output if reused) and
+            # surface a timeout, mirroring the outer wait_for timeout branch.
+            if error == KERNEL_EXEC_TIMEOUT:
+                await self._discard_session(session_id)
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=f"Code execution timed out ({timeout}s). The kernel was "
+                          "reset. If installing packages, run %pip install "
+                          "separately first, or raise the timeout.",
+                )
+
             if error:
                 return ToolResult(
                     success=False,
@@ -1355,6 +1410,11 @@ Output formats:
             return ToolResult(success=True, content=content)
 
         except (asyncio.TimeoutError, TimeoutError):
+            # The kernel is still blocked executing this code in a thread-pool
+            # worker we cannot cancel. Discard the session so it is NOT reused
+            # (a busy kernel would interleave IOPub output on the next call);
+            # stopping it also unblocks the orphaned worker thread.
+            await self._discard_session(session_id)
             return ToolResult(
                 success=False,
                 content="",

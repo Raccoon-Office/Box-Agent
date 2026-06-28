@@ -424,3 +424,104 @@ def test_no_sandbox_uses_login_shell():
 
     tool = BashTool()
     assert tool._use_login_shell is True
+
+
+@pytest.mark.asyncio
+async def test_foreground_timeout_kills_grandchild_process(tmp_path):
+    """B4 regression: a foreground timeout must tear down the whole process
+    tree (shell + grandchildren), not just the shell.
+
+    We spawn a shell that backgrounds a grandchild which appends to a sentinel
+    file every 0.2s. Before the fix, the timeout killed only the shell, leaving
+    the grandchild orphaned and still writing. After the fix the child is
+    spawned in its own session and killpg reaps the whole group, so the file
+    stops growing once the command times out.
+    """
+    import platform
+
+    if platform.system() == "Windows":
+        pytest.skip("Unix process-group semantics; Unix-only test")
+
+    sentinel = tmp_path / "ticks.txt"
+    # Grandchild loops independently of the parent shell.
+    command = (
+        f"( while true; do echo tick >> {sentinel}; sleep 0.2; done ) & "
+        "wait"
+    )
+
+    bash_tool = BashTool()
+    result = await bash_tool.execute(command=command, timeout=1)
+
+    assert not result.success
+    assert "timed out" in result.error.lower()
+
+    # Give any orphan a chance to keep writing, then confirm it stopped.
+    await asyncio.sleep(1.0)
+    count_after_kill = len(sentinel.read_text().splitlines()) if sentinel.exists() else 0
+    await asyncio.sleep(1.0)
+    count_later = len(sentinel.read_text().splitlines()) if sentinel.exists() else 0
+
+    # If the grandchild were orphaned it would have written ~5 more lines.
+    assert count_later == count_after_kill, (
+        f"grandchild kept writing after timeout kill: {count_after_kill} -> {count_later}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_foreground_timeout_kills_grandchild_when_shell_already_exited(tmp_path):
+    """B4 regression (shell-exited form): a foreground command backgrounds a
+    grandchild and the shell itself returns immediately, but ``communicate()``
+    still blocks because the grandchild inherits the stdout pipe. At timeout the
+    shell's returncode is already set; the cleanup must STILL kill the process
+    group (not bail out early), or the grandchild keeps running.
+    """
+    import platform
+
+    if platform.system() == "Windows":
+        pytest.skip("Unix process-group semantics; Unix-only test")
+
+    sentinel = tmp_path / "ticks.txt"
+    # NOTE: no `wait` — the shell exits right after backgrounding the loop.
+    command = (
+        f"( for i in $(seq 1 100); do echo tick >> {sentinel}; sleep 0.2; done ) &"
+    )
+
+    bash_tool = BashTool()
+    result = await bash_tool.execute(command=command, timeout=1)
+
+    assert not result.success
+    assert "timed out" in result.error.lower()
+
+    await asyncio.sleep(1.0)
+    count_after_kill = len(sentinel.read_text().splitlines()) if sentinel.exists() else 0
+    await asyncio.sleep(1.0)
+    count_later = len(sentinel.read_text().splitlines()) if sentinel.exists() else 0
+
+    assert count_later == count_after_kill, (
+        f"grandchild kept writing after shell-exited timeout: "
+        f"{count_after_kill} -> {count_later}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_foreground_timeout_reaps_process_no_zombie():
+    """B4 regression: after a timeout the process must be reaped (returncode set),
+    not left as a zombie."""
+    bash_tool = BashTool()
+    # Wrap _create_subprocess to capture the process object.
+    captured = {}
+    orig = bash_tool._create_subprocess
+
+    async def _capture(command, *, merge_stderr=False):
+        proc = await orig(command, merge_stderr=merge_stderr)
+        captured["proc"] = proc
+        return proc
+
+    bash_tool._create_subprocess = _capture
+    result = await bash_tool.execute(command="sleep 10", timeout=1)
+
+    assert not result.success
+    proc = captured.get("proc")
+    assert proc is not None
+    # Reaped: returncode is set (not None) after _kill_process_tree awaited wait().
+    assert proc.returncode is not None

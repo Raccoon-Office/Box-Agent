@@ -2029,6 +2029,8 @@ async def run_agent(
         memory_promotion_enabled=config.agent.memory_promotion_proposal_enabled,
         memory_promotion_hit_threshold=config.agent.memory_promotion_hit_threshold,
         memory_promotion_cooldown_days=config.agent.memory_promotion_cooldown_days,
+        truncation_continuation_enabled=config.agent.retry_on_suspected_truncation,
+        max_truncation_continuations=config.agent.max_truncation_continuations,
     )
 
     restored_goal = _restore_cli_goal(agent, workspace_dir)

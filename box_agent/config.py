@@ -131,6 +131,13 @@ class AgentConfig(BaseModel):
     goal_autopilot_max_turns: int = 3
     goal_autopilot_max_seconds: float = 14400.0
     goal_autopilot_no_progress_turns: int = 2
+    # Suspected-truncation continuation: some upstream models / relay gateways
+    # stop a streamed text turn mid-sentence yet report a normal finish_reason
+    # ("stop"/"end_turn") or omit it. When enabled, the loop detects this
+    # conservatively (loop_guards.looks_like_truncated_output) and injects a
+    # one-shot continuation so the reply finishes within the same message.
+    retry_on_suspected_truncation: bool = True
+    max_truncation_continuations: int = 1
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
     code_prompt_path: str = "code_prompt.md"
@@ -407,6 +414,8 @@ class Config(BaseModel):
             goal_autopilot_max_turns=data.get("goal_autopilot_max_turns", 3),
             goal_autopilot_max_seconds=data.get("goal_autopilot_max_seconds", 14400.0),
             goal_autopilot_no_progress_turns=data.get("goal_autopilot_no_progress_turns", 2),
+            retry_on_suspected_truncation=data.get("retry_on_suspected_truncation", True),
+            max_truncation_continuations=data.get("max_truncation_continuations", 1),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
             analysis_prompt_path=data.get("analysis_prompt_path", "analysis_prompt.md"),
             code_prompt_path=data.get("code_prompt_path", "code_prompt.md"),

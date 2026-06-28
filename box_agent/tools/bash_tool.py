@@ -11,6 +11,7 @@ import os
 import platform
 import re
 import shlex
+import signal
 import sys
 import time
 import uuid
@@ -573,13 +574,60 @@ class BashTool(Tool):
             if self._use_login_shell:
                 args.append("-l")
             args.extend(["-c", command])
+            # start_new_session=True puts the shell in its own session/process
+            # group so a timeout can kill the *whole* tree (shell + any children
+            # it spawned, e.g. ``python server.py``) via killpg, not just the
+            # shell — otherwise grandchildren are orphaned and keep running.
             return await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
                 env=self._subprocess_env,
+                start_new_session=True,
             )
+
+    @staticmethod
+    async def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
+        """Kill a foreground process group and reap the shell.
+
+        On Unix the child was spawned with ``start_new_session=True``, so it is
+        a process-group leader whose pgid equals its pid. We signal that group
+        directly with ``os.killpg(process.pid, SIGKILL)`` so any grandchildren
+        (e.g. a backgrounded ``python server.py``) are killed too.
+
+        Crucially we do this **even if the shell itself already exited**
+        (``returncode`` set): a foreground command can launch a background child
+        and let the shell return while the child keeps the stdout pipe open,
+        which is exactly what makes ``communicate()`` time out. The group still
+        contains the live grandchild, so killpg(pid) reaps it. We don't use
+        ``os.getpgid(pid)`` — once the leader is reaped that raises, defeating
+        the purpose. On Windows there is no such group; fall back to killing the
+        process directly. Always ``await process.wait()`` to avoid a zombie.
+        """
+        if not sys.platform.startswith("win"):
+            try:
+                # pgid == pid by the start_new_session convention. Signal the
+                # whole group; this works whether or not the leader is alive.
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                # Group already fully gone, or we cannot signal it — fall back
+                # to killing the process if it is still tracked as running.
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+        elif process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await process.wait()
+        except Exception:
+            # Reaping is best-effort; never let cleanup mask the timeout error.
+            pass
 
     @property
     def name(self) -> str:
@@ -851,7 +899,9 @@ Examples:
                 try:
                     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
                 except asyncio.TimeoutError:
-                    process.kill()
+                    # Kill the whole process group and reap, so the shell and any
+                    # children it spawned are torn down (no orphans, no zombie).
+                    await self._kill_process_tree(process)
                     error_msg = f"Command timed out after {timeout} seconds"
                     return BashOutputResult(
                         success=False,

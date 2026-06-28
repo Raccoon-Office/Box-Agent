@@ -134,12 +134,20 @@ def is_retryable_stream_error(exc: BaseException) -> bool:
 def async_retry(
     config: RetryConfig | None = None,
     on_retry: Callable[[Exception, int], None] | None = None,
+    should_retry: Callable[[BaseException], bool] | None = None,
 ) -> Callable:
     """Async function retry decorator
 
     Args:
         config: Retry configuration object, uses default config if None
         on_retry: Callback function on retry, receives exception and current attempt number
+        should_retry: Optional predicate applied to a caught exception. When
+            provided, an exception is retried only if both it matches
+            ``config.retryable_exceptions`` AND ``should_retry(exc)`` returns
+            True; otherwise it is re-raised immediately (fail-fast). Use this to
+            avoid retrying non-recoverable errors such as 4xx client errors.
+            When omitted, behavior is unchanged (retry on
+            ``config.retryable_exceptions``).
 
     Returns:
         Decorator function
@@ -167,6 +175,12 @@ def async_retry(
 
                 except config.retryable_exceptions as e:
                     last_exception = e
+
+                    # Fail-fast on exceptions the predicate rejects (e.g. 4xx
+                    # client errors) — re-raise the original error untouched
+                    # rather than wrapping/retrying it.
+                    if should_retry is not None and not should_retry(e):
+                        raise
 
                     # If this is the last attempt, don't retry
                     if attempt >= config.max_retries:

@@ -10,6 +10,7 @@ import anthropic
 from ..retry import RetryConfig, StreamInterrupted, async_retry, is_retryable_stream_error
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from .base import LLMClientBase
+from .error_messages import is_retryable_llm_error
 from .debug_logging import (
     log_llm_error_meta,
     log_llm_request,
@@ -345,7 +346,11 @@ class AnthropicClient(LLMClientBase):
         # Make API request with retry logic
         if self.retry_config.enabled:
             # Apply retry logic
-            retry_decorator = async_retry(config=self.retry_config, on_retry=self.retry_callback)
+            retry_decorator = async_retry(
+                config=self.retry_config,
+                on_retry=self.retry_callback,
+                should_retry=is_retryable_llm_error,
+            )
             api_call = retry_decorator(self._make_api_request)
             response = await api_call(
                 request_params["system_message"],
@@ -569,6 +574,18 @@ class AnthropicClient(LLMClientBase):
             prompt_tokens=total_input,
             completion_tokens=output_tokens,
             total_tokens=total_input + output_tokens,
+        )
+
+        # Always-on diagnostics, symmetric with the OpenAI client, so the
+        # upstream stop_reason is visible in box-agent-stderr.log for
+        # truncation triage regardless of provider.
+        logger.info(
+            "anthropic stream finished: finish_reason=%r completion_tokens=%s "
+            "text_len=%d request_id=%s",
+            finish_reason,
+            usage.completion_tokens,
+            len(text_content),
+            provider_request_id,
         )
 
         yield StreamEvent(

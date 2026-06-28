@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from ..retry import RetryConfig, StreamInterrupted, async_retry, is_retryable_stream_error
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from .base import LLMClientBase
+from .error_messages import is_retryable_llm_error
 from .debug_logging import (
     log_llm_error_meta,
     log_llm_request,
@@ -348,7 +349,11 @@ class OpenAIClient(LLMClientBase):
         # Make API request with retry logic
         if self.retry_config.enabled:
             # Apply retry logic
-            retry_decorator = async_retry(config=self.retry_config, on_retry=self.retry_callback)
+            retry_decorator = async_retry(
+                config=self.retry_config,
+                on_retry=self.retry_callback,
+                should_retry=is_retryable_llm_error,
+            )
             api_call = retry_decorator(self._make_api_request)
             response = await api_call(
                 request_params["api_messages"],
@@ -404,7 +409,10 @@ class OpenAIClient(LLMClientBase):
         text_content = ""
         thinking_content = ""
         usage: TokenUsage | None = None
-        finish_reason = "stop"
+        # ``None`` (not "stop") so we can tell "upstream explicitly said stop"
+        # apart from "upstream never sent a finish_reason" in the diagnostics
+        # log below. core.py tolerates None via ``finish_reason or "stop"``.
+        finish_reason: str | None = None
 
         # Tool call accumulators: {index: {id, name, arguments_str}}
         tool_acc: dict[int, dict[str, str]] = {}
@@ -440,7 +448,7 @@ class OpenAIClient(LLMClientBase):
             text_content = ""
             thinking_content = ""
             usage = None
-            finish_reason = "stop"
+            finish_reason = None
             tool_acc = {}
 
             try:
@@ -588,8 +596,26 @@ class OpenAIClient(LLMClientBase):
                 )
             )
 
+        # Capture the upstream value before the tool-truncation override so the
+        # diagnostics distinguish "gateway clipped tool args" (length, set here)
+        # from "gateway ended a text turn" (stop / end_turn / None from upstream).
+        raw_finish_reason = finish_reason
         if truncated_tool:
             finish_reason = "length"
+
+        # Always-on (INFO) diagnostics: surfaces the upstream finish_reason —
+        # including ``None`` when the gateway omitted it entirely — so a
+        # mid-sentence "stop" cutoff is identifiable in box-agent-stderr.log
+        # without enabling full LLM debug logging.
+        logger.info(
+            "openai stream finished: raw_finish_reason=%r final_finish_reason=%r "
+            "completion_tokens=%s text_len=%d request_id=%s",
+            raw_finish_reason,
+            finish_reason,
+            usage.completion_tokens if usage else None,
+            len(text_content),
+            provider_request_id,
+        )
 
         yield StreamEvent(
             type="finish",

@@ -425,9 +425,7 @@ incomplete）。
    持续累积（每个 8k token 上限）。Layer 1 只动 `role == "tool"`。一个
    专门针对老 thinking 块的压缩器能帮助长 deep-think 会话避免直接升级到
    Layer 2。
-3. **可配置的子 agent `token_limit`**。当前在 `sub_agent_tool.py` 硬编码
-   为 `40_000`，值得通过 `AgentConfig` 暴露。
-4. **增量 Layer 2**。每次触发都重新摘要每一轮，会重复支付 LLM 成本；
+3. **增量 Layer 2**。每次触发都重新摘要每一轮，会重复支付 LLM 成本；
    被标记为"已摘要"的轮次可以在后续触发时短路。
 
 ## 文件索引

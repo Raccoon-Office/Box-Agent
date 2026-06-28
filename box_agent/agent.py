@@ -423,11 +423,15 @@ class Agent:
         memory_promotion_hit_threshold: int = 5,
         memory_promotion_cooldown_days: int = 14,
         max_parallel_tools: int = 8,
+        truncation_continuation_enabled: bool = True,
+        max_truncation_continuations: int = 1,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
         self.max_steps = max_steps
         self.max_parallel_tools = max_parallel_tools
+        self.truncation_continuation_enabled = truncation_continuation_enabled
+        self.max_truncation_continuations = max_truncation_continuations
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         self.cancel_event: Optional[asyncio.Event] = None
@@ -662,6 +666,8 @@ class Agent:
             plan_approval=plan_approval,
             pause_after_plan_write=pause_after_plan_write,
             completion_gate=completion_gate,
+            truncation_continuation_enabled=self.truncation_continuation_enabled,
+            max_truncation_continuations=self.max_truncation_continuations,
             artifact_detection_enabled=artifact_detection_enabled,
         ):
             # Track token usage on Agent instance for backward compat

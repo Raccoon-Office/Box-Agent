@@ -462,10 +462,7 @@ listed here so future work can pick them up with context.
    touches `role == "tool"`. A targeted compactor for old thinking
    blocks would help long deep-think sessions without escalating to
    Layer 2.
-3. **Configurable sub-agent `token_limit`.** Currently hardcoded to
-   `40_000` in `sub_agent_tool.py`. Worth exposing through
-   `AgentConfig`.
-4. **Incremental Layer 2.** Re-summarizing every round on every trigger
+3. **Incremental Layer 2.** Re-summarizing every round on every trigger
    re-pays the LLM cost; tagged-as-summarized rounds could short-circuit
    on subsequent triggers.
 

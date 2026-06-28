@@ -375,6 +375,80 @@ def _plan_approval_from_pending_text(
     return payload
 
 
+_USER_QUESTION_MARKERS = (
+    "用户问题：",
+    "用户问题:",
+    "当前用户问题：",
+    "当前用户问题:",
+    "User question:",
+    "Current user question:",
+)
+_USER_ROLE_LABELS = {"用户:", "用户：", "user:", "User:"}
+_ASSISTANT_ROLE_LABELS = {"助手:", "助手：", "assistant:", "Assistant:"}
+
+
+def _strip_history_text_prefix(text: str) -> str:
+    stripped = text.strip()
+    lowered = stripped.lower()
+    for prefix in ("text:", "content:"):
+        if lowered.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return stripped
+
+
+def _latest_user_request_for_plan_detection(prompt_text: str) -> str:
+    """Extract the newest real user request from a host-wrapped prompt.
+
+    officev3 may restore a new ACP session by sending a large prompt that starts
+    with recent chat history. That history can contain old ``plan:`` snapshots,
+    so plan-start detection must not scan the whole wrapper.
+    """
+    text = (prompt_text or "").strip()
+    if not text:
+        return ""
+
+    marker_index = -1
+    marker_text = ""
+    for marker in _USER_QUESTION_MARKERS:
+        index = text.rfind(marker)
+        if index > marker_index:
+            marker_index = index
+            marker_text = marker
+    if marker_index >= 0:
+        return text[marker_index + len(marker_text):].strip()
+
+    user_blocks: list[str] = []
+    current_role: str | None = None
+    current_lines: list[str] = []
+
+    def flush_user_block() -> None:
+        if current_role != "user":
+            return
+        block = _strip_history_text_prefix("\n".join(current_lines))
+        if block:
+            user_blocks.append(block)
+
+    for line in text.splitlines():
+        label = line.strip()
+        if label in _USER_ROLE_LABELS:
+            flush_user_block()
+            current_role = "user"
+            current_lines = []
+            continue
+        if label in _ASSISTANT_ROLE_LABELS:
+            flush_user_block()
+            current_role = "assistant"
+            current_lines = []
+            continue
+        if current_role == "user":
+            current_lines.append(line)
+
+    flush_user_block()
+    if user_blocks:
+        return user_blocks[-1]
+    return text
+
+
 def _update_pending_plan_approval_from_raw(
     state: "SessionState",
     raw_output: Any,
@@ -925,6 +999,8 @@ class BoxACPAgent:
             memory_promotion_enabled=self._config.agent.memory_promotion_proposal_enabled,
             memory_promotion_hit_threshold=self._config.agent.memory_promotion_hit_threshold,
             memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,
+            truncation_continuation_enabled=self._config.agent.retry_on_suspected_truncation,
+            max_truncation_continuations=self._config.agent.max_truncation_continuations,
         )
 
         if initial_goal_request is not None:
@@ -1156,12 +1232,13 @@ class BoxACPAgent:
 
         state.cancelled = False
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
+        plan_detection_text = _latest_user_request_for_plan_detection(user_text)
         prompt_meta = getattr(params, "field_meta", None) or {}
         plan_approval = _plan_approval_from_meta(prompt_meta)
         if plan_approval is None:
             plan_approval = _plan_approval_from_pending_text(
                 state.pending_plan_approval,
-                user_text,
+                plan_detection_text,
             )
         plan_approval_approved = _plan_approval_is_approved(plan_approval)
         if plan_approval_approved:
@@ -1178,24 +1255,20 @@ class BoxACPAgent:
         session_force_plan_start = state.force_plan_start
         if session_force_plan_start:
             state.force_plan_start = False
-        prompt_requests_plan_start = text_requests_plan_start(user_text)
+        prompt_requests_plan_start = text_requests_plan_start(plan_detection_text)
+        prompt_force_plan_hint = _meta_bool(
+            prompt_meta,
+            "force_plan_start",
+            "forcePlanStart",
+        )
+        host_plan_hint = session_force_plan_start or prompt_force_plan_hint
         force_plan_start = (
             False
             if plan_approval_approved
-            else session_force_plan_start or _meta_bool(
-                prompt_meta,
-                "force_plan_start",
-                "forcePlanStart",
-            ) or prompt_requests_plan_start
+            else prompt_requests_plan_start
         )
         require_plan_approval = (
-            state.require_plan_approval
-            or _meta_bool(
-                prompt_meta,
-                "require_plan_approval",
-                "requirePlanApproval",
-            )
-            or (force_plan_start and not auto_approve_plan)
+            (force_plan_start and not auto_approve_plan)
             or (
                 state.pending_plan_approval is not None
                 and not plan_approval_approved
@@ -1222,6 +1295,8 @@ class BoxACPAgent:
             "session/prompt",
             session_id=session_id,
             message=user_text,
+            plan_detection_text=plan_detection_text[:500],
+            host_plan_hint=host_plan_hint,
             force_plan_start=force_plan_start,
             require_plan_approval=require_plan_approval,
             plan_approval_approved=plan_approval_approved,
@@ -1325,6 +1400,7 @@ class BoxACPAgent:
                 plan_approval=plan_approval,
                 auto_approve_plan=auto_approve_plan,
                 completion_gate=completion_gate,
+                plan_start_text=plan_detection_text,
             )
             while (
                 auto_enabled
@@ -1359,6 +1435,7 @@ class BoxACPAgent:
                     session_id,
                     auto_approve_plan=auto_approve_plan,
                     completion_gate=completion_gate,
+                    plan_start_text=plan_detection_text,
                 )
                 after_signature = goal_autopilot_progress_signature(state.agent.goal)
                 if should_continue_goal_autopilot(state.agent, stop_reason):
@@ -1908,6 +1985,7 @@ class BoxACPAgent:
         plan_approval: dict[str, Any] | None = None,
         auto_approve_plan: bool = False,
         completion_gate: CompletionGate | None = None,
+        plan_start_text: str | None = None,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
         agent = state.agent
@@ -2127,8 +2205,11 @@ class BoxACPAgent:
             force_plan_start=force_plan_start,
             require_plan_approval=require_plan_approval,
             plan_approval=plan_approval,
+            plan_start_text=plan_start_text,
             pause_after_plan_write=not auto_approve_plan,
             completion_gate=completion_gate,
+            truncation_continuation_enabled=agent.truncation_continuation_enabled,
+            max_truncation_continuations=agent.max_truncation_continuations,
             artifact_detection_enabled=state.artifact_mode != "project",
             artifact_root_dir=state.output_dir,
         ):

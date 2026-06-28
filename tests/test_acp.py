@@ -10,6 +10,7 @@ from acp import text_block, update_agent_message
 from box_agent.acp import (
     BoxACPAgent,
     _inject_item_id,
+    _latest_user_request_for_plan_detection,
     _looks_like_plan_approval_text,
     _tool_result_raw_output,
 )
@@ -128,6 +129,32 @@ def test_acp_plan_approval_text_accepts_short_confirmations():
     assert _looks_like_plan_approval_text("好的")
     assert _looks_like_plan_approval_text("可以")
     assert not _looks_like_plan_approval_text("hello")
+
+
+def test_latest_user_request_for_plan_detection_ignores_history_plan_snapshot():
+    prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
+用户:
+text: 可以开始
+
+助手:
+plan: {"title": "执行计划", "steps": []}
+
+用户问题：ok"""
+
+    assert _latest_user_request_for_plan_detection(prompt) == "ok"
+
+
+def test_latest_user_request_for_plan_detection_falls_back_to_last_user_block():
+    prompt = """用户：
+text: 先做这个
+
+助手：
+plan: {"title": "旧计划", "steps": []}
+
+用户：
+text: ok"""
+
+    assert _latest_user_request_for_plan_detection(prompt) == "ok"
 
 
 class TodoLLM:
@@ -2072,7 +2099,7 @@ async def test_acp_emits_plan_snapshot_raw_output(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_session_meta_force_plan_start_is_one_shot(tmp_path):
+async def test_acp_session_meta_force_plan_start_hint_is_one_shot(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
@@ -2091,7 +2118,7 @@ async def test_acp_session_meta_force_plan_start_is_one_shot(tmp_path):
     response = await agent.prompt(
         SimpleNamespace(
             sessionId=session.sessionId,
-            prompt=[{"text": "hello"}],
+            prompt=[{"text": "介绍一下太阳系"}],
             field_meta={},
         )
     )
@@ -2099,12 +2126,18 @@ async def test_acp_session_meta_force_plan_start_is_one_shot(tmp_path):
     assert response.stopReason == "end_turn"
     state = agent._sessions[session.sessionId]
     assert state.force_plan_start is False
-    assert state.pending_plan_approval is not None
-    assert llm.calls == 2
+    assert state.pending_plan_approval is None
+    assert llm.calls == 1
+    assert not any(
+        getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+        for update in conn.updates
+    )
 
 
 @pytest.mark.asyncio
-async def test_acp_prompt_meta_force_plan_start_waits_for_approval(tmp_path):
+async def test_acp_prompt_meta_force_plan_start_is_hint_only(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
@@ -2118,29 +2151,137 @@ async def test_acp_prompt_meta_force_plan_start_waits_for_approval(tmp_path):
     response = await agent.prompt(
         SimpleNamespace(
             sessionId=session.sessionId,
-            prompt=[{"text": "hello"}],
+            prompt=[{"text": "介绍一下太阳系"}],
             field_meta={"forcePlanStart": True},
         )
     )
 
     assert response.stopReason == "end_turn"
-    plan_outputs = [
-        update.update.rawOutput
-        for update in conn.updates
-        if getattr(update.update, "rawOutput", None)
+    assert agent._sessions[session.sessionId].pending_plan_approval is None
+    assert llm.calls == 1
+    assert not any(
+        getattr(update.update, "rawOutput", None)
         and isinstance(update.update.rawOutput, dict)
         and update.update.rawOutput.get("type") == "plan_snapshot"
-    ]
-    assert plan_outputs
-    assert plan_outputs[0]["action"] == "start"
-    assert any(
-        output.get("action") == "set"
-        and output["plan"]["title"] == "Forced host plan"
-        and output.get("approval", {}).get("state") == "pending"
-        for output in plan_outputs
+        for update in conn.updates
     )
-    assert agent._sessions[session.sessionId].pending_plan_approval is not None
+
+
+@pytest.mark.asyncio
+async def test_acp_history_plan_snapshot_does_not_force_plan_for_short_reply(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    llm = PlanAfterRetryLLM()
+    agent = BoxACPAgent(conn, config, llm, [], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
+用户:
+text: 可以开始
+
+助手:
+plan: {"title": "执行计划", "steps": [{"title": "旧步骤"}]}
+
+用户问题：ok"""
+    response = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": prompt}],
+            field_meta={"forcePlanStart": True, "requirePlanApproval": True},
+        )
+    )
+
+    assert response.stopReason == "end_turn"
+    assert llm.calls == 1
+    state = agent._sessions[session.sessionId]
+    assert state.pending_plan_approval is None
+    assert not any(
+        getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+        for update in conn.updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_acp_history_plan_snapshot_does_not_force_plan_from_host_hint(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    llm = PlanAfterRetryLLM()
+    agent = BoxACPAgent(conn, config, llm, [], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
+用户:
+text: 可以开始
+
+助手:
+plan: {"title": "执行计划", "steps": [{"title": "旧步骤"}]}"""
+    response = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": prompt}],
+            field_meta={"forcePlanStart": True, "requirePlanApproval": True},
+        )
+    )
+
+    assert response.stopReason == "end_turn"
+    assert llm.calls == 1
+    assert agent._sessions[session.sessionId].pending_plan_approval is None
+    assert not any(
+        getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+        for update in conn.updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_acp_latest_user_plan_request_still_triggers_plan_with_history(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    llm = PlanAfterRetryLLM()
+    agent = BoxACPAgent(conn, config, llm, [], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
+用户:
+text: ok
+
+助手:
+plan: {"title": "旧计划", "steps": []}
+
+用户问题：先出一个计划"""
+    response = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": prompt}],
+            field_meta={},
+        )
+    )
+
+    assert response.stopReason == "end_turn"
     assert llm.calls == 2
+    assert agent._sessions[session.sessionId].pending_plan_approval is not None
+    assert any(
+        getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+        and update.update.rawOutput.get("action") == "start"
+        for update in conn.updates
+    )
 
 
 @pytest.mark.asyncio
@@ -2324,8 +2465,16 @@ async def test_acp_plan_approval_text_continues_pending_plan(tmp_path):
         for output in plan_outputs
     )
 
+    approval_prompt = """以下是当前会话最近的上下文，请在此基础上继续回答：
+用户:
+text: 先出计划
+
+助手:
+plan: {"title": "Approval-gated plan", "steps": []}
+
+用户问题：继续执行"""
     second = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "继续执行"}])
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": approval_prompt}])
     )
 
     assert second.stopReason == "end_turn"

@@ -173,6 +173,98 @@ def humanize_llm_error(exc: BaseException) -> str:
         return _GENERIC_FALLBACK
 
 
+# Error categories that a retry cannot fix — deterministic client-side faults.
+# (Mirrors the classifier categories in ``_RULES``.)
+_NON_RETRYABLE_CATEGORIES: frozenset[str] = frozenset({
+    "content_filter",
+    "auth",
+    "permission",
+    "quota",
+    "context_length",
+    "model_not_found",
+    "endpoint_not_found",
+})
+
+# Categories that represent transient server/network conditions worth retrying.
+_RETRYABLE_CATEGORIES: frozenset[str] = frozenset({
+    "rate_limit",
+    "server_error",
+    "timeout",
+    "connection",
+})
+
+
+def _http_status_code(exc: BaseException) -> int | None:
+    """Best-effort extraction of an HTTP status code from a provider exception."""
+    for attr in ("status_code", "status"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int):
+            return val
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        val = getattr(resp, "status_code", None)
+        if isinstance(val, int):
+            return val
+    return None
+
+
+def is_retryable_llm_error(exc: BaseException) -> bool:
+    """Whether a (non-streaming) LLM call error is worth retrying.
+
+    Retries transient conditions — 429 rate limits, 5xx server errors, request
+    timeouts, and network/connection drops — but fails fast on deterministic
+    client errors (400/401/403/404, content filter, quota, context length,
+    unknown model, wrong endpoint) that retrying cannot fix.
+
+    Distinct from :func:`is_retryable_stream_error`, which only recognizes
+    network/stream-transport faults: that one is too narrow for the non-stream
+    path, where the provider returns a structured 429/5xx HTTP error rather than
+    dropping the connection. Never raises.
+    """
+    try:
+        root = _unwrap(exc)
+    except Exception:
+        root = exc
+
+    # HTTP status is the most precise signal, so check it FIRST. A structured
+    # 4xx must fail fast even when its message happens to contain a
+    # transient-looking substring (e.g. a 400 whose body mentions "connection
+    # reset") — otherwise the string-matching predicates below would wrongly
+    # flag it as retryable.
+    try:
+        status = _http_status_code(root)
+    except Exception:
+        status = None
+    if status is not None:
+        if status == 429 or status == 408 or 500 <= status <= 599:
+            return True
+        if 400 <= status < 500:
+            return False
+
+    # No usable status: fall back to transport-level transients (httpx/openai
+    # network classes that drop the connection without exposing a status code).
+    try:
+        from ..retry import is_retryable_stream_error
+
+        if is_retryable_stream_error(exc):
+            return True
+    except Exception:
+        pass
+
+    # ...then message-token classification.
+    try:
+        category = classify_llm_error(exc).category
+    except Exception:
+        category = "unknown"
+    if category in _NON_RETRYABLE_CATEGORIES:
+        return False
+    if category in _RETRYABLE_CATEGORIES:
+        return True
+    # Unknown / unclassified: assume transient and allow the retry budget to
+    # apply (restores pre-fail-fast behavior for errors we can't categorize).
+    return True
+
+
 def _safe_str(obj: object) -> str:
     """``str(obj)`` that never raises (some exception objects have broken ``__str__``)."""
     try:

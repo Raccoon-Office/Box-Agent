@@ -32,6 +32,7 @@ breaker's decision logic independently testable.
 from __future__ import annotations
 
 import glob
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -137,6 +138,100 @@ def format_injected_message(text: str) -> str:
         "If it asks a question, answer it briefly if useful, then continue the original task. "
         "Do not stop or switch tasks unless the user explicitly asks you to stop, cancel, or change the task.\n\n"
         f"Mid-turn user message:\n{text}"
+    )
+
+
+# ── Suspected-truncation continuation ────────────────────────────
+#
+# Some upstream models / relay gateways stop a streamed text turn
+# mid-sentence yet report a *normal* finish_reason ("stop"/"end_turn")
+# or omit it entirely. The existing ``finish_reason in ("length",
+# "max_tokens")`` guard in ``core`` never fires for these, so the half
+# sentence is presented as a finished answer. The helpers below let the
+# loop detect that case (conservatively) and inject a one-shot
+# continuation so the model finishes the thought in the same message.
+
+# Only consider a turn truncated when the model actually produced a
+# non-trivial amount of text. Short replies legitimately end without
+# terminal punctuation (e.g. a bare "好的" / a single path), and we do
+# not want to chase those.
+MIN_TOKENS_FOR_TRUNCATION_CHECK: Final[int] = 50
+
+# Character-count fallback for the same "non-trivial reply" gate when the
+# provider omits usage (or reports completion_tokens=0). Production
+# gateways send usage, so this only guards degenerate/no-usage paths.
+MIN_CHARS_FOR_TRUNCATION_CHECK: Final[int] = 40
+
+# Trailing characters that count as a *clean* ending — if the text ends
+# with any of these we never treat it as truncated. Covers CJK + ASCII
+# sentence punctuation, closing quotes/brackets, colons/semicolons
+# (section leads), markdown emphasis/inline-code closers, table pipes,
+# and dashes.
+_CLEAN_ENDING_CHARS: Final[frozenset[str]] = frozenset(
+    "。．.！!？?…⋯"  # sentence terminators
+    "」』）)】］]｝}＞>"  # closing brackets
+    "\"'”’《》"  # quotes
+    "：:；;"  # colon / semicolon (list or section lead-ins)
+    "*`"  # markdown emphasis / inline code closers
+    "|"  # table row
+    "—～~"  # dashes / tilde
+)
+
+# Markdown structural last-lines that are complete as-is.
+_TABLE_ROW_RE: Final = re.compile(r"^\s*\|.*\|\s*$")
+_LIST_ITEM_RE: Final = re.compile(r"^\s*([-*+]|\d+[.)])\s+\S")
+
+
+def looks_like_truncated_output(text: str) -> bool:
+    """Conservatively decide whether assistant text was cut mid-thought.
+
+    Bias: prefer a false negative (miss a genuinely truncated reply that
+    happens to end without punctuation) over a false positive (re-prompt
+    a perfectly complete answer). Any "clean ending" signal — terminal
+    punctuation, a closed bracket/quote/emphasis, or a complete markdown
+    structural line (code fence, table row, list item) — returns False.
+    """
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    if stripped[-1] in _CLEAN_ENDING_CHARS:
+        return False
+    last_line = stripped.rsplit("\n", 1)[-1].strip()
+    if last_line.startswith("```"):
+        return False
+    if _TABLE_ROW_RE.match(last_line):
+        return False
+    if _LIST_ITEM_RE.match(last_line):
+        return False
+    return True
+
+
+def reply_is_substantial(content_len: int, completion_tokens: int | None) -> bool:
+    """Gate truncation handling to non-trivial replies only.
+
+    Prefer the provider's completion-token count; fall back to character
+    length when usage is absent or zero (degenerate / no-usage gateways),
+    so a short reply without usage is not chased as a truncation.
+    """
+    if completion_tokens:
+        return completion_tokens >= MIN_TOKENS_FOR_TRUNCATION_CHECK
+    return content_len >= MIN_CHARS_FOR_TRUNCATION_CHECK
+
+
+def truncation_continuation_text(tail: str) -> str:
+    """One-shot continuation prompt for a suspected mid-sentence cutoff.
+
+    Deliberately NOT wrapped by ``format_injected_message``: this is not
+    a user interjection but a system-detected continuation instruction,
+    so it must carry its own framing. ``tail`` is a short slice of where
+    the previous reply stopped, to anchor the model.
+    """
+    return (
+        "（系统提示）你上一条回复似乎在生成过程中被意外中断了，"
+        f"结尾停在：“…{tail}”。\n"
+        "请直接接着上面的结尾继续写完剩余内容，保持原有的格式、结构与语气；"
+        "不要重复任何已经输出过的内容，也不要重新开头或重述前面已说过的部分，"
+        "从断点处自然衔接即可。如果上一条其实已经表达完整，只需补一句简短收尾。"
     )
 
 
