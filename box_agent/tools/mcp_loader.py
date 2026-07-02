@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -337,9 +338,80 @@ class MCPServerConnection:
             traceback.print_exc()
             return False
 
+    # Windows system variables that non-trivial CLIs (ssh.exe, git.exe, etc.)
+    # rely on during early process init but that the MCP SDK's default env
+    # allowlist (``mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS``) does not
+    # include. Supplementing these fixed sshmcp startup on Windows; the SDK's
+    # allowlist covers PATH / APPDATA / SYSTEMROOT / ... but omits e.g.
+    # ``ComSpec`` and ``ProgramData``, which ssh's DLL init path resolves.
+    #
+    # Casing note: Windows itself treats env-var names case-insensitively, so
+    # the exact spelling below is only a readability convention — we do NOT
+    # depend on any casing invariant surviving into CreateProcess. An earlier
+    # revision of this code tried to enforce single-casing on both sides of
+    # the SDK's merge; that was found to be unnecessary and has been removed.
+    _WINDOWS_ENV_SUPPLEMENT = (
+        "windir",
+        "ComSpec",
+        "ProgramData",
+        "ALLUSERSPROFILE",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "USERDOMAIN",
+    )
+
+    def _build_stdio_env(self) -> dict[str, str] | None:
+        """Build the ``env`` argument passed to ``StdioServerParameters``.
+
+        Windows-only fix. On macOS and Linux the behavior is unchanged: we
+        return the server's own ``env`` (or ``None`` so the SDK applies its
+        default inherited-env allowlist).
+
+        On Windows the MCP SDK's ``get_default_environment()`` allowlist is
+        conservative and omits several variables that non-trivial CLIs read
+        at startup — see ``_WINDOWS_ENV_SUPPLEMENT`` above. Without them,
+        ssh.exe (as launched by sshmcp) exits before emitting any output and
+        the MCP loader only sees the stdout pipe close. We supplement those
+        variables from the host process's own environment; ``os.environ``
+        lookups on Windows are case-insensitive, so we don't chase casing.
+
+        Important interaction with the SDK: ``stdio_client()`` re-merges the
+        env we return as ``{**get_default_environment(), **server.env}``
+        (see ``mcp/client/stdio/__init__.py``). That means:
+
+          1. Server-specific ``env`` entries from ``mcp.json`` win over both
+             the SDK defaults and our supplement (Python dict merge order).
+          2. Supplemented variables end up in the final env because the SDK
+             defaults don't declare them, so nothing overrides them.
+
+        The regression test in ``tests/test_mcp.py`` exercises the SDK's
+        merge and asserts the final env shape, so future SDK changes to
+        that merge order are caught in CI.
+        """
+        if sys.platform != "win32":
+            return self.env if self.env else None
+
+        # Start from the server's env from mcp.json — its keys will remain
+        # ours to override once the SDK re-merges with its defaults.
+        env: dict[str, str] = dict(self.env or {})
+
+        for name in self._WINDOWS_ENV_SUPPLEMENT:
+            value = os.environ.get(name)
+            if value is None:
+                continue
+            # Respect a case-variant already supplied via mcp.json; users
+            # who set ``PROGRAMDATA=...`` explicitly should not be shadowed
+            # by our CamelCase copy.
+            if any(k.lower() == name.lower() for k in env):
+                continue
+            env[name] = value
+
+        return env or None
+
     async def _connect_stdio(self):
         """Connect via STDIO transport."""
-        server_params = StdioServerParameters(command=self.command, args=self.args, env=self.env if self.env else None)
+        server_params = StdioServerParameters(command=self.command, args=self.args, env=self._build_stdio_env())
         return await self.exit_stack.enter_async_context(stdio_client(server_params))
 
     async def _connect_sse(self):

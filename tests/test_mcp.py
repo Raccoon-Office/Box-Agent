@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -200,6 +201,156 @@ class TestMCPServerConnectionInit:
         assert conn.connect_timeout == 15.0
         assert conn.execute_timeout == 90.0
         assert conn.sse_read_timeout == 180.0
+
+
+# =============================================================================
+# Windows stdio env supplement tests
+# =============================================================================
+
+
+class TestStdioEnvBuild:
+    """Cover ``MCPServerConnection._build_stdio_env`` on both platforms.
+
+    The unit-level checks pin the return value we produce. The integration
+    checks then simulate the MCP SDK's ``{**get_default_environment(),
+    **server.env}`` merge to prove the final env handed to CreateProcess
+    contains the variables we care about — this is what actually gets a
+    Windows stdio MCP server started, and it's the invariant that must
+    survive future SDK changes.
+    """
+
+    def _fake_default_env(self):
+        # Mirrors ``mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS`` on Windows
+        # closely enough for the merge behavior we care about.
+        return {
+            "APPDATA": r"C:\Users\test\AppData\Roaming",
+            "HOMEDRIVE": "C:",
+            "HOMEPATH": r"\Users\test",
+            "LOCALAPPDATA": r"C:\Users\test\AppData\Local",
+            "PATH": r"C:\Windows\System32",
+            "PATHEXT": ".COM;.EXE;.BAT",
+            "PROCESSOR_ARCHITECTURE": "AMD64",
+            "SYSTEMDRIVE": "C:",
+            "SYSTEMROOT": r"C:\Windows",
+            "TEMP": r"C:\Users\test\AppData\Local\Temp",
+            "USERNAME": "test",
+            "USERPROFILE": r"C:\Users\test",
+        }
+
+    def _final_sdk_env(self, server_env):
+        """Simulate ``stdio_client``'s env merge for a Windows spawn."""
+        default = self._fake_default_env()
+        return {**default, **server_env} if server_env is not None else default
+
+    def test_non_windows_returns_server_env_untouched(self, monkeypatch):
+        """macOS/Linux path must not diverge from the pre-fix baseline."""
+        monkeypatch.setattr("box_agent.tools.mcp_loader.sys.platform", "linux")
+
+        conn = MCPServerConnection(name="ssh", command="ssh", env={"FOO": "bar"})
+        assert conn._build_stdio_env() == {"FOO": "bar"}
+
+        # Empty env → None so the SDK applies its own default allowlist.
+        conn_empty = MCPServerConnection(name="ssh", command="ssh", env={})
+        assert conn_empty._build_stdio_env() is None
+
+    def test_windows_supplements_missing_system_vars(self, monkeypatch):
+        """Windows path adds vars the SDK allowlist misses (ComSpec etc.)."""
+        monkeypatch.setattr("box_agent.tools.mcp_loader.sys.platform", "win32")
+        # Only the variables our supplement covers — plus a distractor
+        # that must NOT be pulled in blindly.
+        fake_os_env = {
+            "windir": r"C:\Windows",
+            "ComSpec": r"C:\Windows\System32\cmd.exe",
+            "ProgramData": r"C:\ProgramData",
+            "ALLUSERSPROFILE": r"C:\ProgramData",
+            "ProgramFiles": r"C:\Program Files",
+            "ProgramFiles(x86)": r"C:\Program Files (x86)",
+            "ProgramW6432": r"C:\Program Files",
+            "USERDOMAIN": "TESTDOMAIN",
+            "SECRETS_NOT_INHERITED": "should-not-leak",
+        }
+        monkeypatch.setattr("box_agent.tools.mcp_loader.os.environ", fake_os_env)
+
+        conn = MCPServerConnection(name="ssh", command="ssh", env={})
+        built = conn._build_stdio_env()
+        assert built is not None
+        # Every supplement entry present.
+        for name in MCPServerConnection._WINDOWS_ENV_SUPPLEMENT:
+            assert built[name] == fake_os_env[name], name
+        # Only the allowlisted supplement leaked through; nothing else.
+        assert "SECRETS_NOT_INHERITED" not in built
+
+    def test_windows_final_env_after_sdk_merge_has_all_vars(self, monkeypatch):
+        """End-to-end: after the SDK re-merges, the final env is sufficient.
+
+        This is the invariant that matters for CreateProcess. If the SDK ever
+        changes its default allowlist or merge order, this catches it.
+        """
+        monkeypatch.setattr("box_agent.tools.mcp_loader.sys.platform", "win32")
+        fake_os_env = {
+            "windir": r"C:\Windows",
+            "ComSpec": r"C:\Windows\System32\cmd.exe",
+            "ProgramData": r"C:\ProgramData",
+            "ALLUSERSPROFILE": r"C:\ProgramData",
+            "ProgramFiles": r"C:\Program Files",
+            "ProgramFiles(x86)": r"C:\Program Files (x86)",
+            "ProgramW6432": r"C:\Program Files",
+            "USERDOMAIN": "TESTDOMAIN",
+        }
+        monkeypatch.setattr("box_agent.tools.mcp_loader.os.environ", fake_os_env)
+
+        conn = MCPServerConnection(name="ssh", command="ssh", env={"MY_VAR": "yes"})
+        server_env = conn._build_stdio_env()
+        final = self._final_sdk_env(server_env)
+
+        # SDK defaults still land (nothing above should have shadowed them).
+        assert final["SYSTEMROOT"] == r"C:\Windows"
+        assert final["PATH"] == r"C:\Windows\System32"
+        # Our supplement lands.
+        for name in MCPServerConnection._WINDOWS_ENV_SUPPLEMENT:
+            assert final[name] == fake_os_env[name], name
+        # Server-specific mcp.json env wins.
+        assert final["MY_VAR"] == "yes"
+
+    def test_windows_user_env_wins_over_supplement(self, monkeypatch):
+        """User-supplied ``env`` in mcp.json must not be shadowed by us."""
+        monkeypatch.setattr("box_agent.tools.mcp_loader.sys.platform", "win32")
+        monkeypatch.setattr(
+            "box_agent.tools.mcp_loader.os.environ",
+            {"ComSpec": r"C:\Windows\System32\cmd.exe"},
+        )
+        # Explicit user override, both same casing and a lower-case variant.
+        conn = MCPServerConnection(
+            name="ssh",
+            command="ssh",
+            env={"ComSpec": r"C:\custom\shell.exe"},
+        )
+        built = conn._build_stdio_env()
+        assert built["ComSpec"] == r"C:\custom\shell.exe"
+
+        # Case-variant supplied by user: we must not re-add our CamelCase
+        # copy on top (would leave two entries pointing at different values).
+        conn2 = MCPServerConnection(
+            name="ssh",
+            command="ssh",
+            env={"COMSPEC": r"C:\custom\shell.exe"},
+        )
+        built2 = conn2._build_stdio_env()
+        # Only one case variant remains — the user's — with their value.
+        comspec_keys = [k for k in built2 if k.lower() == "comspec"]
+        assert comspec_keys == ["COMSPEC"]
+        assert built2["COMSPEC"] == r"C:\custom\shell.exe"
+
+    def test_windows_missing_host_vars_are_silently_skipped(self, monkeypatch):
+        """A minimal host env (e.g. CI runner) must not crash env-build."""
+        monkeypatch.setattr("box_agent.tools.mcp_loader.sys.platform", "win32")
+        monkeypatch.setattr("box_agent.tools.mcp_loader.os.environ", {})
+
+        conn = MCPServerConnection(name="ssh", command="ssh", env={})
+        # Empty user env + no host vars → None, so the SDK applies its own
+        # defaults unmodified. This preserves the pre-fix behavior on hosts
+        # where none of our supplement variables exist.
+        assert conn._build_stdio_env() is None
 
 
 # =============================================================================
