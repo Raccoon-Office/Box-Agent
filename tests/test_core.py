@@ -5095,6 +5095,28 @@ def test_micro_compact_replaces_old_tool_results():
     assert msgs[9].content.startswith("latest result")
 
 
+@pytest.mark.parametrize("latest_todo_tool", ["todo_write", "todo_read"])
+def test_micro_compact_preserves_only_latest_todo_state(latest_todo_tool):
+    old_todo_content = "Old todo state\n" + "o" * 500
+    latest_todo_content = "Canonical todo state with ids and statuses\n" + "t" * 500
+    msgs = [
+        Message(role="system", content="sys"),
+        _make_tool_msg("todo_write", old_todo_content, "todo-old"),
+        _make_tool_msg(latest_todo_tool, latest_todo_content, "todo-latest"),
+        _make_tool_msg("bash", "one\n" + "a" * 500, "tc-1"),
+        _make_tool_msg("read_file", "two\n" + "b" * 500, "tc-2"),
+        _make_tool_msg("bash", "three\n" + "c" * 500, "tc-3"),
+        _make_tool_msg("write_file", "four\n" + "d" * 500, "tc-4"),
+    ]
+
+    compacted = _micro_compact(msgs)
+
+    assert compacted.transformed_count == 2
+    assert msgs[1].content.startswith("[Previous result from todo_write:")
+    assert msgs[2].content == latest_todo_content
+    assert msgs[2].tool_call_id == "todo-latest"
+
+
 def test_micro_compact_preserves_short_content():
     """Tool results shorter than MIN_COMPACT_LEN should not be compacted."""
     msgs = [
@@ -5677,6 +5699,72 @@ async def test_maybe_summarize_preserves_latest_user_and_recent_tail_exactly():
     assert outcome.messages is not None
     assert outcome.messages[-2] is latest_user
     assert outcome.messages[-1] is recent_tail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("latest_todo_tool", ["todo_write", "todo_read"])
+@pytest.mark.parametrize("summary_fails", [False, True])
+async def test_maybe_summarize_preserves_latest_todo_state_exactly(
+    latest_todo_tool,
+    summary_fails,
+):
+    from box_agent.core import _maybe_summarize, _TODO_STATE_MARKER
+
+    todo_state = "Canonical todo state with ids and statuses\n" + "t" * 500
+    latest_user = Message(role="user", content="keep this request")
+    msgs = [
+        Message(role="system", content="sys"),
+        latest_user,
+        _make_tool_msg(latest_todo_tool, todo_state, "todo-latest"),
+        Message(role="assistant", content="large execution " * 8_000),
+    ]
+    llm = _FakeSummaryLLM(
+        "execution summarized",
+        raise_exc=RuntimeError("provider down") if summary_fails else None,
+    )
+
+    outcome = await _maybe_summarize(
+        llm,
+        msgs,
+        token_limit=5_000,
+        api_total_tokens=0,
+        skip_check=False,
+    )
+
+    assert outcome.messages is not None
+    checkpoints = [
+        message
+        for message in outcome.messages
+        if message.role == "user"
+        and str(message.content).startswith(_TODO_STATE_MARKER)
+    ]
+    assert len(checkpoints) == 1
+    assert checkpoints[0].content == (
+        f"{_TODO_STATE_MARKER}\nTool: {latest_todo_tool}\n\n{todo_state}"
+    )
+    assert outcome.messages[-1] is latest_user
+
+    second_input = [
+        *outcome.messages,
+        Message(role="assistant", content="more large execution " * 8_000),
+    ]
+    second_outcome = await _maybe_summarize(
+        llm,
+        second_input,
+        token_limit=5_000,
+        api_total_tokens=0,
+        skip_check=False,
+    )
+    assert second_outcome.messages is not None
+    repeated_checkpoints = [
+        message
+        for message in second_outcome.messages
+        if message.role == "user"
+        and str(message.content).startswith(_TODO_STATE_MARKER)
+    ]
+    assert [message.content for message in repeated_checkpoints] == [
+        f"{_TODO_STATE_MARKER}\nTool: {latest_todo_tool}\n\n{todo_state}"
+    ]
 
 
 @pytest.mark.asyncio

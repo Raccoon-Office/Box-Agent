@@ -1645,9 +1645,18 @@ async def _maybe_summarize(
         )
         summary = _deterministic_history_fallback(source)
 
+    latest_todo_checkpoint = _latest_todo_state_checkpoint(messages)
+    checkpoint_messages: list[Message] = []
+    if (
+        latest_todo_checkpoint is not None
+        and latest_todo_checkpoint[0] < tail_start
+    ):
+        checkpoint_messages.append(latest_todo_checkpoint[1])
+
     new_messages = [
         messages[0],
         Message(role="user", content=f"{_SUMMARY_MARKER}\n\n{summary}"),
+        *checkpoint_messages,
         messages[latest_user_idx],
         *messages[tail_start:],
     ]
@@ -1686,6 +1695,7 @@ async def _maybe_summarize(
 # already-summarized round, do not re-summarize". Kept stable across releases
 # because it is also visible to the model and used as a re-entry guard.
 _SUMMARY_MARKER = "[Assistant Execution Summary]"
+_TODO_STATE_MARKER = "[Latest Todo Tool State]"
 
 
 def _is_summary_marker(msg: Message) -> bool:
@@ -1694,6 +1704,26 @@ def _is_summary_marker(msg: Message) -> bool:
         return False
     content = msg.content if isinstance(msg.content, str) else ""
     return content.startswith(_SUMMARY_MARKER)
+
+
+def _latest_todo_state_checkpoint(
+    messages: list[Message],
+) -> tuple[int, Message] | None:
+    """Return an exact, protocol-safe checkpoint for the newest todo state."""
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        content = msg.content if isinstance(msg.content, str) else ""
+        if msg.role == "user" and content.startswith(_TODO_STATE_MARKER):
+            return idx, msg
+        if msg.role == "tool" and msg.name in {"todo_write", "todo_read"}:
+            return (
+                idx,
+                Message(
+                    role="user",
+                    content=f"{_TODO_STATE_MARKER}\nTool: {msg.name}\n\n{content}",
+                ),
+            )
+    return None
 
 
 # ── Micro-compact (Layer 1) ─────────────────────────────────
@@ -2370,8 +2400,9 @@ def _micro_compact(
     """Replace old tool-result content with short placeholders.
 
     Walks the message list, finds tool-role messages, keeps the last
-    ``_KEEP_RECENT_TOOL_RESULTS`` intact, and replaces earlier ones
-    whose content exceeds ``_MIN_COMPACT_LEN`` with a one-liner.
+    ``_KEEP_RECENT_TOOL_RESULTS`` and the latest todo state intact, and
+    replaces earlier ones whose content exceeds ``_MIN_COMPACT_LEN`` with a
+    one-liner.
 
     Additionally, if the cumulative token cost of the "kept" recent
     messages exceeds ``_KEEP_RECENT_TOOL_TOKEN_BUDGET``, the keep window
@@ -2387,6 +2418,15 @@ def _micro_compact(
     tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
     if len(tool_indices) <= 1:
         return HistoryTransformResult()
+
+    latest_todo_state_index = next(
+        (
+            idx
+            for idx in reversed(tool_indices)
+            if messages[idx].name in {"todo_write", "todo_read"}
+        ),
+        None,
+    )
 
     # Start with the conservative N-recent keep window.
     keep_count = min(_KEEP_RECENT_TOOL_RESULTS, len(tool_indices))
@@ -2406,6 +2446,8 @@ def _micro_compact(
     compacted = 0
     replaced_source_ids: list[str] = []
     for idx in tool_indices[:-keep_count]:
+        if idx == latest_todo_state_index:
+            continue
         msg = messages[idx]
         source = (
             context_resource_ledger.source(msg.tool_call_id)

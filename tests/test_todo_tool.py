@@ -207,6 +207,103 @@ async def test_set_preserves_existing_identity_and_never_reuses_ids(writer):
 
 
 @pytest.mark.asyncio
+async def test_set_rejects_status_only_progress_for_existing_list(writer):
+    initial = await writer.execute(
+        action="set",
+        todos=[
+            {"task": "Implement feature", "status": "in_progress"},
+            {"task": "Run verification", "status": "pending"},
+        ],
+    )
+    current, next_item = initial.raw_output["items"]
+
+    result = await writer.execute(
+        action="set",
+        todos=[
+            {
+                "id": current["id"],
+                "task": current["task"],
+                "status": "completed",
+            },
+            {
+                "id": next_item["id"],
+                "task": next_item["task"],
+                "status": "in_progress",
+            },
+        ],
+    )
+
+    assert not result.success
+    assert "action='transition'" in result.error
+    assert writer._store.list() == initial.raw_output["items"]
+
+    without_ids = await writer.execute(
+        action="set",
+        todos=[
+            {"task": current["task"], "status": "completed"},
+            {"task": next_item["task"], "status": "in_progress"},
+        ],
+    )
+
+    assert not without_ids.success
+    assert "action='transition'" in without_ids.error
+    assert writer._store.list() == initial.raw_output["items"]
+
+
+@pytest.mark.asyncio
+async def test_set_rejects_existing_task_without_canonical_id(writer):
+    initial = await writer.execute(
+        action="set",
+        todos=[
+            {"task": "Keep identity", "status": "in_progress"},
+            {"task": "Add later", "status": "pending"},
+        ],
+    )
+
+    result = await writer.execute(
+        action="set",
+        todos=[
+            {"task": "Keep identity", "status": "in_progress"},
+            {
+                "id": initial.raw_output["items"][1]["id"],
+                "task": "Add later",
+                "status": "pending",
+            },
+            {"task": "New task", "status": "pending"},
+        ],
+    )
+
+    assert not result.success
+    assert "must preserve its id (#1)" in result.error
+    assert "todo_read" in result.error
+    assert writer._store.list() == initial.raw_output["items"]
+
+
+@pytest.mark.asyncio
+async def test_set_rejects_existing_task_with_another_todo_id(writer):
+    initial = await writer.execute(
+        action="set",
+        todos=[
+            {"task": "First", "status": "in_progress"},
+            {"task": "Second", "status": "pending"},
+        ],
+    )
+    first, second = initial.raw_output["items"]
+
+    result = await writer.execute(
+        action="set",
+        todos=[
+            {"id": second["id"], "task": first["task"], "status": "in_progress"},
+            {"id": first["id"], "task": second["task"], "status": "pending"},
+        ],
+    )
+
+    assert not result.success
+    assert "must preserve its original id (#1), not #2" in result.error
+    assert writer._store.list() == initial.raw_output["items"]
+
+
+@pytest.mark.asyncio
 async def test_set_requires_valid_todos(writer):
     result = await writer.execute(action="set")
     assert not result.success
