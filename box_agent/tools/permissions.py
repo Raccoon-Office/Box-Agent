@@ -90,6 +90,7 @@ class CapabilityPolicy(BaseModel):
         session_workspace_root: str | None = None,
         allowed_directories: tuple[str, ...] | list[str] | None = None,
         filesystem_scope: str | None = None,
+        replace_allowed_directories: bool = False,
     ) -> CapabilityPolicy:
         """Apply per-session filesystem context from a trusted host.
 
@@ -105,12 +106,15 @@ class CapabilityPolicy(BaseModel):
         if session_workspace_root is not None:
             updates["session_workspace_root"] = session_workspace_root
         if allowed_directories is not None:
-            # Merge with existing rather than replace, so host injection adds
-            # to whatever is configured globally.
-            merged = list(self.allowed_directories) + [
-                d for d in allowed_directories if d not in self.allowed_directories
-            ]
-            updates["allowed_directories"] = tuple(merged)
+            if replace_allowed_directories:
+                updates["allowed_directories"] = tuple(dict.fromkeys(allowed_directories))
+            else:
+                # Legacy host context remains additive for clients that have
+                # not opted into the session permission protocol.
+                merged = list(self.allowed_directories) + [
+                    d for d in allowed_directories if d not in self.allowed_directories
+                ]
+                updates["allowed_directories"] = tuple(merged)
         if filesystem_scope is not None:
             updates["filesystem_scope"] = filesystem_scope
         if not updates:

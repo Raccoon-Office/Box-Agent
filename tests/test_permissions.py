@@ -583,6 +583,16 @@ class TestFilesystemOverrides:
         # No duplicate
         assert list(new.allowed_directories).count("/a") == 1
 
+    def test_allowed_directories_replaced_for_session_policy(self):
+        base = CapabilityPolicy(allowed_directories=("/global",))
+        new = base.with_filesystem_overrides(
+            allowed_directories=["/session", "/session"],
+            replace_allowed_directories=True,
+        )
+
+        assert new.allowed_directories == ("/session",)
+        assert base.allowed_directories == ("/global",)
+
     def test_no_args_returns_self(self):
         base = CapabilityPolicy(session_workspace_root="/r")
         new = base.with_filesystem_overrides()
@@ -802,6 +812,21 @@ class TestBashPermissionPhase1:
             permission_engine=perm_engine,
         )
         return await tool.execute(command)
+
+    async def test_full_access_bypasses_dangerous_command_approval(self, workspace: Path):
+        from box_agent.tools.bash_tool import BashTool
+
+        tool = BashTool(
+            workspace_dir=str(workspace),
+            allow_full_access=True,
+            non_interactive=True,
+            permission_engine=None,
+            bypass_dangerous_command_approval=True,
+        )
+        result = await tool.execute(f'rm -rf "{workspace / "missing-target"}"')
+
+        assert result.permission_request is None
+        assert "Approval required" not in (result.stderr or "")
 
     def _make_engine(self, workspace: Path) -> PermissionEngine:
         policy = CapabilityPolicy()  # session_workspace scope

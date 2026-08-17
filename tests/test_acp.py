@@ -3842,6 +3842,119 @@ async def test_acp_prompt_lists_officev3_allowed_directories(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_acp_default_permission_mode_replaces_global_allowed_directories(tmp_path):
+    global_allowed = tmp_path / "global"
+    session_allowed = tmp_path / "session-allowed"
+    workspace = tmp_path / "workspace"
+    global_allowed.mkdir()
+    session_allowed.mkdir()
+
+    officev3 = Officev3Config(
+        permissions=Officev3Permissions(
+            filesystem=FilesystemPermissions(
+                scope="user_home",
+                allowed_directories=[str(global_allowed)],
+            )
+        ),
+        paths=Officev3Paths(session_workspace_root=str(tmp_path / "legacy-root")),
+    )
+    officev3._present = True
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(allow_full_access=True),
+        officev3=officev3,
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(workspace),
+            field_meta={
+                "permission_mode": "default",
+                "filesystem_policy": {
+                    "filesystem_scope": "session_workspace",
+                    "session_workspace_root": str(workspace),
+                    "allowed_directories": [str(session_allowed)],
+                },
+            },
+        )
+    )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+
+    assert bash_tool.allow_full_access is False
+    assert bash_tool._perm is not None
+    assert bash_tool._perm.policy.filesystem_scope == "session_workspace"
+    assert bash_tool._perm.policy.allowed_directories == (str(session_allowed),)
+
+
+@pytest.mark.asyncio
+async def test_acp_default_permission_mode_without_filesystem_policy_fails_closed(tmp_path):
+    global_allowed = tmp_path / "global"
+    workspace = tmp_path / "workspace"
+    global_allowed.mkdir()
+
+    officev3 = Officev3Config(
+        permissions=Officev3Permissions(
+            filesystem=FilesystemPermissions(
+                scope="user_home",
+                allowed_directories=[str(global_allowed)],
+            )
+        ),
+        paths=Officev3Paths(session_workspace_root=str(tmp_path / "legacy-root")),
+    )
+    officev3._present = True
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(allow_full_access=True),
+        officev3=officev3,
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(workspace),
+            field_meta={"permission_mode": "default"},
+        )
+    )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+
+    assert bash_tool.allow_full_access is False
+    assert bash_tool.bypass_dangerous_command_approval is False
+    assert bash_tool._perm is not None
+    assert bash_tool._perm.policy.filesystem_scope == "session_workspace"
+    assert bash_tool._perm.policy.session_workspace_root == str(workspace)
+    assert bash_tool._perm.policy.allowed_directories == ()
+
+
+@pytest.mark.asyncio
+async def test_acp_full_access_mode_bypasses_permission_engine(tmp_path):
+    workspace = tmp_path / "workspace"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(allow_full_access=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(workspace),
+            field_meta={"permission_mode": "full_access"},
+        )
+    )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+    session_tools = agent._sessions[session.sessionId].agent.tools
+
+    assert bash_tool.allow_full_access is True
+    assert bash_tool.bypass_dangerous_command_approval is True
+    assert bash_tool._perm is None
+    assert "execute_code" in session_tools
+    assert "sandbox_status" in session_tools
+
+
+@pytest.mark.asyncio
 async def test_acp_prompt_includes_skill_runtime_context(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     sandbox_base = tmp_path / "sandbox-runtime"

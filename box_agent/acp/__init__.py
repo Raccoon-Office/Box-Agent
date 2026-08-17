@@ -1292,9 +1292,38 @@ class BoxACPAgent:
         perm_engine = None
         grant_store = GrantStore()
         effective_policy: CapabilityPolicy | None = None
-        if self._has_officev3_policy():
+        raw_permission_mode = meta.get("permission_mode") if isinstance(meta, dict) else None
+        permission_mode = raw_permission_mode if raw_permission_mode in {"default", "full_access"} else None
+        if raw_permission_mode is not None and permission_mode is None:
+            log.warn(
+                "session/permissions",
+                session_id=session_id,
+                message=f"Invalid permission_mode={raw_permission_mode!r}; using default permissions",
+            )
+            permission_mode = "default"
+        session_allow_full_access = (
+            permission_mode == "full_access"
+            or (permission_mode is None and self._config.tools.allow_full_access)
+        )
+        # Keep the managed Python/Jupyter runtime available in every ACP
+        # permission mode. Full access bypasses the host permission engine via
+        # session_allow_full_access/perm_engine; it must not require users to
+        # have a separate host Python installation.
+        session_sandbox_mode = True
+
+        if self._has_officev3_policy() and permission_mode != "full_access":
             try:
                 base_policy = CapabilityPolicy.from_config(self._config)
+                if permission_mode == "default":
+                    # Explicit session-default mode must fail closed even when
+                    # the host omits its filesystem context. Host-provided
+                    # values below may narrow or extend this session baseline.
+                    base_policy = base_policy.with_filesystem_overrides(
+                        session_workspace_root=str(workspace),
+                        allowed_directories=[],
+                        filesystem_scope="session_workspace",
+                        replace_allowed_directories=True,
+                    )
 
                 # officev3_permissions_override is DEPRECATED — kept for parsing only.
                 # In-band permission/request negotiation handles escalation now.
@@ -1330,6 +1359,7 @@ class BoxACPAgent:
                         session_workspace_root=swr,
                         allowed_directories=extra_dirs,
                         filesystem_scope=fs_scope,
+                        replace_allowed_directories=permission_mode == "default",
                     )
                     log.info(
                         "session/permissions",
@@ -1356,9 +1386,28 @@ class BoxACPAgent:
                 )
                 effective_policy = fallback_policy
                 perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
+        elif permission_mode == "default":
+            fallback_policy = CapabilityPolicy(
+                filesystem_scope="session_workspace",
+                session_workspace_root=str(workspace),
+            )
+            effective_policy = fallback_policy
+            perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
+            session_allow_full_access = False
+            log.warn(
+                "session/permissions",
+                session_id=session_id,
+                message="No officev3 policy configured; using restrictive session policy",
+            )
+        elif permission_mode == "full_access":
+            log.warn(
+                "session/permissions",
+                session_id=session_id,
+                message="Full access enabled for this session; permission checks are bypassed",
+            )
 
         skill_runtime_context = build_skill_runtime_context(
-            sandbox_mode=True,
+            sandbox_mode=session_sandbox_mode,
             env_context=env_context,
         )
         session_skill_loader = self._skill_loader
@@ -1421,8 +1470,8 @@ class BoxACPAgent:
                 tools,
                 self._config,
                 workspace,
-                sandbox_mode=True,
-                allow_full_access=self._config.tools.allow_full_access,
+                sandbox_mode=session_sandbox_mode,
+                allow_full_access=session_allow_full_access,
                 non_interactive=True,  # ACP cannot do interactive terminal prompts
                 output=lambda msg: sys.stderr.write(msg + "\n"),
                 llm=session_llm,
@@ -1434,6 +1483,7 @@ class BoxACPAgent:
                 artifact_root_dir=output_dir,
                 env_context=env_context,
                 process_owner_id=session_id,
+                bypass_dangerous_command_approval=permission_mode == "full_access",
             )
             system_prompt = (
                 f"{system_prompt.rstrip()}\n\n"

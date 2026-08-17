@@ -781,6 +781,7 @@ class BashTool(Tool):
         permission_engine: PermissionEngine | None = None,
         runtime_env: dict[str, str] | None = None,
         process_owner_id: str | None = None,
+        bypass_dangerous_command_approval: bool = False,
     ):
         """Initialize BashTool with OS-specific shell detection.
 
@@ -797,6 +798,8 @@ class BashTool(Tool):
                                so subprocess commands use the sandbox Python.
             permission_engine: If provided, use capability-based permission checks.
             runtime_env: Extra runtime environment variables exposed to commands.
+            bypass_dangerous_command_approval: If True, skip approval for dangerous
+                                                commands in an explicitly trusted session.
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
@@ -853,6 +856,7 @@ class BashTool(Tool):
         self.non_interactive = non_interactive
         self._perm = permission_engine
         self.process_owner_id = process_owner_id
+        self.bypass_dangerous_command_approval = bypass_dangerous_command_approval
         self._approved_safety_commands: set[str] = set()
         self._subprocess_env = None
         self._use_login_shell = True
@@ -1305,9 +1309,10 @@ Examples:
                     exit_code=1,
                 )
 
-            # 1. Dangerous command detection (always active)
+            # 1. Dangerous command approval is bypassed only for an explicitly
+            # trusted full-access session. Hard product blocks above still apply.
             danger_reason = detect_dangerous_command(command)
-            if danger_reason:
+            if danger_reason and not self.bypass_dangerous_command_approval:
                 if not self._consume_safety_approval(command, danger_reason):
                     return BashOutputResult(
                         success=False,
