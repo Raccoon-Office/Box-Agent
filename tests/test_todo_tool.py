@@ -147,8 +147,8 @@ async def test_set_initialization_ignores_supplied_ids(writer):
     result = await writer.execute(
         action="set",
         todos=[
-            {"id": "1", "task": "Inspect implementation", "status": "in_progress"},
-            {"id": "t2", "task": "Run verification", "status": "pending"},
+            {"id": "99", "task": "Inspect implementation", "status": "in_progress"},
+            {"id": "", "task": "Run verification", "status": "pending"},
         ],
     )
 
@@ -161,6 +161,15 @@ async def test_set_initialization_ignores_supplied_ids(writer):
     assert result.model_context is not None
     assert '"id": "1"' in result.model_context
     assert '"id": "2"' in result.model_context
+
+
+def test_store_replace_keeps_foreign_ids_strict_when_empty(store):
+    with pytest.raises(ValueError, match="Todo #99 does not exist"):
+        store.replace(
+            [
+                {"id": "99", "task": "Inspect implementation", "status": "in_progress"},
+            ]
+        )
 
 
 @pytest.mark.asyncio

@@ -291,11 +291,10 @@ class TodoStore:
 
     def replace(self, todos: list[dict[str, Any]]) -> list[dict]:
         current = self._items
-        initializing = not current
         supplied_ids = [
             str(todo["id"]).strip()
             for todo in todos
-            if not initializing and todo.get("id") is not None
+            if todo.get("id") is not None
         ]
         seen_ids: set[str] = set()
         for todo_id in supplied_ids:
@@ -310,7 +309,7 @@ class TodoStore:
 
         candidate_state = []
         for todo in todos:
-            supplied_id = None if initializing else todo.get("id")
+            supplied_id = todo.get("id")
             existing = current.get(str(supplied_id).strip()) if supplied_id is not None else None
             candidate_state.append({
                 "status": str(
@@ -325,10 +324,7 @@ class TodoStore:
 
         items: list[dict] = []
         for todo in todos:
-            # Models sometimes copy plan-step IDs into the first todo snapshot.
-            # Those IDs do not identify existing todos, so allocate canonical IDs
-            # when the store is empty and report them in the resulting snapshot.
-            supplied_id = None if initializing else todo.get("id")
+            supplied_id = todo.get("id")
             if supplied_id is None:
                 todo_id = self._next_id()
                 created_at = datetime.now().isoformat()
@@ -578,10 +574,18 @@ class TodoWriteTool(Tool):
     ) -> ToolResult:
         try:
             if action == "set":
-                validation_error = self._validate_todos(todos)
+                normalized_todos = todos
+                if isinstance(todos, list) and not self._store.list():
+                    normalized_todos = [
+                        {key: value for key, value in todo.items() if key != "id"}
+                        if isinstance(todo, dict)
+                        else todo
+                        for todo in todos
+                    ]
+                validation_error = self._validate_todos(normalized_todos)
                 if validation_error:
                     return ToolResult(success=False, error=validation_error)
-                items = self._store.replace(todos or [])
+                items = self._store.replace(normalized_todos or [])
                 return self._result(
                     content=(
                         f"Set todo list with {len(items)} "
