@@ -54,6 +54,92 @@ async def test_staged_write_commit_can_override_begin_chunk_count(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_staged_write_rejects_second_begin_for_same_target(tmp_path: Path):
+    tool = StagedFileWriteTool(workspace_dir=str(tmp_path))
+    first = await tool.execute(
+        action="begin", path="deck.patch.json", expected_chunks=4
+    )
+
+    duplicate = await tool.execute(
+        action="begin", path="./deck.patch.json", expected_chunks=5
+    )
+
+    assert first.success
+    assert not duplicate.success
+    assert duplicate.error.startswith("STAGED_FILE_WRITE_TARGET_ACTIVE")
+    assert first.raw_output["write_id"] in duplicate.error
+    assert "next_chunk_index=0" in duplicate.error
+    assert duplicate.raw_output["write_id"] == first.raw_output["write_id"]
+    assert len(tool._writes) == 1
+    assert len(list((tmp_path / ".box-agent-staging").glob("*.part"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_staged_write_recovers_missing_write_id_with_one_active_write(tmp_path: Path):
+    tool = StagedFileWriteTool(workspace_dir=str(tmp_path))
+    begin = await tool.execute(action="begin", path="recovered.txt", expected_chunks=1)
+
+    appended = await tool.execute(action="append_text", chunk_index=0, content="done")
+    committed = await tool.execute(action="commit")
+
+    assert begin.success and appended.success and committed.success
+    assert appended.raw_output["write_id"] == begin.raw_output["write_id"]
+    assert (tmp_path / "recovered.txt").read_text(encoding="utf-8") == "done"
+
+
+@pytest.mark.asyncio
+async def test_staged_write_missing_write_id_is_ambiguous_with_multiple_active_writes(
+    tmp_path: Path,
+):
+    tool = StagedFileWriteTool(workspace_dir=str(tmp_path))
+    await tool.execute(action="begin", path="first.txt")
+    await tool.execute(action="begin", path="second.txt")
+
+    result = await tool.execute(action="append_text", chunk_index=0, content="no")
+
+    assert not result.success
+    assert result.error.startswith("STAGED_FILE_WRITE_ID_REQUIRED")
+    assert "active_writes=2" in result.error
+
+
+@pytest.mark.asyncio
+async def test_staged_write_recovers_unknown_write_id_with_one_active_write(tmp_path: Path):
+    tool = StagedFileWriteTool(workspace_dir=str(tmp_path))
+    begin = await tool.execute(action="begin", path="active.txt", expected_chunks=1)
+
+    appended = await tool.execute(
+        action="append_text",
+        write_id="not-active",
+        chunk_index=0,
+        content="recovered",
+    )
+    committed = await tool.execute(action="commit", write_id="still-not-active")
+
+    assert begin.success and appended.success and committed.success
+    assert appended.raw_output["write_id"] == begin.raw_output["write_id"]
+    assert (tmp_path / "active.txt").read_text(encoding="utf-8") == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_staged_write_rejects_unknown_write_id_with_multiple_active_writes(
+    tmp_path: Path,
+):
+    tool = StagedFileWriteTool(workspace_dir=str(tmp_path))
+    await tool.execute(action="begin", path="first.txt")
+    await tool.execute(action="begin", path="second.txt")
+
+    result = await tool.execute(
+        action="append_text",
+        write_id="not-active",
+        chunk_index=0,
+        content="no",
+    )
+
+    assert not result.success
+    assert result.error.startswith("STAGED_FILE_WRITE_ID_UNKNOWN")
+
+
+@pytest.mark.asyncio
 async def test_staged_write_rejects_large_and_out_of_order_chunks(tmp_path: Path):
     tool = StagedFileWriteTool(workspace_dir=str(tmp_path))
     begin = await tool.execute(action="begin", path="large.html")
@@ -74,6 +160,23 @@ async def test_staged_write_rejects_large_and_out_of_order_chunks(tmp_path: Path
     assert not oversized.success
     assert oversized.error.startswith("STAGED_FILE_CHUNK_TOO_LARGE")
     assert not (tmp_path / "large.html").exists()
+
+
+@pytest.mark.asyncio
+async def test_staged_write_accepts_chunk_at_generated_body_limit(tmp_path: Path):
+    tool = StagedFileWriteTool(workspace_dir=str(tmp_path))
+    begin = await tool.execute(action="begin", path="at-limit.html", expected_chunks=1)
+
+    appended = await tool.execute(
+        action="append_text",
+        write_id=begin.raw_output["write_id"],
+        chunk_index=0,
+        content="x" * MAX_GENERATED_BODY_CHARS,
+    )
+    committed = await tool.execute(action="commit", write_id=begin.raw_output["write_id"])
+
+    assert appended.success and committed.success
+    assert (tmp_path / "at-limit.html").stat().st_size == MAX_GENERATED_BODY_CHARS
 
 
 @pytest.mark.asyncio

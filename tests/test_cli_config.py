@@ -300,6 +300,66 @@ def test_config_mcp_connect_timeout_defaults_and_overrides(tmp_path: Path) -> No
     assert cli.Config.from_yaml(override_path).tools.mcp.connect_timeout == 15.0
 
 
+def test_enable_playwright_migrates_managed_timeout_defaults(tmp_path: Path) -> None:
+    mcp_path = tmp_path / "mcp.json"
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright": {
+                        "command": "npx",
+                        "args": [
+                            "-y",
+                            "@playwright/mcp@latest",
+                            "--timeout-navigation",
+                            "60000",
+                        ],
+                        "disabled": True,
+                        "execute_timeout": 60,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cli._enable_playwright_in_mcp(mcp_path)
+
+    playwright = json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"][
+        "playwright"
+    ]
+    assert playwright["disabled"] is False
+    assert playwright["execute_timeout"] == 45.0
+    assert playwright["args"][-2:] == ["--timeout-navigation", "30000"]
+    assert playwright["args"].count("--timeout-navigation") == 1
+
+
+def test_enable_playwright_preserves_custom_execute_timeout(tmp_path: Path) -> None:
+    mcp_path = tmp_path / "mcp.json"
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright": {
+                        "command": "npx",
+                        "args": ["-y", "@playwright/mcp@latest"],
+                        "execute_timeout": 90,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cli._enable_playwright_in_mcp(mcp_path)
+
+    playwright = json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"][
+        "playwright"
+    ]
+    assert playwright["execute_timeout"] == 90
+    assert playwright["args"][-2:] == ["--timeout-navigation", "30000"]
+
+
 def test_config_parallel_tool_timeout_defaults_and_overrides(tmp_path: Path) -> None:
     default_path = tmp_path / "default.yaml"
     _write_config(default_path)

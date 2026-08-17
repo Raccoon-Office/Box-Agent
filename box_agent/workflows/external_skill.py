@@ -164,7 +164,7 @@ def build_external_skill_completion_gate(
         completion_reserve_tool_calls=(
             limits.completion_reserve_calls if artifact_globs else 0
         ),
-        pause_tools=frozenset({"request_user_input"}),
+        pause_tools=frozenset({"request_user_input", "request_user_decision"}),
         workflow_checkpoint_kind=EXTERNAL_SKILL_WORKFLOW_KIND,
         workflow_options=external_skill_workflow_options(
             skill_name=skill.name,
@@ -215,7 +215,7 @@ def build_external_skill_completion_gate_from_options(
         completion_reserve_tool_calls=(
             limits.completion_reserve_calls if artifact_globs else 0
         ),
-        pause_tools=frozenset({"request_user_input"}),
+        pause_tools=frozenset({"request_user_input", "request_user_decision"}),
         workflow_checkpoint_kind=EXTERNAL_SKILL_WORKFLOW_KIND,
         workflow_options=options,
     )
@@ -366,8 +366,10 @@ class ExternalSkillRunPolicy:
             "Continue following the named Skill without modifying its installed files. "
             "The Skill may keep intermediate work in its own approved directories, but "
             "before declaring completion publish final user-facing files to artifact_root. "
-            "At a blocking confirmation, call request_user_input instead of only asking in "
-            "plain text. Preserve completed work and continue from the next unfinished action."
+            "For missing facts, call request_user_input. For a finite choice that materially "
+            "changes the user-visible result, call request_user_decision instead of only asking "
+            "in plain text. Internal implementation choices are yours to make. Preserve "
+            "completed work and continue from the next unfinished action."
         )
         if self._resume_checkpoint is not None:
             checkpoint_text = (

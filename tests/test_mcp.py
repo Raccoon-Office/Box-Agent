@@ -13,6 +13,12 @@ import httpx
 import pytest
 
 from box_agent.tools import mcp_loader
+from box_agent.tools.browser_runtime_scope import (
+    BrowserRuntimeCoordinator,
+    release_browser_runtime,
+    reset_browser_runtime_owner,
+    set_browser_runtime_owner,
+)
 from box_agent.tools.mcp_loader import (
     DynamicBearerAuth,
     MCPServerConnection,
@@ -325,6 +331,75 @@ class TestMCPToolExecution:
 
         assert result.success is True
         assert json.loads(result.content)["data"] == {"status": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_playwright_lock_wait_uses_execution_timeout(self):
+        owner_a = "session-a:turn-1"
+        owner_b = "session-b:turn-1"
+
+        class FakeSession:
+            calls = 0
+
+            async def call_tool(self, name, arguments):
+                self.calls += 1
+                return SimpleNamespace(content=[], isError=False)
+
+        session = FakeSession()
+        tool = MCPTool(
+            name="browser_navigate",
+            description="navigate",
+            parameters={"type": "object"},
+            session=session,
+            server_name="playwright",
+            execute_timeout=0.02,
+        )
+
+        await BrowserRuntimeCoordinator.acquire(owner_a)
+        owner_token = set_browser_runtime_owner(owner_b)
+        try:
+            result = await tool.execute(url="https://example.com")
+        finally:
+            reset_browser_runtime_owner(owner_token)
+
+        assert result.success is False
+        assert result.error is not None
+        assert result.error.startswith("BROWSER_RUNTIME_BUSY:")
+        assert session.calls == 0
+
+        waiting = asyncio.create_task(BrowserRuntimeCoordinator.acquire(owner_b))
+        await asyncio.sleep(0)
+        assert waiting.done() is False
+        await release_browser_runtime(owner_a)
+        await asyncio.wait_for(waiting, timeout=0.5)
+        await release_browser_runtime(owner_b)
+
+    @pytest.mark.asyncio
+    async def test_playwright_call_timeout_is_not_reported_as_runtime_busy(self):
+        class SlowSession:
+            async def call_tool(self, name, arguments):
+                await asyncio.sleep(1)
+
+        owner = "session-a:turn-1"
+        owner_token = set_browser_runtime_owner(owner)
+        try:
+            tool = MCPTool(
+                name="browser_navigate",
+                description="navigate",
+                parameters={"type": "object"},
+                session=SlowSession(),
+                server_name="playwright",
+                execute_timeout=0.02,
+            )
+            result = await tool.execute(url="https://example.com")
+        finally:
+            await release_browser_runtime(owner)
+            reset_browser_runtime_owner(owner_token)
+
+        assert result.success is False
+        assert result.error == (
+            "MCP tool execution timed out after 0.02s. "
+            "The remote server may be slow or unresponsive."
+        )
 
 
 # =============================================================================

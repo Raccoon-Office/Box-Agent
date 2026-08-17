@@ -68,6 +68,11 @@ Keep the same slide order and slide intent across all depths. Guided and scripte
    - Include "可用素材 / 依据" when the source contains specific evidence, examples, data points, quotes, or citations.
    - Keep this lightweight. Do not build a formal evidence map unless asked.
    - If a claim is useful but not supported by the supplied material, mark it as "需要补充依据" rather than presenting it as sourced.
+   - When the source bundle contains a generic presentation handoff, consume
+     only `delivery_mode`, `verified_facts`, `gaps`, and `quality_summary`. Use
+     all verified facts for `full`, only that verified subset for `partial`, and
+     create a placeholder-only factual structure for `framework`. Do not depend
+     on the producing research skill's validator name or internal status fields.
 
 8. **Expand to the requested depth**
    - For brief outline, output only the deck setup and slide outline.

@@ -17,6 +17,13 @@ const PAGE_COUNT_RE = new RegExp(
   `(?<!第)(${PAGE_TOKEN_SOURCE})\\s*(?:页|pages?|slides?)`,
   "i"
 );
+const POSITIONAL_PAGE_SPAN_RE = new RegExp(
+  `(?:前|首|最前)\\s*${PAGE_TOKEN_SOURCE}` +
+    `(?:\\s*(?:-|~|～|—|–|至|到)\\s*${PAGE_TOKEN_SOURCE})?\\s*页(?:内容)?` +
+    `|\\b(?:first|initial)\\s+${PAGE_TOKEN_SOURCE}` +
+    `(?:\\s*(?:-|~|to|through)\\s*${PAGE_TOKEN_SOURCE})?\\s*(?:pages?|slides?)\\b`,
+  "gi"
+);
 
 function parsePageToken(value) {
   const token = String(value || "").trim();
@@ -47,7 +54,9 @@ function explicitPageCountContract(sourceText) {
     `第\\s*${PAGE_TOKEN_SOURCE}(?:\\s*(?:-|~|～|—|–|至|到)\\s*${PAGE_TOKEN_SOURCE})?\\s*页`,
     "gi"
   );
-  const requestText = normalized.replace(ordinalPageReference, " ");
+  const requestText = normalized
+    .replace(ordinalPageReference, " ")
+    .replace(POSITIONAL_PAGE_SPAN_RE, " ");
   const range = requestText.match(PAGE_RANGE_RE);
   if (range) {
     const minimum = parsePageToken(range[1]);
@@ -78,7 +87,7 @@ function outlineBulletCount(slide) {
 function usage() {
   console.error(
     "Usage: validate_outline.js outline.json [--min-slides N] " +
-    "[--max-slides N] [--research-report research/qa/topic_research_check.json] " +
+    "[--max-slides N] [--research-handoff research/qa/topic_research_check.json] " +
     "[--report qa/outline_check.json]"
   );
   process.exit(2);
@@ -92,7 +101,7 @@ function parseArgs(argv) {
     maxSlides: 40,
     minSlidesExplicit: false,
     maxSlidesExplicit: false,
-    researchReport: null,
+    researchHandoff: null,
     report: null,
   };
   for (let i = 1; i < argv.length; i += 1) {
@@ -109,8 +118,9 @@ function parseArgs(argv) {
     } else if (arg === "--report" && value) {
       opts.report = value;
       i += 1;
-    } else if (arg === "--research-report" && value) {
-      opts.researchReport = value;
+    } else if (["--research-handoff", "--research-report"].includes(arg) && value) {
+      // --research-report remains a compatibility alias for existing sessions.
+      opts.researchHandoff = value;
       i += 1;
     } else {
       usage();
@@ -133,42 +143,73 @@ function readOutline(outlinePath) {
   }
 }
 
-function readVerifiedResearchEvidence(reportPath) {
-  if (!reportPath) return null;
-  const resolved = resolveArtifactPath(reportPath);
-  let report;
+function readPresentationHandoff(handoffPath) {
+  if (!handoffPath) return null;
+  const resolved = resolveArtifactPath(handoffPath);
+  let container;
   try {
-    report = JSON.parse(fs.readFileSync(resolved, "utf8"));
+    container = JSON.parse(fs.readFileSync(resolved, "utf8"));
   } catch (error) {
-    throw new Error(`Invalid research QA report ${resolved}: ${error.message}`);
+    throw new Error(`Invalid presentation research handoff ${resolved}: ${error.message}`);
+  }
+  const generic = container && container.presentation_handoff
+    ? container.presentation_handoff
+    : (container && container.delivery_mode ? container : null);
+  let deliveryMode;
+  let verifiedFacts;
+  let qualityOk;
+  let legacySupported = true;
+  if (generic) {
+    deliveryMode = generic.delivery_mode;
+    verifiedFacts = Array.isArray(generic.verified_facts)
+      ? generic.verified_facts
+      : null;
+    qualityOk = Boolean(
+      generic.quality_summary && generic.quality_summary.quality_ok === true
+    );
+  } else {
+    // Compatibility adapter for reports written before presentation_handoff v1.
+    legacySupported = container && container.validator === "research-synthesis";
+    const legacyFull = container
+      && container.delivery_allowed === undefined
+      && container.ok === true;
+    const deliveryAllowed = legacyFull || container.delivery_allowed === true;
+    deliveryMode = deliveryAllowed
+      ? (legacyFull ? "full" : container.handoff_status)
+      : "invalid";
+    verifiedFacts = Array.isArray(container && container.verified_evidence)
+      ? container.verified_evidence
+      : null;
+    qualityOk = container && container.quality_ok === true;
   }
   if (
-    !report
-    || report.ok !== true
-    || report.validator !== "research-synthesis"
-    || report.evidence_schema_version !== 1
-    || !Array.isArray(report.verified_evidence)
-    || report.verified_evidence.length < 1
+    !container
+    || !legacySupported
+    || (generic && generic.schema_version !== 1)
+    || !["full", "partial", "framework"].includes(deliveryMode)
+    || !verifiedFacts
+    || (["full", "partial"].includes(deliveryMode) && verifiedFacts.length < 1)
+    || (deliveryMode === "framework" && verifiedFacts.length !== 0)
   ) {
     throw new Error(
-      "Research QA report is not a successful entity-bound evidence handoff"
+      "Presentation research handoff is not a valid full/partial/framework delivery"
     );
   }
   const verified = new Map();
-  report.verified_evidence.forEach((item, index) => {
+  verifiedFacts.forEach((item, index) => {
     if (
       !item
-      || item.status !== "verified"
+      || (item.status !== undefined && item.status !== "verified")
       || !text(item.entity)
       || !text(item.claim)
       || !text(item.source_url)
       || !text(item.canonical)
     ) {
-      throw new Error(`Research QA verified_evidence.${index} is invalid`);
+      throw new Error(`Presentation handoff verified_facts.${index} is invalid`);
     }
     verified.set(text(item.canonical), item);
   });
-  return { resolved, verified };
+  return { resolved, verified, deliveryMode, qualityOk };
 }
 
 function text(value) {
@@ -227,6 +268,22 @@ function isPublicResearchOutline(outline) {
 
 function hasEvidence(slide) {
   return Array.isArray(slide.evidence) && slide.evidence.some(item => text(item));
+}
+
+function isStructuralEvidenceExemptSlide(slide, index) {
+  const role = `${slide && slide.layout || ""} ${slide && slide.visual || ""}`;
+  if (index === 0 && includesAny(role, ["cover", "hero", "封面"])) return true;
+  return includesAny(role, [
+    "agenda",
+    "table of contents",
+    "section divider",
+    "section-divider",
+    "目录",
+    "议程",
+    "章节页",
+    "章节过渡",
+    "过渡页",
+  ]);
 }
 
 const ASSUMPTION_EVIDENCE_RE = /假设|示意|假定|assum(?:e|ed|ption)|illustrative|hypothetical/i;
@@ -371,6 +428,8 @@ function validate(outline, opts) {
       warnings.push(`${label}: bullets has ${outlineBulletCount(slide)} items; trim to 5 or fewer`);
     }
 
+    const structuralEvidenceExempt = isStructuralEvidenceExemptSlide(slide, index);
+
     if (!Array.isArray(slide.evidence)) {
       issues.push(`${label}: evidence must be an array, use [] for non-evidence slides`);
     } else {
@@ -386,10 +445,15 @@ function validate(outline, opts) {
             `${label}: public-research page has no evidence because it explicitly ` +
             "marks a required fact as unavailable"
           );
+        } else if (structuralEvidenceExempt) {
+          warnings.push(
+            `${label}: structural public-research page has no factual evidence; ` +
+            "cover, agenda, and section-divider pages may keep evidence empty"
+          );
         } else if (verifiedResearch) {
           issues.push(
             `${label}: entity-bound research handoff requires at least one exact ` +
-            "verified_evidence canonical item unless a required fact is explicitly unavailable"
+            "verified_facts canonical item unless a required fact is explicitly unavailable"
           );
         } else {
           warnings.push(
@@ -408,7 +472,7 @@ function validate(outline, opts) {
         if (verifiedResearch && !verifiedItem) {
           issues.push(
             `${label}: evidence.${evidenceIndex} is not an exact canonical item from ` +
-            "the successful research QA report"
+            "the presentation research handoff"
           );
         }
         if (verifiedItem) {
@@ -511,18 +575,19 @@ function validate(outline, opts) {
 
     const combined = [slide.title, slide.message, slide.layout, slide.visual, slide.notes].map(text).join(" ");
     const isDataHeavy = includesAny(combined, dataHeavyTerms);
-    const isCoverLike = index === 0 || includesAny(
-      `${slide.layout || ""} ${slide.visual || ""}`,
-      ["cover", "封面"]
-    );
     const chartWorthy = numberTokens(combined).length > 0
       || includesAny(combined, chartWorthyTerms);
-    if (isDataHeavy && publicResearch && !hasEvidence(slide)) {
+    if (
+      isDataHeavy
+      && publicResearch
+      && !structuralEvidenceExempt
+      && !hasEvidence(slide)
+    ) {
       warnings.push(`${label}: appears data/evidence-heavy but evidence is empty`);
     }
     if (
       isDataHeavy
-      && !isCoverLike
+      && !structuralEvidenceExempt
       && chartWorthy
       && !includesAny(slide.visual, dataDisplayTerms)
     ) {
@@ -566,13 +631,13 @@ function main() {
     if (!opts.minSlidesExplicit) opts.minSlides = pageCountContract.minimum;
     if (!opts.maxSlidesExplicit) opts.maxSlides = pageCountContract.maximum;
   }
-  opts.verifiedResearch = readVerifiedResearchEvidence(opts.researchReport);
+  opts.verifiedResearch = readPresentationHandoff(opts.researchHandoff);
   const { outline, resolved } = readOutline(opts.outlinePath);
   const result = validate(outline, opts);
   const output = {
     ...result,
     outline: resolved,
-    researchReport: opts.verifiedResearch ? opts.verifiedResearch.resolved : null,
+    researchHandoff: opts.verifiedResearch ? opts.verifiedResearch.resolved : null,
     pageCountContract,
   };
   const outputText = JSON.stringify(output, null, 2);

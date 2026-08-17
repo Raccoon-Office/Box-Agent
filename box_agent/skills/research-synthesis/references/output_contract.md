@@ -90,9 +90,11 @@ Conflict fields:
 
 Entity/source rules:
 
-- Every target entity needs verified evidence.
-- When an entity declares `official_domains`, it also needs at least one
-  verified `first_party` row whose URL hostname matches that domain.
+- Missing verified evidence for a target entity is a coverage warning. It does
+  not invalidate verified rows for other entities or block a downstream deck.
+- When an entity declares `official_domains`, a `first_party` row is accepted
+  only when its URL hostname matches that domain. Missing first-party coverage
+  is reported as a warning.
 - `first_party` means owned by the target entity; government, regulator,
   filing, standards, or academic pages retain their own source type.
 - The validator checks that claim numbers occur in the excerpt and that the
@@ -106,11 +108,24 @@ Entity/source rules:
 
 After the Markdown artifacts are complete, run the bundled validator with
 `--report {workspace}/research/qa/{topic}_research_check.json`. The report is
-the machine-readable handoff to downstream presentation/report workflows and
-contains `ok`, route, topic, actual/minimum dimension counts, checked files,
-issues, warnings, evidence counts, first-party coverage, and the
-`verified_evidence` array. Each verified row includes a canonical
-`entity | claim | source_type | source_url` string for downstream fact binding.
+the machine-readable handoff to downstream presentation/report workflows. Its
+stable boundary is `presentation_handoff` schema v1:
+
+- `delivery_mode`: `full`, `partial`, `framework`, or `invalid`.
+- `verified_facts`: source-bound fact objects with canonical
+  `entity | claim | source_type | source_url` strings.
+- `gaps`: excluded claims and quality limitations.
+- `quality_summary`: quality result and actual/recommended coverage.
+- `context_files`: producer artifacts that may be read for narrative context.
+
+The remaining top-level fields (`ok`, `quality_ok`, `delivery_allowed`,
+`handoff_status`, route, evidence counts, and so on) describe this validator's
+own QA process and are retained for diagnostics and compatibility. Presentation
+consumers must not branch on them. `full` means the quality target passed,
+`partial` means a verified subset is usable despite quality gaps, and
+`framework` means delivery may continue with no external factual claims.
+Dimension shortfalls and excluded unverified rows do not make the deck
+undeliverable.
 Do not create this JSON by hand. If any checked research file or the evidence
 ledger changes, rerun the validator so the report is newer than its inputs.
 

@@ -6,6 +6,7 @@ and verification strategy. Todo items remain the execution progress tracker.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from itertools import count
 from typing import Any
@@ -20,9 +21,11 @@ def _now() -> str:
     return datetime.now().isoformat()
 
 
-def _normalize_text_list(values: list[Any] | None) -> list[str]:
+def _normalize_text_list(values: list[Any] | str | None) -> list[str]:
     if not values:
         return []
+    if isinstance(values, str):
+        values = [values]
     normalized: list[str] = []
     for value in values:
         text = str(value).strip()
@@ -31,9 +34,18 @@ def _normalize_text_list(values: list[Any] | None) -> list[str]:
     return normalized
 
 
-def _normalize_steps(values: list[Any] | None) -> list[dict[str, str]]:
+def _normalize_steps(values: list[Any] | dict[str, Any] | str | None) -> list[dict[str, str]]:
     if not values:
         return []
+    if isinstance(values, str):
+        raw_values = values.strip()
+        try:
+            parsed_values = json.loads(raw_values)
+        except json.JSONDecodeError:
+            parsed_values = None
+        values = parsed_values if isinstance(parsed_values, list) else [raw_values]
+    elif isinstance(values, dict):
+        values = [values]
 
     steps: list[dict[str, str]] = []
     for index, value in enumerate(values, start=1):
@@ -93,10 +105,10 @@ class PlanStore:
         title: str,
         objective: str = "",
         scope: str = "",
-        steps: list[Any] | None = None,
-        verification: list[Any] | None = None,
-        risks: list[Any] | None = None,
-        assumptions: list[Any] | None = None,
+        steps: list[Any] | dict[str, Any] | str | None = None,
+        verification: list[Any] | str | None = None,
+        risks: list[Any] | str | None = None,
+        assumptions: list[Any] | str | None = None,
         status: str = "active",
     ) -> dict[str, Any]:
         now = _now()
@@ -144,7 +156,9 @@ class PlanWriteTool(Tool):
             "separately to track completed/in-progress/pending work. Do not use this "
             "for greetings, acknowledgements, approval replies, or short messages like "
             "ok, continue, confirmed, 好的, 收到, or 继续 unless they also contain a new "
-            "concrete task."
+            "concrete task. Every call must include action. For action='set', always "
+            "include a non-empty title and pass steps, verification, risks, and assumptions "
+            "as JSON arrays, never as JSON-encoded strings."
         )
 
     @property
@@ -155,7 +169,7 @@ class PlanWriteTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": ["set", "clear"],
-                    "description": "Set/replace the current plan, or clear it.",
+                    "description": "Required on every call. Set/replace the plan, or clear it.",
                 },
                 "title": {
                     "type": "string",
@@ -176,7 +190,10 @@ class PlanWriteTool(Tool):
                 },
                 "steps": {
                     "type": "array",
-                    "description": "Ordered plan steps. These describe approach, not progress.",
+                    "description": (
+                        "Ordered plan steps as a JSON array, never a JSON-encoded string. "
+                        "These describe approach, not progress."
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -207,17 +224,23 @@ class PlanWriteTool(Tool):
 
     async def execute(
         self,
-        action: str,
+        action: str | None = None,
         title: str | None = None,
         objective: str = "",
         scope: str = "",
         status: str = "active",
-        steps: list[Any] | None = None,
-        verification: list[Any] | None = None,
-        risks: list[Any] | None = None,
-        assumptions: list[Any] | None = None,
+        steps: list[Any] | dict[str, Any] | str | None = None,
+        verification: list[Any] | str | None = None,
+        risks: list[Any] | str | None = None,
+        assumptions: list[Any] | str | None = None,
     ) -> ToolResult:
-        if action == "clear":
+        normalized_action = str(action or "").strip().lower()
+        if not normalized_action and any(
+            value for value in (title, objective, scope, steps, verification, risks, assumptions)
+        ):
+            normalized_action = "set"
+
+        if normalized_action == "clear":
             self._store.clear()
             return ToolResult(
                 success=True,
@@ -225,14 +248,20 @@ class PlanWriteTool(Tool):
                 raw_output=_plan_snapshot(None, action="clear"),
             )
 
-        if action != "set":
+        if normalized_action != "set":
             return ToolResult(success=False, error=f"Unknown action: {action}")
 
-        if not title or not title.strip():
+        normalized_title = str(title or "").strip()
+        if not normalized_title:
+            normalized_title = str(objective or "").strip()
+        if not normalized_title:
+            normalized_steps = _normalize_steps(steps)
+            normalized_title = normalized_steps[0]["title"] if normalized_steps else ""
+        if not normalized_title:
             return ToolResult(success=False, error="'title' is required for set.")
 
         plan = self._store.set(
-            title=title,
+            title=normalized_title,
             objective=objective,
             scope=scope,
             status=status,

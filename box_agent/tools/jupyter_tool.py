@@ -1194,8 +1194,8 @@ Best practices:
 - Keep each code argument under {MAX_EXECUTE_CODE_CHARS_DISPLAY} characters
 - Do not inline large generated static artifact bodies (HTML/CSS/JS, shared
   styles, JSON manifests, templates, base64, or file bodies) in execute_code.
-  Use write_file for the first chunk and append_file for later chunks unless
-  Python processing is actually required.
+  Use staged_file_write with begin, ordered append_text or append_file chunks,
+  and commit unless Python processing is actually required.
 - Use print() to see intermediate results
 - Never use the bash tool's `pip install` for sandbox packages — bash runs against the
   host Python and the sandbox kernel will not see those packages
@@ -1220,8 +1220,9 @@ Output formats:
                         "generated static content such as HTML/CSS/JS, shared "
                         "styles, JSON manifests, templates, base64, or file "
                         "bodies, do not inline the body in execute_code; use "
-                        "write_file for the first chunk and append_file for later "
-                        "chunks unless Python processing is actually required. "
+                        "staged_file_write with begin, ordered append_text or "
+                        "append_file chunks, and commit unless Python processing "
+                        "is actually required. "
                         "Variables and functions from previous calls in the same "
                         "session are available. Use %pip install <pkg> to install "
                         "packages."
@@ -1273,8 +1274,8 @@ Output formats:
                     f"{len(code)} characters; limit is {MAX_EXECUTE_CODE_CHARS}. "
                     "Split the work into multiple execute_code calls because "
                     "kernel state persists. Do not inline large generated static "
-                    "artifact bodies; use write_file for the first chunk and "
-                    "append_file for later chunks."
+                    "artifact bodies; use staged_file_write with begin, ordered "
+                    "append_text or append_file chunks, and commit."
                 ),
             )
         if self._looks_like_python_pptx_new_deck(code):

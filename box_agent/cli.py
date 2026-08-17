@@ -1718,7 +1718,7 @@ def _ensure_user_mcp_config() -> Path:
 
 
 def _enable_playwright_in_mcp(mcp_path: Path) -> None:
-    """Flip `mcpServers.playwright.disabled` to false, adding the entry if missing."""
+    """Enable Playwright and apply the managed browser timeout defaults."""
     import json
 
     data = json.loads(mcp_path.read_text(encoding="utf-8"))
@@ -1731,6 +1731,26 @@ def _enable_playwright_in_mcp(mcp_path: Path) -> None:
         if entry is None:
             raise RuntimeError("playwright entry missing from mcp-example.json")
         servers["playwright"] = entry
+
+    # Migrate the previous managed default while preserving deliberate custom
+    # execution timeouts. Keep the outer MCP deadline above Playwright's own
+    # navigation deadline so the actionable browser error can be returned.
+    if entry.get("execute_timeout") in (None, 60, 60.0):
+        entry["execute_timeout"] = 45.0
+    args = entry.get("args")
+    if isinstance(args, list) and all(isinstance(arg, str) for arg in args):
+        next_args: list[str] = []
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--timeout-navigation":
+                index += 1
+                if index < len(args) and not args[index].startswith("--"):
+                    index += 1
+                continue
+            next_args.append(arg)
+            index += 1
+        entry["args"] = [*next_args, "--timeout-navigation", "30000"]
     entry["disabled"] = False
     mcp_path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
 

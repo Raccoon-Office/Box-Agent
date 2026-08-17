@@ -104,6 +104,9 @@ def test_validator_writes_success_report_for_reduced_focused_route(
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["ok"] is True
+    assert payload["quality_ok"] is True
+    assert payload["delivery_allowed"] is True
+    assert payload["handoff_status"] == "full"
     assert payload["validator"] == "research-synthesis"
     assert payload["route"] == "B"
     assert payload["min_dimensions"] == 3
@@ -111,6 +114,13 @@ def test_validator_writes_success_report_for_reduced_focused_route(
     assert len(payload["files_checked"]) == 6
     assert payload["evidence_schema_version"] == 1
     assert payload["verified_evidence_count"] == 1
+    handoff = payload["presentation_handoff"]
+    assert handoff["schema_version"] == 1
+    assert handoff["delivery_mode"] == "full"
+    assert handoff["verified_facts"][0]["canonical"] == payload[
+        "verified_evidence"
+    ][0]["canonical"]
+    assert handoff["quality_summary"]["quality_ok"] is True
     assert payload["first_party_entity_count"] == 1
     assert payload["verified_evidence"][0]["canonical"] == (
         "Example Corp | Example Corp launched Product One in 2026. | "
@@ -148,6 +158,10 @@ def test_validator_writes_failed_report_when_research_is_too_shallow(
     assert result.returncode == 1
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["ok"] is False
+    assert payload["delivery_allowed"] is True
+    assert payload["handoff_status"] == "partial"
+    assert payload["presentation_handoff"]["delivery_mode"] == "partial"
+    assert payload["presentation_handoff"]["quality_summary"]["quality_ok"] is False
     assert payload["dimension_count"] == 2
     assert "expected at least 3 dimension files, found 2" in payload["issues"]
 
@@ -244,8 +258,164 @@ def test_validator_rejects_first_party_source_on_wrong_domain(tmp_path: Path) ->
         "does not match an official domain" in issue for issue in payload["issues"]
     )
     assert any(
-        "no verified first_party evidence" in issue for issue in payload["issues"]
+        "no verified first_party evidence" in warning
+        for warning in payload["warnings"]
     )
+
+
+def test_validator_allows_partial_delivery_with_verified_subset(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    _write_focused_research(
+        research,
+        dimensions=2,
+        evidence=[
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp launched Product One in 2026.",
+                "source_url": "https://example.com/news/product-one",
+                "source_type": "first_party",
+                "evidence_excerpt": (
+                    "Example Corp launched Product One for customers in 2026."
+                ),
+                "confidence": "high",
+                "status": "verified",
+            },
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp reached 48.1% in 2026.",
+                "source_url": "https://example.com/news/unread",
+                "source_type": "secondary",
+                "evidence_excerpt": "A search result mentioned market growth.",
+                "confidence": "low",
+                "status": "unverified",
+                "unverified_reason": "The exact page could not be read.",
+            },
+        ],
+    )
+    report = research / "qa" / "topic_research_check.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--research-dir",
+            str(research),
+            "--topic",
+            "topic",
+            "--route",
+            "B",
+            "--min-dimensions",
+            "3",
+            "--report",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["quality_ok"] is False
+    assert payload["delivery_allowed"] is True
+    assert payload["handoff_status"] == "partial"
+    assert payload["verified_evidence_count"] == 1
+    assert payload["unverified_evidence_count"] == 1
+    assert any("48.1%" in warning for warning in payload["warnings"])
+    assert not any("48.1%" in issue for issue in payload["issues"])
+    assert len(payload["presentation_handoff"]["verified_facts"]) == 1
+    assert any(
+        "48.1%" in gap for gap in payload["presentation_handoff"]["gaps"]
+    )
+
+
+def test_validator_allows_framework_delivery_without_verified_evidence(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    _write_focused_research(
+        research,
+        evidence=[
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp reached 62.2% in 2026.",
+                "source_url": "https://example.com/news/unread",
+                "source_type": "secondary",
+                "evidence_excerpt": "Unverified search discovery only.",
+                "confidence": "low",
+                "status": "unverified",
+                "unverified_reason": "The source page was unavailable.",
+            }
+        ],
+    )
+    report = research / "qa" / "topic_research_check.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--research-dir",
+            str(research),
+            "--topic",
+            "topic",
+            "--route",
+            "B",
+            "--min-dimensions",
+            "3",
+            "--report",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["quality_ok"] is False
+    assert payload["delivery_allowed"] is True
+    assert payload["handoff_status"] == "framework"
+    assert payload["verified_evidence"] == []
+    assert payload["presentation_handoff"]["delivery_mode"] == "framework"
+    assert payload["presentation_handoff"]["verified_facts"] == []
+    assert "no verified evidence available" in "\n".join(payload["issues"])
+
+
+def test_validator_does_not_allow_delivery_before_minimum_structure_exists(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    research.mkdir()
+    (research / "topic_dim01.md").write_text("# One dimension\n", encoding="utf-8")
+    report = research / "qa" / "topic_research_check.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--research-dir",
+            str(research),
+            "--topic",
+            "topic",
+            "--route",
+            "B",
+            "--min-dimensions",
+            "3",
+            "--report",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["delivery_allowed"] is False
+    assert payload["handoff_status"] == "invalid"
+    assert payload["presentation_handoff"]["delivery_mode"] == "invalid"
 
 
 def test_validator_excludes_conflicting_user_input_from_verified_handoff(

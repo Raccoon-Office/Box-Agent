@@ -60,7 +60,8 @@ Use for specific but multi-dimensional research questions.
    set before opening another batch. A later query must target a named uncovered
    dimension, conflict, or missing first-party source; reordered or lightly
    reworded versions of an already-run entity/fact query do not add depth.
-2. Decompose into at least 10 dimensions unless the scope is explicitly small.
+2. Decompose into distinct slide-relevant dimensions; ten is a quality target
+   for a broad landscape, not a delivery-blocking file quota.
 3. Deep dive each dimension.
    - If subagents are authorized, launch multiple dimension agents in bounded
      rounds, with one dimension and one output file per agent.

@@ -41,6 +41,7 @@ def create_workflow_policy(
     workspace_dir: str | None,
     artifact_root_dir: str | Path | None,
     workflow_options: Mapping[str, Any] | None = None,
+    available_tool_names: frozenset[str] | None = None,
 ) -> WorkflowPolicy | None:
     """Create a per-run policy without exposing implementations to the kernel."""
     if workflow_kind == ControlledPresentationPolicy.kind:
@@ -69,6 +70,7 @@ def create_workflow_policy(
                 if isinstance(image_generation_policy, str)
                 else None
             ),
+            available_tool_names=available_tool_names,
         )
         resume_checkpoint = load_workflow_checkpoint(
             workspace_dir=workspace_dir,

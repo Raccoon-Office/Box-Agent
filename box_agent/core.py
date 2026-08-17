@@ -118,6 +118,7 @@ _log = logging.getLogger(__name__)
 _DEFAULT_AGENT_CONFIG = AgentConfig()
 PARALLEL_TOOL_CANCEL_GRACE_SECONDS: Final[float] = 2.0
 LLM_ACTIVITY_INTERVAL_SECONDS: Final[float] = 15.0
+TOOL_ACTIVITY_INTERVAL_SECONDS: Final[float] = 15.0
 # Long tool arguments can legitimately take more than two minutes before the
 # provider emits another SSE chunk.  Match the conservative baseline used by
 # mature long-running agents while retaining bounded recovery below.
@@ -206,21 +207,34 @@ _MODEL_HISTORY_PLACEHOLDER_ARGUMENTS: Final[dict[str, tuple[str, ...]]] = {
     "append_file": ("content",),
     "edit_file": ("old_str", "new_str"),
     "execute_code": ("code",),
+    "staged_file_write": ("content",),
 }
+_MODEL_HISTORY_FILE_MUTATION_TOOLS: Final[frozenset[str]] = frozenset(
+    {"write_file", "append_file", "edit_file"}
+)
 _MODEL_HISTORY_PLACEHOLDER_REPAIR_LIMIT: Final[int] = 1
 _MODEL_HISTORY_PLACEHOLDER_TOOL_ERROR = (
     "INTERNAL_MODEL_HISTORY_PLACEHOLDER: the requested tool argument is an internal "
     "history summary, not executable content. Regenerate the real argument. For static "
-    "artifacts, continue with write_file/append_file instead of moving the body into "
-    "execute_code."
+    "artifacts, use staged_file_write instead of moving the body into execute_code."
 )
 _MODEL_HISTORY_PLACEHOLDER_REPAIR_GUIDANCE = (
     "An internal model-history placeholder was returned as a tool argument. Regenerate "
     "the missing real content now. Never copy text beginning with "
     "`[Full tool-call argument omitted from model history]`, `[Full file content omitted "
     "from model history]`, or `[Full tool output omitted from model history]` into any "
-    "tool argument. For long static artifacts, use write_file for the first real chunk "
-    "and append_file for later real chunks; do not move the file body into execute_code."
+    "tool argument. For long static artifacts, use staged_file_write with begin, ordered "
+    "append_text or append_file chunks, and commit; do not move the file body into "
+    "execute_code."
+)
+_MODEL_HISTORY_PLACEHOLDER_RECOVERY_REQUIRED = (
+    "INTERNAL_MODEL_HISTORY_PLACEHOLDER_RECOVERY_REQUIRED: a mutation argument was "
+    "replaced by an internal history placeholder, so the intended update did not "
+    "happen. Complete that exact mutation with regenerated real content before "
+    "calling any downstream tool; do not validate, apply, render, or otherwise reuse "
+    "the unchanged target. For a rejected file mutation, either retry a file mutation "
+    "with real content for the same target or finish one staged_file_write "
+    "begin/append_text/commit transaction for that target."
 )
 
 _BROWSER_SNAPSHOT_OUTPUT_PATH_ERROR = (
@@ -756,6 +770,132 @@ def _model_history_placeholder_argument(
         if is_model_history_placeholder(arguments.get(argument_name)):
             return argument_name
     return None
+
+
+@dataclass(slots=True)
+class _ModelHistoryPlaceholderRecovery:
+    """One mutation that must be completed before dependent work can continue."""
+
+    tool_name: str
+    argument_name: str
+    target: Path | None
+    action: str | None = None
+    staged_write_id: str | None = None
+
+
+def _model_history_recovery_target(
+    tool_name: str,
+    arguments: dict[str, Any],
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
+) -> Path | None:
+    """Resolve the file target used to bind placeholder recovery to one artifact."""
+    if tool_name not in _MODEL_HISTORY_FILE_MUTATION_TOOLS:
+        return None
+    raw_path = arguments.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    candidate = Path(raw_path).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve(strict=False)
+    root = _artifact_scan_root(workspace_dir, artifact_root_dir)
+    if root is None:
+        root = Path(workspace_dir).expanduser() if workspace_dir else Path.cwd()
+    root = root.resolve(strict=False)
+    if workspace_dir:
+        workspace = Path(workspace_dir).expanduser().resolve(strict=False)
+        try:
+            root_from_workspace = root.relative_to(workspace)
+        except ValueError:
+            root_from_workspace = None
+        if (
+            root_from_workspace is not None
+            and candidate.parts[: len(root_from_workspace.parts)]
+            == root_from_workspace.parts
+        ):
+            return (workspace / candidate).resolve(strict=False)
+    return (root / candidate).resolve(strict=False)
+
+
+def _model_history_placeholder_recovery_error(
+    recovery: _ModelHistoryPlaceholderRecovery | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
+) -> str | None:
+    """Block stale downstream work until the rejected mutation is really completed."""
+    if recovery is None:
+        return None
+    if recovery.tool_name == "staged_file_write":
+        if tool_name == "staged_file_write" and arguments.get("action") == recovery.action:
+            return None
+    elif tool_name in _MODEL_HISTORY_FILE_MUTATION_TOOLS:
+        if recovery.target is None or _model_history_recovery_target(
+            tool_name,
+            arguments,
+            workspace_dir,
+            artifact_root_dir,
+        ) == recovery.target:
+            return None
+    if (
+        recovery.tool_name in _MODEL_HISTORY_FILE_MUTATION_TOOLS
+        and tool_name == "staged_file_write"
+    ):
+        action = arguments.get("action")
+        if action == "begin":
+            raw_path = arguments.get("path")
+            if isinstance(raw_path, str):
+                staged_target = _model_history_recovery_target(
+                    "write_file",
+                    {"path": raw_path},
+                    workspace_dir,
+                    artifact_root_dir,
+                )
+                if staged_target == recovery.target:
+                    return None
+        elif action in {"append_text", "append_file", "commit", "abort"}:
+            supplied_id = arguments.get("write_id")
+            if recovery.staged_write_id is not None and supplied_id in {
+                None,
+                recovery.staged_write_id,
+            }:
+                return None
+    target = str(recovery.target) if recovery.target is not None else "not file-backed"
+    return (
+        f"{_MODEL_HISTORY_PLACEHOLDER_RECOVERY_REQUIRED} Pending mutation: "
+        f"{recovery.tool_name}.{recovery.argument_name}; target: {target}."
+    )
+
+
+def _record_model_history_placeholder_recovery_result(
+    recovery: _ModelHistoryPlaceholderRecovery | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: ToolResult,
+) -> _ModelHistoryPlaceholderRecovery | None:
+    """Advance or clear the recovery gate only after an actual successful mutation."""
+    if recovery is None or not result.success:
+        return recovery
+    if recovery.tool_name == "staged_file_write":
+        if tool_name == "staged_file_write" and arguments.get("action") == recovery.action:
+            return None
+        return recovery
+    if tool_name in _MODEL_HISTORY_FILE_MUTATION_TOOLS:
+        return None
+    if tool_name != "staged_file_write":
+        return recovery
+    action = arguments.get("action")
+    if action == "begin":
+        raw_output = result.raw_output if isinstance(result.raw_output, dict) else {}
+        write_id = raw_output.get("write_id")
+        if isinstance(write_id, str) and write_id:
+            recovery.staged_write_id = write_id
+    elif action == "commit":
+        return None
+    elif action == "abort":
+        recovery.staged_write_id = None
+    return recovery
 
 
 def _tool_message_content_for_model(
@@ -2886,6 +3026,7 @@ async def run_agent_loop(
     pending_history_compaction: Message | None = None
     model_history_placeholder_repairs = 0
     model_history_framework_error_counts: dict[str, int] = {}
+    pending_model_history_recovery: _ModelHistoryPlaceholderRecovery | None = None
 
     def _compact_pending_tool_call_history() -> None:
         """Compact the latest large tool arguments after one LLM request saw them."""
@@ -4554,6 +4695,13 @@ async def run_agent_loop(
                 fn_name,
                 fn_args,
             )
+            placeholder_recovery_error = _model_history_placeholder_recovery_error(
+                pending_model_history_recovery,
+                fn_name,
+                fn_args,
+                workspace_dir,
+                artifact_root_dir,
+            )
 
             if browser_intent_error is not None:
                 allowed_to_execute = False
@@ -4566,6 +4714,25 @@ async def run_agent_loop(
                 )
                 if can_auto_repair_placeholder:
                     model_history_placeholder_auto_repair_requested = True
+                if pending_model_history_recovery is None:
+                    pending_model_history_recovery = _ModelHistoryPlaceholderRecovery(
+                        tool_name=fn_name,
+                        argument_name=placeholder_argument,
+                        target=_model_history_recovery_target(
+                            fn_name,
+                            fn_args,
+                            workspace_dir,
+                            artifact_root_dir,
+                        ),
+                        action=(
+                            str(fn_args.get("action"))
+                            if fn_name == "staged_file_write"
+                            else None
+                        ),
+                    )
+            elif placeholder_recovery_error is not None:
+                allowed_to_execute = False
+                internal_skip_error = placeholder_recovery_error
             elif browser_snapshot_path_error is not None:
                 allowed_to_execute = False
                 internal_skip_error = browser_snapshot_path_error
@@ -4680,6 +4847,7 @@ async def run_agent_loop(
 
                     exec_task = asyncio.create_task(_seq_exec())
                     tool_cancelled = False
+                    last_tool_activity = perf_counter()
                     while not exec_done.is_set() or not event_queue.empty():
                         if (
                             getattr(tool, "cancel_on_agent_cancel", False)
@@ -4692,8 +4860,23 @@ async def run_agent_loop(
                         try:
                             evt = await asyncio.wait_for(event_queue.get(), timeout=0.1)
                             yield evt
+                            last_tool_activity = perf_counter()
                         except (asyncio.TimeoutError, TimeoutError):
-                            continue
+                            pass
+                        now = perf_counter()
+                        if (
+                            not exec_done.is_set()
+                            and now - last_tool_activity >= TOOL_ACTIVITY_INTERVAL_SECONDS
+                        ):
+                            yield LLMActivityEvent(
+                                step=step + 1,
+                                payload={
+                                    "protocol": "agent_activity_v1",
+                                    "phase": "tool_running",
+                                    "tool_name": fn_name,
+                                },
+                            )
+                            last_tool_activity = now
                     while not event_queue.empty():
                         yield event_queue.get_nowait()
                     if tool_cancelled:
@@ -4713,8 +4896,25 @@ async def run_agent_loop(
                         await exec_task
                         result = exec_result  # type: ignore[assignment]
                 else:
+                    exec_task = asyncio.create_task(tools[fn_name].execute(**fn_args))
                     try:
-                        result = await tools[fn_name].execute(**fn_args)
+                        while True:
+                            done, _ = await asyncio.wait(
+                                {exec_task}, timeout=TOOL_ACTIVITY_INTERVAL_SECONDS
+                            )
+                            if done:
+                                result = exec_task.result()
+                                break
+                            yield LLMActivityEvent(
+                                step=step + 1,
+                                payload={
+                                    "protocol": "agent_activity_v1",
+                                    "phase": "tool_running",
+                                    "tool_name": fn_name,
+                                },
+                            )
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as exc:
                         detail = f"{type(exc).__name__}: {exc!s}"
                         trace = traceback.format_exc()
@@ -4723,6 +4923,13 @@ async def run_agent_loop(
                             content="",
                             error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
                         )
+                    finally:
+                        if not exec_task.done():
+                            exec_task.cancel()
+                            try:
+                                await exec_task
+                            except BaseException:
+                                pass
 
             if plan_approval_gate_active and fn_name == "plan_write" and result.success:
                 result = result.model_copy(
@@ -4815,8 +5022,23 @@ async def run_agent_loop(
                 browser_snapshot_target,
             )
             result = _activate_skill_result(fn_name, fn_args, result)
+            pending_model_history_recovery = (
+                _record_model_history_placeholder_recovery_result(
+                    pending_model_history_recovery,
+                    fn_name,
+                    fn_args,
+                    result,
+                )
+            )
             _record_nested_tool_budget(fn_name, result)
             if workflow_policy is not None:
+                begin_tool_decision = getattr(
+                    workflow_policy,
+                    "begin_tool_decision",
+                    None,
+                )
+                if callable(begin_tool_decision):
+                    begin_tool_decision(step + 1)
                 workflow_policy.record_tool_result(
                     fn_name,
                     fn_args,
@@ -5023,9 +5245,19 @@ async def run_agent_loop(
                     tc.function.name,
                     par_fn_args,
                 )
+                placeholder_recovery_error = _model_history_placeholder_recovery_error(
+                    pending_model_history_recovery,
+                    tc.function.name,
+                    par_fn_args,
+                    workspace_dir,
+                    artifact_root_dir,
+                )
                 if browser_intent_error is not None:
                     allowed_to_execute = False
                     internal_skip_error = browser_intent_error
+                elif placeholder_recovery_error is not None:
+                    allowed_to_execute = False
+                    internal_skip_error = placeholder_recovery_error
                 elif browser_snapshot_path_error is not None:
                     allowed_to_execute = False
                     internal_skip_error = browser_snapshot_path_error
@@ -5155,6 +5387,7 @@ async def run_agent_loop(
             timeout_deadline = perf_counter() + timeout_seconds if timeout_seconds else None
             timed_out = False
             cancel_observed = False
+            last_parallel_activity = perf_counter()
             while True:
                 all_done = all(task.done() for task in per_tc_tasks.values())
                 if all_done and par_event_queue.empty():
@@ -5178,8 +5411,23 @@ async def run_agent_loop(
                 try:
                     evt = await asyncio.wait_for(par_event_queue.get(), timeout=0.1)
                     yield evt
+                    last_parallel_activity = perf_counter()
                 except (asyncio.TimeoutError, TimeoutError):
-                    continue
+                    pass
+                now = perf_counter()
+                if (
+                    not all_done
+                    and now - last_parallel_activity >= TOOL_ACTIVITY_INTERVAL_SECONDS
+                ):
+                    yield LLMActivityEvent(
+                        step=step + 1,
+                        payload={
+                            "protocol": "agent_activity_v1",
+                            "phase": "tool_running",
+                            "tool_name": "parallel_tools",
+                        },
+                    )
+                    last_parallel_activity = now
             # Drain any stragglers enqueued between the last get() and now
             while not par_event_queue.empty():
                 yield par_event_queue.get_nowait()
@@ -5355,6 +5603,13 @@ async def run_agent_loop(
                 )
                 _record_nested_tool_budget(fn_name, result)
                 if workflow_policy is not None:
+                    begin_tool_decision = getattr(
+                        workflow_policy,
+                        "begin_tool_decision",
+                        None,
+                    )
+                    if callable(begin_tool_decision):
+                        begin_tool_decision(step + 1)
                     workflow_policy.record_tool_result(
                         fn_name,
                         fn_args,

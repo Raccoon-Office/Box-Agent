@@ -92,8 +92,13 @@ research**. Pick the branch that fits:
    support the slide plan, while a concise proposal brief stays in branch 2. After
    the route is complete, run its bundled artifact validator with
    `--report research/qa/{topic}_research_check.json`; even a reduced sequential
-   run should preserve distinct dimensions. Use a fresh successful report when
-   available, then omit or mark nonessential gaps instead of repeating the same
+   run should preserve distinct dimensions, but the dimension target is a
+   quality goal rather than a delivery gate. The workflow converts a fresh
+   report into the generic `presentation_handoff` contract: `full` uses the
+   complete verified facts, `partial` uses only its verified subset, and `framework` creates
+   explicit unavailable-data placeholders. Cover, agenda, and section-divider
+   pages are structural and may keep `evidence: []`; framework data pages still
+   need an explicit unavailable-data placeholder. Then omit or mark nonessential gaps instead of repeating the same
    queries. If bounded research or its validator is unavailable or incomplete,
    continue with supported findings, omit optional claims, and use explicit
    placeholders for required facts; never delay `index.html`. Pass resulting
@@ -103,8 +108,8 @@ research**. Pick the branch that fits:
    prefer a `site:`-constrained query; discard SEO-looking, mirror, or unrelated
    results. Prefer at least one `claim | source | URL` evidence item on a
    public-research page when a verified source is available. Missing evidence,
-   URL, or numeric traceability is a post-generation advisory, never an outline
-   or HTML blocker. Never label a source FIFA/IOC/official unless that returned
+   URL, or numeric traceability excludes that claim from the factual handoff,
+   but never blocks outline or HTML delivery. Never label a source FIFA/IOC/official unless that returned
    URL belongs to the named institution, and never treat an unverified URL as
    verified evidence. If a `site:` query returns no matching host, never invent
    the expected URL; successfully read a known exact first-party URL, omit the
@@ -132,6 +137,14 @@ cold "I can't do this".
 
 When the decision gate says an outline is needed, create an `outline.json`
 beside the future `deck.json`:
+
+In output mode, file-tool paths are already relative to the presentation
+artifact root. Use `write_file(path="outline.json", ...)`; do not pass the
+absolute session-workspace path and do not add another `output/` prefix. When
+the complete JSON exceeds the single-call limit, use one
+`staged_file_write` transaction whose `begin` call also uses
+`path="outline.json"`, then reuse the exact returned `write_id` through ordered
+`append_text` calls and `commit`.
 
 For `source_mode=user_provided`, user-stated solution requirements and proposed
 architecture scope are valid planning inputs; make unsupplied implementation

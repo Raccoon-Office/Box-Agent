@@ -92,3 +92,12 @@ def test_system_prompt_makes_missing_input_a_resumable_pause():
     assert "只问一个聚焦问题并列出最少必要字段" in prompt
     assert "用户补充后从当前检查点继续" in prompt
     assert "可省略或可标为待补充的非必要内容不得阻塞" in prompt
+
+
+def test_system_prompt_separates_user_decisions_from_missing_input():
+    prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    assert "调用 `request_user_decision`" in prompt
+    assert "不要只在普通文本里列方案并等待回复" in prompt
+    assert "内部实现和恢复策略应自行选择" in prompt
+    assert "最终是否允许由运行时决定" in prompt

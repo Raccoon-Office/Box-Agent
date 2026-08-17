@@ -34,7 +34,7 @@ _NEW_VERSION_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 _CREATE_PRESENTATION_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:做一份|做一个|做个|做份|制作|生成|创建|新建|另出|另做|重新做|"
+    r"(?:做一份|做一个|做个|做份|做成|制作成|整理成|制作|生成|创建|新建|另出|另做|重新做|"
     r"create|generate|make|build|produce|draft|remake)"
     r"(?!\s*的)"
     r"[^，。；;.!?\n]{0,48}"
@@ -66,6 +66,27 @@ _REQUEST_NEW_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:pptx?|powerpoint|演示文稿|幻灯片|slide\s+deck|slides?|presentation)"
     r"|(?:帮我\s*)?(?:出|来)\s*(?:一份|一个|一版|个|份)"
     r"[^，。；;.!?\n]{0,40}?"
+    r"(?:pptx?|powerpoint|演示文稿|幻灯片|slide\s+deck|slides?|presentation)",
+    re.IGNORECASE,
+)
+_NON_PRESENTATION_ARTIFACT_RE: Final[str] = (
+    r"(?:柱状图|折线图|饼图|散点图|流程图|图表|图形|图片|配图|图像|"
+    r"数据表|统计表|表格|excel|xlsx|文案|文字|摘要|讲稿|视频|素材|"
+    r"charts?|graphs?|images?|figures?|tables?|spreadsheets?|copy|summary|video)"
+)
+_PRESENTATION_USAGE_CONTAINER_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:pptx?|powerpoint|演示文稿|幻灯片|slide\s+deck|slides?|presentation)"
+    r"\s*(?:里|中|内|上|里的|中的|内的|上的|的|用的|所用的|"
+    r"[-–—]?\s*(?:ready|compatible)\b)"
+    rf"[^，。；;.!?\n]{{0,64}}{_NON_PRESENTATION_ARTIFACT_RE}",
+    re.IGNORECASE,
+)
+_ARTIFACT_FOR_PRESENTATION_RE: Final[re.Pattern[str]] = re.compile(
+    rf"{_NON_PRESENTATION_ARTIFACT_RE}"
+    r"[^，。；;.!?\n]{0,40}?"
+    r"(?:用于|用在|用到|放入|放进|放到|加入|插入|贴到|"
+    r"for(?:\s+use)?\s+in|for|into)"
+    r"[^，。；;.!?\n]{0,24}?"
     r"(?:pptx?|powerpoint|演示文稿|幻灯片|slide\s+deck|slides?|presentation)",
     re.IGNORECASE,
 )
@@ -153,6 +174,13 @@ _PAGE_RANGE_RE: Final[re.Pattern[str]] = re.compile(
 )
 _PAGE_COUNT_RE: Final[re.Pattern[str]] = re.compile(
     rf"({_PAGE_TOKEN_RE})\s*(?:页|pages?|slides?)",
+    re.IGNORECASE,
+)
+_POSITIONAL_PAGE_SPAN_RE: Final[re.Pattern[str]] = re.compile(
+    rf"(?:前|首|最前)\s*{_PAGE_TOKEN_RE}"
+    rf"(?:\s*(?:-|~|～|—|–|至|到)\s*{_PAGE_TOKEN_RE})?\s*页(?:内容)?"
+    rf"|\b(?:first|initial)\s+{_PAGE_TOKEN_RE}"
+    rf"(?:\s*(?:-|~|to|through)\s*{_PAGE_TOKEN_RE})?\s*(?:pages?|slides?)\b",
     re.IGNORECASE,
 )
 _ROLE_PREFIXES: Final[tuple[str, ...]] = (
@@ -276,6 +304,28 @@ def _is_referenced_creation(
     )
 
 
+def _uses_presentation_as_context(
+    text: str,
+    creation_match: re.Match[str],
+) -> bool:
+    """Return whether PPT describes where another requested artifact will be used."""
+    clause_start = max(
+        text.rfind(separator, 0, creation_match.start())
+        for separator in ("，", ",", "。", ";", "；", "\n")
+    )
+    clause_end_candidates = [
+        index
+        for separator in ("，", ",", "。", ";", "；", "\n")
+        if (index := text.find(separator, creation_match.end())) >= 0
+    ]
+    clause_end = min(clause_end_candidates, default=len(text))
+    clause = text[clause_start + 1 : clause_end]
+    return bool(
+        _PRESENTATION_USAGE_CONTAINER_RE.search(clause)
+        or _ARTIFACT_FOR_PRESENTATION_RE.search(clause)
+    )
+
+
 def _is_presentation_prompt_authoring_request(text: str) -> bool:
     """Return whether the requested artifact is a prompt, not a deck.
 
@@ -344,7 +394,9 @@ def classify_presentation_request(
         request_new_match = None
 
     create_matches = [
-        match for match in (direct_create_match, request_new_match) if match is not None
+        match
+        for match in (direct_create_match, request_new_match)
+        if match is not None and not _uses_presentation_as_context(positive_text, match)
     ]
     create_match = min(create_matches, key=lambda match: match.start(), default=None)
     if create_match is not None and _is_referenced_creation(positive_text, create_match):
@@ -484,22 +536,26 @@ def _parse_page_token(token: str) -> int | None:
 
 
 def _extract_page_count_value(normalized_text: str, field: dict[str, Any]) -> str | None:
+    # A positional span such as "前 2 页内容" identifies which pages to preview;
+    # it is not a request for a two-page deck. Remove it before looking for an
+    # explicit total so a later phrase such as "完整版 8 页" remains authoritative.
+    page_count_text = _POSITIONAL_PAGE_SPAN_RE.sub(" ", normalized_text)
     for option in field["options"]:
         if isinstance(option.get("min"), int):
             continue
         aliases = option.get("aliases")
         if isinstance(aliases, list) and any(
-            isinstance(alias, str) and _alias_matches(normalized_text, alias)
+            isinstance(alias, str) and _alias_matches(page_count_text, alias)
             for alias in aliases
         ):
             return option["id"]
 
-    range_match = _PAGE_RANGE_RE.search(normalized_text)
+    range_match = _PAGE_RANGE_RE.search(page_count_text)
     if range_match:
         end_count = _parse_page_token(range_match.group(2))
         if end_count is not None:
             return _page_count_option(field, end_count)
-    page_match = _PAGE_COUNT_RE.search(normalized_text)
+    page_match = _PAGE_COUNT_RE.search(page_count_text)
     if not page_match:
         return None
     count = _parse_page_token(page_match.group(1))

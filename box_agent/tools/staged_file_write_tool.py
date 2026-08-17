@@ -61,7 +61,9 @@ class StagedFileWriteTool(Tool):
         return (
             "Transactionally build a large UTF-8 text file in bounded chunks. "
             "Call begin once, append_text or append_file in ascending chunk_index order, "
-            "then commit. If begin declares expected_chunks, commit reuses it unless "
+            "then commit. Save the write_id returned by begin and include that exact "
+            "write_id in every append_text, append_file, commit, or abort call. If begin "
+            "declares expected_chunks, commit reuses it unless "
             "commit explicitly overrides it. The final target remains unchanged until "
             "commit succeeds. "
             f"Keep generated text chunks near {RECOMMENDED_GENERATED_BODY_CHARS} characters "
@@ -81,7 +83,13 @@ class StagedFileWriteTool(Tool):
                     "type": "string",
                     "description": "Final target path for begin, or source path for append_file.",
                 },
-                "write_id": {"type": "string"},
+                "write_id": {
+                    "type": "string",
+                    "description": (
+                        "Required for append_text, append_file, commit, and abort. Copy the "
+                        "exact write_id returned by begin. Omit only for begin."
+                    ),
+                },
                 "chunk_index": {"type": "integer", "minimum": 0},
                 "content": {
                     "type": "string",
@@ -167,6 +175,27 @@ class StagedFileWriteTool(Tool):
         target = self._resolve(path)
         if error := self._permission_error(target, "filesystem.write"):
             return error
+        for active_write_id, active in self._writes.items():
+            if active.target == target:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "STAGED_FILE_WRITE_TARGET_ACTIVE: this target already has an "
+                        f"active transaction; write_id={active_write_id}; "
+                        f"next_chunk_index={active.next_index}; "
+                        f"expected_chunks={active.expected_chunks}. Continue with that "
+                        "write_id using append_text, append_file, commit, or abort; do not "
+                        "begin another transaction for the same target."
+                    ),
+                    raw_output={
+                        "type": "staged_file_write",
+                        "action": "begin_rejected",
+                        "write_id": active_write_id,
+                        "next_index": active.next_index,
+                        "size_bytes": active.size_bytes,
+                        "expected_chunks": active.expected_chunks,
+                    },
+                )
         self._staging_dir.mkdir(parents=True, exist_ok=True)
         write_id = uuid.uuid4().hex
         temporary = self._staging_dir / f"{write_id}.part"
@@ -192,10 +221,29 @@ class StagedFileWriteTool(Tool):
             },
         )
 
-    def _get_write(self, write_id: str | None) -> _StagedWrite | ToolResult:
-        if not write_id or write_id not in self._writes:
-            return ToolResult(success=False, error="Unknown or expired write_id")
-        return self._writes[write_id]
+    def _get_write(
+        self,
+        write_id: str | None,
+    ) -> tuple[str, _StagedWrite] | ToolResult:
+        if not write_id:
+            if len(self._writes) == 1:
+                return next(iter(self._writes.items()))
+            return ToolResult(
+                success=False,
+                error=(
+                    "STAGED_FILE_WRITE_ID_REQUIRED: include the write_id returned by begin; "
+                    f"active_writes={len(self._writes)}."
+                ),
+            )
+        state = self._writes.get(write_id)
+        if state is None:
+            if len(self._writes) == 1:
+                return next(iter(self._writes.items()))
+            return ToolResult(
+                success=False,
+                error=f"STAGED_FILE_WRITE_ID_UNKNOWN: write_id={write_id!r} is not active.",
+            )
+        return write_id, state
 
     def _append_text(
         self,
@@ -203,9 +251,10 @@ class StagedFileWriteTool(Tool):
         chunk_index: int | None,
         content: str | None,
     ) -> ToolResult:
-        state = self._get_write(write_id)
-        if isinstance(state, ToolResult):
-            return state
+        resolved = self._get_write(write_id)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        resolved_write_id, state = resolved
         if content is None:
             return ToolResult(success=False, error="append_text requires content")
         if len(content) > MAX_GENERATED_BODY_CHARS:
@@ -216,7 +265,12 @@ class StagedFileWriteTool(Tool):
                     f"{len(content)} characters; limit is {MAX_GENERATED_BODY_CHARS}."
                 ),
             )
-        return self._append_bytes(state, chunk_index, content.encode("utf-8"))
+        return self._append_bytes(
+            resolved_write_id,
+            state,
+            chunk_index,
+            content.encode("utf-8"),
+        )
 
     def _append_file(
         self,
@@ -224,9 +278,10 @@ class StagedFileWriteTool(Tool):
         chunk_index: int | None,
         path: str | None,
     ) -> ToolResult:
-        state = self._get_write(write_id)
-        if isinstance(state, ToolResult):
-            return state
+        resolved = self._get_write(write_id)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        resolved_write_id, state = resolved
         if not path:
             return ToolResult(success=False, error="append_file requires source path")
         source = self._resolve(path)
@@ -239,10 +294,11 @@ class StagedFileWriteTool(Tool):
             data.decode("utf-8")
         except UnicodeDecodeError:
             return ToolResult(success=False, error="append_file supports UTF-8 text files only")
-        return self._append_bytes(state, chunk_index, data)
+        return self._append_bytes(resolved_write_id, state, chunk_index, data)
 
     def _append_bytes(
         self,
+        write_id: str,
         state: _StagedWrite,
         chunk_index: int | None,
         data: bytes,
@@ -269,11 +325,12 @@ class StagedFileWriteTool(Tool):
             success=True,
             content=(
                 f"Appended chunk {chunk_index}; next chunk_index={state.next_index}; "
-                f"total_bytes={state.size_bytes}."
+                f"total_bytes={state.size_bytes}. Continue with write_id={write_id}."
             ),
             raw_output={
                 "type": "staged_file_write",
                 "action": "append",
+                "write_id": write_id,
                 "next_index": state.next_index,
                 "size_bytes": state.size_bytes,
             },
@@ -285,9 +342,10 @@ class StagedFileWriteTool(Tool):
         expected_chunks: int | None,
         expected_sha256: str | None,
     ) -> ToolResult:
-        state = self._get_write(write_id)
-        if isinstance(state, ToolResult):
-            return state
+        resolved = self._get_write(write_id)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        resolved_write_id, state = resolved
         effective_expected_chunks = (
             expected_chunks
             if expected_chunks is not None
@@ -315,7 +373,7 @@ class StagedFileWriteTool(Tool):
         if state.target.exists():
             backup_file(state.target)
         os.replace(state.temporary, state.target)
-        self._writes.pop(write_id or "", None)
+        self._writes.pop(resolved_write_id, None)
         return ToolResult(
             success=True,
             content=(
@@ -330,11 +388,12 @@ class StagedFileWriteTool(Tool):
         )
 
     def _abort(self, write_id: str | None) -> ToolResult:
-        state = self._get_write(write_id)
-        if isinstance(state, ToolResult):
-            return state
+        resolved = self._get_write(write_id)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        resolved_write_id, state = resolved
         state.temporary.unlink(missing_ok=True)
-        self._writes.pop(write_id or "", None)
+        self._writes.pop(resolved_write_id, None)
         return ToolResult(success=True, content="Aborted staged write.")
 
     def cleanup_pending_writes(self) -> list[str]:

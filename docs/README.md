@@ -46,6 +46,8 @@ wire contract:
   recall shown to hosts.
 - [Memory Promotion protocol](MEMORY_PROPOSAL_PROTOCOL.md): proposal push, list,
   and apply flows.
+- [User Decision protocol](USER_DECISION_PROTOCOL.md) / [用户决策协议](USER_DECISION_PROTOCOL_CN.md):
+  public Skill decision cards, runtime-bounded defaults, and same-session resume.
 
 ## Documentation maintenance
 

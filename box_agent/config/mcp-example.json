@@ -20,11 +20,13 @@
             "command": "npx",
             "args": [
                 "-y",
-                "@playwright/mcp@latest"
+                "@playwright/mcp@latest",
+                "--timeout-navigation",
+                "30000"
             ],
             "disabled": true,
             "connect_timeout": 15.0,
-            "execute_timeout": 60.0
+            "execute_timeout": 45.0
         }
     }
 }

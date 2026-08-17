@@ -11,7 +11,7 @@ from box_agent.acp.follow_up_suggestions import (
     parse_follow_up_suggestions_response,
 )
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from box_agent.schema import LLMResponse, StreamEvent
+from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 
 
 class _RecordingConn:
@@ -58,6 +58,48 @@ class _DedicatedFollowUpLLM:
 
     async def generate_stream(self, messages, tools=None, **_):
         yield StreamEvent(type="text", delta="React 当前 npm 稳定最新版是 19.2.7。")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+
+class _DecisionThenStopLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, messages, tools=None, **_):
+        return LLMResponse(content="done", finish_reason="stop")
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool",
+                tool_calls=[
+                    ToolCall(
+                        id="choose-delivery-scope",
+                        type="function",
+                        function=FunctionCall(
+                            name="request_user_decision",
+                            arguments={
+                                "question": "请选择交付范围。",
+                                "decision_kind": "delivery_scope",
+                                "options": [
+                                    {"id": "full", "label": "保持完整版本"},
+                                    {"id": "prototype", "label": "先做精简版本"},
+                                ],
+                            },
+                        ),
+                    )
+                ],
+            )
+            return
+        yield StreamEvent(
+            type="text",
+            delta=(
+                "请在选择卡片中继续。\n```follow_up_suggestions\n"
+                '{"suggestions":["选择完整版本"]}\n```'
+            ),
+        )
         yield StreamEvent(type="finish", finish_reason="stop")
 
 
@@ -202,3 +244,48 @@ async def test_acp_generates_suggestions_in_a_dedicated_lightweight_call(tmp_pat
     assert llm.generate_calls[-1]["session_id"] == "office-session-1"
     assert llm.generate_calls[-1]["turn_id"] == "office-turn-1"
     assert llm.generate_calls[-1]["title"] == "React 版本查询"
+
+
+@pytest.mark.asyncio
+async def test_acp_does_not_mix_follow_up_suggestions_with_user_decision(tmp_path) -> None:
+    conn = _RecordingConn()
+    llm = _DecisionThenStopLLM()
+    agent = BoxACPAgent(
+        conn,
+        Config(
+            llm=LLMConfig(api_key="test-key"),
+            agent=AgentConfig(max_steps=8, workspace_dir=str(tmp_path)),
+            tools=ToolsConfig(),
+        ),
+        llm,
+        [],
+        "system",
+    )
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(tmp_path), field_meta={"follow_up_suggestions": True})
+    )
+
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "制作演示文稿"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    assert agent._sessions[session.sessionId].waiting_for_user_input is True
+    raw_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "sessionUpdate", None) == "tool_call_update"
+        and isinstance(getattr(update.update, "rawOutput", None), dict)
+    ]
+    assert any(output.get("type") == "user_decision_request" for output in raw_outputs)
+    assert not any(output.get("type") == "follow_up_suggestions" for output in raw_outputs)
+
+    resumed = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "我不选这两个方案，改成六页并突出案例。"}],
+        )
+    )
+
+    assert resumed.stopReason == "end_turn"
+    assert agent._sessions[session.sessionId].waiting_for_user_input is False

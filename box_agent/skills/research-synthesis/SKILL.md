@@ -97,13 +97,21 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
   marking a claim verified, and capture a short excerpt that actually supports
   the claim and names the target entity. Never transfer a search-result snippet
   directly into the verified evidence ledger.
+- After bounded search, verify no more than five unique exact article, report,
+  filing, or data-page URLs. Never use an origin homepage or retry the same URL
+  with the same browser backend. If two consecutive direct reads yield no usable
+  source text, stop browsing, mark the remaining candidates `unverified`, and
+  finish the handoff so downstream work can continue in `partial` or `framework`
+  mode.
 - Maintain `research/{topic}_evidence.json` while researching. Every downstream
   factual claim must be bound to one target entity, source URL, source type,
   page excerpt, confidence, and `verified` / `conflicting` / `unverified`
   status. Use the exact schema in
   [output_contract.md](references/output_contract.md).
-- Record known official domains for target entities and obtain at least one
-  verified first-party source for each entity that has an official domain.
+- Record known official domains for target entities and prefer verified
+  first-party sources when a claim concerns that entity's own disclosure.
+  Missing per-entity or first-party coverage is a research-quality warning, not
+  a reason to discard other verified evidence or block downstream delivery.
   `first_party` is a claim about URL ownership, not a synonym for a high search
   authority score.
 - When user-provided material conflicts with a source, preserve the user claim,
@@ -199,22 +207,25 @@ fi
 ${BOX_AGENT_PYTHON:-python3} "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" --research-dir "research" --topic "{topic}" --route A --report "research/qa/{topic}_research_check.json"
 ```
 
-Adjust `--route` for the selected route. Add `--min-dimensions N` when the
-dimension count differs from the default. For a sequential reduced-budget run,
-keep at least three distinct dimensions and record the actual budget in the
-cross-verification file; the downstream presentation checkpoint requires this
-fresh successful JSON report before outline authoring. The report embeds only
-the `verified_evidence` rows that passed entity, excerpt, source, first-party,
-and conflict checks. `conflicting` and `unverified` rows remain available for
-limitations, but must not be copied into an outline or final factual claim.
+Adjust `--route` for the selected route. `--min-dimensions N` is a recommended
+quality target, not a deck-delivery threshold. Record the actual reduced budget
+in the cross-verification file. The validator emits a producer-neutral
+`presentation_handoff` object. Downstream presentation workflows consume its
+`delivery_mode`, `verified_facts`, `gaps`, and `quality_summary`; they do not
+interpret this skill's internal QA state. `full`, `partial`, and `framework`
+remain deliverable even when research quality is incomplete. Only verified rows
+that passed entity, excerpt, source, first-party, and conflict checks enter
+`verified_facts`; conflicting and unverified rows stay in gaps/limitations.
 
 ## Final Handoff
 
 If a report-writing, paper-writing, document, or presentation skill is available
 and the user requested that output type, hand off explicit file paths and state
-that research is complete. For a presentation, hand off only canonical evidence
-strings from the validator report's `verified_evidence[].canonical`; prose
-artifacts are context, not an independent fact source. Otherwise, produce
+the generic `presentation_handoff.delivery_mode`. For `partial`, downstream
+work uses only the verified subset and marks or omits gaps; for `framework`, it
+creates a usable placeholder structure without external factual claims. For a
+presentation, hand off only `presentation_handoff.verified_facts[].canonical`;
+prose artifacts are context, not an independent fact source. Otherwise, produce
 `{topic}_final.md` from the verified research artifacts.
 
 For technical product or codebase research tasks:

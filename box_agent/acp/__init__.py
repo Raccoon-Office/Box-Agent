@@ -447,6 +447,40 @@ def _plan_approval_from_meta(meta: Any) -> dict[str, Any] | None:
     return None
 
 
+def _user_decision_response_from_meta(meta: Any) -> dict[str, str] | None:
+    """Normalize the host response to a public ``request_user_decision`` call."""
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("userDecision") or meta.get("user_decision")
+    if not isinstance(raw, dict):
+        return None
+
+    request_id = str(raw.get("request_id") or raw.get("requestId") or "").strip()
+    decision_kind = str(
+        raw.get("decision_kind") or raw.get("decisionKind") or ""
+    ).strip()
+    option_id = str(
+        raw.get("selected_option_id") or raw.get("selectedOptionId") or ""
+    ).strip()
+    option_label = str(
+        raw.get("selected_option_label") or raw.get("selectedOptionLabel") or ""
+    ).strip()
+    custom_text = str(raw.get("custom_text") or raw.get("customText") or "").strip()
+    trigger = str(raw.get("trigger") or "user").strip().lower()
+    if not request_id or not decision_kind or not (option_id or custom_text):
+        return None
+    if trigger not in {"user", "timeout"}:
+        trigger = "user"
+    return {
+        "request_id": request_id[:128],
+        "decision_kind": decision_kind[:128],
+        "selected_option_id": option_id[:128],
+        "selected_option_label": option_label[:500],
+        "custom_text": custom_text[:2_000],
+        "trigger": trigger,
+    }
+
+
 def _plan_approval_is_approved(plan_approval: dict[str, Any] | None) -> bool:
     if not isinstance(plan_approval, dict):
         return False
@@ -1663,6 +1697,7 @@ class BoxACPAgent:
                 return PromptResponse(stopReason="refusal")
 
         state.cancelled = False
+        was_waiting_for_user_input = state.waiting_for_user_input
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
         plan_detection_text = _latest_user_request_for_plan_detection(user_text)
         source_binding_text = (
@@ -1672,6 +1707,14 @@ class BoxACPAgent:
         )
         _bind_user_source_text(state, source_binding_text)
         prompt_meta = getattr(params, "field_meta", None) or {}
+        user_decision_response = _user_decision_response_from_meta(prompt_meta)
+        if user_decision_response is not None:
+            user_text = (
+                "[HOST_USER_DECISION_RESPONSE]\n"
+                f"{_json.dumps(user_decision_response, ensure_ascii=False)}\n"
+                "[/HOST_USER_DECISION_RESPONSE]\n\n"
+                f"{user_text}"
+            )
         ui_language = _meta_string(prompt_meta, "ui_language", "uiLanguage").lower()
         if ui_language in {"en", "ja", "zh"}:
             display_language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[ui_language]
@@ -2030,6 +2073,12 @@ class BoxACPAgent:
             elif cancels_pending_completion_gate(plan_detection_text):
                 state.pending_completion_gate = None
                 state.waiting_for_user_input = False
+        if was_waiting_for_user_input:
+            # The first subsequent user prompt resumes a paused decision or
+            # missing-input request. This also supports a host-side "cancel
+            # card and continue in the composer" action without a synthetic
+            # hidden prompt.
+            state.waiting_for_user_input = False
         if completion_gate is not None:
             completion_gate = rebase_pending_completion_gate(
                 completion_gate,
@@ -3614,7 +3663,7 @@ class BoxACPAgent:
                             log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text, user_visible=user_visible)
                         else:
                             log.warn("tool/fail", session_id=session_id, tool_call_id=tid, tool_name=tname, error=err, user_visible=user_visible)
-                        if ok and tname == "request_user_input":
+                        if ok and tname in {"request_user_input", "request_user_decision"}:
                             state.waiting_for_user_input = True
                             log.info(
                                 "completion_gate/waiting_for_user",
@@ -3768,6 +3817,7 @@ class BoxACPAgent:
                         if (
                             reason == StopReason.END_TURN
                             and state.pending_plan_approval is None
+                            and not state.waiting_for_user_input
                             and (state.agent.goal is None or state.agent.goal.status != "active")
                         ):
                             if not suggestions:

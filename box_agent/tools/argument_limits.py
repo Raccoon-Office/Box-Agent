@@ -7,7 +7,7 @@ pathological calls before they consume an entire provider completion budget.
 
 from __future__ import annotations
 
-MAX_GENERATED_BODY_CHARS = 8_000
+MAX_GENERATED_BODY_CHARS = 12_000
 RECOMMENDED_GENERATED_BODY_CHARS = 5_500
 MAX_BASH_COMMAND_CHARS = 8_000
 

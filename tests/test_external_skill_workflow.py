@@ -83,7 +83,7 @@ def test_external_skill_gate_has_bounded_host_lifecycle(tmp_path: Path) -> None:
     assert gate.required_changed_artifact_globs == ("output/**/*.pptx",)
     assert gate.max_tool_calls == 128
     assert gate.completion_reserve_tool_calls == 10
-    assert gate.pause_tools == frozenset({"request_user_input"})
+    assert gate.pause_tools == frozenset({"request_user_input", "request_user_decision"})
     assert gate.workflow_options["skill_name"] == "ppt-master"
     assert gate.workflow_options["skill_source"] == "user"
 
@@ -145,4 +145,5 @@ def test_policy_tracks_only_existing_workspace_or_skill_paths(tmp_path: Path) ->
     assert policy.last_failures == ["bash: browser dependency missing"]
     checkpoint = policy.build_checkpoint()
     assert "request_user_input" in checkpoint
+    assert "request_user_decision" in checkpoint
     assert "publish final user-facing files to artifact_root" in checkpoint

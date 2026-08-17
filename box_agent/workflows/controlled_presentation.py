@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import shlex
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Final
@@ -46,7 +47,8 @@ GATEWAY_RESEARCH_READ_TOOLS: Final[frozenset[str]] = frozenset(
     {"browser_open_url", "browser_read_page", "browser_read_article"}
 )
 RESEARCH_READ_BATCH_SIZE: Final[int] = 2
-RESEARCH_DIRECT_READ_LIMIT: Final[int] = 12
+RESEARCH_DIRECT_READ_LIMIT: Final[int] = 5
+RESEARCH_UNPRODUCTIVE_DIRECT_READ_LIMIT: Final[int] = 2
 RESEARCH_ROUND_LIMIT: Final[int] = ToolLimitsConfig().presentation.research_rounds
 
 _log = logging.getLogger(__name__)
@@ -61,12 +63,20 @@ _CONTENT_PATCH_TOOL_ERROR = (
     "(and append_file only if the body exceeds the file-tool limit)."
 )
 _CONTENT_PATCH_REPAIR_ALLOWED_TOOLS: Final[frozenset[str]] = frozenset(
-    {"read_file", "write_file", "append_file", "edit_file"}
+    {"read_file", "write_file", "append_file", "edit_file", "staged_file_write"}
 )
 _CONTENT_PATCH_REPAIR_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_PATCH_JSON_INCOMPLETE: deck.patch.json is not complete, "
-    "valid JSON. Read, rewrite, edit, or append only that file until it parses; do not "
-    "run apply_deck_patch.js or mutate another artifact yet."
+    "valid JSON. Read, rewrite, edit, append, or complete one staged_file_write "
+    "transaction only for that file until it parses; do not run apply_deck_patch.js "
+    "or mutate another artifact yet."
+)
+_CONTENT_PATCH_STAGED_ACTIVE_TOOL_ERROR = (
+    "CONTROLLED_PRESENTATION_PATCH_STAGED_WRITE_ACTIVE: deck.patch.json already has "
+    "an active staged_file_write transaction with write_id={write_id}. Continue that "
+    "exact transaction with the next append_text/append_file chunk, commit it when "
+    "complete, or abort it before starting over. Do not begin another transaction, "
+    "read the unchanged target, or switch to another write tool."
 )
 _IMAGE_GENERATION_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_IMAGE_INPUT_READY: IMAGE_INPUT already contains the "
@@ -83,18 +93,21 @@ _IMAGE_AUTH_BLOCKED_TOOL_ERROR = (
 _SCAFFOLD_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_SCAFFOLD_INPUT_READY: SCAFFOLD_INPUT in the latest "
     "checkpoint already contains every registered theme/layout id and every page "
-    "intent. Invoke inspect_deck_contract.js once now with exact registered layout "
-    "ids plus --outline outline.json and --out deck.json; do not reread files, list "
-    "the registry, or invent ids. Keep the inspector as the only shell command: do "
-    "not append a pipe, tail, redirection, or another command."
+    "intent. Invoke inspect_deck_contract.js once now with only --outline "
+    "outline.json and --out deck.json; do not pass layout ids, --theme, "
+    "--image-mode, --title, facts, or other optional flags, and do not reread files "
+    "or list the registry. Keep the inspector as the only shell command: do not "
+    "append a pipe, tail, redirection, or another command."
 )
 _SCAFFOLD_SHELL_SUFFIX_TOOL_ERROR = (
     f"{_SCAFFOLD_TOOL_ERROR} Rejected shell suffix: remove the entire pipe or "
-    "redirection (for example `2>&1 | tail -N`) and invoke the inspector directly. "
-    "Registered layout ids and valid inspector flags may remain."
+    "redirection (for example `2>&1 | tail -N`) and invoke the inspector directly."
+)
+_OUTLINE_REPAIR_ALLOWED_TOOLS: Final[frozenset[str]] = frozenset(
+    {"write_file", "staged_file_write"}
 )
 _REPAIR_ALLOWED_TOOLS: Final[frozenset[str]] = frozenset(
-    {"write_file", "append_file"}
+    {"write_file", "append_file", "staged_file_write"}
 )
 _MUTATION_TOOLS: Final[frozenset[str]] = frozenset(
     {
@@ -107,10 +120,10 @@ _MUTATION_TOOLS: Final[frozenset[str]] = frozenset(
     }
 )
 _REPAIR_STAGES: Final[frozenset[str]] = frozenset(
-    {"outline_repair", "deck_spec_repair"}
+    {"outline_repair", "deck_spec_repair", "content_patch_repair"}
 )
 _POLICY_REJECTION_STAGES: Final[frozenset[str]] = (
-    _REPAIR_STAGES | frozenset({"research", "scaffold"})
+    _REPAIR_STAGES | frozenset({"research", "outline", "scaffold"})
 )
 _REPEATED_EXECUTION_FAILURE_LIMIT: Final[int] = 2
 _REPEATED_POLICY_REJECTION_LIMIT: Final[int] = 3
@@ -123,8 +136,10 @@ _REPAIR_TOOL_ERROR = (
 _OUTLINE_REPAIR_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_OUTLINE_REPAIR_INPUT_READY: REPAIR_INPUT in the "
     "latest checkpoint already contains the complete current outline and fresh "
-    "validator issues. Write the corrected outline.json now; do not reread files, "
-    "inspect the schema, update todos/plans, or run another command first."
+    "validator issues. Write the corrected outline.json now with write_file, or use "
+    "one staged_file_write begin/append_text/commit transaction when it exceeds the "
+    "single-call limit; do not reread files, inspect the schema, update todos/plans, "
+    "or run another command first."
 )
 _IMAGE_STATUS_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_IMAGE_STATUS_SYNC_REQUIRED: all planned image files "
@@ -203,27 +218,54 @@ _RESEARCH_HANDOFF_TOOL_ERROR = (
     "Do not search/browse, create or update todos/plans, reread outline.md or the "
     "research QA report, or inspect/list the filesystem. Read only a Markdown "
     "handoff file explicitly named in RESEARCH_INPUT when its content is missing "
-    "from context; otherwise write outline.json now."
+    "from context; otherwise write outline.json now. In output mode, call "
+    "write_file with path=outline.json so it resolves inside the canonical artifact "
+    "root; never use the absolute session-workspace path. If the complete JSON "
+    "exceeds the single-call limit, use one staged_file_write transaction whose "
+    "begin call also uses path=outline.json, then reuse its exact write_id through "
+    "append_text and commit."
+)
+_OUTLINE_TARGET_TOOL_ERROR = (
+    "CONTROLLED_PRESENTATION_OUTLINE_TARGET_REQUIRED: write outline.json inside "
+    "the canonical presentation artifact root. In output mode, use the exact "
+    "artifact-relative path outline.json; never use the absolute session-workspace "
+    "path. For a large outline, the staged_file_write begin call must use that same "
+    "path."
 )
 _RESEARCH_SEARCH_COMPLETE_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_RESEARCH_SEARCH_COMPLETE: bounded research searches "
     "already returned candidate sources. Do not call web_search again. Search snippets "
-    "are discovery only: open the exact strongest first-party candidate URLs with a "
-    "browser read tool before marking their evidence rows verified, then complete the "
-    "ledger and validation report."
+    "are discovery only: read a small set of unique exact authoritative candidate "
+    "URLs before marking their evidence rows verified. Do not require first-party "
+    "coverage when another suitable authoritative source supports the claim; then "
+    "complete the ledger and validation report."
 )
 _RESEARCH_DIRECT_READ_COMPLETE_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_RESEARCH_DIRECT_READ_COMPLETE: the bounded direct-source "
-    "read budget is exhausted. Do not retry browser reads. Mark any unread source rows "
-    "unverified (or omit optional unsupported claims), then finish the evidence ledger "
-    "and run validate_research_artifacts.py."
+    "verification pass is complete after five attempts or two consecutive reads that "
+    "did not yield usable source content. Do not retry browser reads. Mark any unread "
+    "source rows unverified (or omit optional unsupported claims), then finish the "
+    "evidence ledger and run validate_research_artifacts.py."
+)
+_RESEARCH_EXACT_SOURCE_URL_REQUIRED_TOOL_ERROR = (
+    "CONTROLLED_PRESENTATION_EXACT_SOURCE_URL_REQUIRED: after bounded search, direct "
+    "verification must use an exact article, report, filing, or data-page URL. Do not "
+    "open an origin homepage or an empty URL. Mark the source unverified if no exact "
+    "candidate URL is available."
+)
+_RESEARCH_DIRECT_URL_ALREADY_ATTEMPTED_TOOL_ERROR = (
+    "CONTROLLED_PRESENTATION_DIRECT_URL_ALREADY_ATTEMPTED: this exact source URL was "
+    "already attempted with the same browser backend. Do not retry it. Use one "
+    "different exact candidate URL, use the alternate browser backend once, or mark "
+    "the source unverified and continue."
 )
 _RESEARCH_UNREAD_EVIDENCE_URL_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_UNREAD_EVIDENCE_URL: the evidence ledger marks URLs as "
-    "verified even though this run has not successfully read those exact source pages: "
-    "{urls}. Search snippets do not establish provenance. Open each URL with a browser "
-    "read tool, or change the corresponding row to unverified and include an "
-    "unverified_reason, then rerun the validator."
+    "verified even though this run has not successfully read those exact source pages, "
+    "or its evidence_excerpt is not present in the successful page result: {urls}. "
+    "Search snippets and locally rewritten excerpts do not establish provenance. Open "
+    "each URL with a browser read tool and copy a supporting excerpt from that result, "
+    "or change the row to unverified with unverified_reason, then rerun the validator."
 )
 _RESEARCH_LOCAL_READ_COMPLETE_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_RESEARCH_LOCAL_READ_COMPLETE: bounded research is "
@@ -247,6 +289,12 @@ _RESEARCH_BROWSER_CONNECTOR_UNAVAILABLE_TOOL_ERROR = (
     "retry browser_read_page, browser_read_article, or browser_open_url. Use the "
     "available standalone Playwright browser_navigate tool with an exact candidate "
     "URL, or mark the source unverified and continue to the research artifacts."
+)
+_RESEARCH_REVALIDATION_REQUIRED_TOOL_ERROR = (
+    "CONTROLLED_PRESENTATION_RESEARCH_REVALIDATION_REQUIRED: research artifacts are "
+    "newer than their QA report. Run exactly the single validate_research_artifacts.py "
+    "command from RESEARCH_INPUT.revalidation.command now. Do not search, browse, "
+    "read, list, rewrite files, append shell commands, or alter its arguments first."
 )
 
 _PPTX_SCRIPTS_DIR = (
@@ -587,6 +635,7 @@ def _apply_patch_error(
     repair_allowed: bool = False,
     repair_paths: tuple[str, ...] = (),
     workspace_dir: str | None = None,
+    staged_write_id: str | None = None,
 ) -> str | None:
     if stage != "apply_patch":
         return None
@@ -599,6 +648,16 @@ def _apply_patch_error(
         )
         if tool_name == "read_file" and safe_patch_path:
             return None
+        if tool_name == "staged_file_write":
+            action = arguments.get("action")
+            if action == "begin" and safe_patch_path:
+                return None
+            if (
+                action in {"append_text", "append_file", "commit", "abort"}
+                and staged_write_id is not None
+                and arguments.get("write_id") == staged_write_id
+            ):
+                return None
         if (
             tool_name == "write_file"
             and safe_patch_path
@@ -697,6 +756,7 @@ def _content_patch_repair_error(
     stage: str | None,
     tool_name: str,
     arguments: dict[str, Any],
+    staged_write_id: str | None = None,
 ) -> str | None:
     if stage != "content_patch_repair":
         return None
@@ -706,6 +766,24 @@ def _content_patch_repair_error(
         and Path(path).name == "deck.patch.json"
         and ".." not in Path(path).parts
     )
+    if tool_name == "staged_file_write":
+        action = arguments.get("action")
+        if staged_write_id is not None:
+            if (
+                action in {"append_text", "append_file", "commit", "abort"}
+                and arguments.get("write_id") == staged_write_id
+            ):
+                return None
+            return _CONTENT_PATCH_STAGED_ACTIVE_TOOL_ERROR.format(
+                write_id=staged_write_id
+            )
+        if action == "begin" and safe_patch_path:
+            return None
+        return _CONTENT_PATCH_REPAIR_TOOL_ERROR
+    if staged_write_id is not None:
+        return _CONTENT_PATCH_STAGED_ACTIVE_TOOL_ERROR.format(
+            write_id=staged_write_id
+        )
     if tool_name not in _CONTENT_PATCH_REPAIR_ALLOWED_TOOLS or not safe_patch_path:
         return _CONTENT_PATCH_REPAIR_TOOL_ERROR
     return None
@@ -988,7 +1066,19 @@ def _research_validation_failed(
         report_payload = json.loads(report.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return isinstance(report_payload, dict) and report_payload.get("ok") is False
+    if not isinstance(report_payload, dict):
+        return False
+    handoff = report_payload.get("presentation_handoff")
+    generic_delivery_allowed = bool(
+        isinstance(handoff, dict)
+        and handoff.get("schema_version") == 1
+        and handoff.get("delivery_mode") in {"full", "partial", "framework"}
+    )
+    return bool(
+        report_payload.get("ok") is False
+        and report_payload.get("delivery_allowed") is not True
+        and not generic_delivery_allowed
+    )
 
 
 def _is_substantive_research_url(value: Any) -> bool:
@@ -1012,11 +1102,80 @@ def _research_result_establishes_direct_source(
         or _research_result_is_empty(result)
     ):
         return False
-    if tool_name != "browser_navigate":
-        return True
-    return _is_substantive_research_url(
+    page_text, resolved_url = _research_direct_source_content(arguments, result)
+    if (
+        not page_text
+        or _research_navigation_result_is_metadata_only(page_text)
+        or not _is_substantive_research_url(resolved_url)
+    ):
+        return False
+    error_page_markers = (
+        "404 not found",
+        "404错误",
+        "页面不存在",
+        "页面丢失",
+        "网页失联",
+        "access denied",
+        "captcha",
+        "error page",
+    )
+    folded = page_text.casefold()
+    return not any(marker in folded for marker in error_page_markers)
+
+
+def _research_direct_source_content(
+    arguments: dict[str, Any],
+    result: ToolResult,
+) -> tuple[str, str]:
+    """Extract page text and the resolved URL from one direct-read result."""
+    content = result.content if isinstance(result.content, str) else ""
+    resolved_url = str(
+        arguments.get("url") or arguments.get("URL") or arguments.get("href") or ""
+    )
+    page_url_match = re.search(r"(?im)^-\s*Page URL:\s*(\S+)\s*$", content)
+    if page_url_match:
+        resolved_url = page_url_match.group(1)
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            resolved_url = str(data.get("url") or resolved_url)
+            content = "\n".join(
+                str(data.get(field) or "") for field in ("title", "content")
+            )
+    return content.strip(), normalize_search_url(resolved_url)
+
+
+def _research_navigation_result_is_metadata_only(page_text: str) -> bool:
+    """Return whether Playwright returned navigation metadata without page text."""
+    return bool(
+        re.search(r"(?im)^### Page\s*$", page_text)
+        and re.search(r"(?im)^### Snapshot\s*$", page_text)
+        and re.search(r"(?im)^- \[Snapshot\]\(", page_text)
+    )
+
+
+def _research_direct_read_key(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Return the exact URL and backend family for direct-read deduplication."""
+    url = normalize_search_url(
         arguments.get("url") or arguments.get("URL") or arguments.get("href")
     )
+    if not url.startswith(("http://", "https://")):
+        return None
+    backend = "playwright" if tool_name == "browser_navigate" else "gateway"
+    return url, backend
+
+
+def _normalized_source_text(value: object) -> str:
+    """Normalize an excerpt and page text for exact provenance containment."""
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", normalized)
 
 
 def _research_unread_verified_urls(
@@ -1025,6 +1184,7 @@ def _research_unread_verified_urls(
     workspace_dir: str | None,
     artifact_root_dir: str | Path | None,
     verified_evidence_urls: set[str],
+    verified_evidence_content: dict[str, str],
 ) -> tuple[str, ...]:
     """Return ledger URLs incorrectly marked verified without a page read."""
     ledger = _research_validation_ledger(
@@ -1052,8 +1212,13 @@ def _research_unread_verified_urls(
             continue
         url = row.get("source_url")
         normalized = normalize_search_url(url)
+        excerpt = _normalized_source_text(row.get("evidence_excerpt"))
+        source_text = verified_evidence_content.get(normalized, "")
         if normalized.startswith(("http://", "https://")) and (
-            not _is_substantive_research_url(normalized) or normalized not in trusted
+            not _is_substantive_research_url(normalized)
+            or normalized not in trusted
+            or not excerpt
+            or excerpt not in source_text
         ):
             unread.append(str(url))
     return tuple(dict.fromkeys(unread))
@@ -1064,14 +1229,36 @@ def _research_handoff_error(
     research_mode: str | None,
     tool_name: str,
     arguments: dict[str, Any],
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
+    outline_staged_write_id: str | None,
 ) -> str | None:
     if stage != "outline" or research_mode != "deep":
         return None
-    if tool_name == "request_user_input":
+    if tool_name in {"request_user_input", "request_user_decision"}:
         return None
     if tool_name == "write_file":
-        path = arguments.get("path")
-        if isinstance(path, str) and Path(path).name == "outline.json":
+        if _is_canonical_artifact_target(
+            arguments.get("path"),
+            "outline.json",
+            workspace_dir,
+            artifact_root_dir,
+        ):
+            return None
+    if tool_name == "staged_file_write":
+        action = arguments.get("action")
+        if action == "begin" and _is_canonical_artifact_target(
+            arguments.get("path"),
+            "outline.json",
+            workspace_dir,
+            artifact_root_dir,
+        ):
+            return None
+        if (
+            action in {"append_text", "commit", "abort"}
+            and outline_staged_write_id is not None
+            and arguments.get("write_id") == outline_staged_write_id
+        ):
             return None
     if tool_name == "read_file":
         path = arguments.get("path")
@@ -1084,6 +1271,137 @@ def _research_handoff_error(
             ):
                 return None
     return _RESEARCH_HANDOFF_TOOL_ERROR
+
+
+def _is_canonical_artifact_target(
+    value: Any,
+    expected_name: str,
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
+) -> bool:
+    """Return whether a tool path resolves to the active artifact-root file."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    root = artifact_scan_root(workspace_dir, artifact_root_dir)
+    if root is None:
+        return _is_safe_named_path(value, expected_name)
+    root = root.resolve(strict=False)
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=False)
+    else:
+        workspace = (
+            Path(workspace_dir).expanduser().resolve(strict=False)
+            if workspace_dir
+            else None
+        )
+        root_from_workspace: Path | None = None
+        if workspace is not None:
+            try:
+                root_from_workspace = root.relative_to(workspace)
+            except ValueError:
+                pass
+        if (
+            workspace is not None
+            and root_from_workspace is not None
+            and candidate.parts[: len(root_from_workspace.parts)]
+            == root_from_workspace.parts
+        ):
+            resolved = (workspace / candidate).resolve(strict=False)
+        else:
+            resolved = (root / candidate).resolve(strict=False)
+    return resolved == (root / expected_name).resolve(strict=False)
+
+
+def _outline_target_error(
+    stage: str | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
+) -> str | None:
+    """Reject outline writes that bypass the active presentation artifact root."""
+    if stage != "outline":
+        return None
+    candidate: Any = None
+    if tool_name == "write_file":
+        candidate = arguments.get("path")
+    elif tool_name == "staged_file_write" and arguments.get("action") == "begin":
+        candidate = arguments.get("path")
+    if not isinstance(candidate, str) or Path(candidate).name != "outline.json":
+        return None
+    if _is_canonical_artifact_target(
+        candidate,
+        "outline.json",
+        workspace_dir,
+        artifact_root_dir,
+    ):
+        return None
+    return _OUTLINE_TARGET_TOOL_ERROR
+
+
+def _repair_artifact_name(stage: str | None) -> str | None:
+    if stage == "outline_repair":
+        return "outline.json"
+    if stage in {"deck_spec_repair", "content_patch_repair"}:
+        return "deck.patch.json"
+    return None
+
+
+def _is_safe_named_path(value: Any, expected_name: str) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    candidate = Path(value)
+    return candidate.name == expected_name and ".." not in candidate.parts
+
+
+def _staged_repair_call_allowed(
+    stage: str | None,
+    arguments: dict[str, Any],
+) -> bool:
+    """Allow one transactional repair without opening unrelated file operations."""
+    expected_name = _repair_artifact_name(stage)
+    if expected_name is None:
+        return False
+    action = arguments.get("action")
+    if action == "begin":
+        return _is_safe_named_path(arguments.get("path"), expected_name)
+    return action in {"append_text", "commit", "abort"}
+
+
+def _repair_write_call_allowed(
+    stage: str | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> bool:
+    expected_name = _repair_artifact_name(stage)
+    if expected_name is None:
+        return False
+    if tool_name == "staged_file_write":
+        return _staged_repair_call_allowed(stage, arguments)
+    if tool_name in {"write_file", "append_file"}:
+        return _is_safe_named_path(arguments.get("path"), expected_name)
+    return False
+
+
+def _is_committed_repair_mutation(
+    stage: str | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: ToolResult,
+) -> bool:
+    """Return whether a successful call committed the expected repair artifact."""
+    if not result.success:
+        return False
+    expected_name = _repair_artifact_name(stage)
+    if expected_name is None:
+        return False
+    if tool_name in {"write_file", "append_file"}:
+        return _is_safe_named_path(arguments.get("path"), expected_name)
+    return (
+        tool_name == "staged_file_write"
+        and arguments.get("action") == "commit"
+    )
 
 
 def _scaffold_error(
@@ -1108,47 +1426,6 @@ def _scaffold_error(
     script_index = script_indexes[0] if script_indexes else None
     if script_index is None or "--outline" not in tokens or "--out" not in tokens:
         return _SCAFFOLD_TOOL_ERROR
-
-    registered_layouts = {
-        item
-        for item in scaffold_input.get("registered_layout_ids", [])
-        if isinstance(item, str)
-    }
-    layout_ids: list[str] = []
-    for token in tokens[script_index + 1 :]:
-        if token.startswith("--"):
-            break
-        layout_ids.append(token)
-    invalid_layouts = [item for item in layout_ids if item not in registered_layouts]
-
-    registered_themes = {
-        item
-        for item in scaffold_input.get("registered_theme_ids", [])
-        if isinstance(item, str)
-    }
-    invalid_theme: str | None = None
-    if "--theme" in tokens:
-        theme_index = tokens.index("--theme") + 1
-        if (
-            theme_index >= len(tokens)
-            or (
-                tokens[theme_index].lower() != "auto"
-                and tokens[theme_index] not in registered_themes
-            )
-        ):
-            invalid_theme = tokens[theme_index] if theme_index < len(tokens) else "<missing>"
-    if invalid_layouts or invalid_theme is not None:
-        details = []
-        if invalid_theme is not None:
-            details.append(f"invalid theme id {invalid_theme!r}")
-        if invalid_layouts:
-            details.append(f"invalid layout ids {invalid_layouts!r}")
-        return (
-            "CONTROLLED_PRESENTATION_INVALID_REGISTRY_ID: "
-            + "; ".join(details)
-            + ". Choose exact ids from SCAFFOLD_INPUT and invoke "
-            "inspect_deck_contract.js once; the invalid command was not executed."
-        )
 
     if len(script_indexes) != 1 or script_index < 1:
         return _SCAFFOLD_TOOL_ERROR
@@ -1177,6 +1454,20 @@ def _scaffold_error(
         return _SCAFFOLD_SHELL_SUFFIX_TOOL_ERROR
     if tokens.count("--outline") != 1 or tokens.count("--out") != 1:
         return _SCAFFOLD_TOOL_ERROR
+    allowed_flags = {"--outline", "--out"}
+    if scaffold_input.get("image_generation_policy") == "forbidden_by_user":
+        allowed_flags.add("--no-images")
+    index = script_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token not in allowed_flags:
+            return _SCAFFOLD_TOOL_ERROR
+        if token == "--no-images":
+            index += 1
+            continue
+        if index + 1 >= len(tokens) or tokens[index + 1].startswith("--"):
+            return _SCAFFOLD_TOOL_ERROR
+        index += 2
     if (
         scaffold_input.get("image_generation_policy")
         == "forbidden_by_user"
@@ -1249,6 +1540,18 @@ def _stage(checkpoint_text: str) -> str | None:
     return stage or None
 
 
+def _normalized_outline_issue(issue: Any) -> str | None:
+    """Collapse volatile page numbers and values into one outline issue class."""
+    if not isinstance(issue, str) or not issue.strip():
+        return None
+    normalized = unicodedata.normalize("NFKC", issue).casefold().strip()
+    normalized = re.sub(r"slide-\d+", "slide", normalized)
+    normalized = re.sub(r"slides?\.\d+", "slide", normalized)
+    normalized = re.sub(r"\b\d+\b", "#", normalized)
+    normalized = re.sub(r",\s*got\s+.+$", ", got <value>", normalized)
+    return re.sub(r"\s+", " ", normalized)
+
+
 def _research_result_is_empty(result: ToolResult) -> bool:
     """Return whether a successful research tool call yielded no usable payload."""
     if not result.success:
@@ -1285,6 +1588,9 @@ def _tool_failure_signature(result: ToolResult) -> str:
     payload = "\n".join(
         part for part in (result.error, result.content) if isinstance(part, str) and part
     )
+    controlled_code = re.search(r"\b(CONTROLLED_PRESENTATION_[A-Z0-9_]+):", payload)
+    if controlled_code is not None:
+        return controlled_code.group(1)
     return re.sub(r"\s+", " ", payload).strip()[:4000] or "empty-tool-failure"
 
 
@@ -1297,6 +1603,7 @@ class ControlledPresentationPolicy:
     research_mode: str | None = None
     research_round_limit: int = RESEARCH_ROUND_LIMIT
     image_generation_policy: str | None = None
+    available_tool_names: frozenset[str] | None = None
     stage: str | None = None
     scaffold_input: dict[str, Any] | None = None
     image_input: dict[str, Any] | None = None
@@ -1304,6 +1611,7 @@ class ControlledPresentationPolicy:
     has_scaffold_input: bool = False
     has_image_input: bool = False
     has_repair_input: bool = False
+    research_revalidation: dict[str, Any] | None = None
     repair_stalled: bool = False
     image_auth_blocked: bool = False
     research_search_exhausted: bool = False
@@ -1319,24 +1627,42 @@ class ControlledPresentationPolicy:
     _policy_rejection_stage: str | None = None
     _policy_rejection_signature: str | None = None
     _policy_rejection_streak: int = 0
+    _policy_rejection_decision_id: int | str | None = None
+    _active_tool_decision_id: int | str | None = None
+    _outline_staged_write_id: str | None = None
+    _content_patch_staged_write_id: str | None = None
+    _apply_patch_staged_write_id: str | None = None
     _research_tool_attempts: int = 0
     _research_successful_attempts: int = 0
     _research_failed_attempts: int = 0
     _research_empty_attempts: int = 0
     _research_direct_read_attempts: int = 0
     _research_successful_direct_read_attempts: int = 0
+    _research_consecutive_unproductive_direct_reads: int = 0
     _research_failed_validation_attempts: int = 0
     _research_calls_since_checkpoint: int = 0
     _research_rounds_without_handoff: int = 0
     _research_json_reads_since_mutation: set[str] = field(default_factory=set)
     _research_browser_connector_unavailable: bool = False
+    _research_direct_read_keys: set[tuple[str, str]] = field(default_factory=set)
+    _research_direct_source_text: dict[str, str] = field(default_factory=dict)
     _successful_mutation_since_checkpoint: bool = False
     _no_progress_mutation_streak: int = 0
+    _previous_outline_issue_classes: frozenset[str] = frozenset()
+    _previous_outline_issue_count: int | None = None
 
     kind: ClassVar[str] = WORKFLOW_KIND
     checkpoint_injection_id: ClassVar[str] = CHECKPOINT_MARKER
     evidence_read_batch_size: ClassVar[int] = RESEARCH_READ_BATCH_SIZE
     evidence_read_limit: ClassVar[int] = RESEARCH_DIRECT_READ_LIMIT
+
+    @property
+    def _research_direct_read_complete(self) -> bool:
+        return bool(
+            self._research_direct_read_attempts >= self.evidence_read_limit
+            or self._research_consecutive_unproductive_direct_reads
+            >= RESEARCH_UNPRODUCTIVE_DIRECT_READ_LIMIT
+        )
 
     def attach_resume_checkpoint(
         self,
@@ -1344,6 +1670,10 @@ class ControlledPresentationPolicy:
     ) -> None:
         """Attach validated durable metadata loaded by the trusted registry."""
         self._resume_checkpoint = checkpoint
+
+    def begin_tool_decision(self, decision_id: int | str) -> None:
+        """Identify one model decision whose sibling tool calls share a fuse count."""
+        self._active_tool_decision_id = decision_id
 
     def build_checkpoint(self) -> str | None:
         """Derive the current presentation stage from persisted artifacts."""
@@ -1357,11 +1687,8 @@ class ControlledPresentationPolicy:
         )
         unavailable = self._research_failed_attempts + self._research_empty_attempts
         direct_source_verification_unavailable = (
-            self._research_direct_read_attempts > 0
+            self._research_direct_read_complete
             and self._research_successful_direct_read_attempts == 0
-        )
-        direct_source_budget_exhausted = (
-            self._research_direct_read_attempts >= self.evidence_read_limit
         )
         repeated_research_validation_failure = (
             self._research_failed_validation_attempts
@@ -1377,7 +1704,6 @@ class ControlledPresentationPolicy:
             and (
                 unavailable == self._research_tool_attempts
                 or direct_source_verification_unavailable
-                or direct_source_budget_exhausted
                 or repeated_research_validation_failure
                 or repeated_research_progress_rejection
             )
@@ -1389,6 +1715,11 @@ class ControlledPresentationPolicy:
             "successful": self._research_successful_attempts,
             "failed": self._research_failed_attempts,
             "empty": self._research_empty_attempts,
+            "direct_reads": self._research_direct_read_attempts,
+            "verified_pages": self._research_successful_direct_read_attempts,
+            "consecutive_unproductive_reads": (
+                self._research_consecutive_unproductive_direct_reads
+            ),
         }
         fallback_reason = None
         if fallback_allowed:
@@ -1399,9 +1730,15 @@ class ControlledPresentationPolicy:
                     "research_progress_stalled_after_bounded_search"
                     if repeated_research_progress_rejection
                     else (
-                        "research_sources_unavailable"
-                        if unavailable == self._research_tool_attempts
-                        else "research_round_limit_reached_without_validated_report"
+                        "direct_source_verification_unavailable"
+                        if direct_source_verification_unavailable
+                        else (
+                            "research_sources_unavailable"
+                            if unavailable == self._research_tool_attempts
+                            else (
+                                "research_round_limit_reached_without_validated_report"
+                            )
+                        )
                     )
                 )
             )
@@ -1413,6 +1750,11 @@ class ControlledPresentationPolicy:
             research_fallback_reason=fallback_reason,
             research_attempt_summary=attempt_summary,
             research_search_exhausted=self.research_search_exhausted,
+            direct_research_read_complete=self._research_direct_read_complete,
+            direct_research_read_available=(
+                self.available_tool_names is None
+                or bool(self.available_tool_names & DIRECT_RESEARCH_READ_TOOLS)
+            ),
         )
         research_input = (
             _checkpoint_json(checkpoint_text, "RESEARCH_INPUT")
@@ -1529,6 +1871,37 @@ class ControlledPresentationPolicy:
                     "successful_mutations_without_progress=%d",
                     self._no_progress_mutation_streak,
                 )
+        candidate_stage = _stage(checkpoint_text)
+        repair_input = _checkpoint_json(checkpoint_text, "REPAIR_INPUT")
+        if candidate_changed and candidate_stage == "outline_repair":
+            normalized_issues = tuple(
+                normalized
+                for issue in (repair_input or {}).get("issues", [])
+                if (normalized := _normalized_outline_issue(issue)) is not None
+            )
+            issue_classes = frozenset(normalized_issues)
+            issue_count = len(normalized_issues)
+            issue_count_improved = (
+                self._previous_outline_issue_count is not None
+                and issue_count < self._previous_outline_issue_count
+            )
+            recurring = (
+                frozenset()
+                if issue_count_improved
+                else issue_classes & self._previous_outline_issue_classes
+            )
+            if recurring:
+                self.repair_stalled = True
+                _log.warning(
+                    "controlled_presentation/repair_stalled "
+                    "stage=outline_repair recurring_issue_classes=%s",
+                    sorted(recurring),
+                )
+            self._previous_outline_issue_classes = issue_classes
+            self._previous_outline_issue_count = issue_count
+        elif candidate_stage not in {"outline", "outline_qa", "outline_repair"}:
+            self._previous_outline_issue_classes = frozenset()
+            self._previous_outline_issue_count = None
         if self.repair_stalled:
             checkpoint_text = _repair_stalled_checkpoint()
         next_stage = _stage(checkpoint_text)
@@ -1544,6 +1917,13 @@ class ControlledPresentationPolicy:
             )
             self._policy_rejection_signature = None
             self._policy_rejection_streak = 0
+            self._policy_rejection_decision_id = None
+        if next_stage != "outline":
+            self._outline_staged_write_id = None
+        if next_stage != "content_patch_repair":
+            self._content_patch_staged_write_id = None
+        if next_stage != "apply_patch":
+            self._apply_patch_staged_write_id = None
         self.stage = next_stage
         self.has_patch_input = "\nPATCH_INPUT=" in checkpoint_text
         self.has_scaffold_input = "\nSCAFFOLD_INPUT=" in checkpoint_text
@@ -1551,6 +1931,11 @@ class ControlledPresentationPolicy:
         self.has_image_input = "\nIMAGE_INPUT=" in checkpoint_text
         self.image_input = _checkpoint_json(checkpoint_text, "IMAGE_INPUT")
         self.has_repair_input = "\nREPAIR_INPUT=" in checkpoint_text
+        research_input = _checkpoint_json(checkpoint_text, "RESEARCH_INPUT")
+        raw_revalidation = (research_input or {}).get("revalidation")
+        self.research_revalidation = (
+            raw_revalidation if isinstance(raw_revalidation, dict) else None
+        )
 
         changed = checkpoint_text != self._last_checkpoint_text
         recovered_urls = (
@@ -1655,6 +2040,29 @@ class ControlledPresentationPolicy:
             return _RESEARCH_LOCAL_READ_COMPLETE_TOOL_ERROR
         return None
 
+    def _research_revalidation_error(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> str | None:
+        revalidation = self.research_revalidation
+        if self.stage != "research" or revalidation is None:
+            return None
+        expected = revalidation.get("command")
+        command = arguments.get("command")
+        if (
+            tool_name != "bash"
+            or not isinstance(expected, str)
+            or not isinstance(command, str)
+        ):
+            return _RESEARCH_REVALIDATION_REQUIRED_TOOL_ERROR
+        try:
+            if shlex.split(command) != shlex.split(expected):
+                return _RESEARCH_REVALIDATION_REQUIRED_TOOL_ERROR
+        except ValueError:
+            return _RESEARCH_REVALIDATION_REQUIRED_TOOL_ERROR
+        return None
+
     def tool_call_error(
         self,
         tool_name: str,
@@ -1669,6 +2077,16 @@ class ControlledPresentationPolicy:
             self.research_mode,
             tool_name,
             arguments,
+            self.workspace_dir,
+            self.artifact_root_dir,
+            self._outline_staged_write_id,
+        )
+        outline_target_error = _outline_target_error(
+            self.stage,
+            tool_name,
+            arguments,
+            self.workspace_dir,
+            self.artifact_root_dir,
         )
         if self.stage == "repair_stalled":
             return _REPAIR_STALLED_TOOL_ERROR
@@ -1676,6 +2094,20 @@ class ControlledPresentationPolicy:
             return _IMAGE_AUTH_BLOCKED_TOOL_ERROR
         if handoff_error is not None:
             return handoff_error
+        if outline_target_error is not None:
+            return outline_target_error
+        research_revalidation_error = self._research_revalidation_error(
+            tool_name,
+            arguments,
+        )
+        if research_revalidation_error is not None:
+            return research_revalidation_error
+        if (
+            self.stage == "research"
+            and tool_name in DIRECT_RESEARCH_READ_TOOLS
+            and self._research_direct_read_complete
+        ):
+            return _RESEARCH_DIRECT_READ_COMPLETE_TOOL_ERROR
         research_local_read_error = self._research_local_read_error(
             tool_name,
             arguments,
@@ -1686,6 +2118,7 @@ class ControlledPresentationPolicy:
             self.stage,
             tool_name,
             arguments,
+            self._content_patch_staged_write_id,
         )
         if content_patch_repair_error is not None:
             return content_patch_repair_error
@@ -1696,13 +2129,14 @@ class ControlledPresentationPolicy:
         )
         if image_policy_rebase_error is not None:
             return image_policy_rebase_error
-        if self.stage == "research":
+        if self.stage == "research" and self.research_revalidation is None:
             unread_urls = _research_unread_verified_urls(
                 tool_name,
                 arguments,
                 self.workspace_dir,
                 self.artifact_root_dir,
                 verified_evidence_urls,
+                self._research_direct_source_text,
             )
             if unread_urls:
                 displayed = ", ".join(unread_urls[:5])
@@ -1717,10 +2151,16 @@ class ControlledPresentationPolicy:
             return _RESEARCH_SEARCH_COMPLETE_TOOL_ERROR
         if (
             self.stage == "research"
+            and self.research_search_exhausted
             and tool_name in DIRECT_RESEARCH_READ_TOOLS
-            and self._research_direct_read_attempts >= self.evidence_read_limit
         ):
-            return _RESEARCH_DIRECT_READ_COMPLETE_TOOL_ERROR
+            direct_read_key = _research_direct_read_key(tool_name, arguments)
+            if direct_read_key is None or not _is_substantive_research_url(
+                direct_read_key[0]
+            ):
+                return _RESEARCH_EXACT_SOURCE_URL_REQUIRED_TOOL_ERROR
+            if direct_read_key in self._research_direct_read_keys:
+                return _RESEARCH_DIRECT_URL_ALREADY_ATTEMPTED_TOOL_ERROR
         if (
             self.stage == "content_patch"
             and self.has_patch_input
@@ -1747,13 +2187,27 @@ class ControlledPresentationPolicy:
         if (
             self.stage == "outline_repair"
             and self.has_repair_input
-            and tool_name != "write_file"
+            and (
+                tool_name not in _OUTLINE_REPAIR_ALLOWED_TOOLS
+                or not _repair_write_call_allowed(
+                    self.stage,
+                    tool_name,
+                    arguments,
+                )
+            )
         ):
             return _OUTLINE_REPAIR_TOOL_ERROR
         if (
             self.stage == "deck_spec_repair"
             and self.has_repair_input
-            and tool_name not in _REPAIR_ALLOWED_TOOLS
+            and (
+                tool_name not in _REPAIR_ALLOWED_TOOLS
+                or not _repair_write_call_allowed(
+                    self.stage,
+                    tool_name,
+                    arguments,
+                )
+            )
         ):
             return _REPAIR_TOOL_ERROR
         image_status_error = _image_status_error(self.stage, tool_name, arguments)
@@ -1766,6 +2220,7 @@ class ControlledPresentationPolicy:
             repair_allowed=self.apply_patch_repair_allowed,
             repair_paths=self.apply_patch_repair_paths,
             workspace_dir=self.workspace_dir,
+            staged_write_id=self._apply_patch_staged_write_id,
         )
         if apply_patch_error is not None:
             return apply_patch_error
@@ -1793,11 +2248,16 @@ class ControlledPresentationPolicy:
                 self._step_failure_streak,
             )
 
-    def _record_policy_rejection(self, result: ToolResult) -> None:
+    def _record_policy_rejection(
+        self,
+        result: ToolResult,
+    ) -> None:
+        decision_id = self._active_tool_decision_id
         if self.stage not in _POLICY_REJECTION_STAGES:
             self._policy_rejection_stage = None
             self._policy_rejection_signature = None
             self._policy_rejection_streak = 0
+            self._policy_rejection_decision_id = None
             return
         signature = _tool_failure_signature(result)
         if signature.startswith(
@@ -1809,11 +2269,23 @@ class ControlledPresentationPolicy:
             # non-compliance and terminate the whole presentation workflow.
             self._policy_rejection_signature = None
             self._policy_rejection_streak = 0
+            self._policy_rejection_decision_id = None
             return
         if not signature.startswith("CONTROLLED_PRESENTATION_"):
             self._policy_rejection_stage = None
             self._policy_rejection_signature = None
             self._policy_rejection_streak = 0
+            self._policy_rejection_decision_id = None
+            return
+        if (
+            decision_id is not None
+            and decision_id == self._policy_rejection_decision_id
+            and self.stage == self._policy_rejection_stage
+            and signature == self._policy_rejection_signature
+        ):
+            # One model decision may fan out several parallel calls before any
+            # sibling rejection is visible. Count that decision once, not once
+            # per preplanned tool call.
             return
         if (
             self.stage == self._policy_rejection_stage
@@ -1824,6 +2296,13 @@ class ControlledPresentationPolicy:
             self._policy_rejection_stage = self.stage
             self._policy_rejection_signature = signature
             self._policy_rejection_streak = 1
+        self._policy_rejection_decision_id = decision_id
+        if self.stage == "research" and self.research_revalidation is None:
+            # Research has its own bounded fallback in build_checkpoint(). A
+            # transition guard such as SEARCH_COMPLETE must move the workflow
+            # toward an unverified ledger/outline fallback, not terminate the
+            # whole presentation through the generic repair fuse.
+            return
         if self._policy_rejection_streak >= _REPEATED_POLICY_REJECTION_LIMIT:
             self.repair_stalled = True
             _log.warning(
@@ -1848,10 +2327,58 @@ class ControlledPresentationPolicy:
         self._policy_rejection_stage = None
         self._policy_rejection_signature = None
         self._policy_rejection_streak = 0
-        if (
-            result.success
-            and tool_name in _MUTATION_TOOLS
-            and self.stage != "research"
+        self._policy_rejection_decision_id = None
+        if self.stage == "outline" and tool_name == "staged_file_write":
+            action = arguments.get("action")
+            if action == "begin" and result.success:
+                raw_output = result.raw_output
+                write_id = (
+                    raw_output.get("write_id")
+                    if isinstance(raw_output, dict)
+                    else None
+                )
+                self._outline_staged_write_id = (
+                    write_id if isinstance(write_id, str) and write_id else None
+                )
+            elif action in {"commit", "abort"} and result.success:
+                self._outline_staged_write_id = None
+        if self.stage == "content_patch_repair" and tool_name == "staged_file_write":
+            action = arguments.get("action")
+            if (
+                action == "begin"
+                and result.success
+                and self._content_patch_staged_write_id is None
+            ):
+                raw_output = result.raw_output
+                write_id = (
+                    raw_output.get("write_id")
+                    if isinstance(raw_output, dict)
+                    else None
+                )
+                self._content_patch_staged_write_id = (
+                    write_id if isinstance(write_id, str) and write_id else None
+                )
+            elif action in {"commit", "abort"} and result.success:
+                self._content_patch_staged_write_id = None
+        if self.stage == "apply_patch" and tool_name == "staged_file_write":
+            action = arguments.get("action")
+            if action == "begin" and result.success:
+                raw_output = result.raw_output
+                write_id = (
+                    raw_output.get("write_id")
+                    if isinstance(raw_output, dict)
+                    else None
+                )
+                self._apply_patch_staged_write_id = (
+                    write_id if isinstance(write_id, str) and write_id else None
+                )
+            elif action in {"commit", "abort"} and result.success:
+                self._apply_patch_staged_write_id = None
+        if _is_committed_repair_mutation(
+            self.stage,
+            tool_name,
+            arguments,
+            result,
         ):
             self._successful_mutation_since_checkpoint = True
         if (
@@ -1869,20 +2396,38 @@ class ControlledPresentationPolicy:
         if self.stage == "research" and tool_name in RESEARCH_BUDGET_EXEMPT_TOOLS:
             self._research_tool_attempts += 1
             self._research_calls_since_checkpoint += 1
+            establishes_direct_source = False
             if tool_name in DIRECT_RESEARCH_READ_TOOLS:
                 self._research_direct_read_attempts += 1
+                direct_read_key = _research_direct_read_key(tool_name, arguments)
+                if direct_read_key is not None:
+                    self._research_direct_read_keys.add(direct_read_key)
+                establishes_direct_source = _research_result_establishes_direct_source(
+                    tool_name,
+                    arguments,
+                    result,
+                )
             if not result.success:
                 self._research_failed_attempts += 1
             elif _research_result_is_empty(result):
                 self._research_empty_attempts += 1
             else:
                 self._research_successful_attempts += 1
-                if _research_result_establishes_direct_source(
-                    tool_name,
-                    arguments,
-                    result,
-                ):
+                if establishes_direct_source:
                     self._research_successful_direct_read_attempts += 1
+                    page_text, resolved_url = _research_direct_source_content(
+                        arguments,
+                        result,
+                    )
+                    if resolved_url:
+                        self._research_direct_source_text[resolved_url] = (
+                            _normalized_source_text(page_text)
+                        )
+            if tool_name in DIRECT_RESEARCH_READ_TOOLS:
+                if establishes_direct_source:
+                    self._research_consecutive_unproductive_direct_reads = 0
+                else:
+                    self._research_consecutive_unproductive_direct_reads += 1
             if (
                 tool_name in GATEWAY_RESEARCH_READ_TOOLS
                 and not result.success
@@ -1951,11 +2496,15 @@ class ControlledPresentationPolicy:
                 and Path(patch_path).name == "deck.patch.json"
                 and ".." not in Path(patch_path).parts
             )
+            committed_staged_patch = (
+                tool_name == "staged_file_write"
+                and arguments.get("action") == "commit"
+            )
             applied_patch = (
                 tool_name == "bash"
                 and _apply_patch_error(self.stage, tool_name, arguments) is None
             )
-            if wrote_patch or applied_patch:
+            if wrote_patch or committed_staged_patch or applied_patch:
                 self._clear_step_failure("apply_patch")
             if applied_patch:
                 self.apply_patch_repair_allowed = False

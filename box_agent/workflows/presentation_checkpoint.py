@@ -29,6 +29,12 @@ _CONTROLLED_PPTX_SCRIPTS_DIR: Final = (
     / "pptx"
     / "scripts"
 )
+_RESEARCH_SYNTHESIS_SCRIPTS_DIR: Final = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "research-synthesis"
+    / "scripts"
+)
 
 
 def _controlled_pptx_command(script_name: str, arguments: str) -> str:
@@ -225,8 +231,91 @@ def _validated_research_source(item: dict[str, object]) -> bool:
         return False
 
 
+def _normalized_presentation_handoff(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Normalize a source-specific report into the presentation handoff contract."""
+    raw_handoff = payload.get("presentation_handoff")
+    if isinstance(raw_handoff, dict):
+        handoff = raw_handoff
+    else:
+        # Read older research-synthesis reports during migration. New downstream
+        # consumers must not depend on these producer-specific fields.
+        if payload.get("validator") != "research-synthesis":
+            return {}
+        legacy_full = "delivery_allowed" not in payload and payload.get("ok") is True
+        delivery_allowed = payload.get("delivery_allowed") is True or legacy_full
+        delivery_mode = payload.get(
+            "handoff_status", "full" if legacy_full else "invalid"
+        )
+        if not delivery_allowed:
+            delivery_mode = "invalid"
+        handoff = {
+            "schema_version": 1,
+            "delivery_mode": delivery_mode,
+            "verified_facts": payload.get("verified_evidence", []),
+            "gaps": [
+                item
+                for key in ("issues", "warnings")
+                for item in (
+                    payload.get(key) if isinstance(payload.get(key), list) else []
+                )
+                if isinstance(item, str) and item.strip()
+            ],
+            "quality_summary": {
+                "quality_ok": payload.get("quality_ok", payload.get("ok") is True),
+                "actual_dimensions": payload.get("dimension_count"),
+                "recommended_dimensions": payload.get("min_dimensions"),
+            },
+        }
+
+    delivery_mode = handoff.get("delivery_mode")
+    verified_facts = handoff.get("verified_facts")
+    gaps = handoff.get("gaps")
+    quality_summary = handoff.get("quality_summary")
+    context_files = handoff.get("context_files", [])
+    if (
+        handoff.get("schema_version") != 1
+        or delivery_mode not in {"full", "partial", "framework"}
+        or not isinstance(verified_facts, list)
+        or not isinstance(gaps, list)
+        or not all(isinstance(item, str) and item.strip() for item in gaps)
+        or not isinstance(quality_summary, dict)
+        or not isinstance(context_files, list)
+        or not all(
+            isinstance(item, str) and item.strip() for item in context_files
+        )
+    ):
+        return {}
+    if any(
+        not isinstance(item, dict)
+        or item.get("status") not in {None, "verified"}
+        or not isinstance(item.get("entity"), str)
+        or not item["entity"].strip()
+        or not isinstance(item.get("claim"), str)
+        or not item["claim"].strip()
+        or not _validated_research_source(item)
+        or not isinstance(item.get("canonical"), str)
+        or not item["canonical"].strip()
+        for item in verified_facts
+    ):
+        return {}
+    if delivery_mode in {"full", "partial"} and not verified_facts:
+        return {}
+    if delivery_mode == "framework" and verified_facts:
+        return {}
+    return {
+        "schema_version": 1,
+        "delivery_mode": delivery_mode,
+        "verified_facts": verified_facts,
+        "gaps": gaps,
+        "quality_summary": quality_summary,
+        "context_files": context_files,
+    }
+
+
 def _presentation_research_artifacts(workspace_dir: str | Path) -> tuple[bool, tuple[Path, ...]]:
-    """Return whether a fresh validated deep-research handoff is complete."""
+    """Return whether a fresh research handoff may proceed to deck delivery."""
     workspace_root = Path(workspace_dir)
     # Presentation tools execute from the artifact root (``output/``), so the
     # canonical research handoff is ``output/research``.  Older sessions and
@@ -260,7 +349,12 @@ def _presentation_research_artifacts(workspace_dir: str | Path) -> tuple[bool, t
             research_root / "qa" / "research_status.json",
         ]
     )
-    report_paths = non_empty(research_root.rglob("*_research_check.json"))
+    report_paths = non_empty(
+        [
+            *research_root.rglob("*_research_check.json"),
+            *research_root.rglob("*_presentation_handoff.json"),
+        ]
+    )
     for report_path in sorted(
         report_paths,
         key=lambda path: path.stat().st_mtime_ns,
@@ -270,33 +364,73 @@ def _presentation_research_artifacts(workspace_dir: str | Path) -> tuple[bool, t
             payload = json.loads(report_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
+        if not isinstance(payload, dict):
             continue
-        if payload.get("validator") != "research-synthesis":
+        handoff = _normalized_presentation_handoff(payload)
+        if not handoff:
             continue
+        handoff_status = handoff["delivery_mode"]
+        verified_evidence = handoff["verified_facts"]
+        has_generic_handoff = isinstance(payload.get("presentation_handoff"), dict)
+        legacy_full_handoff = (
+            not has_generic_handoff
+            and "delivery_allowed" not in payload
+            and payload.get("ok") is True
+        )
         route = payload.get("route")
         topic = payload.get("topic")
         min_dimensions = payload.get("min_dimensions")
         dimension_count = payload.get("dimension_count")
         evidence_schema_version = payload.get("evidence_schema_version")
         evidence_file_value = payload.get("evidence_file")
-        verified_evidence_count = payload.get("verified_evidence_count")
-        verified_evidence = payload.get("verified_evidence")
+        verified_evidence_count = len(verified_evidence)
+        if has_generic_handoff:
+            context_files = []
+            for relative_path in handoff["context_files"]:
+                candidate = research_root / relative_path
+                try:
+                    if candidate.resolve().is_relative_to(research_root.resolve()):
+                        context_files.append(candidate)
+                except OSError:
+                    continue
+            handoff_files = tuple(
+                dict.fromkeys([*non_empty(context_files), report_path])
+            )
+            topic_dependencies = (
+                non_empty(
+                    [
+                        *research_root.glob(f"{topic}_*.md"),
+                        research_root / f"{topic}_evidence.json",
+                    ]
+                )
+                if isinstance(topic, str) and topic.strip()
+                else list(handoff_files[:-1])
+            )
+            try:
+                report_mtime = report_path.stat().st_mtime_ns
+                if any(
+                    path.stat().st_mtime_ns > report_mtime
+                    for path in topic_dependencies
+                ):
+                    continue
+            except OSError:
+                continue
+            return (True, handoff_files)
         if (
             route not in {"A", "B"}
             or not isinstance(topic, str)
             or not topic.strip()
             or not isinstance(min_dimensions, int)
-            or min_dimensions < 3
+            or min_dimensions < 1
             or not isinstance(dimension_count, int)
-            or dimension_count < min_dimensions
-            or evidence_schema_version != 1
-            or not isinstance(evidence_file_value, str)
-            or not isinstance(verified_evidence_count, int)
-            or verified_evidence_count < 1
-            or not isinstance(verified_evidence, list)
-            or len(verified_evidence) != verified_evidence_count
+            or verified_evidence_count < 0
         ):
+            continue
+        if legacy_full_handoff and dimension_count < min_dimensions:
+            continue
+        if handoff_status in {"full", "partial"} and verified_evidence_count < 1:
+            continue
+        if handoff_status == "framework" and verified_evidence_count != 0:
             continue
         if any(
             not isinstance(item, dict)
@@ -312,22 +446,27 @@ def _presentation_research_artifacts(workspace_dir: str | Path) -> tuple[bool, t
         ):
             continue
         evidence_file = research_root / f"{topic}_evidence.json"
-        try:
-            reported_evidence_file = Path(evidence_file_value).resolve()
-            if (
-                not evidence_file.is_file()
-                or reported_evidence_file != evidence_file.resolve()
+        if verified_evidence_count > 0:
+            if evidence_schema_version != 1 or not isinstance(
+                evidence_file_value, str
             ):
                 continue
-        except OSError:
-            continue
+            try:
+                reported_evidence_file = Path(evidence_file_value).resolve()
+                if (
+                    not evidence_file.is_file()
+                    or reported_evidence_file != evidence_file.resolve()
+                ):
+                    continue
+            except OSError:
+                continue
         dimensions = non_empty(research_root.glob(f"{topic}_dim*.md"))
         wide = non_empty(research_root.glob(f"{topic}_wide*.md"))
         cross_verification = non_empty(
             [research_root / f"{topic}_cross_verification.md"]
         )
         insights = non_empty([research_root / f"{topic}_insight.md"])
-        if (
+        if legacy_full_handoff and (
             len(dimensions) < min_dimensions
             or (route == "A" and not wide)
             or not cross_verification
@@ -341,7 +480,7 @@ def _presentation_research_artifacts(workspace_dir: str | Path) -> tuple[bool, t
                     *dimensions,
                     *cross_verification,
                     *insights,
-                    evidence_file,
+                    *([evidence_file] if evidence_file.is_file() else []),
                     report_path,
                 ]
             )
@@ -356,33 +495,108 @@ def _presentation_research_artifacts(workspace_dir: str | Path) -> tuple[bool, t
     return (False, tuple(dict.fromkeys([*observed, *report_paths])))
 
 
-def _verified_research_evidence(research_files: tuple[Path, ...]) -> list[str]:
-    """Return only validator-approved canonical facts for outline binding."""
+def _presentation_handoff(research_files: tuple[Path, ...]) -> dict[str, object]:
+    """Return the normalized presentation handoff from the selected report."""
     report_path = next(
         (
             path
             for path in research_files
-            if path.name.endswith("_research_check.json")
+            if path.name.endswith(("_research_check.json", "_presentation_handoff.json"))
         ),
         None,
     )
     if report_path is None:
-        return []
+        return {}
     try:
         payload = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
-    evidence = payload.get("verified_evidence") if isinstance(payload, dict) else None
-    if not isinstance(evidence, list):
-        return []
-    return [
-        item["canonical"].strip()
-        for item in evidence
-        if isinstance(item, dict)
-        and item.get("status") == "verified"
-        and isinstance(item.get("canonical"), str)
-        and item["canonical"].strip()
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return _normalized_presentation_handoff(payload)
+
+
+def _stale_research_revalidation(
+    workspace_dir: str | Path,
+    research_files: tuple[Path, ...],
+) -> dict[str, object] | None:
+    """Return one deterministic validator call when research changed after QA."""
+    workspace_root = Path(workspace_dir)
+    canonical_research_root = workspace_root / OUTPUT_SUBDIR / "research"
+    report_paths = [
+        path
+        for path in research_files
+        if path.name.endswith(("_research_check.json", "_presentation_handoff.json"))
+        and path.is_file()
     ]
+    if not report_paths or not canonical_research_root.is_dir():
+        return None
+    report_path = max(report_paths, key=lambda path: path.stat().st_mtime_ns)
+    try:
+        if report_path.parent != canonical_research_root / "qa":
+            return None
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        report_mtime = report_path.stat().st_mtime_ns
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    topic = payload.get("topic")
+    route = payload.get("route")
+    if (
+        not isinstance(topic, str)
+        or not topic.strip()
+        or Path(topic).name != topic
+        or route not in {"A", "B"}
+    ):
+        return None
+
+    dependencies = [
+        path
+        for path in research_files
+        if path.is_file()
+        and (
+            (
+                path.suffix.casefold() == ".md"
+                and path.name.startswith(f"{topic}_")
+            )
+            or path.name == f"{topic}_evidence.json"
+        )
+    ]
+    try:
+        stale_dependencies = [
+            path for path in dependencies if path.stat().st_mtime_ns > report_mtime
+        ]
+    except OSError:
+        return None
+    if not stale_dependencies:
+        return None
+
+    script_path = _RESEARCH_SYNTHESIS_SCRIPTS_DIR / "validate_research_artifacts.py"
+    report_argument = (Path("research") / "qa" / report_path.name).as_posix()
+    command = " ".join(
+        [
+            "${BOX_AGENT_PYTHON:-python3}",
+            shlex.quote(str(script_path)),
+            "--research-dir",
+            "research",
+            "--topic",
+            shlex.quote(topic),
+            "--route",
+            route,
+            "--report",
+            shlex.quote(report_argument),
+        ]
+    )
+    return {
+        "required": True,
+        "command": command,
+        "report": report_argument,
+        "stale_dependencies": [
+            path.relative_to(canonical_research_root).as_posix()
+            for path in stale_dependencies
+        ],
+    }
 
 
 def _manifest_generation_progress(
@@ -1092,6 +1306,8 @@ def build_checkpoint_text(
     research_fallback_reason: str | None = None,
     research_attempt_summary: dict[str, int] | None = None,
     research_search_exhausted: bool = False,
+    direct_research_read_complete: bool = False,
+    direct_research_read_available: bool = True,
 ) -> str | None:
     """Return an authoritative next-stage checkpoint for controlled decks.
 
@@ -1106,12 +1322,19 @@ def build_checkpoint_text(
     output_root = Path(workspace_dir) / OUTPUT_SUBDIR
     research_required = research_mode == "deep"
     research_ready, research_files = _presentation_research_artifacts(workspace_dir)
-    verified_research_evidence = (
-        _verified_research_evidence(research_files) if research_ready else []
+    research_handoff = _presentation_handoff(research_files) if research_ready else {}
+    stale_revalidation = (
+        _stale_research_revalidation(workspace_dir, research_files)
+        if research_required and not research_ready
+        else None
+    )
+    research_delivery_mode = str(
+        research_handoff.get("delivery_mode") or "invalid"
     )
     research_fallback = (
         research_required
         and not research_ready
+        and stale_revalidation is None
         and (
             research_fallback_allowed
             or _research_fallback_available(research_files)
@@ -1183,12 +1406,13 @@ def build_checkpoint_text(
         (
             path
             for path in research_files
-            if research_ready and path.name.endswith("_research_check.json")
+            if research_ready
+            and path.name.endswith(("_research_check.json", "_presentation_handoff.json"))
         ),
         None,
     )
     research_report_argument = (
-        f" --research-report {shlex.quote(str(research_report_path))}"
+        f" --research-handoff {shlex.quote(str(research_report_path))}"
         if research_report_path is not None
         else ""
     )
@@ -1326,38 +1550,66 @@ def build_checkpoint_text(
         and html_path is None
     ):
         stage = "research"
-        if research_search_exhausted:
+        if stale_revalidation is not None:
+            next_action = (
+                "The research files are newer than their QA report, so the report is "
+                "stale. Do not search, browse, read, list, or rewrite any artifact. "
+                "Your only next tool call must run this validator command exactly once: `"
+                f"{stale_revalidation['command']}`. The fresh generic presentation "
+                "handoff will advance to full, partial, or framework delivery."
+            )
+        elif research_search_exhausted:
+            direct_read_instruction = (
+                "The bounded direct-source verification pass is complete. Do not "
+                "search or browse again. Mark unread candidates status=unverified "
+                "with unverified_reason and finish the ledger and validation report. "
+                if direct_research_read_complete
+                else (
+                    "Search snippets are discovery only: read at most five unique "
+                    "exact article, report, filing, or data-page candidate URLs before "
+                    "marking their rows verified. Never open an origin homepage or "
+                    "retry the same URL with the same backend; stop after two "
+                    "consecutive reads yield no usable source content. Do not inspect "
+                    "browser tabs, execute page scripts, take snapshots, or use another "
+                    "browser-state side channel after bounded search. "
+                    if direct_research_read_available
+                    else (
+                        "No direct browser read tool is available in this run. Do not "
+                        "attempt another search or invent a browser tool; mark candidate "
+                        "rows status=unverified with unverified_reason, then complete the "
+                        "ledger and validation report from the evidence already in "
+                        "context. "
+                    )
+                )
+            )
             next_action = (
                 "The bounded search rounds already returned candidate sources, so do "
-                "not call web_search again. Search snippets are discovery only: open "
-                "the exact strongest first-party candidate URLs with a browser read "
-                "tool before marking their rows verified. Do not inspect browser "
-                "tabs, execute page scripts, take snapshots, or use another "
-                "browser-state side channel after the bounded search is complete; "
-                "use only exact-URL page reads or navigation. Do not create "
-                "outline.json yet. Do not inspect/list files or reread skill "
+                "not call web_search again. "
+                + direct_read_instruction
+                + "Do not create outline.json before writing the fresh research "
+                "handoff report. Do not inspect/list files or reread skill "
                 "references, validator source, or Markdown research notes. Use only "
                 "the evidence already present in model context and research/ to "
                 "finish the route's cross-verification, "
                 "insight, structured evidence ledger, and fresh "
                 "research/qa/*_research_check.json via "
-                "validate_research_artifacts.py --report. Repair an unsuccessful "
-                "report from the existing evidence instead of bypassing validation; "
-                "after a failed validation, read its JSON report and JSON evidence "
-                "ledger once, then make a repair before reading either again. "
+                "validate_research_artifacts.py --report. The report may hand off a "
+                "full, partial, or framework delivery even when quality_ok is false; "
+                "do not rewrite evidence excerpts merely to make quality_ok true. "
                 "Keep the ledger contract exact across context compaction: top-level "
                 "schema_version=1, topic, target_entities, evidence; each evidence row "
                 "uses entity, claim, source_url, source_type, evidence_excerpt, "
                 "confidence, status. Use source_type=first_party for official-domain "
                 "pages. Each target_entities entry uses entity, aliases (array), and "
                 "official_domains (array); never substitute name or official_domain. "
-                "Route A requires at least 10 distinct dimension files; Route B "
-                "requires at least 3. "
+                "The recommended dimension count is a research-quality target, not a "
+                "deck-delivery blocker. "
                 "Never use the invented source_type value official. A verified row "
                 "requires a successful exact-page read in this run; otherwise use "
                 "status=unverified with unverified_reason. Preserve publication date "
                 "and report/title in claim or evidence_excerpt when the user requested them. "
-                "The checkpoint advances only after that report is successful."
+                "Run the validator once after the artifacts are structurally complete; "
+                "the checkpoint will advance with only its verified subset."
             )
         else:
             next_action = (
@@ -1382,12 +1634,11 @@ def build_checkpoint_text(
                 "target_entities, evidence, with row fields entity, claim, source_url, "
                 "source_type, evidence_excerpt, confidence, status. Each target_entities "
                 "entry uses entity, aliases (array), official_domains (array), never "
-                "name or official_domain. Route A requires at least 10 distinct "
-                "dimension files; Route B requires at least 3. "
+                "name or official_domain. Route dimension counts are quality targets, "
+                "not delivery blockers. "
                 "Do not create or validate outline.json yet. The checkpoint "
-                "advances only after research/ contains the route's required distinct "
-                "dimension-file count, cross-verification and insight files, "
-                "and a fresh successful research/qa/*_research_check.json written by "
+                "advances after a fresh delivery-allowed research/qa/*_research_check.json "
+                "is written by "
                 "validate_research_artifacts.py --report. Route A must also include "
                 "wide exploration. If an early "
                 "outline already exists, preserve it; update it from the completed "
@@ -1467,6 +1718,14 @@ def build_checkpoint_text(
                     if research_fallback
                     else ""
                 )
+                + (
+                    " Research quality did not fully pass, but its fresh report "
+                    f"authorized a {research_delivery_mode} delivery. State that "
+                    "status separately from presentation QA and offer to enrich the "
+                    "verified subset after delivery."
+                    if research_ready and research_delivery_mode != "full"
+                    else ""
+                )
             )
         else:
             stage = "qa"
@@ -1479,15 +1738,20 @@ def build_checkpoint_text(
             stage = "outline"
             next_action = (
                 (
-                    "Research QA is complete. Do not call web_search or any browser "
+                    f"Research delivery mode is {research_delivery_mode}. Do not call "
+                    "web_search or any browser "
                     "tool again, do not reread the research QA report or outline.md, "
                     "and do not list/check the filesystem. If the handoff contents "
                     "are not already present in the current model context, read the "
                     "completed Markdown handoff files named in RESEARCH_INPUT in one "
                     "parallel batch for narrative context; otherwise skip reading. "
                     "For factual evidence, copy only the canonical strings in "
-                    "RESEARCH_INPUT.verified_evidence. Never promote conflicting or "
-                    "unverified prose from a Markdown file. Then your very next tool "
+                    "RESEARCH_INPUT.verified_facts[].canonical. Never promote conflicting or "
+                    "unverified prose from a Markdown file. For partial handoff, use "
+                    "only that verified subset and omit or explicitly mark remaining "
+                    "required facts unavailable. For framework handoff, use no external "
+                    "factual claims and produce an editable placeholder structure. Then "
+                    "your very next tool "
                     "call must write outline.json. "
                     if research_required and research_ready
                     else (
@@ -1523,15 +1787,17 @@ def build_checkpoint_text(
                 "literal used in its title, message, or bullets must also appear "
                 "verbatim in that page's evidence array; evidence is the fact "
                 "ledger, so remove decorative/structural numbers that are not "
-                "content claims. Every public-research page must include at least "
-                "one evidence item unless it explicitly marks a required fact as "
-                "unavailable; every non-empty item must include the actual http(s) "
+                "content claims. Cover, agenda, and section-divider pages are "
+                "structural and may keep evidence empty. Every other public-research "
+                "page must include at least one evidence item unless it explicitly "
+                "marks a required fact as unavailable; every non-empty item must "
+                "include the actual http(s) "
                 "source URL used for that claim. "
                 "Treat AuthLevel as a ranking hint, not proof of authority: when "
                 "a first-party domain is known, use a site:-constrained query, "
                 "discard SEO-looking/mirror/unrelated results, and never label a "
                 "source FIFA/IOC/official unless the returned URL belongs to that "
-                "institution. When RESEARCH_INPUT.verified_evidence is non-empty, "
+                "institution. When RESEARCH_INPUT.verified_facts is non-empty, "
                 "copy every evidence item exactly from that canonical list; another "
                 "URL, claim, source type, or entity binding is a hard outline failure. "
                 "Without a validated handoff. Do not invent the expected URL: omit "
@@ -1582,7 +1848,10 @@ def build_checkpoint_text(
                 "id and every page intent. Do not read outline.json, inspect/list the "
                 "registry, or invent an id. Your very next tool call must invoke "
                 "inspect_deck_contract.js once to create deck.json and its image "
-                "manifest, passing `--outline outline.json --out deck.json`. The "
+                "manifest, passing only `--outline outline.json --out deck.json`. "
+                "Do not pass layout ids, --theme, --image-mode, --title, facts, or "
+                "other optional flags; the inspector deterministically derives the "
+                "ordered layout plan and theme from the validated outline. The "
                 "inspector must be the only shell command: do not append `tail`, a "
                 "pipe such as `2>&1 | tail -N`, redirection, or another command. "
                 "ordered plan may repeat layout "
@@ -1594,20 +1863,7 @@ def build_checkpoint_text(
                     if image_generation_policy == IMAGE_GENERATION_FORBIDDEN
                     else ""
                 )
-                + "A "
-                "qualitative page must not use chart-* or kpi-grid-v1 unless its "
-                "outline evidence contains real quantities. For source_mode=user_provided, "
-                "exact quantities in that page's message/bullets are evidence even when "
-                "the external-link evidence array is empty. Choose layouts that can "
-                "express each page's evidence without unresolved public-research "
-                "placeholders. SCAFFOLD_INPUT.registered_layouts contains compact "
-                "selection semantics; use project-case-study-v1 only for an actual "
-                "source-backed project/case with proof metrics, not merely as a "
-                "generic image-plus-text page. Choose --image-mode auto unless the brief activates "
-                "creative_image_mode. Pass every --fact as an exact contiguous copy "
-                "from the user's source; use --research-fact only for completed "
-                "research not already present in the bound public-research outline, "
-                "and --assumption only with explicit user permission. The scaffold "
+                + "The scaffold "
                 "automatically imports public outline evidence and writes "
                 "source_outline_page. Do not paraphrase facts, infer dates, or "
                 "repeat discovery calls."
@@ -1878,6 +2134,12 @@ def build_checkpoint_text(
             {
                 "mode": research_mode,
                 "ready": research_ready,
+                **(
+                    {"revalidation": stale_revalidation}
+                    if stale_revalidation is not None
+                    else {}
+                ),
+                **research_handoff,
                 **({"fallback": True} if research_fallback else {}),
                 **(
                     {
@@ -1900,8 +2162,10 @@ def build_checkpoint_text(
                     )
                     for path in (research_files if not research_fallback else ())
                 ],
-                "verified_evidence": (
-                    verified_research_evidence if not research_fallback else []
+                "verified_facts": (
+                    research_handoff.get("verified_facts", [])
+                    if not research_fallback
+                    else []
                 ),
             },
             ensure_ascii=False,

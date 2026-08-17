@@ -128,7 +128,7 @@ def test_builtin_external_skill_adapter_round_trips_data_only_options(
     assert recovered is not None
     assert recovered.workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND
     assert recovered.required_changed_artifact_globs == ("output/**/*.pptx",)
-    assert recovered.pause_tools == frozenset({"request_user_input"})
+    assert recovered.pause_tools == frozenset({"request_user_input", "request_user_decision"})
 
 
 def test_new_process_policy_injects_validated_resume_metadata_once(tmp_path: Path) -> None:

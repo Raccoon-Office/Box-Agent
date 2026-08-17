@@ -17,6 +17,7 @@ from box_agent.acp import (
     _latest_user_request_for_plan_detection,
     _looks_like_plan_approval_text,
     _tool_result_raw_output,
+    _user_decision_response_from_meta,
 )
 from box_agent.acp.stdio_compat import _READ_LIMIT
 from box_agent.completion import should_resume_pending_completion_gate
@@ -56,6 +57,43 @@ class DummyConn:
 
     async def sessionUpdate(self, payload):
         self.updates.append(payload)
+
+
+def test_acp_normalizes_structured_user_decision_response_meta():
+    assert _user_decision_response_from_meta(
+        {
+            "userDecision": {
+                "request_id": "decision-1",
+                "decision_kind": "delivery_scope",
+                "selected_option_id": "keep_full",
+                "selected_option_label": "保持完整版本",
+                "trigger": "timeout",
+            }
+        }
+    ) == {
+        "request_id": "decision-1",
+        "decision_kind": "delivery_scope",
+        "selected_option_id": "keep_full",
+        "selected_option_label": "保持完整版本",
+        "custom_text": "",
+        "trigger": "timeout",
+    }
+    assert _user_decision_response_from_meta(
+        {
+            "user_decision": {
+                "request_id": "decision-2",
+                "decision_kind": "content_direction",
+                "custom_text": "突出年度案例",
+            }
+        }
+    ) == {
+        "request_id": "decision-2",
+        "decision_kind": "content_direction",
+        "selected_option_id": "",
+        "selected_option_label": "",
+        "custom_text": "突出年度案例",
+        "trigger": "user",
+    }
 
 
 @pytest.mark.asyncio

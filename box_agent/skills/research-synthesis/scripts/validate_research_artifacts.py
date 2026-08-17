@@ -235,6 +235,7 @@ def validate_evidence_ledger(
     seen_canonical: set[str] = set()
     for index, raw_record in enumerate(raw_evidence):
         label = f"{path.name}: evidence.{index}"
+        record_error_start = len(errors)
         if not isinstance(raw_record, dict):
             errors.append(f"{label} must be an object")
             continue
@@ -386,12 +387,22 @@ def validate_evidence_ledger(
                 f"{label}.unverified_reason is required for status=unverified"
             )
         if status != "verified":
+            # Discovery rows are retained for limitations and future recovery, but
+            # they are not part of the factual handoff.  Claim/excerpt quality
+            # findings on those rows must not fail the whole research package.
+            record_errors = errors[record_error_start:]
+            del errors[record_error_start:]
+            warnings.extend(record_errors)
             warnings.append(
                 f"{label}: status={status}; excluded from downstream verified evidence"
             )
             continue
         if confidence == "low":
             errors.append(f"{label}: verified evidence cannot use confidence=low")
+            continue
+        if len(errors) > record_error_start:
+            # A row labelled verified is usable only when every entity, URL,
+            # excerpt, number, and source-ownership check above passed.
             continue
 
         canonical = canonical_evidence(record)
@@ -424,7 +435,7 @@ def validate_evidence_ledger(
 
     for entity_key, entity_spec in entities.items():
         if verified_by_entity[entity_key] == 0:
-            errors.append(
+            warnings.append(
                 f"{path.name}: no verified evidence for target entity "
                 f"{entity_spec['entity']!r}"
             )
@@ -432,7 +443,7 @@ def validate_evidence_ledger(
             entity_spec["official_domains"]
             and first_party_by_entity[entity_key] == 0
         ):
-            errors.append(
+            warnings.append(
                 f"{path.name}: no verified first_party evidence from an official "
                 f"domain for target entity {entity_spec['entity']!r}"
             )
@@ -520,8 +531,73 @@ def main() -> int:
             if "[^" in path.read_text(encoding="utf-8") and not definitions:
                 errors.append(f"{path.name}: contains footnote markers but no definitions")
 
+    verified_evidence_count = evidence_summary.get("verified_evidence_count", 0)
+    if not errors and verified_evidence_count == 0:
+        errors.append("no verified evidence available for downstream factual handoff")
+
+    quality_ok = not errors
+    required_outputs_present = bool(
+        research_dir.is_dir()
+        and dim_files
+        and all(
+            (research_dir / name.format(topic=args.topic)).is_file()
+            for name in ROUTE_REQUIRED[args.route]
+        )
+    )
+    delivery_allowed = bool(
+        required_outputs_present
+        and evidence_summary.get("evidence_schema_version") == 1
+    )
+    dimension_coverage_ratio = min(
+        1.0,
+        len(dim_files) / max(1, args.min_dimensions),
+    )
+    handoff_status = (
+        "invalid"
+        if not delivery_allowed
+        else (
+            "full"
+            if quality_ok and verified_evidence_count > 0
+            else "partial" if verified_evidence_count > 0 else "framework"
+        )
+    )
+    presentation_handoff = {
+        "schema_version": 1,
+        "delivery_mode": handoff_status,
+        "verified_facts": [
+            {
+                field: record[field]
+                for field in (
+                    "entity",
+                    "claim",
+                    "source_type",
+                    "source_url",
+                    "canonical",
+                )
+            }
+            for record in evidence_summary.get("verified_evidence", [])
+        ],
+        "gaps": [*errors, *warnings],
+        "quality_summary": {
+            "quality_ok": quality_ok,
+            "issue_count": len(errors),
+            "warning_count": len(warnings),
+            "actual_dimensions": len(dim_files),
+            "recommended_dimensions": args.min_dimensions,
+        },
+        "context_files": [
+            str(path.relative_to(research_dir))
+            for path in files_to_check
+            if path.exists()
+        ],
+    }
     report_payload: dict[str, object] = {
-        "ok": not errors,
+        # Keep the top-level fields for research QA diagnostics and older
+        # runtimes. New presentation consumers use ``presentation_handoff``.
+        "ok": quality_ok,
+        "quality_ok": quality_ok,
+        "delivery_allowed": delivery_allowed,
+        "handoff_status": handoff_status,
         "validator": "research-synthesis",
         "route": args.route,
         "topic": args.topic,
@@ -529,9 +605,19 @@ def main() -> int:
         "min_dimensions": args.min_dimensions,
         "dimension_count": len(dim_files),
         "wide_count": len(wide_files),
+        "coverage": {
+            "actual_dimensions": len(dim_files),
+            "recommended_dimensions": args.min_dimensions,
+            "dimension_ratio": round(dimension_coverage_ratio, 4),
+            "wide_required": args.route == "A",
+            "wide_present": bool(wide_files),
+        },
         "files_checked": [str(path.resolve()) for path in files_to_check if path.exists()],
         "issues": errors,
         "warnings": warnings,
+        # Stable downstream contract. Presentation workflows consume this
+        # object instead of interpreting research-synthesis's internal QA state.
+        "presentation_handoff": presentation_handoff,
         **evidence_summary,
     }
     write_report(args.report, report_payload)

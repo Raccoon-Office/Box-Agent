@@ -36,6 +36,7 @@ def run_agent_loop(**kwargs: Any) -> AsyncIterator[AgentEvent]:
                 if completion_gate is not None
                 else None
             ),
+            available_tool_names=frozenset(kwargs.get("tools", {})),
         )
     return _run_agent_loop(**kwargs)
 

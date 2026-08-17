@@ -12,6 +12,7 @@ from .file_tools import (
 from .staged_file_write_tool import StagedFileWriteTool
 from .obsidian_tool import ObsidianCreateNoteTool, ObsidianDailyNoteTool, ObsidianUpdateNoteTool
 from .plan_tool import PlanReadTool, PlanStore, PlanWriteTool
+from .request_user_decision_tool import RequestUserDecisionTool
 from .request_user_input_tool import RequestUserInputTool
 from .setup import add_workspace_tools, await_skill_discovery, initialize_base_tools
 from .todo_tool import TodoReadTool, TodoStore, TodoWriteTool
@@ -35,6 +36,7 @@ __all__ = [
     "PlanWriteTool",
     "PlanReadTool",
     "RequestUserInputTool",
+    "RequestUserDecisionTool",
     "TodoStore",
     "TodoWriteTool",
     "TodoReadTool",

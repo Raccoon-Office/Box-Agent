@@ -17,6 +17,9 @@ For the default controlled HTML route, the blocking checks are
 `index.html`. Generate `qa/truth_check.json` afterward as a source advisory.
 Its missing sources, unverified URLs, private-fact gaps, or `"ok": false` result
 must not block, invalidate, or reopen an otherwise usable `index.html`.
+Report research quality separately from presentation QA: a `partial` or
+`framework` research handoff may produce a valid deck, but must not be described
+as a full-quality research pass.
 `deck_spec` also verifies bound `outline_intent`: every contract-v2 page keeps
 the exact outline title/message/layout/visual metadata, uses a compatible
 registered layout, and honors explicit visual counts such as three stages,

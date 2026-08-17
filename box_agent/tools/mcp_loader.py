@@ -292,12 +292,16 @@ class MCPTool(Tool):
     async def execute(self, **kwargs) -> ToolResult:
         """Execute MCP tool via the session with timeout protection."""
         timeout = self._execute_timeout or _default_timeout_config.execute_timeout
+        browser_runtime_acquired = False
 
         try:
-            if self._server_name == "playwright":
-                await acquire_browser_runtime_for_current_turn()
-            # Wrap call_tool with timeout
+            # Browser-lease waiting is part of tool execution. Keeping it inside
+            # the same deadline prevents a busy shared Playwright runtime from
+            # outliving the host's liveness watchdog before call_tool even starts.
             async with _timeout(timeout):
+                if self._server_name == "playwright":
+                    await acquire_browser_runtime_for_current_turn()
+                    browser_runtime_acquired = True
                 result = await self._session.call_tool(self._name, arguments=kwargs)
 
             # MCP tool results are a list of content items
@@ -319,6 +323,16 @@ class MCPTool(Tool):
             return ToolResult(success=True, content=content_str, error=None)
 
         except TimeoutError:
+            if self._server_name == "playwright" and not browser_runtime_acquired:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=(
+                        "BROWSER_RUNTIME_BUSY: Playwright is currently used by "
+                        "another local-agent turn. Retry later or use a non-browser "
+                        "fallback."
+                    ),
+                )
             return ToolResult(
                 success=False,
                 content="",

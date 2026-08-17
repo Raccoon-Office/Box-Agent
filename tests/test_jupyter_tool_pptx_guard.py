@@ -14,7 +14,8 @@ def test_execute_code_schema_exposes_code_size_limit():
     assert code_schema["maxLength"] == MAX_EXECUTE_CODE_CHARS
     assert f"{MAX_EXECUTE_CODE_CHARS:,} characters" in code_schema["description"]
     assert "do not inline the body in execute_code" in code_schema["description"]
-    assert "append_file for later chunks" in code_schema["description"]
+    assert "staged_file_write" in code_schema["description"]
+    assert "commit" in code_schema["description"]
     assert "JSON manifests" in code_schema["description"]
 
 
@@ -37,7 +38,8 @@ async def test_execute_code_rejects_oversized_code_before_kernel_start(monkeypat
     assert result.error is not None
     assert result.error.startswith("EXECUTE_CODE_TOO_LARGE")
     assert "Split the work into multiple execute_code calls" in result.error
-    assert "append_file for later chunks" in result.error
+    assert "staged_file_write" in result.error
+    assert "commit" in result.error
 
 
 def test_execute_code_blocks_bare_python_pptx_new_deck_constructor():

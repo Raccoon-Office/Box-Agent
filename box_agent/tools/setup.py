@@ -39,6 +39,7 @@ from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_con
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
 from box_agent.tools.obsidian_tool import create_obsidian_tools
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
+from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.request_user_input_tool import RequestUserInputTool
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.skill_execution_env import build_skill_execution_env
@@ -627,6 +628,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # missing facts or abandon an in-progress artifact workflow.
     tools.append(RequestUserInputTool())
     _out(f"{Colors.GREEN}✅ Loaded user-input request tool{Colors.RESET}")
+
+    # Public declarative decision surface for built-in and user-provided Skills.
+    # The host owns rendering; this trusted tool validates any requested timeout.
+    tools.append(RequestUserDecisionTool())
+    _out(f"{Colors.GREEN}✅ Loaded user-decision request tool{Colors.RESET}")
 
     # Host-neutral execution receipt. External workflow identity, task context,
     # versions, and submission remain the host's responsibility.

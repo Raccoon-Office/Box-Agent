@@ -145,6 +145,16 @@ def test_skill_owned_preflight_config_is_valid():
             "优化以上 prompt 的格式",
             False,
         ),
+        (
+            "请帮我处理细胞增殖实验数据，计算均值和误差并进行 ANOVA。"
+            "最后生成可以直接放在这周组会 PPT 里汇报的带误差棒和显著性星号的"
+            "漂亮柱状图和折线图，并附带 Excel 统计表。",
+            False,
+        ),
+        ("生成一张用于 PPT 的配图", False),
+        ("生成图表用于组会 PPT", False),
+        ("Create presentation-ready charts and an Excel summary", False),
+        ("Generate a chart for use in a presentation", False),
     ],
 )
 def test_non_new_deck_requests_skip_preflight(text: str, has_existing: bool):
@@ -184,6 +194,8 @@ def test_non_new_deck_requests_skip_preflight(text: str, has_existing: bool):
         "Use this prompt to create a PowerPoint and polish the layout",
         "Polish this prompt and create the presentation",
         "先生成一份哈利波特主题 PPT 提示词，然后根据它制作 PPT",
+        "把分析结果整理成一份组会 PPT，并附 Excel 统计表",
+        "把分析结果做成一份组会 PPT",
     ],
 )
 def test_new_deck_requests_enter_preflight(text: str):
@@ -360,6 +372,28 @@ def test_chinese_and_range_page_count_extraction(
     values = infer_explicit_presentation_values(text, config)
 
     assert values["page_count"] == expected
+
+
+def test_positional_preview_span_does_not_override_total_page_count():
+    config = load_presentation_preflight_config()
+
+    values = infer_explicit_presentation_values(
+        "先完成封面、目录和前 2 页内容；完整版 8 页为默认项。",
+        config,
+    )
+
+    assert values["page_count"] == "page_count_5_10"
+
+
+def test_positional_preview_span_alone_is_not_a_total_page_count():
+    config = load_presentation_preflight_config()
+
+    values = infer_explicit_presentation_values(
+        "先完成封面、目录和前两页内容，再让我预览。",
+        config,
+    )
+
+    assert "page_count" not in values
 
 
 @pytest.mark.parametrize(

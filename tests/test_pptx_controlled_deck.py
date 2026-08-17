@@ -2339,6 +2339,28 @@ def test_scaffold_binds_outline_pages_and_imports_public_research_evidence(
     )
 
 
+def test_scaffold_derives_ordered_layout_plan_from_outline_when_ids_are_omitted(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    _write_outline(outline_path, page_count=3, source_mode="user_provided")
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert len(deck["slides"]) == 3
+    assert all(slide["layout_id"] for slide in deck["slides"])
+    assert [slide["source_outline_page"] for slide in deck["slides"]] == [1, 2, 3]
+
+
 def test_scaffold_rejects_outline_count_and_normalizes_qualitative_quantitative_layout(
     tmp_path: Path,
 ) -> None:
@@ -5587,6 +5609,52 @@ def test_short_source_bound_brief_defaults_runtime_request_into_truth_contract(
     assert report["source_binding"]["verified_fact_count"] == 1
 
 
+def test_long_source_bound_brief_defaults_to_bounded_contiguous_facts(
+    tmp_path: Path,
+) -> None:
+    source_text = (
+        "当前场景为市场调研，目标受众为公司内部管理层，页数应根据内容自然决定。"
+        "这些配置只用于影响内容结构和视觉表达，不应被误当作外部研究事实。"
+        "请制作一份新能源汽车市场分析演示文稿，用于管理层战略汇报。"
+        "需要覆盖市场份额、销量变化、品牌竞争、热门车型、区域表现和行业趋势；"
+        "主动搜索中国公开数据，优先使用政府部门、行业协会和上市公司披露。"
+        "所有数据注明来源、统计时间、发布日期和报告名称，并保持统计口径一致。"
+        "如果同一指标存在多个来源，优先采用最新、权威且可验证的数据。"
+        "对于无法查证的数据不得虚构，可以明确标注暂无公开数据，"
+        "但仍需继续完成可交付的 HTML 演示文稿。"
+        "整体风格现代、专业、简洁，适合企业管理层决策参考。"
+    )
+    assert len(source_text) > 280
+    env = os.environ.copy()
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        source_text.encode("utf-8")
+    ).decode("ascii")
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "cards-grid-v1",
+        "closing-next-steps-v1",
+        "--title",
+        "新能源汽车市场分析",
+        "--out",
+        str(deck_path),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    source_facts = deck["truth_contract"]["source_facts"]
+    normalized_source = "".join(source_text.split())
+    assert len(source_facts) > 1
+    assert all(len(fact) <= 280 for fact in source_facts)
+    assert all("".join(fact.split()) in normalized_source for fact in source_facts)
+    report = json.loads((tmp_path / "qa" / "deck_contract.json").read_text())
+    assert report["source_fact_defaulted_from_runtime"] is True
+    assert report["source_binding"]["verified_fact_count"] == len(source_facts)
+
+
 def test_number_backing_keeps_cjk_comma_separated_date_and_year_tokens() -> None:
     if NODE is None:
         pytest.skip("Node.js is required to test the controlled deck compiler")
@@ -8032,8 +8100,8 @@ def test_pptx_theme_selection_has_no_hard_html_templates_dependency() -> None:
     assert "apply_deck_patch.js" in text
     assert "${BOX_AGENT_NODE:-node} scripts/apply_deck_patch.js" in text
     assert "validate_deck_truth.js" in text
-    assert "validate_outline.js --research-report" in text
-    assert "verified_evidence[].canonical" in text
+    assert "validate_outline.js --research-handoff" in text
+    assert "verified_facts[].canonical" in text
     assert "Conflicting, unverified, cross-entity" in text
     assert "`comic-panel`" in text
     assert "`8-bit-orbit`" in text
@@ -8188,6 +8256,229 @@ def test_outline_research_handoff_accepts_only_verified_canonical_evidence(
     payload = json.loads(rejected.stdout)
     assert any(
         "is not an exact canonical item" in issue for issue in payload["issues"]
+    )
+
+
+def test_outline_accepts_partial_research_handoff_verified_subset(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    canonical = (
+        "Example Corp | Example Corp launched Product One in 2026. | "
+        "first_party | https://example.com/news/product-one"
+    )
+    outline = _write_outline(outline_path, page_count=1)
+    outline["slides"][0].update(
+        {
+            "title": "Example Corp 产品进展",
+            "message": "Example Corp 在 2026 年推出 Product One。",
+            "bullets": ["产品发布得到官方页面支持", "其余市场数据暂无可验证公开数据"],
+            "evidence": [canonical],
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    research_report = tmp_path / "research_check.json"
+    research_report.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "partial",
+                    "verified_facts": [
+                        {
+                            "entity": "Example Corp",
+                            "claim": "Example Corp launched Product One in 2026.",
+                            "source_url": "https://example.com/news/product-one",
+                            "source_type": "first_party",
+                            "canonical": canonical,
+                        }
+                    ],
+                    "gaps": ["Market share remains unverified"],
+                    "quality_summary": {"quality_ok": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "validate_outline.js",
+        str(outline_path),
+        "--min-slides",
+        "1",
+        "--max-slides",
+        "1",
+        "--research-handoff",
+        str(research_report),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_outline_accepts_framework_research_handoff_with_explicit_gap(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=1)
+    outline["slides"][0].update(
+        {
+            "title": "市场数据框架",
+            "message": "当前暂无可验证公开数据，保留后续补充位置。",
+            "bullets": ["市场规模待补充", "竞争格局待补充"],
+            "evidence": [],
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    research_report = tmp_path / "research_check.json"
+    research_report.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "framework",
+                    "verified_facts": [],
+                    "gaps": ["No verified public facts"],
+                    "quality_summary": {"quality_ok": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "validate_outline.js",
+        str(outline_path),
+        "--min-slides",
+        "1",
+        "--max-slides",
+        "1",
+        "--research-handoff",
+        str(research_report),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_outline_accepts_framework_structural_pages_without_evidence(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=3)
+    outline["slides"][0].update(
+        {
+            "title": "新能源汽车市场动态分析",
+            "message": "建立面向管理层的市场观察框架。",
+            "layout": "cover",
+            "visual": "咨询风封面",
+            "evidence": [],
+        }
+    )
+    outline["slides"][1].update(
+        {
+            "title": "分析框架与数据口径",
+            "message": "从市场、品牌和区域三个维度展开。",
+            "layout": "agenda",
+            "visual": "目录列表",
+            "evidence": [],
+        }
+    )
+    outline["slides"][2].update(
+        {
+            "title": "市场规模",
+            "message": "当前暂无可验证公开数据。",
+            "bullets": ["销量规模待核验", "市场渗透率待核验"],
+            "layout": "kpi-grid",
+            "visual": "KPI 指标卡",
+            "evidence": [],
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    research_report = tmp_path / "research_check.json"
+    research_report.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "framework",
+                    "verified_facts": [],
+                    "gaps": ["No verified public facts"],
+                    "quality_summary": {"quality_ok": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "validate_outline.js",
+        str(outline_path),
+        "--min-slides",
+        "3",
+        "--max-slides",
+        "3",
+        "--research-handoff",
+        str(research_report),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert sum(
+        "structural public-research page has no factual evidence" in warning
+        for warning in payload["warnings"]
+    ) == 2
+
+
+def test_outline_framework_data_page_still_requires_gap_or_evidence(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=2)
+    outline["slides"][0].update(
+        {"layout": "cover", "visual": "封面", "evidence": []}
+    )
+    outline["slides"][1].update(
+        {
+            "title": "市场规模",
+            "message": "展示新能源汽车销量与渗透率。",
+            "layout": "kpi-grid",
+            "visual": "KPI 指标卡",
+            "evidence": [],
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    research_report = tmp_path / "research_check.json"
+    research_report.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "framework",
+                    "verified_facts": [],
+                    "gaps": ["No verified public facts"],
+                    "quality_summary": {"quality_ok": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "validate_outline.js",
+        str(outline_path),
+        "--min-slides",
+        "2",
+        "--max-slides",
+        "2",
+        "--research-handoff",
+        str(research_report),
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert any(
+        issue.startswith("slide-02: entity-bound research handoff")
+        for issue in payload["issues"]
     )
 
 
@@ -11291,6 +11582,43 @@ def test_explicit_total_page_count_outranks_host_range_and_ordinal_slide_span(
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(result.stdout)
     assert report["pageCountContract"] == {"minimum": 6, "maximum": 6}
+
+
+def test_positional_preview_span_does_not_override_total_page_count(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    _write_outline(outline_path, page_count=8, source_mode="user_provided")
+    env = os.environ.copy()
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        (
+            "继续。从现有 outline.json 恢复：先完成封面、目录和前 2 页内容，"
+            "再调用结构化用户决策卡；完整版 8 页为默认项。"
+        ).encode()
+    ).decode()
+
+    result = _run("validate_outline.js", str(outline_path), env=env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["pageCountContract"] == {"minimum": 8, "maximum": 8}
+
+
+def test_positional_preview_span_alone_is_not_a_total_page_count(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    _write_outline(outline_path, page_count=8, source_mode="user_provided")
+    env = os.environ.copy()
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "先完成封面、目录和前两页内容，再让我预览。".encode()
+    ).decode()
+
+    result = _run("validate_outline.js", str(outline_path), env=env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["pageCountContract"] is None
 
 
 def test_no_image_instruction_blocks_technical_cover_generation_and_is_qa_enforced(

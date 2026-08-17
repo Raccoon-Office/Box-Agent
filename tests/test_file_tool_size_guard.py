@@ -18,7 +18,8 @@ def test_write_file_schema_exposes_content_size_limit():
     assert content_schema["maxLength"] == MAX_FILE_TOOL_CONTENT_CHARS
     assert f"{MAX_FILE_TOOL_CONTENT_CHARS:,} characters" in content_schema["description"]
     assert "large generated artifacts" in content_schema["description"]
-    assert "append_file for later chunks" in content_schema["description"]
+    assert "staged_file_write" in content_schema["description"]
+    assert "commit" in content_schema["description"]
 
 
 def test_append_file_schema_exposes_content_size_limit():
@@ -26,7 +27,8 @@ def test_append_file_schema_exposes_content_size_limit():
 
     assert content_schema["maxLength"] == MAX_FILE_TOOL_CONTENT_CHARS
     assert f"{MAX_FILE_TOOL_CONTENT_CHARS:,} characters" in content_schema["description"]
-    assert "multiple append_file calls" in content_schema["description"]
+    assert "staged_file_write" in content_schema["description"]
+    assert "commit" in content_schema["description"]
 
 
 @pytest.mark.asyncio
@@ -40,7 +42,8 @@ async def test_write_file_rejects_oversized_content_before_writing(tmp_path):
     assert result.success is False
     assert result.error is not None
     assert result.error.startswith("FILE_TOOL_ARGUMENT_TOO_LARGE")
-    assert "Use write_file for the first chunk and append_file for later chunks" in result.error
+    assert "use staged_file_write" in result.error
+    assert "commit" in result.error
     assert not target.exists()
 
 

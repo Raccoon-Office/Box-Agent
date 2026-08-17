@@ -133,7 +133,8 @@ _CONTROLLED_ARTIFACT_GLOBS: Final[tuple[str, ...]] = (
     f"{OUTPUT_SUBDIR}/**/*.htm",
 )
 _PRESENTATION_BUDGET_EXEMPT_TOOLS: Final[frozenset[str]] = (
-    FINAL_SUMMARY_EXCLUDED_TOOLS | frozenset({"request_user_input"})
+    FINAL_SUMMARY_EXCLUDED_TOOLS
+    | frozenset({"request_user_input", "request_user_decision"})
 )
 
 
@@ -251,7 +252,7 @@ def build_presentation_completion_gate(
         ),
         budget_exempt_tools=_PRESENTATION_BUDGET_EXEMPT_TOOLS,
         completion_reserve_tool_calls=limits.completion_reserve_calls,
-        pause_tools=frozenset({"request_user_input"}),
+        pause_tools=frozenset({"request_user_input", "request_user_decision"}),
         workflow_checkpoint_kind=WORKFLOW_KIND,
         workflow_options={
             RESEARCH_MODE_OPTION: research_mode,

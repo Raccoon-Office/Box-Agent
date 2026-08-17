@@ -60,7 +60,61 @@ async def test_set_plan_snapshot(writer, reader):
 
 
 @pytest.mark.asyncio
-async def test_set_requires_title(writer):
+async def test_set_plan_treats_string_list_fields_as_single_items(writer):
+    result = await writer.execute(
+        action="set",
+        title="String compatibility",
+        verification="Check the generated artifact.",
+        risks="The provider may ignore the schema.",
+        assumptions="The user supplied the input data.",
+    )
+
+    assert result.success
+    assert result.raw_output["plan"]["verification"] == ["Check the generated artifact."]
+    assert result.raw_output["plan"]["risks"] == ["The provider may ignore the schema."]
+    assert result.raw_output["plan"]["assumptions"] == ["The user supplied the input data."]
+    assert result.raw_output["summary"] == {
+        "steps": 0,
+        "verification": 1,
+        "risks": 1,
+        "assumptions": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_recovers_missing_title_and_json_encoded_steps(writer):
+    objective = "Deliver a twelve-page portfolio."
+    result = await writer.execute(
+        action="set",
+        objective=objective,
+        steps='[{"title":"Draft the portfolio","details":"Use the supplied brief."}]',
+    )
+
+    assert result.success
+    assert result.raw_output["plan"]["title"] == objective
+    assert result.raw_output["plan"]["steps"] == [
+        {
+            "id": "1",
+            "title": "Draft the portfolio",
+            "details": "Use the supplied brief.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_infers_missing_action_from_plan_content(writer):
+    result = await writer.execute(
+        title="Recovered plan",
+        steps=[{"title": "Continue after malformed tool call"}],
+    )
+
+    assert result.success
+    assert result.raw_output["action"] == "set"
+    assert result.raw_output["plan"]["title"] == "Recovered plan"
+
+
+@pytest.mark.asyncio
+async def test_set_requires_title_when_no_fallback_is_available(writer):
     result = await writer.execute(action="set")
 
     assert not result.success

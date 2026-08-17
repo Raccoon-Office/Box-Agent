@@ -110,13 +110,14 @@ Use these artifacts:
 - Insight file: [workspace]/research/[topic]_insight.md
 - Cross-verification file: [workspace]/research/[topic]_cross_verification.md
 - Evidence ledger: [workspace]/research/[topic]_evidence.json
-- Successful QA report: [workspace]/research/qa/[topic]_research_check.json
+- Delivery handoff report: [workspace]/research/qa/[topic]_research_check.json
 - Dimension files: [workspace]/research/[topic]_dim01.md through [topic]_dimNN.md
 - File analysis: [workspace]/research/[topic]_file_analysis.md, if present
 - Wide exploration files: [workspace]/research/[topic]_wideNN.md, if present
 
 Preserve Markdown footnotes exactly. Do not renumber, strip, or replace them.
 For factual downstream copy, use only
-`verified_evidence[].canonical` from the successful QA report. Do not promote
+`presentation_handoff.verified_facts[].canonical` from the report. Respect its
+`delivery_mode` (`full` / `partial` / `framework`). Do not promote
 conflicting or unverified prose from the Markdown files.
 ```

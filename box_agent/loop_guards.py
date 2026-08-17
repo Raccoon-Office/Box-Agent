@@ -76,6 +76,8 @@ FINAL_SUMMARY_EXCLUDED_TOOLS: Final[frozenset[str]] = frozenset(
         "memory_read",
         "memory_write",
         "memory_search",
+        "request_user_input",
+        "request_user_decision",
     }
 )
 
@@ -687,5 +689,6 @@ def completion_budget_reserve_text(
         f"接下来最多保留 {reserve_tool_calls} 次实质工具调用；只执行完成交付必需的"
         "批量补丁、truth/spec 校验、HTML 渲染、self-check 与 runtime probe。"
         "若确实缺少无法推断的用户事实，调用 `request_user_input` 提出一个聚焦问题并结束本轮；"
+        "若需要用户在有限且会改变交付结果的选项中决策，调用 `request_user_decision`，不要只输出普通文本选项；"
         "用户补充后将从当前产物继续。"
     )

@@ -105,9 +105,9 @@ def _oversized_file_tool_argument_error(tool_name: str, argument_name: str, valu
         f"FILE_TOOL_ARGUMENT_TOO_LARGE: {tool_name}.{argument_name} is "
         f"{len(value)} characters; limit is {MAX_FILE_TOOL_CONTENT_CHARS}. "
         "For large generated artifacts such as HTML/CSS/JS, JSON manifests, "
-        "templates, base64, or file bodies, split the work into smaller chunks. "
-        "Use write_file for the first chunk and append_file for later chunks, "
-        "then validate with read_file or a render check."
+        "templates, base64, or file bodies, use staged_file_write: begin, append_text "
+        "or append_file in ordered chunks, then commit and validate with read_file "
+        "or a render check."
     )
 
 
@@ -654,8 +654,8 @@ class WriteTool(Tool):
             "For existing files, you should read the file first using read_file. "
             "Prefer editing existing files over creating new ones unless explicitly needed. "
             f"Keep content under {MAX_FILE_TOOL_CONTENT_CHARS_DISPLAY} characters; "
-            "for larger generated artifacts, write the first chunk with write_file "
-            "and continue with append_file."
+            "for larger generated artifacts, use staged_file_write from begin through "
+            "ordered append_text or append_file chunks to commit."
         )
 
     @property
@@ -675,8 +675,8 @@ class WriteTool(Tool):
                         f"Keep this under {MAX_FILE_TOOL_CONTENT_CHARS_DISPLAY} "
                         "characters. For large generated artifacts such as HTML/CSS/JS, "
                         "JSON manifests, templates, base64, or file bodies, use "
-                        "write_file for the first chunk and append_file for later "
-                        "chunks, then validate."
+                        "staged_file_write with begin, ordered append_text or append_file "
+                        "chunks, and commit, then validate."
                     ),
                 },
             },
@@ -762,8 +762,8 @@ class AppendTool(Tool):
         return (
             "Append content to a file, creating it if it does not exist. "
             f"Keep each content chunk under {MAX_FILE_TOOL_CONTENT_CHARS_DISPLAY} "
-            "characters. Use after write_file for large generated artifacts such "
-            "as HTML/CSS/JS, JSON manifests, templates, base64, or file bodies."
+            "characters. For a generated artifact whose complete body exceeds that "
+            "limit, use staged_file_write so the target changes only at commit."
         )
 
     @property
@@ -781,8 +781,8 @@ class AppendTool(Tool):
                     "description": (
                         "Content chunk to append. Keep this under "
                         f"{MAX_FILE_TOOL_CONTENT_CHARS_DISPLAY} characters. "
-                        "For large generated artifacts, split the file into "
-                        "multiple append_file calls and validate the final file."
+                        "For a large generated artifact, use staged_file_write with "
+                        "ordered chunks and commit, then validate the final file."
                     ),
                 },
             },

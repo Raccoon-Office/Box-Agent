@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import re
+import uuid
 from collections.abc import AsyncIterator
 from time import monotonic
 from typing import Any
@@ -34,6 +35,122 @@ logger = logging.getLogger(__name__)
 # cutting JSON mid-string and triggering empty-arguments retry loops). Pin a
 # generous default; users can override via ``LLMConfig.max_output_tokens``.
 _DEFAULT_MAX_TOKENS = 64000
+_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
+_SENSENOVA_PSEUDO_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*<function=([A-Za-z_][\w.-]*)>\s*(.*?)\s*</function>\s*</tool_call>",
+    re.DOTALL,
+)
+_SENSENOVA_PSEUDO_PARAMETER_RE = re.compile(
+    r"<parameter=([A-Za-z_][\w.-]*)>\s*(.*?)\s*</parameter>",
+    re.DOTALL,
+)
+_MAX_RECOVERED_SENSENOVA_TOOL_CALLS = 4
+
+
+def _is_sensenova_model(model: str | None) -> bool:
+    """Return whether ``model`` uses the SenseNova OpenAI-compatible dialect."""
+    return bool(model and model.strip().casefold().startswith(_SENSENOVA_MODEL_PREFIXES))
+
+
+def _sensenova_thinking_body() -> dict[str, Any]:
+    """Build the provider extension that enables SenseNova thinking."""
+    return {
+        "chat_template_kwargs": {
+            "thinking": True,
+            "reasoning_effort": "high",
+        }
+    }
+
+
+def _tool_parameter_types(
+    openai_tools: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, str]]:
+    parameter_types: dict[str, dict[str, str]] = {}
+    for tool in openai_tools or []:
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        parameters = function.get("parameters")
+        if not isinstance(name, str) or not isinstance(parameters, dict):
+            continue
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+        parameter_types[name] = {
+            key: value.get("type", "string")
+            for key, value in properties.items()
+            if isinstance(key, str) and isinstance(value, dict)
+        }
+    return parameter_types
+
+
+def _coerce_pseudo_parameter(raw: str, expected_type: str) -> Any:
+    value = raw.strip()
+    try:
+        if expected_type == "integer":
+            return int(value)
+        if expected_type == "number":
+            return float(value)
+        if expected_type == "boolean":
+            if value.casefold() == "true":
+                return True
+            if value.casefold() == "false":
+                return False
+        if expected_type in {"array", "object"}:
+            parsed = json.loads(value)
+            if expected_type == "array" and isinstance(parsed, list):
+                return parsed
+            if expected_type == "object" and isinstance(parsed, dict):
+                return parsed
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return value
+
+
+def _recover_sensenova_tool_calls_from_thinking(
+    thinking: str,
+    openai_tools: list[dict[str, Any]] | None,
+) -> list[ToolCall]:
+    """Recover SenseNova's XML-like tool dialect when native tool_calls is empty."""
+    parameter_types = _tool_parameter_types(openai_tools)
+    if not parameter_types:
+        return []
+
+    recovered: list[ToolCall] = []
+    for match in _SENSENOVA_PSEUDO_TOOL_CALL_RE.finditer(thinking):
+        if len(recovered) >= _MAX_RECOVERED_SENSENOVA_TOOL_CALLS:
+            break
+        name, body = match.groups()
+        if name not in parameter_types:
+            continue
+        arguments: dict[str, Any] = {}
+        for parameter_match in _SENSENOVA_PSEUDO_PARAMETER_RE.finditer(body):
+            parameter_name, raw_value = parameter_match.groups()
+            if parameter_name not in parameter_types[name]:
+                continue
+            arguments[parameter_name] = _coerce_pseudo_parameter(
+                raw_value,
+                parameter_types[name][parameter_name],
+            )
+        arguments_len = len(json.dumps(arguments, ensure_ascii=False))
+        if arguments_len > streamed_argument_limit(name):
+            logger.warning(
+                "Ignored oversized SenseNova tool call recovered from thinking: "
+                "name=%s arguments_len=%d limit=%d",
+                name,
+                arguments_len,
+                streamed_argument_limit(name),
+            )
+            continue
+        recovered.append(
+            ToolCall(
+                id=f"sensenova_recovered_{uuid.uuid4().hex}",
+                type="function",
+                function=FunctionCall(name=name, arguments=arguments),
+            )
+        )
+    return recovered
 
 
 def _escape_invalid_chars_in_json_strings(raw: str) -> str:
@@ -271,8 +388,8 @@ class OpenAIClient(LLMClientBase):
         Args:
             api_messages: List of messages in OpenAI format
             tools: Optional list of tools
-            thinking_enabled: Currently a no-op for OpenAI-compatible
-                endpoints to preserve broad third-party gateway compatibility.
+            thinking_enabled: When True, request provider-native thinking for
+                recognized model families.
 
         Returns:
             OpenAI ChatCompletion response (full response including usage)
@@ -289,6 +406,9 @@ class OpenAIClient(LLMClientBase):
 
         if tools:
             params["tools"] = self._convert_tools(tools)
+
+        if thinking_enabled and _is_sensenova_model(self.model):
+            params["extra_body"] = _sensenova_thinking_body()
 
         auth_headers = self._auth_headers(
             self._request_headers(session_id, turn_id, title, call_kind)
@@ -445,7 +565,11 @@ class OpenAIClient(LLMClientBase):
             "tools": tools,
         }
 
-    def _parse_response(self, response: Any) -> LLMResponse:
+    def _parse_response(
+        self,
+        response: Any,
+        tools: list[Any] | None = None,
+    ) -> LLMResponse:
         """Parse OpenAI response into LLMResponse.
 
         Args:
@@ -490,6 +614,25 @@ class OpenAIClient(LLMClientBase):
                     )
                 )
 
+        finish_reason = getattr(response.choices[0], "finish_reason", None) or "stop"
+        if (
+            not tool_calls
+            and not text_content.strip()
+            and thinking_content
+            and _is_sensenova_model(self.model)
+        ):
+            openai_tools = self._convert_tools(tools) if tools else None
+            tool_calls = _recover_sensenova_tool_calls_from_thinking(
+                thinking_content,
+                openai_tools,
+            )
+            if tool_calls:
+                finish_reason = "tool_calls"
+                logger.warning(
+                    "Recovered %d SenseNova tool call(s) from thinking output",
+                    len(tool_calls),
+                )
+
         # Extract token usage from response
         usage = None
         if hasattr(response, "usage") and response.usage:
@@ -503,7 +646,7 @@ class OpenAIClient(LLMClientBase):
             content=text_content,
             thinking=thinking_content if thinking_content else None,
             tool_calls=tool_calls if tool_calls else None,
-            finish_reason="stop",  # OpenAI doesn't provide finish_reason in the message
+            finish_reason=finish_reason,
             usage=usage,
             provider_response_id=str(response.id) if getattr(response, "id", None) else None,
         )
@@ -524,7 +667,8 @@ class OpenAIClient(LLMClientBase):
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
-            thinking_enabled: Currently a no-op for OpenAI-compatible endpoints.
+            thinking_enabled: Request provider-native thinking when True for
+                recognized model families.
             session_id: Optional caller-owned session id.
             turn_id: Optional caller-owned turn id.
             title: Optional trace title.
@@ -566,7 +710,7 @@ class OpenAIClient(LLMClientBase):
             )
 
         # Parse and return response
-        return self._parse_response(response)
+        return self._parse_response(response, tools)
 
     async def generate_stream(
         self,
@@ -596,6 +740,8 @@ class OpenAIClient(LLMClientBase):
             params["model"] = self.model
         if request_params["tools"]:
             params["tools"] = self._convert_tools(request_params["tools"])
+        if thinking_enabled and _is_sensenova_model(self.model):
+            params["extra_body"] = _sensenova_thinking_body()
 
         auth_headers = self._auth_headers(
             self._request_headers(session_id, turn_id, title, call_kind)
@@ -900,6 +1046,23 @@ class OpenAIClient(LLMClientBase):
         # diagnostics distinguish "gateway clipped tool args" (length, set here)
         # from "gateway ended a text turn" (stop / end_turn / None from upstream).
         raw_finish_reason = finish_reason
+        if (
+            not truncated_tool
+            and not tool_calls
+            and not text_content.strip()
+            and thinking_content
+            and _is_sensenova_model(self.model)
+        ):
+            tool_calls = _recover_sensenova_tool_calls_from_thinking(
+                thinking_content,
+                params.get("tools"),
+            )
+            if tool_calls:
+                finish_reason = "tool_calls"
+                logger.warning(
+                    "Recovered %d SenseNova tool call(s) from streamed thinking output",
+                    len(tool_calls),
+                )
         stream_dropped_mid_tool = truncated_tool and raw_finish_reason is None
         if truncated_tool:
             finish_reason = "length"

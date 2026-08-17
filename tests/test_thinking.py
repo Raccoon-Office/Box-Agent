@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
 
 from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
@@ -64,8 +67,8 @@ async def test_anthropic_request_no_thinking_by_default(monkeypatch):
 # ───────────────────────── OpenAI ─────────────────────────
 
 @pytest.mark.asyncio
-async def test_openai_request_sends_no_vendor_thinking_params_when_enabled(monkeypatch):
-    """OpenAIClient keeps deep-think no-op for broad gateway compatibility."""
+async def test_openai_request_keeps_generic_thinking_noop_when_enabled(monkeypatch):
+    """Generic OpenAI-compatible models keep the existing request shape."""
     client = OpenAIClient(api_key="k", api_base="https://x.example", model="qwen")
 
     captured: dict = {}
@@ -86,6 +89,40 @@ async def test_openai_request_sends_no_vendor_thinking_params_when_enabled(monke
     )
 
     assert "extra_body" not in captured
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+async def test_sensenova_request_sends_chat_template_thinking_when_enabled(monkeypatch):
+    """SenseNova models receive their provider-specific thinking extension."""
+    client = OpenAIClient(
+        api_key="k",
+        api_base="https://token.sensenova.cn/v1",
+        model="SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp",
+    )
+    captured: dict = {}
+
+    async def fake_create(**params):
+        captured.update(params)
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content="", tool_calls=None, reasoning_details=None),
+        )
+        return SimpleNamespace(choices=[choice], usage=None)
+
+    monkeypatch.setattr(client.client.chat.completions, "create", fake_create)
+
+    await client._make_api_request(
+        api_messages=[{"role": "user", "content": "go"}],
+        tools=None,
+        thinking_enabled=True,
+    )
+
+    assert captured["extra_body"] == {
+        "chat_template_kwargs": {
+            "thinking": True,
+            "reasoning_effort": "high",
+        }
+    }
     assert "reasoning_effort" not in captured
 
 
@@ -112,6 +149,270 @@ async def test_openai_request_no_extra_body_by_default(monkeypatch):
 
     assert "extra_body" not in captured, "extra_body must not be sent by default"
     assert "reasoning_effort" not in captured, "reasoning_effort must not be sent by default"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "thinking_enabled", "expects_sensenova_body"),
+    [
+        ("qwen", True, False),
+        ("SenseNova-Flash-Lite-test", False, False),
+        ("SenseNova-Flash-Lite-test", True, True),
+        ("sn-sensenova-6-8-flash-lite", True, True),
+    ],
+)
+async def test_openai_stream_request_maps_sensenova_thinking(
+    model,
+    thinking_enabled,
+    expects_sensenova_body,
+    monkeypatch,
+):
+    """Streaming requests use the same model-specific mapping as completions."""
+    client = OpenAIClient(api_key="k", api_base="https://x.example", model=model)
+    captured: dict = {}
+
+    delta = SimpleNamespace(
+        content="ok",
+        tool_calls=None,
+        reasoning=None,
+        reasoning_content=None,
+        reasoning_details=None,
+    )
+    chunk = SimpleNamespace(
+        id="resp-123",
+        usage=None,
+        choices=[SimpleNamespace(finish_reason="stop", delta=delta)],
+    )
+
+    async def response_stream():
+        yield chunk
+
+    async def fake_create(**params):
+        captured.update(params)
+        return SimpleNamespace(
+            request_id="req-123",
+            headers={},
+            parse=response_stream,
+        )
+
+    monkeypatch.setattr(
+        client.client.chat.completions.with_raw_response,
+        "create",
+        fake_create,
+    )
+
+    events = [
+        event
+        async for event in client.generate_stream(
+            [Message(role="user", content="go")],
+            thinking_enabled=thinking_enabled,
+        )
+    ]
+
+    assert [event.delta for event in events if event.type == "text"] == ["ok"]
+    if expects_sensenova_body:
+        assert captured["extra_body"] == {
+            "chat_template_kwargs": {
+                "thinking": True,
+                "reasoning_effort": "high",
+            }
+        }
+    else:
+        assert "extra_body" not in captured
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+async def test_sensenova_stream_recovers_allowed_tool_call_from_thinking(monkeypatch):
+    client = OpenAIClient(
+        api_key="k",
+        api_base="https://token.sensenova.cn/v1",
+        model="sn-sensenova-6-8-flash-lite",
+    )
+    pseudo_call = """
+<tool_call>
+<function=staged_file_write>
+<parameter=action>
+append_text
+</parameter>
+<parameter=chunk_index>
+0
+</parameter>
+<parameter=content>
+<html>recovered</html>
+</parameter>
+</function>
+</tool_call>
+"""
+    delta = SimpleNamespace(
+        content=None,
+        tool_calls=None,
+        reasoning=pseudo_call,
+        reasoning_content=None,
+        reasoning_details=None,
+    )
+    chunk = SimpleNamespace(
+        id="resp-recovered",
+        usage=None,
+        choices=[SimpleNamespace(finish_reason="stop", delta=delta)],
+    )
+
+    async def response_stream():
+        yield chunk
+
+    async def fake_create(**_params):
+        return SimpleNamespace(request_id="req-recovered", headers={}, parse=response_stream)
+
+    monkeypatch.setattr(
+        client.client.chat.completions.with_raw_response,
+        "create",
+        fake_create,
+    )
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "staged_file_write",
+            "description": "write",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "chunk_index": {"type": "integer"},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+    }
+
+    events = [
+        event
+        async for event in client.generate_stream(
+            [Message(role="user", content="go")],
+            tools=[tool],
+            thinking_enabled=True,
+        )
+    ]
+    finish = next(event for event in events if event.type == "finish")
+
+    assert finish.raw_finish_reason == "stop"
+    assert finish.finish_reason == "tool_calls"
+    assert finish.tool_calls is not None
+    assert finish.tool_calls[0].function.name == "staged_file_write"
+    assert finish.tool_calls[0].function.arguments == {
+        "action": "append_text",
+        "chunk_index": 0,
+        "content": "<html>recovered</html>",
+    }
+
+
+@pytest.mark.asyncio
+async def test_generic_openai_stream_does_not_execute_tool_markup_from_thinking(monkeypatch):
+    client = OpenAIClient(api_key="k", api_base="https://x.example", model="qwen")
+    delta = SimpleNamespace(
+        content=None,
+        tool_calls=None,
+        reasoning="<tool_call><function=echo></function></tool_call>",
+        reasoning_content=None,
+        reasoning_details=None,
+    )
+    chunk = SimpleNamespace(
+        id="resp-generic",
+        usage=None,
+        choices=[SimpleNamespace(finish_reason="stop", delta=delta)],
+    )
+
+    async def response_stream():
+        yield chunk
+
+    async def fake_create(**_params):
+        return SimpleNamespace(request_id="req-generic", headers={}, parse=response_stream)
+
+    monkeypatch.setattr(
+        client.client.chat.completions.with_raw_response,
+        "create",
+        fake_create,
+    )
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "echo",
+            "description": "echo",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+    events = [
+        event
+        async for event in client.generate_stream(
+            [Message(role="user", content="go")],
+            tools=[tool],
+            thinking_enabled=True,
+        )
+    ]
+    finish = next(event for event in events if event.type == "finish")
+
+    assert finish.finish_reason == "stop"
+    assert finish.tool_calls is None
+
+
+@pytest.mark.asyncio
+async def test_sensenova_sdk_extra_body_merges_into_wire_body():
+    """The SDK sends ``chat_template_kwargs`` at the HTTP body top level."""
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "SenseNova-Flash-Lite-test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAIClient(
+        api_key="k",
+        api_base="https://token.sensenova.cn/v1",
+        model="SenseNova-Flash-Lite-test",
+    )
+    await client.client.close()
+    client.client = AsyncOpenAI(
+        api_key="k",
+        base_url="https://token.sensenova.cn/v1",
+        http_client=http_client,
+    )
+
+    try:
+        await client._make_api_request(
+            api_messages=[{"role": "user", "content": "go"}],
+            tools=None,
+            thinking_enabled=True,
+        )
+    finally:
+        await client.client.close()
+
+    assert captured["chat_template_kwargs"] == {
+        "thinking": True,
+        "reasoning_effort": "high",
+    }
+    assert "extra_body" not in captured
+    assert "reasoning_effort" not in captured
 
 
 @pytest.mark.asyncio

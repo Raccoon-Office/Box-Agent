@@ -13,6 +13,7 @@ const {
 } = require("../layouts/registry.js");
 const {
   DEFAULT_THEME_ID,
+  TRUTH_TEXT_MAX_CHARACTERS,
   createDeckDesign,
   getTheme,
   listThemes,
@@ -285,6 +286,29 @@ function canonicalizeSourceFacts(sourceFacts) {
   return { facts: [...new Set(facts)], changes };
 }
 
+function splitDefaultRuntimeSourceFacts(value) {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const chunks = [];
+  let remaining = text;
+  const preferredBoundaryStart = Math.floor(TRUTH_TEXT_MAX_CHARACTERS * 0.6);
+  while (Array.from(remaining).length > TRUTH_TEXT_MAX_CHARACTERS) {
+    const characters = Array.from(remaining);
+    let splitAt = TRUTH_TEXT_MAX_CHARACTERS;
+    for (let index = splitAt; index >= preferredBoundaryStart; index -= 1) {
+      if (/[\n。！？!?；;]/.test(characters[index - 1])) {
+        splitAt = index;
+        break;
+      }
+    }
+    const chunk = characters.slice(0, splitAt).join("").trim();
+    if (chunk) chunks.push(chunk);
+    remaining = characters.slice(splitAt).join("").trimStart();
+  }
+  if (remaining.trim()) chunks.push(remaining.trim());
+  return chunks;
+}
+
 function parseArgs(argv) {
   const opts = {
     layoutIds: [],
@@ -507,7 +531,7 @@ function narrativeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function readOutlineBinding(outlineInput, expectedSlideCount) {
+function readOutlineBinding(outlineInput, expectedSlideCount = null) {
   const outlineFile = resolveArtifactPath(outlineInput);
   if (!isNonEmptyFile(outlineFile)) {
     throw new Error(`Outline file not found or empty: ${outlineFile}`);
@@ -535,7 +559,7 @@ function readOutlineBinding(outlineInput, expectedSlideCount) {
   if (!slides) {
     issues.push("outline.slides: required array");
   } else {
-    if (slides.length !== expectedSlideCount) {
+    if (Number.isInteger(expectedSlideCount) && slides.length !== expectedSlideCount) {
       issues.push(
         `outline.slides: contains ${slides.length} page(s), but the ordered layout plan ` +
         `contains ${expectedSlideCount}`
@@ -1086,7 +1110,7 @@ function main() {
     }
   });
   const outlineBinding = opts.outline
-    ? readOutlineBinding(opts.outline, opts.layoutIds.length)
+    ? readOutlineBinding(opts.outline, opts.layoutIds.length || null)
     : null;
   const assumptions = [...new Set(
     opts.assumptions.map(value => value.trim()).filter(Boolean)
@@ -1099,6 +1123,18 @@ function main() {
       || assumptionBinding.assumption_count > 0
     ),
   };
+  if (outlineBinding && opts.layoutIds.length === 0) {
+    opts.layoutIds = outlineBinding.slides.map(slide => {
+      const semantic = analyzeOutlineLayoutIntent(
+        slide,
+        outlineBinding.sourceMode,
+        layoutPolicy
+      );
+      return semantic && semantic.preferred_layout_id
+        ? semantic.preferred_layout_id
+        : "cards-grid-v1";
+    });
+  }
   const layoutResolution = normalizeOutlineDrivenLayoutIds(
     opts.layoutIds,
     outlineBinding,
@@ -1203,11 +1239,13 @@ function main() {
     ...opts.researchFacts.map(value => value.trim()).filter(Boolean),
     ...(outlineBinding ? outlineBinding.importedResearchFacts : []),
   ])];
-  // A short source-bound brief is itself the only user-provided provenance.
+  // A source-bound brief is itself the only user-provided provenance.
   // Models should still pass --fact explicitly when they extract multiple
   // claims, but never let an omitted flag produce an empty truth contract when
   // the ACP runtime has bound the exact current user request. Research evidence
-  // remains in its separate bucket and suppresses this fallback.
+  // remains in its separate bucket and suppresses this fallback. Long runtime
+  // requests are split into exact contiguous phrases so the deterministic
+  // fallback cannot violate the per-fact truth-contract limit.
   const defaultedSourceFacts = Boolean(
     opts.truthMode === "source_bound"
     && opts.sourceFacts.length === 0
@@ -1216,7 +1254,9 @@ function main() {
     && runtimeBinding.source_text.trim()
   );
   const sourceFactNormalization = canonicalizeSourceFacts(
-    defaultedSourceFacts ? [runtimeBinding.source_text] : opts.sourceFacts
+    defaultedSourceFacts
+      ? splitDefaultRuntimeSourceFacts(runtimeBinding.source_text)
+      : opts.sourceFacts
   );
   const skeleton = orderedLayouts.length
     ? {
