@@ -143,6 +143,27 @@ async def test_set_replaces_full_todo_list(writer, reader):
 
 
 @pytest.mark.asyncio
+async def test_set_initialization_ignores_supplied_ids(writer):
+    result = await writer.execute(
+        action="set",
+        todos=[
+            {"id": "1", "task": "Inspect implementation", "status": "in_progress"},
+            {"id": "t2", "task": "Run verification", "status": "pending"},
+        ],
+    )
+
+    assert result.success
+    assert [item["id"] for item in result.raw_output["items"]] == ["1", "2"]
+    assert [item["status"] for item in result.raw_output["items"]] == [
+        "in_progress",
+        "pending",
+    ]
+    assert result.model_context is not None
+    assert '"id": "1"' in result.model_context
+    assert '"id": "2"' in result.model_context
+
+
+@pytest.mark.asyncio
 async def test_set_preserves_existing_identity_and_never_reuses_ids(writer):
     initial = await writer.execute(
         action="set",

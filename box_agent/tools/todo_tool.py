@@ -291,8 +291,11 @@ class TodoStore:
 
     def replace(self, todos: list[dict[str, Any]]) -> list[dict]:
         current = self._items
+        initializing = not current
         supplied_ids = [
-            str(todo["id"]).strip() for todo in todos if todo.get("id") is not None
+            str(todo["id"]).strip()
+            for todo in todos
+            if not initializing and todo.get("id") is not None
         ]
         seen_ids: set[str] = set()
         for todo_id in supplied_ids:
@@ -307,7 +310,7 @@ class TodoStore:
 
         candidate_state = []
         for todo in todos:
-            supplied_id = todo.get("id")
+            supplied_id = None if initializing else todo.get("id")
             existing = current.get(str(supplied_id).strip()) if supplied_id is not None else None
             candidate_state.append({
                 "status": str(
@@ -322,7 +325,10 @@ class TodoStore:
 
         items: list[dict] = []
         for todo in todos:
-            supplied_id = todo.get("id")
+            # Models sometimes copy plan-step IDs into the first todo snapshot.
+            # Those IDs do not identify existing todos, so allocate canonical IDs
+            # when the store is empty and report them in the resulting snapshot.
+            supplied_id = None if initializing else todo.get("id")
             if supplied_id is None:
                 todo_id = self._next_id()
                 created_at = datetime.now().isoformat()
@@ -461,6 +467,8 @@ class TodoWriteTool(Tool):
             "'update' changes an existing item, and 'delete' removes an item. "
             "Use 'set' only for new or substantially revised multi-step work. Preserve "
             "the id of unchanged existing items in the complete ordered todos array. "
+            "When initializing an empty todo list, omit ids; any supplied ids are "
+            "ignored and canonical todo ids are assigned automatically. "
             "Use 'transition' for normal progress instead of rebuilding the whole list. "
             "If a current plan exists, call plan_read before setting todos. Derive the "
             "todos from plan steps in order and keep the plan's objective, scope, and "
@@ -501,7 +509,8 @@ class TodoWriteTool(Tool):
                                 "type": "string",
                                 "description": (
                                     "Existing todo ID to preserve during action='set'. "
-                                    "Omit for a new todo."
+                                    "Omit for a new todo and when initializing an empty "
+                                    "todo list; supplied ids are ignored during initialization."
                                 ),
                             },
                             "task": {"type": "string", "description": "Task description."},

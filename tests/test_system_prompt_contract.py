@@ -16,6 +16,8 @@ def test_system_prompt_keeps_todo_separate_from_factual_evidence():
     assert "初始化清单或 plan 实质修订后" in prompt
     assert "正常推进用 `action=\"transition\"`" in prompt
     assert "为未变化的已有 Todo 保留 `id`" in prompt
+    assert "首次初始化 Todo 时不要传 `id`" in prompt
+    assert "Plan step 的 `id` 不是 Todo `id`" in prompt
     assert "列表为空或全部完成时允许没有 `in_progress`" in prompt
     assert "否则必须恰好有一个 `in_progress`" in prompt
     assert "只执行唯一的 `in_progress` 项" in prompt
