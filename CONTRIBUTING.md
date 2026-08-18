@@ -88,6 +88,11 @@ Every non-trivial PR should be reviewable through TPR:
 - **Proof**: exact commands, tests, probes, screenshots, logs, regenerated manifests, or runtime checks.
 - **Risk**: compatibility, packaging/runtime impact, migration, config/secrets, rollback plan, and cross-repository follow-up.
 
+The PR must also identify affected architecture layers and record whether
+target-branch changes after the merge base were considered. The committed
+repository profile under `general_review/` defines the automated roles and CI
+gate; changes to that profile are reviewed like any other production contract.
+
 #### Development Process
 
 1. **Write Code**
@@ -169,6 +174,14 @@ Before submitting a PR, please ensure:
 All Pull Requests will be reviewed. Maintainers use the detailed
 [Maintainer Review Guide](docs/REVIEW_GUIDE.md) for review order, blockers, and
 proof expectations:
+
+- Non-draft PRs must pass the repository-owned `general_review/ci/preflight.sh`
+  command and receive `teamwork/local-ci: success` for the current Head SHA.
+- A new Head SHA invalidates prior preflight and automated review results.
+- Automated Review Agents are read-only decision inputs; maintainers retain the
+  final merge decision.
+- The generic review service does not own Box-Agent CI or review policy. Those
+  remain versioned in this repository under `general_review/`.
 
 - Review starts from the TPR evidence. Missing proof is treated as incomplete work, not as a reviewer task.
 - Reviewers should check behavior, ownership boundaries, tests, packaging/runtime implications, and documentation before style details.

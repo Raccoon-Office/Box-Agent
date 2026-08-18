@@ -49,6 +49,9 @@ graphify-out
 workspace/
 *.log
 
+# Teamwork Review Agents local database, PID, logs, and temporary state
+general_review/runtime/
+
 # Local test, browser, and rendered-artifact output
 output/
 .playwright-cli/

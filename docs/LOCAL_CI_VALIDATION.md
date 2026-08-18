@@ -1,5 +1,10 @@
 # Box-Agent 本地 CI 集成验收报告
 
+> 本文是 2026-08-17 针对指定 Head 的历史验收证据，不是当前运行配置的来源。
+> 现行仓库级配置位于 `general_review/review.config.yaml`，CI 命令来源位于
+> `general_review/ci/preflight.sh`。修改 CI 时应更新这些版本化文件并重新产生新的
+> 验收证据，不应覆盖本文记录的历史结果。
+
 ## 验收结论
 
 - **门禁与调度流程：通过。** Preflight 能在准确 Head 的隔离 worktree 中执行，
@@ -16,7 +21,7 @@ detached 临时 worktree，临时空 `HOME`。
 `e2079027544fc540d1b2c480d10c012230fd6048`，落后于本次 Head，因此只用于定位；
 所有结论均由当前源码和真实运行验证。
 
-## 实际 Preflight 配置
+## 当次验收使用的 Preflight 配置
 
 ```yaml
 preflight:
@@ -108,7 +113,7 @@ Agent 和合并流程应被阻断。
 `core.autocrlf=true` 把 `box_agent/skills/zhihu/scripts/run.sh` 检出为 CRLF，导致
 `sh -n` 语法检查失败；改用 WSL Git/LF 后该失败消失。
 
-正式服务应完全在 WSL 内执行 Git 操作。建议另行增加 `.gitattributes`：
+正式服务应完全在 WSL 内执行 Git 操作。仓库现已通过 `.gitattributes` 固定：
 
 ```gitattributes
 *.sh text eol=lf

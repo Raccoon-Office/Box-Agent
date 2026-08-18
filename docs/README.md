@@ -14,6 +14,7 @@ contracts.
 | Understand Anything code map | [Code Map Guide](UNDERSTAND_ANYTHING.md) | [代码图谱指南](UNDERSTAND_ANYTHING_CN.md) |
 | Production and runtime packaging | [Production Guide](PRODUCTION_GUIDE.md) | [生产指南](PRODUCTION_GUIDE_CN.md) |
 | PR and maintainer review | [Review Guide](REVIEW_GUIDE.md) | [PR 审查规范](REVIEW_GUIDE_CN.md) |
+| Automated review integration | [Automated Review](AUTOMATED_REVIEW.md) | Same document |
 | Local CI integration validation | [Box-Agent validation report](LOCAL_CI_VALIDATION.md) | Same document |
 | Current published/unreleased state | [Release State](RELEASE_STATE.md) | Same document |
 | Third-party model API behavior | [Third-party API Compatibility](THIRD_PARTY_API_COMPATIBILITY.md) | Same document |

@@ -25,6 +25,7 @@ box_agent/skills/document-skills/pptx/scripts/dom-to-pptx.bundle.js
 graphify-out/
 workspace/
 output/
+general_review/runtime/
 .playwright-cli/
 .venv-x64/
 .build-python-x64/

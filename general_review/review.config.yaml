@@ -1,0 +1,102 @@
+database:
+  path: ./runtime/data/teamwork-review-agents.db
+
+scanner:
+  interval_seconds: 300
+  max_items_per_repository: 100
+  api_page_size: 50
+  emit_initial_events: false
+
+runtime:
+  max_concurrent_agents: 2
+  lock_timeout_seconds: 300
+  lock_ttl_seconds: 120
+  max_sub_agent_depth: 1
+  max_agent_runs_per_root: 4
+  event_retry_count: 2
+  codex_binary: codex
+  mcp_startup_timeout_seconds: 15
+  mcp_tool_timeout_seconds: 1800
+  max_jsonl_events: 2000
+
+web:
+  host: 127.0.0.1
+  port: 8080
+  config_poll_seconds: 2
+  log_retention_days: 30
+
+environment:
+  global:
+    GITHUB_TOKEN:
+      from_system: GITHUB_TOKEN
+      secret: true
+      expose_to_prompt: false
+      expose_to_process: false
+
+providers:
+  github-main:
+    kind: github
+    base_url: https://api.github.com
+    token_env: GITHUB_TOKEN
+    request_timeout_seconds: 30
+
+repositories:
+  - id: box-agent
+    provider: github-main
+    project: Raccoon-Office/Box-Agent
+    clone_url: https://github.com/Raccoon-Office/Box-Agent.git
+    workspace: ..
+    enabled: true
+    preflight:
+      enabled: true
+      status_context: teamwork/local-ci
+      timeout_seconds: 3600
+      max_output_bytes: 2000000
+      steps:
+        - name: box-agent-preflight
+          timeout_seconds: 3600
+          command:
+            - bash
+            - general_review/ci/preflight.sh
+
+agents:
+  general-reviewer:
+    prompt_file: "${TEAMWORK_REVIEW_AGENTS_ROOT}/prompts/general-review.md"
+    sandbox: read-only
+    timeout_seconds: 1800
+    write_scopes: []
+    allowed_sub_agents: []
+    skip_git_repo_check: false
+    extra_codex_args: []
+    environment:
+      REVIEW_SKILLS:
+        value: ""
+        secret: false
+        expose_to_prompt: false
+        expose_to_process: true
+      REVIEW_DESIGN_DOC_DIR:
+        value: docs
+        secret: false
+        expose_to_prompt: false
+        expose_to_process: true
+      REVIEW_CHANGE_HISTORY_DIR:
+        value: docs
+        secret: false
+        expose_to_prompt: false
+        expose_to_process: true
+
+rules:
+  - name: box-agent-general-review
+    events:
+      - change_request.discovered
+      - change_request.commits_changed
+      - change_request.reopened
+      - change_request.draft_changed
+    agents:
+      - general-reviewer
+    repositories:
+      - box-agent
+    conditions:
+      state: opened
+      draft: false
+    enabled: true

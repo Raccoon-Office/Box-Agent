@@ -88,6 +88,10 @@
 - **Proof**：具体命令、测试、探针、截图、日志、重新生成的 manifest 或 runtime 验证。
 - **Risk**：兼容性、打包/runtime 影响、迁移、配置/密钥、回滚方案和跨仓库后续事项。
 
+PR 还必须说明受影响的架构层，并记录是否检查了 merge base 之后目标分支的相关变化。
+`general_review/` 下提交的仓库 Review Profile 定义自动化角色和 CI 门禁；修改该
+Profile 时，应像修改其他生产契约一样接受审查。
+
 #### 开发流程
 
 1. **编写代码**
@@ -167,6 +171,13 @@
 所有 Pull Request 需要经过代码审查。维护者使用详细的
 [维护者 Review 指南](docs/REVIEW_GUIDE_CN.md) 来确定 review 顺序、阻塞项和
 proof 要求：
+
+- 非 Draft PR 必须通过仓库自有的 `general_review/ci/preflight.sh`，并让当前
+  Head SHA 获得 `teamwork/local-ci: success`。
+- Head SHA 变化后，旧的 Preflight 和自动 Review 结果失效。
+- 自动 Review Agent 保持只读，只提供决策输入；最终合并权属于人工维护者。
+- 通用 Review 服务不拥有 Box-Agent CI 或审查规则；这些内容由本仓库
+  `general_review/` 目录版本化维护。
 
 - 审查从 TPR 证据开始。缺少 proof 视为工作未完成，而不是让 reviewer 代为确认。
 - Reviewer 应先检查行为、归属边界、测试、打包/runtime 影响和文档，再看代码风格细节。

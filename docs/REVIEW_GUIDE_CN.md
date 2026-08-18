@@ -154,11 +154,12 @@ ownership 和风险的审查。
 Verdict: APPROVE | REQUEST_CHANGES | COMMENT
 Reviewed SHA: <40-character head sha>
 Preflight: success | failure | error | missing
+TPR: complete | incomplete | not provided by runtime
 
 ## TPR 检查
-- Task: complete | incomplete
-- Proof: sufficient | insufficient
-- Risk: complete | incomplete
+- Task: complete | incomplete | unavailable
+- Proof: sufficient | insufficient | unavailable
+- Risk: complete | incomplete | unavailable
 
 ## 阻塞问题
 - [P1] 标题 — `path/to/file.py:123`
@@ -185,6 +186,7 @@ Preflight: success | failure | error | missing
 | --- | --- |
 | Preflight 缺失、`failure` 或 `error` | `REQUEST_CHANGES`，不启动完整 Review Agent |
 | TPR 缺失或 Proof 无法证明行为 | `REQUEST_CHANGES` |
+| 运行上下文未提供 TPR，且没有已证实阻塞问题 | `COMMENT`，等待人工补充证据 |
 | 存在未解决 P0/P1 | `REQUEST_CHANGES` |
 | 存在 P2 且未被维护者显式接受 | `REQUEST_CHANGES` |
 | 仅有 P3 或无 finding，所有门禁满足 | `APPROVE` |

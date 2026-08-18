@@ -21,6 +21,18 @@
 - Rollback:
 - Cross-repository follow-up:
 
+### Design and architecture impact
+
+- Affected layers and owners:
+- Contract, schema, or protocol impact:
+- Documentation updated:
+
+### Target branch consistency
+
+- Base branch and reviewed Head SHA:
+- Relevant target-branch changes considered:
+- Rebase, compatibility, or historical-fix risk:
+
 ## Checklist
 
 - [ ] This PR has one clear behavior or subsystem scope.
@@ -33,3 +45,5 @@
 - [ ] Packaged runtime impact is stated, including whether rebuild/install/probe was done.
 - [ ] No local config, logs, workspace files, or generated `.understand-anything` graph/cache files are included.
 - [ ] This branch was rebased onto the latest base `main` before this PR was opened or updated; `main` was not merged into the feature branch.
+- [ ] Design and target-branch consistency evidence is included above.
+- [ ] `teamwork/local-ci` passed for the current Head SHA, or the missing status is explained.

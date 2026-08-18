@@ -12,6 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,10 +27,5 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync --all-extras
-
-      - name: Run pytest
-        # Integration tests that need box_agent/config/config.yaml or mcp.json
-        # auto-skip in CI; deselect the network-flaky timeout test.
-        run: uv run pytest tests/ -q --tb=short --deselect tests/test_mcp.py::test_connection_timeout_on_unreachable_server
+      - name: Run repository-owned preflight
+        run: bash general_review/ci/preflight.sh
