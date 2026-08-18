@@ -1713,14 +1713,23 @@ def _latest_todo_state_checkpoint(
     for idx in range(len(messages) - 1, -1, -1):
         msg = messages[idx]
         content = msg.content if isinstance(msg.content, str) else ""
-        if msg.role == "user" and content.startswith(_TODO_STATE_MARKER):
-            return idx, msg
-        if msg.role == "tool" and msg.name in {"todo_write", "todo_read"}:
+        is_todo_tool_state = (
+            msg.role == "tool"
+            and msg.name in {"todo_write", "todo_read"}
+            and msg.state_checkpoint is not None
+        )
+        is_synthetic_todo_state = (
+            msg.role == "user"
+            and content.startswith(_TODO_STATE_MARKER)
+            and msg.state_checkpoint is not None
+        )
+        if is_todo_tool_state or is_synthetic_todo_state:
             return (
                 idx,
                 Message(
                     role="user",
-                    content=f"{_TODO_STATE_MARKER}\nTool: {msg.name}\n\n{content}",
+                    content=f"{_TODO_STATE_MARKER}\n\n{msg.state_checkpoint}",
+                    state_checkpoint=msg.state_checkpoint,
                 ),
             )
     return None
@@ -2424,6 +2433,7 @@ def _micro_compact(
             idx
             for idx in reversed(tool_indices)
             if messages[idx].name in {"todo_write", "todo_read"}
+            and messages[idx].state_checkpoint is not None
         ),
         None,
     )
@@ -5181,6 +5191,7 @@ async def run_agent_loop(
                 content=msg_content,
                 tool_call_id=tc_id,
                 name=fn_name,
+                state_checkpoint=result.state_checkpoint if result.success else None,
             )
             messages.append(tool_msg)
             _record_context_resource_history(
@@ -5752,6 +5763,7 @@ async def run_agent_loop(
                     content=msg_content,
                     tool_call_id=tc_id,
                     name=fn_name,
+                    state_checkpoint=result.state_checkpoint if result.success else None,
                 )
                 messages.append(tool_msg)
                 _record_context_resource_history(

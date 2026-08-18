@@ -165,9 +165,8 @@ def _todo_model_context(
     items: list[dict],
     *,
     action: str,
-    changed_items: list[dict] | None = None,
 ) -> str:
-    """Return bounded, state-aware context for future model turns."""
+    """Return a bounded checkpoint of the complete current todo state."""
     if not items:
         return (
             f"Todo action '{action}' succeeded. The current todo list is empty. "
@@ -176,38 +175,29 @@ def _todo_model_context(
 
     summary = _todo_snapshot(items)["summary"]
     instruction = _todo_next_instruction(items)
-    if action == "set":
-        current = [_context_item(item) for item in items]
-        full_context = (
-            "Todo action 'set' succeeded. This is the complete current todo list "
-            "and execution state:\n"
-            f"{json.dumps(current, indent=2, ensure_ascii=False)}\n"
-            f"Summary: {json.dumps(summary, ensure_ascii=False)}\n"
-            f"{instruction}"
-        )
-        if len(full_context) <= _MAX_TODO_MODEL_CONTEXT_CHARS:
-            return full_context
-
-        active = [item for item in items if item.get("status") == "in_progress"]
-        preview_source = active + [
-            item for item in items if item.get("status") == "pending"
-        ][:5]
-        preview = [_context_item(item) for item in preview_source]
-        return (
-            "Todo action 'set' succeeded. The complete list was omitted from model "
-            "context because it exceeds the context limit; use todo_read when the full "
-            "list is needed.\n"
-            f"Summary: {json.dumps(summary, ensure_ascii=False)}\n"
-            f"Active and next pending preview: "
-            f"{json.dumps(preview, ensure_ascii=False)}\n"
-            f"{instruction}"
-        )
-
-    changes = [_context_item(item) for item in (changed_items or [])[:3]]
-    return (
-        f"Todo action '{action}' succeeded.\n"
+    current = [_context_item(item) for item in items]
+    full_context = (
+        f"Todo action '{action}' succeeded. This is the complete current todo list "
+        "and execution state:\n"
+        f"{json.dumps(current, indent=2, ensure_ascii=False)}\n"
         f"Summary: {json.dumps(summary, ensure_ascii=False)}\n"
-        f"Changed items: {json.dumps(changes, ensure_ascii=False)}\n"
+        f"{instruction}"
+    )
+    if len(full_context) <= _MAX_TODO_MODEL_CONTEXT_CHARS:
+        return full_context
+
+    active = [item for item in items if item.get("status") == "in_progress"]
+    preview_source = active + [
+        item for item in items if item.get("status") == "pending"
+    ][:5]
+    preview = [_context_item(item) for item in preview_source]
+    return (
+        f"Todo action '{action}' succeeded. The complete list was omitted from model "
+        "context because it exceeds the context limit; use todo_read when the full "
+        "list is needed.\n"
+        f"Summary: {json.dumps(summary, ensure_ascii=False)}\n"
+        f"Active and next pending preview: "
+        f"{json.dumps(preview, ensure_ascii=False)}\n"
         f"{instruction}"
     )
 
@@ -308,9 +298,26 @@ class TodoStore:
                 f"Todo #{unknown_ids[0]} does not exist; omit id for a new todo."
             )
 
-        requested_tasks = [str(todo["task"]).strip() for todo in todos]
-        current_tasks = [str(item["task"]).strip() for item in current_items]
-        if current_items and requested_tasks == current_tasks:
+        requested_shape = (
+            [
+                (
+                    str(todo["task"]).strip(),
+                    str(
+                        todo.get("priority")
+                        or current_items[index].get("priority")
+                        or "medium"
+                    ),
+                )
+                for index, todo in enumerate(todos)
+            ]
+            if len(todos) == len(current_items)
+            else []
+        )
+        current_shape = [
+            (str(item["task"]).strip(), str(item.get("priority") or "medium"))
+            for item in current_items
+        ]
+        if current_items and requested_shape == current_shape:
             requested_statuses = [
                 str(todo.get("status") or current_items[index]["status"])
                 for index, todo in enumerate(todos)
@@ -328,23 +335,18 @@ class TodoStore:
                 str(item["id"])
             )
         for todo in todos:
+            if todo.get("id") is not None:
+                continue
             task = str(todo["task"]).strip()
             matching_ids = existing_ids_by_task.get(task)
             if not matching_ids:
                 continue
-            supplied_id = todo.get("id")
-            if supplied_id is None:
-                expected = ", ".join(f"#{todo_id}" for todo_id in matching_ids)
+            missing_ids = [todo_id for todo_id in matching_ids if todo_id not in seen_ids]
+            if missing_ids:
+                expected = ", ".join(f"#{todo_id}" for todo_id in missing_ids)
                 raise ValueError(
                     f"Existing todo '{task}' must preserve its id ({expected}); "
                     "call todo_read before rebuilding the list."
-                )
-            normalized_id = str(supplied_id).strip()
-            if normalized_id not in matching_ids:
-                expected = ", ".join(f"#{todo_id}" for todo_id in matching_ids)
-                raise ValueError(
-                    f"Existing todo '{task}' must preserve its original id "
-                    f"({expected}), not #{normalized_id}."
                 )
 
         candidate_state = []
@@ -469,11 +471,11 @@ class TodoWriteTool(Tool):
         content: str,
         action: str,
         item: dict | None = None,
-        changed_items: list[dict] | None = None,
         transition: dict[str, Any] | None = None,
     ) -> ToolResult:
         items = self._store.list()
         snapshot = _todo_snapshot(items)
+        model_context = _todo_model_context(items, action=action)
         raw_output = {**snapshot, "action": action}
         if item is not None:
             raw_output["item"] = dict(item)
@@ -483,11 +485,8 @@ class TodoWriteTool(Tool):
             success=True,
             content=content,
             raw_output=raw_output,
-            model_context=_todo_model_context(
-                items,
-                action=action,
-                changed_items=changed_items or ([item] if item is not None else None),
-            ),
+            model_context=model_context,
+            state_checkpoint=model_context,
         )
 
     @property
@@ -671,7 +670,6 @@ class TodoWriteTool(Tool):
                 return self._result(
                     content=content,
                     action="transition",
-                    changed_items=[item for item in changed if item is not None],
                     transition=transition,
                 )
 
@@ -700,7 +698,6 @@ class TodoWriteTool(Tool):
                 return self._result(
                     content=f"Deleted todo #{todo_id}.",
                     action="delete",
-                    changed_items=[removed],
                 )
 
             return ToolResult(success=False, error=f"Unknown action: {action}")
@@ -769,6 +766,7 @@ class TodoReadTool(Tool):
     async def execute(self, todo_id: str | None = None, status: str | None = None) -> ToolResult:
         all_items = self._store.list()
         snapshot = _todo_snapshot(all_items)
+        model_context = _todo_model_context(all_items, action="read")
 
         # Single item lookup
         if todo_id:
@@ -779,6 +777,8 @@ class TodoReadTool(Tool):
                 success=True,
                 content=self._format_items([item]),
                 raw_output=snapshot,
+                model_context=model_context,
+                state_checkpoint=model_context,
             )
 
         # List (optionally filtered)
@@ -789,11 +789,15 @@ class TodoReadTool(Tool):
                 success=True,
                 content=f"No todo items{label}.",
                 raw_output=snapshot,
+                model_context=model_context,
+                state_checkpoint=model_context,
             )
         return ToolResult(
             success=True,
             content=self._format_items(items),
             raw_output=snapshot,
+            model_context=model_context,
+            state_checkpoint=model_context,
         )
 
     @staticmethod

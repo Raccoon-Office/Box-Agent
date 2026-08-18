@@ -5047,8 +5047,20 @@ async def test_stream_interrupted_preserves_partial_assistant_message(tmp_path):
 from box_agent.core import _micro_compact, _KEEP_RECENT_TOOL_RESULTS, _MIN_COMPACT_LEN
 
 
-def _make_tool_msg(name: str, content: str, tc_id: str = "tc-0") -> Message:
-    return Message(role="tool", content=content, tool_call_id=tc_id, name=name)
+def _make_tool_msg(
+    name: str,
+    content: str,
+    tc_id: str = "tc-0",
+    *,
+    state_checkpoint: str | None = None,
+) -> Message:
+    return Message(
+        role="tool",
+        content=content,
+        tool_call_id=tc_id,
+        name=name,
+        state_checkpoint=state_checkpoint,
+    )
 
 
 def test_micro_compact_no_op_when_few_tool_msgs():
@@ -5102,7 +5114,12 @@ def test_micro_compact_preserves_only_latest_todo_state(latest_todo_tool):
     msgs = [
         Message(role="system", content="sys"),
         _make_tool_msg("todo_write", old_todo_content, "todo-old"),
-        _make_tool_msg(latest_todo_tool, latest_todo_content, "todo-latest"),
+        _make_tool_msg(
+            latest_todo_tool,
+            latest_todo_content,
+            "todo-latest",
+            state_checkpoint=latest_todo_content,
+        ),
         _make_tool_msg("bash", "one\n" + "a" * 500, "tc-1"),
         _make_tool_msg("read_file", "two\n" + "b" * 500, "tc-2"),
         _make_tool_msg("bash", "three\n" + "c" * 500, "tc-3"),
@@ -5715,7 +5732,12 @@ async def test_maybe_summarize_preserves_latest_todo_state_exactly(
     msgs = [
         Message(role="system", content="sys"),
         latest_user,
-        _make_tool_msg(latest_todo_tool, todo_state, "todo-latest"),
+        _make_tool_msg(
+            latest_todo_tool,
+            todo_state,
+            "todo-latest",
+            state_checkpoint=todo_state,
+        ),
         Message(role="assistant", content="large execution " * 8_000),
     ]
     llm = _FakeSummaryLLM(
@@ -5739,9 +5761,8 @@ async def test_maybe_summarize_preserves_latest_todo_state_exactly(
         and str(message.content).startswith(_TODO_STATE_MARKER)
     ]
     assert len(checkpoints) == 1
-    assert checkpoints[0].content == (
-        f"{_TODO_STATE_MARKER}\nTool: {latest_todo_tool}\n\n{todo_state}"
-    )
+    assert checkpoints[0].content == f"{_TODO_STATE_MARKER}\n\n{todo_state}"
+    assert checkpoints[0].state_checkpoint == todo_state
     assert outcome.messages[-1] is latest_user
 
     second_input = [
@@ -5763,8 +5784,33 @@ async def test_maybe_summarize_preserves_latest_todo_state_exactly(
         and str(message.content).startswith(_TODO_STATE_MARKER)
     ]
     assert [message.content for message in repeated_checkpoints] == [
-        f"{_TODO_STATE_MARKER}\nTool: {latest_todo_tool}\n\n{todo_state}"
+        f"{_TODO_STATE_MARKER}\n\n{todo_state}"
     ]
+
+
+def test_latest_todo_checkpoint_ignores_newer_failed_tool_result():
+    from box_agent.core import _latest_todo_state_checkpoint, _TODO_STATE_MARKER
+
+    canonical = "Complete current todo state"
+    messages = [
+        _make_tool_msg(
+            "todo_write",
+            canonical,
+            "todo-success",
+            state_checkpoint=canonical,
+        ),
+        _make_tool_msg(
+            "todo_write",
+            "Error: Todo #99 does not exist",
+            "todo-failure",
+        ),
+    ]
+
+    checkpoint = _latest_todo_state_checkpoint(messages)
+
+    assert checkpoint is not None
+    assert checkpoint[0] == 0
+    assert checkpoint[1].content == f"{_TODO_STATE_MARKER}\n\n{canonical}"
 
 
 @pytest.mark.asyncio

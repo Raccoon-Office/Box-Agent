@@ -251,6 +251,46 @@ async def test_set_rejects_status_only_progress_for_existing_list(writer):
 
 
 @pytest.mark.asyncio
+async def test_set_allows_status_change_with_substantive_priority_revision(writer):
+    initial = await writer.execute(
+        action="set",
+        todos=[
+            {"task": "Implement", "status": "in_progress", "priority": "low"},
+            {"task": "Verify", "status": "pending", "priority": "low"},
+        ],
+    )
+    current, next_item = initial.raw_output["items"]
+
+    result = await writer.execute(
+        action="set",
+        todos=[
+            {
+                "id": current["id"],
+                "task": current["task"],
+                "status": "completed",
+                "priority": "high",
+            },
+            {
+                "id": next_item["id"],
+                "task": next_item["task"],
+                "status": "in_progress",
+                "priority": "high",
+            },
+        ],
+    )
+
+    assert result.success
+    assert [item["status"] for item in result.raw_output["items"]] == [
+        "completed",
+        "in_progress",
+    ]
+    assert [item["priority"] for item in result.raw_output["items"]] == [
+        "high",
+        "high",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_set_rejects_existing_task_without_canonical_id(writer):
     initial = await writer.execute(
         action="set",
@@ -280,7 +320,7 @@ async def test_set_rejects_existing_task_without_canonical_id(writer):
 
 
 @pytest.mark.asyncio
-async def test_set_rejects_existing_task_with_another_todo_id(writer):
+async def test_set_uses_ids_as_identity_when_tasks_are_swapped(writer):
     initial = await writer.execute(
         action="set",
         todos=[
@@ -298,9 +338,39 @@ async def test_set_rejects_existing_task_with_another_todo_id(writer):
         ],
     )
 
-    assert not result.success
-    assert "must preserve its original id (#1), not #2" in result.error
-    assert writer._store.list() == initial.raw_output["items"]
+    assert result.success
+    assert [item["id"] for item in result.raw_output["items"]] == ["2", "1"]
+    assert [item["task"] for item in result.raw_output["items"]] == [
+        "First",
+        "Second",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_allows_new_duplicate_task_after_existing_id_is_preserved(writer):
+    initial = await writer.execute(
+        action="set",
+        todos=[{"task": "Run tests", "status": "in_progress"}],
+    )
+
+    result = await writer.execute(
+        action="set",
+        todos=[
+            {
+                "id": initial.raw_output["items"][0]["id"],
+                "task": "Run tests",
+                "status": "in_progress",
+            },
+            {"task": "Run tests", "status": "pending"},
+        ],
+    )
+
+    assert result.success
+    assert [item["id"] for item in result.raw_output["items"]] == ["1", "2"]
+    assert [item["task"] for item in result.raw_output["items"]] == [
+        "Run tests",
+        "Run tests",
+    ]
 
 
 @pytest.mark.asyncio
@@ -430,6 +500,7 @@ async def test_update_status(writer, reader):
 async def test_transition_atomically_advances_to_next_todo(writer):
     await writer.execute(action="create", task="Inspect implementation", status="in_progress")
     await writer.execute(action="create", task="Run verification")
+    await writer.execute(action="create", task="Publish result")
 
     result = await writer.execute(
         action="transition",
@@ -445,14 +516,15 @@ async def test_transition_atomically_advances_to_next_todo(writer):
     assert [item["status"] for item in result.raw_output["items"]] == [
         "completed",
         "in_progress",
+        "pending",
     ]
     assert result.model_context is not None
-    assert "Changed items" in result.model_context
+    assert "complete current todo list" in result.model_context
     assert "Inspect implementation" in result.model_context
     assert "Run verification" in result.model_context
+    assert "Publish result" in result.model_context
+    assert result.state_checkpoint == result.model_context
     assert "action='transition'" in result.model_context
-    assert "without next_todo_id" in result.model_context
-    assert "complete current todo list" not in result.model_context
 
 
 @pytest.mark.asyncio
@@ -600,6 +672,11 @@ async def test_read_single_by_id(writer, reader):
         "in_progress": 1,
         "pending": 1,
     }
+    assert result.state_checkpoint is not None
+    assert '"id": "1"' in result.state_checkpoint
+    assert '"id": "2"' in result.state_checkpoint
+    assert "Task A" in result.state_checkpoint
+    assert "Task B" in result.state_checkpoint
 
 
 @pytest.mark.asyncio
@@ -617,6 +694,9 @@ async def test_read_filter_by_status(writer, reader):
         "Done task",
     ]
     assert result.raw_output["summary"]["total"] == 2
+    assert result.state_checkpoint is not None
+    assert "Pending task" in result.state_checkpoint
+    assert "Done task" in result.state_checkpoint
 
 
 @pytest.mark.asyncio

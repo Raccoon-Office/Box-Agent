@@ -17,6 +17,7 @@ class ToolResult(BaseModel):
     permission_request: dict | None = None  # capability request payload
     raw_output: dict | None = None  # optional structured payload for host UIs
     model_context: str | None = None  # optional compact content for future LLM turns
+    state_checkpoint: str | None = None  # optional canonical state for compaction
 
 
 class Tool:

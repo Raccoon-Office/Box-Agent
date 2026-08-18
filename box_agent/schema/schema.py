@@ -74,6 +74,9 @@ class Message(BaseModel):
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None  # For tool role
+    # Internal canonical state carried across history transforms. LLM adapters
+    # intentionally do not serialize this field to provider message payloads.
+    state_checkpoint: str | None = None
 
 
 class TokenUsage(BaseModel):
