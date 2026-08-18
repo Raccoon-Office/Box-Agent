@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import traceback
 from collections.abc import AsyncIterator
@@ -312,8 +313,16 @@ def empty_final_answer_retry_text(tool_call_count: int) -> str:
 _EMPTY_FINAL_ANSWER_ERROR = "工具已执行完成，但模型未生成最终答复，请重试。"
 
 
-# Regex to match file references like [foo.png] in tool output.
-_ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
+# Regex to match file references like [foo.png] in tool output. Keep the
+# candidate bounded: structured tool payloads such as web_search commonly use
+# a top-level JSON array, and an unbounded match can otherwise consume the
+# entire payload and misclassify it as one enormous filename.
+_MAX_ARTIFACT_REF_CHARS = 512
+_MAX_ARTIFACT_COMPONENT_BYTES = 255
+_ARTIFACT_REF_RE = re.compile(
+    r"\[([^\]\n]{1,512}\.\w{1,10})\]",
+    re.IGNORECASE,
+)
 
 
 def _message_text(content: str | list[dict[str, Any]]) -> str:
@@ -1183,26 +1192,41 @@ def _detect_artifacts(
     if not workspace_dir or not content:
         return []
 
-    ws = Path(workspace_dir).resolve()
-    out = _artifact_scan_root(workspace_dir, artifact_root_dir)
+    try:
+        ws = Path(workspace_dir).resolve()
+        out = _artifact_scan_root(workspace_dir, artifact_root_dir)
+    except (OSError, RuntimeError, ValueError):
+        # Artifact discovery is best-effort and must never fail the tool call.
+        return []
     if out is None:
         return []
-    if not out.is_dir():
+    try:
+        if not out.is_dir():
+            return []
+    except OSError:
         return []
 
     artifacts: list[ArtifactEvent] = []
     seen_paths: set[Path] = set()
     for match in _ARTIFACT_REF_RE.finditer(content):
         filename = match.group(1)
-        candidate = (out / filename).resolve()
         try:
+            if len(filename) > _MAX_ARTIFACT_REF_CHARS or any(
+                len(os.fsencode(part)) > _MAX_ARTIFACT_COMPONENT_BYTES
+                for part in Path(filename).parts
+            ):
+                continue
+            candidate = (out / filename).resolve()
             candidate.relative_to(out)
-        except ValueError:
-            continue
-        if candidate in seen_paths or not candidate.is_file():
+            if candidate in seen_paths or not candidate.is_file():
+                continue
+            artifact = _make_artifact(tool_call_id, candidate, ws)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            # Invalid, overlong, racy, or otherwise unresolvable references are
+            # ordinary false positives in arbitrary tool output.
             continue
         seen_paths.add(candidate)
-        artifacts.append(_make_artifact(tool_call_id, candidate, ws))
+        artifacts.append(artifact)
 
     return artifacts
 
