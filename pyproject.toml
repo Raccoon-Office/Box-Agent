@@ -23,7 +23,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "jsonschema>=4.18.0",
     "pyyaml>=6.0.0",
-    "httpx[socks]>=0.27.0",
+    "httpx[http2,socks]>=0.27.0",
     "mcp==1.19.0",
     "requests>=2.31.0",
     "tiktoken>=0.5.0",
@@ -40,6 +40,7 @@ dependencies = [
 box-agent = "box_agent.cli:main"
 box-agent-acp = "box_agent.acp.server:main"
 box-agent-build-runtime = "box_agent.build_runtime_cli:main"
+box-agent-web-extract-mcp = "box_agent.mcp_servers.web_extract_server:main"
 
 [project.urls]
 Homepage = "https://github.com/Raccoon-Office/Box-Agent"

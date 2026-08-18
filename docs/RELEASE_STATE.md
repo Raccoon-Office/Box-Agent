@@ -25,7 +25,7 @@
 ### What shipped
 
 - **Explicit sub-agent capability contract:** new-style calls declare minimum
-  tools, Skills, inputs, deny-by-default constraints, and hard step/tool-call
+  tools, Skills, inputs, explicit constraints, and hard step/tool-call
   budgets. Capability resolution uses the live parent tool map, distinguishes
   MCP `loading` from `ready`, blocks recursive delegation, and returns structured
   diagnostics without silently falling back to legacy execution.

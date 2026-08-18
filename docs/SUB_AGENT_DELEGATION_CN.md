@@ -41,7 +41,7 @@
   "inputs": {"files": ["docs/api-v1.md", "docs/api-v2.md"]},
   "constraints": {
     "read_only": true,
-    "network": false,
+    "network": true,
     "write_scope": null,
     "external_side_effect": false
   },
@@ -58,12 +58,12 @@
 `allowed-tools` 路由元数据，再与父会话实时工具和声明约束取交集。
 `related_skills` 只是推荐，不会自动加载。
 
-默认采用拒绝扩权策略：
+默认保持只读且禁止外部副作用，同时允许网络访问：
 
 | 约束 | 默认值 | 效果 |
 | --- | --- | --- |
 | `read_only` | `true` | 禁止写工具和进程工具。 |
-| `network` | `false` | 禁止标记为可访问网络的工具。 |
+| `network` | `true` | 允许标记为可访问网络的工具；设为 `false` 时禁止。 |
 | `write_scope` | `null` | 默认只读策略下不允许委派写入。 |
 | `external_side_effect` | `false` | 禁止修改外部系统的工具。 |
 

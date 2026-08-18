@@ -48,7 +48,7 @@ The full shape is:
   "inputs": {"files": ["docs/api-v1.md", "docs/api-v2.md"]},
   "constraints": {
     "read_only": true,
-    "network": false,
+    "network": true,
     "write_scope": null,
     "external_side_effect": false
   },
@@ -68,12 +68,12 @@ The runtime normalizes requested names, expands selected Skills and their
 the result with the parent's live tool map and the declared constraints.
 `related_skills` are suggestions only and are not auto-loaded.
 
-Defaults are deny-by-default:
+Defaults remain read-only and side-effect-free while allowing network access:
 
 | Constraint | Default | Effect |
 | --- | --- | --- |
 | `read_only` | `true` | Denies write and process tools. |
-| `network` | `false` | Denies tools marked as network-capable. |
+| `network` | `true` | Allows tools marked as network-capable; set to `false` to deny them. |
 | `write_scope` | `null` | No delegated writes are allowed under the default read-only policy. |
 | `external_side_effect` | `false` | Denies tools that change external systems. |
 

@@ -60,6 +60,7 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "execute_code": ToolCapabilityMetadata(read=True, write=True, network=True, process=True),
     "sandbox_status": ToolCapabilityMetadata(read=True, process=True),
     "web_search": ToolCapabilityMetadata(read=True, network=True),
+    "web_extract": ToolCapabilityMetadata(read=True, network=True),
     "vision_review": ToolCapabilityMetadata(read=True, network=True),
     "generate_image": ToolCapabilityMetadata(write=True, network=True),
     "get_skill": ToolCapabilityMetadata(read=True),
@@ -116,7 +117,7 @@ def _tool_capability_metadata(name: str, tool: Tool) -> ToolCapabilityMetadata |
 @dataclass(frozen=True)
 class DelegationConstraints:
     read_only: bool = True
-    network: bool = False
+    network: bool = True
     write_scope: tuple[str, ...] | None = None
     external_side_effect: bool = False
 
@@ -353,7 +354,7 @@ def parse_delegation_spec(
     constraint_values: dict[str, bool] = {}
     for name, default in (
         ("read_only", True),
-        ("network", False),
+        ("network", True),
         ("external_side_effect", False),
     ):
         if name not in constraints:

@@ -74,7 +74,7 @@ You: "Analyze data1.csv, data2.csv, and data3.csv separately, then give me a com
                     └─────────────────────────┘
 ```
 
-New-style delegation is deny-by-default (`read_only: true`, `network: false`,
+New-style delegation is read-only with network access by default (`read_only: true`, `network: true`,
 `external_side_effect: false`). See the
 [sub-agent delegation contract](docs/SUB_AGENT_DELEGATION.md) for schemas,
 limits, compatibility behavior, and host diagnostics.

@@ -1,5 +1,18 @@
 {
     "mcpServers": {
+        "box-agent-web-extract": {
+            "description": "Box-Agent Web Extract MCP - direct HTTP page extraction with configured-model summarization",
+            "command": "box-agent-web-extract-mcp",
+            "alwaysLoad": true,
+            "disabled": true
+        },
+        "mcp-server-askecho-search-infinity": {
+            "description": "Office Raccoon hosted web search",
+            "url": "https://xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp",
+            "type": "streamable_http",
+            "alwaysLoad": true,
+            "disabled": true
+        },
         "tavily": {
             "description": "Tavily - Web search and content extraction",
             "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_API_KEY",
