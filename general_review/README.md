@@ -6,8 +6,9 @@ detection, preflight execution, locking, agent orchestration, and audit logs;
 Box-Agent owns everything that is specific to this repository:
 
 - `review.config.yaml`: repository, CI, agent, and trigger configuration;
-- `ci/preflight.sh`: the deterministic CI gate;
-- repository documentation referenced by the generic review roles.
+- `ci/preflight.sh`: the only CI entry point, executed by Teamwork Preflight;
+- `docs/design/README.md`: active architecture, protocol, and design index;
+- `docs/changes/README.md`: release, migration, rollback, and validation history index.
 
 The reusable review prompt is maintained only as
 `teamwork_review_agents/prompts/general-review.md`; do not copy it into this
@@ -33,6 +34,12 @@ Validation and startup intentionally fail if `TEAMWORK_REVIEW_AGENTS_ROOT` is
 missing or points at a checkout that does not contain the generic prompt pack.
 The service also requires a WSL/Linux-native `codex` executable; a Windows npm
 shim exposed through `/mnt/c` is not a valid runtime for Linux agents.
+
+The review rule sets `run_preflight: true`, so a matching open, non-draft PR
+must pass `teamwork/local-ci` before `general-reviewer` starts. Source-branch
+and target-branch Head changes both create review events, and events from the
+same scan are deduplicated into one Agent run. GitHub Actions is intentionally
+not used for this contract.
 
 Preflight and the Review Agents are currently intended only for pull requests
 from trusted internal contributors. A temporary worktree and filtered

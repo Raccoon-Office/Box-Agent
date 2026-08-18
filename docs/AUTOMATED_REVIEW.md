@@ -38,7 +38,7 @@ Head SHA 变化后，旧的 CI 和 Review 结论不得复用。
 
 ## 3. CI 契约
 
-本地 Preflight 与 GitHub Actions 都调用：
+Teamwork 本地 Preflight 调用仓库唯一的 CI 入口：
 
 ```bash
 bash general_review/ci/preflight.sh
@@ -53,8 +53,9 @@ uv run pytest tests/ -q --tb=short --deselect <已记录的网络超时用例>
 uv build
 ```
 
-首个失败步骤终止后续步骤。当前执行模型只允许可信内部 PR；临时 worktree和环境
-过滤不是容器、独立 UID 或虚拟机级安全边界。
+触发规则必须设置 `run_preflight: true`。首个失败步骤终止后续步骤，CI 失败或超时
+不会启动该规则的 `general-reviewer`。当前执行模型只允许可信内部 PR；临时
+worktree 和环境过滤不是容器、独立 UID 或虚拟机级安全边界。
 
 ## 4. Review 角色
 
@@ -79,15 +80,19 @@ npm install -g @openai/codex
 codex --version
 codex --login
 
-cd /mnt/d/code/teamwork_review_agents/.worktrees/local-ci-preflight
+python3 -m venv "$HOME/.venvs/teamwork-review-agents"
+"$HOME/.venvs/teamwork-review-agents/bin/pip" install \
+  -e /mnt/d/code/teamwork_review_agents
+
+cd /mnt/d/code/teamwork_review_agents
 export GITHUB_TOKEN='<provider token from a secret store>'
 export CODEX_HOME="$HOME/.codex"
 export TEAMWORK_REVIEW_AGENTS_ROOT='/mnt/d/code/teamwork_review_agents'
 
-uv run teamwork-review-agents validate \
+"$HOME/.venvs/teamwork-review-agents/bin/teamwork-review-agents" validate \
   -c /mnt/d/code/Box-Agent/general_review/review.config.yaml
 
-uv run teamwork-review-agents run \
+"$HOME/.venvs/teamwork-review-agents/bin/teamwork-review-agents" run \
   -c /mnt/d/code/Box-Agent/general_review/review.config.yaml
 ```
 
@@ -108,8 +113,10 @@ PR 和 Commit Status、写入 Commit Status 的仓库权限；Provider Token 不
 针对 `main` 的 Ruleset 至少要求：
 
 - `teamwork/local-ci`；
-- GitHub Actions 的 `test` job；
 - 仓库规定的人工 Review 数量。
+
+本仓库不再维护 GitHub Actions CI；确定性检查统一由 Teamwork Preflight 在准确
+PR Head 的隔离 worktree 中运行。
 
 `.github/CODEOWNERS` 应由仓库管理员使用真实 GitHub Team/User 映射补充。不要猜测
 不存在的 Team slug；在映射落地前，`docs/ARCHITECTURE*.md` 中的所有权规则仍是

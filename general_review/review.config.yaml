@@ -75,12 +75,12 @@ agents:
         expose_to_prompt: false
         expose_to_process: true
       REVIEW_DESIGN_DOC_DIR:
-        value: docs
+        value: docs/design
         secret: false
         expose_to_prompt: false
         expose_to_process: true
       REVIEW_CHANGE_HISTORY_DIR:
-        value: docs
+        value: docs/changes
         secret: false
         expose_to_prompt: false
         expose_to_process: true
@@ -90,6 +90,7 @@ rules:
     events:
       - change_request.discovered
       - change_request.commits_changed
+      - change_request.target_commits_changed
       - change_request.reopened
       - change_request.draft_changed
     agents:
@@ -99,4 +100,6 @@ rules:
     conditions:
       state: opened
       draft: false
+    deduplicate_per_scan: true
+    run_preflight: true
     enabled: true

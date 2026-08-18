@@ -1,5 +1,10 @@
 # Box-Agent Automated Review Integration Implementation Plan
 
+> 2026-08-18 更新：本文记录的是最初的双 CI 实施计划。现行方案已经移除
+> GitHub Actions CI，只保留 Teamwork 本地 Preflight + Review Agent；运行来源以
+> `general_review/review.config.yaml`、`general_review/ci/preflight.sh` 和
+> `docs/AUTOMATED_REVIEW.md` 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Box-Agent own its CI, review roles, trigger rules, and repository-specific review contract while `teamwork_review_agents` remains a reusable review engine.
