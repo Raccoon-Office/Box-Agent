@@ -127,6 +127,7 @@ def is_retryable_stream_error(exc: BaseException) -> bool:
             "incomplete read",
             "connection reset",
             "server disconnected",
+            "the model service could not complete this request",
         )
     )
 

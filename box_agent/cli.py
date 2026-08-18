@@ -49,7 +49,11 @@ from box_agent.events import StopReason
 from box_agent.schema import LLMProvider, Message
 from box_agent.tools.base import Tool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
-from box_agent.tools.mcp_loader import cleanup_mcp_connections
+from box_agent.tools.mcp_loader import (
+    cleanup_mcp_connections,
+    get_all_mcp_tools,
+    reconnect_auth_failed_mcp_servers_if_token_changed,
+)
 from box_agent.tools.skill_preload import (
     build_auto_loaded_skills_prompt,
     turn_preload_skill_names,
@@ -2320,6 +2324,25 @@ async def run_agent(
             tool_limits=config.tool_limits,
         )
 
+    async def _refresh_mcp_after_auth_change() -> None:
+        results = await reconnect_auth_failed_mcp_servers_if_token_changed()
+        if not results:
+            return
+        if not config.tools.mcp.deferred_loading_enabled:
+            register_mcp_tools(agent.tools, get_all_mcp_tools())
+        for result in results:
+            name = result["name"]
+            if result.get("success"):
+                print(
+                    f"{Colors.GREEN}✅ Reconnected MCP server '{name}' "
+                    f"after login token refresh{Colors.RESET}"
+                )
+            else:
+                print(
+                    f"{Colors.YELLOW}⚠️  MCP reconnect failed for '{name}': "
+                    f"{result.get('error') or 'unknown error'}{Colors.RESET}"
+                )
+
     # 8. Display welcome information
     if not task:
         print_banner()
@@ -2334,6 +2357,7 @@ async def run_agent(
         loaded_mcp_tools = await await_mcp_tools(mcp_task)
         if not config.tools.mcp.deferred_loading_enabled:
             register_mcp_tools(agent.tools, loaded_mcp_tools)
+        await _refresh_mcp_after_auth_change()
         _apply_skill_filter(task)
         completion_gate = _build_cli_completion_gate(task)
         _apply_cli_auto_loaded_skills(completion_gate, task)
@@ -2670,6 +2694,7 @@ async def run_agent(
             loaded_mcp_tools = await await_mcp_tools(mcp_task)
             if not config.tools.mcp.deferred_loading_enabled:
                 register_mcp_tools(agent.tools, loaded_mcp_tools)
+            await _refresh_mcp_after_auth_change()
             mcp_task = None  # clear so we don't re-await the cached result each turn
 
             print(

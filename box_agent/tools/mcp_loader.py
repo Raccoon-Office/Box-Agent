@@ -1,6 +1,7 @@
 """MCP tool loader with real MCP client integration and timeout handling."""
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os
@@ -776,6 +777,15 @@ _mcp_config_path: str | None = None
 # DynamicBearer / Authorization headers the cold-start path would build.
 _mcp_auth_file: str = ""
 _mcp_auth_token: str = ""
+_mcp_auth_fingerprint: str = ""
+
+
+def _current_mcp_auth_fingerprint() -> str:
+    """Return a non-reversible marker for the currently resolved login token."""
+    token = resolve_auth_token(_mcp_auth_token, _mcp_auth_file)
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def is_mcp_loading() -> bool:
@@ -920,7 +930,8 @@ async def load_mcp_tools_async(
     Returns:
         List of Tool objects representing MCP tools
     """
-    global _mcp_connections, _mcp_status, _mcp_loading, _mcp_config_path, _mcp_auth_file, _mcp_auth_token
+    global _mcp_connections, _mcp_status, _mcp_loading, _mcp_config_path
+    global _mcp_auth_file, _mcp_auth_token, _mcp_auth_fingerprint
     _mcp_loading = True
     catalog = get_mcp_tool_catalog()
     catalog.mark_loading()
@@ -928,6 +939,7 @@ async def load_mcp_tools_async(
     # dynamic bearer / Authorization headers it would have used on cold start.
     _mcp_auth_file = auth_file
     _mcp_auth_token = auth_token
+    _mcp_auth_fingerprint = _current_mcp_auth_fingerprint()
     try:
         config_file = _resolve_mcp_config_path(config_path)
         if config_file is not None:
@@ -1074,6 +1086,40 @@ async def reconnect_mcp_server(name: str) -> dict:
     lock = _mcp_reconnect_locks.setdefault(name, asyncio.Lock())
     async with lock:
         return await _reconnect_mcp_server_locked(name)
+
+
+async def reconnect_auth_failed_mcp_servers_if_token_changed() -> list[dict]:
+    """Reconnect 401-failed MCP servers after the product login token rotates.
+
+    Hosted MCP discovery happens once during CLI startup. If that initial
+    connection receives a 401, there is no persistent HTTP client on which the
+    dynamic bearer hook can observe a later desktop-login refresh. This helper
+    notices the auth-file change and retries only servers whose last failure was
+    an authentication failure. Connected servers do not need reconnecting:
+    ``DynamicBearerAuth`` already reads the latest token for every request.
+    """
+    global _mcp_auth_fingerprint
+
+    current_fingerprint = _current_mcp_auth_fingerprint()
+    if not current_fingerprint or current_fingerprint == _mcp_auth_fingerprint:
+        return []
+    _mcp_auth_fingerprint = current_fingerprint
+
+    failed_names = [
+        status.name
+        for status in _mcp_status.values()
+        if status.state == "failed"
+        and status.error
+        and (
+            "HTTP 401" in status.error
+            or "Authentication failed" in status.error
+        )
+    ]
+    results: list[dict] = []
+    for name in failed_names:
+        result = await reconnect_mcp_server(name)
+        results.append({"name": name, **result})
+    return results
 
 
 async def _reconnect_mcp_server_locked(name: str) -> dict:
