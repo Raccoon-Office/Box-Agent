@@ -1184,6 +1184,7 @@ class JupyterSandboxTool(Tool):
         runtime_env: Mapping[str, str] | None = None,
         use_output_dir: bool = True,
         output_dir: str | None = None,
+        fixed_session_id: str | None = None,
     ):
         """Initialize sandbox tool.
 
@@ -1192,11 +1193,14 @@ class JupyterSandboxTool(Tool):
             runtime_env: Host runtime environment exported by env_context.
             use_output_dir: Chdir kernels into {workspace}/output when True.
             output_dir: Optional explicit artifact output directory.
+            fixed_session_id: Optional tool-owned session id. When set, callers
+                cannot switch kernels by passing a different session_id.
         """
         self.workspace_dir = workspace_dir
         self.runtime_env = dict(runtime_env or {})
         self.use_output_dir = use_output_dir
         self.output_dir = output_dir
+        self._fixed_session_id = fixed_session_id.strip() if fixed_session_id else None
         self._session_id: Optional[str] = None
 
     @property
@@ -1331,37 +1335,42 @@ Output formats:
 
     @property
     def parameters(self) -> dict[str, Any]:
+        properties: dict[str, Any] = {
+            "code": {
+                "type": "string",
+                "maxLength": MAX_EXECUTE_CODE_CHARS,
+                "description": (
+                    "Python code to execute. Keep this under "
+                    f"{MAX_EXECUTE_CODE_CHARS_DISPLAY} characters. For large "
+                    "generated static content such as HTML/CSS/JS, shared "
+                    "styles, JSON manifests, templates, base64, or file "
+                    "bodies, do not inline the body in execute_code; use "
+                    "ordered write_file chunks using chunk_index/final unless "
+                    "Python processing is actually required. "
+                    "Reads may use allowed input paths, but durable writes "
+                    "are confined to the active project/artifact root. "
+                    "Variables and functions from previous calls in the same "
+                    "session are available. Use %pip install <pkg> to install "
+                    "packages."
+                ),
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Execution timeout in seconds (default: 60, max: 300)",
+                "default": 60,
+            },
+        }
+        if self._fixed_session_id is None:
+            properties["session_id"] = {
+                "type": "string",
+                "description": (
+                    "Session ID for persistent kernel. Same session_id shares all state. "
+                    "Auto-generated if not provided."
+                ),
+            }
         return {
             "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "maxLength": MAX_EXECUTE_CODE_CHARS,
-                    "description": (
-                        "Python code to execute. Keep this under "
-                        f"{MAX_EXECUTE_CODE_CHARS_DISPLAY} characters. For large "
-                        "generated static content such as HTML/CSS/JS, shared "
-                        "styles, JSON manifests, templates, base64, or file "
-                        "bodies, do not inline the body in execute_code; use "
-                        "ordered write_file chunks using chunk_index/final unless "
-                        "Python processing is actually required. "
-                        "Reads may use allowed input paths, but durable writes "
-                        "are confined to the active project/artifact root. "
-                        "Variables and functions from previous calls in the same "
-                        "session are available. Use %pip install <pkg> to install "
-                        "packages."
-                    ),
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Session ID for persistent kernel. Same session_id shares all state. Auto-generated if not provided.",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Execution timeout in seconds (default: 60, max: 300)",
-                    "default": 60,
-                },
-            },
+            "properties": properties,
             "required": ["code"],
         }
 
@@ -1439,9 +1448,13 @@ Output formats:
             )
 
         # Create or get session
-        if session_id is None:
-            session_id = self._session_id or str(uuid.uuid4())[:8]
-        self._session_id = session_id
+        active_session_id = (
+            self._fixed_session_id
+            or session_id
+            or self._session_id
+            or str(uuid.uuid4())[:8]
+        )
+        self._session_id = active_session_id
 
         # Check kernel health if session already exists
         existing_session = self._sessions.get(self._session_id)
@@ -1449,22 +1462,32 @@ Output formats:
             old_session_id = self._session_id
             del self._sessions[self._session_id]
             existing_session = None
-            session_id = str(uuid.uuid4())[:8]
-            self._session_id = session_id
-            workspace = self._get_workspace(session_id)
-            session = self._create_session(session_id, workspace, env)
+            replacement_session_id = self._fixed_session_id or str(uuid.uuid4())[:8]
+            self._session_id = replacement_session_id
+            workspace = self._get_workspace(replacement_session_id)
+            session = self._create_session(replacement_session_id, workspace, env)
             await session.start()
-            self._sessions[session_id] = session
+            self._sessions[replacement_session_id] = session
+            if replacement_session_id == old_session_id:
+                restart_note = (
+                    "Sandbox kernel died. Auto-restarted this session; please retry your code."
+                )
+            else:
+                restart_note = (
+                    "Sandbox kernel died "
+                    f"(old session={old_session_id}). Auto-restarted with new session="
+                    f"{replacement_session_id}. Please retry your code."
+                )
             return ToolResult(
                 success=False,
                 content="",
-                error=f"KERNEL_DIED: Sandbox kernel died (old session={old_session_id}). Auto-restarted with new session={session_id}. Please retry your code.",
+                error=f"KERNEL_DIED: {restart_note}",
             )
 
         # Get or create kernel session
-        if session_id not in self._sessions:
-            workspace = self._get_workspace(session_id)
-            session = self._create_session(session_id, workspace, env)
+        if active_session_id not in self._sessions:
+            workspace = self._get_workspace(active_session_id)
+            session = self._create_session(active_session_id, workspace, env)
             try:
                 await session.start()
             except RuntimeError as e:
@@ -1473,9 +1496,9 @@ Output formats:
                     content="",
                     error=f"KERNEL_START_FAILED: {e}",
                 )
-            self._sessions[session_id] = session
+            self._sessions[active_session_id] = session
 
-        session = self._sessions[session_id]
+        session = self._sessions[active_session_id]
 
         # Snapshot files in workspace BEFORE execution to detect new ones
         workspace = session.workspace
@@ -1522,7 +1545,7 @@ Output formats:
             # session (it would corrupt the next call's output if reused) and
             # surface a timeout, mirroring the outer wait_for timeout branch.
             if error == KERNEL_EXEC_TIMEOUT:
-                await self._discard_session(session_id)
+                await self._discard_session(active_session_id)
                 return ToolResult(
                     success=False,
                     content="",
@@ -1567,7 +1590,7 @@ Output formats:
             # worker we cannot cancel. Discard the session so it is NOT reused
             # (a busy kernel would interleave IOPub output on the next call);
             # stopping it also unblocks the orphaned worker thread.
-            await self._discard_session(session_id)
+            await self._discard_session(active_session_id)
             return ToolResult(
                 success=False,
                 content="",

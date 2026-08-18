@@ -813,7 +813,7 @@ class TestBashPermissionPhase1:
         )
         return await tool.execute(command)
 
-    async def test_full_access_bypasses_dangerous_command_approval(self, workspace: Path):
+    async def test_full_access_still_requires_dangerous_command_approval(self, workspace: Path):
         from box_agent.tools.bash_tool import BashTool
 
         tool = BashTool(
@@ -821,12 +821,11 @@ class TestBashPermissionPhase1:
             allow_full_access=True,
             non_interactive=True,
             permission_engine=None,
-            bypass_dangerous_command_approval=True,
         )
         result = await tool.execute(f'rm -rf "{workspace / "missing-target"}"')
 
-        assert result.permission_request is None
-        assert "Approval required" not in (result.stderr or "")
+        assert result.permission_request is not None
+        assert "Approval required" in (result.stderr or "")
 
     def _make_engine(self, workspace: Path) -> PermissionEngine:
         policy = CapabilityPolicy()  # session_workspace scope

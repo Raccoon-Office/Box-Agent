@@ -112,6 +112,15 @@ def test_sandbox_tool_accepts_runtime_env_python_without_process_env(
     assert env._bundled_override is True
 
 
+def test_fixed_session_id_hides_session_parameter(tmp_path: Path) -> None:
+    tool = JupyterSandboxTool(
+        workspace_dir=str(tmp_path / "workspace"),
+        fixed_session_id="acp-session-1",
+    )
+
+    assert "session_id" not in tool.parameters["properties"]
+
+
 def test_sandbox_subprocess_env_includes_host_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -265,6 +274,49 @@ async def test_execute_code_runs_with_runtime_env_python(
 
     assert result.success is True
     assert "external-python-ok" in result.content
+
+
+@pytest.mark.asyncio
+async def test_fixed_session_id_ignores_caller_supplied_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_python_runtime_env(monkeypatch)
+    monkeypatch.setattr(jupyter_tool, "SANDBOX_BASE_DIR", tmp_path / "sandbox")
+    monkeypatch.setattr(jupyter_tool, "RUNTIME_PACKAGES_DIR", tmp_path / "runtime-packages")
+    monkeypatch.setattr(SandboxEnvironment, "_REQUIRED_MODULES", {"ipykernel": "ipykernel"})
+    await JupyterSandboxTool.shutdown_all()
+    JupyterSandboxTool._sandbox_env = None
+    JupyterSandboxTool._sandbox_env_key = None
+    tool_a = JupyterSandboxTool(
+        workspace_dir=str(tmp_path / "workspace-a"),
+        runtime_env={"BOX_AGENT_SANDBOX_PYTHON": sys.executable},
+        fixed_session_id="acp-session-a",
+    )
+    tool_b = JupyterSandboxTool(
+        workspace_dir=str(tmp_path / "workspace-b"),
+        runtime_env={"BOX_AGENT_SANDBOX_PYTHON": sys.executable},
+        fixed_session_id="acp-session-b",
+    )
+
+    try:
+        result_a = await tool_a.execute("secret = 41\nprint(secret)", session_id="shared-kernel")
+        result_b = await tool_b.execute(
+            "print(globals().get('secret', 'missing'))",
+            session_id="shared-kernel",
+        )
+        result_a_again = await tool_a.execute("print(secret)", session_id="other-kernel")
+    finally:
+        await JupyterSandboxTool.shutdown_all()
+        JupyterSandboxTool._sandbox_env = None
+        JupyterSandboxTool._sandbox_env_key = None
+
+    assert result_a.success is True
+    assert "41" in result_a.content
+    assert result_b.success is True
+    assert "missing" in result_b.content
+    assert result_a_again.success is True
+    assert "41" in result_a_again.content
 
 
 def test_frozen_without_host_python_keeps_in_process_fallback(

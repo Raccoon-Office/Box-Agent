@@ -3921,7 +3921,6 @@ async def test_acp_default_permission_mode_without_filesystem_policy_fails_close
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
 
     assert bash_tool.allow_full_access is False
-    assert bash_tool.bypass_dangerous_command_approval is False
     assert bash_tool._perm is not None
     assert bash_tool._perm.policy.filesystem_scope == "session_workspace"
     assert bash_tool._perm.policy.session_workspace_root == str(workspace)
@@ -3929,7 +3928,7 @@ async def test_acp_default_permission_mode_without_filesystem_policy_fails_close
 
 
 @pytest.mark.asyncio
-async def test_acp_full_access_mode_bypasses_permission_engine(tmp_path):
+async def test_acp_full_access_mode_respects_server_allow_full_access(tmp_path):
     workspace = tmp_path / "workspace"
     config = Config(
         llm=LLMConfig(api_key="test-key"),
@@ -3947,9 +3946,10 @@ async def test_acp_full_access_mode_bypasses_permission_engine(tmp_path):
     bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
     session_tools = agent._sessions[session.sessionId].agent.tools
 
-    assert bash_tool.allow_full_access is True
-    assert bash_tool.bypass_dangerous_command_approval is True
-    assert bash_tool._perm is None
+    assert bash_tool.allow_full_access is False
+    assert bash_tool._perm is not None
+    assert bash_tool._perm.policy.filesystem_scope == "session_workspace"
+    assert bash_tool._perm.policy.session_workspace_root == str(workspace)
     assert "execute_code" in session_tools
     assert "sandbox_status" in session_tools
 

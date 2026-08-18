@@ -1301,8 +1301,18 @@ class BoxACPAgent:
                 message=f"Invalid permission_mode={raw_permission_mode!r}; using default permissions",
             )
             permission_mode = "default"
+        if permission_mode == "full_access" and not self._config.tools.allow_full_access:
+            log.warn(
+                "session/permissions",
+                session_id=session_id,
+                message=(
+                    "permission_mode='full_access' ignored because "
+                    "tools.allow_full_access=false; using default permissions"
+                ),
+            )
+            permission_mode = "default"
         session_allow_full_access = (
-            permission_mode == "full_access"
+            (permission_mode == "full_access" and self._config.tools.allow_full_access)
             or (permission_mode is None and self._config.tools.allow_full_access)
         )
         # Keep the managed Python/Jupyter runtime available in every ACP
@@ -1483,7 +1493,6 @@ class BoxACPAgent:
                 artifact_root_dir=output_dir,
                 env_context=env_context,
                 process_owner_id=session_id,
-                bypass_dangerous_command_approval=permission_mode == "full_access",
             )
             system_prompt = (
                 f"{system_prompt.rstrip()}\n\n"
