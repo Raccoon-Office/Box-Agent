@@ -38,3 +38,9 @@ def test_dev_code_init_is_builtin_and_matches_slash_init():
     assert skill is not None
     assert "Create or update" in skill.description
     assert "root `AGENTS.md`" in skill.content
+
+
+def test_roadmap_is_a_top_level_builtin_skill():
+    entries = dict(_collect_skills())
+
+    assert entries["roadmap"] == "roadmap/SKILL.md"

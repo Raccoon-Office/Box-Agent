@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://box-agent.local/schemas/runtime-capabilities-v1.schema.json",
+  "title": "Box-Agent runtime capabilities v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "contractVersion", "deckProtocolVersion", "roadmap"],
+  "properties": {
+    "contract": { "const": "box-agent.runtime-capabilities" },
+    "contractVersion": { "const": 1 },
+    "deckProtocolVersion": { "type": "integer", "minimum": 1 },
+    "roadmap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "geometryVersion",
+        "rendererVersion",
+        "capabilities"
+      ],
+      "properties": {
+        "schemaVersion": { "type": "integer", "minimum": 1 },
+        "geometryVersion": { "type": "integer", "minimum": 1 },
+        "rendererVersion": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "roadmap.generate.html",
+              "roadmap.preview",
+              "roadmap.edit"
+            ]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "capabilities": {
+                "contains": {
+                  "enum": ["roadmap.generate.html", "roadmap.preview", "roadmap.edit"]
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "rendererVersion": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

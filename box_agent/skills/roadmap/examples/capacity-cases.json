@@ -1,0 +1,12 @@
+{
+  "recommended": {
+    "months": 6,
+    "lanes": 8,
+    "items": 80
+  },
+  "cases": [
+    { "items": 30, "expected": "visual-degradation-warning" },
+    { "items": 80, "expected": "at-limit-warning" },
+    { "items": 81, "expected": "contract-error" }
+  ]
+}

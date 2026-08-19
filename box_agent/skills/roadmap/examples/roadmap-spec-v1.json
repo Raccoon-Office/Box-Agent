@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "kind": "roadmap-spec",
+  "title": "Agent Box / Office v3 集成路线图",
+  "range": {
+    "start": "2026-08-01",
+    "end": "2026-11-01",
+    "granularity": "half-month"
+  },
+  "lanes": [
+    {
+      "id": "agent-box",
+      "label": "Agent Box",
+      "order": 1
+    },
+    {
+      "id": "office-v3",
+      "label": "Office v3",
+      "order": 2
+    },
+    {
+      "id": "qa",
+      "label": "QA",
+      "order": 3
+    },
+    {
+      "id": "release",
+      "label": "Release",
+      "order": 4
+    }
+  ],
+  "items": [
+    {
+      "id": "contract-core",
+      "lane_id": "agent-box",
+      "title": "数据契约与编译器",
+      "start": "2026-08-01",
+      "end": "2026-09-01",
+      "kind": "bar",
+      "certainty": "confirmed",
+      "progress": "doing",
+      "continuation": {
+        "before": true
+      },
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 1,
+        "field_path": "items.contract-core"
+      }
+    },
+    {
+      "id": "geometry-core",
+      "lane_id": "agent-box",
+      "title": "纯几何层",
+      "start": "2026-08-16",
+      "end": "2026-09-16",
+      "kind": "bar",
+      "certainty": "confirmed",
+      "progress": "planned",
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 1,
+        "field_path": "items.geometry-core"
+      }
+    },
+    {
+      "id": "contract-frozen",
+      "lane_id": "agent-box",
+      "title": "P0 契约冻结",
+      "start": "2026-09-16",
+      "kind": "milestone",
+      "certainty": "confirmed",
+      "progress": "planned",
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 1,
+        "field_path": "items.contract-frozen"
+      }
+    },
+    {
+      "id": "client-preview",
+      "lane_id": "office-v3",
+      "title": "预览接入",
+      "start": "2026-09-01",
+      "end": "2026-10-16",
+      "kind": "bar",
+      "certainty": "tentative",
+      "progress": "planned",
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 0.85,
+        "field_path": "items.client-preview"
+      }
+    },
+    {
+      "id": "client-edit",
+      "lane_id": "office-v3",
+      "title": "编辑交互预研",
+      "start": "2026-09-16",
+      "end": "2026-10-01",
+      "kind": "bar",
+      "certainty": "tentative",
+      "progress": "planned",
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 0.8,
+        "field_path": "items.client-edit"
+      }
+    },
+    {
+      "id": "qa-window",
+      "lane_id": "qa",
+      "title": "跨月合同与边界日期验证",
+      "start": "2026-09-15",
+      "end": "2026-09-20",
+      "kind": "bar",
+      "certainty": "confirmed",
+      "progress": "doing",
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 1,
+        "field_path": "items.qa-window"
+      }
+    },
+    {
+      "id": "qa-signoff",
+      "lane_id": "qa",
+      "title": "QA 签核",
+      "start": "2026-09-20",
+      "kind": "milestone",
+      "certainty": "confirmed",
+      "progress": "planned",
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 1,
+        "field_path": "items.qa-signoff"
+      }
+    },
+    {
+      "id": "release-candidate",
+      "lane_id": "release",
+      "title": "候选版验证与发布",
+      "start": "2026-10-01",
+      "end": "2026-11-01",
+      "kind": "bar",
+      "certainty": "tentative",
+      "progress": "planned",
+      "continuation": {
+        "after": true
+      },
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 0.85,
+        "field_path": "items.release-candidate"
+      }
+    },
+    {
+      "id": "release-gate",
+      "lane_id": "release",
+      "title": "上线门禁",
+      "start": "2026-10-31",
+      "kind": "milestone",
+      "certainty": "tentative",
+      "progress": "planned",
+      "source": {
+        "type": "roadmap-spec",
+        "confidence": 0.85,
+        "field_path": "items.release-gate"
+      }
+    }
+  ],
+  "legend": [
+    {
+      "key": "confirmed",
+      "label": "已确认"
+    },
+    {
+      "key": "tentative",
+      "label": "待确认"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "registry_version": 1,
+  "default_palette_id": "roadmap-default-v1",
+  "palettes": [
+    {
+      "id": "roadmap-default-v1",
+      "colors": [
+        "#8e6bf2",
+        "#7092fa",
+        "#56d9b6",
+        "#ebaf78",
+        "#f96565",
+        "#96dee8",
+        "#9f5f8f",
+        "#78d3f8",
+        "#21d3c5",
+        "#f9c955",
+        "#ff9999"
+      ]
+    }
+  ],
+  "layouts": [
+    {
+      "id": "roadmap-swimlane-v1",
+      "artifact_kind": "roadmap",
+      "mime_type": "text/html",
+      "schema_version": 1,
+      "geometry_version": 1,
+      "renderer_version": 1,
+      "default_example": "examples/roadmap-spec-v1.json",
+      "editor": {
+        "mode": "form-table",
+        "source_element_id": "deck-document",
+        "supports_in_place_save": true
+      }
+    }
+  ]
+}

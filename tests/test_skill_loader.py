@@ -480,6 +480,34 @@ def test_user_source_not_filtered_by_manifest():
         assert loader.get_skill("builtin-orphan") is None
 
 
+def test_user_skill_cannot_override_reserved_roadmap_runtime():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        builtin_dir = root / "builtin"
+        user_dir = root / "user"
+        builtin_dir.mkdir()
+        user_dir.mkdir()
+
+        builtin_skill = builtin_dir / "roadmap"
+        builtin_skill.mkdir()
+        create_test_skill(
+            builtin_skill, "roadmap", "builtin roadmap", "trusted builtin content"
+        )
+        _write_manifest(builtin_dir, ["roadmap"])
+
+        user_skill = user_dir / "roadmap"
+        user_skill.mkdir()
+        create_test_skill(user_skill, "roadmap", "user roadmap", "override content")
+
+        loader = SkillLoader(sources=[(user_dir, "user"), (builtin_dir, "builtin")])
+        loader.discover_skills()
+
+        roadmap = loader.get_skill("roadmap")
+        assert roadmap is not None
+        assert roadmap.source == "builtin"
+        assert roadmap.content == "trusted builtin content"
+
+
 def test_skill_settings_disable_filters_loaded_skills():
     """officev3 disabled skills must not be listed or loadable via get_skill."""
     with tempfile.TemporaryDirectory() as tmpdir:

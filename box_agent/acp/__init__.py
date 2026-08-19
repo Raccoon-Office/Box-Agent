@@ -73,7 +73,6 @@ from box_agent.agent import (
 from box_agent.tools.setup import (
     add_workspace_tools,
     await_mcp_tools,
-    await_skill_discovery,
     build_file_delivery_prompt,
     build_image_generation_prompt,
     build_sandbox_info_prompt,
@@ -178,6 +177,7 @@ from box_agent.acp.project_context import build_project_startup_context_prompt
 from box_agent.experts import ExpertSessionContext
 from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
+from box_agent.runtime_capabilities import runtime_capabilities
 from box_agent.schema import LLMProvider, Message
 from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
 from box_agent.tools.runtime import (
@@ -201,6 +201,9 @@ from .debug_logger import acp_logger as log
 # Keep stdlib logger for backward compat with existing log calls
 logger = logging.getLogger(__name__)
 _DEFAULT_AGENT_TITLE = "Box-Agent"
+_SKILL_DISCOVERY_WAIT_SECONDS = 5.0
+_RUNTIME_CAPABILITIES_UPDATE_METHOD = "box-agent/runtime-capabilities-update"
+_RUNTIME_CAPABILITIES_UPDATE_CONTRACT = "box-agent.runtime-capabilities-update"
 
 try:
     class InitializeRequestPatch(InitializeRequest):
@@ -250,6 +253,8 @@ def _artifact_envelope(
     }
     if output_dir:
         payload["output_dir"] = output_dir
+    if art.layout_id:
+        payload["layout_id"] = art.layout_id
     if session_id:
         payload["session_id"] = session_id
         payload["sessionId"] = session_id
@@ -873,6 +878,7 @@ class SessionState:
     skill_runtime_context: "SkillRuntimeContext | None" = None
     skill_loader: Any | None = None  # session-local loader for expert-only recommended skills
     skill_selector: Any | None = None  # SkillSelector — filters skill metadata per turn
+    runtime_capabilities: dict[str, Any] | None = None
     expert_context: ExpertSessionContext | None = None
     upstream_session_id: str = ""  # caller-owned session id from _meta.session_id
     current_task_id: str = ""
@@ -1323,7 +1329,7 @@ class BoxACPAgent:
             )
         return results
 
-    async def _ensure_skills_loaded(self) -> None:
+    async def _ensure_skills_loaded(self) -> bool:
         """Await the background skill-discovery task before it's needed.
 
         SkillSelector runs at newSession + first-turn boundary; both call
@@ -1334,22 +1340,37 @@ class BoxACPAgent:
         alternative is an empty ``## Available Skills`` block on turn 1.
         """
         if self._skills_loaded:
-            return
-        try:
-            await await_skill_discovery(self._skill_task)
-        finally:
-            # Flip regardless of outcome — discovery failures are logged
-            # inside the task; retrying on every turn would just repeat them.
+            return True
+        if self._skill_task is None:
             self._skills_loaded = True
+            return True
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self._skill_task),
+                timeout=_SKILL_DISCOVERY_WAIT_SECONDS,
+            )
+        except TimeoutError:
+            log.warn(
+                "skills/discovery_timeout",
+                message=(
+                    "Skill discovery is still pending after "
+                    f"{_SKILL_DISCOVERY_WAIT_SECONDS:g}s; continuing conservatively"
+                ),
+            )
+            return False
+        except Exception:
+            # Discovery logs its own failure. Treat a completed failed task as
+            # final so sessions can continue with the partial/empty catalog.
+            pass
+        self._skills_loaded = True
+        return True
 
     def _skills_meta(self) -> list[dict] | None:
         """Return current skills metadata for ACP _meta payload, reloading if changed.
 
         Returns ``None`` (rather than an empty list) while background
-        discovery is still running so the initialize RPC never blocks on
-        skill parsing. Hosts that need the catalog can read
-        ``session/new._meta.skills`` — by newSession time the task has been
-        awaited via ``_ensure_skills_loaded``.
+        discovery is still running. ``initialize`` reports that conservative
+        pending state; ``session/new`` waits for and publishes the final catalog.
         """
         if not self._skill_loader:
             return None
@@ -1362,6 +1383,82 @@ class BoxACPAgent:
             log.warn("skills/meta_error", message=f"Failed to build skills metadata: {exc}")
             return None
 
+    def _runtime_capabilities_meta(
+        self,
+        *,
+        node_available: bool | None = None,
+        roadmap_skill_available: bool | None = None,
+    ) -> dict[str, Any]:
+        if roadmap_skill_available is None:
+            roadmap_skill_available = self._roadmap_skill_available()
+        kwargs: dict[str, Any] = {
+            "skills_enabled": self._config.tools.enable_skills,
+            "roadmap_skill_available": roadmap_skill_available,
+        }
+        if node_available is not None:
+            kwargs["node_available"] = node_available
+        return runtime_capabilities(**kwargs)
+
+    def _roadmap_skill_available(self, loader: Any | None = None) -> bool:
+        if not self._skills_loaded or not self._config.tools.enable_skills:
+            return False
+        skill_loader = loader or self._skill_loader
+        if skill_loader is None:
+            return False
+        try:
+            return skill_loader.get_skill("roadmap") is not None
+        except Exception as exc:
+            log.warn(
+                "skills/roadmap_availability_error",
+                message=f"Failed to resolve Roadmap skill availability: {exc}",
+            )
+            return False
+
+    async def _publish_runtime_capabilities_if_changed(
+        self,
+        session_id: str,
+        state: SessionState,
+    ) -> None:
+        runtime_context = state.skill_runtime_context
+        current = self._runtime_capabilities_meta(
+            node_available=(
+                runtime_context.get("node").available
+                if runtime_context is not None
+                else None
+            ),
+            roadmap_skill_available=self._roadmap_skill_available(state.skill_loader),
+        )
+        if current == state.runtime_capabilities:
+            return
+
+        notify = getattr(self._conn, "extNotification", None)
+        if not callable(notify):
+            state.runtime_capabilities = current
+            return
+        try:
+            await asyncio.wait_for(
+                notify(
+                    _RUNTIME_CAPABILITIES_UPDATE_METHOD,
+                    {
+                        "contract": _RUNTIME_CAPABILITIES_UPDATE_CONTRACT,
+                        "contractVersion": 1,
+                        "sessionId": session_id,
+                        "runtime_capabilities": current,
+                    },
+                ),
+                timeout=self._SESSION_UPDATE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warn(
+                "runtime_capabilities/update_error",
+                session_id=session_id,
+                message=str(exc),
+            )
+            return
+        state.runtime_capabilities = current
+
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:
         log.info("initialize", message="ACP initialize request received")
         meta = getattr(params, "field_meta", None) or {}
@@ -1373,9 +1470,13 @@ class BoxACPAgent:
             agentInfo=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
         skills = self._skills_meta()
+        response_meta: dict[str, Any] = {
+            "runtime_capabilities": self._runtime_capabilities_meta(),
+        }
         if skills is not None:
-            # Pydantic alias: _meta ↔ field_meta
-            kwargs["field_meta"] = {"skills": skills}
+            response_meta["skills"] = skills
+        # Pydantic alias: _meta ↔ field_meta
+        kwargs["field_meta"] = response_meta
         resp = InitializeResponse(**kwargs)
         log.info("initialize", message=f"Initialized box-agent v{__version__}, skills={len(skills) if skills else 0}")
         return resp
@@ -1386,7 +1487,7 @@ class BoxACPAgent:
         # prompt (SkillSelector.bind reads the sentinel; the metadata block
         # is populated on the first turn). This is a no-op after the first
         # session — the task caches its result.
-        await self._ensure_skills_loaded()
+        skills_ready = await self._ensure_skills_loaded()
         session_id = f"sess-{len(self._sessions)}-{uuid4().hex[:8]}"
         workspace = Path(params.cwd or self._config.agent.workspace_dir).expanduser()
         if not workspace.is_absolute():
@@ -1797,6 +1898,13 @@ class BoxACPAgent:
             session_id=upstream_session_id or session_id,
             acp_session_id=session_id,
         )
+        session_runtime_capabilities = self._runtime_capabilities_meta(
+            node_available=skill_runtime_context.get("node").available,
+            roadmap_skill_available=(
+                skills_ready
+                and self._roadmap_skill_available(session_skill_loader)
+            ),
+        )
         self._sessions[session_id] = SessionState(
             agent=agent, session_llm=session_llm,
             summary_llm=summary_llm,
@@ -1811,6 +1919,7 @@ class BoxACPAgent:
             env_context=env_context,
             skill_runtime_context=skill_runtime_context,
             skill_loader=session_skill_loader,
+            runtime_capabilities=session_runtime_capabilities,
             expert_context=expert_context,
             upstream_session_id=upstream_session_id,
             current_task_id=initial_task_id,
@@ -1859,10 +1968,12 @@ class BoxACPAgent:
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
 
         kwargs: dict[str, Any] = {"sessionId": session_id}
-        response_meta: dict[str, Any] = {}
+        response_meta: dict[str, Any] = {
+            "runtime_capabilities": session_runtime_capabilities,
+        }
         skills = (
             session_skill_loader.list_skills_metadata()
-            if session_skill_loader is not None
+            if skills_ready and session_skill_loader is not None
             else self._skills_meta()
         )
         if skills is not None:
@@ -2399,17 +2510,19 @@ class BoxACPAgent:
         # short-circuit any edge case where a session was created before
         # the task finished (e.g. host called newSession within the same
         # event-loop iteration as run_acp_server's setup).
-        await self._ensure_skills_loaded()
+        skills_ready = await self._ensure_skills_loaded()
 
         # Refresh skills so officev3-authored skills are available mid-session
-        if state.skill_loader:
+        if skills_ready and state.skill_loader:
             try:
                 state.skill_loader.maybe_reload()
             except Exception as exc:
                 log.warn("skills/reload_error", session_id=session_id, message=str(exc))
+        if skills_ready:
+            await self._publish_runtime_capabilities_if_changed(session_id, state)
 
         # Per-turn skill metadata filter.
-        if state.skill_selector is not None:
+        if skills_ready and state.skill_selector is not None:
             try:
                 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
                 current_system = state.agent.messages[0].content
@@ -2429,21 +2542,22 @@ class BoxACPAgent:
             except Exception as exc:
                 log.warn("skills/filter_error", session_id=session_id, message=str(exc))
 
+        turn_skill_loader = state.skill_loader if skills_ready else None
         matched_skill_names = (
             state.skill_selector.matched_skill_names
-            if state.skill_selector is not None
+            if skills_ready and state.skill_selector is not None
             else ()
         )
         current_skill_names = (
             tuple(
                 skill.name
-                for skill in state.skill_loader.filter_by_query(plan_detection_text)
+                for skill in turn_skill_loader.filter_by_query(plan_detection_text)
             )
-            if state.skill_loader is not None and plan_detection_text.strip()
+            if turn_skill_loader is not None and plan_detection_text.strip()
             else ()
         )
         explicit_skill = resolve_explicit_skill_invocation(
-            state.skill_loader,
+            turn_skill_loader,
             plan_detection_text,
         )
         explicit_skill_uses_controlled_workflow = (
@@ -2471,7 +2585,7 @@ class BoxACPAgent:
             host_presentation_config = None
         presentation_provider = (
             resolve_presentation_skill_provider(
-                state.skill_loader,
+                turn_skill_loader,
                 current_skill_names,
                 preferred_skill=(
                     host_presentation_config.preferred_skill
@@ -2480,7 +2594,7 @@ class BoxACPAgent:
                 ),
                 query=plan_detection_text,
             )
-            if state.skill_loader is not None
+            if turn_skill_loader is not None
             else None
         )
         if host_presentation_config is not None:
@@ -2511,8 +2625,8 @@ class BoxACPAgent:
             and presentation_provider.uses_controlled_workflow
         )
         presentation_provider_skill = (
-            state.skill_loader.get_skill(presentation_provider.skill_name)
-            if state.skill_loader is not None
+            turn_skill_loader.get_skill(presentation_provider.skill_name)
+            if turn_skill_loader is not None
             and presentation_provider is not None
             else None
         )
@@ -2720,7 +2834,7 @@ class BoxACPAgent:
                 source=completion_gate_source,
             )
 
-        if state.skill_selector is not None:
+        if skills_ready and state.skill_selector is not None:
             preload_names = self._turn_preload_skill_names(
                 state.skill_selector.matched_skill_names,
                 completion_gate,

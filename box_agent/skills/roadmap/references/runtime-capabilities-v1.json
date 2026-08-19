@@ -1,0 +1,15 @@
+{
+  "contract": "box-agent.runtime-capabilities",
+  "contractVersion": 1,
+  "deckProtocolVersion": 1,
+  "roadmap": {
+    "schemaVersion": 1,
+    "geometryVersion": 1,
+    "rendererVersion": 1,
+    "capabilities": [
+      "roadmap.generate.html",
+      "roadmap.preview",
+      "roadmap.edit"
+    ]
+  }
+}

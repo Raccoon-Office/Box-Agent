@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "kind": "roadmap-draft",
+  "title": "Agent Box 8—10 月实施路线图",
+  "range": {
+    "start": "2026-08-01",
+    "end": "2026-11-01",
+    "granularity": "half-month"
+  },
+  "lanes": [
+    {
+      "id": "runtime",
+      "label": "Agent Box Runtime",
+      "order": 1,
+      "raw": {
+        "text": "Agent Box Runtime：先固化数据契约，再接入渲染器"
+      },
+      "source": {
+        "type": "natural-language",
+        "confidence": 1,
+        "excerpt": "Agent Box Runtime：先固化数据契约，再接入渲染器"
+      }
+    },
+    {
+      "id": "client",
+      "label": "Office v3 Client",
+      "order": 2,
+      "raw": {
+        "text": "Office v3 Client：四季度接入预览"
+      },
+      "source": {
+        "type": "natural-language",
+        "confidence": 1,
+        "excerpt": "Office v3 Client：四季度接入预览"
+      }
+    }
+  ],
+  "items": [
+    {
+      "id": "runtime-contract",
+      "lane_ref": "runtime",
+      "title": "Roadmap 数据契约",
+      "start": "2026-08-01",
+      "end": "2026-09-01",
+      "kind": "bar",
+      "certainty": "confirmed",
+      "progress": "doing",
+      "raw": {
+        "text": "8 月完成 Roadmap 数据契约"
+      },
+      "source": {
+        "type": "natural-language",
+        "confidence": 1,
+        "excerpt": "8 月完成 Roadmap 数据契约"
+      }
+    },
+    {
+      "id": "geometry-ready",
+      "lane_ref": "runtime",
+      "title": "几何层冻结",
+      "start": "2026-09-16",
+      "kind": "milestone",
+      "certainty": "confirmed",
+      "progress": "planned",
+      "raw": {
+        "text": "9 月下半月冻结几何层"
+      },
+      "source": {
+        "type": "natural-language",
+        "confidence": 0.95,
+        "excerpt": "9 月下半月冻结几何层"
+      }
+    },
+    {
+      "id": "client-preview",
+      "lane_ref": "client",
+      "title": "客户端预览接入",
+      "start": "2026-10-01",
+      "end": "2026-11-01",
+      "kind": "bar",
+      "certainty": "confirmed",
+      "progress": "planned",
+      "raw": {
+        "text": "10 月完成客户端预览接入"
+      },
+      "source": {
+        "type": "natural-language",
+        "confidence": 1,
+        "excerpt": "10 月完成客户端预览接入"
+      }
+    }
+  ],
+  "pending_questions": []
+}

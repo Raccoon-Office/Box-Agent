@@ -4,7 +4,7 @@ Skill Loader - Load Claude Skills from multiple sources.
 Supports:
 - Builtin skills shipped with the package (read-only)
 - User skills at ~/.box-agent/skills/ (writable from officev3)
-- User skills override builtin ones on name conflict
+- User skills override builtin ones on name conflict, except reserved runtime skills
 - mtime-based auto reload (no explicit trigger needed)
 - Manifest-based whitelist for builtin sources: any SKILL.md left on disk
   (e.g. by a downstream host that updated box-agent without deleting old
@@ -24,6 +24,7 @@ import yaml
 SkillSource = Literal["builtin", "user"]
 
 MANIFEST_FILENAME = "_manifest.json"
+RESERVED_BUILTIN_SKILL_NAMES = frozenset({"roadmap"})
 
 
 def _warn(msg: str) -> None:
@@ -526,12 +527,13 @@ class SkillLoader:
         return content
 
     def discover_skills(self) -> List[Skill]:
-        """Discover skills from all sources; user overrides builtin on name conflict."""
+        """Discover skills, preserving canonical implementations of reserved runtimes."""
         self.loaded_skills = {}
         self._all_skills = {}
         # Reset per-run parse errors so callers always see the current pass only.
         self.parse_errors = []
         orphan_count = 0
+        reserved_override_count = 0
         discovered: List[Skill] = []
         disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path)
 
@@ -560,6 +562,16 @@ class SkillLoader:
                     # Orphan builtin skill (installer left old files behind).
                     # Silent by default; the aggregate count is logged below.
                     orphan_count += 1
+                    continue
+
+                if (
+                    entry.source == "user"
+                    and skill.name in RESERVED_BUILTIN_SKILL_NAMES
+                ):
+                    # These skills own host-negotiated runtime contracts.  A
+                    # user prompt skill may extend the workflow under another
+                    # name, but must not replace the packaged implementation.
+                    reserved_override_count += 1
                     continue
 
                 self._all_skills[skill.name] = skill
@@ -598,6 +610,11 @@ class SkillLoader:
             _warn(
                 f"⚠️  Ignored {orphan_count} orphan builtin skill(s) not listed in "
                 f"{MANIFEST_FILENAME} (leftovers from a previous installer)."
+            )
+        if reserved_override_count:
+            _warn(
+                f"⚠️  Ignored {reserved_override_count} user skill override(s) for "
+                "reserved builtin runtime names. Rename the user skill to extend it."
             )
 
         return discovered

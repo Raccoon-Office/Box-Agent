@@ -2457,7 +2457,7 @@ async def test_acp_default_artifact_mode_creates_output(tmp_path):
     assert state.output_dir == str(tmp_path / "output")
     assert state.artifact_mode == "output"
     assert "cwd 已是 `{workspace}/output/`" in state.agent.system_prompt
-    assert session.field_meta is None
+    assert session.field_meta["runtime_capabilities"]["contractVersion"] == 1
 
 
 @pytest.mark.asyncio
@@ -3136,6 +3136,73 @@ async def test_acp_preloads_matched_pptx_skill_for_deliverable(tmp_path):
     assert "# PPTX FULL RULES" in first_system_prompt
     assert prompt_capture.parent_system_prompt == first_system_prompt
     assert agent._sessions[session.sessionId].preloaded_skill_names == ["pptx"]
+
+
+@pytest.mark.asyncio
+async def test_acp_does_not_use_partially_discovered_skill_before_catalog_ready(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr("box_agent.acp._SKILL_DISCOVERY_WAIT_SECONDS", 0.01)
+    skills_dir = tmp_path / "skills"
+    roadmap_dir = skills_dir / "roadmap"
+    roadmap_dir.mkdir(parents=True)
+    roadmap_dir.joinpath("SKILL.md").write_text(
+        "---\n"
+        "name: roadmap\n"
+        "description: Generate editable HTML roadmaps.\n"
+        "keywords: [roadmap]\n"
+        "---\n"
+        "# ROADMAP FULL RULES\n",
+        encoding="utf-8",
+    )
+    skill_loader = SkillLoader(skills_dir)
+    skill_loader.discover_skills()
+    discovery_gate = asyncio.Event()
+    skill_task = asyncio.create_task(discovery_gate.wait())
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    agent = BoxACPAgent(
+        DummyConn(),
+        config,
+        DoneLLM(),
+        [],
+        f"system\n\n{SKILL_SLOT_SENTINEL}",
+        skill_loader=skill_loader,
+        skill_task=skill_task,
+    )
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    async def capture_run_turn(state_arg, session_id, **kwargs):
+        return "end_turn"
+
+    agent._run_turn = capture_run_turn  # type: ignore[method-assign]
+    await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "请使用 /roadmap 生成路线图"}],
+        )
+    )
+
+    state = agent._sessions[session.sessionId]
+    assert state.preloaded_skill_names == []
+    assert "# ROADMAP FULL RULES" not in state.agent.system_prompt
+
+    discovery_gate.set()
+    await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "请使用 /roadmap 生成路线图"}],
+        )
+    )
+
+    assert state.preloaded_skill_names == ["roadmap"]
+    assert "# ROADMAP FULL RULES" in state.agent.system_prompt
 
 
 @pytest.mark.asyncio
@@ -4172,7 +4239,8 @@ async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path
         SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
     )
 
-    assert session.field_meta is None
+    assert session.field_meta["runtime_capabilities"]["contractVersion"] == 1
+    assert "memory" not in session.field_meta
     assert "--- MEMORY START ---" in agent._sessions[session.sessionId].agent.system_prompt
     assert "User prefers concise Chinese responses" in agent._sessions[session.sessionId].agent.system_prompt
 

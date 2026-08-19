@@ -1,0 +1,410 @@
+{
+  "schema_version": 1,
+  "kind": "roadmap-geometry",
+  "source_schema_version": 1,
+  "canvas": {
+    "width": 1440,
+    "height": 784,
+    "plot_left": 292,
+    "plot_right": 1408,
+    "header_top": 60,
+    "header_height": 76
+  },
+  "headers": [
+    {
+      "id": "month-1",
+      "kind": "month",
+      "label": "2026-08",
+      "start": "2026-08-01",
+      "end": "2026-09-01",
+      "x": 292,
+      "y": 60,
+      "width": 376.043,
+      "height": 38
+    },
+    {
+      "id": "month-2",
+      "kind": "month",
+      "label": "2026-09",
+      "start": "2026-09-01",
+      "end": "2026-10-01",
+      "x": 668.043,
+      "y": 60,
+      "width": 363.914,
+      "height": 38
+    },
+    {
+      "id": "month-3",
+      "kind": "month",
+      "label": "2026-10",
+      "start": "2026-10-01",
+      "end": "2026-11-01",
+      "x": 1031.957,
+      "y": 60,
+      "width": 376.043,
+      "height": 38
+    },
+    {
+      "id": "half-month-1",
+      "kind": "half-month",
+      "label": "上半月",
+      "start": "2026-08-01",
+      "end": "2026-08-16",
+      "x": 292,
+      "y": 98,
+      "width": 181.957,
+      "height": 38
+    },
+    {
+      "id": "half-month-2",
+      "kind": "half-month",
+      "label": "下半月",
+      "start": "2026-08-16",
+      "end": "2026-09-01",
+      "x": 473.957,
+      "y": 98,
+      "width": 194.086,
+      "height": 38
+    },
+    {
+      "id": "half-month-3",
+      "kind": "half-month",
+      "label": "上半月",
+      "start": "2026-09-01",
+      "end": "2026-09-16",
+      "x": 668.043,
+      "y": 98,
+      "width": 181.957,
+      "height": 38
+    },
+    {
+      "id": "half-month-4",
+      "kind": "half-month",
+      "label": "下半月",
+      "start": "2026-09-16",
+      "end": "2026-10-01",
+      "x": 850,
+      "y": 98,
+      "width": 181.957,
+      "height": 38
+    },
+    {
+      "id": "half-month-5",
+      "kind": "half-month",
+      "label": "上半月",
+      "start": "2026-10-01",
+      "end": "2026-10-16",
+      "x": 1031.957,
+      "y": 98,
+      "width": 181.956,
+      "height": 38
+    },
+    {
+      "id": "half-month-6",
+      "kind": "half-month",
+      "label": "下半月",
+      "start": "2026-10-16",
+      "end": "2026-11-01",
+      "x": 1213.913,
+      "y": 98,
+      "width": 194.087,
+      "height": 38
+    }
+  ],
+  "lanes": [
+    {
+      "id": "agent-box",
+      "label": "Agent Box",
+      "order": 1,
+      "x": 32,
+      "y": 136,
+      "width": 1376,
+      "height": 154,
+      "track_count": 2
+    },
+    {
+      "id": "office-v3",
+      "label": "Office v3",
+      "order": 2,
+      "x": 32,
+      "y": 290,
+      "width": 1376,
+      "height": 154,
+      "track_count": 2
+    },
+    {
+      "id": "qa",
+      "label": "QA",
+      "order": 3,
+      "x": 32,
+      "y": 444,
+      "width": 1376,
+      "height": 154,
+      "track_count": 2
+    },
+    {
+      "id": "release",
+      "label": "Release",
+      "order": 4,
+      "x": 32,
+      "y": 598,
+      "width": 1376,
+      "height": 154,
+      "track_count": 2
+    }
+  ],
+  "bars": [
+    {
+      "id": "contract-core",
+      "lane_id": "agent-box",
+      "title": "数据契约与编译器",
+      "start": "2026-08-01",
+      "end": "2026-09-01",
+      "track": 0,
+      "x": 292,
+      "y": 156,
+      "width": 376.043,
+      "height": 46,
+      "certainty": "confirmed",
+      "progress": "doing",
+      "line_style": "solid"
+    },
+    {
+      "id": "geometry-core",
+      "lane_id": "agent-box",
+      "title": "纯几何层",
+      "start": "2026-08-16",
+      "end": "2026-09-16",
+      "track": 1,
+      "x": 473.957,
+      "y": 220,
+      "width": 376.043,
+      "height": 46,
+      "certainty": "confirmed",
+      "progress": "planned",
+      "line_style": "solid"
+    },
+    {
+      "id": "client-preview",
+      "lane_id": "office-v3",
+      "title": "预览接入",
+      "start": "2026-09-01",
+      "end": "2026-10-16",
+      "track": 0,
+      "x": 668.043,
+      "y": 310,
+      "width": 545.87,
+      "height": 46,
+      "certainty": "tentative",
+      "progress": "planned",
+      "line_style": "dashed"
+    },
+    {
+      "id": "client-edit",
+      "lane_id": "office-v3",
+      "title": "编辑交互预研",
+      "start": "2026-09-16",
+      "end": "2026-10-01",
+      "track": 1,
+      "x": 850,
+      "y": 374,
+      "width": 181.957,
+      "height": 46,
+      "certainty": "tentative",
+      "progress": "planned",
+      "line_style": "dashed"
+    },
+    {
+      "id": "qa-window",
+      "lane_id": "qa",
+      "title": "跨月合同与边界日期验证",
+      "start": "2026-09-15",
+      "end": "2026-09-20",
+      "track": 0,
+      "x": 837.87,
+      "y": 464,
+      "width": 60.652,
+      "height": 46,
+      "certainty": "confirmed",
+      "progress": "doing",
+      "line_style": "solid"
+    },
+    {
+      "id": "release-candidate",
+      "lane_id": "release",
+      "title": "候选版验证与发布",
+      "start": "2026-10-01",
+      "end": "2026-11-01",
+      "track": 0,
+      "x": 1031.957,
+      "y": 618,
+      "width": 376.043,
+      "height": 46,
+      "certainty": "tentative",
+      "progress": "planned",
+      "line_style": "dashed"
+    }
+  ],
+  "milestones": [
+    {
+      "id": "contract-frozen",
+      "lane_id": "agent-box",
+      "title": "P0 契约冻结",
+      "date": "2026-09-16",
+      "track": 0,
+      "x": 850,
+      "y": 179,
+      "size": 18,
+      "certainty": "confirmed",
+      "progress": "planned",
+      "line_style": "solid"
+    },
+    {
+      "id": "qa-signoff",
+      "lane_id": "qa",
+      "title": "QA 签核",
+      "date": "2026-09-20",
+      "track": 1,
+      "x": 898.522,
+      "y": 551,
+      "size": 18,
+      "certainty": "confirmed",
+      "progress": "planned",
+      "line_style": "solid"
+    },
+    {
+      "id": "release-gate",
+      "lane_id": "release",
+      "title": "上线门禁",
+      "date": "2026-10-31",
+      "track": 1,
+      "x": 1395.87,
+      "y": 705,
+      "size": 18,
+      "certainty": "tentative",
+      "progress": "planned",
+      "line_style": "dashed"
+    }
+  ],
+  "labels": [
+    {
+      "id": "label-contract-core",
+      "item_id": "contract-core",
+      "lane_id": "agent-box",
+      "text": "数据契约与编译器",
+      "placement": "inside",
+      "x": 302,
+      "y": 156,
+      "width": 356.043,
+      "height": 46
+    },
+    {
+      "id": "label-geometry-core",
+      "item_id": "geometry-core",
+      "lane_id": "agent-box",
+      "text": "纯几何层",
+      "placement": "inside",
+      "x": 483.957,
+      "y": 220,
+      "width": 356.043,
+      "height": 46
+    },
+    {
+      "id": "label-contract-frozen",
+      "item_id": "contract-frozen",
+      "lane_id": "agent-box",
+      "text": "P0 契约冻结",
+      "placement": "outside-right",
+      "x": 869,
+      "y": 156,
+      "width": 84,
+      "height": 46
+    },
+    {
+      "id": "label-client-preview",
+      "item_id": "client-preview",
+      "lane_id": "office-v3",
+      "text": "预览接入",
+      "placement": "inside",
+      "x": 678.043,
+      "y": 310,
+      "width": 525.87,
+      "height": 46
+    },
+    {
+      "id": "label-client-edit",
+      "item_id": "client-edit",
+      "lane_id": "office-v3",
+      "text": "编辑交互预研",
+      "placement": "inside",
+      "x": 860,
+      "y": 374,
+      "width": 161.957,
+      "height": 46
+    },
+    {
+      "id": "label-qa-window",
+      "item_id": "qa-window",
+      "lane_id": "qa",
+      "text": "跨月合同与边界日期验证",
+      "placement": "outside-right",
+      "x": 908.522,
+      "y": 464,
+      "width": 165,
+      "height": 46
+    },
+    {
+      "id": "label-qa-signoff",
+      "item_id": "qa-signoff",
+      "lane_id": "qa",
+      "text": "QA 签核",
+      "placement": "outside-right",
+      "x": 917.522,
+      "y": 528,
+      "width": 72,
+      "height": 46
+    },
+    {
+      "id": "label-release-candidate",
+      "item_id": "release-candidate",
+      "lane_id": "release",
+      "text": "候选版验证与发布",
+      "placement": "inside",
+      "x": 1041.957,
+      "y": 618,
+      "width": 356.043,
+      "height": 46
+    },
+    {
+      "id": "label-release-gate",
+      "item_id": "release-gate",
+      "lane_id": "release",
+      "text": "上线门禁",
+      "placement": "outside-left",
+      "x": 1304.87,
+      "y": 682,
+      "width": 72,
+      "height": 46
+    }
+  ],
+  "continuations": [
+    {
+      "id": "continuation-contract-core-before",
+      "item_id": "contract-core",
+      "lane_id": "agent-box",
+      "direction": "before",
+      "x": 292,
+      "y": 179,
+      "size": 10
+    },
+    {
+      "id": "continuation-release-candidate-after",
+      "item_id": "release-candidate",
+      "lane_id": "release",
+      "direction": "after",
+      "x": 1408,
+      "y": 641,
+      "size": 10
+    }
+  ]
+}

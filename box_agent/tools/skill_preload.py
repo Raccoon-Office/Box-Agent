@@ -39,6 +39,59 @@ _BROWSER_OPERATION_SIGNAL_RE = re.compile(
     r"爬虫|表单|人工接管|让我检查|我最后提交|内网)",
     re.IGNORECASE,
 )
+_ROADMAP_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("roadmap", re.compile(r"\broadmap\b|路线图", re.IGNORECASE)),
+    (
+        "schedule",
+        re.compile(r"\b(?:schedule|planning)\b|排期|项目计划|实施计划", re.IGNORECASE),
+    ),
+    ("swimlane", re.compile(r"\bswim[\s-]?lane\b|泳道", re.IGNORECASE)),
+    (
+        "calendar-scale",
+        re.compile(
+            r"\b(?:monthly|by\s+month|month(?:ly)?[\s-]+(?:scale|axis)|half[\s-]?month)\b|"
+            r"月份?刻度|月度刻度|按月|半月|上下旬|上旬|下旬",
+            re.IGNORECASE,
+        ),
+    ),
+    ("gantt", re.compile(r"\bgantt\b|甘特", re.IGNORECASE)),
+    ("milestone", re.compile(r"\bmilestones?\b|里程碑", re.IGNORECASE)),
+)
+_ROADMAP_STRONG_DELIVERABLE_EN_PATTERN = (
+    r"build|create|design|draft|generate|make|output|produce|render|turn"
+)
+_ROADMAP_STRONG_DELIVERABLE_ZH_PATTERN = (
+    r"生成|创建|制作|做一|做个|"
+    r"(?<!怎么)(?<!如何)做(?=(?:未来|接下来|今后|\d|[一二三四五六七八九十]))|"
+    r"画一|绘制|设计|输出|整理成|转成|转换为"
+)
+_ROADMAP_STRONG_DELIVERABLE_INTENT_RE = re.compile(
+    rf"\b(?:{_ROADMAP_STRONG_DELIVERABLE_EN_PATTERN})\b|"
+    rf"(?:{_ROADMAP_STRONG_DELIVERABLE_ZH_PATTERN})",
+    re.IGNORECASE,
+)
+_ROADMAP_DELIVERABLE_INTENT_RE = re.compile(
+    rf"\b(?:{_ROADMAP_STRONG_DELIVERABLE_EN_PATTERN}|need|want)\b|"
+    rf"(?:{_ROADMAP_STRONG_DELIVERABLE_ZH_PATTERN}|帮我|给我|需要|想要)",
+    re.IGNORECASE,
+)
+_ROADMAP_INFORMATION_REQUEST_RE = re.compile(
+    r"\b(?:advice|analy[sz]e|analysis|compare|define|difference|evaluate|explain|recommend|what\s+is)\b|"
+    r"(?:建议|分析|评估|解释|说明|原则|区别|差异|是什么|什么意思|含义|怎么|如何|介绍一下)",
+    re.IGNORECASE,
+)
+_ROADMAP_NEGATED_ACTION_CLAUSE_RE = re.compile(
+    r"(?:\b(?:do\s+not|don't|dont)\s+"
+    r"(?:build|create|design|draft|generate|make|output|produce|render)\b|"
+    r"(?:不要|别|无需|不需要|禁止)(?:再)?(?:生成|创建|制作|做|画|绘制|设计|输出))"
+    r"[^,，.;；。!！?？\n]*",
+    re.IGNORECASE,
+)
+_ROADMAP_SINGLE_GANTT_RE = re.compile(
+    r"\b(?:single(?:[\s-]+project)?|one)[\s-]+gantt\b|"
+    r"(?:单张|单个|单项目|单泳道)[^,，.;；。!！?？\n]{0,20}(?:甘特|gantt)",
+    re.IGNORECASE,
+)
 _VIDEO_DELIVERABLE_SIGNAL_RE = re.compile(
     r"\b(?:videos?|mp4|gifs?|hyperframes)\b|"
     r"\bmotion[\s-]+graphics?\b|"
@@ -208,6 +261,58 @@ def has_browser_operation_intent(user_text: str | None) -> bool:
     return bool(_BROWSER_OPERATION_SIGNAL_RE.search(user_text))
 
 
+def roadmap_artifact_intent_signals(user_text: str | None) -> tuple[str, ...]:
+    """Return ordered semantic signals for a dedicated roadmap artifact."""
+    if not user_text or not user_text.strip():
+        return ()
+    return tuple(
+        name
+        for name, pattern in _ROADMAP_SIGNAL_PATTERNS
+        if pattern.search(user_text)
+    )
+
+
+def has_roadmap_artifact_intent(user_text: str | None) -> bool:
+    """Distinguish schedule swimlanes from plain processes and Gantt tables."""
+    if not user_text:
+        return False
+    positive_text = _ROADMAP_NEGATED_ACTION_CLAUSE_RE.sub("", user_text)
+    if not _ROADMAP_DELIVERABLE_INTENT_RE.search(positive_text):
+        return False
+    if (
+        _ROADMAP_INFORMATION_REQUEST_RE.search(positive_text)
+        and not _ROADMAP_STRONG_DELIVERABLE_INTENT_RE.search(positive_text)
+    ):
+        return False
+    signals = set(roadmap_artifact_intent_signals(positive_text))
+    if (
+        _ROADMAP_SINGLE_GANTT_RE.search(positive_text)
+        and "roadmap" not in signals
+        and "swimlane" not in signals
+    ):
+        return False
+    if len(signals) < 2:
+        return False
+    has_dedicated_geometry = bool(signals & {"swimlane", "calendar-scale"})
+    has_roadmap_schedule_pair = "roadmap" in signals and bool(
+        signals & {"schedule", "gantt"}
+    )
+    return has_dedicated_geometry or has_roadmap_schedule_pair
+
+
+def semantic_artifact_preload_skill_names(
+    matched_skill_names: tuple[str, ...],
+    user_text: str | None,
+) -> list[str]:
+    """Preload entry-independent artifact skills on strong semantic intent."""
+    if (
+        "roadmap" in matched_skill_names
+        and has_roadmap_artifact_intent(user_text)
+    ):
+        return ["roadmap"]
+    return []
+
+
 def host_runtime_preload_skill_names(
     matched_skill_names: tuple[str, ...],
     env_context: Any | None,
@@ -249,6 +354,12 @@ def turn_preload_skill_names(
         matched_skill_names,
         completion_gate,
         presentation_skill_name=presentation_skill_name,
+    ):
+        if skill_name not in preload:
+            preload.append(skill_name)
+    for skill_name in semantic_artifact_preload_skill_names(
+        matched_skill_names,
+        user_text,
     ):
         if skill_name not in preload:
             preload.append(skill_name)

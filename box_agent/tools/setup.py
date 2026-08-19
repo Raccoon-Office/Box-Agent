@@ -325,7 +325,8 @@ async def initialize_base_tools(
             user_skills_dir = Path.home() / ".box-agent" / "skills"
             user_skills_dir.mkdir(parents=True, exist_ok=True)
 
-            # User skills take priority over builtin on name conflict
+            # User skills take priority on ordinary name conflicts. Runtime-
+            # contract skills such as roadmap remain canonical builtin entries.
             sources = [
                 (user_skills_dir, "user"),
                 (builtin_dir, "builtin"),

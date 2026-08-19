@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "kind": "roadmap-draft",
+  "title": "截图路线图识别结果",
+  "range": {
+    "start": "2026-08-01",
+    "end": "2026-11-01",
+    "granularity": "half-month"
+  },
+  "lanes": [
+    {
+      "id": "desktop",
+      "label": "Desktop",
+      "order": 1,
+      "raw": {
+        "ocr": "Desktop"
+      },
+      "source": {
+        "type": "image",
+        "confidence": 0.94,
+        "page": 1,
+        "region": [42, 120, 168, 72]
+      }
+    }
+  ],
+  "items": [
+    {
+      "id": "preview-integration",
+      "lane_ref": "desktop",
+      "title": "预览集成",
+      "start": "2026-09-01",
+      "end": "2026-10-01",
+      "kind": "bar",
+      "certainty": "confirmed",
+      "progress": "planned",
+      "raw": {
+        "ocr": "预览集成 9.1-10.1"
+      },
+      "source": {
+        "type": "image",
+        "confidence": 0.72,
+        "field_confidence": {
+          "start": 0.72,
+          "end": 0.7
+        },
+        "page": 1,
+        "region": [238, 120, 386, 72]
+      }
+    }
+  ],
+  "pending_questions": []
+}

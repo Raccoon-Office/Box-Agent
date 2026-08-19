@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "kind": "roadmap-draft",
+  "title": "产品交付计划",
+  "range": {
+    "start": "2026-08-01",
+    "end": "2026-11-01",
+    "granularity": "half-month"
+  },
+  "lanes": [
+    {
+      "label": "Agent Box",
+      "order": 1,
+      "raw": {
+        "row": ["Agent Box", "数据契约", "2026-08-01", "2026-09-01"]
+      },
+      "source": {
+        "type": "table",
+        "confidence": 0.98,
+        "row": 2,
+        "column": "A"
+      }
+    },
+    {
+      "label": "Office v3",
+      "order": 2,
+      "raw": {
+        "row": ["Office v3", "预览集成", "2026-09-01", "2026-10-16"]
+      },
+      "source": {
+        "type": "table",
+        "confidence": 0.98,
+        "row": 3,
+        "column": "A"
+      }
+    }
+  ],
+  "items": [
+    {
+      "lane_ref": "Agent Box",
+      "title": "数据契约",
+      "start": "2026-08-01",
+      "end": "2026-09-01",
+      "kind": "bar",
+      "progress": "doing",
+      "raw": {
+        "row": ["Agent Box", "数据契约", "2026-08-01", "2026-09-01"]
+      },
+      "source": {
+        "type": "table",
+        "confidence": 0.98,
+        "field_confidence": {
+          "start": 0.99,
+          "end": 0.99
+        },
+        "row": 2,
+        "column": "B:E"
+      }
+    },
+    {
+      "lane_ref": "Office v3",
+      "title": "预览集成",
+      "start": "2026-09-01",
+      "end": "2026-10-16",
+      "kind": "bar",
+      "progress": "planned",
+      "raw": {
+        "row": ["Office v3", "预览集成", "2026-09-01", "2026-10-16"]
+      },
+      "source": {
+        "type": "table",
+        "confidence": 0.98,
+        "field_confidence": {
+          "start": 0.96,
+          "end": 0.96
+        },
+        "row": 3,
+        "column": "B:E"
+      }
+    }
+  ],
+  "pending_questions": []
+}

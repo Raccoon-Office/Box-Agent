@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://box-agent.local/schemas/roadmap-spec.schema.json",
+  "title": "Box-Agent RoadmapSpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "title", "range", "lanes", "items"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "roadmap-spec" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "granularity"],
+      "properties": {
+        "start": { "$ref": "#/$defs/plainDate" },
+        "end": { "$ref": "#/$defs/plainDate" },
+        "granularity": { "const": "half-month" }
+      }
+    },
+    "lanes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "order"],
+        "properties": {
+          "id": { "$ref": "#/$defs/stableId" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "order": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 80,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "lane_id", "title", "start", "kind", "certainty", "progress"],
+        "properties": {
+          "id": { "$ref": "#/$defs/stableId" },
+          "lane_id": { "$ref": "#/$defs/stableId" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "start": { "$ref": "#/$defs/plainDate" },
+          "end": { "$ref": "#/$defs/plainDate" },
+          "kind": { "enum": ["bar", "milestone"] },
+          "certainty": { "enum": ["confirmed", "tentative"] },
+          "progress": { "enum": ["planned", "doing", "done", "blocked"] },
+          "continuation": { "$ref": "#/$defs/continuation" },
+          "color": { "type": "string", "maxLength": 40 },
+          "detail": { "type": "string", "maxLength": 500 },
+          "source": { "$ref": "roadmap-draft.schema.json#/$defs/source" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "kind": { "const": "bar" } }, "required": ["kind"] },
+            "then": { "required": ["end"] }
+          },
+          {
+            "if": { "properties": { "kind": { "const": "milestone" } }, "required": ["kind"] },
+            "then": { "not": { "required": ["end"] } }
+          },
+          {
+            "if": { "required": ["continuation"] },
+            "then": { "properties": { "kind": { "const": "bar" } } }
+          }
+        ]
+      }
+    },
+    "legend": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "label"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "label": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "plainDate": {
+      "type": "string",
+      "anyOf": [
+        {
+          "pattern": "^(?:0[1-9][0-9]{2}|[1-9][0-9]{3})-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))$"
+        },
+        {
+          "pattern": "^(?:(?:0[1-9]|[1-9][0-9])(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29$"
+        }
+      ]
+    },
+    "stableId": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$" },
+    "continuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "before": { "const": true },
+        "after": { "const": true }
+      },
+      "minProperties": 1
+    }
+  }
+}
