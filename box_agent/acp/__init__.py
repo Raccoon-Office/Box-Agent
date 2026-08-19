@@ -1287,12 +1287,22 @@ class BoxACPAgent:
             ),
         )
 
-        # Build PermissionEngine via policy composition if officev3 block is configured
+        # Build PermissionEngine from persisted policy and/or session context.
         perm_engine = None
         grant_store = GrantStore()
         effective_policy: CapabilityPolicy | None = None
         raw_permission_mode = meta.get("permission_mode") if isinstance(meta, dict) else None
-        permission_mode = raw_permission_mode if raw_permission_mode in {"default", "full_access"} else None
+        valid_permission_modes = {
+            "default",
+            "unrestricted_filesystem",
+            "full_access",
+        }
+        permission_mode = (
+            raw_permission_mode
+            if isinstance(raw_permission_mode, str)
+            and raw_permission_mode in valid_permission_modes
+            else None
+        )
         if raw_permission_mode is not None and permission_mode is None:
             log.warn(
                 "session/permissions",
@@ -1301,7 +1311,7 @@ class BoxACPAgent:
             )
             permission_mode = "default"
         session_allow_full_access = (
-            permission_mode == "full_access"
+            permission_mode in {"unrestricted_filesystem", "full_access"}
             or (permission_mode is None and self._config.tools.allow_full_access)
         )
         # Keep the managed Python/Jupyter runtime available in every ACP
@@ -1310,9 +1320,44 @@ class BoxACPAgent:
         # have a separate host Python installation.
         session_sandbox_mode = True
 
-        if self._has_officev3_policy() and permission_mode != "full_access":
+        fs_meta = meta.get("filesystem_policy") if isinstance(meta, dict) else None
+        has_session_filesystem_policy = isinstance(fs_meta, dict)
+        has_officev3_policy = self._has_officev3_policy()
+        should_build_permission_engine = permission_mode not in {
+            "unrestricted_filesystem",
+            "full_access",
+        } and (
+            has_officev3_policy
+            or permission_mode == "default"
+            or has_session_filesystem_policy
+        )
+
+        # officev3_permissions_override is DEPRECATED — kept for parsing only.
+        # In-band permission/request negotiation handles escalation now.
+        permission_overrides = (
+            meta.get("officev3_permissions_override")
+            if isinstance(meta, dict)
+            else None
+        )
+        if permission_overrides:
+            log.warn(
+                "session/permissions",
+                session_id=session_id,
+                message=(
+                    "officev3_permissions_override is deprecated and has no effect; "
+                    "use in-band permission/request negotiation instead"
+                ),
+            )
+
+        if should_build_permission_engine:
             try:
-                base_policy = CapabilityPolicy.from_config(self._config)
+                if has_officev3_policy:
+                    base_policy = CapabilityPolicy.from_config(self._config)
+                else:
+                    base_policy = CapabilityPolicy(
+                        filesystem_scope="session_workspace",
+                        session_workspace_root=str(workspace),
+                    )
                 if permission_mode == "default":
                     # Explicit session-default mode must fail closed even when
                     # the host omits its filesystem context. Host-provided
@@ -1324,25 +1369,11 @@ class BoxACPAgent:
                         replace_allowed_directories=True,
                     )
 
-                # officev3_permissions_override is DEPRECATED — kept for parsing only.
-                # In-band permission/request negotiation handles escalation now.
-                permission_overrides = meta.get("officev3_permissions_override") if isinstance(meta, dict) else None
-                if permission_overrides:
-                    log.warn(
-                        "session/permissions",
-                        session_id=session_id,
-                        message=(
-                            "officev3_permissions_override is deprecated and has no effect; "
-                            "use in-band permission/request negotiation instead"
-                        ),
-                    )
-
                 # Host-supplied filesystem context: workspace root and any
                 # extra allowed directories the host wants this session to
                 # see. This is *context*, not escalation — escalation still
                 # goes through in-band permission/request.
-                fs_meta = meta.get("filesystem_policy") if isinstance(meta, dict) else None
-                if isinstance(fs_meta, dict):
+                if has_session_filesystem_policy:
                     swr = fs_meta.get("session_workspace_root")
                     extra_dirs = fs_meta.get("allowed_directories")
                     fs_scope = fs_meta.get("filesystem_scope")
@@ -1385,24 +1416,16 @@ class BoxACPAgent:
                 )
                 effective_policy = fallback_policy
                 perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
-        elif permission_mode == "default":
-            fallback_policy = CapabilityPolicy(
-                filesystem_scope="session_workspace",
-                session_workspace_root=str(workspace),
-            )
-            effective_policy = fallback_policy
-            perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
-            session_allow_full_access = False
+        elif permission_mode in {"unrestricted_filesystem", "full_access"}:
             log.warn(
                 "session/permissions",
                 session_id=session_id,
-                message="No officev3 policy configured; using restrictive session policy",
-            )
-        elif permission_mode == "full_access":
-            log.warn(
-                "session/permissions",
-                session_id=session_id,
-                message="Full access enabled for this session; permission checks are bypassed",
+                message=(
+                    "Unrestricted filesystem access enabled for this session; "
+                    "filesystem permission checks are bypassed"
+                    if permission_mode == "unrestricted_filesystem"
+                    else "Full access enabled for this session; permission checks are bypassed"
+                ),
             )
 
         skill_runtime_context = build_skill_runtime_context(

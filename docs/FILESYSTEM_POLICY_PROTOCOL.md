@@ -40,6 +40,7 @@ Box-Agent 的权限引擎是**能力（capability）模型**：每个文件读/�
     "cwd": "/Users/me/work/my-project",
     "_meta": {
       "session_mode": "data_analysis",
+      "permission_mode": "default",
       "filesystem_policy": {
         "session_workspace_root": "/Users/me/work/my-project",
         "allowed_directories": [
@@ -53,12 +54,22 @@ Box-Agent 的权限引擎是**能力（capability）模型**：每个文件读/�
 }
 ```
 
+`session/new._meta.permission_mode` 定义会话级权限档位：
+
+| 值 | 文件系统权限 | 危险命令审批 |
+|---|---|---|
+| `default` | 按 `filesystem_policy` 拦截越权访问 | 保留 |
+| `unrestricted_filesystem` | 不限制目录访问 | 保留 |
+| `full_access` | 不限制目录访问 | 跳过应用层审批 |
+
+未知值或非字符串值按 `default` 处理并记录警告，避免意外放宽权限。
+
 ### 2.2 字段定义
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `session_workspace_root` | string | 否 | session 的主工作区绝对路径。覆盖 `config.yaml` 中的同名字段。空字符串等价于不传。 |
-| `allowed_directories` | string[] | 否 | 额外白名单。**与 config.yaml 中的同名字段合并**（去重），不会替换。 |
+| `allowed_directories` | string[] | 否 | 额外白名单。显式 `permission_mode: "default"` 时替换全局目录；旧宿主未传 `permission_mode` 时仍与全局目录合并去重。 |
 | `filesystem_scope` | string | 否 | 覆盖默认 scope，取值 `session_workspace` / `user_home` / `custom`。默认 `session_workspace`。 |
 
 ### 2.3 合并语义
@@ -66,7 +77,7 @@ Box-Agent 的权限引擎是**能力（capability）模型**：每个文件读/�
 | 字段 | 来源 | 合并方式 |
 |---|---|---|
 | `session_workspace_root` | config.yaml `officev3.paths.session_workspace_root` | 宿主提供则**覆盖**；否则继承配置 |
-| `allowed_directories` | config.yaml `officev3.permissions.filesystem.allowed_directories` | 宿主提供则**追加合并并去重**；否则继承配置 |
+| `allowed_directories` | config.yaml `officev3.permissions.filesystem.allowed_directories` | 显式 `default` 时以宿主列表**替换**；未传 `permission_mode` 时追加合并去重 |
 | `filesystem_scope` | config.yaml `officev3.permissions.filesystem.scope` | 宿主提供则**覆盖**；否则继承配置 |
 
 ### 2.4 输入校验
@@ -94,12 +105,14 @@ Box-Agent 的权限引擎是**能力（capability）模型**：每个文件读/�
 ```
 session/new
     ↓
-解析 _meta.filesystem_policy（dict 校验）
+解析 _meta.permission_mode 与 _meta.filesystem_policy（类型校验）
     ↓
-base_policy = CapabilityPolicy.from_config(config)
+存在全局 officev3 配置：base_policy = CapabilityPolicy.from_config(config)
+否则：base_policy = 当前 workspace 的限制性策略
     ↓
 base_policy.with_filesystem_overrides(
-    session_workspace_root=..., allowed_directories=..., filesystem_scope=...
+    session_workspace_root=..., allowed_directories=..., filesystem_scope=...,
+    replace_allowed_directories=(permission_mode == "default")
 )
     ↓
 PermissionEngine(effective_policy, workspace, grant_store)
@@ -109,7 +122,7 @@ PermissionEngine(effective_policy, workspace, grant_store)
   session/permissions session_id=... PermissionEngine created: scope=..., swr=..., allowed_dirs=[...]
 ```
 
-`with_filesystem_overrides` 是**不可变变换**——返回新 `CapabilityPolicy` 实例，原对象不变。`allowed_directories` 走**合并去重**而非替换，所以宿主追加目录不会丢失全局配置。
+`with_filesystem_overrides` 是**不可变变换**——返回新 `CapabilityPolicy` 实例，原对象不变。显式 `default` 会以本次 session 的目录替换持久化目录，确保会话权限不继承无关业务目录；旧宿主未传 `permission_mode` 时保留原有的合并去重行为。
 
 ---
 
@@ -214,9 +227,11 @@ PermissionEngine.check FILESYSTEM_WRITE → allowed=False, escalation=user_home
 
 | 场景 | 行为 |
 |---|---|
-| 宿主不传 `_meta.filesystem_policy` | 完全沿用 `config.yaml` —— 0.8.26 及之前的行为 |
-| 宿主传空对象 `{}` | 等价于不传 |
-| 宿主只传 `session_workspace_root` | 仅覆盖该字段，`allowed_directories` 与 `filesystem_scope` 沿用配置 |
+| 宿主既不传 `permission_mode`，也不传 `filesystem_policy` | 有全局 `officev3` 配置时沿用配置；无全局配置时沿用旧版 `tools.allow_full_access` 行为 |
+| 无全局 `officev3` 配置，但宿主传 `filesystem_policy` | 从当前 workspace 的限制性策略起步，并应用本次 session 的目录与 scope |
+| 显式 `permission_mode: "default"`，但不传 `filesystem_policy` | 仅允许当前 workspace，不继承全局业务目录 |
+| 显式 `permission_mode: "default"` 并传 `allowed_directories` | 以本次 session 的目录替换全局目录 |
+| 旧宿主不传 `permission_mode`，只传 `allowed_directories` | 与全局目录追加合并并去重，保持兼容 |
 | 宿主同时还传 deprecated `officev3_permissions_override` | 旧字段会被 WARNING 但忽略；新字段照常生效 |
 
 无破坏性变更。

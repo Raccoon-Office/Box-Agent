@@ -3929,6 +3929,111 @@ async def test_acp_default_permission_mode_without_filesystem_policy_fails_close
 
 
 @pytest.mark.asyncio
+async def test_acp_default_applies_session_policy_without_officev3_config(tmp_path):
+    workspace = tmp_path / "workspace"
+    session_allowed = tmp_path / "session-allowed"
+    workspace.mkdir()
+    session_allowed.mkdir()
+    allowed_file = session_allowed / "allowed.txt"
+    allowed_file.write_text("allowed", encoding="utf-8")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(allow_full_access=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(workspace),
+            field_meta={
+                "permission_mode": "default",
+                "filesystem_policy": {
+                    "filesystem_scope": "session_workspace",
+                    "session_workspace_root": str(workspace),
+                    "allowed_directories": [str(session_allowed)],
+                },
+            },
+        )
+    )
+    session_tools = agent._sessions[session.sessionId].agent.tools
+    bash_tool = session_tools["bash"]
+    read_tool = session_tools["read_file"]
+
+    assert bash_tool.allow_full_access is False
+    assert bash_tool.bypass_dangerous_command_approval is False
+    assert bash_tool._perm is not None
+    assert bash_tool._perm.policy.allowed_directories == (str(session_allowed),)
+
+    read_result = await read_tool.execute(path=str(allowed_file))
+    assert read_result.success is True
+    bash_result = await bash_tool.execute(command=f'echo "{allowed_file}"')
+    assert bash_result.success is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_mode", [[], {}])
+async def test_acp_non_string_permission_mode_fails_closed(tmp_path, invalid_mode):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(allow_full_access=True),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(workspace),
+            field_meta={"permission_mode": invalid_mode},
+        )
+    )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+
+    assert bash_tool.allow_full_access is False
+    assert bash_tool.bypass_dangerous_command_approval is False
+    assert bash_tool._perm is not None
+    assert bash_tool._perm.policy.filesystem_scope == "session_workspace"
+    assert bash_tool._perm.policy.session_workspace_root == str(workspace)
+
+
+@pytest.mark.asyncio
+async def test_acp_unrestricted_filesystem_keeps_dangerous_command_approval(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside", encoding="utf-8")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(allow_full_access=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(workspace),
+            field_meta={"permission_mode": "unrestricted_filesystem"},
+        )
+    )
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+    read_tool = agent._sessions[session.sessionId].agent.tools["read_file"]
+
+    assert bash_tool.allow_full_access is True
+    assert bash_tool.bypass_dangerous_command_approval is False
+    assert bash_tool._perm is None
+
+    read_result = await read_tool.execute(path=str(outside_file))
+    assert read_result.success is True
+
+    result = await bash_tool.execute(command=f'rm "{tmp_path / "must-not-run.txt"}"')
+    assert result.success is False
+    assert result.permission_request is not None
+    assert result.permission_request["scope"] == "safety"
+
+
+@pytest.mark.asyncio
 async def test_acp_full_access_mode_bypasses_permission_engine(tmp_path):
     workspace = tmp_path / "workspace"
     config = Config(
