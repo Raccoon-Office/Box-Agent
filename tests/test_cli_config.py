@@ -127,22 +127,20 @@ def test_config_parses_goal_autopilot_settings(tmp_path: Path) -> None:
     assert config.agent.goal_autopilot_no_progress_turns == 4
 
 
-def test_config_sub_agent_token_limit_defaults_and_overrides(tmp_path: Path) -> None:
-    # Default when absent from yaml.
-    default_path = tmp_path / "default.yaml"
-    _write_config(default_path)
-    defaults = cli.Config.from_yaml(default_path).agent
-    assert defaults.max_steps == 300
-    assert defaults.sub_agent_token_limit == 50_000
-
-    # Overridable for advanced/host scenarios; config-example.yaml documents it
-    # only as a comment so generated configs continue to inherit runtime updates.
-    override_path = tmp_path / "override.yaml"
-    _write_config(override_path)
-    with override_path.open("a", encoding="utf-8") as f:
+def test_config_has_no_independent_sub_agent_context_limit(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write("context_window: 220000\n")
+        f.write("max_output_tokens: 20000\n")
+        # Legacy configs remain loadable, but this retired key cannot create a
+        # child-only context budget.
         f.write("sub_agent_token_limit: 12345\n")
 
-    assert cli.Config.from_yaml(override_path).agent.sub_agent_token_limit == 12345
+    config = cli.Config.from_yaml(config_path)
+
+    assert config.llm.context_token_limit == 180_000
+    assert not hasattr(config.agent, "sub_agent_token_limit")
 
 
 def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> None:

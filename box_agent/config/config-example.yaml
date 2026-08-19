@@ -69,7 +69,6 @@ retry:
 # max_steps: 300 # Maximum execution steps
 max_parallel_tools: 8 # Hard cap on concurrent parallel_safe tool calls (sub_agent, generate_image) per step
 parallel_tool_timeout_seconds: 900 # Per-step wall-clock cap for one parallel_safe tool batch
-# sub_agent_token_limit: 50000 # Per-call child context budget
 workspace_dir: "./workspace" # Working directory
 system_prompt_path: "system_prompt.md" # System prompt file (same config directory)
 analysis_prompt_path: "analysis_prompt.md" # Extra prompt for data_analysis sessions

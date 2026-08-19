@@ -250,12 +250,15 @@ provider: "anthropic" # "anthropic" 或 "openai"
 max_steps: 200
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
-sub_agent_token_limit: 50000
 goal_autopilot_enabled: true
 goal_autopilot_max_turns: 3
 goal_autopilot_max_seconds: 14400
 goal_autopilot_no_progress_turns: 2
 ```
+
+main agent 与 subagent 使用同一个由模型配置推导出的上下文阈值。请通过
+`context_window` 和 `max_output_tokens` 配置该共享阈值，不再提供独立的子代理
+上下文窗口配置。
 
 ```bash
 box-agent config                    # 查看当前配置摘要

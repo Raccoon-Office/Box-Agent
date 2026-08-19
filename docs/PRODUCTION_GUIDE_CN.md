@@ -136,13 +136,13 @@ services:
 max_steps: 300
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
-sub_agent_token_limit: 50000
 ```
 
 这些配置分别控制不同操作：`max_steps` 限制顶层模型迭代，`max_parallel_tools`
 限制单步中 `parallel_safe` 调用并发量，`parallel_tool_timeout_seconds` 限制一个
-并发批次，`sub_agent_token_limit` 限制子 Agent 摘要前的独立上下文预算。每个子
-Agent 使用相同的通用 loop；步数和工具调用上限来自 `tool_limits.sub_agent`，并可在
+并发批次。main agent 与 subagent 使用同一个由 `context_window` 和
+`max_output_tokens` 推导的 `context_token_limit`。每个子 Agent 使用相同的通用
+loop；步数和工具调用上限来自 `tool_limits.sub_agent`，并可在
 单次调用中进一步收窄。详见[子 Agent 委派](SUB_AGENT_DELEGATION_CN.md)。
 工具阈值默认值只保存在 `box_agent/config.py`，新生成的用户配置不会显式写入这些值，
 因此 runtime 升级可以更新默认值。只有确实需要长期固定的覆盖项才应写入

@@ -1112,18 +1112,22 @@ async def test_parallel_calls_each_inherit_the_same_parent_tool_boundary():
     assert result_web.raw_output["resolved_tools"] == ["read_file", "web_search"]
 
 
-def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path) -> None:
-    """Sub-agent config and live capability providers flow through setup."""
-    from box_agent.config import AgentConfig, ToolLimitsConfig, ToolsConfig
+def test_add_workspace_tools_uses_main_context_limit_for_sub_agent(tmp_path) -> None:
+    """Main and child loops share the model-derived safe input limit."""
+    from box_agent.config import (
+        AgentConfig,
+        LLMConfig,
+        ToolLimitsConfig,
+        ToolsConfig,
+    )
     from box_agent.tools.setup import add_workspace_tools
 
     class Config:
+        llm = LLMConfig(context_window=220_000, max_output_tokens=20_000)
         tool_limits = ToolLimitsConfig(
             sub_agent={"general_max_steps": 55, "no_progress_steps": 9}
         )
-        agent = AgentConfig(
-            sub_agent_token_limit=12345,
-        )
+        agent = AgentConfig()
         tools = ToolsConfig(
             enable_bash=False,
             enable_file_tools=False,
@@ -1144,7 +1148,7 @@ def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path) -> None:
     )
 
     sub_agent = next(t for t in tools if t.name == "sub_agent")
-    assert sub_agent._token_limit == 12345
+    assert sub_agent._token_limit == Config.llm.context_token_limit == 180_000
     assert sub_agent.parameters["properties"]["budget"]["default"]["max_steps"] == 55
     assert sub_agent._no_progress_limit == 9
     assert sub_agent._resolve_skill_loader() is skill_loader

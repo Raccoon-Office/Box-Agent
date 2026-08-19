@@ -266,12 +266,15 @@ provider: "anthropic" # "anthropic" or "openai"
 max_steps: 300
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
-sub_agent_token_limit: 50000
 goal_autopilot_enabled: true
 goal_autopilot_max_turns: 3
 goal_autopilot_max_seconds: 14400
 goal_autopilot_no_progress_turns: 2
 ```
+
+Main and sub-agent loops use the same model-derived context limit. Configure
+that shared limit through `context_window` and `max_output_tokens`; there is no
+separate child context-window setting.
 
 Tool limits are omitted by default so runtime upgrades can supply updated
 defaults from `box_agent/config.py`. Add only deliberate overrides under

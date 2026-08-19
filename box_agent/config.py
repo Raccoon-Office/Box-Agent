@@ -225,12 +225,6 @@ class AgentConfig(BaseModel):
     # sibling results are kept; unfinished siblings get synthetic timeout
     # failures so the parent can continue instead of waiting forever.
     parallel_tool_timeout_seconds: float = 900.0
-    # Per-call token budget for sub-agent child contexts before they summarize.
-    # The child runs in an isolated context, so this is independent of the main
-    # loop's context_token_limit. Single source of truth for the value that was
-    # previously hardcoded in SubAgentTool; shown only as a commented advanced
-    # override in config-example.yaml so new user configs do not pin it.
-    sub_agent_token_limit: int = 50_000
     # Continue an active durable goal after a natural end_turn, bounded so a
     # third-party outage or bad plan cannot loop forever.
     goal_autopilot_enabled: bool = True

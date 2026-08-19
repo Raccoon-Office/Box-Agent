@@ -221,14 +221,14 @@ container limits:
 max_steps: 300
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
-sub_agent_token_limit: 50000
 ```
 
 These limits control different operations: `max_steps` bounds top-level model
 iterations, `max_parallel_tools` caps `parallel_safe` calls in one step,
-`parallel_tool_timeout_seconds` caps one such parallel batch,
-and `sub_agent_token_limit` bounds each child context before summarization. Each
-sub-agent uses the same general-purpose loop; its step and tool-call ceilings
+and `parallel_tool_timeout_seconds` caps one such parallel batch. Main and
+sub-agent loops use the same model-derived `context_token_limit`, configured by
+`context_window` and `max_output_tokens`. Each sub-agent uses the same
+general-purpose loop; its step and tool-call ceilings
 come from `tool_limits.sub_agent` and can be narrowed per invocation. See
 [Sub-agent Delegation](SUB_AGENT_DELEGATION.md).
 Tool-limit defaults live only in `box_agent/config.py` and are intentionally

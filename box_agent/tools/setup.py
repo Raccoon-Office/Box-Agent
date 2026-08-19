@@ -740,7 +740,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             parent_tools=parent_tools,
             workspace_dir=str(workspace_dir),
             tool_limits=tool_limits,
-            token_limit=config.agent.sub_agent_token_limit,
+            token_limit=config.llm.context_token_limit,
             artifact_detection_enabled=use_output_dir,
             artifact_root_dir=str(artifact_root) if artifact_root else None,
         )
