@@ -241,7 +241,7 @@ class SubAgentTool(EventEmittingTool):
                     "type": "object",
                     "description": (
                         "Optional numeric limits as a JSON object, for example "
-                        "{\"max_steps\":12,\"max_tool_calls\":25}. Never pass a "
+                        "{\"max_steps\":60,\"max_tool_calls\":100}. Never pass a "
                         "serialized JSON string."
                     ),
                     "default": {
