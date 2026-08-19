@@ -241,7 +241,11 @@ Host behavior:
 - Replace the current todo state with `items` for that session or message scope.
 - Treat every `todo_snapshot` as a complete snapshot, including results from filtered or single-item `todo_read` calls.
 - Use stable `items[].id` values as task identity. `set` preserves supplied existing IDs and allocates new IDs only for new tasks.
-- Every item in a non-empty `set` request must include `status`. While unfinished work remains, the complete list must contain exactly one `in_progress` item; empty or fully completed lists contain none.
+- Every item in a non-empty `set` request must include `status`. For unfinished work,
+  `todo_write` now allows no initial `in_progress` item; the tool will
+  automatically activate the first unfinished item in list order. After processing,
+  the complete snapshot therefore has exactly one `in_progress` item unless the
+  list is empty or fully completed.
 - `action: "transition"` may include an optional `transition` object with `completed_id` and `in_progress_id`; hosts do not need this field to consume the complete snapshot.
 - Do not classify `todo_write` as sub-agent work just because `rawInput.task` exists.
 - A `todo_read` result also includes `todo_snapshot`; it may omit `action` and `item`.
