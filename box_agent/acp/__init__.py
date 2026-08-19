@@ -1177,12 +1177,6 @@ class BoxACPAgent:
         self._mcp_loaded = True
         log.info("mcp/ready", count=len(mcp_tools))
 
-    def _sub_agent_capability_state(self) -> str:
-        """Expose MCP readiness without leaking configuration or permissions."""
-        if self._mcp_loaded or self._mcp_task is None:
-            return "ready"
-        return "loading"
-
     async def _finalize_mcp_load(self) -> None:
         """Background drain of the MCP task after the prompt has already started."""
         if self._mcp_loaded or self._mcp_task is None:
@@ -1655,7 +1649,6 @@ class BoxACPAgent:
                 permission_engine=perm_engine,
                 skill_runtime_context=skill_runtime_context,
                 skill_loader=session_skill_loader,
-                capability_state_provider=self._sub_agent_capability_state,
                 use_output_dir=artifact_mode != "project",
                 artifact_root_dir=output_dir,
                 env_context=env_context,

@@ -352,38 +352,6 @@ class PointsInsufficientLLM:
         raise AssertionError("streaming path expected")
 
 
-@pytest.mark.asyncio
-async def test_acp_exposes_loading_then_ready_capability_state(tmp_path):
-    gate = asyncio.Event()
-
-    async def load_mcp_tools():
-        await gate.wait()
-        return []
-
-    mcp_task = asyncio.create_task(load_mcp_tools())
-    config = Config(
-        llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(workspace_dir=str(tmp_path)),
-        tools=ToolsConfig(),
-    )
-    agent = BoxACPAgent(
-        DummyConn(),
-        config,
-        DummyLLM(),
-        [],
-        "system",
-        mcp_task=mcp_task,
-    )
-
-    assert agent._sub_agent_capability_state() == "loading"
-    gate.set()
-    await mcp_task
-    # A completed task is not usable until its tools have been registered.
-    assert agent._sub_agent_capability_state() == "loading"
-    await agent._ensure_mcp_loaded()
-    assert agent._sub_agent_capability_state() == "ready"
-
-
 def test_acp_stdio_reader_allows_large_resume_frames():
     assert _READ_LIMIT >= 16 * 1024 * 1024
 

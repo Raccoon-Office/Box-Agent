@@ -70,24 +70,25 @@ def test_system_prompt_uses_mode_specific_file_delivery_guidance():
     assert "所有交付物落 `{workspace}/output/`" not in prompt
 
 
-def test_system_prompt_sub_agent_routing_is_cost_aware_and_capability_explicit():
+def test_system_prompt_sub_agent_uses_one_loop_and_inherits_parent_boundary():
     prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
 
     assert "独立上下文、并行耗时或证据隔离收益明显高于启动和合并成本" in prompt
     assert "不要仅因单元数量达到 5 个就强制并行" in prompt
-    assert "execution.strategy=\"batch_files\"" in prompt
-    assert 'capabilities.required_tools=["read_file"]' in prompt
-    assert "满足限制的最少互斥批次" in prompt
-    assert "显式最小能力声明的 `general_loop`" in prompt
-    assert "INVALID_DELEGATION_SPEC" in prompt
-    assert "最多修正重试一次" in prompt
-    assert "只有完全没有 `capabilities` 的旧调用" in prompt
+    assert "始终运行同一种通用 agent loop" in prompt
+    assert "不存在调用方或运行时策略选择" in prompt
+    assert "顶层 `skills`" in prompt
+    assert "顶层 `required_tools`" in prompt
+    assert "省略 `skills` 等价于空列表" in prompt
+    assert "省略 `required_tools` 会继承主 agent 当前全部可用工具" in prompt
+    assert "显式列表只用于缩小工具范围" in prompt
+    assert "继承主 agent 当前权限和约束" in prompt
+    assert (
+        "不要传 `execution`、`capabilities`、`inputs` 或 `constraints`"
+        in prompt
+    )
     assert "最终合并、交叉校验" in prompt
     assert '`budget` 必须直接传对象' in prompt
-    assert '"read_only":false' in prompt
-    assert '"network":true' in prompt
-    assert '"write_scope":["research/dim01.md"]' in prompt
-    assert '"external_side_effect":false' in prompt
     assert "互斥的精确输出路径" in prompt
 
 

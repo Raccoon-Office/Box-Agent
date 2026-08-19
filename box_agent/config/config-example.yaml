@@ -70,7 +70,6 @@ retry:
 max_parallel_tools: 8 # Hard cap on concurrent parallel_safe tool calls (sub_agent, generate_image) per step
 parallel_tool_timeout_seconds: 900 # Per-step wall-clock cap for one parallel_safe tool batch
 # sub_agent_token_limit: 50000 # Per-call child context budget
-# sub_agent_batch_synthesis_timeout_seconds: 600 # batch_files synthesis call; 0 disables this extra cap
 workspace_dir: "./workspace" # Working directory
 system_prompt_path: "system_prompt.md" # System prompt file (same config directory)
 analysis_prompt_path: "analysis_prompt.md" # Extra prompt for data_analysis sessions
@@ -108,9 +107,8 @@ max_truncation_continuations: 1 # Max continuations per turn (loop guard)
 #     deep_research_max_tool_calls: 240 # 1..512; deep-research presentation budget
 #     research_rounds: 5 # 1..20; research rounds before requiring artifact handoff
 #   sub_agent:
-#     general_max_steps: 80 # 1..256; declared sub-agent step cap
-#     general_max_tool_calls: 48 # 1..256; declared sub-agent tool-call cap
-#     legacy_max_steps: 80 # 1..256; fallback sub-agent loop step cap
+#     general_max_steps: 80 # 1..256; sub-agent step cap
+#     general_max_tool_calls: 48 # 1..256; sub-agent tool-call cap
 #     no_progress_steps: 8 # 1..50; stop after consecutive no-progress steps
 
 # ===== Memory Configuration =====

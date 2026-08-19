@@ -145,25 +145,6 @@ def test_config_sub_agent_token_limit_defaults_and_overrides(tmp_path: Path) -> 
     assert cli.Config.from_yaml(override_path).agent.sub_agent_token_limit == 12345
 
 
-def test_config_batch_synthesis_timeout_defaults_and_overrides(tmp_path: Path) -> None:
-    default_path = tmp_path / "default.yaml"
-    _write_config(default_path)
-    assert (
-        cli.Config.from_yaml(default_path).agent.sub_agent_batch_synthesis_timeout_seconds
-        == 600.0
-    )
-
-    override_path = tmp_path / "override.yaml"
-    _write_config(override_path)
-    with override_path.open("a", encoding="utf-8") as f:
-        f.write("sub_agent_batch_synthesis_timeout_seconds: 123.5\n")
-
-    assert (
-        cli.Config.from_yaml(override_path).agent.sub_agent_batch_synthesis_timeout_seconds
-        == 123.5
-    )
-
-
 def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> None:
     default_path = tmp_path / "default.yaml"
     _write_config(default_path)
@@ -172,7 +153,7 @@ def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> Non
     assert defaults.web_search.total_calls == 50
     assert defaults.external_skill.max_tool_calls == 128
     assert defaults.presentation.deep_research_max_tool_calls == 200
-    assert defaults.sub_agent.general_max_tool_calls == 32
+    assert defaults.sub_agent.general_max_tool_calls == 100
 
     override_path = tmp_path / "override.yaml"
     _write_config(override_path)
@@ -189,7 +170,6 @@ def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> Non
             "    research_rounds: 5\n"
             "  sub_agent:\n"
             "    general_max_steps: 20\n"
-            "    legacy_max_steps: 60\n"
         )
 
     limits = cli.Config.from_yaml(override_path).tool_limits
@@ -201,7 +181,6 @@ def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> Non
     assert limits.external_skill.completion_reserve_calls == 10
     assert limits.presentation.research_rounds == 5
     assert limits.sub_agent.general_max_steps == 20
-    assert limits.sub_agent.legacy_max_steps == 60
 
 
 def test_config_example_does_not_pin_tool_limit_defaults(
@@ -214,7 +193,6 @@ def test_config_example_does_not_pin_tool_limit_defaults(
     assert "tool_limits" not in data
     assert "max_steps" not in data
     assert "sub_agent_token_limit" not in data
-    assert "sub_agent_batch_synthesis_timeout_seconds" not in data
 
     monkeypatch.setenv("HOME", str(tmp_path))
     generated_path = cli.Config._ensure_user_config()
@@ -222,7 +200,6 @@ def test_config_example_does_not_pin_tool_limit_defaults(
     assert "tool_limits" not in generated
     assert "max_steps" not in generated
     assert "sub_agent_token_limit" not in generated
-    assert "sub_agent_batch_synthesis_timeout_seconds" not in generated
 
 
 def test_config_rejects_invalid_tool_limits(tmp_path: Path) -> None:
@@ -258,7 +235,6 @@ def test_config_rejects_web_search_concurrency_above_batch_size() -> None:
         (("presentation", "research_rounds"), 20),
         (("sub_agent", "general_max_steps"), 256),
         (("sub_agent", "general_max_tool_calls"), 256),
-        (("sub_agent", "legacy_max_steps"), 256),
         (("sub_agent", "no_progress_steps"), 50),
     ],
 )

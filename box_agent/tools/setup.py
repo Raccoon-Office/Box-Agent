@@ -524,7 +524,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                         allow_full_access: bool = True, non_interactive: bool = False, output=None,
                         llm=None, permission_engine: PermissionEngine | None = None,
                         skill_runtime_context: SkillRuntimeContext | None = None,
-                        skill_loader=None, capability_state_provider=None,
+                        skill_loader=None,
                         use_output_dir: bool = True,
                         artifact_root_dir: str | Path | None = None,
                         env_context=None,
@@ -546,7 +546,6 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         permission_engine: If provided, tools use capability-based permission checks
         skill_runtime_context: Runtime env to expose to subprocess-backed tools
         skill_loader: Current live SkillLoader for explicit child Skill selection
-        capability_state_provider: Read-only callable returning MCP loading/ready state
         use_output_dir: If True, execute_code chdirs into {workspace}/output.
         artifact_root_dir: Optional host-supplied output root for this session.
         process_owner_id: Optional ACP session identifier used to scope and
@@ -741,17 +740,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             parent_tools=parent_tools,
             workspace_dir=str(workspace_dir),
             tool_limits=tool_limits,
-            max_steps=tool_limits.sub_agent.legacy_max_steps,
             token_limit=config.agent.sub_agent_token_limit,
-            batch_synthesis_timeout_seconds=(
-                config.agent.sub_agent_batch_synthesis_timeout_seconds
-            ),
             artifact_detection_enabled=use_output_dir,
             artifact_root_dir=str(artifact_root) if artifact_root else None,
         )
         if skill_loader is not None:
             sub_agent_tool.set_skill_provider(lambda: skill_loader)
-        if capability_state_provider is not None:
-            sub_agent_tool.set_capability_state_provider(capability_state_provider)
         tools.append(sub_agent_tool)
         _out(f"{Colors.GREEN}✅ Loaded sub-agent tool (sub_agent){Colors.RESET}")

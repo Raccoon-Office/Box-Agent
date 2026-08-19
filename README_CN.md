@@ -51,10 +51,10 @@ box-agent --task "分析 sales.csv — 按收入展示前 10 名产品的柱状�
 
 ### 子 Agent 并行
 
-把隔离工作委派给子 Agent，并显式声明工具、Skills、输入、约束以及步骤/工具调用
-硬预算。多个已知本地文本文件可交给一个 `batch_files` 子 Agent 并发读取，再执行
-一次无工具综合；异构任务则使用有边界的 `general_loop` 子 Agent。父 Agent 始终负责
-冲突处理、最终交付物和验证。
+把隔离工作委派给子 Agent，并按需声明顶层 Skills、工具子集以及步骤/工具调用
+硬预算。所有子 Agent 都运行相同的通用 agent loop 并继承父 Agent 的策略边界；
+省略 `required_tools` 时继承父 Agent 当前全部工具，显式列表则收窄工具边界。
+父 Agent 始终负责冲突处理、最终交付物和验证。
 
 ```
 用户: "分别分析 data1.csv、data2.csv 和 data3.csv，然后给出综合总结"
@@ -250,7 +250,7 @@ provider: "anthropic" # "anthropic" 或 "openai"
 max_steps: 200
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
-sub_agent_batch_synthesis_timeout_seconds: 300 # 设为 0 可关闭额外综合超时
+sub_agent_token_limit: 50000
 goal_autopilot_enabled: true
 goal_autopilot_max_turns: 3
 goal_autopilot_max_seconds: 14400

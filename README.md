@@ -51,10 +51,11 @@ Most agent frameworks are either too simple (no sandbox, no tools) or too comple
 
 ### Sub-Agent Parallelism
 
-Delegate isolated work to sub-agents with explicit tools, Skills, inputs,
-constraints, and hard step/tool-call budgets. For many known local text files,
-one `batch_files` child reads the files concurrently and performs one tool-free
-synthesis call; heterogeneous work can use bounded `general_loop` children.
+Delegate isolated work to sub-agents with optional Skills, explicit tool
+selection, and hard step/tool-call budgets. Every child uses the same
+general-purpose agent loop and inherits the parent's live policy. Omitting
+`required_tools` exposes all current parent tools; an explicit list narrows that
+boundary.
 The parent remains responsible for conflict handling, the final deliverable,
 and verification.
 
@@ -266,7 +267,6 @@ max_steps: 300
 max_parallel_tools: 8
 parallel_tool_timeout_seconds: 900
 sub_agent_token_limit: 50000
-sub_agent_batch_synthesis_timeout_seconds: 600 # 0 disables the extra batch synthesis cap
 goal_autopilot_enabled: true
 goal_autopilot_max_turns: 3
 goal_autopilot_max_seconds: 14400
