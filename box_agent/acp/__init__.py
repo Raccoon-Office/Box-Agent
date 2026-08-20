@@ -1349,7 +1349,7 @@ class BoxACPAgent:
                 asyncio.shield(self._skill_task),
                 timeout=_SKILL_DISCOVERY_WAIT_SECONDS,
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             log.warn(
                 "skills/discovery_timeout",
                 message=(
