@@ -712,8 +712,10 @@ async def test_initialize_base_tools_can_gate_mcp_until_protocol_ready(
     from box_agent.tools import setup as setup_module
 
     started = asyncio.Event()
+    loaded_paths: list[str] = []
 
-    async def fake_load_mcp_tools_async(*args, **kwargs):
+    async def fake_load_mcp_tools_async(config_path, **kwargs):
+        loaded_paths.append(config_path)
         started.set()
         return []
 
@@ -749,6 +751,12 @@ async def test_initialize_base_tools_can_gate_mcp_until_protocol_ready(
     gate.set()
     await mcp_task
     assert started.is_set() is True
+    assert loaded_paths == [str(mcp_config)]
+    bootstrapped = json.loads(mcp_config.read_text(encoding="utf-8"))
+    assert (
+        bootstrapped["mcpServers"]["mcp-server-askecho-search-infinity"]["disabled"]
+        is False
+    )
 
 
 @pytest.mark.asyncio

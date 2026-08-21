@@ -67,6 +67,33 @@ Release, provider API, and ACP compatibility have their own sources under
 
 ## Pending material changes
 
+### 2026-08-21 — managed web-search/web-extract bootstrap and runtime dispatch
+
+- Change: [PR #73](https://github.com/Raccoon-Office/Box-Agent/pull/73),
+  superseding the incomplete host-registration boundary in
+  [PR #64](https://github.com/Raccoon-Office/Box-Agent/pull/64); no merge or
+  release reference exists yet.
+- Runtime contract: `manifest.json` advertises `box-agent-web-extract` as a
+  stdio MCP that reuses the packaged `box-agent-acp` entry with
+  `--web-extract-mcp`. Source installs may continue to use the existing
+  `box-agent-web-extract-mcp` console script.
+- Shared bootstrap contract: CLI and ACP reconcile hosted `web_search` and
+  runtime-advertised stdio MCP servers into the user-owned `mcp.json` before
+  discovery. The first migration enables the legacy disabled defaults; a schema
+  marker makes later starts preserve explicit user disable choices. Existing
+  unrelated MCP entries are retained and malformed files are never overwritten.
+- Compatibility: runtime fields and the top-level config marker are additive.
+  The bootstrap changes the old opt-in default for these two managed public-web
+  tools to enabled and removes the OfficeV3 manifest-registration dependency.
+- Proof anchors: `tests/test_mcp_bootstrap.py`, `tests/test_runtime_entry.py`,
+  `tests/test_build_runtime.py`, source MCP suites, the packaged runtime
+  manifest, and MCP initialize/list/call probes against CLI and the built binary.
+- Runtime boundary: source tests, runtime build, install, host restart, and a
+  fresh live task remain separate evidence checkpoints.
+- Rollback: revert the implementation, rebuild the prior runtime, and remove
+  managed entries or set `disabled: true`; unrelated user MCP config remains
+  intact.
+
 ### 2026-08-19 — flattened sub-agent contract with derived policy
 
 - Change: implementation on `codex/simplify-subagent-contract`; no merge or

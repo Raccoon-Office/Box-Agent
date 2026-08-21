@@ -36,6 +36,7 @@ from box_agent.tools.jupyter_tool import (
     SandboxStatusTool,
 )
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
+from box_agent.tools.mcp_bootstrap import bootstrap_managed_mcp_config
 from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
 from box_agent.tools.obsidian_tool import create_obsidian_tools
@@ -386,10 +387,23 @@ async def initialize_base_tools(
             execute_timeout=mcp_config.execute_timeout,
             sse_read_timeout=mcp_config.sse_read_timeout,
         )
-        # Always prefer user config dir (~/.box-agent/config/mcp.json) so dev and
-        # packaged modes read from the same place.
-        _user_mcp = Path.home() / ".box-agent" / "config" / "mcp.json"
-        mcp_config_path = _user_mcp if _user_mcp.exists() else Config.find_config_file(config.tools.mcp_config_path)
+        # Keep CLI and ACP on the same user-owned configuration. Reconcile the
+        # hosted search endpoint and any MCP servers advertised by the frozen
+        # runtime before background discovery starts.
+        configured_mcp = Path(config.tools.mcp_config_path).expanduser()
+        bootstrap_target = (
+            configured_mcp
+            if configured_mcp.is_absolute()
+            else Path.home() / ".box-agent" / "config" / "mcp.json"
+        )
+        bootstrap = bootstrap_managed_mcp_config(bootstrap_target)
+        if bootstrap.warning:
+            _out(f"{Colors.YELLOW}⚠️  {bootstrap.warning}{Colors.RESET}")
+        mcp_config_path = (
+            bootstrap.path
+            if bootstrap.path.exists()
+            else Config.find_config_file(config.tools.mcp_config_path)
+        )
         if mcp_config_path:
             get_mcp_tool_catalog().mark_loading()
             _out(f"{Colors.BRIGHT_CYAN}Loading MCP tools in background (from: {mcp_config_path})...{Colors.RESET}")

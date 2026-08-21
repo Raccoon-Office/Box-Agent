@@ -112,6 +112,26 @@ def test_bundled_stable_runtime_components_empty_for_external_python_mode() -> N
     ) == ()
 
 
+def test_runtime_manifest_advertises_bundled_web_extract_mcp() -> None:
+    manifest = build_runtime.build_runtime_manifest(
+        version="0.8.87",
+        plat="darwin",
+        arch="arm64",
+        entry_path="bin/box-agent-acp",
+        external_python_sandbox=False,
+        bundled_components=(),
+    )
+
+    assert manifest["entry"] == "bin/box-agent-acp"
+    assert manifest["mcp_servers"] == {
+        "box-agent-web-extract": {
+            "entry": "bin/box-agent-acp",
+            "args": ["--web-extract-mcp"],
+            "transport": "stdio",
+        }
+    }
+
+
 @pytest.mark.parametrize("arch", ["arm64", "x64"])
 def test_linux_uses_host_stable_runtimes_in_external_sandbox_mode(arch: str) -> None:
     assert build_runtime.bundled_stable_runtime_components(
@@ -150,6 +170,7 @@ def test_pyinstaller_args_keep_bundled_sandbox_by_default() -> None:
     assert "ipykernel" in hidden
     assert "pandas" in hidden
     assert "pip._internal.cli.main" in hidden
+    assert "box_agent.mcp_servers.web_extract_server" in hidden
     assert ("--collect-all", "ipykernel") in collect_pairs
     assert ("--collect-submodules", "pandas") in collect_pairs
     assert ("--collect-submodules", "pip") in collect_pairs
@@ -168,6 +189,7 @@ def test_pyinstaller_args_drop_sandbox_stack_for_external_python_mode() -> None:
     assert "jupyter_core" in hidden
     assert "dateutil" in hidden
     assert "dateutil.parser" in hidden
+    assert "box_agent.mcp_servers.web_extract_server" in hidden
     assert "ipykernel" not in hidden
     assert "pandas" not in hidden
     assert "pip._internal.cli.main" not in hidden

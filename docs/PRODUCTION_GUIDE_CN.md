@@ -68,6 +68,29 @@ gh release download --repo Raccoon-Office/Box-Agent \
 [发布状态](RELEASE_STATE.md)；除非对应 tag 和 asset 已真实存在，不要用开发版本号
 拼接下载地址。
 
+runtime 的 `manifest.json` 同时声明默认 ACP 入口和内置 stdio MCP。Box-Agent
+会以 runtime 根目录解析相对 `entry`，并在 CLI 与 ACP 开始 MCP 发现前，将配置
+同步到用户目录 `~/.box-agent/config/mcp.json`。宿主仍可直接消费同一声明，但
+OfficeV3 不再需要单独实现注册逻辑：
+
+```json
+{
+  "entry": "bin/box-agent-acp",
+  "mcp_servers": {
+    "box-agent-web-extract": {
+      "entry": "bin/box-agent-acp",
+      "args": ["--web-extract-mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+启动同步还会注册托管的 `web_search` MCP。首次迁移会启用旧模板中默认禁用的
+条目；后续启动会保留用户主动设置的 `disabled` 状态，同时刷新受管端点和 runtime
+路径。源码安装环境在没有 frozen manifest 时使用 `box-agent-web-extract-mcp`
+console script。
+
 #### 从源码构建
 
 ```bash

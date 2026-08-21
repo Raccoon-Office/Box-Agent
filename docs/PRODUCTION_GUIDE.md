@@ -84,6 +84,25 @@ box-agent-runtime/
     └── node/         # Bundled macOS Node.js runtime for skill scripts
 ```
 
+`manifest.json` declares both the default ACP entry and bundled stdio MCP
+servers. Box-Agent resolves each relative `entry` from the runtime directory
+and reconciles it into the user-owned `~/.box-agent/config/mcp.json` before
+both CLI and ACP MCP discovery. Hosts may also consume the same declaration
+directly, but no OfficeV3-specific registration step is required:
+
+```json
+{
+  "entry": "bin/box-agent-acp",
+  "mcp_servers": {
+    "box-agent-web-extract": {
+      "entry": "bin/box-agent-acp",
+      "args": ["--web-extract-mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
 #### Spawning from Host Process
 
 ```typescript
@@ -102,6 +121,12 @@ const proc = spawn('build-resources/box-agent-runtime/bin/box-agent-acp', [], {
 // stdin/stdout: ACP JSON-RPC protocol (pure, no stray bytes)
 // stderr: diagnostic logs (safe to pipe to host logger)
 ```
+
+The bootstrap also registers the hosted `web_search` MCP. On first migration it
+enables the previously disabled template entries; later starts preserve an
+explicit user `disabled` choice while refreshing managed endpoints and runtime
+paths. Source installs use the `box-agent-web-extract-mcp` console script when
+no frozen manifest is available.
 
 #### Key Constraints
 
