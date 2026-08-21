@@ -487,6 +487,7 @@ class Agent:
         memory_promotion_cooldown_days: int = 14,
         max_parallel_tools: int = 8,
         parallel_tool_timeout_seconds: float | None = 900.0,
+        provider_stale_seconds: float | None = None,
         truncation_continuation_enabled: bool = True,
         max_truncation_continuations: int = 3,
         max_truncated_tool_call_retries: int = 3,
@@ -506,6 +507,7 @@ class Agent:
         self.tool_limits = tool_limits or ToolLimitsConfig()
         self.max_parallel_tools = max_parallel_tools
         self.parallel_tool_timeout_seconds = parallel_tool_timeout_seconds
+        self.provider_stale_seconds = provider_stale_seconds
         self.truncation_continuation_enabled = truncation_continuation_enabled
         self.max_truncation_continuations = max_truncation_continuations
         self.max_truncated_tool_call_retries = max_truncated_tool_call_retries
@@ -947,6 +949,7 @@ class Agent:
             title=effective_options.title,
             max_parallel_tools=self.max_parallel_tools,
             parallel_tool_timeout_seconds=self.parallel_tool_timeout_seconds,
+            provider_stale_seconds=self.provider_stale_seconds,
             force_plan_start=effective_options.force_plan_start,
             require_plan_approval=effective_options.require_plan_approval,
             plan_approval=effective_options.plan_approval,

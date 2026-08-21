@@ -1748,6 +1748,7 @@ class BoxACPAgent:
             thinking_enabled=deep_think,
             max_parallel_tools=self._config.agent.max_parallel_tools,
             parallel_tool_timeout_seconds=self._config.agent.parallel_tool_timeout_seconds,
+            provider_stale_seconds=self._config.agent.provider_stale_seconds,
             memory_promotion_enabled=self._config.agent.memory_promotion_proposal_enabled,
             memory_promotion_hit_threshold=self._config.agent.memory_promotion_hit_threshold,
             memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,

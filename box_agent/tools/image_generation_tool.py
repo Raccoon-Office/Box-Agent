@@ -31,8 +31,10 @@ if TYPE_CHECKING:
 _ENDPOINT_ENV = ("BOX_AGENT_IMAGE_GENERATION_ENDPOINT", "BOX_AGENT_IMAGE_GEN_ENDPOINT")
 _API_KEY_ENV = ("BOX_AGENT_IMAGE_GENERATION_API_KEY", "BOX_AGENT_IMAGE_GEN_API_KEY")
 _TIMEOUT_ENV = "BOX_AGENT_IMAGE_GENERATION_TIMEOUT"
+_MAX_DIM_ENV = "BOX_AGENT_IMAGE_MAX_DIM"
 _DEFAULT_TIMEOUT = 120.0
 _MIN_IMAGE_DIMENSION = 1024
+_DEFAULT_MAX_IMAGE_DIMENSION = 1024
 _MIN_OPENAI_IMAGE_PIXELS = _MIN_IMAGE_DIMENSION * _MIN_IMAGE_DIMENSION
 _HOST_IMAGE_DIMENSION_ALIGNMENT = 16
 _CANONICAL_IMAGE_RATIOS: tuple[tuple[int, int], ...] = (
@@ -308,6 +310,41 @@ def _normalize_explicit_size(size: str) -> tuple[str, int, int]:
     return f"{width}x{height}", width, height
 
 
+def _resolve_max_image_dimension(configured: int | None) -> int:
+    """Effective longest-edge cap for generic/custom endpoints.
+
+    Precedence: ``BOX_AGENT_IMAGE_MAX_DIM`` env (operational override) > the
+    configured ``image_generation.max_dimension`` > the built-in default.
+    A non-positive value disables the clamp; an unparseable env is ignored.
+    """
+    raw = os.environ.get(_MAX_DIM_ENV, "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    if configured is not None:
+        return int(configured)
+    return _DEFAULT_MAX_IMAGE_DIMENSION
+
+
+def _clamp_to_max_dimension(width: int, height: int, max_dim: int) -> tuple[str, int, int]:
+    """Scale a size down so neither side exceeds ``max_dim``, preserving ratio.
+
+    Only the generic/custom OpenAI-compatible branch uses this: those endpoints
+    forward an explicit ``size`` unchanged and can 504 on oversized requests.
+    OpenAI, Doubao/Seedream, and host-aligned endpoints keep their own size
+    rules. ``max_dim <= 0`` disables the clamp.
+    """
+    longest = max(width, height)
+    if max_dim <= 0 or longest <= max_dim:
+        return f"{width}x{height}", width, height
+    scale = max_dim / float(longest)
+    clamped_width = max(1, int(width * scale))
+    clamped_height = max(1, int(height * scale))
+    return f"{clamped_width}x{clamped_height}", clamped_width, clamped_height
+
+
 def _normalize_openai_explicit_size(size: str) -> tuple[str, int, int]:
     normalized_size, width, height = _normalize_explicit_size(size)
     pixel_count = width * height
@@ -360,6 +397,7 @@ class GenerateImageTool(Tool):
         model: str | None = None,
         auth_file: str | None = None,
         timeout: float | None = None,
+        max_dimension: int | None = None,
     ) -> None:
         self.workspace_dir = Path(workspace_dir).absolute()
         self.output_dir = Path(output_dir).absolute() if output_dir else self.workspace_dir
@@ -370,6 +408,7 @@ class GenerateImageTool(Tool):
         self.model = model or _DEFAULT_MODEL
         self.auth_file = auth_file or ""
         self.timeout = timeout
+        self.max_dimension = _resolve_max_image_dimension(max_dimension)
 
     @property
     def name(self) -> str:
@@ -521,6 +560,12 @@ class GenerateImageTool(Tool):
                     size, width, height = _normalize_openai_explicit_size(size)
                 else:
                     size, width, height = _normalize_explicit_size(size)
+                    # Generic/custom endpoints have no downstream size rule of
+                    # their own and would forward an oversized request as-is
+                    # (a common cause of 504s). Clamp the longest edge.
+                    size, width, height = _clamp_to_max_dimension(
+                        width, height, self.max_dimension
+                    )
             if _is_large_image_service(self.endpoint, self.model):
                 size, width, height = _seedream_size_for_ratio(width, height)
             else:

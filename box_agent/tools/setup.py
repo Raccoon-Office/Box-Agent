@@ -710,25 +710,33 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         )
         _out(f"{Colors.GREEN}✅ Loaded vision review tool (vision_review){Colors.RESET}")
 
-    # Image generation tool — standard Box-Agent capability shared by CLI and ACP
+    # Image generation tool — standard Box-Agent capability shared by CLI and ACP.
+    # Only register when an endpoint is configured (via config or env): an
+    # unconfigured generate_image can only fail on every call and wastes steps.
     image_generation_config = getattr(config, "image_generation", None)
-    tools.append(
-        GenerateImageTool(
-            workspace_dir=str(workspace_dir),
-            output_dir=str(artifact_root) if artifact_root else None,
-            allow_full_access=allow_full_access,
-            permission_engine=permission_engine,
-            endpoint=getattr(image_generation_config, "endpoint", "") or None,
-            api_key=getattr(image_generation_config, "api_key", "") or None,
-            model=getattr(image_generation_config, "model", "") or None,
-            auth_file=(
-                getattr(image_generation_config, "auth_file", "")
-                or getattr(getattr(config, "llm", None), "auth_file", "")
-            ),
-            timeout=getattr(image_generation_config, "timeout", None),
+    if image_generation_service_configured(config):
+        tools.append(
+            GenerateImageTool(
+                workspace_dir=str(workspace_dir),
+                output_dir=str(artifact_root) if artifact_root else None,
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                endpoint=getattr(image_generation_config, "endpoint", "") or None,
+                api_key=getattr(image_generation_config, "api_key", "") or None,
+                model=getattr(image_generation_config, "model", "") or None,
+                auth_file=(
+                    getattr(image_generation_config, "auth_file", "")
+                    or getattr(getattr(config, "llm", None), "auth_file", "")
+                ),
+                timeout=getattr(image_generation_config, "timeout", None),
+                max_dimension=getattr(image_generation_config, "max_dimension", None),
+            )
         )
-    )
-    _out(f"{Colors.GREEN}✅ Loaded image generation tool (generate_image){Colors.RESET}")
+        _out(f"{Colors.GREEN}✅ Loaded image generation tool (generate_image){Colors.RESET}")
+    else:
+        _out(
+            f"{Colors.DIM}⏭️  Skipped image generation tool (no image_generation.endpoint configured){Colors.RESET}"
+        )
 
     # Obsidian tools — host/Vault dependent, so register with workspace tools
     # before sub-agent so child agents inherit the native Obsidian capability.

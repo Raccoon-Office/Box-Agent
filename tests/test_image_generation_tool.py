@@ -265,6 +265,173 @@ async def test_generate_image_accepts_explicit_size(
     assert result.raw_output["height"] == 2048
 
 
+def test_image_generation_config_default_max_dimension() -> None:
+    assert ImageGenerationConfig().max_dimension == 1024
+
+
+@pytest.mark.asyncio
+async def test_generate_image_clamps_oversized_size_for_generic_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == "1024x1024"
+        return httpx.Response(
+            200,
+            json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://custom.example.test/v1/generate",
+        max_dimension=1024,
+    )
+
+    result = await tool.execute(
+        prompt="oversized hero",
+        output_path="assets/generated/hero.png",
+        size="1400x1400",
+    )
+
+    assert result.success
+    assert result.raw_output["size"] == "1024x1024"
+    assert result.raw_output["width"] == 1024
+    assert result.raw_output["height"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_generate_image_generic_clamp_preserves_aspect_ratio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == "1024x512"
+        return httpx.Response(
+            200,
+            json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://custom.example.test/v1/generate",
+        max_dimension=1024,
+    )
+
+    result = await tool.execute(
+        prompt="wide banner",
+        output_path="assets/generated/banner.png",
+        size="2000x1000",
+    )
+
+    assert result.success
+    assert result.raw_output["width"] == 1024
+    assert result.raw_output["height"] == 512
+
+
+@pytest.mark.asyncio
+async def test_generate_image_generic_clamp_disabled_forwards_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == "1400x1400"
+        return httpx.Response(
+            200,
+            json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://custom.example.test/v1/generate",
+        max_dimension=0,  # clamp disabled
+    )
+
+    result = await tool.execute(
+        prompt="oversized on purpose",
+        output_path="assets/generated/big.png",
+        size="1400x1400",
+    )
+
+    assert result.success
+    assert result.raw_output["size"] == "1400x1400"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_max_dimension_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOX_AGENT_IMAGE_MAX_DIM", "768")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == "768x768"
+        return httpx.Response(
+            200,
+            json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://custom.example.test/v1/generate",
+        max_dimension=1024,  # env override wins over this
+    )
+
+    result = await tool.execute(
+        prompt="env clamp",
+        output_path="assets/generated/env.png",
+        size="1400x1400",
+    )
+
+    assert result.success
+    assert result.raw_output["width"] == 768
+
+
+@pytest.mark.asyncio
+async def test_generate_image_openai_endpoint_size_not_clamped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        # OpenAI-style endpoints keep their own normalization; the generic
+        # max-dimension clamp must not shrink them.
+        assert payload["size"] == "2048x2048"
+        return httpx.Response(
+            200,
+            json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://image.example.test/v1/images/generations",
+        max_dimension=1024,
+    )
+
+    result = await tool.execute(
+        prompt="high-res",
+        output_path="assets/generated/openai.png",
+        size="2048x2048",
+    )
+
+    assert result.success
+    assert result.raw_output["width"] == 2048
+    assert result.raw_output["height"] == 2048
+
+
 @pytest.mark.asyncio
 async def test_generate_image_upscales_too_small_explicit_size_for_openai_style_endpoint(
     tmp_path: Path,
@@ -900,10 +1067,29 @@ def test_add_workspace_tools_registers_generate_image(tmp_path: Path) -> None:
 
     class Config:
         tools = ToolsConfig(enable_bash=False, enable_file_tools=False, enable_todo=False, enable_sub_agent=False)
+        image_generation = ImageGenerationConfig(
+            endpoint="https://image.example.test/v1/images/generations"
+        )
 
     add_workspace_tools(tools, Config(), tmp_path, allow_full_access=False, output=lambda *_: None)
 
     assert any(tool.name == "generate_image" for tool in tools)
+
+
+def test_add_workspace_tools_skips_generate_image_without_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("BOX_AGENT_IMAGE_GENERATION_ENDPOINT", raising=False)
+    monkeypatch.delenv("BOX_AGENT_IMAGE_GEN_ENDPOINT", raising=False)
+    tools = []
+
+    class Config:
+        tools = ToolsConfig(enable_bash=False, enable_file_tools=False, enable_todo=False, enable_sub_agent=False)
+        image_generation = ImageGenerationConfig()  # endpoint unset
+
+    add_workspace_tools(tools, Config(), tmp_path, allow_full_access=False, output=lambda *_: None)
+
+    assert not any(tool.name == "generate_image" for tool in tools)
 
 
 def test_image_generation_service_is_box_agent_configured_for_cli_and_acp() -> None:
@@ -1085,6 +1271,9 @@ def test_project_mode_tools_keep_workspace_relative_root(tmp_path: Path) -> None
             enable_file_tools=True,
             enable_todo=False,
             enable_sub_agent=False,
+        )
+        image_generation = ImageGenerationConfig(
+            endpoint="https://image.example.test/v1/images/generations"
         )
 
     add_workspace_tools(

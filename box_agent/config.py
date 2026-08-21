@@ -125,6 +125,12 @@ class ImageGenerationConfig(BaseModel):
     model: str = "gpt-image-1"
     timeout: float = 120.0
     auth_file: str = ""
+    # Longest-edge cap (pixels) applied only to generic/custom OpenAI-compatible
+    # endpoints, which otherwise forward an explicit ``size`` unchanged and can
+    # 504 on oversized requests. OpenAI, Doubao/Seedream, and host-aligned
+    # ``/images/gen`` endpoints keep their own size rules. ``0`` disables the
+    # clamp; ``BOX_AGENT_IMAGE_MAX_DIM`` overrides this value.
+    max_dimension: int = 1024
 
 
 class ToolLimitsModel(BaseModel):
@@ -228,6 +234,12 @@ class AgentConfig(BaseModel):
     # sibling results are kept; unfinished siblings get synthetic timeout
     # failures so the parent can continue instead of waiting forever.
     parallel_tool_timeout_seconds: float = 900.0
+    # Seconds a streaming response may go without a new provider chunk before
+    # the loop treats it as stale and triggers bounded recovery. The default
+    # matches the historical hardcoded baseline; raise it for slow/deep-thinking
+    # models whose single step can legitimately exceed it, or lower it to fail
+    # faster. The ``BOX_AGENT_PROVIDER_STALE_SECONDS`` env var overrides this.
+    provider_stale_seconds: float = 180.0
     # Per-call token budget for sub-agent child contexts before they summarize.
     # The child runs in an isolated context, so this is independent of the main
     # loop's context_token_limit. Single source of truth for the value that was
@@ -522,12 +534,15 @@ class Config(BaseModel):
         image_generation_data = data.get("image_generation", {})
         if not isinstance(image_generation_data, dict):
             image_generation_data = {}
+        raw_max_dimension = image_generation_data.get("max_dimension", 1024)
+        max_dimension = int(raw_max_dimension) if raw_max_dimension is not None else 1024
         image_generation_config = ImageGenerationConfig(
             endpoint=str(image_generation_data.get("endpoint", "") or "").strip(),
             api_key=str(image_generation_data.get("api_key", "") or "").strip(),
             model=str(image_generation_data.get("model", "gpt-image-1") or "").strip(),
             timeout=float(image_generation_data.get("timeout", 120.0) or 120.0),
             auth_file=image_generation_data.get("auth_file") or llm_config.auth_file,
+            max_dimension=max_dimension,
         )
 
         tool_limits_data = data.get("tool_limits", {})
