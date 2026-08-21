@@ -68,6 +68,26 @@ gh release download --repo Raccoon-Office/Box-Agent \
 [发布状态](RELEASE_STATE.md)；除非对应 tag 和 asset 已真实存在，不要用开发版本号
 拼接下载地址。
 
+runtime 的 `manifest.json` 同时声明默认 ACP 入口和内置 stdio MCP。宿主应以
+runtime 根目录解析相对 `entry`，不要假设存在第二个可执行文件：
+
+```json
+{
+  "entry": "bin/box-agent-acp",
+  "mcp_servers": {
+    "box-agent-web-extract": {
+      "entry": "bin/box-agent-acp",
+      "args": ["--web-extract-mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+启动内置网页提取器时，使用该 MCP 声明的 `entry` 和 `args`，并将 stdin/stdout
+保留给 MCP stdio 协议。它复用同一个 frozen binary，不依赖只在源码安装环境中存在的
+`box-agent-web-extract-mcp` console script。
+
 #### 从源码构建
 
 ```bash

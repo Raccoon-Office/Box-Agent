@@ -176,6 +176,9 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
         "box_agent.llm.openai_client",
         "box_agent.llm.llm_wrapper",
         "box_agent.logger",
+        "box_agent.mcp_servers",
+        "box_agent.mcp_servers.web_extract",
+        "box_agent.mcp_servers.web_extract_server",
         "box_agent.retry",
         "box_agent.schema",
         "box_agent.tools",
@@ -399,6 +402,35 @@ def bundled_stable_runtime_components(
     return ()
 
 
+def build_runtime_manifest(
+    *,
+    version: str,
+    plat: str,
+    arch: str,
+    entry_path: str,
+    external_python_sandbox: bool,
+    bundled_components: tuple[str, ...],
+) -> dict[str, object]:
+    """Return the host-facing manifest for a packaged runtime."""
+    return {
+        "name": "box-agent",
+        "version": version,
+        "platform": plat,
+        "arch": arch,
+        "entry": entry_path,
+        "mode": "standalone",
+        "external_python_sandbox": external_python_sandbox,
+        "bundled_stable_runtimes": list(bundled_components),
+        "mcp_servers": {
+            "box-agent-web-extract": {
+                "entry": entry_path,
+                "args": ["--web-extract-mcp"],
+                "transport": "stdio",
+            }
+        },
+    }
+
+
 # ── Build ────────────────────────────────────────────────────
 
 
@@ -611,16 +643,14 @@ def build_runtime(
         arch=arch,
         external_python_sandbox=external_python_sandbox,
     )
-    manifest = {
-        "name": "box-agent",
-        "version": version,
-        "platform": plat,
-        "arch": arch,
-        "entry": entry_path,
-        "mode": "standalone",
-        "external_python_sandbox": external_python_sandbox,
-        "bundled_stable_runtimes": list(bundled_components),
-    }
+    manifest = build_runtime_manifest(
+        version=version,
+        plat=plat,
+        arch=arch,
+        entry_path=entry_path,
+        external_python_sandbox=external_python_sandbox,
+        bundled_components=bundled_components,
+    )
     (runtime_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )

@@ -67,6 +67,26 @@ Release, provider API, and ACP compatibility have their own sources under
 
 ## Pending material changes
 
+### 2026-08-21 — bundled web-extract MCP runtime dispatch (PR #64)
+
+- Change: [PR #64](https://github.com/Raccoon-Office/Box-Agent/pull/64),
+  implementation on `codex/client-web-extract-runtime`; no merge or release
+  reference exists yet.
+- Runtime contract: `manifest.json` advertises `box-agent-web-extract` as a
+  stdio MCP that reuses the packaged `box-agent-acp` entry with
+  `--web-extract-mcp`. Source installs may continue to use the existing
+  `box-agent-web-extract-mcp` console script.
+- Compatibility: the manifest field and runtime argument are additive. Desktop
+  hosts must read the relative MCP entry and arguments before the bundled
+  extractor becomes available; hosts that only launch ACP remain unchanged.
+- Proof anchors: `tests/test_runtime_entry.py`, `tests/test_build_runtime.py`,
+  the packaged runtime manifest, and an MCP initialize/list/call probe against
+  the built binary.
+- Runtime boundary: the PR records build and local binary probe evidence
+  separately from officev3 install, host restart, and fresh live-task checks.
+- Rollback: revert the implementation commit and rebuild the prior runtime; no
+  user data or configuration migration is required.
+
 ### 2026-08-19 — flattened sub-agent contract with derived policy
 
 - Change: implementation on `codex/simplify-subagent-contract`; no merge or

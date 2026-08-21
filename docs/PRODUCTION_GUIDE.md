@@ -84,6 +84,23 @@ box-agent-runtime/
     └── node/         # Bundled macOS Node.js runtime for skill scripts
 ```
 
+`manifest.json` declares both the default ACP entry and bundled stdio MCP
+servers. Hosts should resolve each relative `entry` from the runtime directory
+instead of assuming a second executable exists:
+
+```json
+{
+  "entry": "bin/box-agent-acp",
+  "mcp_servers": {
+    "box-agent-web-extract": {
+      "entry": "bin/box-agent-acp",
+      "args": ["--web-extract-mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
 #### Spawning from Host Process
 
 ```typescript
@@ -102,6 +119,11 @@ const proc = spawn('build-resources/box-agent-runtime/bin/box-agent-acp', [], {
 // stdin/stdout: ACP JSON-RPC protocol (pure, no stray bytes)
 // stderr: diagnostic logs (safe to pipe to host logger)
 ```
+
+To launch the bundled web extractor, spawn the declared MCP `entry` with its
+declared `args` and keep stdin/stdout reserved for the MCP stdio protocol. This
+reuses the same frozen binary and does not require the source-install-only
+`box-agent-web-extract-mcp` console script.
 
 #### Key Constraints
 
