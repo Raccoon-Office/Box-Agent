@@ -1,4 +1,4 @@
-"""Regression coverage for research-synthesis handoff validation."""
+"""Regression coverage for the compact research-synthesis handoff."""
 
 from __future__ import annotations
 
@@ -19,52 +19,34 @@ VALIDATOR = (
 SKILL_ROOT = VALIDATOR.parents[1]
 
 
-def _write_focused_research(
+def _write_research(
     research: Path,
     *,
-    dimensions: int = 3,
     evidence: list[dict[str, str]] | None = None,
+    schema_version: int = 1,
+    narrative: str = "# Research\n\nA concise source-backed conclusion.\n",
 ) -> None:
     research.mkdir(parents=True)
-    for index in range(1, dimensions + 1):
-        (research / f"topic_dim{index:02d}.md").write_text(
-            f"# Dimension {index}\n\nEvidence for dimension {index}.\n",
-            encoding="utf-8",
-        )
-    (research / "topic_cross_verification.md").write_text(
-        "# Cross Verification\n\n## High Confidence\n\nConfirmed.\n",
-        encoding="utf-8",
-    )
-    (research / "topic_insight.md").write_text(
-        "# Insight\n\nCross-dimension conclusion.\n",
-        encoding="utf-8",
-    )
+    (research / "topic_research.md").write_text(narrative, encoding="utf-8")
+    records = evidence
+    if records is None:
+        records = [
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp launched Product One in 2026.",
+                "source_url": "https://example.com/news/product-one",
+                "source_type": "first_party",
+                "evidence_excerpt": "Example Corp launched Product One in 2026.",
+                "confidence": "high",
+                "status": "verified",
+            }
+        ]
     (research / "topic_evidence.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": schema_version,
                 "topic": "topic",
-                "target_entities": [
-                    {
-                        "entity": "Example Corp",
-                        "aliases": ["Example"],
-                        "official_domains": ["example.com"],
-                    }
-                ],
-                "evidence": evidence
-                or [
-                    {
-                        "entity": "Example Corp",
-                        "claim": "Example Corp launched Product One in 2026.",
-                        "source_url": "https://example.com/news/product-one",
-                        "source_type": "first_party",
-                        "evidence_excerpt": (
-                            "Example Corp launched Product One for customers in 2026."
-                        ),
-                        "confidence": "high",
-                        "status": "verified",
-                    }
-                ],
+                "evidence": records,
             },
             ensure_ascii=False,
             indent=2,
@@ -74,13 +56,12 @@ def _write_focused_research(
     )
 
 
-def test_validator_writes_success_report_for_reduced_focused_route(
-    tmp_path: Path,
-) -> None:
-    research = tmp_path / "research"
-    _write_focused_research(research)
+def _run_validator(
+    research: Path,
+    *,
+    extra_args: tuple[str, ...] = (),
+) -> tuple[subprocess.CompletedProcess[str], dict]:
     report = research / "qa" / "topic_research_check.json"
-
     result = subprocess.run(
         [
             sys.executable,
@@ -91,489 +72,406 @@ def test_validator_writes_success_report_for_reduced_focused_route(
             "topic",
             "--route",
             "B",
-            "--min-dimensions",
-            "3",
             "--report",
             str(report),
+            *extra_args,
         ],
         capture_output=True,
         text=True,
         check=False,
     )
+    return result, json.loads(report.read_text(encoding="utf-8"))
+
+
+def test_validator_accepts_one_consolidated_narrative_without_dimensions(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    _write_research(research)
+
+    result, payload = _run_validator(research)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["ok"] is True
     assert payload["quality_ok"] is True
     assert payload["delivery_allowed"] is True
     assert payload["handoff_status"] == "full"
-    assert payload["validator"] == "research-synthesis"
-    assert payload["route"] == "B"
-    assert payload["min_dimensions"] == 3
-    assert payload["dimension_count"] == 3
-    assert len(payload["files_checked"]) == 6
+    assert payload["min_dimensions"] is None
+    assert payload["dimension_count"] == 0
     assert payload["evidence_schema_version"] == 1
     assert payload["verified_evidence_count"] == 1
-    handoff = payload["presentation_handoff"]
-    assert handoff["schema_version"] == 1
-    assert handoff["delivery_mode"] == "full"
-    assert handoff["verified_facts"][0]["canonical"] == payload[
-        "verified_evidence"
-    ][0]["canonical"]
-    assert handoff["quality_summary"]["quality_ok"] is True
-    assert payload["first_party_entity_count"] == 1
-    assert payload["verified_evidence"][0]["canonical"] == (
-        "Example Corp | Example Corp launched Product One in 2026. | "
-        "first_party | https://example.com/news/product-one"
-    )
+    assert payload["presentation_handoff"]["delivery_mode"] == "full"
+    assert payload["presentation_handoff"]["quality_summary"][
+        "recommended_dimensions"
+    ] is None
 
 
-def test_validator_writes_failed_report_when_research_is_too_shallow(
+def test_deprecated_dimension_option_is_ignored_instead_of_blocking(
     tmp_path: Path,
 ) -> None:
     research = tmp_path / "research"
-    _write_focused_research(research, dimensions=2)
-    report = research / "qa" / "topic_research_check.json"
+    _write_research(research)
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "B",
-            "--min-dimensions",
-            "3",
-            "--report",
-            str(report),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    result, payload = _run_validator(
+        research,
+        extra_args=("--min-dimensions", "20"),
     )
 
-    assert result.returncode == 1
-    payload = json.loads(report.read_text(encoding="utf-8"))
-    assert payload["ok"] is False
+    assert result.returncode == 0
     assert payload["delivery_allowed"] is True
-    assert payload["handoff_status"] == "partial"
-    assert payload["presentation_handoff"]["delivery_mode"] == "partial"
-    assert payload["presentation_handoff"]["quality_summary"]["quality_ok"] is False
-    assert payload["dimension_count"] == 2
-    assert "expected at least 3 dimension files, found 2" in payload["issues"]
+    assert payload["handoff_status"] == "full"
+    assert payload["dimension_count"] == 0
 
 
-def test_validator_reports_hyphenated_reserved_suffixes_as_near_matches(
+def test_validator_accepts_optional_extra_metadata_and_schema_two(
     tmp_path: Path,
 ) -> None:
     research = tmp_path / "research"
-    research.mkdir()
-    for name in (
-        "topic-dim01.md",
-        "topic-wide01.md",
-        "topic-cross_verification.md",
-        "topic-insight.md",
-    ):
-        (research / name).write_text(f"# {name}\n", encoding="utf-8")
-    (research / "topic-evidence.json").write_text("{}\n", encoding="utf-8")
-    report = research / "qa" / "topic_research_check.json"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "A",
-            "--min-dimensions",
-            "1",
-            "--report",
-            str(report),
+    _write_research(
+        research,
+        schema_version=2,
+        evidence=[
+            {
+                "claim": "Example Corp launched Product One in 2026.",
+                "source_url": "https://example.com/news/product-one",
+                "evidence_excerpt": "The company launched Product One in 2026.",
+                "status": "verified",
+                "fact_key": "product.launch",
+                "time_basis": "2026",
+            }
         ],
-        capture_output=True,
-        text=True,
-        check=False,
     )
 
-    assert result.returncode == 1
-    issues = json.loads(report.read_text(encoding="utf-8"))["issues"]
-    joined = "\n".join(issues)
-    assert (
-        "topic_cross_verification.md; found non-canonical near-match "
-        "topic-cross_verification.md"
-    ) in joined
-    assert (
-        "topic_insight.md; found non-canonical near-match topic-insight.md"
-        in joined
-    )
-    assert "non-canonical dimension filenames ignored: topic-dim01.md" in joined
-    assert "Use the exact pattern topic_dimNN.md" in joined
-    assert "non-canonical near-match(es): topic-wide01.md" in joined
-    assert "Use the exact pattern topic_wideNN.md" in joined
-    assert (
-        "topic_evidence.json; found non-canonical near-match topic-evidence.json"
-        in joined
-    )
+    result, payload = _run_validator(research)
+
+    assert result.returncode == 0
+    assert payload["evidence_schema_version"] == 2
+    fact = payload["presentation_handoff"]["verified_facts"][0]
+    assert fact["entity"] == "topic"
+    assert fact["source_type"] == "secondary"
 
 
-def test_validator_rejects_cross_entity_excerpt_mismatch(tmp_path: Path) -> None:
+def test_validator_accepts_file_reference_for_file_only_evidence(
+    tmp_path: Path,
+) -> None:
     research = tmp_path / "research"
-    _write_focused_research(
+    _write_research(
         research,
         evidence=[
             {
-                "entity": "Example Corp",
-                "claim": "Example Corp launched Product One in 2026.",
-                "source_url": "https://example.com/news/product-one",
-                "source_type": "first_party",
-                "evidence_excerpt": "Another Company launched Product One in 2026.",
-                "confidence": "high",
+                "claim": "The supplied report states the project goal.",
+                "source_url": "file:strategy.pdf#page=3",
+                "source_type": "user_input",
+                "evidence_excerpt": "Project goal: improve delivery quality.",
                 "status": "verified",
             }
         ],
     )
-    report = research / "qa" / "topic_research_check.json"
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "B",
-            "--min-dimensions",
-            "3",
-            "--report",
-            str(report),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result, payload = _run_validator(research)
 
-    assert result.returncode == 1
-    payload = json.loads(report.read_text(encoding="utf-8"))
-    assert any(
-        "evidence_excerpt does not name entity" in issue
-        for issue in payload["issues"]
-    )
+    assert result.returncode == 0
+    assert payload["verified_evidence_count"] == 1
 
 
-def test_validator_rejects_first_party_source_on_wrong_domain(tmp_path: Path) -> None:
-    research = tmp_path / "research"
-    _write_focused_research(
-        research,
-        evidence=[
-            {
-                "entity": "Example Corp",
-                "claim": "Example Corp launched Product One in 2026.",
-                "source_url": "https://unrelated.example/news/product-one",
-                "source_type": "first_party",
-                "evidence_excerpt": (
-                    "Example Corp launched Product One for customers in 2026."
-                ),
-                "confidence": "high",
-                "status": "verified",
-            }
-        ],
-    )
-    report = research / "qa" / "topic_research_check.json"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "B",
-            "--min-dimensions",
-            "3",
-            "--report",
-            str(report),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 1
-    payload = json.loads(report.read_text(encoding="utf-8"))
-    assert any(
-        "does not match an official domain" in issue for issue in payload["issues"]
-    )
-    assert any(
-        "no verified first_party evidence" in warning
-        for warning in payload["warnings"]
-    )
-
-
-def test_validator_allows_partial_delivery_with_verified_subset(
+def test_validator_excludes_search_results_and_homepages_without_repair_loop(
     tmp_path: Path,
 ) -> None:
     research = tmp_path / "research"
-    _write_focused_research(
+    _write_research(
         research,
-        dimensions=2,
         evidence=[
             {
-                "entity": "Example Corp",
-                "claim": "Example Corp launched Product One in 2026.",
-                "source_url": "https://example.com/news/product-one",
-                "source_type": "first_party",
-                "evidence_excerpt": (
-                    "Example Corp launched Product One for customers in 2026."
-                ),
-                "confidence": "high",
+                "claim": "Discovery result",
+                "source_url": "https://www.google.com/search?q=example",
+                "evidence_excerpt": "Search snippet",
                 "status": "verified",
             },
             {
-                "entity": "Example Corp",
-                "claim": "Example Corp reached 48.1% in 2026.",
-                "source_url": "https://example.com/news/unread",
-                "source_type": "secondary",
-                "evidence_excerpt": "A search result mentioned market growth.",
-                "confidence": "low",
+                "claim": "Homepage result",
+                "source_url": "https://example.com/",
+                "evidence_excerpt": "Homepage text",
+                "status": "verified",
+            },
+        ],
+    )
+
+    result, payload = _run_validator(research)
+
+    assert result.returncode == 0
+    assert payload["delivery_allowed"] is True
+    assert payload["handoff_status"] == "framework"
+    assert payload["verified_evidence_count"] == 0
+    warnings = "\n".join(payload["warnings"])
+    assert "search-results page" in warnings
+    assert "origin homepage" in warnings
+
+
+def test_validator_keeps_verified_subset_and_reports_unverified_as_gap(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    _write_research(
+        research,
+        evidence=[
+            {
+                "claim": "Supported claim",
+                "source_url": "https://example.com/report/one",
+                "evidence_excerpt": "Supported claim",
+                "status": "verified",
+            },
+            {
+                "claim": "Candidate only",
+                "source_url": "https://example.com/report/two",
                 "status": "unverified",
-                "unverified_reason": "The exact page could not be read.",
+                "unverified_reason": "The page could not be read.",
             },
         ],
     )
-    report = research / "qa" / "topic_research_check.json"
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "B",
-            "--min-dimensions",
-            "3",
-            "--report",
-            str(report),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result, payload = _run_validator(research)
 
-    assert result.returncode == 1
-    payload = json.loads(report.read_text(encoding="utf-8"))
-    assert payload["quality_ok"] is False
-    assert payload["delivery_allowed"] is True
+    assert result.returncode == 0
     assert payload["handoff_status"] == "partial"
     assert payload["verified_evidence_count"] == 1
     assert payload["unverified_evidence_count"] == 1
-    assert any("48.1%" in warning for warning in payload["warnings"])
-    assert not any("48.1%" in issue for issue in payload["issues"])
     assert len(payload["presentation_handoff"]["verified_facts"]) == 1
-    assert any(
-        "48.1%" in gap for gap in payload["presentation_handoff"]["gaps"]
-    )
 
 
-def test_validator_allows_framework_delivery_without_verified_evidence(
-    tmp_path: Path,
-) -> None:
+def test_markdown_format_findings_are_advisory(tmp_path: Path) -> None:
     research = tmp_path / "research"
-    _write_focused_research(
+    _write_research(
         research,
-        evidence=[
-            {
-                "entity": "Example Corp",
-                "claim": "Example Corp reached 62.2% in 2026.",
-                "source_url": "https://example.com/news/unread",
-                "source_type": "secondary",
-                "evidence_excerpt": "Unverified search discovery only.",
-                "confidence": "low",
-                "status": "unverified",
-                "unverified_reason": "The source page was unavailable.",
-            }
-        ],
-    )
-    report = research / "qa" / "topic_research_check.json"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "B",
-            "--min-dimensions",
-            "3",
-            "--report",
-            str(report),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+        narrative="# Research\n\nA supported statement.[^missing]\n",
     )
 
-    assert result.returncode == 1
-    payload = json.loads(report.read_text(encoding="utf-8"))
-    assert payload["quality_ok"] is False
+    result, payload = _run_validator(research)
+
+    assert result.returncode == 0
     assert payload["delivery_allowed"] is True
-    assert payload["handoff_status"] == "framework"
-    assert payload["verified_evidence"] == []
-    assert payload["presentation_handoff"]["delivery_mode"] == "framework"
-    assert payload["presentation_handoff"]["verified_facts"] == []
-    assert "no verified evidence available" in "\n".join(payload["issues"])
+    assert payload["handoff_status"] == "partial"
+    assert any("missing footnote definitions" in item for item in payload["warnings"])
 
 
-def test_validator_does_not_allow_delivery_before_minimum_structure_exists(
-    tmp_path: Path,
-) -> None:
+def test_missing_core_artifacts_remains_invalid(tmp_path: Path) -> None:
     research = tmp_path / "research"
     research.mkdir()
-    (research / "topic_dim01.md").write_text("# One dimension\n", encoding="utf-8")
-    report = research / "qa" / "topic_research_check.json"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "B",
-            "--min-dimensions",
-            "3",
-            "--report",
-            str(report),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    (research / "topic_evidence.json").write_text(
+        '{"schema_version": 1, "topic": "topic", "evidence": []}\n',
+        encoding="utf-8",
     )
 
+    result, payload = _run_validator(research)
+
     assert result.returncode == 1
-    payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["delivery_allowed"] is False
     assert payload["handoff_status"] == "invalid"
-    assert payload["presentation_handoff"]["delivery_mode"] == "invalid"
+    assert "missing narrative research artifact" in "\n".join(payload["issues"])
 
 
-def test_validator_excludes_conflicting_user_input_from_verified_handoff(
+def test_validator_excludes_automatically_detected_fact_conflicts(
     tmp_path: Path,
 ) -> None:
     research = tmp_path / "research"
-    _write_focused_research(
+    _write_research(
         research,
         evidence=[
             {
                 "entity": "Example Corp",
                 "claim": "Example Corp launched Product One in 2026.",
-                "source_url": "https://example.com/news/product-one",
-                "source_type": "first_party",
-                "evidence_excerpt": (
-                    "Example Corp launched Product One for customers in 2026."
-                ),
-                "confidence": "high",
+                "source_url": "https://example.com/news/launch-a",
+                "evidence_excerpt": "Example Corp launched Product One in 2026.",
                 "status": "verified",
             },
             {
                 "entity": "Example Corp",
-                "claim": "Example Corp did not launch Product One in 2025.",
-                "source_url": "https://example.com/news/product-one",
-                "source_type": "first_party",
-                "evidence_excerpt": (
-                    "Example Corp launched Product One for customers in 2026, not 2025."
-                ),
-                "confidence": "high",
-                "status": "conflicting",
-                "user_input_claim": "Example Corp launched Product One in 2025.",
-                "user_input_alignment": "conflicting",
-                "conflict_note": "The official launch year conflicts with the user input.",
+                "claim": "Example Corp launched Product One in 2025.",
+                "source_url": "https://example.com/news/launch-b",
+                "evidence_excerpt": "Example Corp launched Product One in 2025.",
+                "status": "verified",
+            },
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp operates Product Two in 2026.",
+                "source_url": "https://example.com/news/product-two",
+                "evidence_excerpt": "Example Corp operates Product Two in 2026.",
+                "status": "verified",
             },
         ],
     )
-    report = research / "qa" / "topic_research_check.json"
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--research-dir",
-            str(research),
-            "--topic",
-            "topic",
-            "--route",
-            "B",
-            "--min-dimensions",
-            "3",
-            "--report",
-            str(report),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result, payload = _run_validator(research)
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert result.returncode == 0
+    assert payload["handoff_status"] == "partial"
     assert payload["verified_evidence_count"] == 1
-    assert payload["conflicting_evidence_count"] == 1
-    assert len(payload["verified_evidence"]) == 1
-    assert any(
-        "excluded from downstream verified evidence" in warning
-        for warning in payload["warnings"]
+    assert payload["auto_conflicting_evidence_count"] == 2
+    assert payload["detected_conflict_count"] == 1
+    assert payload["verified_evidence"][0]["claim"].endswith("Product Two in 2026.")
+    assert any("conflict for the same fact" in item for item in payload["warnings"])
+
+
+def test_validator_allows_same_fact_at_explicitly_different_times(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    _write_research(
+        research,
+        schema_version=2,
+        evidence=[
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp revenue was 10 million in 2025.",
+                "source_url": "https://example.com/filing/2025",
+                "evidence_excerpt": "Example Corp revenue was 10 million in 2025.",
+                "fact_key": "revenue.total",
+                "fact_value": "10",
+                "time_basis": "2025",
+                "scope": "global",
+                "unit": "USD-million",
+                "status": "verified",
+            },
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp revenue was 12 million in 2026.",
+                "source_url": "https://example.com/filing/2026",
+                "evidence_excerpt": "Example Corp revenue was 12 million in 2026.",
+                "fact_key": "revenue.total",
+                "fact_value": "12",
+                "time_basis": "2026",
+                "scope": "global",
+                "unit": "USD-million",
+                "status": "verified",
+            },
+        ],
     )
 
+    result, payload = _run_validator(research)
 
-def test_research_instructions_preserve_depth_without_rephrased_query_loops() -> None:
+    assert result.returncode == 0
+    assert payload["handoff_status"] == "full"
+    assert payload["verified_evidence_count"] == 2
+    assert payload["detected_conflict_count"] == 0
+
+
+def test_validator_excludes_opposite_claim_excerpt_direction(tmp_path: Path) -> None:
+    research = tmp_path / "research"
+    _write_research(
+        research,
+        evidence=[
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp revenue rose 20% in 2026.",
+                "source_url": "https://example.com/filing/revenue",
+                "evidence_excerpt": "Example Corp revenue fell 20% in 2026.",
+                "status": "verified",
+            }
+        ],
+    )
+
+    result, payload = _run_validator(research)
+
+    assert result.returncode == 0
+    assert payload["handoff_status"] == "framework"
+    assert payload["verified_evidence_count"] == 0
+    assert any("claim direction" in item for item in payload["warnings"])
+
+
+def test_validator_excludes_chinese_direction_mismatch(tmp_path: Path) -> None:
+    research = tmp_path / "research"
+    _write_research(
+        research,
+        evidence=[
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp 2026年营收增长20%。",
+                "source_url": "https://example.com/filing/revenue-cn",
+                "evidence_excerpt": "Example Corp 2026年营收下降20%。",
+                "status": "verified",
+            }
+        ],
+    )
+
+    result, payload = _run_validator(research)
+
+    assert result.returncode == 0
+    assert payload["verified_evidence_count"] == 0
+    assert any("claim direction" in item for item in payload["warnings"])
+
+
+def test_validator_excludes_negated_claim_against_affirmed_excerpt(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    _write_research(
+        research,
+        evidence=[
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp did not launch Product One in 2026.",
+                "source_url": "https://example.com/news/launch",
+                "evidence_excerpt": "Example Corp launched Product One in 2026.",
+                "status": "verified",
+            }
+        ],
+    )
+
+    result, payload = _run_validator(research)
+
+    assert result.returncode == 0
+    assert payload["verified_evidence_count"] == 0
+    assert any("negates term" in item for item in payload["warnings"])
+
+
+def test_validator_excludes_excerpt_missing_claim_number(tmp_path: Path) -> None:
+    research = tmp_path / "research"
+    _write_research(
+        research,
+        evidence=[
+            {
+                "entity": "Example Corp",
+                "claim": "Example Corp revenue reached 48.1% in 2026.",
+                "source_url": "https://example.com/filing/share",
+                "evidence_excerpt": "Example Corp reported growth in 2026.",
+                "status": "verified",
+            }
+        ],
+    )
+
+    result, payload = _run_validator(research)
+
+    assert result.returncode == 0
+    assert payload["verified_evidence_count"] == 0
+    assert any("missing claim number" in item for item in payload["warnings"])
+
+
+def test_research_instructions_keep_source_checks_but_remove_fixed_structure() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     routes = (SKILL_ROOT / "references" / "routes.md").read_text(encoding="utf-8")
-    prompts = (SKILL_ROOT / "references" / "prompts.md").read_text(encoding="utf-8")
-    output_contract = (
-        SKILL_ROOT / "references" / "output_contract.md"
-    ).read_text(encoding="utf-8")
+    output_contract = (SKILL_ROOT / "references" / "output_contract.md").read_text(
+        encoding="utf-8"
+    )
+    prompts = (SKILL_ROOT / "references" / "prompts.md").read_text(
+        encoding="utf-8"
+    )
+    combined = "\n".join((skill, routes, output_contract, prompts))
 
-    assert "covering distinct evidence gaps" in skill
-    assert "do not rerun a near-equivalent" in skill
-    assert "use `managed_browser_*` for independent public-web" in skill
-    assert "Use `user_browser_*` when the read depends on the user's current page" in skill
-    assert "does not require a\n  separate authorization prompt" in skill
-    assert "Do not route between browser modes through a" in skill
-    assert "five distinct evidence intents" in routes
-    assert "reworded versions of an already-run entity/fact query do not add depth" in routes
-    assert "`research/{topic}_evidence.json`" in skill
-    assert "search-result snippet alone is not evidence" in prompts
-    assert "user_input_alignment" in output_contract
-    assert "verified_evidence" in output_contract
+    assert "there is no default" in skill
+    assert "minimum, or target count" in skill
+    assert "Default to only two research artifacts" in skill
+    assert "Focused search has no fixed five-query or ten-dimension requirement" in routes
+    assert "exact opened article, report, filing, or data page" in output_contract
+    assert "Do not create one artifact per agent or dimension" in prompts
+    assert "fact_key" in output_contract
+    assert "no `fact_key`" in output_contract
+    assert "schema v2 exactly" not in combined
+    assert "10-20 dimensions" not in combined
 
 
 def test_research_instructions_use_artifact_relative_validator_paths() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-    assert '--research-dir "research"' in skill
+    assert "--research-dir research" in skill
     assert '--report "research/qa/{topic}_research_check.json"' in skill
-    assert "artifact-root-relative `research/...`" in skill
-    assert "Reserved research artifact templates override" in skill
-    assert "ai-quality-scheduling_dim01.md" in skill
-    assert "never write\n  `ai-quality-scheduling-dim01.md`" in skill
-    assert "displayed session" in skill
-    assert "workspace is the filesystem safety boundary" in skill
-    assert "Never derive an absolute research path from it" in skill
-    assert "do not use `$(pwd)/output/research`" in skill
-    assert '--research-dir "{workspace}/research"' not in skill
+    assert '"$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py"' in skill
+    assert "$(pwd)/output/research" not in skill

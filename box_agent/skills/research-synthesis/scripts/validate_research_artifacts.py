@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Validate deep research artifacts and Markdown footnote integrity."""
+"""Validate the small, source-first research handoff contract.
+
+The validator deliberately checks only what downstream consumers need:
+
+* there is at least one narrative research artifact;
+* the evidence ledger is readable; and
+* every row handed off as verified points to a concrete HTTP(S) source page.
+
+Formatting, dimension counts, footnote style, and prose/evidence similarity are
+quality hints, not delivery gates.  This keeps a usable partial or framework
+handoff from turning into a repair loop.
+"""
 
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
-import math
 import re
 import sys
 import unicodedata
@@ -15,24 +26,6 @@ from urllib.parse import urlsplit
 
 FOOTNOTE_MARKER_RE = re.compile(r"\[\^([A-Za-z0-9_.:-]+)\]")
 FOOTNOTE_DEF_RE = re.compile(r"^\[\^([A-Za-z0-9_.:-]+)\]:", re.MULTILINE)
-NUMBER_RE = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?%?")
-LATIN_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,}")
-CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]+")
-SOURCE_TYPES = frozenset(
-    {
-        "first_party",
-        "government",
-        "regulator",
-        "filing",
-        "standards_body",
-        "academic",
-        "reputable_media",
-        "secondary",
-        "user_input",
-    }
-)
-CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
-EVIDENCE_STATUSES = frozenset({"verified", "conflicting", "unverified"})
 SEARCH_RESULT_HOSTS = frozenset(
     {
         "bing.com",
@@ -42,63 +35,100 @@ SEARCH_RESULT_HOSTS = frozenset(
         "search.yahoo.com",
     }
 )
-SEMANTIC_STOPWORDS = frozenset(
-    {
-        "about",
-        "after",
-        "also",
-        "and",
-        "are",
-        "been",
-        "for",
-        "from",
-        "has",
-        "have",
-        "into",
-        "its",
-        "that",
-        "the",
-        "their",
-        "this",
-        "was",
-        "were",
-        "with",
-    }
-)
-
-
-ROUTE_REQUIRED = {
-    "A": ["{topic}_cross_verification.md", "{topic}_insight.md"],
-    "B": ["{topic}_cross_verification.md", "{topic}_insight.md"],
-    "C": [
-        "{topic}_file_analysis.md",
-        "{topic}_cross_verification.md",
-        "{topic}_insight.md",
-    ],
-    "D": [
-        "{topic}_file_analysis.md",
-        "{topic}_cross_verification.md",
-        "{topic}_insight.md",
-    ],
+EVIDENCE_STATUSES = frozenset({"verified", "conflicting", "unverified"})
+NUMBER_RE = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?%?")
+LATIN_WORD_RE = re.compile(r"[a-z][a-z-]*")
+DIRECTION_TERMS = {
+    "increase": (
+        "increase",
+        "increased",
+        "increasing",
+        "grew",
+        "growth",
+        "rise",
+        "risen",
+        "rose",
+        "上涨",
+        "上升",
+        "增加",
+        "增长",
+        "提升",
+    ),
+    "decrease": (
+        "decrease",
+        "decreased",
+        "decreasing",
+        "decline",
+        "declined",
+        "drop",
+        "dropped",
+        "fall",
+        "fell",
+        "fallen",
+        "下跌",
+        "下降",
+        "减少",
+        "降低",
+        "衰退",
+    ),
+    "above": (
+        "above",
+        "exceed",
+        "exceeded",
+        "greater",
+        "higher",
+        "超过",
+        "高于",
+    ),
+    "below": (
+        "below",
+        "fewer",
+        "less",
+        "lower",
+        "under",
+        "低于",
+        "少于",
+        "不足",
+    ),
 }
-
-
-def hyphenated_reserved_variant(topic: str, canonical_name: str) -> str | None:
-    """Return the common non-canonical form that replaces the suffix `_` with `-`."""
-    prefix = f"{topic}_"
-    if not canonical_name.startswith(prefix):
-        return None
-    return f"{topic}-{canonical_name[len(prefix):]}"
+OPPOSITE_DIRECTIONS = {
+    "increase": "decrease",
+    "decrease": "increase",
+    "above": "below",
+    "below": "above",
+}
+NEGATABLE_CJK_TERMS = (
+    "发布",
+    "推出",
+    "上线",
+    "批准",
+    "确认",
+    "增长",
+    "增加",
+    "上升",
+    "下降",
+    "减少",
+    "超过",
+    "达到",
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Validate deep research output files for a topic."
+        description="Validate source URLs in a research handoff."
     )
     parser.add_argument("--research-dir", required=True, type=Path)
     parser.add_argument("--topic", required=True)
-    parser.add_argument("--route", required=True, choices=sorted(ROUTE_REQUIRED))
-    parser.add_argument("--min-dimensions", type=int, default=10)
+    parser.add_argument("--route", required=True, choices=("A", "B", "C", "D"))
+    parser.add_argument(
+        "--min-dimensions",
+        type=int,
+        default=None,
+        help=(
+            "Deprecated compatibility option. Dimension counts are no longer "
+            "validated or used as a delivery threshold."
+        ),
+    )
     parser.add_argument(
         "--report",
         type=Path,
@@ -107,7 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-missing-footnotes",
         action="store_true",
-        help="Only warn when footnote markers lack definitions.",
+        help="Deprecated compatibility option; missing definitions are always warnings.",
     )
     return parser.parse_args()
 
@@ -122,11 +152,49 @@ def write_report(path: Path | None, payload: dict[str, object]) -> None:
     )
 
 
-def collect_footnotes(path: Path) -> tuple[set[str], set[str]]:
-    text = path.read_text(encoding="utf-8")
-    definitions = set(FOOTNOTE_DEF_RE.findall(text))
+def normalized_host(url: str) -> str:
+    try:
+        return (urlsplit(url).hostname or "").casefold().strip(".")
+    except ValueError:
+        return ""
+
+
+def is_concrete_source_page(
+    url: str,
+    *,
+    source_type: str = "secondary",
+) -> tuple[bool, str | None]:
+    """Return whether *url* identifies a concrete page rather than discovery UI."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False, "source_url is not a valid URL"
+    if source_type == "user_input" and parsed.scheme in {"file", "user-input"}:
+        return True, None
+    host = (parsed.hostname or "").casefold().strip(".")
+    if parsed.scheme not in {"http", "https"} or not host:
+        return False, "source_url must be an absolute http(s) URL"
+    if host in SEARCH_RESULT_HOSTS:
+        return False, "source_url points to a search-results page"
+    if not parsed.path.strip("/") and not parsed.query:
+        return False, "source_url must identify a concrete page, not an origin homepage"
+    return True, None
+
+
+def collect_footnote_warnings(path: Path) -> list[str]:
+    """Return advisory Markdown findings without rejecting the handoff."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"could not read narrative file {path.name}: {exc}"]
     markers = set(FOOTNOTE_MARKER_RE.findall(text))
-    return markers - definitions, definitions
+    definitions = set(FOOTNOTE_DEF_RE.findall(text))
+    missing = sorted(markers - definitions)
+    if not missing:
+        return []
+    return [
+        f"{path.name}: missing footnote definitions for {', '.join(missing)}"
+    ]
 
 
 def normalized_text(value: object) -> str:
@@ -137,51 +205,165 @@ def normalized_text(value: object) -> str:
     )
 
 
-def semantic_tokens(value: object) -> set[str]:
+def _normalized_numbers(value: object) -> set[str]:
+    return {match.replace(",", "") for match in NUMBER_RE.findall(str(value or ""))}
+
+
+def _stem_latin_word(word: str) -> str:
+    for suffix in ("ing", "ied", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) > len(suffix) + 2:
+            if suffix == "ied":
+                return word[: -len(suffix)] + "y"
+            return word[: -len(suffix)]
+    return word
+
+
+def _latin_words(value: object) -> set[str]:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    tokens = {
-        token
-        for token in LATIN_TOKEN_RE.findall(text)
-        if token not in SEMANTIC_STOPWORDS
+    return {_stem_latin_word(word) for word in LATIN_WORD_RE.findall(text)}
+
+
+def _negated_terms(value: object) -> set[str]:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    terms = {
+        _stem_latin_word(match.group(1))
+        for match in re.finditer(
+            r"\b(?:did\s+|does\s+|do\s+|is\s+|are\s+|was\s+|were\s+|"
+            r"has\s+|have\s+)?(?:not|never)\s+([a-z][a-z-]*)",
+            text,
+        )
     }
-    for run in CJK_RUN_RE.findall(text):
-        if len(run) == 1:
-            tokens.add(run)
-            continue
-        tokens.update(run[index : index + 2] for index in range(len(run) - 1))
-    return tokens
+    terms.update(
+        term
+        for term in NEGATABLE_CJK_TERMS
+        if re.search(rf"(?:没有|并未|未曾|不曾|未|不)\s*{re.escape(term)}", text)
+    )
+    return terms
 
 
-def normalized_host(url: str) -> str:
-    try:
-        return (urlsplit(url).hostname or "").casefold().strip(".")
-    except ValueError:
-        return ""
+def _direction_signals(value: object) -> set[str]:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    signals: set[str] = set()
+    for direction, terms in DIRECTION_TERMS.items():
+        for term in terms:
+            pattern = rf"\b{re.escape(term)}\b" if term.isascii() else re.escape(term)
+            for match in re.finditer(pattern, text):
+                prefix = text[max(0, match.start() - 10) : match.start()]
+                if re.search(r"(?:not|never)\s+$", prefix) or re.search(
+                    r"(?:没有|并未|未曾|不曾|未|不)\s*$", prefix
+                ):
+                    continue
+                signals.add(direction)
+                break
+    return signals
 
 
-def host_matches_domain(host: str, domain: str) -> bool:
-    normalized_domain = domain.casefold().strip(".")
-    return bool(
-        host
-        and normalized_domain
-        and (host == normalized_domain or host.endswith(f".{normalized_domain}"))
+def claim_excerpt_conflicts(claim: str, excerpt: str) -> list[str]:
+    """Return clear number, direction, or negation mismatches for one row."""
+    findings: list[str] = []
+    missing_numbers = sorted(_normalized_numbers(claim) - _normalized_numbers(excerpt))
+    if missing_numbers:
+        findings.append("excerpt is missing claim number(s): " + ", ".join(missing_numbers))
+
+    claim_directions = _direction_signals(claim)
+    excerpt_directions = _direction_signals(excerpt)
+    for direction in sorted(claim_directions):
+        opposite = OPPOSITE_DIRECTIONS[direction]
+        if opposite in excerpt_directions and direction not in excerpt_directions:
+            findings.append(
+                f"claim direction '{direction}' conflicts with excerpt direction "
+                f"'{opposite}'"
+            )
+
+    claim_negated = _negated_terms(claim)
+    excerpt_negated = _negated_terms(excerpt)
+    claim_words = _latin_words(claim) | {
+        term for term in NEGATABLE_CJK_TERMS if term in claim
+    }
+    excerpt_words = _latin_words(excerpt) | {
+        term for term in NEGATABLE_CJK_TERMS if term in excerpt
+    }
+    negated_only_in_claim = claim_negated & (excerpt_words - excerpt_negated)
+    negated_only_in_excerpt = excerpt_negated & (claim_words - claim_negated)
+    if negated_only_in_claim:
+        findings.append(
+            "claim negates term(s) affirmed by excerpt: "
+            + ", ".join(sorted(negated_only_in_claim))
+        )
+    if negated_only_in_excerpt:
+        findings.append(
+            "excerpt negates term(s) affirmed by claim: "
+            + ", ".join(sorted(negated_only_in_excerpt))
+        )
+    return findings
+
+
+def _claim_signature(claim: str, entity: str) -> str:
+    """Build a conservative predicate skeleton for rows lacking a fact key."""
+    text = unicodedata.normalize("NFKC", claim).casefold()
+    entity_text = unicodedata.normalize("NFKC", entity).casefold().strip()
+    if entity_text:
+        text = text.replace(entity_text, " ")
+    for terms in DIRECTION_TERMS.values():
+        for term in sorted(terms, key=len, reverse=True):
+            pattern = rf"\b{re.escape(term)}\b" if term.isascii() else re.escape(term)
+            text = re.sub(pattern, " <direction> ", text)
+    text = re.sub(
+        r"\b(?:did\s+|does\s+|do\s+|is\s+|are\s+|was\s+|were\s+|"
+        r"has\s+|have\s+)?(?:not|never)\b",
+        " ",
+        text,
+    )
+    text = re.sub(r"(?:没有|并未|未曾|不曾|未|不)", "", text)
+    text = NUMBER_RE.sub(" <number> ", text)
+    return re.sub(r"[^a-z0-9\u3400-\u9fff<>]+", "", text)
+
+
+def _claim_value_signature(claim: str) -> str:
+    return "|".join(
+        (
+            "numbers=" + ",".join(sorted(_normalized_numbers(claim))),
+            "directions=" + ",".join(sorted(_direction_signals(claim))),
+            "negated=" + ",".join(sorted(_negated_terms(claim))),
+        )
     )
 
 
-def canonical_evidence(record: dict[str, object]) -> str:
-    return " | ".join(
-        str(record.get(field) or "").strip()
-        for field in ("entity", "claim", "source_type", "source_url")
+def _fact_group_key(record: dict[str, object]) -> tuple[str, ...]:
+    entity = str(record.get("entity") or "")
+    fact_key = str(record.get("fact_key") or "").strip()
+    if fact_key:
+        return (
+            "structured",
+            normalized_text(entity),
+            normalized_text(fact_key),
+            normalized_text(record.get("time_basis") or "unspecified"),
+            normalized_text(record.get("scope") or "unspecified"),
+        )
+    return (
+        "heuristic",
+        normalized_text(entity),
+        _claim_signature(str(record.get("claim") or ""), entity),
+        normalized_text(record.get("time_basis") or "unspecified"),
+        normalized_text(record.get("scope") or "unspecified"),
     )
+
+
+def canonical_evidence(record: dict[str, object], *, topic: str) -> str:
+    entity = str(record.get("entity") or topic).strip()
+    claim = str(record.get("claim") or "").strip()
+    source_type = str(record.get("source_type") or "secondary").strip()
+    source_url = str(record.get("source_url") or "").strip()
+    return " | ".join((entity, claim, source_type, source_url))
 
 
 def validate_evidence_ledger(
     path: Path,
     topic: str,
 ) -> tuple[list[str], list[str], dict[str, object]]:
-    errors: list[str] = []
+    """Validate provenance and exclude contradictory verified candidates."""
+    structural_errors: list[str] = []
     warnings: list[str] = []
-    verified_evidence: list[dict[str, object]] = []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -190,423 +372,217 @@ def validate_evidence_ledger(
         return [f"{path.name}: invalid JSON: {exc}"], [], {}
     if not isinstance(payload, dict):
         return [f"{path.name}: root must be a JSON object"], [], {}
-    if payload.get("schema_version") != 1:
-        errors.append(f"{path.name}: schema_version must be 1")
-    if payload.get("topic") != topic:
-        errors.append(f"{path.name}: topic must equal {topic!r}")
 
-    raw_entities = payload.get("target_entities")
-    if not isinstance(raw_entities, list) or not raw_entities:
-        errors.append(f"{path.name}: target_entities must be a non-empty array")
-        raw_entities = []
-    entities: dict[str, dict[str, object]] = {}
-    for index, raw_entity in enumerate(raw_entities):
-        label = f"{path.name}: target_entities.{index}"
-        if not isinstance(raw_entity, dict):
-            errors.append(f"{label} must be an object")
-            continue
-        entity = str(raw_entity.get("entity") or "").strip()
-        if not entity:
-            errors.append(f"{label}.entity must be non-empty")
-            continue
-        key = normalized_text(entity)
-        if key in entities:
-            errors.append(f"{label}.entity duplicates {entity!r}")
-            continue
-        aliases = raw_entity.get("aliases")
-        if not isinstance(aliases, list) or not all(
-            isinstance(alias, str) and alias.strip() for alias in aliases
-        ):
-            errors.append(f"{label}.aliases must be a non-empty string array")
-            aliases = []
-        official_domains = raw_entity.get("official_domains", [])
-        if not isinstance(official_domains, list) or not all(
-            isinstance(domain, str) and domain.strip() for domain in official_domains
-        ):
-            errors.append(f"{label}.official_domains must be a string array")
-            official_domains = []
-        entities[key] = {
-            "entity": entity,
-            "aliases": [entity, *aliases],
-            "official_domains": [
-                str(domain).casefold().strip(".") for domain in official_domains
-            ],
-        }
+    schema_version = payload.get("schema_version", 1)
+    if not isinstance(schema_version, int) or schema_version < 1:
+        structural_errors.append(f"{path.name}: schema_version must be a positive integer")
+    ledger_topic = payload.get("topic")
+    if ledger_topic not in (None, topic):
+        structural_errors.append(f"{path.name}: topic must equal {topic!r}")
 
     raw_evidence = payload.get("evidence")
-    if not isinstance(raw_evidence, list) or not raw_evidence:
-        errors.append(f"{path.name}: evidence must be a non-empty array")
+    if not isinstance(raw_evidence, list):
+        structural_errors.append(f"{path.name}: evidence must be an array")
         raw_evidence = []
-    verified_by_entity: dict[str, int] = {key: 0 for key in entities}
-    first_party_by_entity: dict[str, int] = {key: 0 for key in entities}
+
+    verified_evidence: list[dict[str, object]] = []
+    verified_candidates: list[dict[str, object]] = []
     status_counts = {status: 0 for status in EVIDENCE_STATUSES}
-    seen_canonical: set[str] = set()
+    seen: set[str] = set()
     for index, raw_record in enumerate(raw_evidence):
         label = f"{path.name}: evidence.{index}"
-        record_error_start = len(errors)
         if not isinstance(raw_record, dict):
-            errors.append(f"{label} must be an object")
+            warnings.append(f"{label} is not an object; excluded")
             continue
-        missing = [
-            field
-            for field in (
-                "entity",
-                "claim",
-                "source_url",
-                "source_type",
-                "evidence_excerpt",
-                "confidence",
-                "status",
-            )
-            if not isinstance(raw_record.get(field), str)
-            or not str(raw_record.get(field)).strip()
-        ]
-        if missing:
-            errors.append(f"{label} missing non-empty fields: {', '.join(missing)}")
-            continue
-        record = {
-            key: str(value).strip() if isinstance(value, str) else value
-            for key, value in raw_record.items()
-        }
-        entity_key = normalized_text(record["entity"])
-        entity_spec = entities.get(entity_key)
-        if entity_spec is None:
-            errors.append(
-                f"{label}.entity {record['entity']!r} is not declared in target_entities"
-            )
-            continue
-        source_type = str(record["source_type"]).casefold()
-        confidence = str(record["confidence"]).casefold()
-        status = str(record["status"]).casefold()
-        if source_type not in SOURCE_TYPES:
-            errors.append(
-                f"{label}.source_type must be one of {', '.join(sorted(SOURCE_TYPES))}"
-            )
-        if confidence not in CONFIDENCE_LEVELS:
-            errors.append(
-                f"{label}.confidence must be one of {', '.join(sorted(CONFIDENCE_LEVELS))}"
-            )
+
+        status = str(raw_record.get("status") or "unverified").casefold().strip()
         if status not in EVIDENCE_STATUSES:
-            errors.append(
-                f"{label}.status must be one of {', '.join(sorted(EVIDENCE_STATUSES))}"
-            )
-            continue
+            warnings.append(f"{label}.status is unknown; treated as unverified")
+            status = "unverified"
         status_counts[status] += 1
-
-        source_url = str(record["source_url"])
-        try:
-            parsed_url = urlsplit(source_url)
-        except ValueError:
-            parsed_url = urlsplit("")
-        host = normalized_host(source_url)
-        is_user_file_reference = (
-            source_type == "user_input"
-            and parsed_url.scheme in {"file", "user-input"}
-        )
-        if (
-            not is_user_file_reference
-            and (parsed_url.scheme not in {"http", "https"} or not host)
-        ):
-            errors.append(
-                f"{label}.source_url must be an absolute http(s) URL, or a "
-                "file:/user-input: reference for source_type=user_input"
-            )
-        if not is_user_file_reference and host in SEARCH_RESULT_HOSTS:
-            errors.append(
-                f"{label}.source_url points to a search-results page, not evidence"
-            )
-        aliases = [
-            normalized_text(alias)
-            for alias in entity_spec["aliases"]
-            if normalized_text(alias)
-        ]
-        excerpt_normalized = normalized_text(record["evidence_excerpt"])
-        if not any(alias in excerpt_normalized for alias in aliases):
-            errors.append(
-                f"{label}.evidence_excerpt does not name entity "
-                f"{entity_spec['entity']!r} or one of its aliases"
-            )
-
-        claim = str(record["claim"])
-        excerpt = str(record["evidence_excerpt"])
-        claim_numbers = set(NUMBER_RE.findall(claim))
-        excerpt_numbers = set(NUMBER_RE.findall(excerpt))
-        missing_numbers = sorted(claim_numbers - excerpt_numbers)
-        if missing_numbers:
-            errors.append(
-                f"{label}.evidence_excerpt is missing claim number(s): "
-                + ", ".join(missing_numbers)
-            )
-        claim_tokens = semantic_tokens(claim)
-        excerpt_tokens = semantic_tokens(excerpt)
-        overlap = claim_tokens & excerpt_tokens
-        required_overlap = max(1, math.ceil(len(claim_tokens) * 0.25))
-        if claim_tokens and len(overlap) < required_overlap:
-            errors.append(
-                f"{label}.evidence_excerpt does not support the claim closely enough "
-                f"(token overlap {len(overlap)}/{len(claim_tokens)}, "
-                f"requires {required_overlap})"
-            )
-
-        valid_first_party = False
-        if source_type == "first_party":
-            official_domains = entity_spec["official_domains"]
-            if not official_domains:
-                errors.append(
-                    f"{label}: first_party evidence requires official_domains for "
-                    f"{entity_spec['entity']!r}"
-                )
-            elif not any(
-                host_matches_domain(host, domain) for domain in official_domains
-            ):
-                errors.append(
-                    f"{label}.source_url host {host!r} does not match an official "
-                    f"domain for {entity_spec['entity']!r}"
-                )
-            else:
-                valid_first_party = True
-
-        user_input_claim = str(record.get("user_input_claim") or "").strip()
-        user_input_alignment = str(
-            record.get("user_input_alignment") or ""
-        ).casefold().strip()
-        if user_input_claim:
-            if user_input_alignment not in {
-                "supported",
-                "conflicting",
-                "unverified",
-            }:
-                errors.append(
-                    f"{label}.user_input_alignment must be supported, conflicting, "
-                    "or unverified when user_input_claim is present"
-                )
-            if user_input_alignment == "conflicting" and status != "conflicting":
-                errors.append(
-                    f"{label}: a conflicting user input claim must use status=conflicting"
-                )
-        if status == "conflicting" and not str(
-            record.get("conflict_note") or ""
-        ).strip():
-            errors.append(f"{label}.conflict_note is required for status=conflicting")
-        if status == "unverified" and not str(
-            record.get("unverified_reason") or ""
-        ).strip():
-            errors.append(
-                f"{label}.unverified_reason is required for status=unverified"
-            )
         if status != "verified":
-            # Discovery rows are retained for limitations and future recovery, but
-            # they are not part of the factual handoff.  Claim/excerpt quality
-            # findings on those rows must not fail the whole research package.
-            record_errors = errors[record_error_start:]
-            del errors[record_error_start:]
-            warnings.extend(record_errors)
-            warnings.append(
-                f"{label}: status={status}; excluded from downstream verified evidence"
-            )
-            continue
-        if confidence == "low":
-            errors.append(f"{label}: verified evidence cannot use confidence=low")
-            continue
-        if len(errors) > record_error_start:
-            # A row labelled verified is usable only when every entity, URL,
-            # excerpt, number, and source-ownership check above passed.
+            warnings.append(f"{label}: status={status}; excluded from verified facts")
             continue
 
-        canonical = canonical_evidence(record)
-        if len(canonical) > 280:
-            errors.append(
-                f"{label}: canonical evidence exceeds 280 characters; shorten the "
-                "claim without removing the entity, source type, or URL"
-            )
+        claim = str(raw_record.get("claim") or "").strip()
+        source_url = str(raw_record.get("source_url") or "").strip()
+        excerpt = str(raw_record.get("evidence_excerpt") or "").strip()
+        row_warnings: list[str] = []
+        if not claim:
+            row_warnings.append("claim is empty")
+        source_type = str(raw_record.get("source_type") or "secondary").strip()
+        concrete, source_error = is_concrete_source_page(
+            source_url,
+            source_type=source_type,
+        )
+        if not concrete and source_error:
+            row_warnings.append(source_error)
+        if not excerpt:
+            row_warnings.append("evidence_excerpt is empty")
+        if claim and excerpt:
+            row_warnings.extend(claim_excerpt_conflicts(claim, excerpt))
+        if row_warnings:
+            warnings.extend(f"{label}: {warning}; excluded" for warning in row_warnings)
             continue
-        canonical_key = normalized_text(canonical)
-        if canonical_key in seen_canonical:
-            errors.append(f"{label}: duplicate verified evidence")
+
+        canonical = canonical_evidence(raw_record, topic=topic)
+        if canonical in seen:
+            warnings.append(f"{label}: duplicate verified fact; excluded")
             continue
-        seen_canonical.add(canonical_key)
-        verified_by_entity[entity_key] += 1
-        if valid_first_party:
-            first_party_by_entity[entity_key] += 1
-        verified_evidence.append(
-            {
-                "entity": record["entity"],
-                "claim": record["claim"],
-                "source_url": record["source_url"],
-                "source_type": source_type,
-                "evidence_excerpt": record["evidence_excerpt"],
-                "confidence": confidence,
-                "status": status,
-                "canonical": canonical,
+        seen.add(canonical)
+        candidate = {
+            "entity": str(raw_record.get("entity") or topic).strip(),
+            "claim": claim,
+            "source_url": source_url,
+            "source_type": source_type,
+            "evidence_excerpt": excerpt,
+            "confidence": str(raw_record.get("confidence") or "medium").strip(),
+            "status": "verified",
+            "canonical": canonical,
+            **{
+                field: raw_record[field]
+                for field in (
+                    "fact_key",
+                    "fact_value",
+                    "time_basis",
+                    "scope",
+                    "unit",
+                    "published_at",
+                    "retrieved_at",
+                )
+                if field in raw_record
+            },
+            "_ledger_index": index,
+        }
+        verified_candidates.append(candidate)
+
+    candidates_by_fact: dict[
+        tuple[str, ...], list[dict[str, object]]
+    ] = defaultdict(list)
+    for candidate in verified_candidates:
+        candidates_by_fact[_fact_group_key(candidate)].append(candidate)
+
+    auto_conflicting_indices: set[int] = set()
+    detected_conflicts: list[dict[str, object]] = []
+    for candidates in candidates_by_fact.values():
+        if len(candidates) < 2:
+            continue
+        if all(str(item.get("fact_value") or "").strip() for item in candidates):
+            values = {
+                normalized_text(item.get("fact_value")) for item in candidates
             }
+        else:
+            values = {
+                _claim_value_signature(str(item.get("claim") or ""))
+                for item in candidates
+            }
+        units = {
+            normalized_text(item.get("unit"))
+            for item in candidates
+            if str(item.get("unit") or "").strip()
+        }
+        reasons: list[str] = []
+        if len(values) > 1:
+            reasons.append("different values or directions")
+        if len(units) > 1:
+            reasons.append("different units")
+        if not reasons:
+            continue
+
+        indices = sorted(int(item["_ledger_index"]) for item in candidates)
+        auto_conflicting_indices.update(indices)
+        conflict = {
+            "entity": candidates[0]["entity"],
+            "fact_key": candidates[0].get("fact_key"),
+            "time_basis": candidates[0].get("time_basis"),
+            "scope": candidates[0].get("scope"),
+            "ledger_indices": indices,
+            "reason": " and ".join(reasons),
+        }
+        detected_conflicts.append(conflict)
+        warnings.append(
+            f"{path.name}: evidence records {indices} conflict for the same fact "
+            f"({conflict['reason']}); excluded from verified facts"
         )
 
-    for entity_key, entity_spec in entities.items():
-        if verified_by_entity[entity_key] == 0:
-            warnings.append(
-                f"{path.name}: no verified evidence for target entity "
-                f"{entity_spec['entity']!r}"
-            )
-        if (
-            entity_spec["official_domains"]
-            and first_party_by_entity[entity_key] == 0
-        ):
-            warnings.append(
-                f"{path.name}: no verified first_party evidence from an official "
-                f"domain for target entity {entity_spec['entity']!r}"
-            )
+    for candidate in verified_candidates:
+        ledger_index = int(candidate.pop("_ledger_index"))
+        if ledger_index not in auto_conflicting_indices:
+            verified_evidence.append(candidate)
 
     summary: dict[str, object] = {
-        "evidence_schema_version": 1,
+        "evidence_schema_version": schema_version,
         "evidence_file": str(path.resolve()),
-        "target_entity_count": len(entities),
         "evidence_count": len(raw_evidence),
         "verified_evidence_count": len(verified_evidence),
-        "conflicting_evidence_count": status_counts["conflicting"],
-        "unverified_evidence_count": status_counts["unverified"],
-        "first_party_entity_count": sum(
-            1 for count in first_party_by_entity.values() if count > 0
+        "conflicting_evidence_count": (
+            status_counts["conflicting"] + len(auto_conflicting_indices)
         ),
+        "auto_conflicting_evidence_count": len(auto_conflicting_indices),
+        "detected_conflict_count": len(detected_conflicts),
+        "detected_conflicts": detected_conflicts,
+        "unverified_evidence_count": status_counts["unverified"],
         "verified_evidence": verified_evidence,
     }
-    return errors, warnings, summary
+    return structural_errors, warnings, summary
 
 
 def main() -> int:
     args = parse_args()
     research_dir = args.research_dir
-    errors: list[str] = []
+    structural_errors: list[str] = []
     warnings: list[str] = []
-    dim_files: list[Path] = []
-    wide_files: list[Path] = []
-    files_to_check: list[Path] = []
     evidence_summary: dict[str, object] = {}
+    narrative_files: list[Path] = []
 
     if not research_dir.exists():
-        errors.append(f"research dir does not exist: {research_dir}")
+        structural_errors.append(f"research dir does not exist: {research_dir}")
     elif not research_dir.is_dir():
-        errors.append(f"research path is not a directory: {research_dir}")
+        structural_errors.append(f"research path is not a directory: {research_dir}")
+    else:
+        narrative_files = sorted(
+            path
+            for path in research_dir.glob(f"{args.topic}_*.md")
+            if path.is_file() and path.stat().st_size > 0
+        )
+        if not narrative_files:
+            structural_errors.append(
+                f"missing narrative research artifact for topic {args.topic!r}"
+            )
 
-    if not errors:
-        required = [name.format(topic=args.topic) for name in ROUTE_REQUIRED[args.route]]
-        dim_files = sorted(research_dir.glob(f"{args.topic}_dim*.md"))
-        wide_files = sorted(research_dir.glob(f"{args.topic}_wide*.md"))
         evidence_file = research_dir / f"{args.topic}_evidence.json"
-
-        for file_name in required:
-            if not (research_dir / file_name).exists():
-                near_match = hyphenated_reserved_variant(args.topic, file_name)
-                if near_match and (research_dir / near_match).exists():
-                    errors.append(
-                        f"missing required file: {file_name}; found non-canonical "
-                        f"near-match {near_match}. Use the exact reserved filename "
-                        f"{file_name}"
-                    )
-                else:
-                    errors.append(f"missing required file: {file_name}")
-
-        if len(dim_files) < args.min_dimensions:
-            errors.append(
-                f"expected at least {args.min_dimensions} dimension files, found {len(dim_files)}"
-            )
-            noncanonical_dims = sorted(research_dir.glob(f"{args.topic}-dim*.md"))
-            if noncanonical_dims:
-                errors.append(
-                    "non-canonical dimension filenames ignored: "
-                    + ", ".join(path.name for path in noncanonical_dims)
-                    + f". Use the exact pattern {args.topic}_dimNN.md"
-                )
-
-        if args.route == "A" and not wide_files:
-            noncanonical_wide = sorted(research_dir.glob(f"{args.topic}-wide*.md"))
-            if noncanonical_wide:
-                errors.append(
-                    "route A requires at least one wide exploration file; found "
-                    "non-canonical near-match(es): "
-                    + ", ".join(path.name for path in noncanonical_wide)
-                    + f". Use the exact pattern {args.topic}_wideNN.md"
-                )
-            else:
-                errors.append("route A requires at least one wide exploration file")
         if not evidence_file.is_file():
-            near_match = hyphenated_reserved_variant(
-                args.topic,
-                evidence_file.name,
-            )
-            if near_match and (research_dir / near_match).is_file():
-                errors.append(
-                    f"missing required file: {evidence_file.name}; found "
-                    f"non-canonical near-match {near_match}. Use the exact reserved "
-                    f"filename {evidence_file.name}"
-                )
-            else:
-                errors.append(f"missing required file: {evidence_file.name}")
+            structural_errors.append(f"missing required file: {evidence_file.name}")
         else:
-            evidence_errors, evidence_warnings, evidence_summary = (
+            ledger_errors, ledger_warnings, evidence_summary = (
                 validate_evidence_ledger(evidence_file, args.topic)
             )
-            errors.extend(evidence_errors)
-            warnings.extend(evidence_warnings)
+            structural_errors.extend(ledger_errors)
+            warnings.extend(ledger_warnings)
 
-        files_to_check = sorted(
-            {
-                *dim_files,
-                *wide_files,
-                *(research_dir / file_name for file_name in required),
-                *(research_dir.glob(f"{args.topic}_final.md")),
-                *([evidence_file] if evidence_file.is_file() else []),
-            }
-        )
+        for path in narrative_files:
+            warnings.extend(collect_footnote_warnings(path))
 
-        for path in files_to_check:
-            if not path.exists() or path.suffix.casefold() != ".md":
-                continue
-            missing_defs, definitions = collect_footnotes(path)
-            if missing_defs:
-                message = (
-                    f"{path.name}: missing footnote definitions for "
-                    + ", ".join(sorted(missing_defs))
-                )
-                if args.allow_missing_footnotes:
-                    warnings.append(message)
-                else:
-                    errors.append(message)
-            if "[^" in path.read_text(encoding="utf-8") and not definitions:
-                errors.append(f"{path.name}: contains footnote markers but no definitions")
-
-    verified_evidence_count = evidence_summary.get("verified_evidence_count", 0)
-    if not errors and verified_evidence_count == 0:
-        errors.append("no verified evidence available for downstream factual handoff")
-
-    quality_ok = not errors
-    required_outputs_present = bool(
-        research_dir.is_dir()
-        and dim_files
-        and all(
-            (research_dir / name.format(topic=args.topic)).is_file()
-            for name in ROUTE_REQUIRED[args.route]
-        )
-    )
-    delivery_allowed = bool(
-        required_outputs_present
-        and evidence_summary.get("evidence_schema_version") == 1
-    )
-    dimension_coverage_ratio = min(
-        1.0,
-        len(dim_files) / max(1, args.min_dimensions),
-    )
-    handoff_status = (
+    verified_count = int(evidence_summary.get("verified_evidence_count", 0))
+    delivery_allowed = not structural_errors
+    quality_ok = bool(delivery_allowed and verified_count > 0 and not warnings)
+    delivery_mode = (
         "invalid"
         if not delivery_allowed
-        else (
-            "full"
-            if quality_ok and verified_evidence_count > 0
-            else "partial" if verified_evidence_count > 0 else "framework"
-        )
+        else "framework"
+        if verified_count == 0
+        else "partial"
+        if warnings
+        else "full"
     )
+    context_files = [path.name for path in narrative_files]
+    evidence_file_value = evidence_summary.get("evidence_file")
+    if evidence_file_value:
+        context_files.append(Path(str(evidence_file_value)).name)
+
     presentation_handoff = {
         "schema_version": 1,
-        "delivery_mode": handoff_status,
+        "delivery_mode": delivery_mode,
         "verified_facts": [
             {
                 field: record[field]
@@ -620,46 +596,34 @@ def main() -> int:
             }
             for record in evidence_summary.get("verified_evidence", [])
         ],
-        "gaps": [*errors, *warnings],
+        "gaps": [*structural_errors, *warnings],
         "quality_summary": {
             "quality_ok": quality_ok,
-            "issue_count": len(errors),
+            "issue_count": len(structural_errors),
             "warning_count": len(warnings),
-            "actual_dimensions": len(dim_files),
-            "recommended_dimensions": args.min_dimensions,
+            "actual_dimensions": len(
+                [path for path in narrative_files if "_dim" in path.stem]
+            ),
+            "recommended_dimensions": None,
         },
-        "context_files": [
-            str(path.relative_to(research_dir))
-            for path in files_to_check
-            if path.exists()
-        ],
+        "context_files": context_files,
     }
     report_payload: dict[str, object] = {
-        # Keep the top-level fields for research QA diagnostics and older
-        # runtimes. New presentation consumers use ``presentation_handoff``.
-        "ok": quality_ok,
+        "ok": delivery_allowed,
         "quality_ok": quality_ok,
         "delivery_allowed": delivery_allowed,
-        "handoff_status": handoff_status,
+        "handoff_status": delivery_mode,
         "validator": "research-synthesis",
         "route": args.route,
         "topic": args.topic,
         "research_dir": str(research_dir.resolve()),
-        "min_dimensions": args.min_dimensions,
-        "dimension_count": len(dim_files),
-        "wide_count": len(wide_files),
-        "coverage": {
-            "actual_dimensions": len(dim_files),
-            "recommended_dimensions": args.min_dimensions,
-            "dimension_ratio": round(dimension_coverage_ratio, 4),
-            "wide_required": args.route == "A",
-            "wide_present": bool(wide_files),
-        },
-        "files_checked": [str(path.resolve()) for path in files_to_check if path.exists()],
-        "issues": errors,
+        "min_dimensions": None,
+        "dimension_count": len(
+            [path for path in narrative_files if "_dim" in path.stem]
+        ),
+        "files_checked": [str(path.resolve()) for path in narrative_files],
+        "issues": structural_errors,
         "warnings": warnings,
-        # Stable downstream contract. Presentation workflows consume this
-        # object instead of interpreting research-synthesis's internal QA state.
         "presentation_handoff": presentation_handoff,
         **evidence_summary,
     }
@@ -667,14 +631,14 @@ def main() -> int:
 
     for warning in warnings:
         print(f"WARN: {warning}", file=sys.stderr)
-
-    if errors:
-        for error in errors:
+    if structural_errors:
+        for error in structural_errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     print(
-        f"OK: {args.route} artifacts for topic '{args.topic}' validated in {research_dir}"
+        f"OK: {args.route} research handoff for topic {args.topic!r} "
+        f"validated with delivery_mode={delivery_mode}"
     )
     return 0
 

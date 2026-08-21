@@ -55,6 +55,7 @@ decision, read those entries together.
 | Tool invocation | `box_agent/tools/base.py`, `schema_validation.py`, `Tool.invoke` | Tool schemas and arguments fail closed before `execute()` is called. | Current at this baseline. | [PR #33](#2026-08-17--validate-tool-arguments-before-execution-pr-33) |
 | Context compression | `box_agent/core.py`, tool-call arguments, history summarization | Normal unsummarized history retains exact tool-call arguments; whole-history summarization remains a separate boundary. | Current at this baseline. | [PR #35](#2026-08-17--preserve-tool-call-arguments-in-normal-history-pr-35) |
 | MCP deferred loading | `mcp_tool_catalog.py`, `mcp_tool_search.py`, `tool_search` | Ordinary MCP schemas are hidden by default until session-scoped activation; `alwaysLoad` remains eager. | Current; later research hardening may also apply to research paths. | [PR #31](#2026-08-17--deferred-mcp-catalog-and-session-exposure-pr-31), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
+| Research synthesis | `research-synthesis`, evidence ledger, research artifact validation | Dimensions follow evidence gaps; the default handoff is one consolidated report plus one verified-source ledger. | PR #65 simplifies the earlier hardening without changing PPT checkpoints. | [PR #65](#2026-08-21--simplified-research-synthesis-contract-pr-65) |
 | Sub-agent delegation | `sub_agent_tool.py`, `sub_agent_capabilities.py`, `required_tools`, `write_scope`, `files` | The public request is flat; runtime-derived policy limits implicit tools to trusted local readers, keeps process/external/unknown MCP capabilities fail-closed, and scopes path writes. | Supersedes the caller-authored nested constraint contract while retaining its runtime enforcement goals. | [2026-08-19 flattened contract](#2026-08-19--flattened-sub-agent-contract-with-derived-policy) |
 | Workflow ownership | `workflow_owner_store.py`, explicit Skills, ACP decisions, presentation recovery | Runtime-selected owner precedes artifact discovery. Unknown Skills use the generic external lifecycle; foreign `deck.json` files cannot activate controlled finalization. | Pending implementation; hardens external-Skill and controlled-presentation recovery. | [2026-08-20 owner hardening](#2026-08-20--workflow-owner-precedence-for-third-party-skills) |
 | Model routing and controlled presentations | `box_agent/llm/model_routing.py`, `box_agent/workflows/presentation_*`, controlled PPTX | Automatic child-model routing uses a host allowlist, while presentation-specific state and recovery remain outside the generic kernel. | PR #30 is the main record; later research hardening must be checked where relevant. | [PR #30](#2026-08-14--runtime-routing-and-presentation-reliability-pr-30), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
@@ -66,6 +67,27 @@ Release, provider API, and ACP compatibility have their own sources under
 [long-lived release and compatibility history](#long-lived-release-and-compatibility-history).
 
 ## Pending material changes
+
+### 2026-08-21 — simplified research-synthesis contract (PR #65)
+
+- Change: [PR #65](https://github.com/Raccoon-Office/Box-Agent/pull/65),
+  implementation on `codex/simplify-research-synthesis`; no merge or release
+  reference exists yet.
+- Skill contract: research dimensions are derived from distinct evidence gaps
+  rather than a default count. The default durable handoff is one consolidated
+  Markdown report plus one evidence ledger; per-dimension and repair artifacts
+  are optional.
+- Evidence boundary: verified facts still require an opened exact source URL
+  and supporting excerpt. Bounded failures remain explicit as `partial` or
+  `framework` instead of triggering repeated search or prose-repair loops.
+- Compatibility: downstream consumers should use `presentation_handoff` and
+  `verified_facts` instead of depending on fixed dimension files or optional
+  normalization fields. PPT Skill routing and presentation checkpoints are out
+  of scope and retain their existing behavior.
+- Proof anchors: `tests/test_research_synthesis.py`, the regenerated built-in
+  Skill manifest, matcher/loader tests, and the repository preflight.
+- Rollback: revert the implementation commit and regenerate the Skill manifest;
+  no user data migration is required.
 
 ### 2026-08-19 — flattened sub-agent contract with derived policy
 
