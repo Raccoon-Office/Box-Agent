@@ -3086,6 +3086,12 @@ async def run_agent_loop(
     delegated_tool_call_total = 0
     delegated_budget_guidance_injected = False
     completion_reserve_injected = False
+    # Multimodal follow-up content a tool asked to hand to the main model
+    # (e.g. vision_review in native strategy). Accumulated during tool
+    # execution and flushed as ONE user message at the next step boundary —
+    # after every tool result is appended, before the next model call — so
+    # tool-call/result closure is never interleaved with it.
+    pending_followup_user_content: list[dict] = []
     tool_budget_wrapup_injected: set[str] = set()
     visible_tool_call_total = 0
     final_summary_guidance_injected = False
@@ -3236,6 +3242,21 @@ async def run_agent_loop(
                     injection_id=injection_id,
                     user_visible=user_visible,
                 )
+
+        # Deliver any multimodal content a previous step's tool handed to the
+        # main model as a single follow-up user message before this step's
+        # model call. Runs after all prior tool results are already in
+        # ``messages`` so the assistant->tool_result->user ordering stays valid.
+        if pending_followup_user_content:
+            messages.append(
+                Message(role="user", content=pending_followup_user_content)
+            )
+            yield InjectedMessageEvent(
+                content="[vision_review] Image(s) attached for direct inspection.",
+                injection_id=None,
+                user_visible=False,
+            )
+            pending_followup_user_content = []
 
         has_plan_tool = "plan_write" in tools
         latest_user_text = _latest_user_text(messages)
@@ -5461,6 +5482,8 @@ async def run_agent_loop(
             )
             msg_content = tool_msg.content
             messages.append(tool_msg)
+            if result.followup_user_content:
+                pending_followup_user_content.extend(result.followup_user_content)
             _record_context_resource_history(
                 tool_call_id=tc_id,
                 decision=resource_decision,
@@ -6069,6 +6092,8 @@ async def run_agent_loop(
                 )
                 msg_content = tool_msg.content
                 messages.append(tool_msg)
+                if result.followup_user_content:
+                    pending_followup_user_content.extend(result.followup_user_content)
                 _record_context_resource_history(
                     tool_call_id=tc_id,
                     decision=resource_decision,

@@ -29,6 +29,15 @@ class ToolResult(BaseModel):
     # object leaves the execution loop; excluding it avoids duplicating a large
     # payload in serialized host events.
     persistence_content: str | None = Field(default=None, exclude=True)
+    # Optional multimodal content a tool asks the loop to deliver to the MAIN
+    # model as a follow-up ``user`` message, appended once after the whole tool
+    # batch completes (before the next model call). Each entry is a provider-
+    # shaped content block (e.g. a text block plus ``image``/``image_url``
+    # blocks). This is how a tool hands real images to a vision-capable main
+    # model instead of proxying them to a side call. ``None`` (the default)
+    # means the loop behaves exactly as before. Excluded from serialization
+    # because image payloads must not bloat host events.
+    followup_user_content: list[dict] | None = Field(default=None, exclude=True)
 
 
 @dataclass(frozen=True, slots=True)

@@ -81,7 +81,9 @@ class VisionReviewTool(Tool):
             "sending them as image content to the current multimodal LLM, writing "
             "the markdown report to visual_review.md beside the first input image by default, and returning "
             "per-image PASS/ISSUE findings. Use this when a skill requires real "
-            "visual QA; passing image paths in text is not enough."
+            "visual QA; passing image paths in text is not enough. Set strategy=native "
+            "to attach the images to your own context and inspect them directly instead "
+            "of proxying to a separate vision model."
         )
 
     @property
@@ -115,6 +117,20 @@ class VisionReviewTool(Tool):
                         "image understanding without writing visual_review.md."
                     ),
                 },
+                "strategy": {
+                    "type": "string",
+                    "enum": ["proxy", "native"],
+                    "default": "proxy",
+                    "description": (
+                        "proxy (default): a separate vision model inspects the images and "
+                        "returns a text review — use when you need a written QA report or "
+                        "the main model cannot see images. native: attach the images "
+                        "directly to your own (the main model's) context for the next turn "
+                        "and inspect them yourself — use when you are a vision-capable model "
+                        "and want to reason over the raw pixels. native ignores mode and "
+                        "writes no report."
+                    ),
+                },
             },
             "required": ["image_paths"],
         }
@@ -125,12 +141,39 @@ class VisionReviewTool(Tool):
         output_path: str | None = None,
         instructions: str | None = None,
         mode: str = "review",
+        strategy: str = "proxy",
     ) -> ToolResult:
         """Run visual review and write the markdown report."""
         if not image_paths:
             return ToolResult(success=False, error="image_paths must contain at least one image path")
+        if strategy not in {"proxy", "native"}:
+            return ToolResult(success=False, error="strategy must be 'proxy' or 'native'")
         if mode not in {"review", "describe"}:
             return ToolResult(success=False, error="mode must be 'review' or 'describe'")
+
+        # Native strategy: hand the raw images to the MAIN model instead of
+        # proxying them to a side vision call. The images are attached as a
+        # follow-up user message (see ToolResult.followup_user_content) so the
+        # main model inspects the pixels itself on its next turn. No report is
+        # written and no extra LLM call is made.
+        if strategy == "native":
+            try:
+                images = [self._load_image(path) for path in image_paths]
+            except ValueError as exc:
+                return ToolResult(success=False, error=str(exc))
+            blocks = self._build_native_blocks(images, instructions=instructions)
+            attached = ", ".join(image["path"] for image in images)
+            note = (
+                f"Attached {len(images)} image(s) to your context for direct visual "
+                f"inspection: {attached}. Inspect them yourself and continue the task; "
+                "do not call vision_review again for the same images."
+            )
+            return ToolResult(
+                success=True,
+                content=note,
+                followup_user_content=blocks,
+            )
+
         if self._terminal_error is not None:
             return ToolResult(success=False, error=self._terminal_error)
 
@@ -389,6 +432,46 @@ class VisionReviewTool(Tool):
         blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for image in images:
             if "anthropic" in self._provider_hint():
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image["mime_type"],
+                            "data": image["base64"],
+                        },
+                    }
+                )
+            else:
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image["data_url"]},
+                    }
+                )
+        return blocks
+
+    def _build_native_blocks(
+        self,
+        images: list[dict[str, str]],
+        *,
+        instructions: str | None,
+    ) -> list[dict[str, Any]]:
+        """Provider-shaped blocks handed to the MAIN model for native review.
+
+        A leading text block frames the task, then each image is labeled and
+        attached in the current provider's wire format (Anthropic ``image`` vs
+        OpenAI ``image_url``). The main-model provider serializes these when the
+        loop appends them as a follow-up user message.
+        """
+        lead = (instructions or "").strip()
+        intro = "Inspect the following screenshot(s) directly and continue the task."
+        text = f"{intro} Extra criteria: {lead}" if lead else intro
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        provider = self._provider_hint()
+        for index, image in enumerate(images, start=1):
+            blocks.append({"type": "text", "text": f"Image {index}: {image['path']}"})
+            if "anthropic" in provider:
                 blocks.append(
                     {
                         "type": "image",

@@ -399,3 +399,83 @@ def test_add_workspace_tools_routes_vision_review_to_catalog_vision_model(tmp_pa
     vision_tool = next(tool for tool in tools if tool.name == "vision_review")
     assert vision_tool.llm.model == "vision-model"
     assert vision_tool.llm.max_output_tokens == 8192
+
+
+class _NoCallLLM:
+    """Vision LLM that must never be called (native strategy proxies nothing)."""
+
+    provider = "openai"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, *args, **kwargs):  # pragma: no cover - must not run
+        self.calls += 1
+        raise AssertionError("native strategy must not call the proxy LLM")
+
+
+@pytest.mark.asyncio
+async def test_native_strategy_attaches_images_without_proxy_call(tmp_path: Path):
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+    llm = _NoCallLLM()
+    tool = VisionReviewTool(llm=llm, workspace_dir=str(tmp_path), allow_full_access=False)
+
+    result = await tool.execute(
+        image_paths=["slide.png"], strategy="native", instructions="check contrast"
+    )
+
+    assert result.success, result.error
+    assert llm.calls == 0
+    # No report is written in native mode.
+    assert not (tmp_path / "visual_review.md").exists()
+    assert "slide.png" in result.content
+    # Images are handed to the main model as follow-up user content.
+    blocks = result.followup_user_content
+    assert blocks is not None
+    assert "check contrast" in blocks[0]["text"]
+    image_block = next(block for block in blocks if block.get("type") == "image_url")
+    assert image_block["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_native_strategy_uses_anthropic_block_shape(tmp_path: Path):
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+
+    class _AnthropicLLM(_NoCallLLM):
+        provider = "anthropic"
+
+    tool = VisionReviewTool(llm=_AnthropicLLM(), workspace_dir=str(tmp_path), allow_full_access=False)
+    result = await tool.execute(image_paths=["slide.png"], strategy="native")
+
+    assert result.success, result.error
+    image_block = next(
+        block for block in result.followup_user_content if block.get("type") == "image"
+    )
+    assert image_block["source"]["media_type"] == "image/png"
+    assert image_block["source"]["type"] == "base64"
+
+
+@pytest.mark.asyncio
+async def test_invalid_strategy_rejected(tmp_path: Path):
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+    tool = VisionReviewTool(llm=FakeVisionLLM(), workspace_dir=str(tmp_path), allow_full_access=False)
+
+    result = await tool.execute(image_paths=["slide.png"], strategy="bogus")
+
+    assert not result.success
+    assert "strategy" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_proxy_strategy_sets_no_followup_content(tmp_path: Path):
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+    tool = VisionReviewTool(llm=FakeVisionLLM(), workspace_dir=str(tmp_path), allow_full_access=False)
+
+    result = await tool.execute(image_paths=["slide.png"])  # default proxy
+
+    assert result.success, result.error
+    assert result.followup_user_content is None
