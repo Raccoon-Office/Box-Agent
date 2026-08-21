@@ -44,6 +44,7 @@ from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.request_user_input_tool import RequestUserInputTool
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.skill_execution_env import build_skill_execution_env
+from box_agent.tools.skill_scratch import prepare_skill_scratch_dir
 from box_agent.tools.mcp_config_tool import McpConfigTool
 from box_agent.tools.schedule_tool import CreateScheduledTaskTool
 from box_agent.tools.skill_tool import create_skill_tools
@@ -572,6 +573,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Relative tool paths use the project root or the active artifact root.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
     runtime_env = build_skill_execution_env(runtime_context)
+    skill_scratch_dir = None
     if artifact_root is not None:
         # Make the canonical delivery root available to subprocess-backed
         # skills even when a generated command unnecessarily changes cwd.
@@ -579,6 +581,8 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         # this directory; exposing the same root keeps shell authoring on the
         # identical boundary.
         runtime_env["BOX_AGENT_OUTPUT_DIR"] = str(artifact_root)
+        skill_scratch_dir = prepare_skill_scratch_dir(workspace_dir)
+        runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
     if config.tools.enable_bash:
         sandbox_venv_path = None
         if sandbox_mode and not getattr(sys, "frozen", False):
@@ -681,9 +685,13 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:
+        sandbox_runtime_env = runtime_context.env()
+        if artifact_root is not None and skill_scratch_dir is not None:
+            sandbox_runtime_env["BOX_AGENT_OUTPUT_DIR"] = str(artifact_root)
+            sandbox_runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
         sandbox_tool = JupyterSandboxTool(
             workspace_dir=str(workspace_dir),
-            runtime_env=runtime_context.env(),
+            runtime_env=sandbox_runtime_env,
             use_output_dir=use_output_dir,
             output_dir=str(artifact_root) if artifact_root else None,
             process_owner_id=process_owner_id,
@@ -709,6 +717,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                 relative_root_dir=str(relative_root),
             )
         )
+
         _out(f"{Colors.GREEN}✅ Loaded vision review tool (vision_review){Colors.RESET}")
 
     # Image generation tool — standard Box-Agent capability shared by CLI and ACP
@@ -759,3 +768,5 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             sub_agent_tool.set_capability_state_provider(capability_state_provider)
         tools.append(sub_agent_tool)
         _out(f"{Colors.GREEN}✅ Loaded sub-agent tool (sub_agent){Colors.RESET}")
+
+    return skill_scratch_dir

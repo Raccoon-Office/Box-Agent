@@ -50,18 +50,19 @@ successful build consumes the temporary Draft and leaves only a versioned HTML
 deliverable in `output/`:
 
 Treat `output/` as a deliverables-only boundary. Never create generator scripts,
-temporary JSON, logs, or other support files there. Prefer writing the temporary
-Draft directly. If programmatic Draft construction is necessary, create the
-helper and Draft in a task-scoped scratch directory outside `output/`, pass the
-Draft to the builder with `--consume-input`, and remove the scratch directory
-after either success or failure. `--consume-input` removes only the supplied
-Draft; it does not clean up helper scripts. Before completing the task, verify
-that every file created by this Roadmap run under `output/` is a versioned HTML
-deliverable.
+temporary JSON, logs, or other support files there. Create a unique task
+directory below `$BOX_AGENT_SCRATCH_DIR` and place the temporary Draft and any
+helper there. Pass that Draft to the builder with `--consume-input`. The builder
+removes the task scratch directory after either success or failure, and the
+session runtime clears any residue at the end of the turn. Never place one
+task's files directly in the scratch root or reuse another task's directory.
+Before completing the task, verify that every file created by this Roadmap run
+under `output/` is a versioned HTML deliverable.
 
 ```bash
 ROADMAP_SKILL_DIR="${BOX_AGENT_ROADMAP_SKILL_DIR:-{skill_dir}}"
-${BOX_AGENT_NODE:-node} "$ROADMAP_SKILL_DIR/scripts/build_roadmap_artifact.js" roadmap-draft.json --out roadmap.html --consume-input
+ROADMAP_DRAFT="$BOX_AGENT_SCRATCH_DIR/<task-id>/roadmap-draft.json"
+${BOX_AGENT_NODE:-node} "$ROADMAP_SKILL_DIR/scripts/build_roadmap_artifact.js" "$ROADMAP_DRAFT" --out roadmap.html --consume-input
 ```
 
 Always inspect the builder report. If `pending_questions` is non-empty, the

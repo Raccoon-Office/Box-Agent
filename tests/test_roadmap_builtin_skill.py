@@ -127,5 +127,7 @@ def test_roadmap_skill_keeps_output_directory_deliverable_only() -> None:
     assert skill is not None
     assert "Treat `output/` as a deliverables-only boundary" in skill.content
     assert "Never create generator scripts" in skill.content
-    assert "`--consume-input` removes only the supplied" in skill.content
+    assert "unique task\ndirectory below `$BOX_AGENT_SCRATCH_DIR`" in skill.content
+    assert "after either success or failure" in skill.content
+    assert "session runtime clears any residue" in skill.content
     assert "under `output/` is a versioned HTML" in skill.content

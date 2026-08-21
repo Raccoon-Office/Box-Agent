@@ -1048,6 +1048,10 @@ async def test_output_mode_tools_share_artifact_relative_root(
     assert by_name["bash"].workspace_dir == str(artifact_root)
     assert by_name["bash"].scope_root_dir == str(workspace)
     assert by_name["bash"]._subprocess_env["BOX_AGENT_OUTPUT_DIR"] == str(artifact_root)
+    assert by_name["bash"]._subprocess_env["BOX_AGENT_SCRATCH_DIR"] == str(
+        workspace / ".box-agent-scratch"
+    )
+    assert (workspace / ".box-agent-scratch").is_dir()
 
     node = shutil.which("node")
     if node is None:

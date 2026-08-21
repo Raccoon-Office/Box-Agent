@@ -76,6 +76,7 @@ from box_agent.tools.runtime import (
     resolve_cli_shell_python,
 )
 from box_agent.tools.skill_execution_env import build_skill_execution_env
+from box_agent.tools.skill_scratch import cleanup_skill_scratch_dir
 from box_agent.utils import calculate_display_width
 from box_agent.acp.project_context import build_project_startup_context_prompt
 from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryError
@@ -2075,7 +2076,7 @@ async def run_agent(
         shell_python_path=resolve_cli_shell_python(),
     )
 
-    add_workspace_tools(
+    skill_scratch_dir = add_workspace_tools(
         tools, config, workspace_dir,
         sandbox_mode=sandbox_mode,
         allow_full_access=allow_full_access,
@@ -2443,6 +2444,15 @@ async def run_agent(
                     f"{auto_no_progress_turns} continuation(s) without recorded goal progress.{Colors.RESET}"
                 )
             _save_goal_state(workspace_dir, agent.goal)
+            if skill_scratch_dir is not None:
+                try:
+                    cleanup_skill_scratch_dir(skill_scratch_dir)
+                except Exception as cleanup_error:
+                    print(
+                        f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "
+                        f"{cleanup_error}{Colors.RESET}",
+                        file=sys.stderr,
+                    )
             print_stats(agent, session_start)
             if json_summary:
                 paused = agent.last_stop_reason == StopReason.CHECKPOINT_PAUSED.value
@@ -2788,6 +2798,15 @@ async def run_agent(
                 esc_listener_stop.set()
                 esc_thread.join(timeout=0.2)
                 _save_goal_state(workspace_dir, agent.goal)
+                if skill_scratch_dir is not None:
+                    try:
+                        cleanup_skill_scratch_dir(skill_scratch_dir)
+                    except Exception as cleanup_error:
+                        print(
+                            f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "
+                            f"{cleanup_error}{Colors.RESET}",
+                            file=sys.stderr,
+                        )
 
             # Visual separation
             print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")

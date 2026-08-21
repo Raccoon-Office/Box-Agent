@@ -4760,6 +4760,12 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(tmp_
     assert bash_env["BOX_AGENT_NODE"] == str(node_path)
     assert bash_env["BOX_AGENT_NPM"] == str(npm_path)
     assert bash_env["BOX_AGENT_NPX"] == str(npx_path)
+    assert bash_env["BOX_AGENT_SCRATCH_DIR"] == str(
+        workspace / ".box-agent-scratch"
+    )
+    assert execute_code_env["BOX_AGENT_SCRATCH_DIR"] == str(
+        workspace / ".box-agent-scratch"
+    )
     assert bash_env["NODE_PATH"].split(os.pathsep)[-1] == str(node_modules)
     assert bash_env["NPM_CONFIG_PREFIX"] == str(
         Path.home() / ".box-agent" / "skill-tools"

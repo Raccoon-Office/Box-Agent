@@ -15,6 +15,11 @@ function artifactRoot() {
   return configured ? path.resolve(configured) : process.cwd();
 }
 
+function scratchRoot() {
+  const configured = String(process.env.BOX_AGENT_SCRATCH_DIR || "").trim();
+  return configured ? path.resolve(configured) : null;
+}
+
 function resolveArtifactPath(filePath) {
   if (path.isAbsolute(filePath)) return path.resolve(filePath);
   return path.resolve(artifactRoot(), filePath);
@@ -130,18 +135,19 @@ function removePublishedFileOnBoundaryFailure(resolved, publishedIdentity, bound
   }
 }
 
-function snapshotArtifactFileSync(filePath) {
-  const resolved = resolveArtifactPath(filePath);
-  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
-  const root = configured ? artifactRoot() : path.parse(resolved).root;
-
-  if (configured && !isWithin(root, resolved)) {
+function snapshotFileWithinRootSync(filePath, root, boundaryName) {
+  const resolved = path.resolve(filePath);
+  if (!isWithin(root, resolved)) {
     throw outputPathError(
-      "consumed input must stay within BOX_AGENT_OUTPUT_DIR",
+      `consumed input must stay within ${boundaryName}`,
       filePath,
     );
   }
 
+  const rootStats = rejectLink(root, filePath, "input");
+  if (rootStats === null || !rootStats.isDirectory()) {
+    throw outputPathError("consumed input root must be a real directory", filePath);
+  }
   let current = root;
   let targetStats = null;
   const segments = path.relative(root, resolved).split(path.sep).filter(Boolean);
@@ -166,19 +172,59 @@ function snapshotArtifactFileSync(filePath) {
     throw outputPathError("consumed input must be a regular file", filePath);
   }
 
-  if (configured) {
-    const realRoot = fs.realpathSync(root);
-    if (!isWithin(realRoot, fs.realpathSync(resolved))) {
-      throw outputPathError(
-        "consumed input resolves outside BOX_AGENT_OUTPUT_DIR",
-        filePath,
-      );
-    }
+  const realRoot = fs.realpathSync(root);
+  if (!isWithin(realRoot, fs.realpathSync(resolved))) {
+    throw outputPathError(
+      `consumed input resolves outside ${boundaryName}`,
+      filePath,
+    );
   }
   return {
     path: resolved,
     identity: artifactFileIdentity(targetStats),
+    rootIdentity: artifactFileIdentity(rootStats),
   };
+}
+
+function snapshotArtifactFileSync(filePath) {
+  const resolved = resolveArtifactPath(filePath);
+  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
+  const root = configured ? artifactRoot() : path.parse(resolved).root;
+  return snapshotFileWithinRootSync(
+    resolved,
+    root,
+    configured ? "BOX_AGENT_OUTPUT_DIR" : "filesystem root",
+  );
+}
+
+function snapshotConsumedInputFileSync(filePath) {
+  const resolved = path.resolve(filePath);
+  const scratch = scratchRoot();
+  if (scratch !== null) {
+    const segments = path.relative(scratch, resolved).split(path.sep).filter(Boolean);
+    if (segments.length < 2) {
+      throw outputPathError(
+        "consumed input must stay in a task directory within BOX_AGENT_SCRATCH_DIR",
+        filePath,
+      );
+    }
+    const snapshot = snapshotFileWithinRootSync(
+      resolved,
+      scratch,
+      "BOX_AGENT_SCRATCH_DIR",
+    );
+    const taskDirectory = path.join(scratch, segments[0]);
+    const taskStats = rejectLink(taskDirectory, filePath, "input");
+    if (taskStats === null || !taskStats.isDirectory()) {
+      throw outputPathError("scratch task path must be a directory", filePath);
+    }
+    return {
+      ...snapshot,
+      taskDirectory,
+      taskDirectoryIdentity: artifactFileIdentity(taskStats),
+    };
+  }
+  return snapshotArtifactFileSync(resolved);
 }
 
 function consumeArtifactFileSync(filePath, expectedIdentity) {
@@ -187,6 +233,62 @@ function consumeArtifactFileSync(filePath, expectedIdentity) {
     throw outputPathError("consumed input changed before deletion", filePath);
   }
   fs.unlinkSync(current.path);
+}
+
+function consumeScratchInputFileSync(filePath, expectedSnapshot) {
+  const current = snapshotConsumedInputFileSync(filePath);
+  if (
+    expectedSnapshot.rootIdentity
+    && !sameArtifactInode(current.rootIdentity, expectedSnapshot.rootIdentity)
+  ) {
+    throw outputPathError("scratch root changed before deletion", filePath);
+  }
+  if (
+    expectedSnapshot.taskDirectoryIdentity
+    && !sameArtifactInode(
+      current.taskDirectoryIdentity,
+      expectedSnapshot.taskDirectoryIdentity,
+    )
+  ) {
+    throw outputPathError("scratch task directory changed before deletion", filePath);
+  }
+  if (!sameArtifactFileIdentity(current.identity, expectedSnapshot.identity)) {
+    throw outputPathError("consumed input changed before deletion", filePath);
+  }
+  fs.unlinkSync(current.path);
+}
+
+function cleanupScratchTaskDirectorySync(filePath, expectedSnapshot = null) {
+  const scratch = scratchRoot();
+  if (scratch === null) return;
+  const resolved = path.resolve(filePath);
+  if (!isWithin(scratch, resolved)) return;
+  const segments = path.relative(scratch, resolved).split(path.sep).filter(Boolean);
+  if (segments.length < 2) return;
+
+  const rootStats = rejectLink(scratch, filePath, "input");
+  if (rootStats === null || !rootStats.isDirectory()) {
+    throw outputPathError("consumed input root must be a real directory", filePath);
+  }
+  const taskDir = path.join(scratch, segments[0]);
+  const taskStats = rejectLink(taskDir, filePath, "input");
+  if (taskStats === null) return;
+  if (!taskStats.isDirectory()) {
+    throw outputPathError("scratch task path must be a directory", filePath);
+  }
+  if (
+    expectedSnapshot?.rootIdentity
+    && !sameArtifactInode(rootStats, expectedSnapshot.rootIdentity)
+  ) {
+    throw outputPathError("scratch root changed before cleanup", filePath);
+  }
+  if (
+    expectedSnapshot?.taskDirectoryIdentity
+    && !sameArtifactInode(taskStats, expectedSnapshot.taskDirectoryIdentity)
+  ) {
+    throw outputPathError("scratch task directory changed before cleanup", filePath);
+  }
+  fs.rmSync(taskDir, { recursive: true });
 }
 
 function prepareOutputPath(filePath) {
@@ -323,9 +425,12 @@ function resolveOutputPath(filePath) {
 
 module.exports = {
   artifactRoot,
+  cleanupScratchTaskDirectorySync,
   consumeArtifactFileSync,
+  consumeScratchInputFileSync,
   resolveArtifactPath,
   resolveOutputPath,
+  snapshotConsumedInputFileSync,
   snapshotArtifactFileSync,
   writeOutputFileSync,
 };

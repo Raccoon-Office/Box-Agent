@@ -656,6 +656,140 @@ def test_unified_builder_leaves_only_versioned_html_and_consumes_draft(tmp_path)
     assert 'data-generation-version="1"' in html
 
 
+def test_unified_builder_consumes_external_task_scratch_and_cleans_directory(
+    tmp_path,
+) -> None:
+    output_dir = tmp_path / "output"
+    scratch_root = tmp_path / ".box-agent-scratch"
+    task_scratch = scratch_root / "roadmap-task"
+    output_dir.mkdir()
+    task_scratch.mkdir(parents=True)
+    draft = task_scratch / "roadmap-draft.json"
+    helper = task_scratch / "helper.js"
+    shutil.copyfile(FIXTURES_DIR / "draft-natural-language.json", draft)
+    helper.write_text("// temporary helper", encoding="utf-8")
+    env = {
+        **os.environ,
+        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
+        "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
+    }
+
+    result = _run(
+        "build_roadmap_artifact.js",
+        str(draft),
+        "--out",
+        "roadmap.html",
+        "--consume-input",
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (output_dir / "roadmap-v1.html").is_file()
+    assert list(output_dir.iterdir()) == [output_dir / "roadmap-v1.html"]
+    assert not task_scratch.exists()
+    assert scratch_root.is_dir()
+    assert not list(scratch_root.iterdir())
+
+
+def test_unified_builder_cleans_task_scratch_after_build_failure(tmp_path) -> None:
+    output_dir = tmp_path / "output"
+    scratch_root = tmp_path / ".box-agent-scratch"
+    task_scratch = scratch_root / "roadmap-task"
+    output_dir.mkdir()
+    task_scratch.mkdir(parents=True)
+    draft = task_scratch / "roadmap-draft.json"
+    draft.write_text('{"kind":"roadmap-draft"}', encoding="utf-8")
+    env = {
+        **os.environ,
+        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
+        "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
+    }
+
+    result = _run(
+        "build_roadmap_artifact.js",
+        str(draft),
+        "--out",
+        "roadmap.html",
+        "--consume-input",
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert not task_scratch.exists()
+    assert not list(output_dir.iterdir())
+
+
+def test_unified_builder_rejects_consumed_input_outside_configured_scratch(
+    tmp_path,
+) -> None:
+    output_dir = tmp_path / "output"
+    scratch_root = tmp_path / ".box-agent-scratch"
+    outside_dir = tmp_path / "outside"
+    output_dir.mkdir()
+    scratch_root.mkdir()
+    outside_dir.mkdir()
+    draft = outside_dir / "roadmap-draft.json"
+    shutil.copyfile(FIXTURES_DIR / "draft-natural-language.json", draft)
+    env = {
+        **os.environ,
+        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
+        "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
+    }
+
+    result = _run(
+        "build_roadmap_artifact.js",
+        str(draft),
+        "--out",
+        "roadmap.html",
+        "--consume-input",
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert "must stay within BOX_AGENT_SCRATCH_DIR" in result.stderr
+    assert draft.is_file()
+    assert not list(output_dir.iterdir())
+
+
+def test_unified_builder_rejects_scratch_input_symlink_and_cleans_task(
+    tmp_path,
+) -> None:
+    output_dir = tmp_path / "output"
+    scratch_root = tmp_path / ".box-agent-scratch"
+    task_scratch = scratch_root / "roadmap-task"
+    outside_dir = tmp_path / "outside"
+    output_dir.mkdir()
+    task_scratch.mkdir(parents=True)
+    outside_dir.mkdir()
+    outside_draft = outside_dir / "roadmap-draft.json"
+    shutil.copyfile(FIXTURES_DIR / "draft-natural-language.json", outside_draft)
+    linked_draft = task_scratch / "roadmap-draft.json"
+    try:
+        linked_draft.symlink_to(outside_draft)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks are unavailable in this environment: {error}")
+    env = {
+        **os.environ,
+        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
+        "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
+    }
+
+    result = _run(
+        "build_roadmap_artifact.js",
+        str(linked_draft),
+        "--out",
+        "roadmap.html",
+        "--consume-input",
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert "input path must not contain a symlink or reparse point" in result.stderr
+    assert outside_draft.is_file()
+    assert not task_scratch.exists()
+    assert not list(output_dir.iterdir())
+
+
 def test_unified_builder_rejects_unsafe_existing_version_without_retrying(tmp_path) -> None:
     unsafe_version = tmp_path / "product-roadmap-v9007199254740992.html"
     unsafe_version.write_text("existing", encoding="utf-8")
@@ -1025,6 +1159,56 @@ try {
     assert result.returncode == 1
     assert "consumed input changed before deletion" in result.stderr
     assert source.read_text(encoding="utf-8") == "replacement"
+
+
+def test_scratch_cleanup_rejects_replaced_task_directory(tmp_path) -> None:
+    if NODE is None:
+        pytest.skip("Node.js is required to test Roadmap scratch cleanup")
+    scratch_root = tmp_path / ".box-agent-scratch"
+    task_dir = scratch_root / "roadmap-task"
+    moved_dir = scratch_root / "moved-task"
+    task_dir.mkdir(parents=True)
+    source = task_dir / "draft.json"
+    shutil.copyfile(FIXTURES_DIR / "draft-natural-language.json", source)
+    script = """
+const fs = require('fs');
+const path = require('path');
+const io = require(process.argv[1]);
+const source = process.argv[2];
+const taskDir = path.dirname(source);
+const movedDir = process.argv[3];
+const snapshot = io.snapshotConsumedInputFileSync(source);
+fs.renameSync(taskDir, movedDir);
+fs.mkdirSync(taskDir);
+fs.writeFileSync(path.join(taskDir, 'keep.txt'), 'keep');
+try {
+  io.cleanupScratchTaskDirectorySync(source, snapshot);
+  process.exitCode = 2;
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
+}
+"""
+
+    result = subprocess.run(
+        [
+            str(NODE),
+            "-e",
+            script,
+            str(SCRIPTS_DIR / "roadmap_io.js"),
+            str(source),
+            str(moved_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=SKILL_DIR,
+        env={**os.environ, "BOX_AGENT_SCRATCH_DIR": str(scratch_root)},
+    )
+
+    assert result.returncode == 1
+    assert "scratch task directory changed before cleanup" in result.stderr
+    assert (task_dir / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_roadmap_output_replacement_is_atomic_and_leaves_no_temporary_file(

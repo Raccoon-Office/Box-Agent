@@ -11,9 +11,12 @@ const {
 const { migrateRoadmapSpec } = require("./migrate_roadmap_spec.js");
 const { renderRoadmapHtml } = require("./roadmap_html_core.js");
 const {
+  cleanupScratchTaskDirectorySync,
   consumeArtifactFileSync,
+  consumeScratchInputFileSync,
   resolveArtifactPath,
   resolveOutputPath,
+  snapshotConsumedInputFileSync,
   snapshotArtifactFileSync,
   writeOutputFileSync,
 } = require("./roadmap_io.js");
@@ -140,10 +143,7 @@ function writeDebugArtifacts(debugDir, rendered, report) {
   }
 }
 
-function buildRoadmapArtifact(options) {
-  const consumedInputSnapshot = options.consumeInput
-    ? snapshotArtifactFileSync(options.input)
-    : null;
+function buildRoadmapArtifactOnce(options, consumedInputSnapshot) {
   const input = readRoadmapSpec(options.input);
   if (options.consumeInput && input.inputKind !== "roadmap-draft") {
     throw new Error("--consume-input is only allowed for RoadmapDraft input");
@@ -198,9 +198,35 @@ function buildRoadmapArtifact(options) {
   };
   writeDebugArtifacts(options.debugDir, rendered, report);
   if (consumedInputSnapshot) {
-    consumeArtifactFileSync(options.input, consumedInputSnapshot.identity);
+    consumeScratchInputFileSync(options.input, consumedInputSnapshot);
   }
   return report;
+}
+
+function buildRoadmapArtifact(options) {
+  let consumedInputSnapshot = null;
+  let buildError = null;
+  try {
+    consumedInputSnapshot = options.consumeInput
+      ? snapshotConsumedInputFileSync(options.input)
+      : null;
+    return buildRoadmapArtifactOnce(options, consumedInputSnapshot);
+  } catch (error) {
+    buildError = error;
+    throw error;
+  } finally {
+    if (options.consumeInput) {
+      try {
+        cleanupScratchTaskDirectorySync(options.input, consumedInputSnapshot);
+      } catch (cleanupError) {
+        if (buildError instanceof Error) {
+          buildError.message += `; failed to clean scratch task: ${cleanupError.message}`;
+        } else {
+          throw cleanupError;
+        }
+      }
+    }
+  }
 }
 
 function main() {
