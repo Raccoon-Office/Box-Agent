@@ -114,6 +114,16 @@ def test_parallel_safe():
     assert tool.parallel_safe is True
 
 
+def test_provider_stale_seconds_defaults_to_none():
+    tool = SubAgentTool(llm=AsyncMock(), parent_tools={})
+    assert tool._provider_stale_seconds is None
+
+
+def test_provider_stale_seconds_is_stored_for_child_loop():
+    tool = SubAgentTool(llm=AsyncMock(), parent_tools={}, provider_stale_seconds=350.0)
+    assert tool._provider_stale_seconds == 350.0
+
+
 def test_automatic_child_routing_selects_from_host_allowlist():
     class RoutingLLM:
         auto_model_candidates = (

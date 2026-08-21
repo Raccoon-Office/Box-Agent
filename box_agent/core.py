@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import traceback
@@ -121,12 +122,42 @@ TOOL_ACTIVITY_INTERVAL_SECONDS: Final[float] = 15.0
 LLM_PROVIDER_STALE_SECONDS: Final[float] = 180.0
 MAX_PROVIDER_STALE_RECOVERIES: Final[int] = 3
 MAX_TOOL_PERMISSION_RETRIES: Final[int] = 4
+_PROVIDER_STALE_SECONDS_ENV: Final[str] = "BOX_AGENT_PROVIDER_STALE_SECONDS"
+
+
+def _resolve_provider_stale_seconds(config_value: float | None = None) -> float:
+    """Effective provider-stale cutoff.
+
+    Precedence: the ``BOX_AGENT_PROVIDER_STALE_SECONDS`` env var (an operational
+    escape hatch) wins, then the configured ``agent.provider_stale_seconds``,
+    then the historical ``LLM_PROVIDER_STALE_SECONDS`` default. Non-positive,
+    non-finite (``inf``/``nan``), or unparseable values are ignored so a bad
+    override cannot silently disable the guard.
+    """
+    raw = os.environ.get(_PROVIDER_STALE_SECONDS_ENV)
+    if raw is not None and raw.strip():
+        try:
+            parsed = float(raw)
+        except ValueError:
+            parsed = 0.0
+        if math.isfinite(parsed) and parsed > 0:
+            return parsed
+    if config_value is not None and math.isfinite(config_value) and config_value > 0:
+        return float(config_value)
+    return LLM_PROVIDER_STALE_SECONDS
 
 
 async def _stream_with_activity(
     stream: AsyncIterator[StreamEvent],
+    *,
+    stale_seconds: float | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Add bounded host heartbeats and stop a provider stream that is stale."""
+    # Read the module default at call time (not def time) so monkeypatching
+    # ``LLM_PROVIDER_STALE_SECONDS`` still takes effect and callers can pass an
+    # explicit per-turn value.
+    if stale_seconds is None:
+        stale_seconds = LLM_PROVIDER_STALE_SECONDS
     iterator = stream.__aiter__()
     next_chunk: asyncio.Task[StreamEvent] | None = None
     last_provider_chunk = perf_counter()
@@ -137,15 +168,15 @@ async def _stream_with_activity(
                 {next_chunk}, timeout=LLM_ACTIVITY_INTERVAL_SECONDS
             )
             if not done:
-                stale_seconds = perf_counter() - last_provider_chunk
-                if stale_seconds >= LLM_PROVIDER_STALE_SECONDS:
+                stale_seconds_elapsed = perf_counter() - last_provider_chunk
+                if stale_seconds_elapsed >= stale_seconds:
                     yield StreamEvent(
                         type="finish",
                         finish_reason="provider_stale",
                         activity={
                             "protocol": "agent_activity_v1",
                             "phase": "provider_wait",
-                            "seconds_since_provider_chunk": round(stale_seconds, 1),
+                            "seconds_since_provider_chunk": round(stale_seconds_elapsed, 1),
                         },
                     )
                     return
@@ -154,7 +185,7 @@ async def _stream_with_activity(
                     activity={
                         "protocol": "agent_activity_v1",
                         "phase": "provider_wait",
-                        "seconds_since_provider_chunk": round(stale_seconds, 1),
+                        "seconds_since_provider_chunk": round(stale_seconds_elapsed, 1),
                     },
                 )
                 continue
@@ -2710,6 +2741,7 @@ async def run_agent_loop(
     no_progress_limit: int | None = None,
     max_parallel_tools: int = 8,
     parallel_tool_timeout_seconds: float | None = 900.0,
+    provider_stale_seconds: float | None = None,
     completion_gate: CompletionGate | None = None,
     truncation_continuation_enabled: bool = True,
     max_truncation_continuations: int = 3,
@@ -3076,6 +3108,10 @@ async def run_agent_loop(
     oversized_tool_argument_retries = 0
     provider_stale_retries = 0
     provider_stale_recoveries = 0
+    # Resolve once per turn: env override > configured value > module default.
+    effective_provider_stale_seconds = _resolve_provider_stale_seconds(
+        provider_stale_seconds
+    )
 
     # Per-turn guard for tools that can be repeatedly requested by the model
     # after it already has enough evidence. Once a budget is reached, later
@@ -3768,7 +3804,9 @@ async def run_agent_loop(
             if effective_call_kind:
                 stream_kwargs["call_kind"] = effective_call_kind
             llm_stream = llm.generate_stream(**stream_kwargs)
-            async for chunk in _stream_with_activity(llm_stream):
+            async for chunk in _stream_with_activity(
+                llm_stream, stale_seconds=effective_provider_stale_seconds
+            ):
                 if cancelled():
                     break
                 if chunk.type == "thinking":
@@ -4033,7 +4071,7 @@ async def run_agent_loop(
                     "consecutive_empty=%d partial_content_len=%d",
                     provider_stale_recoveries,
                     MAX_PROVIDER_STALE_RECOVERIES,
-                    LLM_PROVIDER_STALE_SECONDS,
+                    effective_provider_stale_seconds,
                     provider_stale_retries,
                     len(response.content),
                 )

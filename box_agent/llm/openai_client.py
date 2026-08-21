@@ -3,6 +3,7 @@
 import inspect
 import json
 import logging
+import os
 import re
 import uuid
 from collections.abc import AsyncIterator
@@ -36,7 +37,8 @@ logger = logging.getLogger(__name__)
 # generous default; users can override via ``LLMConfig.max_output_tokens``.
 _DEFAULT_MAX_TOKENS = 64000
 _DEEP_THINK_REASONING_EFFORT = "high"
-_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
+_DEFAULT_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
+_SENSENOVA_MODEL_PREFIXES_ENV = "BOX_AGENT_SENSENOVA_MODEL_PREFIXES"
 _SENSENOVA_PSEUDO_TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*<function=([A-Za-z_][\w.-]*)>\s*(.*?)\s*</function>\s*</tool_call>",
     re.DOTALL,
@@ -48,9 +50,30 @@ _SENSENOVA_PSEUDO_PARAMETER_RE = re.compile(
 _MAX_RECOVERED_SENSENOVA_TOOL_CALLS = 4
 
 
+def _sensenova_model_prefixes() -> tuple[str, ...]:
+    """Built-in SenseNova dialect prefixes plus any added via env.
+
+    ``BOX_AGENT_SENSENOVA_MODEL_PREFIXES`` is a comma/whitespace-separated
+    additive list so a new model family can opt into the SenseNova thinking
+    dialect without a source change. The built-ins are always kept, so
+    deployments that do not set the env var are unaffected.
+    """
+    extra_raw = os.environ.get(_SENSENOVA_MODEL_PREFIXES_ENV, "")
+    if not extra_raw.strip():
+        return _DEFAULT_SENSENOVA_MODEL_PREFIXES
+    extra = tuple(
+        token.strip().casefold()
+        for token in re.split(r"[,\s]+", extra_raw)
+        if token.strip()
+    )
+    return _DEFAULT_SENSENOVA_MODEL_PREFIXES + extra
+
+
 def _is_sensenova_model(model: str | None) -> bool:
     """Return whether ``model`` uses the SenseNova OpenAI-compatible dialect."""
-    return bool(model and model.strip().casefold().startswith(_SENSENOVA_MODEL_PREFIXES))
+    return bool(
+        model and model.strip().casefold().startswith(_sensenova_model_prefixes())
+    )
 
 
 def _sensenova_thinking_body() -> dict[str, Any]:

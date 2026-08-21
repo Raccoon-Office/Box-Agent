@@ -386,6 +386,7 @@ def _config_summary(config: Config, config_path: Path, show_secrets: bool = Fals
             "api_key": image_api_key,
             "auth_file": config.image_generation.auth_file,
             "timeout": config.image_generation.timeout,
+            "max_dimension": config.image_generation.max_dimension,
         },
         "tool_limits": config.tool_limits.model_dump(),
         "agent": {
@@ -393,6 +394,7 @@ def _config_summary(config: Config, config_path: Path, show_secrets: bool = Fals
             "workspace_dir": config.agent.workspace_dir,
             "max_parallel_tools": config.agent.max_parallel_tools,
             "parallel_tool_timeout_seconds": config.agent.parallel_tool_timeout_seconds,
+            "provider_stale_seconds": config.agent.provider_stale_seconds,
             "sub_agent_batch_synthesis_timeout_seconds": (
                 config.agent.sub_agent_batch_synthesis_timeout_seconds
             ),
@@ -2197,6 +2199,7 @@ async def run_agent(
         thinking_enabled=deep_think,
         max_parallel_tools=config.agent.max_parallel_tools,
         parallel_tool_timeout_seconds=config.agent.parallel_tool_timeout_seconds,
+        provider_stale_seconds=config.agent.provider_stale_seconds,
         memory_promotion_enabled=config.agent.memory_promotion_proposal_enabled,
         memory_promotion_hit_threshold=config.agent.memory_promotion_hit_threshold,
         memory_promotion_cooldown_days=config.agent.memory_promotion_cooldown_days,

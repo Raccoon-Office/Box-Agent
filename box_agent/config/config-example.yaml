@@ -21,6 +21,11 @@ api_key: "YOUR_API_KEY_HERE"
 api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
 provider: "anthropic"
+# Thinking dialect: models whose name starts with sensenova-/sn-sensenova- use
+# the SenseNova reasoning extension. To opt an extra model family into that
+# dialect without a code change, set (comma/whitespace-separated, additive —
+# the built-ins are always kept):
+#   export BOX_AGENT_SENSENOVA_MODEL_PREFIXES="my-family-,another-"
 # Hosted officev3 login auth lives outside config.yaml so token refreshes do not
 # mark model/provider config dirty. By default Box-Agent reads auth.json next to
 # this file before every LLM request and URL-based MCP connection.
@@ -69,6 +74,8 @@ retry:
 # max_steps: 300 # Maximum execution steps
 max_parallel_tools: 8 # Hard cap on concurrent parallel_safe tool calls (sub_agent, generate_image) per step
 parallel_tool_timeout_seconds: 900 # Per-step wall-clock cap for one parallel_safe tool batch
+# provider_stale_seconds: 180 # Seconds without a new provider chunk before a stream is treated as stale.
+#                             # Raise for slow/deep-thinking models; env BOX_AGENT_PROVIDER_STALE_SECONDS overrides.
 # sub_agent_token_limit: 50000 # Per-call child context budget
 # sub_agent_batch_synthesis_timeout_seconds: 600 # files batch synthesis call; 0 disables this extra cap
 workspace_dir: "./workspace" # Working directory
@@ -163,6 +170,10 @@ image_generation:
   api_key: "" # optional dedicated bearer token; leave empty to reuse hosted auth
   model: "gpt-image-1"
   timeout: 300.0
+  max_dimension: 1024 # Longest-edge cap for generic/custom OpenAI-compatible endpoints that would
+  #                     otherwise forward an oversized `size` unchanged (and 504). OpenAI, Doubao/Seedream,
+  #                     and host-aligned `/images/gen` endpoints keep their own rules. 0 disables the clamp;
+  #                     env BOX_AGENT_IMAGE_MAX_DIM overrides.
   # auth_file defaults to the top-level auth_file / auth.json next to config.yaml.
   # auth_file: "/path/to/auth.json"
 #
