@@ -58,6 +58,7 @@ decision, read those entries together.
 | Sub-agent delegation | `sub_agent_tool.py`, `sub_agent_capabilities.py`, `required_tools`, `write_scope`, `files` | The public request is flat; runtime-derived policy limits implicit tools to trusted local readers, keeps process/external/unknown MCP capabilities fail-closed, and scopes path writes. | Supersedes the caller-authored nested constraint contract while retaining its runtime enforcement goals. | [2026-08-19 flattened contract](#2026-08-19--flattened-sub-agent-contract-with-derived-policy) |
 | Workflow ownership | `workflow_owner_store.py`, explicit Skills, ACP decisions, presentation recovery | Runtime-selected owner precedes artifact discovery. Unknown Skills use the generic external lifecycle; foreign `deck.json` files cannot activate controlled finalization. | Pending implementation; hardens external-Skill and controlled-presentation recovery. | [2026-08-20 owner hardening](#2026-08-20--workflow-owner-precedence-for-third-party-skills) |
 | Model routing and controlled presentations | `box_agent/llm/model_routing.py`, `box_agent/workflows/presentation_*`, controlled PPTX | Automatic child-model routing uses a host allowlist, while presentation-specific state and recovery remain outside the generic kernel. | PR #30 is the main record; later research hardening must be checked where relevant. | [PR #30](#2026-08-14--runtime-routing-and-presentation-reliability-pr-30), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
+| Tool→main-model follow-up, vision review | `box_agent/tools/base.py` (`followup_user_content`), `box_agent/core.py` step-boundary flush, `box_agent/llm/anthropic_client.py` turn merge, `vision_review` `strategy` | Tools may hand multimodal follow-up to the main model via an opt-in field flushed as one user turn; `vision_review` adds a `native` strategy gated on main-model vision capability; Anthropic conversion coalesces consecutive same-role turns. | Pending; default behavior unchanged. | [2026-08-21 native follow-up](#2026-08-21--tool-to-main-model-image-follow-up-and-vision_review-native-strategy) |
 
 For research execution, Todo/progress behavior, browser routing, or contributor
 branch history, also check
@@ -117,6 +118,35 @@ Release, provider API, and ACP compatibility have their own sources under
   tests, foreign-deck recovery tests, and controlled checkpoint command tests.
 - Runtime boundary: source verification does not prove OfficeV3 adoption until
   the runtime is rebuilt, installed, restarted, and replayed with a fresh task.
+
+### 2026-08-21 — tool-to-main-model image follow-up and vision_review native strategy
+
+- Change: implementation on `feat/vision-review-native-strategy`; no merge or
+  release reference exists yet.
+- Tool contract: new opt-in `ToolResult.followup_user_content` (a list of
+  provider-shaped content blocks). The agent loop accumulates these during tool
+  execution and flushes them as one follow-up `user` message at the next step
+  boundary — after every tool result is appended, before the next model call —
+  so tool-call/result closure and assistant→tool_result→user ordering are
+  preserved. The field is excluded from serialization. When unset (the
+  default), the loop behaves exactly as before.
+- Vision review: `vision_review` gains `strategy=proxy|native` (default
+  `proxy`, unchanged). `native` attaches the raw screenshots to the MAIN
+  model's own context instead of proxying to a side vision call, and is refused
+  with a proxy-directed error unless the bound main model is itself
+  vision-capable (`native_supported`).
+- Provider compatibility: `AnthropicClient._convert_messages` now coalesces
+  consecutive same-role turns into one (string content normalized to a text
+  block). Anthropic emits tool results as user turns, so the native image
+  follow-up — and any injected user message after a tool result — would
+  otherwise form two consecutive user turns and be rejected. This also hardens
+  the existing injection paths.
+- Compatibility: default `proxy` and an unset `followup_user_content` are
+  byte-for-byte prior behavior; the Anthropic merge only changes payloads that
+  were already invalid (consecutive same-role turns).
+- Proof anchors: `tests/test_tool_followup_user_content.py`,
+  `tests/test_vision_review_tool.py`, `tests/test_anthropic_message_merge.py`.
+- Rollback: revert the implementation commit; no data migration required.
 
 ## Recent material changes on `main`
 

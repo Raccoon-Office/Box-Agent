@@ -252,7 +252,29 @@ class AnthropicClient(LLMClientBase):
                     }
                 )
 
-        return system_message, api_messages
+        # Anthropic requires strictly alternating user/assistant turns. Tool
+        # results are emitted as user turns, so any following user message — an
+        # injected recovery/context note, or a vision_review native image
+        # attachment — would create two consecutive user turns and be rejected.
+        # Coalesce consecutive same-role turns into one, concatenating their
+        # content (normalizing string content to a text block).
+        def _as_blocks(content: Any) -> list[Any]:
+            if isinstance(content, list):
+                return content
+            if isinstance(content, str):
+                return [{"type": "text", "text": content}] if content else []
+            return [content]
+
+        merged: list[dict[str, Any]] = []
+        for entry in api_messages:
+            if merged and merged[-1]["role"] == entry["role"]:
+                merged[-1]["content"] = _as_blocks(merged[-1]["content"]) + _as_blocks(
+                    entry["content"]
+                )
+            else:
+                merged.append({"role": entry["role"], "content": entry["content"]})
+
+        return system_message, merged
 
     def _prepare_request(
         self,

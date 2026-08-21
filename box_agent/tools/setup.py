@@ -699,6 +699,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # futile resize/retry loops during presentation QA.
     vision_llm = _vision_capable_llm(llm)
     if vision_llm is not None:
+        # native strategy attaches images to the MAIN model's own context, so it
+        # is only safe when the main model itself is vision-capable. When vision
+        # is instead routed to a separate utility model (vision_llm is not the
+        # bound main llm), native is refused and proxy is used.
+        native_supported = vision_llm is llm
         tools.append(
             VisionReviewTool(
                 llm=vision_llm,
@@ -706,6 +711,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,
                 relative_root_dir=str(relative_root),
+                native_supported=native_supported,
             )
         )
         _out(f"{Colors.GREEN}✅ Loaded vision review tool (vision_review){Colors.RESET}")
