@@ -126,6 +126,33 @@ created and uses `params.cwd` (or `config.agent.workspace_dir`) as the
 workspace root. If you want the artifact directory in a custom place,
 override the workspace itself — `output/` always lives under it.
 
+## Runtime capability discovery
+
+`initialize._meta.runtime_capabilities` is a conservative startup snapshot and
+may report Roadmap disabled while background Skill discovery is still running.
+A host restoring persisted artifacts without creating a conversation session
+can request the stable runtime snapshot through the read-only ACP extension
+`_runtime/capabilities`. The request has no parameters and does not create a
+workspace or session.
+
+```json
+{
+  "contract": "box-agent.runtime-capabilities-query",
+  "contractVersion": 1,
+  "ready": true,
+  "_meta": {
+    "runtime_capabilities": {}
+  }
+}
+```
+
+The query waits for Skill discovery using the same bounded wait as
+`session/new`. When the bound expires, `ready` is `false` and the returned
+capabilities remain conservative. Hosts should fail closed, may retry later,
+and must treat an `unknown_method` response from older runtimes as unsupported.
+Capability snapshots belong to the current runtime connection and should not
+be persisted with conversation history.
+
 ## Non-goals
 
 - **No streaming chunks for artifact content.** The artifact payload is

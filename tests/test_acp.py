@@ -194,6 +194,82 @@ async def test_acp_workspace_config_methods_share_profiles(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_acp_runtime_capabilities_query_waits_for_skill_discovery(tmp_path):
+    discovery_gate = asyncio.Event()
+    skill_task = asyncio.create_task(discovery_gate.wait())
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(
+        DummyConn(),
+        config,
+        DummyLLM(),
+        [],
+        "system",
+        skill_task=skill_task,
+    )
+    capabilities = {
+        "contract": "box-agent.runtime-capabilities",
+        "contractVersion": 1,
+        "deckProtocolVersion": 1,
+        "roadmap": {
+            "schemaVersion": 1,
+            "geometryVersion": 1,
+            "rendererVersion": 1,
+            "capabilities": ["roadmap.generate.html", "roadmap.preview", "roadmap.edit"],
+        },
+    }
+    agent._runtime_capabilities_meta = lambda: capabilities  # type: ignore[method-assign]
+
+    query = asyncio.create_task(agent.extMethod("runtime/capabilities", {}))
+    await asyncio.sleep(0)
+    assert not query.done()
+
+    discovery_gate.set()
+    result = await query
+
+    assert result == {
+        "contract": "box-agent.runtime-capabilities-query",
+        "contractVersion": 1,
+        "ready": True,
+        "_meta": {"runtime_capabilities": capabilities},
+    }
+
+
+@pytest.mark.asyncio
+async def test_acp_runtime_capabilities_query_reports_pending_after_bounded_wait(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr("box_agent.acp._SKILL_DISCOVERY_WAIT_SECONDS", 0.01)
+    discovery_gate = asyncio.Event()
+    skill_task = asyncio.create_task(discovery_gate.wait())
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(
+        DummyConn(),
+        config,
+        DummyLLM(),
+        [],
+        "system",
+        skill_task=skill_task,
+    )
+
+    try:
+        result = await agent.extMethod("runtime/capabilities", {})
+    finally:
+        skill_task.cancel()
+
+    assert result["ready"] is False
+    assert result["_meta"]["runtime_capabilities"]["roadmap"]["capabilities"] == []
+
+
+@pytest.mark.asyncio
 async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     workspace = tmp_path / "project"

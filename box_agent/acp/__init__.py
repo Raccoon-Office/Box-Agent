@@ -208,6 +208,7 @@ _DEFAULT_AGENT_TITLE = "Box-Agent"
 _SKILL_DISCOVERY_WAIT_SECONDS = 5.0
 _RUNTIME_CAPABILITIES_UPDATE_METHOD = "box-agent/runtime-capabilities-update"
 _RUNTIME_CAPABILITIES_UPDATE_CONTRACT = "box-agent.runtime-capabilities-update"
+_RUNTIME_CAPABILITIES_QUERY_CONTRACT = "box-agent.runtime-capabilities-query"
 
 try:
     class InitializeRequestPatch(InitializeRequest):
@@ -3338,6 +3339,16 @@ class BoxACPAgent:
 
     async def extMethod(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
+        if method == "runtime/capabilities":
+            skills_ready = await self._ensure_skills_loaded()
+            return {
+                "contract": _RUNTIME_CAPABILITIES_QUERY_CONTRACT,
+                "contractVersion": 1,
+                "ready": skills_ready,
+                "_meta": {
+                    "runtime_capabilities": self._runtime_capabilities_meta(),
+                },
+            }
         if method == "inject":
             session_id = params.get("sessionId", "")
             text = params.get("text", "")
