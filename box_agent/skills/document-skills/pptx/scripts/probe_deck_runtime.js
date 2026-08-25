@@ -199,6 +199,7 @@ async function readEditorState(page, viewport) {
     const toolbar = document.querySelector(".deck-toolbar");
     const statement = document.querySelector(".statement-poster");
     const diagram = document.querySelector("#deck-root > .slide [data-pptx-diagram]");
+    const interactionRoot = document.querySelector("[data-deck-interaction-target]");
     const diagrams = Array.from(document.querySelectorAll("#deck-root > .slide [data-pptx-diagram]")).map(root => {
       let spec = {};
       try {
@@ -320,6 +321,21 @@ async function readEditorState(page, viewport) {
         nodes: diagram.querySelectorAll("[data-diagram-node-id]").length,
         edges: diagram.querySelectorAll("[data-diagram-edge-id]").length,
       } : null,
+      interaction: {
+        requiredMode: document.body.getAttribute("data-deck-interaction-mode"),
+        mode: interactionRoot
+          ? interactionRoot.getAttribute("data-deck-interaction-target")
+          : null,
+        ready: interactionRoot
+          ? interactionRoot.getAttribute("data-interaction-ready") === "true"
+          : false,
+        planetCount: interactionRoot
+          ? interactionRoot.querySelectorAll(".deck-planet").length
+          : 0,
+        spinVisualCount: interactionRoot
+          ? interactionRoot.querySelectorAll(".deck-spin-stage img, .deck-spin-placeholder").length
+          : 0,
+      },
       diagrams,
     };
   }, viewport);
@@ -388,6 +404,9 @@ async function main() {
     await page.evaluate(async () => {
       if (window.__deckDiagramReady && typeof window.__deckDiagramReady.then === "function") {
         await window.__deckDiagramReady;
+      }
+      if (window.__deckInteractionReady && typeof window.__deckInteractionReady.then === "function") {
+        await window.__deckInteractionReady;
       }
     });
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -465,6 +484,26 @@ async function main() {
       editor.diagram.nodes < 2
     )) {
       issues.push("Technical diagram runtime did not produce one ready inline SVG graph");
+    }
+    if (editor.interaction.requiredMode && (
+      !editor.interaction.ready
+      || editor.interaction.mode !== editor.interaction.requiredMode
+    )) {
+      issues.push("Required deck interaction runtime did not initialize");
+    }
+    if (
+      editor.interaction.requiredMode === "solar_orbit"
+      && editor.interaction.planetCount !== 8
+    ) {
+      issues.push(
+        `Solar interaction rendered ${editor.interaction.planetCount} planets instead of 8`
+      );
+    }
+    if (
+      editor.interaction.requiredMode === "spin_360"
+      && editor.interaction.spinVisualCount !== 1
+    ) {
+      issues.push("360 interaction does not contain exactly one rotatable visual");
     }
     (editor.diagrams || []).forEach((diagram, index) => {
       if (diagram.nodes !== diagram.specNodes || diagram.uniqueNodeIds !== diagram.nodes) {

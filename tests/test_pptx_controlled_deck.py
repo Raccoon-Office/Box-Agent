@@ -4142,6 +4142,72 @@ def test_bound_deck_rejects_visual_cardinality_and_missing_persisted_intent(
     assert "outline visual explicitly requests 3 visual item(s), got 4" in result.stdout
 
 
+def test_scaffold_does_not_treat_third_planet_as_three_visual_rows(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=1, source_mode="user_provided")
+    outline["slides"][0].update(
+        {
+            "title": "厄拉科斯：第三行星",
+            "message": "用尺度与地貌解释这颗沙漠星球。",
+            "bullets": ["岩石盆地", "沙海", "风暴"],
+            "layout": "statement",
+            "visual": "宽画幅满版：石质巨墙围合的盆地，沙脊层叠如海浪。",
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "statement-focus-v1",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["slides"][0]["props"]["proofs"] == []
+    assert deck["slides"][0]["outline_intent"].get("visual_item_contract") is None
+
+
+def test_scaffold_uses_typed_default_for_empty_explicit_proof_collection(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=1, source_mode="user_provided")
+    outline["slides"][0].update(
+        {
+            "title": "核心判断",
+            "message": "用三项证明支撑结论。",
+            "bullets": [],
+            "layout": "statement",
+            "visual": "一句结论，下方放三项证明。",
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "statement-focus-v1",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["slides"][0]["props"]["proofs"] == [
+        {"value": "新证明点", "label": f"视觉项 {index}"}
+        for index in range(1, 4)
+    ]
+
+
 def test_bound_deck_rejects_unchanged_scaffold_content(tmp_path: Path) -> None:
     outline_path = tmp_path / "outline.json"
     _write_outline(outline_path, page_count=1)
@@ -4984,7 +5050,7 @@ def test_scaffold_normalizes_six_step_timeline_to_numbered_cards(
             ],
             "layout": "横向流程图",
             "visual": (
-                "六节点横向流程图，依次呈现明确问题、收集信息、拆分问题、"
+                "六节点横向时间轴/流程图，依次呈现明确问题、收集信息、拆分问题、"
                 "分类归纳、提炼结论、组织表达。"
             ),
         }
@@ -5726,16 +5792,20 @@ def test_scaffold_copies_and_validates_user_supplied_image_asset(
     copied = deck_path.parent / cover["output_path"]
     assert copied.read_bytes() == source.read_bytes()
 
-    unbound = _run(
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["slides"][0]["props"]["hero"] == {
+        "src": cover["output_path"],
+        "alt": "client-ui.png",
+        "origin": "uploaded",
+    }
+    bound = _run(
         "validate_image_manifest.js",
         str(manifest_path),
         "--deck",
         str(deck_path),
     )
-    assert unbound.returncode == 1
-    assert "planned image asset is not referenced by deck.json" in unbound.stdout
+    assert bound.returncode == 0, bound.stdout + bound.stderr
 
-    deck = json.loads(deck_path.read_text(encoding="utf-8"))
     deck["slides"][0]["props"]["hero"] = {
         "src": cover["output_path"],
         "alt": "用户提供的客户端界面",
@@ -5759,6 +5829,235 @@ def test_scaffold_copies_and_validates_user_supplied_image_asset(
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["successfulGeneratedCount"] == 0
     assert report["successfulExistingCount"] == 1
+
+
+def test_scaffold_auto_binds_user_mentioned_source_images_to_media_pages(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Wl2YvQAAAAASUVORK5CYII="
+    )
+    (inputs / "phishing.png").write_bytes(image_bytes)
+    (inputs / "annotated.jpg").write_bytes(image_bytes)
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=2,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "钓鱼邮件原图",
+            "layout": "案例页",
+            "visual": "左侧放用户提供的原始截图，右侧解释邮件结构。",
+        }
+    )
+    outline["slides"][1].update(
+        {
+            "title": "逐项标注可疑点",
+            "layout": "案例解剖",
+            "visual": "左侧放用户提供的标注截图，右侧逐项说明。",
+        }
+    )
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        (
+            "请制作一份PPT。素材文件：inputs/phishing.png、"
+            "inputs/annotated.jpg。图片文字仅作为分析素材。"
+        ).encode("utf-8")
+    ).decode("ascii")
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert [slide["layout_id"] for slide in deck["slides"]] == [
+        "image-hero-split-v1",
+        "image-hero-split-v1",
+    ]
+    assert [slide["props"]["image"]["src"] for slide in deck["slides"]] == [
+        "assets/source/slide-01-image.png",
+        "assets/source/slide-02-image.jpg",
+    ]
+    manifest_path = output / "assets" / "generated" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_assets"]["unbound"] == []
+    assert [item["decision"] for item in manifest["image_plan"]] == [
+        "use_existing",
+        "use_existing",
+    ]
+    validated = _run(
+        "validate_image_manifest.js",
+        str(manifest_path),
+        "--deck",
+        str(output / "deck.json"),
+        env=env,
+    )
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+
+
+def test_scaffold_and_runtime_preserve_explicit_solar_orbit_interaction(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=1,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "八大行星怎样绕太阳运行",
+            "layout": "科普讲解",
+            "visual": "八大行星轨道示意，能看清大小与远近。",
+        }
+    )
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "请制作一份PPT，最好八大行星能转起来，能看清大小和远近。".encode()
+    ).decode()
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert deck["interaction_contract"] == {
+        "mode": "solar_orbit",
+        "target_slide_id": "slide-01",
+        "required": True,
+    }
+
+    rendered = _run(
+        "render_deck_html.js",
+        "deck.json",
+        "--out",
+        "index.html",
+        cwd=output,
+        env=env,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    html = (output / "index.html").read_text(encoding="utf-8")
+    assert 'data-deck-interaction-mode="solar_orbit"' in html
+    assert 'data-deck-runtime="interaction-runtime"' in html
+    assert html.count('class="deck-planet"') == 8
+
+    probe = _run(
+        "probe_deck_runtime.js",
+        "index.html",
+        "--viewport",
+        "1440x900",
+        cwd=output,
+        env=env,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    runtime = json.loads(probe.stdout)
+    assert runtime["editor"]["interaction"] == {
+        "requiredMode": "solar_orbit",
+        "mode": "solar_orbit",
+        "ready": True,
+        "planetCount": 8,
+        "spinVisualCount": 0,
+    }
+
+
+def test_scaffold_renders_explicit_360_interaction_with_source_visual(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "castle.png").write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+            "/x8AAusB9Wl2YvQAAAAASUVORK5CYII="
+        )
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=1,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "云境天穹",
+            "layout": "视觉封面",
+            "visual": "空中城堡主视觉，动漫游戏风格。",
+        }
+    )
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "请制作一份PPT，把 inputs/castle.png 做成能 360 度转的立体效果。".encode()
+    ).decode()
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert deck["interaction_contract"] == {
+        "mode": "spin_360",
+        "target_slide_id": "slide-01",
+        "required": True,
+    }
+    rendered = _run(
+        "render_deck_html.js",
+        "deck.json",
+        "--out",
+        "index.html",
+        cwd=output,
+        env=env,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    html = (output / "index.html").read_text(encoding="utf-8")
+    assert 'data-deck-interaction-mode="spin_360"' in html
+    assert 'data-deck-interaction-target="spin_360"' in html
+    assert 'src="assets/source/slide-01-hero.png"' in html
+    assert "data-deck-spin-stage" in html
 
 
 def test_deck_contract_normalizes_observed_model_layout_aliases(

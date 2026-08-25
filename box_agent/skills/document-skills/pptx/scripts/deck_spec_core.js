@@ -744,6 +744,37 @@ function normalizeAndValidateSwimlaneProps(props, fieldPath, issues) {
   });
 }
 
+function validateAndNormalizeInteractionContract(value, slideIds, issues) {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value)) {
+    issues.push("interaction_contract: expected object");
+    return null;
+  }
+  const allowed = ["mode", "target_slide_id", "required"];
+  const unknown = Object.keys(value).filter(key => !allowed.includes(key));
+  if (unknown.length) {
+    issues.push(`interaction_contract: unknown field(s): ${unknown.join(", ")}`);
+  }
+  const mode = String(value.mode || "").trim();
+  const targetSlideId = String(value.target_slide_id || "").trim();
+  if (!["spin_360", "solar_orbit"].includes(mode)) {
+    issues.push("interaction_contract.mode: expected spin_360 or solar_orbit");
+  }
+  if (!slideIds.has(targetSlideId)) {
+    issues.push(
+      `interaction_contract.target_slide_id: unknown slide id ${JSON.stringify(targetSlideId)}`
+    );
+  }
+  if (value.required !== true) {
+    issues.push("interaction_contract.required: expected true");
+  }
+  return {
+    mode,
+    target_slide_id: targetSlideId,
+    required: value.required === true,
+  };
+}
+
 function validateAndNormalizeDeck(spec) {
   const issues = [];
   const warnings = [];
@@ -757,6 +788,7 @@ function validateAndNormalizeDeck(spec) {
     "theme_id",
     "design",
     "design_contract",
+    "interaction_contract",
     "truth_contract",
     "slides",
   ];
@@ -967,12 +999,21 @@ function validateAndNormalizeDeck(spec) {
     });
   }
 
+  const normalizedInteractionContract = validateAndNormalizeInteractionContract(
+    spec.interaction_contract,
+    new Set(normalizedSlides.map(slide => slide.id)),
+    issues
+  );
+
   const normalized = {
     schema_version: 1,
     title: typeof spec.title === "string" ? spec.title.trim() : "",
     theme_id: typeof spec.theme_id === "string" ? spec.theme_id : "",
     ...(normalizedDesign ? { design: normalizedDesign } : {}),
     ...(normalizedDesignContract ? { design_contract: normalizedDesignContract } : {}),
+    ...(normalizedInteractionContract
+      ? { interaction_contract: normalizedInteractionContract }
+      : {}),
     ...(normalizedTruthContract ? { truth_contract: normalizedTruthContract } : {}),
     slides: normalizedSlides,
   };
