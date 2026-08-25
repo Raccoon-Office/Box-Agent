@@ -3981,6 +3981,81 @@ def test_scaffold_splits_overflow_for_typed_collection_layouts(
     assert slides[-1]["source_outline_item_range"]["end"] == item_count
 
 
+def test_scaffold_splits_visual_count_when_bullets_are_page_summary(tmp_path: Path) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=1, source_mode="user_provided")
+    outline["slides"][0].update(
+        {
+            "title": "八大行星，一颗都不能少",
+            "message": "用一页建立八大行星的完整认知。",
+            "bullets": ["认识名称", "区分类型", "观察顺序"],
+            "layout": "cards-grid-v1",
+            "visual": "八张行星卡片，每张标注名称与石头或气体类型。",
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    slides = json.loads(deck_path.read_text(encoding="utf-8"))["slides"]
+    assert [len(slide["props"]["items"]) for slide in slides] == [4, 4]
+    assert [slide["source_outline_item_range"] for slide in slides] == [
+        {"start": 1, "end": 4, "total": 8, "part": 1, "parts": 2},
+        {"start": 5, "end": 8, "total": 8, "part": 2, "parts": 2},
+    ]
+
+
+@pytest.mark.parametrize(
+    "visual",
+    [
+        "12个月销量折线图 + 增速柱状叠加",
+        "近 24 个月销量折线/柱状组合图，含同比标签",
+    ],
+)
+def test_scaffold_does_not_treat_time_window_as_visual_item_count(
+    tmp_path: Path,
+    visual: str,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=1,
+        source_mode="public_authoritative_research",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "月度销量走势",
+            "message": "暂无可验证公开数据",
+            "bullets": ["暂无可验证公开数据"],
+            "layout": "chart-data-v1",
+            "visual": visual,
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    slides = json.loads(deck_path.read_text(encoding="utf-8"))["slides"]
+    assert len(slides) == 1
+    assert "source_outline_item_range" not in slides[0]
+
+
 def test_scaffold_and_patch_support_six_column_nine_row_gantt(
     tmp_path: Path,
 ) -> None:
@@ -6056,6 +6131,59 @@ def test_solar_interaction_owns_eight_planet_cardinality_without_outline_split(
     assert (output / "index.html").read_text(encoding="utf-8").count(
         'class="deck-planet"'
     ) == 8
+
+
+def test_solar_interaction_targets_the_explicit_eight_planet_page(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=3,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "一起出发去太阳系",
+            "layout": "cover-hero-v1",
+            "visual": "太阳系星空封面",
+        }
+    )
+    for page in (1, 2):
+        outline["slides"][page].update(
+            {
+                "title": "八大行星" if page == 1 else "课堂小测试",
+                "message": "认识八大行星的名称、大小与远近。",
+                "bullets": ["认识名称", "比较大小", "观察远近"],
+                "layout": "cards-grid-v1",
+                "visual": "八张行星卡片，每张标注名称。",
+            }
+        )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "请制作一份PPT，八大行星能转起来并看清大小和远近。".encode()
+    ).decode()
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert deck["interaction_contract"] == {
+        "mode": "solar_orbit",
+        "target_slide_id": "slide-02",
+        "required": True,
+    }
+    assert [slide["source_outline_page"] for slide in deck["slides"]] == [1, 2, 3, 3]
 
 
 def test_scaffold_renders_explicit_360_interaction_with_source_visual(

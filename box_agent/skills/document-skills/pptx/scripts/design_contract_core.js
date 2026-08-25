@@ -231,6 +231,24 @@ function countDimension(value) {
   return matched ? matched[1] : "items";
 }
 
+function countUnitDimension(unit, localText) {
+  if (/(?:标签)/i.test(unit)) return "tags";
+  if (/(?:序列|系列)/i.test(unit)) return "series";
+  if (/(?:指标|KPI)/i.test(unit)) return "metrics";
+  if (/(?:节点)/i.test(unit)) return "nodes";
+  if (/(?:阶段|里程碑)/i.test(unit)) return "steps";
+  if (/(?:章节)/i.test(unit)) return "sections";
+  if (/(?:工位)/i.test(unit)) return "stations";
+  if (/(?:分区|区域)/i.test(unit)) return "zones";
+  if (/(?:连接|连线)/i.test(unit)) return "edges";
+  if (/(?:行)/i.test(unit)) return "rows";
+  if (/(?:列)/i.test(unit)) return "columns";
+  if (/(?:卡片)/i.test(unit)) return "cards";
+  if (/(?:类)/i.test(unit)) return "categories";
+  if (/(?:张)/i.test(unit) && /(?:卡片|cards?)/i.test(localText)) return "cards";
+  return null;
+}
+
 function explicitCountContract(slide) {
   const persisted = slide && slide.visual_item_contract;
   if (
@@ -260,12 +278,13 @@ function explicitCountContract(slide) {
       }
     }
   }
-  const match = visual.match(/(?:^|[^第0-9一二三四五六七八九十])([0-9]{1,2}|[一二三四五六七八九十])\s*(?:条|个|项|类|张|段(?:式)?|象限|节点|阶段|主线|里程碑|卡片|标签|层|系统|行|列|章节|工位|分区|区域|序列|系列|指标|KPI|连接|连线)/u);
+  const match = visual.match(/(?:^|[^第0-9一二三四五六七八九十])([0-9]{1,2}|[一二三四五六七八九十])\s*(条|个(?!月|季度|年度|年|百分点|工作日|自然日|小时|分钟|秒)|项|类|张|段(?:式)?|象限|节点|阶段|主线|里程碑|卡片|标签|层|系统|行|列|章节|工位|分区|区域|序列|系列|指标|KPI|连接|连线)/u);
   if (match) {
     const parsed = parseCount(match[1]);
     if (Number.isInteger(parsed) && parsed >= 2 && parsed <= 24) {
       const localText = visual.slice(match.index, match.index + match[0].length + 18);
-      const localDimension = countDimension(localText);
+      const localDimension = countUnitDimension(match[2], localText)
+        || countDimension(localText);
       return {
         count: parsed,
         dimension: localDimension === "items"
