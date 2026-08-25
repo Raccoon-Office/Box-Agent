@@ -562,6 +562,42 @@ class TestExtractAbsolutePaths:
         result = extract_absolute_paths("echo /<strong>$1</strong>/g")
         assert result == []
 
+    def test_css_and_html_comments_are_not_treated_as_root_paths(self):
+        workspace = "/workspace/output"
+        command = (
+            f"cd {workspace} && python3 - <<'PY'\n"
+            "css = '''/* ---------- P2 三个问题 ---------- */'''\n"
+            "html = '<div><!-- /.stage --></div>'\n"
+            "PY"
+        )
+
+        assert extract_absolute_paths(command) == [workspace]
+
+    def test_javascript_line_comment_marker_is_root_noise(self):
+        workspace = "/workspace/output"
+        command = (
+            f"cd {workspace} && cat > script.js <<'JS'\n"
+            "// 使用 CDP 滚动并截图\n"
+            "JS"
+        )
+
+        assert extract_absolute_paths(command) == [workspace]
+
+    def test_real_path_inside_source_payload_remains_enforced(self):
+        command = "python3 - <<'PY'\npath = '/etc/hosts'\nPY"
+
+        assert extract_absolute_paths(command) == ["/etc/hosts"]
+
+    def test_real_path_is_enforced_when_same_text_also_appears_in_comment(self):
+        command = (
+            "python3 - <<'PY'\n"
+            "css = '/* example /etc/hosts */'\n"
+            "path = '/etc/hosts'\n"
+            "PY"
+        )
+
+        assert extract_absolute_paths(command) == ["/etc/hosts"]
+
     def test_word_prefix_s_not_treated_as_sed(self):
         """A token ending in `s/` like `ls/foo` must not trigger the sed strip."""
         # `users/` is not a sed substitution; the real path must survive.

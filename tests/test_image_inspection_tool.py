@@ -457,6 +457,36 @@ async def test_inspect_images_timeout_is_not_cached(tmp_path: Path, monkeypatch)
     assert llm.calls == 2
 
 
+@pytest.mark.asyncio
+async def test_inspect_images_opens_circuit_after_repeated_provider_5xx(tmp_path: Path):
+    (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
+
+    class UnavailableLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(self, **_kwargs):
+            self.calls += 1
+            raise RuntimeError(
+                "Error code: 502 - vision_upstream_http_error"
+            )
+
+    llm = UnavailableLLM()
+    tool = _tool(tmp_path, llm)
+    arguments = {"image_paths": ["slide.png"], "instruction": "Review it."}
+
+    first = await tool.invoke(arguments)
+    second = await tool.invoke(arguments)
+    third = await tool.invoke({**arguments, "strategy": "native"})
+
+    assert first.raw_output["code"] == "IMAGE_REQUEST_FAILED"
+    assert second.raw_output["code"] == "IMAGE_PROVIDER_UNAVAILABLE"
+    assert third.raw_output["code"] == "IMAGE_PROVIDER_UNAVAILABLE"
+    assert "disabled for this session" in (third.error or "").lower()
+    assert "instead of retrying" in (third.error or "").lower()
+    assert llm.calls == 2
+
+
 class ToolConfig:
     class Tools:
         enable_bash = False

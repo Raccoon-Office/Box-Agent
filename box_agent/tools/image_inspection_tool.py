@@ -28,12 +28,25 @@ _MAX_IMAGES = 6
 _JPEG_QUALITY = 85
 _IMAGE_INSPECTION_TIMEOUT = 120.0
 _MAX_MODEL_CONTEXT_CHARS = 24_000
+_PROVIDER_FAILURE_CIRCUIT_THRESHOLD = 2
 _UNSUPPORTED_IMAGE_INPUT_MARKERS = (
     "doesn't support the image content block",
     "does not support the image content block",
     "image input is not supported",
     "image inputs are not supported",
     "unsupported content type: image",
+)
+_PROVIDER_UNAVAILABLE_MARKERS = (
+    "agent_loop_internal_error",
+    "vision_upstream_http_error",
+    "error code: 500",
+    "error code: 502",
+    "error code: 503",
+    "error code: 504",
+    "status code: 500",
+    "status code: 502",
+    "status code: 503",
+    "status code: 504",
 )
 
 
@@ -68,6 +81,8 @@ class ImageInspectionTool(Tool):
         self.native_supported = native_supported
         self._native_capability_llm = native_capability_llm
         self._unsupported_error: str | None = None
+        self._provider_failure_count = 0
+        self._provider_unavailable_error: str | None = None
 
     @property
     def name(self) -> str:
@@ -146,6 +161,11 @@ class ImageInspectionTool(Tool):
                 "IMAGE_INPUT_INVALID",
                 "strategy must be 'proxy' or 'native'",
             )
+        if self._provider_unavailable_error is not None:
+            return self._error(
+                "IMAGE_PROVIDER_UNAVAILABLE",
+                self._provider_unavailable_error,
+            )
         if normalized_strategy == "native" and not self._native_input_supported():
             return self._error(
                 "IMAGE_NATIVE_UNSUPPORTED",
@@ -219,6 +239,19 @@ class ImageInspectionTool(Tool):
                     "the configured model or provider does not support image input"
                 )
                 return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
+            if self._is_provider_unavailable_error(str(exc)):
+                self._provider_failure_count += 1
+                if self._provider_failure_count >= _PROVIDER_FAILURE_CIRCUIT_THRESHOLD:
+                    self._provider_unavailable_error = (
+                        "the configured vision provider failed repeatedly; image "
+                        "inspection is disabled for this session. Continue with the "
+                        "original image files and disclose that visual analysis is "
+                        "unavailable instead of retrying inspect_images."
+                    )
+                    return self._error(
+                        "IMAGE_PROVIDER_UNAVAILABLE",
+                        self._provider_unavailable_error,
+                    )
             return self._error("IMAGE_REQUEST_FAILED", "vision model request failed")
 
         content = response.content or ""
@@ -227,6 +260,7 @@ class ImageInspectionTool(Tool):
                 "IMAGE_RESPONSE_EMPTY",
                 "vision model returned no inspection result",
             )
+        self._provider_failure_count = 0
         raw_output = {
             "type": "image_inspection",
             "schema_version": 1,
@@ -245,6 +279,11 @@ class ImageInspectionTool(Tool):
         if self._native_capability_llm is not None:
             return image_input_support(self._native_capability_llm) is not False
         return self.native_supported
+
+    @staticmethod
+    def _is_provider_unavailable_error(message: str) -> bool:
+        normalized = message.casefold()
+        return any(marker in normalized for marker in _PROVIDER_UNAVAILABLE_MARKERS)
 
     @staticmethod
     def _model_context(content: str) -> str:

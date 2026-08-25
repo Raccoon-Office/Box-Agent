@@ -655,13 +655,31 @@ _SED_SUBST_RE = re.compile(
 # like `cd /; ls` collapsing to `/` after rstrip), we drop it rather than
 # triggering a permission denial that confuses both the LLM and the user.
 _SYSTEM_ROOT_NOISE: frozenset[str] = frozenset({
-    "/",
+    "/", "//",
     "/.",
     "/bin", "/sbin", "/usr", "/etc", "/var", "/opt", "/lib", "/lib64",
     "/proc", "/sys", "/run", "/boot", "/dev",
     "/private", "/Library", "/System", "/Applications",
     "/cores", "/Volumes", "/Network", "/tmp",
 })
+
+
+def _is_source_comment_path(command: str, path: str, position: int) -> bool:
+    """Reject CSS/HTML comment delimiters misread as filesystem paths.
+
+    The permission scanner intentionally still sees real paths elsewhere in
+    the same Python/JavaScript payload.  Only the delimiter-shaped match is
+    suppressed, so a path such as ``/etc/hosts`` remains enforceable even if
+    source text around it contains comments.
+    """
+    if path.startswith("/*"):
+        for match in re.finditer(r"/\*.*?\*/", command, flags=re.DOTALL):
+            if match.start() <= position < match.end():
+                return True
+    for match in re.finditer(r"<!--.*?-->", command, flags=re.DOTALL):
+        if match.start() <= position < match.end():
+            return True
+    return False
 
 
 def _classify_quoted_path(body: str, home: str) -> str | None:
@@ -735,6 +753,7 @@ def extract_absolute_paths(command: str) -> list[str]:
         body = m.group(2)
         expanded = _classify_quoted_path(body, home)
         if expanded is not None and expanded not in _SYSTEM_ROOT_NOISE \
+                and not _is_source_comment_path(sanitized, expanded, m.start(2)) \
                 and expanded not in ("/dev/null", "/dev/stdin",
                                      "/dev/stdout", "/dev/stderr"):
             if expanded not in seen:
@@ -756,6 +775,8 @@ def extract_absolute_paths(command: str) -> list[str]:
     for m in _ABS_PATH_RE.finditer(sanitized):
         p = m.group(1).rstrip(";")
         if p in ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"):
+            continue
+        if _is_source_comment_path(sanitized, p, m.start(1)):
             continue
         # Drop bare system roots that almost certainly came from shell
         # punctuation collapsing the regex match (e.g. `cd /; ls` →  "/").

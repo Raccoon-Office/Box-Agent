@@ -1009,6 +1009,13 @@ class WriteTool(Tool):
             else:
                 started = False
 
+            if state.next_index > 0 and chunk_index == 0:
+                digest = hashlib.sha256(data).hexdigest()
+                if state.chunk_hashes.get(0) != digest:
+                    self._discard(state)
+                    state = self._start(target)
+                    started = True
+
             append_result = self._append_chunk(
                 state,
                 chunk_index,

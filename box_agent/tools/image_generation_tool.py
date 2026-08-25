@@ -57,6 +57,21 @@ _SEEDREAM_PRESETS: dict[tuple[int, int], list[tuple[int, int]]] = {
     (2, 3): [(1664, 2496), (2496, 3744), (3328, 4992)],
     (21, 9): [(3136, 1344), (4704, 2016), (6240, 2656)],
 }
+_SENSENOVA_U1_PRESETS: tuple[tuple[int, int], ...] = (
+    (2048, 2048),
+    (2496, 1664),
+    (1664, 2496),
+    (2368, 1760),
+    (1760, 2368),
+    (2272, 1824),
+    (1824, 2272),
+    (2752, 1536),
+    (1536, 2752),
+    (3072, 1376),
+    (1344, 3136),
+    (2560, 720),
+    (3072, 864),
+)
 _DEFAULT_LARGE_IMAGE_SIZE = "2048x2048"
 _SIZE_RE = re.compile(r"^\s*(\d+)\s*x\s*(\d+)\s*$", re.IGNORECASE)
 _OPENAI_IMAGE_SIZES = {
@@ -88,6 +103,29 @@ def _is_large_image_service(endpoint: str | None, model: str | None) -> bool:
     return (
         "doubao" in needle
         or "seedream" in needle
+    )
+
+
+def _is_sensenova_u1_image_service(model: str | None) -> bool:
+    normalized = (model or "").strip().casefold().replace("_", "-")
+    return "sensenova-u1" in normalized
+
+
+def _sensenova_u1_size_for_ratio(width: int, height: int) -> tuple[str, int, int]:
+    width = max(1, int(width))
+    height = max(1, int(height))
+    target_ratio = width / float(height)
+    candidate_width, candidate_height = min(
+        _SENSENOVA_U1_PRESETS,
+        key=lambda candidate: (
+            abs((candidate[0] / candidate[1]) - target_ratio),
+            candidate[0] * candidate[1],
+        ),
+    )
+    return (
+        f"{candidate_width}x{candidate_height}",
+        candidate_width,
+        candidate_height,
     )
 
 
@@ -554,7 +592,9 @@ class GenerateImageTool(Tool):
             requested_width = width
             requested_height = height
             if size and size.strip():
-                if _is_host_aligned_image_service(self.endpoint):
+                if _is_sensenova_u1_image_service(self.model):
+                    _, width, height = _normalize_explicit_size(size)
+                elif _is_host_aligned_image_service(self.endpoint):
                     _, width, height = _normalize_explicit_size(size)
                     size, width, height = _normalize_host_image_size(width, height)
                 elif _is_openai_image_service(self.endpoint):
@@ -570,7 +610,9 @@ class GenerateImageTool(Tool):
                         size, width, height = _clamp_to_max_dimension(
                             width, height, self.max_dimension
                         )
-            if _is_large_image_service(self.endpoint, self.model):
+            if _is_sensenova_u1_image_service(self.model):
+                size, width, height = _sensenova_u1_size_for_ratio(width, height)
+            elif _is_large_image_service(self.endpoint, self.model):
                 size, width, height = _seedream_size_for_ratio(width, height)
             else:
                 if not size or not size.strip():

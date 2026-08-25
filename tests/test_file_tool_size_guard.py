@@ -81,6 +81,30 @@ async def test_write_file_chunks_enforce_order_and_idempotent_retries(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_write_file_chunk_zero_with_new_content_restarts_pending_transaction(
+    tmp_path,
+):
+    tool = WriteTool(workspace_dir=str(tmp_path))
+
+    first = await tool.execute(
+        path="deck.html", content="stale-", chunk_index=0, final=False
+    )
+    restarted = await tool.execute(
+        path="deck.html", content="fresh-", chunk_index=0, final=False
+    )
+    committed = await tool.execute(
+        path="deck.html", content="deck", chunk_index=1, final=True
+    )
+
+    assert first.success is True
+    assert restarted.success is True
+    assert restarted.raw_output["next_chunk_index"] == 1
+    assert committed.success is True
+    assert (tmp_path / "deck.html").read_text(encoding="utf-8") == "fresh-deck"
+    assert list(tmp_path.glob("*.part")) == []
+
+
+@pytest.mark.asyncio
 async def test_write_file_final_chunk_retry_returns_committed_receipt(tmp_path):
     tool = WriteTool(workspace_dir=str(tmp_path))
 

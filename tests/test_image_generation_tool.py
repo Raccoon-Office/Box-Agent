@@ -752,6 +752,80 @@ async def test_generate_image_uses_default_size_for_seedream_models(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("width", "height", "expected_size"),
+    [
+        (1024, 1024, "2048x2048"),
+        (1600, 900, "2752x1536"),
+        (900, 1600, "1536x2752"),
+    ],
+)
+async def test_generate_image_maps_sensenova_u1_requests_to_supported_sizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    height: int,
+    expected_size: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == expected_size
+        return httpx.Response(
+            200,
+            json={"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://token.sensenova.cn/v1/images/generations",
+        model="sensenova-u1-fast",
+    )
+
+    result = await tool.execute(
+        prompt="cinematic presentation hero",
+        output_path=f"assets/generated/{width}x{height}.png",
+        width=width,
+        height=height,
+    )
+
+    assert result.success
+    assert result.raw_output["size"] == expected_size
+
+
+@pytest.mark.asyncio
+async def test_generate_image_maps_explicit_sensenova_u1_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == "2752x1536"
+        return httpx.Response(
+            200,
+            json={"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://token.sensenova.cn/v1/images/generations",
+        model="SenseNova_U1_Fast",
+    )
+
+    result = await tool.execute(
+        prompt="wide presentation hero",
+        output_path="assets/generated/wide-u1.png",
+        size="2048x1152",
+    )
+
+    assert result.success
+    assert result.raw_output["size"] == "2752x1536"
+
+
+@pytest.mark.asyncio
 async def test_generate_image_passes_explicit_size_through_for_remote_passthrough_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
