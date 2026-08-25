@@ -912,20 +912,23 @@ function expandOutlineDrivenPlan(layoutIds, outlineBinding, interactionContract 
       capacity.maxItems,
       capacity.minItems
     );
-    if (!sizes || bullets.length !== requested.count) {
+    if (!sizes) {
       throw new Error(
         `Slide ${index + 1} requires controlled outline expansion for ${requested.count} ` +
-        `${requested.dimension} item(s), but deterministic splitting requires exactly ` +
-        `${requested.count} outline bullets and chunks within ${layoutId} capacity ` +
+        `${requested.dimension} item(s), but deterministic splitting requires chunks ` +
+        `within ${layoutId} capacity ` +
         `${capacity.minItems}-${capacity.maxItems}`
       );
     }
+    const bulletsMapItems = bullets.length === requested.count;
     let offset = 0;
     sizes.forEach((size, partIndex) => {
       const start = offset + 1;
       const end = offset + size;
       const authoringSlide = JSON.parse(JSON.stringify(outlineSlide));
-      authoringSlide.bullets = bullets.slice(offset, end);
+      authoringSlide.bullets = bulletsMapItems
+        ? bullets.slice(offset, end)
+        : bullets;
       authoringSlide.visual_item_contract = {
         dimension: requested.dimension,
         count: size,
@@ -1337,12 +1340,26 @@ function inferInteractionContract(sourceText, outlineSlides) {
   const targetPattern = mode === "solar_orbit"
     ? /(?:太阳系|八大行星|行星)/i
     : /(?:城堡|主视觉|立体|360)/i;
-  const targetIndex = Math.max(0, outlineSlides.findIndex(slide => targetPattern.test([
-    slide && slide.title,
-    slide && slide.message,
-    slide && slide.layout,
-    slide && slide.visual,
-  ].filter(Boolean).join("\n"))));
+  const rankedTargets = outlineSlides.map((slide, index) => {
+    const content = [
+      slide && slide.title,
+      slide && slide.message,
+      slide && slide.layout,
+      slide && slide.visual,
+    ].filter(Boolean).join("\n");
+    let score = targetPattern.test(content) ? 1 : -100;
+    if (mode === "solar_orbit") {
+      const requested = expectedVisualItemContract(slide);
+      if (requested && requested.count === 8) score += 8;
+      if (/(?:八张|8\s*张).{0,12}(?:行星|卡片)/i.test(content)) score += 3;
+      if (/(?:封面|cover)/i.test(String(slide && slide.layout || ""))) score -= 6;
+    }
+    return { index, score };
+  });
+  const targetIndex = rankedTargets.reduce(
+    (best, candidate) => candidate.score > best.score ? candidate : best,
+    { index: 0, score: -101 },
+  ).index;
   return {
     mode,
     target_slide_id: `slide-${String(targetIndex + 1).padStart(2, "0")}`,
