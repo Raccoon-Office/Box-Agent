@@ -272,6 +272,12 @@ _OUTLINE_TARGET_TOOL_ERROR = (
     "artifact-relative path outline.json; never use the absolute session-workspace "
     "path. For a large outline, every ordered write_file chunk must use that same path."
 )
+_OUTLINE_JSON_TOOL_ERROR = (
+    "CONTROLLED_PRESENTATION_OUTLINE_JSON_INVALID: the proposed outline.json body "
+    "is not valid JSON ({detail}). Correct the JSON syntax and retry the same "
+    "write_file call. Use ordered chunk_index/final writes only when the complete "
+    "document cannot fit in one response."
+)
 _RESEARCH_ARTIFACT_TARGET_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_RESEARCH_ARTIFACT_TARGET_REQUIRED: keep research "
     "artifacts under the canonical presentation artifact root. Use an "
@@ -1727,6 +1733,30 @@ def _outline_target_error(
     )
 
 
+def _outline_json_error(
+    stage: str | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str | None:
+    """Reject malformed single-call outline writes before replacing the artifact."""
+    if stage not in {"outline", "outline_repair"} or tool_name != "write_file":
+        return None
+    if Path(str(arguments.get("path") or "")).name != "outline.json":
+        return None
+    chunk_index = arguments.get("chunk_index", 0)
+    if chunk_index != 0 or arguments.get("final", True) is False:
+        return None
+    content = arguments.get("content")
+    if not isinstance(content, str):
+        return None
+    try:
+        json.loads(content)
+    except json.JSONDecodeError as exc:
+        detail = f"line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        return _OUTLINE_JSON_TOOL_ERROR.format(detail=detail)
+    return None
+
+
 def _repair_artifact_name(stage: str | None) -> str | None:
     if stage == "outline_repair":
         return "outline.json"
@@ -2923,6 +2953,11 @@ class ControlledPresentationPolicy:
             self.workspace_dir,
             self.artifact_root_dir,
         )
+        outline_json_error = _outline_json_error(
+            self.stage,
+            tool_name,
+            arguments,
+        )
         research_artifact_target_error = _research_artifact_target_error(
             self.stage,
             tool_name,
@@ -2936,6 +2971,8 @@ class ControlledPresentationPolicy:
             return _IMAGE_AUTH_BLOCKED_TOOL_ERROR
         if outline_target_error is not None:
             return outline_target_error
+        if outline_json_error is not None:
+            return outline_json_error
         if research_artifact_target_error is not None:
             return research_artifact_target_error
         if handoff_error is not None:

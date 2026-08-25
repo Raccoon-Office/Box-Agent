@@ -3924,6 +3924,42 @@ def test_controlled_repair_allows_only_staged_transaction_for_expected_artifact(
     )
 
 
+def test_controlled_outline_rejects_malformed_single_call_json_before_write(tmp_path):
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=None,
+        stage="outline",
+    )
+
+    error = policy.tool_call_error(
+        "write_file",
+        {"path": "outline.json", "content": '{"slides": [}'},
+        verified_evidence_urls=set(),
+    )
+
+    assert "CONTROLLED_PRESENTATION_OUTLINE_JSON_INVALID" in (error or "")
+    assert "line 1, column" in (error or "")
+
+
+def test_controlled_outline_json_guard_preserves_ordered_chunk_writes(tmp_path):
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=None,
+        stage="outline",
+    )
+
+    assert policy.tool_call_error(
+        "write_file",
+        {
+            "path": "outline.json",
+            "content": '{"slides": [',
+            "chunk_index": 0,
+            "final": False,
+        },
+        verified_evidence_urls=set(),
+    ) is None
+
+
 def test_controlled_apply_patch_repair_allows_bound_staged_transaction(tmp_path):
     policy = ControlledPresentationPolicy(
         workspace_dir=str(tmp_path),
