@@ -2680,6 +2680,51 @@ def test_deterministic_presentation_commands_are_runtime_owned(tmp_path):
         assert "\n" not in action.arguments["command"]
 
 
+def test_runtime_owned_outline_validation_uses_framework_fallback_handoff(tmp_path):
+    artifact_root = tmp_path / "output" / "tasks" / "task-1"
+    qa_root = artifact_root / "research" / "qa"
+    qa_root.mkdir(parents=True)
+    (artifact_root / "outline.json").write_text("{}", encoding="utf-8")
+    (qa_root / "topic_research_check.json").write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "invalid",
+                    "verified_facts": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fallback = qa_root / "research_status.json"
+    fallback.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "framework",
+                    "verified_facts": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=artifact_root,
+        research_mode="deep",
+        stage="outline_qa",
+    )
+
+    action = policy.next_deterministic_action()
+
+    assert action is not None
+    assert action.capability == "controlled_presentation.outline_validate"
+    assert f"--research-handoff {fallback}" in action.arguments["command"]
+    assert "topic_research_check.json" not in action.arguments["command"]
+
+
 @pytest.mark.asyncio
 async def test_stale_research_report_is_revalidated_by_runtime_before_model(tmp_path):
     research = tmp_path / "output" / "research"
