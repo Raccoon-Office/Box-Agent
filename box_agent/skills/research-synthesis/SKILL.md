@@ -128,6 +128,12 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
   page excerpt, confidence, and `verified` / `conflicting` / `unverified`
   status. Use the exact schema in
   [output_contract.md](references/output_contract.md).
+- Use each target's canonical `entity` value in evidence rows. A source-facing
+  abbreviation is valid only when declared once in that target's `aliases`;
+  aliases shared by multiple targets are invalid. Before setting
+  `status=verified`, copy a faithful excerpt that visibly includes the entity or
+  declared alias, every numeric token in the atomic claim, and enough matching
+  claim wording to pass the hard claim-to-excerpt gate.
 - Record known official domains for target entities and prefer verified
   first-party sources when a claim concerns that entity's own disclosure.
   Missing per-entity or first-party coverage is a research-quality warning, not

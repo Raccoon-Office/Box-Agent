@@ -177,6 +177,99 @@ def test_validator_preserves_search_summary_evidence_basis(tmp_path: Path) -> No
     )
 
 
+def test_validator_normalizes_declared_entity_alias_in_verified_handoff(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    _write_focused_research(
+        research,
+        evidence=[
+            {
+                "entity": "Example",
+                "claim": "Example published 2026 market guidance.",
+                "source_url": "https://example.com/market-guidance",
+                "source_type": "first_party",
+                "evidence_excerpt": "Example published 2026 market guidance.",
+                "confidence": "high",
+                "status": "verified",
+            }
+        ],
+    )
+    report = research / "qa" / "topic_research_check.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--research-dir",
+            str(research),
+            "--topic",
+            "topic",
+            "--route",
+            "B",
+            "--min-dimensions",
+            "3",
+            "--report",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    fact = payload["presentation_handoff"]["verified_facts"][0]
+    assert fact["entity"] == "Example Corp"
+    assert fact["canonical"].startswith("Example Corp | Example published 2026")
+
+
+def test_validator_rejects_alias_shared_by_multiple_entities(tmp_path: Path) -> None:
+    research = tmp_path / "research"
+    _write_focused_research(research)
+    evidence_path = research / "topic_evidence.json"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload["target_entities"].append(
+        {
+            "entity": "Second Corp",
+            "aliases": ["Example"],
+            "official_domains": ["second.example"],
+        }
+    )
+    evidence_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    report = research / "qa" / "topic_research_check.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--research-dir",
+            str(research),
+            "--topic",
+            "topic",
+            "--route",
+            "B",
+            "--min-dimensions",
+            "3",
+            "--report",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    issues = json.loads(report.read_text(encoding="utf-8"))["issues"]
+    assert any(
+        "alias 'Example' is declared for more than one entity" in issue
+        for issue in issues
+    )
+
+
 def test_validator_allows_partial_handoff_when_research_is_below_dimension_target(
     tmp_path: Path,
 ) -> None:

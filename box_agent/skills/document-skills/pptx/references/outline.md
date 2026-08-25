@@ -90,6 +90,11 @@ research**. Pick the branch that fits:
    a PPT-specific four-query scan: a one-line request for a sourced factual
    report still needs enough landscape, authority, and conflict coverage to
    support the slide plan, while a concise proposal brief stays in branch 2. After
+   Use canonical target-entity names in the evidence ledger; a source-facing
+   abbreviation is accepted only when declared as a unique alias. Before marking
+   a row verified, its faithful excerpt must visibly contain the entity or alias,
+   every numeric token in the atomic claim, and enough matching wording to
+   support the claim directly. After
    the route is complete, run its bundled artifact validator with
    `--report research/qa/{topic}_research_check.json`; even a reduced sequential
    run should preserve distinct dimensions, but the dimension target is a

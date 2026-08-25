@@ -67,7 +67,10 @@ Create `{topic}_evidence.json` before validation:
 
 Required evidence fields:
 
-- `entity`: exact value from `target_entities`.
+- `entity`: use the canonical `target_entities[].entity` value whenever
+  possible. A unique string declared in that target's `aliases` is accepted and
+  normalized to the canonical entity in the verified handoff; undeclared or
+  ambiguous aliases are rejected.
 - `claim`: one atomic factual statement.
 - `source_url`: the opened evidence page, never a search-results URL. For
   `source_type=user_input` in file-only routes, use a stable `file:` or
@@ -100,7 +103,10 @@ Entity/source rules:
 - The validator checks that claim numbers occur in the excerpt and that the
   claim and excerpt have meaningful lexical overlap. This is a hard
   claim-to-excerpt gate; the researcher remains responsible for opening the
-  page and copying the excerpt faithfully.
+  page and copying the excerpt faithfully. Before marking a row `verified`,
+  confirm that the excerpt visibly includes the entity (or declared alias),
+  every numeric token from the atomic claim, and enough of the claim wording to
+  support it directly.
 - Conflicting and unverified rows are retained for disclosure but excluded from
   `verified_evidence` in the machine-readable report.
 

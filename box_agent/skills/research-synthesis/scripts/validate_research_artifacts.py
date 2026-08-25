@@ -234,6 +234,21 @@ def validate_evidence_ledger(
             ],
         }
 
+    entity_lookup: dict[str, str] = {}
+    for entity_key, entity_spec in entities.items():
+        for alias in entity_spec["aliases"]:
+            alias_key = normalized_text(alias)
+            if not alias_key:
+                continue
+            previous_key = entity_lookup.get(alias_key)
+            if previous_key is not None and previous_key != entity_key:
+                errors.append(
+                    f"{path.name}: target entity alias {alias!r} is declared for "
+                    "more than one entity"
+                )
+                continue
+            entity_lookup[alias_key] = entity_key
+
     raw_evidence = payload.get("evidence")
     if not isinstance(raw_evidence, list) or not raw_evidence:
         errors.append(f"{path.name}: evidence must be a non-empty array")
@@ -269,13 +284,17 @@ def validate_evidence_ledger(
             key: str(value).strip() if isinstance(value, str) else value
             for key, value in raw_record.items()
         }
-        entity_key = normalized_text(record["entity"])
+        entity_key = entity_lookup.get(normalized_text(record["entity"]), "")
         entity_spec = entities.get(entity_key)
         if entity_spec is None:
             errors.append(
-                f"{label}.entity {record['entity']!r} is not declared in target_entities"
+                f"{label}.entity {record['entity']!r} is not declared as a target "
+                "entity or alias"
             )
             continue
+        # Downstream canonical evidence always uses the target's primary name,
+        # even when a source-facing alias was used in the ledger row.
+        record["entity"] = entity_spec["entity"]
         source_type = str(record["source_type"]).casefold()
         confidence = str(record["confidence"]).casefold()
         status = str(record["status"]).casefold()
