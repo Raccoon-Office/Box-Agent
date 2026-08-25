@@ -260,7 +260,7 @@ function explicitCountContract(slide) {
       }
     }
   }
-  const match = visual.match(/(?:^|[^0-9一二三四五六七八九十])([0-9]{1,2}|[一二三四五六七八九十])\s*(?:条|个|项|类|张|段(?:式)?|象限|节点|阶段|主线|里程碑|卡片|标签|层|系统|行|列|章节|工位|分区|区域|序列|系列|指标|KPI|连接|连线)/u);
+  const match = visual.match(/(?:^|[^第0-9一二三四五六七八九十])([0-9]{1,2}|[一二三四五六七八九十])\s*(?:条|个|项|类|张|段(?:式)?|象限|节点|阶段|主线|里程碑|卡片|标签|层|系统|行|列|章节|工位|分区|区域|序列|系列|指标|KPI|连接|连线)/u);
   if (match) {
     const parsed = parseCount(match[1]);
     if (Number.isInteger(parsed) && parsed >= 2 && parsed <= 24) {
@@ -277,7 +277,10 @@ function explicitCountContract(slide) {
   const bullets = Array.isArray(slide && slide.bullets)
     ? slide.bullets.filter(item => String(item || "").trim())
     : [];
-  return ["pyramid", "numbered-actions"].includes(kind) && bullets.length >= 2
+  const declaredLayoutKind = visualKind({ layout: slide && slide.layout });
+  return ["pyramid", "numbered-actions"].includes(kind)
+    && declaredLayoutKind === kind
+    && bullets.length >= 2
     ? { count: bullets.length, dimension: kind === "pyramid" ? "items" : "actions" }
     : null;
 }

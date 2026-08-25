@@ -227,6 +227,60 @@ function renderToolbar() {
   ].join("\n");
 }
 
+function slideMedia(slide) {
+  const props = slide && slide.props && typeof slide.props === "object"
+    ? slide.props
+    : {};
+  return [props.hero, props.image, props.media, slide && slide.background]
+    .find(value => value && typeof value === "object" && typeof value.src === "string")
+    || null;
+}
+
+function renderSolarOrbitInteraction() {
+  const planets = [
+    ["水", 150, 12, 7, "#9b9b97"],
+    ["金", 220, 19, 10, "#d89a45"],
+    ["地", 290, 20, 13, "#3c82d4"],
+    ["火", 360, 16, 16, "#b6492f"],
+    ["木", 440, 38, 21, "#c88f61"],
+    ["土", 520, 34, 27, "#d3b66e"],
+    ["天", 600, 26, 33, "#66bfd0"],
+    ["海", 680, 25, 40, "#376ad2"],
+  ];
+  return [
+    '<div class="deck-interaction deck-interaction-solar" data-deck-decoration="interaction" data-deck-interaction-target="solar_orbit" aria-label="可暂停的八大行星公转示意">',
+    '  <button type="button" class="deck-interaction-toggle" data-deck-interaction-toggle aria-pressed="false">暂停运动</button>',
+    '  <div class="deck-solar-system">',
+    '    <div class="deck-solar-sun">太阳</div>',
+    ...planets.map(([label, orbit, size, duration, color]) => (
+      `    <div class="deck-planet-orbit" style="--orbit-size:${orbit}px;--orbit-duration:${duration}s">` +
+      `<span class="deck-planet" style="--planet-size:${size}px;--planet-color:${color}" title="${label}">${label}</span></div>`
+    )),
+    "  </div>",
+    "</div>",
+  ].join("\n");
+}
+
+function renderSpinInteraction(slide) {
+  const media = slideMedia(slide);
+  const visual = media
+    ? `<img src="${escapeHtml(media.src)}" alt="${escapeHtml(media.alt || "360 度主视觉")}" draggable="false" />`
+    : '<div class="deck-spin-placeholder" aria-label="360 度主视觉占位">360°</div>';
+  return [
+    '<div class="deck-interaction deck-interaction-spin" data-deck-decoration="interaction" data-deck-interaction-target="spin_360" aria-label="可拖拽的 360 度主视觉">',
+    '  <button type="button" class="deck-interaction-toggle" data-deck-interaction-toggle aria-pressed="false">暂停运动</button>',
+    `  <div class="deck-spin-stage" data-deck-spin-stage>${visual}</div>`,
+    "</div>",
+  ].join("\n");
+}
+
+function renderInteraction(contract, slide) {
+  if (!contract || slide.id !== contract.target_slide_id) return "";
+  return contract.mode === "solar_orbit"
+    ? renderSolarOrbitInteraction()
+    : renderSpinInteraction(slide);
+}
+
 function renderDocument(deck, theme) {
   const runtimeCss = fs.readFileSync(path.join(SKILL_ROOT, "runtime", "deck.css"), "utf8");
   const compositionCss = fs.readFileSync(
@@ -234,6 +288,12 @@ function renderDocument(deck, theme) {
     "utf8"
   );
   const editorJs = fs.readFileSync(path.join(SKILL_ROOT, "runtime", "deck-editor.js"), "utf8");
+  const interactionCss = deck.interaction_contract
+    ? fs.readFileSync(path.join(SKILL_ROOT, "runtime", "interaction-runtime.css"), "utf8")
+    : "";
+  const interactionJs = deck.interaction_contract
+    ? fs.readFileSync(path.join(SKILL_ROOT, "runtime", "interaction-runtime.js"), "utf8")
+    : "";
   const layoutRegistryJs = fs.readFileSync(
     path.join(SKILL_ROOT, "layouts", "registry.js"),
     "utf8"
@@ -243,7 +303,11 @@ function renderDocument(deck, theme) {
   const slideHtml = deck.slides.map((slide, index) => {
     const layout = getLayout(slide.layout_id);
     if (!layout) throw new Error(`Unknown layout during render: ${slide.layout_id}`);
-    return layout.render(slide, index, design);
+    const rendered = layout.render(slide, index, design);
+    const interaction = renderInteraction(deck.interaction_contract, slide);
+    return interaction
+      ? rendered.replace(/<\/section>\s*$/, `${interaction}\n</section>`)
+      : rendered;
   }).join("\n\n");
   const hasCharts = slideHtml.includes("data-pptx-chart");
   const chartScripts = hasCharts
@@ -299,10 +363,11 @@ function renderDocument(deck, theme) {
     "  <style>",
     runtimeCss,
     compositionCss,
+    interactionCss,
     themeVariables(theme, deck.design_contract),
     "  </style>",
     "</head>",
-    `<body data-deck-schema-version="1" data-deck-theme="${escapeHtml(visualDnaId)}" data-deck-theme-id="${escapeHtml(theme.id)}" data-deck-composition="${escapeHtml(design.family)}" data-deck-composition-variant="${escapeHtml(design.variant)}" data-deck-design-seed="${escapeHtml(design.seed)}"${paletteAccentUsage}${themeStyleAttributes(theme)}>`,
+    `<body data-deck-schema-version="1" data-deck-theme="${escapeHtml(visualDnaId)}" data-deck-theme-id="${escapeHtml(theme.id)}" data-deck-composition="${escapeHtml(design.family)}" data-deck-composition-variant="${escapeHtml(design.variant)}" data-deck-design-seed="${escapeHtml(design.seed)}"${deck.interaction_contract ? ` data-deck-interaction-mode="${escapeHtml(deck.interaction_contract.mode)}"` : ""}${paletteAccentUsage}${themeStyleAttributes(theme)}>`,
     '  <main id="deck-root">',
     slideHtml,
     "  </main>",
@@ -319,6 +384,13 @@ function renderDocument(deck, theme) {
     "  </script>",
     ...chartScripts,
     ...diagramScripts,
+    ...(interactionJs
+      ? [
+        '  <script data-deck-runtime="interaction-runtime">',
+        safeInlineScript(interactionJs),
+        "  </script>",
+      ]
+      : []),
     "  <script>",
     editorJs,
     "  </script>",

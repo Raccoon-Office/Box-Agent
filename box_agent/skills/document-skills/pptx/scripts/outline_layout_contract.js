@@ -312,6 +312,14 @@ function analyzeOutlineLayoutIntent(
       "outline explicitly marks this page as a typography-led cover"
     );
   }
+  if (MEDIA_RE.test(visual)) {
+    return semanticRule(
+      "source-media",
+      "image-hero-split-v1",
+      ["image-hero-split-v1", "project-case-study-v1"],
+      "outline explicitly asks for a photograph, screenshot, or other primary media asset"
+    );
+  }
   if (FACTORY_PROCESS_RE.test(all)) {
     return semanticRule(
       "factory-process-line",
@@ -367,8 +375,8 @@ function analyzeOutlineLayoutIntent(
     return semanticRule(
       "timeline",
       "timeline-horizontal-v1",
-      ["timeline-horizontal-v1"],
-      "outline asks for ordered milestones on a time or roadmap axis"
+      ["timeline-horizontal-v1", "cards-grid-v1"],
+      "outline asks for ordered milestones; a controlled timeline or numbered cards can preserve the sequence"
     );
   }
   if (PROCESS_RE.test(visual)) {

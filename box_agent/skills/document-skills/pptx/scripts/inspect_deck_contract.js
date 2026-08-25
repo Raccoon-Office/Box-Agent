@@ -50,6 +50,8 @@ const AUTO_COVER_TECH_VISUAL_RE = /(?:代码窗口|代码片段|协作节点|节
 const AUTO_GENERATIVE_VISUAL_MEDIUM_RE = /(?:主视觉|缩略图|实景|照片|插画|卡通(?:形象|插画|插图)?|儿童插画|儿童插图|概念图|效果图|界面|截图|样机|地图|地理分布|空间分布|场景|实物|特写|肖像|包装视觉|hero\s+image|thumbnail|photo|illustration|cartoon(?:\s+illustration)?|concept\s+art|interface|screenshot|mockup|map|geographic\s+distribution|scene|product\s+shot|object\s+study|close[- ]?up|portrait|packaging\s+visual)/i;
 const AUTO_PRIMARY_BITMAP_VISUAL_RE = /(?:主视觉|缩略图|实景|照片|插画|卡通(?:形象|插画|插图)?|儿童插画|儿童插图|概念图|效果图|样机|地图|场景|实物|特写|肖像|包装视觉|hero\s+image|thumbnail|photo|illustration|cartoon(?:\s+illustration)?|concept\s+art|mockup|map|scene|product\s+shot|object\s+study|close[- ]?up|portrait|packaging\s+visual)/i;
 const AUTO_DATA_VISUAL_RE = /(?:图表|表格|数据看板|KPI|指标|chart|table|dashboard|metrics?)/i;
+const AUTO_SOLAR_ORBIT_RE = /(?:(?:太阳系|八大行星)[\s\S]{0,100}(?:转起来|公转|旋转|转动)|(?:转起来|公转|旋转|转动)[\s\S]{0,100}(?:太阳系|八大行星))/i;
+const AUTO_SPIN_360_RE = /(?:360\s*(?:度|°|degrees?)?[^。；;!?！？\n]{0,24}(?:转|旋转|转动)|(?:转|旋转|转动)[^。；;!?！？\n]{0,24}360\s*(?:度|°|degrees?)?)/i;
 const AUTO_COVER_IMAGE_OPTOUT_RE = /(?:不要|无需|不需要|不得|禁止|不)(?:生成|使用|添加)?(?:图片|生图|视觉图)|(?:纯文字|仅文字)|\b(?:no\s+(?:generated\s+)?images?|without\s+images?|text[- ]only)\b/i;
 const AUTO_SLIDE_LOCAL_IMAGE_OPTOUT_RE = /(?:第?\s*\d{1,2}\s*页|(?:页面|slide)\s*[:：#-]?\s*\d{1,2}|封面|首页|cover)[^。；;!?！？\n]{0,48}(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)|(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)[^。；;!?！？\n]{0,48}(?:封面|首页|cover)/i;
 const STRUCTURED_NEXT_STEPS_MATRIX_RE = /(?:表格|矩阵|table|matrix)|(?:(?:执行)?角色|负责人|责任人|owners?|assignees?|responsibilit(?:y|ies))[^\n。；;]{0,48}(?:姓名|成员|人员|names?|members?)/i;
@@ -515,7 +517,18 @@ function alignScaffoldVisualCardinality(layoutId, props, outlineSlide) {
     || (Number.isInteger(contract.maxItems) && expected > contract.maxItems)
   ) return;
   if (collection.length > expected) collection.splice(expected);
-  const seed = collection.length ? collection[collection.length - 1] : null;
+  const collectionName = String(field).split(".").filter(Boolean).pop();
+  const itemDefault = layout
+    && layout.editor
+    && layout.editor.controls
+    && layout.editor.controls.collections
+    && collectionName
+    && layout.editor.controls.collections[collectionName]
+    ? layout.editor.controls.collections[collectionName].itemDefault
+    : null;
+  const seed = collection.length
+    ? collection[collection.length - 1]
+    : itemDefault;
   while (collection.length < expected) {
     const item = seed === null ? "待填充" : JSON.parse(JSON.stringify(seed));
     const ordinal = collection.length + 1;
@@ -1189,10 +1202,128 @@ function prepareExistingImageAssets(specs, orderedLayouts, deckFile, force = fal
       slide: spec.slide,
       slot: spec.slot,
       outputPath,
+      sourceName: path.basename(sourcePath),
       hash: createHash("sha256").update(fs.readFileSync(destination)).digest("hex"),
     });
   });
   return prepared;
+}
+
+function isPathInside(candidate, root) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+}
+
+function mentionedSourceImageFiles(sourceText, deckFile) {
+  const artifactRoot = path.resolve(
+    String(process.env.BOX_AGENT_OUTPUT_DIR || path.dirname(deckFile)).trim()
+      || path.dirname(deckFile)
+  );
+  const allowedRoots = [artifactRoot];
+  if (path.basename(artifactRoot).toLowerCase() === "output") {
+    allowedRoots.push(path.dirname(artifactRoot));
+  }
+  const mentioned = [];
+  const pattern = /(?:^|[\s"'`（(：:,，、])((?:\/|\.\.?[\\/])?[^\s"'`<>|：:,，、；;（）()]+?\.(?:png|jpe?g|webp))(?=$|[\s"'`<>|，。；;、）)])/giu;
+  for (const match of String(sourceText || "").matchAll(pattern)) {
+    const token = match[1];
+    const candidates = path.isAbsolute(token)
+      ? [path.resolve(token)]
+      : [
+        path.resolve(process.cwd(), token),
+        ...allowedRoots.map(root => path.resolve(root, token)),
+      ];
+    const resolved = candidates.find(candidate => (
+      allowedRoots.some(root => isPathInside(candidate, root))
+      && isNonEmptyFile(candidate)
+    ));
+    if (resolved && !mentioned.includes(resolved)) mentioned.push(resolved);
+  }
+  return mentioned;
+}
+
+function automaticImageAssetSpecs(
+  sourceFiles,
+  explicitSpecs,
+  orderedLayouts,
+  outlineSlides,
+) {
+  const explicitSlides = new Set(explicitSpecs.map(spec => spec.slide));
+  const explicitSources = new Set(explicitSpecs.map(spec => path.resolve(spec.sourcePath)));
+  const candidates = orderedLayouts.flatMap((layout, index) => {
+    if (explicitSlides.has(index + 1)) return [];
+    const slots = layout && layout.mediaSlots && Array.isArray(layout.mediaSlots.slots)
+      ? layout.mediaSlots.slots
+      : [];
+    const slot = slots.find(item => (
+      item
+      && Array.isArray(item.strategies)
+      && item.strategies.includes("use_existing")
+    ));
+    return slot
+      ? [{ slide: index + 1, slot: slot.id }]
+      : [];
+  });
+  const remaining = sourceFiles.filter(file => !explicitSources.has(path.resolve(file)));
+  const specs = remaining.slice(0, candidates.length).map((sourcePath, index) => ({
+    ...candidates[index],
+    sourcePath,
+  }));
+  return {
+    specs,
+    unbound: remaining.slice(candidates.length),
+  };
+}
+
+function setNestedValue(root, fieldPath, value) {
+  const parts = String(fieldPath || "").split(".").filter(Boolean);
+  let current = root;
+  parts.slice(0, -1).forEach(part => {
+    if (!current[part] || typeof current[part] !== "object") current[part] = {};
+    current = current[part];
+  });
+  if (parts.length) current[parts[parts.length - 1]] = value;
+}
+
+function bindPreparedImageAssets(skeleton, prepared, orderedLayouts, outlineSlides) {
+  prepared.forEach(asset => {
+    const layout = orderedLayouts[asset.slide - 1];
+    const slide = skeleton.slides[asset.slide - 1];
+    if (!layout || !slide) return;
+    const slot = layout.mediaSlots.slots.find(item => item && item.id === asset.slot);
+    const propPath = asset.slot === "background" ? "background" : slot && slot.propPath;
+    if (!propPath) return;
+    const outlineSlide = outlineSlides[asset.slide - 1] || {};
+    setNestedValue(slide.props, propPath, {
+      src: asset.outputPath,
+      alt: String(outlineSlide.visual || outlineSlide.title || asset.sourceName).trim(),
+      origin: "uploaded",
+    });
+  });
+}
+
+function inferInteractionContract(sourceText, outlineSlides) {
+  const text = String(sourceText || "");
+  const mode = AUTO_SOLAR_ORBIT_RE.test(text)
+    ? "solar_orbit"
+    : AUTO_SPIN_360_RE.test(text)
+      ? "spin_360"
+      : null;
+  if (!mode) return null;
+  const targetPattern = mode === "solar_orbit"
+    ? /(?:太阳系|八大行星|行星)/i
+    : /(?:城堡|主视觉|立体|360)/i;
+  const targetIndex = Math.max(0, outlineSlides.findIndex(slide => targetPattern.test([
+    slide && slide.title,
+    slide && slide.message,
+    slide && slide.layout,
+    slide && slide.visual,
+  ].filter(Boolean).join("\n"))));
+  return {
+    mode,
+    target_slide_id: `slide-${String(targetIndex + 1).padStart(2, "0")}`,
+    required: true,
+  };
 }
 
 function isNonEmptyFile(filePath) {
@@ -1459,6 +1590,10 @@ function main() {
       ? splitDefaultRuntimeSourceFacts(runtimeBinding.source_text)
       : opts.sourceFacts
   );
+  const interactionContract = inferInteractionContract(
+    runtimeBinding.source_text,
+    authoringSlides,
+  );
   const skeleton = orderedLayouts.length
     ? {
       schema_version: 1,
@@ -1466,6 +1601,7 @@ function main() {
       theme_id: theme.id,
       design,
       ...(designContract ? { design_contract: designContract } : {}),
+      ...(interactionContract ? { interaction_contract: interactionContract } : {}),
       truth_contract: {
         mode: opts.truthMode,
         source_facts: sourceFactNormalization.facts,
@@ -1513,6 +1649,8 @@ function main() {
   let deckFile = null;
   let contractReport = null;
   let imageManifest = null;
+  let automaticallyBoundSourceAssets = [];
+  let unboundMentionedSourceAssets = [];
   if (opts.out) {
     if (!skeleton) {
       throw new Error("--out requires at least one ordered LAYOUT_ID");
@@ -1541,12 +1679,35 @@ function main() {
         "keep one deck/manifest pair in the canonical output root"
       );
     }
-    const existingImageAssets = prepareExistingImageAssets(
+    const mentionedSourceAssets = opts.noImages
+      ? []
+      : mentionedSourceImageFiles(runtimeBinding.source_text, deckFile);
+    const automaticAssets = automaticImageAssetSpecs(
+      mentionedSourceAssets,
       opts.imageAssets,
+      orderedLayouts,
+      authoringSlides,
+    );
+    automaticallyBoundSourceAssets = automaticAssets.specs;
+    unboundMentionedSourceAssets = automaticAssets.unbound;
+    const existingImageAssets = prepareExistingImageAssets(
+      [...opts.imageAssets, ...automaticallyBoundSourceAssets],
       orderedLayouts,
       deckFile,
       opts.force,
     );
+    bindPreparedImageAssets(
+      skeleton,
+      existingImageAssets,
+      orderedLayouts,
+      authoringSlides,
+    );
+    const boundValidation = validateAndNormalizeDeck(skeleton);
+    if (!boundValidation.ok) {
+      throw new Error(
+        `Generated skeleton with source media is invalid:\n${boundValidation.issues.join("\n")}`
+      );
+    }
     fs.mkdirSync(path.dirname(deckFile), { recursive: true });
     fs.writeFileSync(deckFile, `${JSON.stringify(skeleton, null, 2)}\n`, "utf8");
 
@@ -1569,6 +1730,15 @@ function main() {
       schema_version: 1,
       mode: opts.imageMode,
       generation_forbidden: generationForbidden,
+      source_assets: {
+        mentioned: mentionedSourceAssets.map(sourcePath => path.basename(sourcePath)),
+        automatically_bound: automaticallyBoundSourceAssets.map(spec => ({
+          slide: spec.slide,
+          slot: spec.slot,
+          source: path.basename(spec.sourcePath),
+        })),
+        unbound: unboundMentionedSourceAssets.map(sourcePath => path.basename(sourcePath)),
+      },
       deck: {
         title: skeleton.title,
         theme_id: skeleton.theme_id,
@@ -1665,6 +1835,13 @@ function main() {
       required_field_normalizations: requiredFieldNormalizations,
       required_field_relaxations: requiredFieldRelaxations,
       warnings: [
+        ...(unboundMentionedSourceAssets.length
+          ? [
+            "User-mentioned source images were not bound because the validated outline " +
+            `contains too few compatible source-media pages: ${unboundMentionedSourceAssets
+              .map(sourcePath => path.basename(sourcePath)).join(", ")}`,
+          ]
+          : []),
         ...requiredFieldRelaxations.map(item => (
           `Slide ${item.slide} ignored decorative --require-field ${item.field} because ` +
           `${item.effective_layout_id} does not expose it and the outline does not ` +
@@ -1682,6 +1859,14 @@ function main() {
           evidence_import_count: outlineBinding.importedResearchFacts.length,
         }
         : null,
+      source_assets: {
+        automatically_bound: automaticallyBoundSourceAssets.map(spec => ({
+          slide: spec.slide,
+          slot: spec.slot,
+          source: path.basename(spec.sourcePath),
+        })),
+        unbound: unboundMentionedSourceAssets.map(sourcePath => path.basename(sourcePath)),
+      },
     };
     fs.mkdirSync(path.dirname(contractReport), { recursive: true });
     fs.writeFileSync(contractReport, `${JSON.stringify(reportPayload, null, 2)}\n`, "utf8");

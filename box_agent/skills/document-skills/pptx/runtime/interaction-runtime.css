@@ -1,0 +1,155 @@
+.deck-interaction {
+  position: absolute;
+  z-index: 8;
+  right: 76px;
+  top: 172px;
+  width: 760px;
+  height: 760px;
+  color: var(--deck-text);
+  pointer-events: auto;
+}
+
+.deck-interaction-toggle {
+  position: absolute;
+  z-index: 12;
+  right: 8px;
+  top: 8px;
+  border: 1px solid color-mix(in srgb, var(--deck-border) 72%, transparent);
+  border-radius: 999px;
+  padding: 9px 16px;
+  background: color-mix(in srgb, var(--deck-surface) 90%, transparent);
+  color: var(--deck-text);
+  font: 600 15px/1 var(--deck-label);
+  cursor: pointer;
+}
+
+.deck-solar-system {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 0;
+  height: 0;
+  transform: translate(-50%, -50%);
+}
+
+.deck-solar-sun {
+  position: absolute;
+  left: -58px;
+  top: -58px;
+  display: grid;
+  width: 116px;
+  height: 116px;
+  place-items: center;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, #fff8b0 0 8%, #ffc928 34%, #f36a16 72%, #a72b0e 100%);
+  box-shadow: 0 0 48px rgba(255, 175, 30, 0.72);
+  color: #5a1c08;
+  font: 800 18px/1 var(--deck-label);
+}
+
+.deck-planet-orbit {
+  --orbit-size: 180px;
+  --orbit-duration: 8s;
+  position: absolute;
+  left: calc(var(--orbit-size) / -2);
+  top: calc(var(--orbit-size) / -2);
+  width: var(--orbit-size);
+  height: var(--orbit-size);
+  border: 1px solid color-mix(in srgb, var(--deck-muted) 42%, transparent);
+  border-radius: 50%;
+  animation: deck-planet-orbit var(--orbit-duration) linear infinite;
+}
+
+.deck-planet {
+  --planet-size: 20px;
+  position: absolute;
+  left: 50%;
+  top: calc(var(--planet-size) / -2);
+  display: grid;
+  width: var(--planet-size);
+  height: var(--planet-size);
+  place-items: center;
+  border: 2px solid rgba(255, 255, 255, 0.66);
+  border-radius: 50%;
+  background: var(--planet-color, var(--deck-primary));
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.28);
+  color: var(--deck-inverse);
+  font: 700 11px/1 var(--deck-label);
+  transform: translateX(-50%);
+}
+
+.deck-interaction.is-paused .deck-planet-orbit {
+  animation-play-state: paused;
+}
+
+.deck-spin-stage {
+  position: absolute;
+  inset: 58px 20px 20px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--deck-border) 66%, transparent);
+  border-radius: var(--deck-radius-large);
+  background: radial-gradient(circle at center, color-mix(in srgb, var(--deck-primary-soft) 52%, transparent), transparent 68%);
+  perspective: 1200px;
+  cursor: grab;
+  user-select: none;
+}
+
+.deck-spin-stage:active {
+  cursor: grabbing;
+}
+
+.deck-spin-stage img {
+  display: block;
+  width: min(92%, 660px);
+  height: min(88%, 620px);
+  object-fit: contain;
+  filter: drop-shadow(0 30px 38px rgba(0, 0, 0, 0.32));
+  transform-style: preserve-3d;
+  animation: deck-spin-360 11s linear infinite;
+}
+
+.deck-spin-placeholder {
+  display: grid;
+  width: 430px;
+  height: 430px;
+  place-items: center;
+  border: 2px solid color-mix(in srgb, var(--deck-primary) 72%, transparent);
+  color: var(--deck-primary);
+  font: 800 96px/1 var(--deck-display);
+  transform-style: preserve-3d;
+  animation: deck-spin-360 11s linear infinite;
+}
+
+.deck-spin-stage.is-user-controlled img,
+.deck-spin-stage.is-user-controlled .deck-spin-placeholder {
+  animation: none;
+  transform: rotateY(var(--deck-spin-angle, 0deg));
+}
+
+@keyframes deck-planet-orbit {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes deck-spin-360 {
+  from { transform: rotateY(0deg); }
+  to { transform: rotateY(360deg); }
+}
+
+.deck-export-mode .deck-interaction-toggle {
+  display: none;
+}
+
+.deck-export-mode .deck-planet-orbit,
+.deck-export-mode .deck-spin-stage img,
+.deck-export-mode .deck-spin-placeholder {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deck-planet-orbit,
+  .deck-spin-stage img,
+  .deck-spin-placeholder {
+    animation-play-state: paused;
+  }
+}

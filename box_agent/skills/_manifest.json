@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "box_agent_version": "0.9.6",
-  "generated_at": "2026-08-23T18:42:14Z",
+  "generated_at": "2026-08-25T22:06:48Z",
   "skills": [
     {
       "name": "artifacts-builder",
