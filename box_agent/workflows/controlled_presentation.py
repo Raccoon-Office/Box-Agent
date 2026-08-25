@@ -287,10 +287,11 @@ _RESEARCH_SEARCH_COMPLETE_TOOL_ERROR = (
 )
 _RESEARCH_EXECUTE_CODE_NETWORK_TOOL_ERROR = (
     "CONTROLLED_PRESENTATION_RESEARCH_NETWORK_TOOL_REQUIRED: network access through "
-    "execute_code bypasses research accounting and source provenance. Do not use "
-    "Python network libraries, URL-reading data APIs, socket connections, or curl/wget "
-    "subprocesses for research retrieval. Call tool_search with one short capability or "
-    "exact tool name at a time, then use web_search or an activated exact-page reader."
+    "execute_code or bash bypasses research accounting and source provenance. Do not "
+    "use Python network libraries, URL-reading data APIs, socket connections, or "
+    "curl/wget subprocesses for research retrieval. Call tool_search with one short "
+    "capability or exact tool name at a time, then use web_search or an activated "
+    "exact-page reader."
 )
 _NETWORK_MODULE_PREFIXES: Final[tuple[str, ...]] = (
     "requests",
@@ -2058,6 +2059,39 @@ def _execute_code_uses_network(arguments: dict[str, Any]) -> bool:
     return False
 
 
+def _bash_uses_network(arguments: dict[str, Any]) -> bool:
+    """Detect shell commands that bypass controlled research retrieval tools."""
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+    folded = command.casefold()
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = []
+
+    command_names = {
+        Path(token).name.casefold()
+        for token in tokens
+        if isinstance(token, str) and token
+    }
+    if command_names & {"curl", "wget", "nc", "ncat", "netcat", "socat"}:
+        return True
+    if "/dev/tcp/" in folded or "/dev/udp/" in folded:
+        return True
+
+    python_invoked = any(
+        name in {"python", "python3", "python.exe", "python3.exe", "py"}
+        or re.fullmatch(r"python3?\.\d+", name) is not None
+        for name in command_names
+    )
+    if not python_invoked:
+        return False
+    return any(prefix in folded for prefix in _NETWORK_MODULE_PREFIXES) or bool(
+        re.search(r"\b(?:urlopen|https?connection|create_connection)\s*\(", folded)
+    )
+
+
 def _image_result_is_unauthorized(result: ToolResult) -> bool:
     """Return whether image generation failed with a deterministic HTTP 401."""
     if result.success:
@@ -2204,12 +2238,16 @@ class ControlledPresentationPolicy:
 
     @property
     def _research_discovery_exhausted(self) -> bool:
+        return self._research_discovery_attempts >= RESEARCH_DISCOVERY_ATTEMPT_LIMIT
+
+    @property
+    def _research_discovery_unavailable(self) -> bool:
         unavailable = (
             self._research_failed_discovery_attempts
             + self._research_empty_discovery_attempts
         )
         return bool(
-            self._research_discovery_attempts >= RESEARCH_DISCOVERY_ATTEMPT_LIMIT
+            self._research_discovery_attempts > 0
             and unavailable == self._research_discovery_attempts
         )
 
@@ -2276,7 +2314,11 @@ class ControlledPresentationPolicy:
         fallback_reason = None
         if fallback_allowed:
             fallback_reason = (
-                "research_tools_unavailable_after_discovery"
+                (
+                    "research_tools_unavailable_after_discovery"
+                    if self._research_discovery_unavailable
+                    else "research_discovery_limit_reached"
+                )
                 if self._research_discovery_exhausted
                 else (
                     "research_artifacts_incomplete_or_validation_failed"
@@ -2948,8 +2990,13 @@ class ControlledPresentationPolicy:
             return research_revalidation_error
         if (
             self.stage == "research"
-            and tool_name == "execute_code"
-            and _execute_code_uses_network(arguments)
+            and (
+                (
+                    tool_name == "execute_code"
+                    and _execute_code_uses_network(arguments)
+                )
+                or (tool_name == "bash" and _bash_uses_network(arguments))
+            )
         ):
             return _RESEARCH_EXECUTE_CODE_NETWORK_TOOL_ERROR
         if (

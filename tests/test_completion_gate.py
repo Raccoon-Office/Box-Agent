@@ -2212,7 +2212,7 @@ def test_deep_research_without_direct_read_tool_requires_unverified_ledger(
     assert "do not call web_search again" in checkpoint
 
 
-def test_successful_tool_search_does_not_consume_research_rounds(
+def test_successful_tool_search_is_capped_without_consuming_research_rounds(
     tmp_path,
 ):
     policy = ControlledPresentationPolicy(
@@ -2247,16 +2247,17 @@ def test_successful_tool_search_does_not_consume_research_rounds(
     assert policy._research_rounds_without_handoff == 0
     assert policy._research_tool_attempts == 0
     assert policy._research_discovery_attempts == RESEARCH_ROUND_LIMIT
+    assert f"{CONTROLLED_PRESENTATION_CHECKPOINT_MARKER}outline" in checkpoint
+    assert '"fallback":true' in checkpoint
     assert policy.research_search_exhausted is False
-    assert (
-        policy.tool_call_error(
-            "web_search",
-            {"query": "first evidence query"},
-            verified_evidence_urls=set(),
-        )
-        is None
+    blocked = policy.tool_call_error(
+        "tool_search",
+        {"query": "same visible tool again"},
+        verified_evidence_urls=set(),
     )
-    assert "No exact-page read tool is available in this run" not in checkpoint
+    assert blocked is not None
+    assert "CONTROLLED_PRESENTATION_RESEARCH_" in blocked
+    assert '"fallback_reason":"research_discovery_limit_reached"' in checkpoint
 
 
 def test_deep_research_counts_empty_tool_search_rounds_and_falls_back(tmp_path):
@@ -2300,7 +2301,7 @@ def test_deep_research_counts_empty_tool_search_rounds_and_falls_back(tmp_path):
     assert '"fallback_reason":"research_tools_unavailable_after_discovery"' in checkpoint
 
 
-def test_research_blocks_execute_code_network_bypass_but_allows_local_analysis(
+def test_research_blocks_code_and_bash_network_bypass_but_allows_local_analysis(
     tmp_path,
 ):
     policy = ControlledPresentationPolicy(
@@ -2326,6 +2327,23 @@ def test_research_blocks_execute_code_network_bypass_but_allows_local_analysis(
         )
         for code in blocked_codes
     ]
+    blocked.extend(
+        policy.tool_call_error(
+            "bash",
+            {"command": command},
+            verified_evidence_urls=set(),
+        )
+        for command in (
+            "curl -fsSL https://example.com/report",
+            "/usr/bin/wget https://example.com/report",
+            (
+                "python3 <<'PY'\n"
+                "import urllib.request\n"
+                "urllib.request.urlopen('https://example.com/report')\n"
+                "PY"
+            ),
+        )
+    )
     allowed = policy.tool_call_error(
         "execute_code",
         {
@@ -2337,6 +2355,11 @@ def test_research_blocks_execute_code_network_bypass_but_allows_local_analysis(
         },
         verified_evidence_urls=set(),
     )
+    allowed_bash = policy.tool_call_error(
+        "bash",
+        {"command": "python3 validate_research_artifacts.py --research-dir research"},
+        verified_evidence_urls=set(),
+    )
 
     assert all(error is not None for error in blocked)
     assert all(
@@ -2344,6 +2367,47 @@ def test_research_blocks_execute_code_network_bypass_but_allows_local_analysis(
         for error in blocked
     )
     assert allowed is None
+    assert allowed_bash is None
+
+
+def test_explicit_research_fallback_overrides_stale_validation(tmp_path):
+    research = tmp_path / "output" / "research"
+    research.mkdir(parents=True)
+    for name in (
+        "market_dim01.md",
+        "market_cross_verification.md",
+        "market_insight.md",
+    ):
+        (research / name).write_text(name, encoding="utf-8")
+    evidence = research / "market_evidence.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "topic": "market",
+                "target_entities": [],
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = research / "qa" / "market_research_check.json"
+    report.parent.mkdir()
+    report.write_text('{"ok":false}', encoding="utf-8")
+    newer = report.stat().st_mtime_ns + 10_000_000
+    os.utime(evidence, ns=(newer, newer))
+
+    checkpoint = build_checkpoint_text(
+        str(tmp_path),
+        "deep",
+        research_fallback_allowed=True,
+        research_fallback_reason="research_artifacts_incomplete_or_validation_failed",
+    )
+
+    assert checkpoint is not None
+    assert f"{CONTROLLED_PRESENTATION_CHECKPOINT_MARKER}outline" in checkpoint
+    assert '"fallback":true' in checkpoint
+    assert '"revalidation"' not in checkpoint
 
 
 def test_deep_research_stops_search_but_requires_report_after_successful_rounds(
