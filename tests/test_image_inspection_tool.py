@@ -30,13 +30,23 @@ class FakeVisionLLM:
         self.messages = None
         self.tools = "unset"
         self.call_kind = None
+        self.retry_enabled = None
         self.calls = 0
 
-    async def generate(self, messages, tools=None, *, thinking_enabled=False, call_kind=""):
+    async def generate(
+        self,
+        messages,
+        tools=None,
+        *,
+        thinking_enabled=False,
+        call_kind="",
+        retry_enabled=None,
+    ):
         self.calls += 1
         self.messages = messages
         self.tools = tools
         self.call_kind = call_kind
+        self.retry_enabled = retry_enabled
         return LLMResponse(content=self.content, finish_reason="stop")
 
 
@@ -84,6 +94,7 @@ async def test_inspect_images_is_read_only_and_returns_model_output_verbatim(
     assert result.content == model_output
     assert result.model_context == model_output
     assert llm.call_kind == "utility"
+    assert llm.retry_enabled is False
     assert llm.tools is None
     system_prompt = llm.messages[0].content
     assert "all visually available evidence relevant" in system_prompt
@@ -458,7 +469,7 @@ async def test_inspect_images_timeout_is_not_cached(tmp_path: Path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_inspect_images_opens_circuit_after_repeated_provider_5xx(tmp_path: Path):
+async def test_inspect_images_opens_circuit_after_first_provider_5xx(tmp_path: Path):
     (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
 
     class UnavailableLLM:
@@ -476,15 +487,13 @@ async def test_inspect_images_opens_circuit_after_repeated_provider_5xx(tmp_path
     arguments = {"image_paths": ["slide.png"], "instruction": "Review it."}
 
     first = await tool.invoke(arguments)
-    second = await tool.invoke(arguments)
-    third = await tool.invoke({**arguments, "strategy": "native"})
+    second = await tool.invoke({**arguments, "strategy": "native"})
 
-    assert first.raw_output["code"] == "IMAGE_REQUEST_FAILED"
+    assert first.raw_output["code"] == "IMAGE_PROVIDER_UNAVAILABLE"
     assert second.raw_output["code"] == "IMAGE_PROVIDER_UNAVAILABLE"
-    assert third.raw_output["code"] == "IMAGE_PROVIDER_UNAVAILABLE"
-    assert "disabled for this session" in (third.error or "").lower()
-    assert "instead of retrying" in (third.error or "").lower()
-    assert llm.calls == 2
+    assert "disabled for this session" in (second.error or "").lower()
+    assert "instead of retrying" in (second.error or "").lower()
+    assert llm.calls == 1
 
 
 class ToolConfig:

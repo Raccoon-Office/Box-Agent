@@ -120,6 +120,7 @@ class LLMClientBase(ABC):
         turn_id: str = "",
         title: str = "",
         call_kind: str = "",
+        retry_enabled: bool | None = None,
     ) -> LLMResponse:
         """Generate response from LLM.
 
@@ -134,6 +135,8 @@ class LLMClientBase(ABC):
             turn_id: Optional caller-owned turn id.
             title: Optional trace title. Non-ASCII values are emitted as UTF-8
                 header bytes so localized titles remain valid.
+            retry_enabled: Optional per-call override. ``False`` makes one
+                provider attempt even when the client retry policy is enabled.
 
         Returns:
             LLMResponse containing the generated content, thinking, and tool calls

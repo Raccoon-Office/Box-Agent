@@ -28,7 +28,7 @@ _MAX_IMAGES = 6
 _JPEG_QUALITY = 85
 _IMAGE_INSPECTION_TIMEOUT = 120.0
 _MAX_MODEL_CONTEXT_CHARS = 24_000
-_PROVIDER_FAILURE_CIRCUIT_THRESHOLD = 2
+_PROVIDER_FAILURE_CIRCUIT_THRESHOLD = 1
 _UNSUPPORTED_IMAGE_INPUT_MARKERS = (
     "doesn't support the image content block",
     "does not support the image content block",
@@ -225,7 +225,12 @@ class ImageInspectionTool(Tool):
         ]
         try:
             response = await asyncio.wait_for(
-                self.llm.generate(messages=messages, tools=None, call_kind="utility"),
+                self.llm.generate(
+                    messages=messages,
+                    tools=None,
+                    call_kind="utility",
+                    retry_enabled=False,
+                ),
                 timeout=_IMAGE_INSPECTION_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -243,7 +248,7 @@ class ImageInspectionTool(Tool):
                 self._provider_failure_count += 1
                 if self._provider_failure_count >= _PROVIDER_FAILURE_CIRCUIT_THRESHOLD:
                     self._provider_unavailable_error = (
-                        "the configured vision provider failed repeatedly; image "
+                        "the configured vision provider failed; image "
                         "inspection is disabled for this session. Continue with the "
                         "original image files and disclose that visual analysis is "
                         "unavailable instead of retrying inspect_images."

@@ -273,6 +273,7 @@ class LLMClient:
         turn_id: str = "",
         title: str = "Box-Agent",
         call_kind: str = "",
+        retry_enabled: bool | None = None,
     ) -> LLMResponse:
         """Generate response from LLM.
 
@@ -312,6 +313,7 @@ class LLMClient:
                 turn_id=turn_id,
                 title=title,
                 call_kind=call_kind,
+                retry_enabled=retry_enabled,
             )
         except BaseException as exc:
             emit_session_trace(
@@ -576,6 +578,7 @@ class SessionBoundLLM:
         turn_id: str = "",
         title: str = "",
         call_kind: str = "",
+        retry_enabled: bool | None = None,
     ) -> LLMResponse:
         client = self._delegate
         kwargs = {
@@ -587,6 +590,8 @@ class SessionBoundLLM:
         effective_call_kind = call_kind.strip() or self._call_kind
         if effective_call_kind:
             kwargs["call_kind"] = effective_call_kind
+        if retry_enabled is not None:
+            kwargs["retry_enabled"] = retry_enabled
         with scoped_client_info(self._client_info):
             return await client.generate(messages, tools, **kwargs)
 

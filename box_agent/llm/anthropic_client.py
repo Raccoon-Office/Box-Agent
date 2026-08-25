@@ -402,6 +402,7 @@ class AnthropicClient(LLMClientBase):
         turn_id: str = "",
         title: str = "",
         call_kind: str = "",
+        retry_enabled: bool | None = None,
     ) -> LLMResponse:
         """Generate response from Anthropic LLM.
 
@@ -420,7 +421,7 @@ class AnthropicClient(LLMClientBase):
         request_params = self._prepare_request(messages, tools)
 
         # Make API request with retry logic
-        if self.retry_config.enabled:
+        if self.retry_config.enabled and retry_enabled is not False:
             # Apply retry logic
             retry_decorator = async_retry(
                 config=self.retry_config,
