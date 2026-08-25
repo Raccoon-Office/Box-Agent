@@ -3225,6 +3225,21 @@ async def run_agent_loop(
     # after exhausting the retries do we surface a user-visible error.
     truncated_tool_call_retries = 0
     oversized_tool_argument_retries = 0
+    oversized_tool_argument_repair_limit = 1
+    if workflow_policy is not None:
+        configured_repair_limit = getattr(
+            workflow_policy,
+            "tool_argument_repair_limit",
+            oversized_tool_argument_repair_limit,
+        )
+        if isinstance(configured_repair_limit, int) and not isinstance(
+            configured_repair_limit,
+            bool,
+        ):
+            oversized_tool_argument_repair_limit = max(
+                0,
+                min(configured_repair_limit, 3),
+            )
     provider_stale_retries = 0
     provider_stale_recoveries = 0
     # Resolve once per turn: env override > configured value > module default.
@@ -4375,7 +4390,10 @@ async def run_agent_loop(
             ) or "unknown tool"
             if response.content.strip():
                 messages.append(assistant_msg)
-            if oversized_tool_argument_retries < 1:
+            if (
+                oversized_tool_argument_retries
+                < oversized_tool_argument_repair_limit
+            ):
                 oversized_tool_argument_retries += 1
                 repair_text = (
                     "上一轮工具参数在流式生成阶段超过安全预算，工具没有执行。"
@@ -4395,8 +4413,9 @@ async def run_agent_loop(
                     user_visible=False,
                 )
                 _log.warning(
-                    "tool argument limit repair %d/1: %s request_id=%s",
+                    "tool argument limit repair %d/%d: %s request_id=%s",
                     oversized_tool_argument_retries,
+                    oversized_tool_argument_repair_limit,
                     rendered,
                     provider_request_id,
                 )

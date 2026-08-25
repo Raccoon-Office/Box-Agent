@@ -2187,6 +2187,7 @@ class ControlledPresentationPolicy:
     checkpoint_injection_id: ClassVar[str] = CHECKPOINT_MARKER
     evidence_read_batch_size: ClassVar[int] = RESEARCH_READ_BATCH_SIZE
     evidence_read_limit: ClassVar[int] = RESEARCH_DIRECT_READ_LIMIT
+    tool_argument_repair_limit: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         """Freeze configured tool availability."""

@@ -93,6 +93,21 @@ class _ScriptedLLM:
         )
 
 
+class _PresentationArgumentRepairPolicy:
+    checkpoint_injection_id = "test-presentation-checkpoint"
+    evidence_read_batch_size = 1
+    tool_argument_repair_limit = 2
+
+    def build_checkpoint(self):
+        return None
+
+    def allows_completion_continuation(self):
+        return False
+
+    def suppresses_generic_final_summary(self):
+        return False
+
+
 def _msgs() -> list[Message]:
     return [
         Message(role="system", content="sys"),
@@ -411,6 +426,57 @@ async def test_repeated_tool_argument_limit_stops_after_one_repair():
     assert [e for e in events if isinstance(e, DoneEvent)][-1].stop_reason == StopReason.ERROR
     assert len([e for e in events if isinstance(e, InjectedMessageEvent)]) == 1
     assert llm.ephemeral_max_tokens_history == [None, None]
+
+
+async def test_controlled_presentation_gets_two_chunked_write_repairs():
+    oversized = {
+        "finish_reason": "tool_argument_limit",
+        "oversized_tool_calls": [
+            {"name": "execute_code", "arguments_len": 16004, "limit": 16000}
+        ],
+    }
+    llm = _ScriptedLLM(
+        [oversized, oversized, {"text": "done.", "finish_reason": "stop"}]
+    )
+
+    events = await _collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={},
+            max_steps=5,
+            workflow_policy=_PresentationArgumentRepairPolicy(),
+        )
+    )
+
+    assert llm.calls == 3
+    assert [e for e in events if isinstance(e, DoneEvent)][-1].stop_reason == StopReason.END_TURN
+    assert len([e for e in events if isinstance(e, InjectedMessageEvent)]) == 2
+    assert llm.ephemeral_max_tokens_history == [None, None, None]
+
+
+async def test_controlled_presentation_stops_after_two_argument_repairs():
+    oversized = {
+        "finish_reason": "tool_argument_limit",
+        "oversized_tool_calls": [
+            {"name": "execute_code", "arguments_len": 16004, "limit": 16000}
+        ],
+    }
+    llm = _ScriptedLLM([oversized, oversized, oversized])
+
+    events = await _collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={},
+            max_steps=5,
+            workflow_policy=_PresentationArgumentRepairPolicy(),
+        )
+    )
+
+    assert llm.calls == 3
+    assert [e for e in events if isinstance(e, DoneEvent)][-1].stop_reason == StopReason.ERROR
+    assert len([e for e in events if isinstance(e, InjectedMessageEvent)]) == 2
 
 
 # ── Case 3 bound: continuation budget is respected ──
