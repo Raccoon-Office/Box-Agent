@@ -122,7 +122,12 @@ def _apply_thinking_params(
         params["reasoning_effort"] = _DEEP_THINK_REASONING_EFFORT
         return
     if _is_sensenova_model(model):
-        params["reasoning_effort"] = "none"
+        # SenseNova-compatible deployments disagree on whether ``none`` is a
+        # valid enum value.  Some accept it, while others only accept
+        # low/medium/high and reject an otherwise valid request with 422.
+        # Omitting the optional field is the only value accepted by both
+        # dialects when deep thinking is disabled.
+        return
 
 
 def _tool_parameter_types(

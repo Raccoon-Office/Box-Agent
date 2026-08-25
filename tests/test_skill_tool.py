@@ -132,6 +132,44 @@ async def test_get_skill_tool_honors_profile_block_until_user_explicitly_allows_
 
 
 @pytest.mark.asyncio
+async def test_get_skill_tool_rejects_competing_skill_during_locked_workflow(
+    skill_loader,
+):
+    locked = {"test-skill-0"}
+    explicitly_allowed: set[str] = set()
+    tool = GetSkillTool(
+        skill_loader,
+        workflow_locked_skill_names=locked,
+        explicitly_allowed_skill_names=explicitly_allowed,
+    )
+
+    blocked = await tool.execute(skill_name="test-skill-1")
+    assert blocked.success is False
+    assert "cannot replace the active workflow" in (blocked.error or "")
+    assert "do not retry" in (blocked.error or "")
+
+    explicitly_allowed.add("test-skill-1")
+    allowed = await tool.execute(skill_name="test-skill-1")
+    assert allowed.success is True
+
+
+@pytest.mark.asyncio
+async def test_get_skill_tool_allows_declared_workflow_dependency(skill_loader):
+    primary = skill_loader.get_skill("test-skill-0")
+    assert primary is not None
+    primary.related_skills = ["test-skill-1"]
+    tool = GetSkillTool(
+        skill_loader,
+        workflow_locked_skill_names={"test-skill-0"},
+    )
+
+    result = await tool.execute(skill_name="test-skill-1")
+
+    assert result.success is True
+    assert "Test skill 1 content" in result.content
+
+
+@pytest.mark.asyncio
 async def test_get_skill_tool_nonexistent(skill_loader):
     """Test getting non-existent skill"""
     tool = GetSkillTool(skill_loader)

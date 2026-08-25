@@ -2038,6 +2038,7 @@ async def run_agent(
         config, memory_manager=memory_mgr, llm=llm_client
     )
     cli_preloaded_skill_hashes: dict[str, str] = {}
+    cli_workflow_locked_skill_names: set[str] = set()
     if skill_loader:
         from box_agent.tools.skill_tool import GetSkillTool
 
@@ -2045,6 +2046,7 @@ async def run_agent(
             GetSkillTool(
                 skill_loader,
                 preloaded_skill_hashes=cli_preloaded_skill_hashes,
+                workflow_locked_skill_names=cli_workflow_locked_skill_names,
             )
             if isinstance(tool, GetSkillTool)
             else tool
@@ -2277,6 +2279,7 @@ async def run_agent(
 
     def _apply_cli_auto_loaded_skills(completion_gate, user_input: str) -> None:
         if skill_loader is None or skill_selector is None:
+            cli_workflow_locked_skill_names.clear()
             _sync_cli_cache_fingerprint_context()
             return
         preload_names = turn_preload_skill_names(
@@ -2286,6 +2289,7 @@ async def run_agent(
             user_input,
         )
         if not preload_names and not cli_preloaded_skill_names:
+            cli_workflow_locked_skill_names.clear()
             _sync_cli_cache_fingerprint_context()
             return
         result = build_auto_loaded_skills_prompt(
@@ -2297,6 +2301,9 @@ async def run_agent(
         cli_preloaded_skill_names[:] = list(result.loaded_names)
         cli_preloaded_skill_hashes.clear()
         cli_preloaded_skill_hashes.update(result.loaded_skill_hashes)
+        cli_workflow_locked_skill_names.clear()
+        if completion_gate is not None and "pptx" in result.loaded_names:
+            cli_workflow_locked_skill_names.update(result.loaded_names)
         _sync_cli_cache_fingerprint_context()
         for missing_name in result.missing_names:
             print(f"{Colors.YELLOW}⚠️  Skill preload target not found: {missing_name}{Colors.RESET}")

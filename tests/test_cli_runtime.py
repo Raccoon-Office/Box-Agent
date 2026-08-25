@@ -93,7 +93,7 @@ class _CaptureStreamLLM:
         yield StreamEvent(type="finish", finish_reason="stop")
 
 
-class _PreloadedSkillThenGetSkillLLM(_CaptureStreamLLM):
+class _PreloadedPptxThenGetCompetingSkillLLM(_CaptureStreamLLM):
     async def generate_stream(self, *, messages, **kwargs):
         self.message_snapshots.append([(message.role, message.content) for message in messages])
         self.system_prompts.append(messages[0].content)
@@ -106,7 +106,7 @@ class _PreloadedSkillThenGetSkillLLM(_CaptureStreamLLM):
                         id="preloaded-skill",
                         type="function",
                         function=FunctionCall(
-                            name="get_skill", arguments={"skill_name": "pptx"}
+                            name="get_skill", arguments={"skill_name": "canvas-design"}
                         ),
                     )
                 ],
@@ -526,6 +526,13 @@ def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkey
         keywords=["html", "template", "visual"],
         content="# HTML TEMPLATE RULES\nSelect a Visual DNA profile.",
     )
+    _write_skill(
+        skills_dir,
+        "canvas-design",
+        description="Create visual canvases and export PDF pages.",
+        keywords=["visual", "canvas", "pdf"],
+        content="# CANVAS RULES\nExport a PDF artwork.",
+    )
     skill_loader = SkillLoader(skills_dir)
     skill_loader.discover_skills()
     assert "pptx" not in [skill.name for skill in skill_loader.filter_by_query(prompt)]
@@ -571,7 +578,7 @@ def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkey
         "find_config_file",
         staticmethod(lambda name: Path(name) if name == str(system_prompt_path) else None),
     )
-    monkeypatch.setattr(cli, "LLMClient", _PreloadedSkillThenGetSkillLLM)
+    monkeypatch.setattr(cli, "LLMClient", _PreloadedPptxThenGetCompetingSkillLLM)
     monkeypatch.setattr(cli, "initialize_base_tools", fake_initialize_base_tools)
     monkeypatch.setattr(cli, "add_workspace_tools", lambda *args, **kwargs: None)
     _CaptureStreamLLM.instances.clear()
@@ -596,10 +603,9 @@ def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkey
     snapshots = _CaptureStreamLLM.instances[0].message_snapshots
     assert len(snapshots) == 2
     tool_messages = [content for role, content in snapshots[1] if role == "tool"]
-    assert tool_messages == [
-        "Skill 'pptx' is already preloaded in this session. "
-        "Follow its system instructions directly."
-    ]
+    assert len(tool_messages) == 1
+    assert "cannot replace the active workflow" in tool_messages[0]
+    assert "canvas-design" in tool_messages[0]
     assert "# PPTX FULL RULES" not in tool_messages[0]
 
 

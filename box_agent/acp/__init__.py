@@ -888,6 +888,7 @@ class SessionState:
     thinking_enabled: bool = False  # extended thinking toggle from _meta.deep_think
     execution_profile: ExecutionProfile = "standard"
     explicitly_allowed_skill_names: set[str] = field(default_factory=set)
+    workflow_locked_skill_names: set[str] = field(default_factory=set)
     env_context: "EnvContext | None" = None  # cached env_context, re-applied when mode switches
     skill_runtime_context: "SkillRuntimeContext | None" = None
     skill_loader: Any | None = None  # session-local loader for expert-only recommended skills
@@ -1709,6 +1710,7 @@ class BoxACPAgent:
         preloaded_skill_hashes: dict[str, str] = {}
         skill_scratch_dir = None
         explicitly_allowed_skill_names: set[str] = set()
+        workflow_locked_skill_names: set[str] = set()
         blocked_skill_names = (
             FAST_OPTIONAL_SKILLS if execution_profile == "fast" else frozenset()
         )
@@ -1731,6 +1733,7 @@ class BoxACPAgent:
                         explicitly_allowed_skill_names=(
                             explicitly_allowed_skill_names
                         ),
+                        workflow_locked_skill_names=workflow_locked_skill_names,
                     )
                     if isinstance(tool, GetSkillTool)
                     or (
@@ -1859,6 +1862,7 @@ class BoxACPAgent:
             thinking_enabled=deep_think,
             execution_profile=execution_profile,
             explicitly_allowed_skill_names=explicitly_allowed_skill_names,
+            workflow_locked_skill_names=workflow_locked_skill_names,
             env_context=env_context,
             skill_runtime_context=skill_runtime_context,
             skill_loader=session_skill_loader,
@@ -2898,6 +2902,9 @@ class BoxACPAgent:
                 self._apply_auto_loaded_skills(state, session_id, [])
             else:
                 self._sync_cache_fingerprint_context(state)
+            state.workflow_locked_skill_names.clear()
+            if completion_gate is not None and "pptx" in state.preloaded_skill_names:
+                state.workflow_locked_skill_names.update(state.preloaded_skill_names)
 
         if image_attachment_context:
             user_text = f"{user_text}\n\n{image_attachment_context}"

@@ -124,9 +124,9 @@ async def test_openai_request_sends_high_reasoning_effort_when_enabled(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("thinking_enabled", "expected_effort"),
-    [(True, "high"), (False, "none")],
+    [(True, "high"), (False, None)],
 )
-async def test_sensenova_request_sends_top_level_reasoning_effort(
+async def test_sensenova_request_uses_compatible_reasoning_control(
     thinking_enabled,
     expected_effort,
     monkeypatch,
@@ -155,7 +155,10 @@ async def test_sensenova_request_sends_top_level_reasoning_effort(
     )
 
     assert "extra_body" not in captured
-    assert captured["reasoning_effort"] == expected_effort
+    if expected_effort is None:
+        assert "reasoning_effort" not in captured
+    else:
+        assert captured["reasoning_effort"] == expected_effort
 
 
 @pytest.mark.asyncio
@@ -193,7 +196,7 @@ async def test_openai_request_no_extra_body_by_default(monkeypatch):
     [
         ("gpt-5", True, None, "high"),
         ("custom-chat-model", False, None, None),
-        ("SenseNova-Flash-Lite-test", False, None, "none"),
+        ("SenseNova-Flash-Lite-test", False, None, None),
         ("SenseNova-Flash-Lite-test", True, None, "high"),
         ("SN-SenseNova-6-8-Flash-Lite", True, None, "high"),
         (
@@ -620,9 +623,9 @@ async def test_generic_openai_stream_does_not_execute_tool_markup_from_thinking(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("thinking_enabled", "expected_effort"),
-    [(True, "high"), (False, "none")],
+    [(True, "high"), (False, None)],
 )
-async def test_sensenova_sdk_sends_reasoning_effort_in_wire_body(
+async def test_sensenova_sdk_uses_compatible_reasoning_control_in_wire_body(
     thinking_enabled,
     expected_effort,
 ):
@@ -678,7 +681,10 @@ async def test_sensenova_sdk_sends_reasoning_effort_in_wire_body(
 
     assert "extra_body" not in captured
     assert "chat_template_kwargs" not in captured
-    assert captured["reasoning_effort"] == expected_effort
+    if expected_effort is None:
+        assert "reasoning_effort" not in captured
+    else:
+        assert captured["reasoning_effort"] == expected_effort
 
 
 @pytest.mark.asyncio
@@ -692,7 +698,7 @@ async def test_sensenova_sdk_sends_reasoning_effort_in_wire_body(
         ("raccoon-405a1c", True, {"reasoning_effort": "high"}),
         ("raccoon-405a1c", False, {}),
         ("sn-sensenova-6-8-flash-lite", True, {"reasoning_effort": "high"}),
-        ("sn-sensenova-6-8-flash-lite", False, {"reasoning_effort": "none"}),
+        ("sn-sensenova-6-8-flash-lite", False, {}),
         ("sn-glm-5-2", True, {"reasoning_effort": "high"}),
         ("sn-glm-5-2", False, {}),
         (

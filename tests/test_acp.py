@@ -44,7 +44,7 @@ from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.bash_tool import BackgroundShellManager
 from box_agent.tools.jupyter_tool import MAX_EXECUTE_CODE_CHARS
 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
-from box_agent.tools.skill_tool import create_skill_tools
+from box_agent.tools.skill_tool import GetSkillTool, create_skill_tools
 from box_agent.tools.setup import (
     SANDBOX_INFO_PROMPT,
     build_file_delivery_prompt,
@@ -4408,6 +4408,18 @@ async def test_acp_preloads_pptx_when_catalog_filter_drops_it(tmp_path):
         "Use the editable deck workflow.\n",
         encoding="utf-8",
     )
+    canvas_dir = skills_dir / "canvas-design"
+    canvas_dir.mkdir()
+    (canvas_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: canvas-design\n"
+        "description: Create visual canvases and export PDF pages.\n"
+        "keywords: [visual, canvas, pdf]\n"
+        "---\n"
+        "# CANVAS RULES\n"
+        "Export a PDF artwork.\n",
+        encoding="utf-8",
+    )
     skill_loader = SkillLoader(skills_dir)
     skill_loader.discover_skills()
     assert "pptx" not in [skill.name for skill in skill_loader.filter_by_query(prompt)]
@@ -4423,7 +4435,7 @@ async def test_acp_preloads_pptx_when_catalog_filter_drops_it(tmp_path):
         conn,
         config,
         llm,
-        [],
+        [GetSkillTool(skill_loader)],
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
@@ -4442,6 +4454,9 @@ async def test_acp_preloads_pptx_when_catalog_filter_drops_it(tmp_path):
     assert "# Skill: pptx" in first_system_prompt
     assert "# PPTX FULL RULES" in first_system_prompt
     assert state.preloaded_skill_names == ["pptx"]
+    competing = await state.agent.tools["get_skill"].execute("canvas-design")
+    assert competing.success is False
+    assert "cannot replace the active workflow" in (competing.error or "")
     turn_usage_outputs = [
         update.update.rawOutput
         for update in conn.updates

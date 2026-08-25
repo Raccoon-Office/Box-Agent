@@ -28,12 +28,14 @@ class GetSkillTool(Tool):
         preloaded_skill_hashes: Mapping[str, str] | None = None,
         blocked_skill_names: set[str] | frozenset[str] | None = None,
         explicitly_allowed_skill_names: MutableSet[str] | None = None,
+        workflow_locked_skill_names: MutableSet[str] | None = None,
     ):
         self.skill_loader = skill_loader
         self.include_disabled = include_disabled
         self.preloaded_skill_hashes = preloaded_skill_hashes
         self.blocked_skill_names = blocked_skill_names or frozenset()
         self.explicitly_allowed_skill_names = explicitly_allowed_skill_names
+        self.workflow_locked_skill_names = workflow_locked_skill_names
 
     @property
     def name(self) -> str:
@@ -59,6 +61,24 @@ class GetSkillTool(Tool):
     async def execute(self, skill_name: str) -> ToolResult:
         """Get detailed information about specified skill"""
         normalized_name = skill_name.strip()
+        if (
+            self.workflow_locked_skill_names
+            and not self._workflow_allows(normalized_name)
+            and (
+                self.explicitly_allowed_skill_names is None
+                or normalized_name not in self.explicitly_allowed_skill_names
+            )
+        ):
+            active = ", ".join(sorted(self.workflow_locked_skill_names))
+            return ToolResult(
+                success=False,
+                content="",
+                error=(
+                    f"Skill '{normalized_name}' cannot replace the active workflow "
+                    f"Skills ({active}). Follow the preloaded workflow and its "
+                    "declared dependencies; do not retry loading a competing Skill."
+                ),
+            )
         if (
             normalized_name in self.blocked_skill_names
             and not (
@@ -125,6 +145,25 @@ class GetSkillTool(Tool):
                 "skill_path": str(skill.skill_path) if skill.skill_path else None,
             }
         return ToolResult(success=True, content=result, raw_output=raw_output)
+
+    def _workflow_allows(self, skill_name: str) -> bool:
+        """Allow the active workflow and dependencies it explicitly declares."""
+        if not self.workflow_locked_skill_names:
+            return True
+        if skill_name in self.workflow_locked_skill_names:
+            return True
+        for active_name in self.workflow_locked_skill_names:
+            active_skill = self.skill_loader.get_skill(
+                active_name,
+                include_disabled=self.include_disabled,
+            )
+            if active_skill is None:
+                continue
+            declared = set(active_skill.required_skills or [])
+            declared.update(active_skill.related_skills or [])
+            if skill_name in declared:
+                return True
+        return False
 
 
 def create_skill_tools(
