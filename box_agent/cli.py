@@ -2376,6 +2376,7 @@ async def run_agent(
         _apply_skill_filter(task)
         completion_gate = _build_cli_completion_gate(task)
         _apply_cli_auto_loaded_skills(completion_gate, task)
+        agent.bind_user_source_text(task)
         agent.add_user_message(task)
         if completion_gate is not None:
             patterns = ", ".join(completion_gate.required_changed_artifact_globs)
@@ -2728,6 +2729,7 @@ async def run_agent(
             _apply_skill_filter(user_input)
             preload_gate = _build_cli_completion_gate(user_input)
             _apply_cli_auto_loaded_skills(preload_gate, user_input)
+            agent.bind_user_source_text(user_input)
             agent.add_user_message(user_input)
 
             # Create cancellation event

@@ -307,6 +307,7 @@ def test_interactive_cli_passes_explicit_skill_gate_to_agent(
         ),
     )
     run_options: list[dict[str, object]] = []
+    bound_source_texts: list[str] = []
 
     async def fake_initialize_base_tools(*args, **kwargs):
         return [GetSkillTool(skill_loader)], skill_loader, None, None
@@ -314,6 +315,10 @@ def test_interactive_cli_passes_explicit_skill_gate_to_agent(
     async def fake_run(self, *args, **kwargs):
         run_options.append(kwargs)
         return "done"
+
+    def fake_bind_user_source_text(self, text: str):
+        bound_source_texts.append(text)
+        return text
 
     monkeypatch.setattr(
         cli.Config,
@@ -333,6 +338,7 @@ def test_interactive_cli_passes_explicit_skill_gate_to_agent(
     monkeypatch.setattr(cli, "add_workspace_tools", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "PromptSession", _ExplicitSkillPromptSession)
     monkeypatch.setattr(cli.Agent, "run", fake_run)
+    monkeypatch.setattr(cli.Agent, "bind_user_source_text", fake_bind_user_source_text)
     _ExplicitSkillPromptSession.prompt_count = 0
 
     exit_code = asyncio.run(
@@ -346,6 +352,7 @@ def test_interactive_cli_passes_explicit_skill_gate_to_agent(
 
     assert exit_code == 0
     assert len(run_options) == 1
+    assert bound_source_texts == ["请用 /report-skill 生成报告"]
     gate = run_options[0]["completion_gate"]
     assert gate.workflow_checkpoint_kind == "external_skill"
     assert gate.workflow_options["skill_name"] == "report-skill"
@@ -564,6 +571,13 @@ def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkey
     async def fake_initialize_base_tools(*args, **kwargs):
         return [GetSkillTool(skill_loader)], skill_loader, None, None
 
+    bound_source_texts: list[str] = []
+    original_bind_user_source_text = cli.Agent.bind_user_source_text
+
+    def capture_bind_user_source_text(self, text: str):
+        bound_source_texts.append(text)
+        return original_bind_user_source_text(self, text)
+
     monkeypatch.setattr(cli.Config, "get_default_config_path", staticmethod(lambda: config_path))
     monkeypatch.setattr(cli.Config, "from_yaml", staticmethod(lambda _path: config))
     monkeypatch.setattr(
@@ -574,6 +588,7 @@ def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkey
     monkeypatch.setattr(cli, "LLMClient", _PreloadedSkillThenGetSkillLLM)
     monkeypatch.setattr(cli, "initialize_base_tools", fake_initialize_base_tools)
     monkeypatch.setattr(cli, "add_workspace_tools", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.Agent, "bind_user_source_text", capture_bind_user_source_text)
     _CaptureStreamLLM.instances.clear()
 
     exit_code = asyncio.run(
@@ -587,6 +602,7 @@ def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkey
     )
 
     assert exit_code == 0
+    assert bound_source_texts == [prompt]
     first_system_prompt = _CaptureStreamLLM.instances[0].system_prompts[0]
     assert "## Auto-Loaded Skill Instructions" in first_system_prompt
     assert "# Skill: pptx" in first_system_prompt
