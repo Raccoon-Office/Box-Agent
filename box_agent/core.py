@@ -5404,6 +5404,18 @@ async def run_agent_loop(
                 server_name=server_name,
             )
 
+            if workflow_action is not None:
+                runtime_approver = getattr(
+                    offered_tools_by_name.get(fn_name),
+                    "approve_runtime_workflow_action",
+                    None,
+                )
+                if callable(runtime_approver):
+                    runtime_approver(
+                        workflow_action.capability,
+                        fn_args,
+                    )
+
             # Hook: tool start (interceptor — may modify arguments)
             if hook_mgr.hooks and tool_user_visible and allowed_to_execute:
                 fn_args = await hook_mgr.fire_tool_start(

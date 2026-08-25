@@ -532,6 +532,24 @@ async def test_non_executable_runtime_node_reference_still_requires_approval(tmp
     assert result.permission_request is not None
 
 
+@pytest.mark.asyncio
+async def test_runtime_owned_action_approves_only_its_exact_dynamic_command():
+    tool = BashTool()
+    command = "${BOX_AGENT_NODE:-node} -e \"process.stdout.write('runtime-ok')\""
+
+    tool.approve_runtime_workflow_action(
+        "controlled_presentation.scaffold",
+        {"command": command},
+    )
+    result = await tool.execute(command=command)
+    changed = await tool.execute(command=f"{command} ")
+
+    assert result.success, result.error
+    assert result.stdout == "runtime-ok"
+    assert changed.success is False
+    assert changed.permission_request is not None
+
+
 def test_runtime_env_can_be_updated_for_future_subprocesses():
     tool = BashTool()
 

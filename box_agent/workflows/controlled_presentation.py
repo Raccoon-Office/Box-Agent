@@ -2669,11 +2669,7 @@ class ControlledPresentationPolicy:
                     (deck_path, manifest_path),
                 )
 
-        if (
-            artifact_root is not None
-            and self.stage == "apply_patch"
-            and not self.apply_patch_repair_allowed
-        ):
+        if artifact_root is not None and self.stage == "apply_patch":
             deck_path = artifact_root / "deck.json"
             patch_path = artifact_root / "deck.patch.json"
             command = (

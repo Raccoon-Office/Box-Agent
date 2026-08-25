@@ -877,6 +877,33 @@ class BashTool(Tool):
         if isinstance(command, str) and isinstance(risk, str):
             self._approved_safety_commands.add(_safety_approval_key(command, risk))
 
+    def approve_runtime_workflow_action(
+        self,
+        capability: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Approve one exact safety check for a runtime-owned workflow call.
+
+        Core invokes this seam only after matching ``capability`` against this
+        tool's explicit ``runtime_workflow_actions`` allowlist. Product hard
+        blocks and filesystem scope checks still run normally.
+        """
+        if capability not in self.runtime_workflow_actions:
+            return
+        command = arguments.get("command")
+        if not isinstance(command, str) or not command:
+            return
+        danger_reason = detect_dangerous_command(
+            command,
+            trusted_executable_references=trusted_runtime_executable_references(
+                self._subprocess_env
+            ),
+        )
+        if danger_reason:
+            self._approved_safety_commands.add(
+                _safety_approval_key(command, danger_reason)
+            )
+
     def _consume_safety_approval(self, command: str, risk: str) -> bool:
         key = _safety_approval_key(command, risk)
         if key not in self._approved_safety_commands:

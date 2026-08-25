@@ -327,6 +327,10 @@ class RuntimeOwnedScaffoldBashTool(CountingBashTool):
         super().__init__()
         self.output_dir = output_dir
         self.commands: list[str] = []
+        self.runtime_approvals: list[tuple[str, dict[str, object]]] = []
+
+    def approve_runtime_workflow_action(self, capability, arguments):
+        self.runtime_approvals.append((capability, dict(arguments)))
 
     async def execute(self, command: str, timeout=None, run_in_background=False):
         self.calls += 1
@@ -2614,6 +2618,31 @@ def test_deterministic_presentation_commands_are_runtime_owned(tmp_path):
         assert action.capability == f"controlled_presentation.{capability_suffix}"
         assert script_name in action.arguments["command"]
         assert "\n" not in action.arguments["command"]
+
+
+def test_repaired_deck_patch_is_redispatched_as_runtime_owned_action(tmp_path):
+    artifact_root = tmp_path / "output" / "tasks" / "task-1"
+    artifact_root.mkdir(parents=True)
+    (artifact_root / "deck.json").write_text("{}", encoding="utf-8")
+    patch_path = artifact_root / "deck.patch.json"
+    patch_path.write_text("{}", encoding="utf-8")
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=artifact_root,
+        stage="apply_patch",
+    )
+
+    initial_action = policy.next_deterministic_action()
+    assert initial_action is not None
+    assert policy.next_deterministic_action() is None
+
+    policy.apply_patch_repair_allowed = True
+    patch_path.write_text('{"slides": {}}', encoding="utf-8")
+    repaired_action = policy.next_deterministic_action()
+
+    assert repaired_action is not None
+    assert repaired_action.capability == "controlled_presentation.apply_patch"
+    assert repaired_action.action_id != initial_action.action_id
 
 
 @pytest.mark.asyncio
@@ -6594,6 +6623,11 @@ async def test_controlled_scaffold_is_dispatched_by_runtime_before_model(tmp_pat
         f"{shlex.quote(str(INSPECTOR_SCRIPT))} "
         "--outline outline.json --out deck.json"
     ]
+    assert len(bash_tool.runtime_approvals) == 1
+    approved_capability, approved_arguments = bash_tool.runtime_approvals[0]
+    assert approved_capability == "controlled_presentation.scaffold"
+    assert approved_arguments["command"] == bash_tool.commands[0]
+    assert approved_arguments["timeout"] == 120
     start = next(
         event
         for event in events
