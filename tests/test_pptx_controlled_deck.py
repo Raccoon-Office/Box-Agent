@@ -3840,6 +3840,18 @@ def test_outline_rejects_conflicting_agenda_counts_across_fields(tmp_path: Path)
     assert "conflicting agenda item counts 7, 8" in validated.stdout
 
 
+def test_outline_rejects_text_that_would_fail_scaffold_contract(tmp_path: Path) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=1, source_mode="user_provided")
+    outline["slides"][0]["visual"] = "超" * 301
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+
+    validated = _run("validate_outline.js", str(outline_path))
+
+    assert validated.returncode == 1
+    assert "slide-01: visual has 301 characters; maximum is 300" in validated.stdout
+
+
 @pytest.mark.parametrize(
     ("title", "visual", "bullets", "layout_id", "field", "count"),
     [
@@ -6254,6 +6266,56 @@ def test_scaffold_renders_explicit_360_interaction_with_source_visual(
     assert "data-deck-spin-stage" in html
 
 
+def test_spin_interaction_targets_explicit_360_content_page(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=3,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "云境天穹：空中城堡",
+            "layout": "cover-hero-v1",
+            "visual": "梦幻空中城堡主视觉封面",
+        }
+    )
+    outline["slides"][2].update(
+        {
+            "title": "360° 立体空中城堡",
+            "message": "拖拽查看城堡的完整三维结构。",
+            "layout": "image-hero-split-v1",
+            "visual": "可拖拽旋转的 3D 城堡模型",
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "请制作一份PPT，把空中城堡做成能 360 度转的立体效果。".encode()
+    ).decode()
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert deck["interaction_contract"] == {
+        "mode": "spin_360",
+        "target_slide_id": "slide-03",
+        "required": True,
+    }
+
+
 def test_deck_contract_normalizes_observed_model_layout_aliases(
     tmp_path: Path,
 ) -> None:
@@ -8116,6 +8178,37 @@ def test_batch_patch_compacts_overlong_optional_source_caption(
     payload = json.loads(result.stdout)
     assert (
         "slides.slide-01.props.source: compacted optional source caption to 100 characters"
+        in payload["normalization_changes"]
+    )
+
+
+def test_batch_patch_compacts_overlong_nested_text(tmp_path: Path) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cards-grid-v1",
+        "--out",
+        str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stderr
+    body = "Part One 与 Part Two 的画幅和镜头系统形成鲜明对照；" + "压迫感" * 30
+    patch_path = tmp_path / "deck.patch.json"
+    patch_path.write_text(
+        json.dumps(
+            {"slides": {"slide-01": {"props": {"items": [{"body": body}]}}}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run("apply_deck_patch.js", str(deck_path), str(patch_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert len(deck["slides"][0]["props"]["items"][0]["body"]) <= 100
+    payload = json.loads(result.stdout)
+    assert (
+        "slides.slide-01.props.items.0.body: compacted overlong text to 100 characters"
         in payload["normalization_changes"]
     )
 
