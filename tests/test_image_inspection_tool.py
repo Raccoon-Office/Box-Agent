@@ -160,6 +160,59 @@ async def test_inspect_images_native_returns_request_only_canonical_blocks(
 
 
 @pytest.mark.asyncio
+async def test_inspect_images_can_default_to_native_for_tui(tmp_path: Path):
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+    llm = FakeVisionLLM()
+    tool = _tool(
+        tmp_path,
+        llm,
+        native_supported=True,
+        default_strategy="native",
+    )
+
+    result = await tool.invoke(
+        {
+            "image_paths": ["slide.png"],
+            "instruction": "Check readability.",
+        }
+    )
+
+    assert result.success, result.error
+    assert llm.calls == 0
+    assert result.raw_output["type"] == "image_inspection_native"
+    assert result.transient_followup_content is not None
+    assert tool.parameters["properties"]["strategy"]["default"] == "native"
+    assert "active TUI model accepts native image input" in tool.description
+
+
+@pytest.mark.asyncio
+async def test_inspect_images_tui_default_keeps_explicit_proxy_fallback(tmp_path: Path):
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+    llm = FakeVisionLLM("Proxy inspection succeeded.")
+    tool = _tool(
+        tmp_path,
+        llm,
+        native_supported=True,
+        default_strategy="native",
+    )
+
+    result = await tool.invoke(
+        {
+            "image_paths": ["slide.png"],
+            "instruction": "Check readability.",
+            "strategy": "proxy",
+        }
+    )
+
+    assert result.success, result.error
+    assert result.content == "Proxy inspection succeeded."
+    assert llm.calls == 1
+    assert result.transient_followup_content is None
+
+
+@pytest.mark.asyncio
 async def test_inspect_images_native_rejects_before_reading_when_main_model_is_text_only(
     tmp_path: Path,
 ):
@@ -631,6 +684,64 @@ def test_add_workspace_tools_routes_inspect_images_to_catalog_vision_model(
     assert tool.llm.model == "vision-model"
     assert tool.llm.max_output_tokens == 8192
     assert tool.native_supported is False
+    assert tool.default_strategy == "proxy"
+
+
+def test_add_workspace_tools_bounds_proxy_without_disabling_native_input(
+    tmp_path: Path,
+):
+    class CloneableVisionLLM(FakeVisionLLM):
+        model = "sensenova-harness-vision-v1.0"
+        max_output_tokens = 63_999
+
+        def for_model(self, model, *, max_output_tokens=None):
+            selected = CloneableVisionLLM()
+            selected.model = model
+            selected.max_output_tokens = max_output_tokens
+            return selected
+
+    llm = CloneableVisionLLM()
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        ToolConfig(),
+        tmp_path,
+        allow_full_access=False,
+        llm=llm,
+        output=lambda *_: None,
+        image_inspection_default_strategy="native",
+        image_inspection_max_output_tokens_cap=4096,
+    )
+
+    tool = next(tool for tool in tools if tool.name == "inspect_images")
+    assert tool.llm is not llm
+    assert tool.llm.max_output_tokens == 4096
+    assert tool.native_supported is True
+    assert tool.default_strategy == "native"
+
+
+def test_add_workspace_tools_preserves_protocol_host_image_defaults(tmp_path: Path):
+    class ProtocolVisionLLM(FakeVisionLLM):
+        model = "sensenova-harness-vision-v1.0"
+        max_output_tokens = 63_999
+
+    llm = ProtocolVisionLLM()
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        ToolConfig(),
+        tmp_path,
+        allow_full_access=False,
+        llm=llm,
+        output=lambda *_: None,
+    )
+
+    tool = next(tool for tool in tools if tool.name == "inspect_images")
+    assert tool.llm is llm
+    assert tool.llm.max_output_tokens == 63_999
+    assert tool.default_strategy == "proxy"
 
 
 def test_explicit_text_only_current_model_routes_to_other_vision_candidate(

@@ -58,14 +58,34 @@ if TYPE_CHECKING:
     from box_agent.tools.permissions import PermissionEngine
 
 
-def _image_capable_llm(llm: Any | None) -> Any | None:
+def _bounded_image_inspection_llm(
+    llm: Any,
+    max_output_tokens_cap: int | None,
+) -> Any:
+    """Keep a utility image description from reserving the main turn's budget."""
+    if max_output_tokens_cap is None:
+        return llm
+    bounded, _diagnostic = resolve_model_client(
+        llm,
+        task="分析图片内容并执行视觉质量审查",
+        strategy="utility",
+        max_output_tokens_cap=max_output_tokens_cap,
+    )
+    return bounded
+
+
+def _image_capable_llm(
+    llm: Any | None,
+    *,
+    max_output_tokens_cap: int | None = None,
+) -> Any | None:
     """Return an image-capable client, or None for known text-only bindings."""
     if llm is None:
         return None
 
     current_support = image_input_support(llm)
     if current_support is True:
-        return llm
+        return _bounded_image_inspection_llm(llm, max_output_tokens_cap)
 
     model = str(getattr(llm, "model", "") or "").strip()
     candidates = tuple(getattr(llm, "auto_model_candidates", ()) or ())
@@ -89,10 +109,15 @@ def _image_capable_llm(llm: Any | None) -> Any | None:
             auto_model_candidates=vision_candidates,
             task_tags=("vision", "analysis"),
             required_ability_level=2,
+            max_output_tokens_cap=max_output_tokens_cap,
         )
         return resolved if diagnostic.get("mode") == "auto" else None
 
-    return None if current_support is False else llm
+    return (
+        None
+        if current_support is False
+        else _bounded_image_inspection_llm(llm, max_output_tokens_cap)
+    )
 
 
 def build_sandbox_info_prompt(use_output_dir: bool = True) -> str:
@@ -537,7 +562,9 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                         skill_scratch_root_dir: str | Path | None = None,
                         env_context=None,
                         process_owner_id: str | None = None,
-                        bypass_dangerous_command_approval: bool = False):
+                        bypass_dangerous_command_approval: bool = False,
+                        image_inspection_default_strategy: str = "proxy",
+                        image_inspection_max_output_tokens_cap: int | None = None):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -566,6 +593,10 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             reclaim background shell processes.
         bypass_dangerous_command_approval: Skip dangerous-command approval for
             an explicitly trusted full-access session.
+        image_inspection_default_strategy: Default image handoff mode. CLI may
+            prefer native input while protocol hosts retain the proxy default.
+        image_inspection_max_output_tokens_cap: Optional utility-image response
+            cap. Protocol hosts retain their configured limit when omitted.
     """
     _out = output or print
     # Ensure workspace directory exists
@@ -720,8 +751,21 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Image inspection tool — only expose it when the bound model can actually
     # accept image blocks. Known text-only endpoints otherwise invite costly,
     # futile resize/retry loops during presentation QA.
-    image_llm = _image_capable_llm(llm)
+    current_image_support = image_input_support(llm)
+    current_model_candidates = tuple(
+        getattr(llm, "auto_model_candidates", ()) or ()
+    )
+    native_supported = current_image_support is True or (
+        current_image_support is not False and not current_model_candidates
+    )
+    image_llm = _image_capable_llm(
+        llm,
+        max_output_tokens_cap=image_inspection_max_output_tokens_cap,
+    )
     if image_llm is not None:
+        default_strategy = (
+            image_inspection_default_strategy if native_supported else "proxy"
+        )
         tools.append(
             ImageInspectionTool(
                 llm=image_llm,
@@ -729,10 +773,9 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,
                 relative_root_dir=str(relative_root),
-                native_supported=(
-                    image_llm is llm and image_input_support(llm) is not False
-                ),
+                native_supported=native_supported,
                 native_capability_llm=llm,
+                default_strategy=default_strategy,
             )
         )
         _out(f"{Colors.GREEN}✅ Loaded image inspection tool (inspect_images){Colors.RESET}")

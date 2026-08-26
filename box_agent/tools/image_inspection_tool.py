@@ -57,7 +57,11 @@ class ImageInspectionTool(Tool):
         relative_root_dir: str | None = None,
         native_supported: bool = False,
         native_capability_llm: Any | None = None,
+        default_strategy: str = "proxy",
     ) -> None:
+        normalized_default_strategy = default_strategy.strip().lower()
+        if normalized_default_strategy not in {"proxy", "native"}:
+            raise ValueError("default_strategy must be 'proxy' or 'native'")
         self.llm = llm
         self.workspace_dir = Path(workspace_dir).absolute()
         self.relative_root_dir = (
@@ -67,6 +71,7 @@ class ImageInspectionTool(Tool):
         self._perm = permission_engine
         self.native_supported = native_supported
         self._native_capability_llm = native_capability_llm
+        self.default_strategy = normalized_default_strategy
         self._unsupported_error: str | None = None
 
     @property
@@ -75,11 +80,18 @@ class ImageInspectionTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
+        description = (
             "Inspect 1-6 local PNG/JPEG images with the configured vision-capable "
             "model and answer the supplied instruction using relevant visual evidence. "
             "Reads image files and performs an LLM request; never modifies files."
         )
+        if self.default_strategy == "native":
+            return (
+                f"{description} The active TUI model accepts native image input, so "
+                "omit strategy or use native first; use proxy only if native input "
+                "cannot fit the transient request budget."
+            )
+        return description
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -111,7 +123,7 @@ class ImageInspectionTool(Tool):
                 "strategy": {
                     "type": "string",
                     "enum": ["proxy", "native"],
-                    "default": "proxy",
+                    "default": self.default_strategy,
                     "description": (
                         "proxy asks the configured vision utility model and returns text; "
                         "native attaches canonical image blocks transiently to the active "
@@ -126,7 +138,7 @@ class ImageInspectionTool(Tool):
         self,
         image_paths: list[str],
         instruction: str,
-        strategy: str = "proxy",
+        strategy: str | None = None,
     ) -> ToolResult:
         """Inspect images without modifying the filesystem."""
         if not image_paths or len(image_paths) > _MAX_IMAGES:
@@ -140,7 +152,7 @@ class ImageInspectionTool(Tool):
                 "IMAGE_INPUT_INVALID",
                 "instruction must not be empty",
             )
-        normalized_strategy = strategy.strip().lower()
+        normalized_strategy = (strategy or self.default_strategy).strip().lower()
         if normalized_strategy not in {"proxy", "native"}:
             return self._error(
                 "IMAGE_INPUT_INVALID",

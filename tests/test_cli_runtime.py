@@ -493,6 +493,8 @@ def test_cli_uses_saved_code_workspace_mode(tmp_path: Path, monkeypatch) -> None
 
     assert exit_code == 0
     assert workspace_tool_options["use_output_dir"] is False
+    assert workspace_tool_options["image_inspection_default_strategy"] == "native"
+    assert workspace_tool_options["image_inspection_max_output_tokens_cap"] == 4096
     system_prompt = _CaptureStreamLLM.instances[0].system_prompts[0]
     assert "Project Workspace Mode" in system_prompt
     assert "Software Engineering Mode (code_agent)" in system_prompt

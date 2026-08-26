@@ -2101,6 +2101,8 @@ async def run_agent(
         ),
         use_output_dir=not code_workspace,
         env_context=cli_env_context,
+        image_inspection_default_strategy="native",
+        image_inspection_max_output_tokens_cap=4096,
     )
 
     if not allow_full_access:
