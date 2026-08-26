@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from box_agent.llm.buffered_stream import generate_buffered_stream
 from box_agent.schema import Message
 from box_agent.tools.base import Tool, ToolResult
 
@@ -268,17 +269,16 @@ class WebExtractTool(Tool):
         ]
 
         try:
-            response = await asyncio.wait_for(
-                summary_llm.generate(
-                    messages=messages,
-                    tools=None,
-                    thinking_enabled=False,
-                    call_kind="utility",
-                ),
-                timeout=_SUMMARY_TIMEOUT_SECONDS,
+            response = await generate_buffered_stream(
+                summary_llm,
+                messages=messages,
+                tools=None,
+                thinking_enabled=False,
+                call_kind="utility",
+                idle_timeout=_SUMMARY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            return None, f"Summarization timed out after {_SUMMARY_TIMEOUT_SECONDS:.0f}s"
+            return None, f"Summarization stream was idle for {_SUMMARY_TIMEOUT_SECONDS:.0f}s"
         except Exception as exc:  # pragma: no cover - provider errors vary
             return None, f"Summarization failed: {exc}"
 

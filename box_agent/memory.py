@@ -24,6 +24,7 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Iterator
 
+from .llm.buffered_stream import generate_buffered_stream
 from .llm.model_routing import resolve_model_client
 
 if TYPE_CHECKING:
@@ -1223,7 +1224,8 @@ class MemoryManager:
                 task_tags=("summary", "analysis"),
                 required_ability_level=1,
             )
-            response = await memory_llm.generate(
+            response = await generate_buffered_stream(
+                memory_llm,
                 messages=[
                     Msg(role="system", content="You extract structured user information from raw notes."),
                     Msg(role="user", content=prompt),
@@ -1307,7 +1309,8 @@ class MemoryManager:
                 task_tags=("summary", "analysis"),
                 required_ability_level=1,
             )
-            response = await memory_llm.generate(
+            response = await generate_buffered_stream(
+                memory_llm,
                 messages=[
                     Msg(role="system", content=_CONTEXT_UPDATE_SYSTEM_PROMPT),
                     Msg(role="user", content=prompt),
@@ -1613,7 +1616,8 @@ class MemoryManager:
                 task_tags=("summary", "analysis"),
                 required_ability_level=1,
             )
-            response = await memory_llm.generate(
+            response = await generate_buffered_stream(
+                memory_llm,
                 messages=[
                     {"role": "system", "content": _PROMOTION_PLAN_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
@@ -2405,7 +2409,8 @@ class MemoryExtractor:
             task_tags=("summary", "analysis"),
             required_ability_level=1,
         )
-        response = await memory_llm.generate(
+        response = await generate_buffered_stream(
+            memory_llm,
             messages=[
                 Msg(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
                 Msg(role="user", content=prompt),

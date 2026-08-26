@@ -60,6 +60,15 @@ class _DedicatedFollowUpLLM:
         )
 
     async def generate_stream(self, messages, tools=None, **_):
+        if _.get("call_kind") == "utility":
+            self.generate_calls.append(_)
+            await self.release_suggestions.wait()
+            yield StreamEvent(
+                type="text",
+                delta='{"suggestions":["核对项目当前的 React 版本", "查看 React 19.2 的新增内容"]}',
+            )
+            yield StreamEvent(type="finish", finish_reason="stop")
+            return
         yield StreamEvent(type="text", delta="React 当前 npm 稳定最新版是 19.2.7。")
         yield StreamEvent(type="finish", finish_reason="stop")
 

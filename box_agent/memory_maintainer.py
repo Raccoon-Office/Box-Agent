@@ -40,6 +40,7 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
 
+from .llm.buffered_stream import generate_buffered_stream
 from .llm.model_routing import resolve_model_client
 
 from .memory import (
@@ -412,7 +413,8 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
                 task_tags=("summary",),
                 required_ability_level=1,
             )
-            response = await maintenance_llm.generate(
+            response = await generate_buffered_stream(
+                maintenance_llm,
                 messages=[
                     Msg(role="system", content=_COMPACT_SYSTEM_PROMPT),
                     Msg(role="user", content=user_prompt),
@@ -667,7 +669,8 @@ class MemoryMaintainer_Conflict:  # placeholder — bound onto MemoryMaintainer 
                     task_tags=("analysis", "reasoning"),
                     required_ability_level=2,
                 )
-                response = await maintenance_llm.generate(
+                response = await generate_buffered_stream(
+                    maintenance_llm,
                     messages=[
                         Msg(role="system", content=_CONFLICT_SYSTEM_PROMPT),
                         Msg(role="user", content=user_prompt),

@@ -44,6 +44,7 @@ from box_agent.agent import (
     should_continue_goal_autopilot,
 )
 from box_agent.config import AgentConfig, Config
+from box_agent.llm.buffered_stream import generate_buffered_stream
 from box_agent.completion import build_auto_completion_gate
 from box_agent.events import StopReason
 from box_agent.schema import LLMProvider, Message
@@ -1454,7 +1455,8 @@ def _doctor_config_status() -> tuple[dict[str, Any], Config | None]:
 
 async def _probe_llm_api(client: LLMClient):
     """Run one tool-free connectivity probe classified as an internal helper call."""
-    return await client.generate(
+    return await generate_buffered_stream(
+        client,
         messages=[Message(role="user", content="hi")],
         call_kind="utility",
     )

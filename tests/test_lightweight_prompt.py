@@ -14,7 +14,7 @@ from box_agent.llm.lightweight import (
     LightweightTimeout,
     run_lightweight_prompt,
 )
-from box_agent.schema import LLMResponse
+from box_agent.schema import LLMResponse, StreamEvent
 from box_agent.schema.schema import TokenUsage
 
 
@@ -69,6 +69,36 @@ class _FakeLLM:
             finish_reason="stop",
             usage=self._usage,
         )
+
+    async def generate_stream(
+        self,
+        messages,
+        tools=None,
+        *,
+        thinking_enabled: bool = False,
+        session_id: str = "",
+        turn_id: str = "",
+        title: str = "",
+        call_kind: str = "",
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "thinking_enabled": thinking_enabled,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "title": title,
+                "call_kind": call_kind,
+            }
+        )
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if self._raises is not None:
+            raise self._raises
+        if self._content:
+            yield StreamEvent(type="text", delta=self._content)
+        yield StreamEvent(type="finish", finish_reason="stop", usage=self._usage)
 
 
 @pytest.mark.asyncio
