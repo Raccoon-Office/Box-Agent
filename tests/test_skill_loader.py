@@ -290,6 +290,37 @@ Run the script: python scripts/test_script.py
         assert str(skill_dir / "scripts" / "test_script.py") in skill.content
 
 
+def test_skill_dir_placeholder_resolves_to_loaded_skill_root(tmp_path: Path):
+    """Installed Skill shell snippets should not retain a guessed root."""
+    skill_dir = tmp_path / "research-synthesis"
+    skill_dir.mkdir()
+    create_test_skill(
+        skill_dir,
+        "research-synthesis",
+        "Research workflow",
+        'SKILL_ROOT="{skill_dir}"\npython "$SKILL_ROOT/scripts/check.py"',
+    )
+
+    skill = SkillLoader(tmp_path).load_skill(skill_dir / "SKILL.md")
+
+    assert skill is not None
+    assert "{skill_dir}" not in skill.content
+    assert f'SKILL_ROOT="{skill_dir.resolve()}"' in skill.content
+
+
+def test_builtin_research_skill_does_not_fall_back_to_other_skill_set():
+    """The bundled validator must stay within research-synthesis roots."""
+    skills_dir = Path(__file__).parents[1] / "box_agent" / "skills"
+    skill = SkillLoader(skills_dir).load_skill(
+        skills_dir / "research-synthesis" / "SKILL.md"
+    )
+
+    assert skill is not None
+    assert "{skill_dir}" not in skill.content
+    assert "deep-research-swarm-officev3" not in skill.content
+    assert str((skills_dir / "research-synthesis").resolve()) in skill.content
+
+
 def test_skill_to_prompt_includes_root_directory():
     """Test that to_prompt includes skill root directory path"""
     with tempfile.TemporaryDirectory() as tmpdir:

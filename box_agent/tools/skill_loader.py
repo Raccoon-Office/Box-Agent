@@ -485,6 +485,11 @@ class SkillLoader:
         """Replace relative paths in skill content with absolute paths."""
         import re
 
+        # Skills may need to embed their installed root in shell snippets.
+        # Resolve the explicit placeholder before the narrower relative-path
+        # rewrites below so the model never has to guess a package/user path.
+        content = content.replace("{skill_dir}", str(skill_dir.resolve()))
+
         def replace_dir_path(match):
             prefix = match.group(1)
             rel_path = match.group(2)

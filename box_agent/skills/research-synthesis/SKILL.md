@@ -218,9 +218,6 @@ RESEARCH_SYNTHESIS_SKILL_DIR="${BOX_AGENT_RESEARCH_SYNTHESIS_SKILL_DIR:-${RESEAR
 if [ ! -f "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" ] && [ -f "$HOME/.box-agent/skills/research-synthesis/scripts/validate_research_artifacts.py" ]; then
   RESEARCH_SYNTHESIS_SKILL_DIR="$HOME/.box-agent/skills/research-synthesis"
 fi
-if [ ! -f "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" ] && [ -f "$HOME/.box-agent/skills/deep-research-swarm-officev3/scripts/validate_research_artifacts.py" ]; then
-  RESEARCH_SYNTHESIS_SKILL_DIR="$HOME/.box-agent/skills/deep-research-swarm-officev3"
-fi
 if [ ! -f "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" ]; then
   echo "ERROR: validate_research_artifacts.py not found under $RESEARCH_SYNTHESIS_SKILL_DIR/scripts" >&2
   exit 1
