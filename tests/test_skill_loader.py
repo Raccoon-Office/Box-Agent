@@ -566,6 +566,35 @@ def test_skill_settings_change_triggers_reload():
         assert loader.get_skill("toggle-skill") is None
 
 
+def test_frozen_snapshot_refreshes_settings_without_reloading_skill_content(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "toggle-skill"
+    skill_dir.mkdir(parents=True)
+    create_test_skill(skill_dir, "toggle-skill", "toggle desc", "original content")
+    settings_path = tmp_path / "skill-settings.json"
+    settings_path.write_text('{"disabledSkillNames":[]}', encoding="utf-8")
+
+    loader = SkillLoader(skills_dir, skill_settings_path=settings_path)
+    loader.discover_skills()
+    frozen = loader.snapshot()
+
+    settings_path.write_text(
+        '{"disabledSkillNames":["toggle-skill"]}', encoding="utf-8"
+    )
+    assert frozen.maybe_reload() is True
+    assert frozen.get_skill("toggle-skill") is None
+
+    create_test_skill(skill_dir, "toggle-skill", "new desc", "new content")
+    assert frozen.maybe_reload() is False
+
+    settings_path.write_text('{"disabledSkillNames":[]}', encoding="utf-8")
+    assert frozen.maybe_reload() is True
+    restored = frozen.get_skill("toggle-skill")
+    assert restored is not None
+    assert restored.description == "toggle desc"
+    assert "original content" in restored.content
+
+
 def test_missing_manifest_fails_closed():
     """No manifest in a builtin dir must load zero managed skills."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -626,15 +655,30 @@ def test_managed_manifest_exposes_stable_ref_and_snapshot_pins_version(tmp_path)
         }),
         encoding="utf-8",
     )
-    loader = SkillLoader(sources=[(builtin_dir, "managed")])
+    settings_path = tmp_path / "skill-settings.json"
+    settings_path.write_text('{"disabledSkillRefs":[]}', encoding="utf-8")
+    loader = SkillLoader(
+        sources=[(builtin_dir, "managed")],
+        skill_settings_path=settings_path,
+    )
     loader.discover_skills()
     skill = loader.get_skill_by_ref("builtin:skill-id")
     assert skill is not None
     assert skill.version_id == "version-id"
     frozen = loader.snapshot()
+
+    settings_path.write_text(
+        '{"disabledSkillRefs":["builtin:skill-id"]}', encoding="utf-8"
+    )
+    assert frozen.maybe_reload() is True
+    assert frozen.get_skill_by_ref("builtin:skill-id") is None
+
     (builtin_dir / "_manifest.json").unlink()
-    assert frozen.maybe_reload() is False
-    assert frozen.get_skill_by_ref("builtin:skill-id").skill_path == skill.skill_path
+    settings_path.write_text('{"disabledSkillRefs":[]}', encoding="utf-8")
+    assert frozen.maybe_reload() is True
+    restored = frozen.get_skill_by_ref("builtin:skill-id")
+    assert restored is not None
+    assert restored.skill_path == skill.skill_path
 
 
 def test_required_stable_ref_never_falls_back_to_same_name(tmp_path):

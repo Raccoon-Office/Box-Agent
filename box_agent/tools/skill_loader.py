@@ -557,11 +557,6 @@ class SkillLoader:
         self.parse_errors = []
         orphan_count = 0
         discovered: List[Skill] = []
-        disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path)
-        disabled_skill_refs = _read_disabled_skill_refs(self._skill_settings_path)
-        self._disabled_skill_names = disabled_skill_names
-        self._disabled_skill_refs = disabled_skill_refs
-
         # Reverse order: load lower-priority sources first, then higher-priority
         # ones overwrite by dict assignment.
         for entry in reversed(self._sources):
@@ -603,18 +598,12 @@ class SkillLoader:
 
                 self._all_skills[skill.name] = skill
 
-                if skill.name in disabled_skill_names or (skill.ref and skill.ref in disabled_skill_refs):
-                    self.loaded_skills.pop(skill.name, None)
-                    continue
-
-                self.loaded_skills[skill.name] = skill
-
             # Cache a cheap signature for reload detection. Keep last_mtime for
             # backward compatibility with older tests/debug code that may read it.
             entry.signature = self._source_signature(entry)
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
-        self._skill_settings_signature = self._file_signature(self._skill_settings_path)
+        self._apply_disabled_skill_settings()
         discovered = list(self.loaded_skills.values())
 
         # Aggregate diagnostics: one line total, not one per broken file. The
@@ -890,15 +879,16 @@ class SkillLoader:
         Returns:
             True if a reload was performed, False otherwise.
         """
-        if self._frozen:
-            return False
-        changed = False
-        if hasattr(self, "_skill_settings_path"):
-            if (
-                self._file_signature(self._skill_settings_path)
-                != self._skill_settings_signature
-            ):
-                changed = True
+        settings_changed = hasattr(self, "_skill_settings_path") and (
+            self._file_signature(self._skill_settings_path)
+            != self._skill_settings_signature
+        )
+        if getattr(self, "_frozen", False):
+            if settings_changed:
+                self._apply_disabled_skill_settings()
+            return settings_changed
+
+        changed = settings_changed
         for entry in self._sources:
             current = self._source_signature(entry)
             if current != entry.signature:
@@ -908,6 +898,28 @@ class SkillLoader:
         if changed:
             self.discover_skills()
         return changed
+
+    def _apply_disabled_skill_settings(self) -> None:
+        """Apply current enable/disable settings without rediscovering sources.
+
+        Session snapshots use this to keep a stable skill file/version view while
+        still honoring an updated desktop enable/disable policy on later turns.
+        """
+        self._disabled_skill_names = _read_disabled_skill_names(
+            self._skill_settings_path
+        )
+        self._disabled_skill_refs = _read_disabled_skill_refs(
+            self._skill_settings_path
+        )
+        self.loaded_skills = {
+            name: skill
+            for name, skill in self._all_skills.items()
+            if name not in self._disabled_skill_names
+            and (skill.ref is None or skill.ref not in self._disabled_skill_refs)
+        }
+        self._skill_settings_signature = self._file_signature(
+            self._skill_settings_path
+        )
 
     def get_skill(self, name: str, *, include_disabled: bool = False) -> Optional[Skill]:
         """Get a loaded skill by name."""
