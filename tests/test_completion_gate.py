@@ -43,6 +43,7 @@ from box_agent.workflows.controlled_presentation import (
     GATEWAY_RESEARCH_READ_TOOLS,
     MANAGED_RESEARCH_NAVIGATE_TOOLS,
     MANAGED_RESEARCH_SNAPSHOT_TOOLS,
+    RESEARCH_DISCOVERY_ATTEMPT_LIMIT,
     RESEARCH_ROUND_LIMIT,
     ControlledPresentationPolicy,
 )
@@ -2228,7 +2229,7 @@ def test_deep_research_without_direct_read_tool_requires_unverified_ledger(
     assert "do not call web_search again" in checkpoint
 
 
-def test_successful_tool_search_does_not_consume_research_rounds(
+def test_successful_tool_search_is_capped_without_consuming_research_rounds(
     tmp_path,
 ):
     policy = ControlledPresentationPolicy(
@@ -2262,17 +2263,18 @@ def test_successful_tool_search_does_not_consume_research_rounds(
 
     assert policy._research_rounds_without_handoff == 0
     assert policy._research_tool_attempts == 0
-    assert policy._research_discovery_attempts == RESEARCH_ROUND_LIMIT
+    assert policy._research_discovery_attempts == RESEARCH_DISCOVERY_ATTEMPT_LIMIT
+    assert f"{CONTROLLED_PRESENTATION_CHECKPOINT_MARKER}outline" in checkpoint
+    assert '"fallback":true' in checkpoint
     assert policy.research_search_exhausted is False
-    assert (
-        policy.tool_call_error(
-            "web_search",
-            {"query": "first evidence query"},
-            verified_evidence_urls=set(),
-        )
-        is None
+    blocked = policy.tool_call_error(
+        "tool_search",
+        {"query": "same visible tool again"},
+        verified_evidence_urls=set(),
     )
-    assert "No exact-page read tool is available in this run" not in checkpoint
+    assert blocked is not None
+    assert "CONTROLLED_PRESENTATION_RESEARCH_" in blocked
+    assert '"fallback_reason":"research_discovery_limit_reached"' in checkpoint
 
 
 def test_deep_research_counts_empty_tool_search_rounds_and_falls_back(tmp_path):
@@ -2353,13 +2355,52 @@ def test_research_blocks_execute_code_network_bypass_but_allows_local_analysis(
         },
         verified_evidence_urls=set(),
     )
-
     assert all(error is not None for error in blocked)
     assert all(
         "CONTROLLED_PRESENTATION_RESEARCH_NETWORK_TOOL_REQUIRED" in (error or "")
         for error in blocked
     )
     assert allowed is None
+
+
+def test_explicit_research_fallback_overrides_stale_validation(tmp_path):
+    research = tmp_path / "output" / "research"
+    research.mkdir(parents=True)
+    for name in (
+        "market_dim01.md",
+        "market_cross_verification.md",
+        "market_insight.md",
+    ):
+        (research / name).write_text(name, encoding="utf-8")
+    evidence = research / "market_evidence.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "topic": "market",
+                "target_entities": [],
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = research / "qa" / "market_research_check.json"
+    report.parent.mkdir()
+    report.write_text('{"ok":false}', encoding="utf-8")
+    newer = report.stat().st_mtime_ns + 10_000_000
+    os.utime(evidence, ns=(newer, newer))
+
+    checkpoint = build_checkpoint_text(
+        str(tmp_path),
+        "deep",
+        research_fallback_allowed=True,
+        research_fallback_reason="research_artifacts_incomplete_or_validation_failed",
+    )
+
+    assert checkpoint is not None
+    assert f"{CONTROLLED_PRESENTATION_CHECKPOINT_MARKER}outline" in checkpoint
+    assert '"fallback":true' in checkpoint
+    assert '"revalidation"' not in checkpoint
 
 
 def test_deep_research_stops_search_but_requires_report_after_successful_rounds(
@@ -2632,6 +2673,51 @@ def test_deterministic_presentation_commands_are_runtime_owned(tmp_path):
         assert "\n" not in action.arguments["command"]
 
 
+def test_runtime_owned_outline_validation_uses_framework_fallback_handoff(tmp_path):
+    artifact_root = tmp_path / "output" / "tasks" / "task-1"
+    qa_root = artifact_root / "research" / "qa"
+    qa_root.mkdir(parents=True)
+    (artifact_root / "outline.json").write_text("{}", encoding="utf-8")
+    (qa_root / "topic_research_check.json").write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "invalid",
+                    "verified_facts": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fallback = qa_root / "research_status.json"
+    fallback.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "framework",
+                    "verified_facts": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=artifact_root,
+        research_mode="deep",
+        stage="outline_qa",
+    )
+
+    action = policy.next_deterministic_action()
+
+    assert action is not None
+    assert action.capability == "controlled_presentation.outline_validate"
+    assert f"--research-handoff {fallback}" in action.arguments["command"]
+    assert "topic_research_check.json" not in action.arguments["command"]
+
+
 @pytest.mark.asyncio
 async def test_stale_research_report_is_revalidated_by_runtime_before_model(tmp_path):
     research = tmp_path / "output" / "research"
@@ -2654,11 +2740,21 @@ async def test_stale_research_report_is_revalidated_by_runtime_before_model(tmp_
         (*dimensions, cross_verification, insight),
     )
     llm = MockLLM([_final("done")])
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=None,
+        research_mode="deep",
+    )
+    policy._research_direct_source_text["https://example.com/official"] = (
+        "exampleentitypublishedverifiedinformationin2026"
+    )
+    messages = _msgs()
+    messages[-1].content = "hi https://example.com/official"
 
     events = await collect(
         run_agent_loop(
             llm=llm,
-            messages=_msgs(),
+            messages=messages,
             tools={"bash": bash_tool},
             max_steps=5,
             completion_gate=CompletionGate(
@@ -2666,6 +2762,7 @@ async def test_stale_research_report_is_revalidated_by_runtime_before_model(tmp_
                 workflow_options={"research_mode": "deep"},
                 max_continuations=0,
             ),
+            workflow_policy=policy,
             workspace_dir=str(tmp_path),
         )
     )

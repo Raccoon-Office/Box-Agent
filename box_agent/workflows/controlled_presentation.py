@@ -557,6 +557,47 @@ def _is_outline_validation_call(
     )
 
 
+def _latest_valid_outline_research_handoff(artifact_root: Path) -> Path | None:
+    """Return the newest valid handoff, including a framework fallback status."""
+    qa_root = artifact_root / "research" / "qa"
+    candidates = [
+        *qa_root.glob("*_research_check.json"),
+        *qa_root.glob("*_presentation_handoff.json"),
+        qa_root / "research_status.json",
+    ]
+    valid: list[tuple[int, Path]] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            handoff = (
+                payload.get("presentation_handoff")
+                if isinstance(payload, dict)
+                else None
+            )
+            if not isinstance(handoff, dict):
+                handoff = payload if isinstance(payload, dict) else None
+            delivery_mode = handoff.get("delivery_mode") if handoff else None
+            verified_facts = handoff.get("verified_facts") if handoff else None
+            schema_version = handoff.get("schema_version") if handoff else None
+            if (
+                schema_version != 1
+                or delivery_mode not in {"full", "partial", "framework"}
+                or not isinstance(verified_facts, list)
+                or (
+                    delivery_mode in {"full", "partial"}
+                    and not verified_facts
+                )
+                or (delivery_mode == "framework" and verified_facts)
+            ):
+                continue
+            valid.append((path.stat().st_mtime_ns, path))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return max(valid, key=lambda item: item[0])[1] if valid else None
+
+
 def _outline_validation_failure_signature(
     tool_name: str,
     arguments: dict[str, Any],
@@ -2213,12 +2254,16 @@ class ControlledPresentationPolicy:
 
     @property
     def _research_discovery_exhausted(self) -> bool:
+        return self._research_discovery_attempts >= RESEARCH_DISCOVERY_ATTEMPT_LIMIT
+
+    @property
+    def _research_discovery_unavailable(self) -> bool:
         unavailable = (
             self._research_failed_discovery_attempts
             + self._research_empty_discovery_attempts
         )
         return bool(
-            self._research_discovery_attempts >= RESEARCH_DISCOVERY_ATTEMPT_LIMIT
+            self._research_discovery_attempts > 0
             and unavailable == self._research_discovery_attempts
         )
 
@@ -2425,7 +2470,11 @@ class ControlledPresentationPolicy:
         fallback_reason = None
         if fallback_allowed:
             fallback_reason = (
-                "research_tools_unavailable_after_discovery"
+                (
+                    "research_tools_unavailable_after_discovery"
+                    if self._research_discovery_unavailable
+                    else "research_discovery_limit_reached"
+                )
                 if self._research_discovery_exhausted
                 else (
                     "research_artifacts_incomplete_or_validation_failed"
@@ -2773,14 +2822,12 @@ class ControlledPresentationPolicy:
         if artifact_root is not None and self.stage == "outline_qa":
             outline_path = artifact_root / "outline.json"
             report_path = artifact_root / "qa" / "outline_check.json"
-            research_reports = sorted(
-                (artifact_root / "research" / "qa").glob("*_research_check.json"),
-                key=lambda path: path.stat().st_mtime_ns,
-                reverse=True,
+            research_handoff = _latest_valid_outline_research_handoff(
+                artifact_root
             )
             research_argument = (
-                f" --research-handoff {shlex.quote(str(research_reports[0]))}"
-                if self.research_mode == "deep" and research_reports
+                f" --research-handoff {shlex.quote(str(research_handoff))}"
+                if self.research_mode == "deep" and research_handoff is not None
                 else ""
             )
             command = (
@@ -2791,7 +2838,10 @@ class ControlledPresentationPolicy:
             return self._runtime_bash_action(
                 "outline_validate",
                 command,
-                (outline_path, *research_reports[:1]),
+                (
+                    outline_path,
+                    *((research_handoff,) if research_handoff is not None else ()),
+                ),
             )
 
         if artifact_root is not None and self.stage == "image_status_sync":

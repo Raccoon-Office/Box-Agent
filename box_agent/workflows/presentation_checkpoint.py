@@ -1533,12 +1533,17 @@ def build_checkpoint_text(
     research_fallback = (
         research_required
         and not research_ready
-        and research_validation is None
         and (
             research_fallback_allowed
             or _research_fallback_available(research_files)
         )
     )
+    if research_fallback:
+        # A bounded fallback decision is authoritative even when incomplete
+        # research files make the deterministic validator look runnable again.
+        # Otherwise a stale or failed ledger can trap every later checkpoint in
+        # revalidation and prevent the framework outline from ever starting.
+        research_validation = None
     fallback_reason = (
         research_fallback_reason
         if research_fallback
@@ -1558,6 +1563,10 @@ def build_checkpoint_text(
         "research_artifacts_incomplete_or_validation_failed": (
             "Research artifacts were attempted, but the required handoff or its "
             "validation report was incomplete or unsuccessful."
+        ),
+        "research_discovery_limit_reached": (
+            "Capability discovery reached its bounded limit without a validated "
+            "research handoff, so delivery is continuing with a framework outline."
         ),
     }
     fallback_message = (

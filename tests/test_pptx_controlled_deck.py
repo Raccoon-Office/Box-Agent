@@ -9125,7 +9125,7 @@ def test_outline_accepts_framework_structural_pages_without_evidence(
         ),
     ],
 )
-def test_outline_framework_data_page_still_requires_exact_gap_or_evidence(
+def test_outline_framework_data_page_missing_exact_gap_is_advisory(
     tmp_path: Path,
     title: str,
     message: str,
@@ -9176,11 +9176,11 @@ def test_outline_framework_data_page_still_requires_exact_gap_or_evidence(
         str(research_report),
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout)
     assert any(
-        issue.startswith("slide-02: framework research page")
-        for issue in payload["issues"]
+        warning.startswith("slide-02: framework research page")
+        for warning in payload["warnings"]
     )
 
 
