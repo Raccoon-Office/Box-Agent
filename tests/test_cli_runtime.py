@@ -7,7 +7,13 @@ import json
 from pathlib import Path
 
 import box_agent.cli as cli
-from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.config import (
+    AgentConfig,
+    Config,
+    LLMConfig,
+    ToolLimitsConfig,
+    ToolsConfig,
+)
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.skill_loader import Skill, SkillLoader
@@ -72,6 +78,91 @@ def test_cli_node_execution_env_preserves_user_environment(monkeypatch, tmp_path
     assert env["NPM_CONFIG_PREFIX"] == str(tmp_path / ".box-agent" / "skill-tools")
     assert "npm_config_prefix" not in env
     assert "npm_config_cache" not in env
+
+
+def test_cli_presentation_gate_requires_a_skill_selected_provider(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_skill(
+        skills_dir,
+        "plain-text",
+        description="Summarize and edit plain text",
+        keywords=["text", "summary"],
+        content="# PLAIN TEXT RULES",
+    )
+    skill_loader = SkillLoader(skills_dir)
+    skill_loader.discover_skills()
+
+    gate = cli._build_cli_skill_routed_completion_gate(
+        "请制作一份 PPT",
+        tmp_path / "workspace",
+        skill_loader=skill_loader,
+        tool_limits=ToolLimitsConfig(),
+    )
+
+    assert gate is None
+
+
+def test_cli_presentation_gate_uses_builtin_skill_provider(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_skill(
+        skills_dir,
+        "pptx",
+        description="Create editable PowerPoint presentation decks",
+        keywords=["ppt", "pptx", "slides"],
+        content="# PPTX RULES",
+    )
+    skill_loader = SkillLoader([(skills_dir, "builtin")])
+    skill_loader.discover_skills()
+
+    gate = cli._build_cli_skill_routed_completion_gate(
+        "请制作一份 PPT",
+        tmp_path / "workspace",
+        skill_loader=skill_loader,
+        tool_limits=ToolLimitsConfig(),
+    )
+
+    assert gate is not None
+    assert gate.workflow_checkpoint_kind == "controlled_presentation"
+
+
+def test_cli_skill_routing_handles_short_and_long_chinese_deck_prompts(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_skill(
+        skills_dir,
+        "pptx",
+        description="Create editable PowerPoint presentation decks",
+        keywords=["ppt", "pptx", "slides", "课件"],
+        content="# PPTX RULES",
+    )
+    skill_loader = SkillLoader([(skills_dir, "builtin")])
+    skill_loader.discover_skills()
+    cases = (
+        (
+            "我是小学科学老师，请制作一份PPT给三年级讲太阳系，"
+            "让八大行星能转起来并看清大小和远近。",
+            "auto",
+        ),
+        (
+            "帮我制作一份标题为《新能源汽车本土品牌市场动态分析》的"
+            "数据解读型PPT。请主动搜索并引用最新的中国公开数据，"
+            "所有图表均标注来源、统计时间和报告名称。",
+            "auto",
+        ),
+    )
+
+    for index, (prompt, expected_research_mode) in enumerate(cases):
+        gate = cli._build_cli_skill_routed_completion_gate(
+            prompt,
+            tmp_path / f"workspace-{index}",
+            skill_loader=skill_loader,
+            tool_limits=ToolLimitsConfig(),
+        )
+
+        assert gate is not None
+        assert gate.workflow_checkpoint_kind == "controlled_presentation"
+        assert gate.workflow_options["research_mode"] == expected_research_mode
 
 
 class _CaptureStreamLLM:

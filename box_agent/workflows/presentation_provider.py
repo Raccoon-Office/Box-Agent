@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from box_agent.delivery import has_deliverable_intent
 from box_agent.tools.skill_loader import Skill, SkillLoader
 
 from .presentation_contract import WORKFLOW_KIND
@@ -300,3 +301,33 @@ def resolve_presentation_skill_provider(
         ):
             declared_providers.append(candidate)
     return declared_providers[0] if declared_providers else None
+
+
+def resolve_query_matched_presentation_skill_provider(
+    skill_loader: SkillLoader,
+    query: str | None,
+) -> PresentationSkillProvider | None:
+    """Resolve a presentation provider selected by normal Skill matching.
+
+    The regular catalog filter intentionally caps the metadata shown to the
+    model. Provider routing must inspect every enabled Skill so a uniquely
+    relevant presentation provider is not dropped behind several broad
+    matches. Unlike :func:`resolve_presentation_skill_provider`, this helper
+    does not fall back to the builtin provider when the query matched no
+    presentation Skill.
+    """
+    if not query or not query.strip() or not has_deliverable_intent(query):
+        return None
+    max_skills = max(16, len(skill_loader.list_skills()))
+    matched_skill_names = tuple(
+        skill.name
+        for skill in skill_loader.filter_by_query(query, max_skills=max_skills)
+    )
+    provider = resolve_presentation_skill_provider(
+        skill_loader,
+        matched_skill_names,
+        query=query,
+    )
+    if provider is None or provider.skill_name not in matched_skill_names:
+        return None
+    return provider

@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -43,7 +44,7 @@ from box_agent.agent import (
     goal_state_from_payload,
     should_continue_goal_autopilot,
 )
-from box_agent.config import Config
+from box_agent.config import Config, ToolLimitsConfig
 from box_agent.completion import build_auto_completion_gate
 from box_agent.events import StopReason
 from box_agent.schema import LLMProvider, Message
@@ -58,6 +59,7 @@ from box_agent.tools.skill_preload import (
     build_auto_loaded_skills_prompt,
     turn_preload_skill_names,
 )
+from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.setup import (
     add_workspace_tools,
     await_mcp_tools,
@@ -84,8 +86,78 @@ from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryErr
 from box_agent.workflows import (
     CONTROLLED_PRESENTATION_WORKFLOW_KIND,
     build_external_skill_completion_gate,
+    build_presentation_completion_gate,
     resolve_explicit_skill_invocation,
+    resolve_query_matched_presentation_skill_provider,
 )
+
+
+def _build_cli_skill_routed_completion_gate(
+    user_input: str,
+    workspace_dir: str | Path,
+    *,
+    skill_loader: SkillLoader | None,
+    tool_limits: ToolLimitsConfig,
+):
+    """Build a gate after Skill routing, without a CLI-only PPT classifier."""
+    explicit_skill = resolve_explicit_skill_invocation(skill_loader, user_input)
+    explicit_skill_uses_controlled_workflow = (
+        explicit_skill is not None
+        and explicit_skill.source == "builtin"
+        and explicit_skill.workflow == CONTROLLED_PRESENTATION_WORKFLOW_KIND
+    )
+    if explicit_skill is not None and not explicit_skill_uses_controlled_workflow:
+        return build_external_skill_completion_gate(
+            user_text=user_input,
+            workspace_dir=workspace_dir,
+            skill=explicit_skill,
+            tool_limits=tool_limits,
+        )
+    presentation_provider = (
+        resolve_query_matched_presentation_skill_provider(
+            skill_loader,
+            user_input,
+        )
+        if skill_loader is not None and explicit_skill is None
+        else None
+    )
+    if presentation_provider is not None:
+        presentation_skill = skill_loader.get_skill(
+            presentation_provider.skill_name
+        )
+        if (
+            presentation_provider.source != "builtin"
+            or not presentation_provider.uses_controlled_workflow
+        ):
+            return build_external_skill_completion_gate(
+                user_text=user_input,
+                workspace_dir=workspace_dir,
+                skill=presentation_skill,
+                tool_limits=tool_limits,
+            )
+    skill_selected_controlled_presentation = (
+        explicit_skill_uses_controlled_workflow
+        or presentation_provider is not None
+    )
+    if skill_selected_controlled_presentation:
+        gate = build_presentation_completion_gate(
+            user_input,
+            workspace_dir,
+            confirmed_presentation=True,
+            tool_limits=tool_limits,
+        )
+        if gate is None:
+            return None
+        return replace(
+            gate,
+            workflow_options={**gate.workflow_options, "research_mode": "auto"},
+        )
+    return build_auto_completion_gate(
+        user_input,
+        workspace_dir,
+        allow_controlled_presentation=False,
+        tool_limits=tool_limits,
+    )
 
 
 def run_setup_wizard(config_path: Path) -> bool:
@@ -2317,25 +2389,10 @@ async def run_agent(
     def _build_cli_completion_gate(user_input: str):
         if not completion_gate_enabled:
             return None
-        explicit_skill = resolve_explicit_skill_invocation(skill_loader, user_input)
-        if (
-            explicit_skill is not None
-            and explicit_skill.workflow != CONTROLLED_PRESENTATION_WORKFLOW_KIND
-        ):
-            return build_external_skill_completion_gate(
-                user_text=user_input,
-                workspace_dir=workspace_dir,
-                skill=explicit_skill,
-                tool_limits=config.tool_limits,
-            )
-        return build_auto_completion_gate(
+        return _build_cli_skill_routed_completion_gate(
             user_input,
             workspace_dir,
-            confirmed_presentation=(
-                explicit_skill is not None
-                and explicit_skill.workflow
-                == CONTROLLED_PRESENTATION_WORKFLOW_KIND
-            ),
+            skill_loader=skill_loader,
             tool_limits=config.tool_limits,
         )
 

@@ -34,6 +34,7 @@ from .presentation_preflight import (
 from .presentation_provider import (
     parse_host_presentation_config,
     resolve_presentation_skill_provider,
+    resolve_query_matched_presentation_skill_provider,
 )
 from .presentation_routing import build_presentation_completion_gate
 
@@ -191,4 +192,5 @@ __all__ = [
     "recover_completion_gate",
     "resolve_explicit_skill_invocation",
     "resolve_presentation_skill_provider",
+    "resolve_query_matched_presentation_skill_provider",
 ]

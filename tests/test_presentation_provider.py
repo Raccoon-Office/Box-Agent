@@ -4,6 +4,7 @@ from box_agent.tools.skill_loader import SkillLoader
 from box_agent.workflows.presentation_provider import (
     parse_host_presentation_config,
     resolve_presentation_skill_provider,
+    resolve_query_matched_presentation_skill_provider,
 )
 
 
@@ -14,6 +15,7 @@ def _write_skill(
     *,
     capabilities: str | None = None,
     workflow: str | None = None,
+    keywords: tuple[str, ...] = (),
 ) -> None:
     skill_dir = root / name
     skill_dir.mkdir(parents=True)
@@ -22,6 +24,8 @@ def _write_skill(
         lines.append(f"capabilities: [{capabilities}]")
     if workflow:
         lines.append(f"workflow: {workflow}")
+    if keywords:
+        lines.append(f"keywords: [{', '.join(keywords)}]")
     lines.extend(["---", "", "Follow this workflow."])
     skill_dir.joinpath("SKILL.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -98,6 +102,78 @@ def test_unmatched_declared_integration_does_not_become_global_default(tmp_path)
 
     assert provider is not None
     assert provider.skill_name == "pptx"
+
+
+def test_query_matched_provider_does_not_use_builtin_fallback(tmp_path) -> None:
+    builtin_root = tmp_path / "builtin"
+    _write_skill(
+        builtin_root,
+        "pptx",
+        "Create presentation files",
+        capabilities="presentation.authoring",
+        workflow="controlled_presentation",
+        keywords=("ppt", "pptx", "slides"),
+    )
+    loader = SkillLoader([(builtin_root, "builtin")])
+    loader.discover_skills()
+
+    provider = resolve_query_matched_presentation_skill_provider(
+        loader,
+        "Summarize this Python module",
+    )
+
+    assert provider is None
+
+
+def test_query_matched_provider_ignores_informational_skill_mentions(tmp_path) -> None:
+    builtin_root = tmp_path / "builtin"
+    _write_skill(
+        builtin_root,
+        "pptx",
+        "Create presentation files",
+        capabilities="presentation.authoring",
+        workflow="controlled_presentation",
+        keywords=("ppt", "pptx", "slides"),
+    )
+    loader = SkillLoader([(builtin_root, "builtin")])
+    loader.discover_skills()
+
+    provider = resolve_query_matched_presentation_skill_provider(
+        loader,
+        "解释一下 pptx 这个 Skill 的名字",
+    )
+
+    assert provider is None
+
+
+def test_query_matched_provider_is_not_dropped_by_catalog_limit(tmp_path) -> None:
+    user_root = tmp_path / "user"
+    builtin_root = tmp_path / "builtin"
+    for index in range(16):
+        _write_skill(
+            user_root,
+            f"training-noise-{index}",
+            "Create editable new employee training checklists",
+            keywords=("新员工", "入职", "培训", "可编辑", "清单"),
+        )
+    _write_skill(
+        builtin_root,
+        "pptx",
+        "Create presentation files",
+        capabilities="presentation.authoring",
+        workflow="controlled_presentation",
+        keywords=("ppt", "pptx", "slides"),
+    )
+    loader = SkillLoader([(user_root, "user"), (builtin_root, "builtin")])
+    loader.discover_skills()
+    prompt = "做一份 12 页新员工入职培训 PPT，1920×1080 可编辑"
+    assert "pptx" not in [skill.name for skill in loader.filter_by_query(prompt)]
+
+    provider = resolve_query_matched_presentation_skill_provider(loader, prompt)
+
+    assert provider is not None
+    assert provider.skill_name == "pptx"
+    assert provider.uses_controlled_workflow is True
 
 
 def test_matched_legacy_user_provider_needs_no_new_fields(tmp_path) -> None:
