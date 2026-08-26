@@ -753,6 +753,22 @@ class ExpertSessionContext:
                     names.append(name)
         return names
 
+    def skill_refs(self) -> list[str]:
+        return [value for value in self.skill_names() if ":" in value]
+
+    def required_skill_refs(self) -> list[str]:
+        refs: list[str] = []
+        profiles: list[Any] = [self.expert] if self.expert else []
+        if self.team:
+            profiles.extend([self.team.leader, *self.team.members])
+        for profile in profiles:
+            if profile is None:
+                continue
+            for value in getattr(profile, "required_skills", []):
+                if ":" in value and value not in refs:
+                    refs.append(value)
+        return refs
+
     def team_progress_payload(self) -> dict[str, object] | None:
         if not self.team:
             return None

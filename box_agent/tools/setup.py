@@ -319,8 +319,12 @@ async def initialize_base_tools(
             # User skills take priority over builtin on name conflict
             sources = [
                 (user_skills_dir, "user"),
-                (builtin_dir, "builtin"),
+                (builtin_dir, "managed" if config.tools.skills_manifest_required else "builtin"),
             ]
+            if config.tools.bootstrap_skills_dir:
+                bootstrap_dir = Path(config.tools.bootstrap_skills_dir).expanduser()
+                if bootstrap_dir.exists() and bootstrap_dir.resolve() != builtin_dir.resolve():
+                    sources.append((bootstrap_dir.resolve(), "builtin"))
 
             # ACP path: defer discovery to a background task so a directory
             # full of malformed SKILL.md files can't block stdio setup and

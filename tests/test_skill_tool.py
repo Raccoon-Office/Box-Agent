@@ -61,6 +61,10 @@ async def test_get_skill_tool(skill_loader):
     assert "Test skill 0 description" in result.content
     assert "Test skill 0 content" in result.content
 
+    by_ref = await tool.execute(skill_name="bootstrap:test-skill-0")
+    assert by_ref.success
+    assert "Test skill 0 content" in by_ref.content
+
 
 @pytest.mark.asyncio
 async def test_get_skill_tool_returns_short_context_when_skill_is_preloaded(skill_loader):

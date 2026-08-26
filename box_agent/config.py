@@ -326,6 +326,8 @@ class ToolsConfig(BaseModel):
     # Skills
     enable_skills: bool = True
     skills_dir: str = "./skills"
+    skills_manifest_required: bool = False
+    bootstrap_skills_dir: str | None = None
 
     # MCP tools
     enable_mcp: bool = True
@@ -585,6 +587,8 @@ class Config(BaseModel):
             allow_full_access=tools_data.get("allow_full_access", False),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),
+            skills_manifest_required=tools_data.get("skills_manifest_required", False),
+            bootstrap_skills_dir=tools_data.get("bootstrap_skills_dir"),
             enable_mcp=tools_data.get("enable_mcp", True),
             mcp_config_path=tools_data.get("mcp_config_path", "mcp.json"),
             mcp=mcp_config,

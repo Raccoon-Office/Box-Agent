@@ -1672,8 +1672,21 @@ class BoxACPAgent:
         session_skill_loader = self._skill_loader
         if expert_context is not None and self._skill_loader is not None:
             session_skill_loader = self._skill_loader.with_expert_skill_sources(
-                expert_context.skill_names()
+                [name for name in expert_context.skill_names() if ":" not in name]
             )
+            session_skill_loader.require_skill_refs(
+                expert_context.required_skill_refs(), include_disabled=False
+            )
+        if session_skill_loader is not None:
+            # One ACP session gets an immutable Skill path/version snapshot.
+            session_skill_loader = session_skill_loader.snapshot()
+
+        expert_ref_skills = []
+        if expert_context is not None and session_skill_loader is not None:
+            for ref in expert_context.skill_refs():
+                skill = session_skill_loader.get_skill_by_ref(ref, include_disabled=False)
+                if skill is not None and skill not in expert_ref_skills:
+                    expert_ref_skills.append(skill)
 
         # Build per-session system prompt with conditional mode injection
         system_prompt = self._build_session_prompt(
@@ -1686,6 +1699,11 @@ class BoxACPAgent:
             artifact_mode=artifact_mode,
             follow_up_suggestions_enabled=follow_up_suggestions_enabled,
         )
+        if expert_ref_skills:
+            system_prompt = (
+                f"{system_prompt.rstrip()}\n\n## Expert-bound Skills\n"
+                + "\n\n".join(skill.to_prompt() for skill in expert_ref_skills)
+            )
 
         # Inject memory context (skipped for lightweight utility sessions)
         memory_block: str | None = None
@@ -1697,6 +1715,8 @@ class BoxACPAgent:
                 log.info("session/memory", session_id=session_id, message="Memory context injected")
 
         preloaded_skill_hashes: dict[str, str] = {}
+        for skill in expert_ref_skills:
+            preloaded_skill_hashes[skill.name] = sha256(skill.to_prompt().encode("utf-8")).hexdigest()
         explicitly_allowed_skill_names: set[str] = set()
         blocked_skill_names = (
             FAST_OPTIONAL_SKILLS if execution_profile == "fast" else frozenset()
