@@ -79,7 +79,7 @@ async def test_openai_simple_completion():
     # Create OpenAI client
     client = OpenAIClient(
         api_key=config["api_key"],
-        api_base="https://api.anthropic.com",
+        api_base=config.get("api_base"),
         model=config.get("model", "claude-sonnet-4-20250514"),
         retry_config=RetryConfig(enabled=True, max_retries=2),
     )
@@ -90,24 +90,14 @@ async def test_openai_simple_completion():
         Message(role="user", content="Say 'Hello from OpenAI!' and nothing else."),
     ]
 
-    try:
-        response = await client.generate(messages=messages)
+    response = await client.generate(messages=messages)
 
-        print(f"Response: {response.content}")
-        print(f"Thinking: {response.thinking}")
-        print(f"Finish reason: {response.finish_reason}")
+    print(f"Response: {response.content}")
+    print(f"Thinking: {response.thinking}")
+    print(f"Finish reason: {response.finish_reason}")
 
-        assert response.content, "Response content is empty"
-        assert "Hello" in response.content or "hello" in response.content
-
-        print("✅ OpenAI simple completion test passed")
-        return True
-    except Exception as e:
-        print(f"❌ OpenAI test failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert response.content, "Response content is empty"
+    assert "Hello" in response.content or "hello" in response.content
 
 
 @pytest.mark.asyncio
@@ -180,7 +170,7 @@ async def test_openai_tool_calling():
     # Create OpenAI client
     client = OpenAIClient(
         api_key=config["api_key"],
-        api_base="https://api.anthropic.com",
+        api_base=config.get("api_base"),
         model=config.get("model", "claude-sonnet-4-20250514"),
     )
 
@@ -207,27 +197,14 @@ async def test_openai_tool_calling():
         Message(role="user", content="What's the weather in New York?"),
     ]
 
-    try:
-        response = await client.generate(messages=messages, tools=tools)
+    response = await client.generate(messages=messages, tools=tools)
 
-        print(f"Response: {response.content}")
-        print(f"Thinking: {response.thinking}")
-        print(f"Tool calls: {response.tool_calls}")
+    print(f"Response: {response.content}")
+    print(f"Thinking: {response.thinking}")
+    print(f"Tool calls: {response.tool_calls}")
 
-        if response.tool_calls:
-            assert len(response.tool_calls) > 0
-            assert response.tool_calls[0].function.name == "get_weather"
-            print("✅ OpenAI tool calling test passed")
-        else:
-            print("⚠️  Warning: LLM didn't use tools, but request succeeded")
-
-        return True
-    except Exception as e:
-        print(f"❌ OpenAI tool calling test failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert response.tool_calls
+    assert response.tool_calls[0].function.name == "get_weather"
 
 
 @pytest.mark.asyncio

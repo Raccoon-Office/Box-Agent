@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from box_agent.config import Config
 from box_agent.llm import LLMClient
 from box_agent.schema import LLMProvider, Message
 
@@ -69,15 +70,16 @@ async def test_wrapper_openai_provider():
     print("\n=== Testing LLM Wrapper (OpenAI Provider) ===")
 
     # Load config
-    config_path = Path("box_agent/config/config.yaml")
-    with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = Config.from_yaml(_CONFIG_PATH.resolve())
 
     # Create client with OpenAI provider
     client = LLMClient(
-        api_key=config["api_key"],
+        api_key=config.llm.api_key,
         provider=LLMProvider.OPENAI,
-        model=config.get("model"),
+        api_base=config.llm.api_base,
+        model=config.llm.model,
+        auth_file=config.llm.auth_file,
+        timeout=config.llm.timeout,
     )
 
     assert client.provider == LLMProvider.OPENAI
@@ -88,25 +90,15 @@ async def test_wrapper_openai_provider():
         Message(role="user", content="Say 'Hello, Box Agent!' and nothing else."),
     ]
 
-    try:
-        response = await client.generate(messages=messages)
+    response = await client.generate(messages=messages)
 
-        print(f"Response: {response.content}")
-        print(f"Finish reason: {response.finish_reason}")
+    print(f"Response: {response.content}")
+    print(f"Finish reason: {response.finish_reason}")
 
-        assert response.content, "Response content is empty"
-        assert "Hello" in response.content or "hello" in response.content, (
-            f"Response doesn't contain 'Hello': {response.content}"
-        )
-
-        print("✅ OpenAI provider test passed")
-        return True
-    except Exception as e:
-        print(f"❌ OpenAI provider test failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert response.content, "Response content is empty"
+    assert "Hello" in response.content or "hello" in response.content, (
+        f"Response doesn't contain 'Hello': {response.content}"
+    )
 
 
 @pytest.mark.asyncio

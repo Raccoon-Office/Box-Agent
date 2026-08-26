@@ -25,7 +25,7 @@ async def test_agent_simple_task():
 
     # Load config
     config_path = Path("box_agent/config/config.yaml")
-    config = Config.from_yaml(config_path)
+    config = Config.from_yaml(config_path.resolve())
 
     # Create temp workspace
     with tempfile.TemporaryDirectory() as workspace_dir:
@@ -41,8 +41,11 @@ async def test_agent_simple_task():
         # Initialize LLM client
         llm_client = LLMClient(
             api_key=config.llm.api_key,
+            provider=config.llm.provider,
             api_base=config.llm.api_base,
             model=config.llm.model,
+            auth_file=config.llm.auth_file,
+            timeout=config.llm.timeout,
         )
 
         # Initialize tools
@@ -50,7 +53,7 @@ async def test_agent_simple_task():
             ReadTool(workspace_dir=workspace_dir),
             WriteTool(workspace_dir=workspace_dir),
             EditTool(workspace_dir=workspace_dir),
-            BashTool(),
+            BashTool(workspace_dir=workspace_dir),
         ]
 
         # Create agent
@@ -68,36 +71,15 @@ async def test_agent_simple_task():
 
         agent.add_user_message(task)
 
-        try:
-            result = await agent.run()
+        result = await agent.run()
 
-            print(f"\n{'=' * 80}")
-            print(f"Agent Result: {result}")
-            print("=" * 80)
+        print(f"\n{'=' * 80}")
+        print(f"Agent Result: {result}")
+        print("=" * 80)
 
-            # Check if file was created
-            test_file = Path(workspace_dir) / "test.txt"
-            if test_file.exists():
-                content = test_file.read_text()
-                print("\n✅ File created successfully!")
-                print(f"Content: {content}")
-
-                if "Hello from Agent!" in content:
-                    print("✅ Content is correct!")
-                    return True
-                else:
-                    print(f"⚠️  Content mismatch: {content}")
-                    return True  # Still count as success, agent did create the file
-            else:
-                print("⚠️  File was not created, but agent completed")
-                return True  # Agent might have completed differently
-
-        except Exception as e:
-            print(f"❌ Agent test failed: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return False
+        test_file = Path(workspace_dir) / "test.txt"
+        assert test_file.exists(), "Agent should create test.txt"
+        assert "Hello from Agent!" in test_file.read_text()
 
 
 @pytest.mark.asyncio
@@ -107,7 +89,7 @@ async def test_agent_bash_task():
 
     # Load config
     config_path = Path("box_agent/config/config.yaml")
-    config = Config.from_yaml(config_path)
+    config = Config.from_yaml(config_path.resolve())
 
     # Create temp workspace
     with tempfile.TemporaryDirectory() as workspace_dir:
@@ -123,15 +105,18 @@ async def test_agent_bash_task():
         # Initialize LLM client
         llm_client = LLMClient(
             api_key=config.llm.api_key,
+            provider=config.llm.provider,
             api_base=config.llm.api_base,
             model=config.llm.model,
+            auth_file=config.llm.auth_file,
+            timeout=config.llm.timeout,
         )
 
         # Initialize tools
         tools = [
             ReadTool(workspace_dir=workspace_dir),
             WriteTool(workspace_dir=workspace_dir),
-            BashTool(),
+            BashTool(workspace_dir=workspace_dir),
         ]
 
         # Create agent
@@ -149,22 +134,13 @@ async def test_agent_bash_task():
 
         agent.add_user_message(task)
 
-        try:
-            result = await agent.run()
+        result = await agent.run()
 
-            print(f"\n{'=' * 80}")
-            print(f"Agent Result: {result}")
-            print("=" * 80)
+        print(f"\n{'=' * 80}")
+        print(f"Agent Result: {result}")
+        print("=" * 80)
 
-            print("\n✅ Bash task completed!")
-            return True
-
-        except Exception as e:
-            print(f"❌ Bash task failed: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return False
+        assert result
 
 
 async def main():
