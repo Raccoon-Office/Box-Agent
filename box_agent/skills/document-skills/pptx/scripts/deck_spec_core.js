@@ -4,6 +4,12 @@ const fs = require("fs");
 const path = require("path");
 
 const TRUTH_TEXT_MAX_CHARACTERS = 280;
+const OUTLINE_INTENT_TEXT_LIMITS = Object.freeze({
+  title: 120,
+  message: 500,
+  layout: 120,
+  visual: 300,
+});
 
 const {
   getLayout,
@@ -590,12 +596,12 @@ function validateAndNormalizeOutlineIntent(value, fieldPath, issues) {
     issues.push(`${fieldPath}: expected object`);
     return null;
   }
-  const contracts = {
-    title: { type: "text", maxChars: 120, required: true },
-    message: { type: "text", maxChars: 500, required: true },
-    layout: { type: "text", maxChars: 120, required: true },
-    visual: { type: "text", maxChars: 300, required: true },
-  };
+  const contracts = Object.fromEntries(
+    Object.entries(OUTLINE_INTENT_TEXT_LIMITS).map(([key, maxChars]) => [
+      key,
+      { type: "text", maxChars, required: true },
+    ])
+  );
   const unknown = Object.keys(value).filter(
     key => !Object.prototype.hasOwnProperty.call(contracts, key)
       && key !== "visual_item_contract"
@@ -1034,6 +1040,7 @@ function buildManifest() {
 module.exports = {
   DEFAULT_THEME_ID,
   MANIFEST_PATH,
+  OUTLINE_INTENT_TEXT_LIMITS,
   SKILL_ROOT,
   TRUTH_TEXT_MAX_CHARACTERS,
   buildManifest,

@@ -2,6 +2,7 @@
 const fs = require("fs");
 const path = require("path");
 const {
+  OUTLINE_INTENT_TEXT_LIMITS,
   TRUTH_TEXT_MAX_CHARACTERS,
   resolveArtifactPath,
   runtimeSourceBinding,
@@ -455,6 +456,13 @@ function validate(outline, opts) {
 
     for (const field of ["title", "message", "layout", "visual"]) {
       if (!text(slide[field])) issues.push(`${label}: missing ${field}`);
+      const length = wordLikeLength(slide[field]);
+      const maxChars = OUTLINE_INTENT_TEXT_LIMITS[field];
+      if (length > maxChars) {
+        issues.push(
+          `${label}: ${field} has ${length} characters; maximum is ${maxChars}`
+        );
+      }
     }
 
     if (!Array.isArray(slide.bullets)) {

@@ -1353,6 +1353,11 @@ function inferInteractionContract(sourceText, outlineSlides) {
       if (requested && requested.count === 8) score += 8;
       if (/(?:八张|8\s*张).{0,12}(?:行星|卡片)/i.test(content)) score += 3;
       if (/(?:封面|cover)/i.test(String(slide && slide.layout || ""))) score -= 6;
+    } else {
+      if (/(?:360\s*(?:°|度)?|全景旋转|可拖拽旋转)/i.test(content)) score += 6;
+      if (/(?:立体|三维|3d|模型)/i.test(content)) score += 3;
+      if (/(?:城堡|主体|主视觉)/i.test(content)) score += 2;
+      if (/(?:封面|cover)/i.test(String(slide && slide.layout || ""))) score -= 6;
     }
     return { index, score };
   });

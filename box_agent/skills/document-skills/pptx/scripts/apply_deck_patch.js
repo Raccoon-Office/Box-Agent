@@ -341,6 +341,19 @@ function normalizeValueToContract(value, contract, layoutId, fieldName, changes,
     );
     return compacted;
   }
+  if (
+    contract.type === "text"
+    && typeof value === "string"
+    && Number.isInteger(contract.maxChars)
+    && characterLength(value) > contract.maxChars
+  ) {
+    const compacted = fitCaption(value, contract.maxChars);
+    recordChange(
+      changes,
+      `${fieldPath}: compacted overlong text to ${contract.maxChars} characters`
+    );
+    return compacted;
+  }
   if (contract.type === "media") {
     const alt = layoutId === "project-case-study-v1"
       ? "AI 概念视觉，实际项目图待补充"
