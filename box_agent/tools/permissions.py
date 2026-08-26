@@ -543,6 +543,9 @@ _SHELL_PATH_ASSIGNMENT_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_]*)="
     r"(?:\"([^\"]*)\"|'([^']*)'|([^\s;]+))"
 )
+_SHELL_PARAMETER_DEFAULT_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-|-)\s*([^{}]*)\}"
+)
 
 # Real shell redirect operators (`>`, `>>`, `2>`, `2>>`, ...). When followed by
 # a path, that path is what we want to extract — but we must distinguish a real
@@ -613,6 +616,24 @@ def expand_inline_shell_path_variables(command: str) -> str:
 
     path_vars: dict[str, str] = {}
 
+    def conservative_parameter_defaults(value: str) -> str:
+        """Resolve static POSIX parameter fallbacks for permission analysis.
+
+        The fallback remains a possible runtime path whenever the variable is
+        unset (or empty for ``:-``), so checking it is safer than trusting the
+        unresolved expression. Nested defaults are reduced from the inside
+        out without evaluating shell syntax or command substitutions.
+        """
+
+        for _ in range(16):
+            value, replacements = _SHELL_PARAMETER_DEFAULT_RE.subn(
+                lambda match: match.group(2),
+                value,
+            )
+            if not replacements:
+                break
+        return value
+
     def substitute_known(value: str) -> str:
         for name, resolved in path_vars.items():
             value = re.sub(rf"\$\{{{re.escape(name)}\}}|\${re.escape(name)}\b", resolved, value)
@@ -624,7 +645,7 @@ def expand_inline_shell_path_variables(command: str) -> str:
             (value for value in match.groups()[1:] if value is not None),
             "",
         )
-        expanded = substitute_known(raw_value)
+        expanded = conservative_parameter_defaults(substitute_known(raw_value))
         expanded = os.path.expanduser(expanded)
         if expanded.startswith("$HOME/"):
             expanded = str(Path.home()) + expanded[5:]

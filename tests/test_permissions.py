@@ -454,6 +454,21 @@ class TestExtractAbsolutePaths:
         assert "/tmp/deck/assets" in result
         assert "/dev/null" not in result
 
+    def test_parameter_default_absolute_path_is_expanded(self):
+        result = extract_absolute_paths(
+            'TARGET="${UNSET_TARGET:-/home/example/private}"\ncat "$TARGET/data.txt"'
+        )
+
+        assert "/home/example/private/data.txt" in result
+
+    def test_nested_parameter_default_absolute_path_is_expanded(self):
+        result = extract_absolute_paths(
+            'TARGET="${FIRST:-${SECOND:-/home/example/private}}"\n'
+            'cat "$TARGET/data.txt"'
+        )
+
+        assert "/home/example/private/data.txt" in result
+
     def test_no_paths(self):
         assert extract_absolute_paths("ls -la") == []
 
@@ -951,6 +966,25 @@ class TestBashPermissionPhase1:
 
         assert result.success is True
         assert (target / "result.txt").read_text(encoding="utf-8") == "ok"
+
+    async def test_parameter_default_outside_workspace_is_denied(
+        self,
+        workspace: Path,
+        tmp_path: Path,
+    ):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "data.txt"
+        secret.write_text("private", encoding="utf-8")
+        eng = self._make_engine(workspace)
+
+        result = await self._run_bash(
+            f'TARGET="${{UNSET_TARGET:-{outside}}}"\ncat "$TARGET/data.txt"',
+            eng,
+        )
+
+        assert result.success is False
+        assert str(secret) in (result.error or "")
 
     async def test_fd_redirect_does_not_upgrade_builtin_skill_read_to_write(
         self, workspace: Path, tmp_path: Path
