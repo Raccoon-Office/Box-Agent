@@ -8,6 +8,7 @@ giving adapters one stable entry point for configuring and running a turn.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -64,6 +65,7 @@ from .session_continuation import ContinuationMessage
 
 _log = logging.getLogger(__name__)
 _ACTIVE_SKILL_TOKEN_BUDGET = 32_000
+_MAX_SOURCE_TEXT_ENV_CHARS = 120_000
 _DEFAULT_AGENT_CONFIG = AgentConfig()
 
 
@@ -586,6 +588,7 @@ class Agent:
         self._active_skill_hashes: dict[str, str] = {}
         self._active_skill_load_order: dict[str, int] = {}
         self._active_skill_sequence = 0
+        self._bound_user_source_text = ""
         for tool in self.tools.values():
             if hasattr(tool, "set_parent_system_prompt"):
                 tool.set_parent_system_prompt(system_prompt)
@@ -807,6 +810,33 @@ class Agent:
         if self.goal is not None and self.goal.status == "active":
             content = self._apply_goal_context(content)
         self.messages.append(Message(role="user", content=content))
+
+    def bind_user_source_text(self, user_request: str) -> str:
+        """Expose accumulated real user text to provenance-aware local tools.
+
+        CLI and ACP call this only at real user-turn boundaries. Internal
+        continuation prompts must not become source facts. Base64 preserves
+        punctuation and newlines across subprocess environments; it is not a
+        secrecy mechanism.
+        """
+        request = user_request.strip()
+        if request:
+            self._bound_user_source_text = (
+                f"{self._bound_user_source_text.rstrip()}\n\n{request}"
+                if self._bound_user_source_text.strip()
+                else request
+            )
+            if len(self._bound_user_source_text) > _MAX_SOURCE_TEXT_ENV_CHARS:
+                self._bound_user_source_text = self._bound_user_source_text[
+                    -_MAX_SOURCE_TEXT_ENV_CHARS:
+                ]
+        encoded = base64.b64encode(
+            self._bound_user_source_text.encode("utf-8")
+        ).decode("ascii")
+        bash_tool = self.tools.get("bash")
+        if bash_tool is not None and hasattr(bash_tool, "update_runtime_env"):
+            bash_tool.update_runtime_env({"BOX_AGENT_SOURCE_TEXT_B64": encoded})
+        return self._bound_user_source_text
 
     def seed_continuation_messages(
         self, messages: tuple[ContinuationMessage, ...]

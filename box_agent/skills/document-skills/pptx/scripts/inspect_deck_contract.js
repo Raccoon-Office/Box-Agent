@@ -680,12 +680,17 @@ function readOutlineBinding(outlineInput, expectedSlideCount = null) {
 function normalizeOutlineDrivenLayoutIds(
   layoutIds,
   outlineBinding,
-  layoutPolicy = {}
+  layoutPolicy = {},
+  interactionContract = null
 ) {
   const normalizations = [];
   if (!outlineBinding) return { layoutIds: layoutIds.slice(), normalizations };
   const effective = layoutIds.map((layoutId, index) => {
     const slide = outlineBinding.slides[index];
+    const interactionOwnsCardinality = interactionContract
+      && interactionContract.mode === "solar_orbit"
+      && interactionContract.target_slide_id
+        === `slide-${String(index + 1).padStart(2, "0")}`;
     const outlineText = [
       slide && slide.title,
       slide && slide.message,
@@ -709,6 +714,8 @@ function normalizeOutlineDrivenLayoutIds(
     const timelineMaxItems = visualCollectionLimit("timeline-horizontal-v1", slide);
     const cardsMaxItems = visualCollectionLimit("cards-grid-v1", slide);
     if (
+      !interactionOwnsCardinality
+      &&
       layoutId === "timeline-horizontal-v1"
       && Number.isInteger(timelineMaxItems)
       && Number.isInteger(cardsMaxItems)
@@ -728,6 +735,8 @@ function normalizeOutlineDrivenLayoutIds(
     }
     const selectedMaxItems = visualCollectionLimit(layoutId, slide);
     if (
+      !interactionOwnsCardinality
+      &&
       layoutId === "statement-focus-v1"
       && Number.isInteger(selectedMaxItems)
       && explicitVisualItemCount > selectedMaxItems
@@ -745,6 +754,8 @@ function normalizeOutlineDrivenLayoutIds(
       return "cards-grid-v1";
     }
     if (
+      !interactionOwnsCardinality
+      &&
       layoutId === "closing-next-steps-v1"
       && explicitVisualItemCount > 4
       && explicitVisualItemCount <= 6
@@ -793,6 +804,14 @@ function normalizeOutlineDrivenLayoutIds(
   });
   const capacityChecked = effective.map((layoutId, index) => {
     const slide = outlineBinding.slides[index];
+    if (
+      interactionContract
+      && interactionContract.mode === "solar_orbit"
+      && interactionContract.target_slide_id
+        === `slide-${String(index + 1).padStart(2, "0")}`
+    ) {
+      return layoutId;
+    }
     const requested = expectedVisualItemContract(slide);
     const expected = requested && requested.count;
     const selectedCapacity = visualCollectionCapacity(layoutId, slide);
@@ -860,17 +879,22 @@ function balancedChunkSizes(total, maximum, minimum) {
   return sizes.every(size => size >= minimum && size <= maximum) ? sizes : null;
 }
 
-function expandOutlineDrivenPlan(layoutIds, outlineBinding) {
+function expandOutlineDrivenPlan(layoutIds, outlineBinding, interactionContract = null) {
   if (!outlineBinding) {
     return layoutIds.map((layoutId, index) => ({ layoutId, outlineSlide: null, index }));
   }
   const plan = [];
   layoutIds.forEach((layoutId, index) => {
     const outlineSlide = outlineBinding.slides[index];
+    const interactionOwnsCardinality = interactionContract
+      && interactionContract.mode === "solar_orbit"
+      && interactionContract.target_slide_id
+        === `slide-${String(index + 1).padStart(2, "0")}`;
     const requested = expectedVisualItemContract(outlineSlide);
     const capacity = visualCollectionCapacity(layoutId, outlineSlide);
     if (
-      !requested
+      interactionOwnsCardinality
+      || !requested
       || !capacity
       || (
         requested.count >= capacity.minItems
@@ -1434,6 +1458,11 @@ function main() {
   const outlineBinding = opts.outline
     ? readOutlineBinding(opts.outline, opts.layoutIds.length || null)
     : null;
+  const runtimeBinding = runtimeSourceBinding();
+  const outlineInteractionContract = inferInteractionContract(
+    runtimeBinding.source_text,
+    outlineBinding ? outlineBinding.slides : [],
+  );
   const assumptions = [...new Set(
     opts.assumptions.map(value => value.trim()).filter(Boolean)
   )];
@@ -1460,11 +1489,13 @@ function main() {
   const layoutResolution = normalizeOutlineDrivenLayoutIds(
     opts.layoutIds,
     outlineBinding,
-    layoutPolicy
+    layoutPolicy,
+    outlineInteractionContract,
   );
   const authoringPlan = expandOutlineDrivenPlan(
     layoutResolution.layoutIds,
-    outlineBinding
+    outlineBinding,
+    outlineInteractionContract,
   );
   const effectiveLayoutIds = authoringPlan.map(entry => {
     const layoutId = entry.layoutId;
@@ -1486,7 +1517,6 @@ function main() {
     outlineBinding ? { ...outlineBinding, slides: authoringSlides } : null,
     layoutPolicy
   );
-  const runtimeBinding = runtimeSourceBinding();
   const designContext = {
     title: opts.title,
     source_facts: opts.sourceFacts,

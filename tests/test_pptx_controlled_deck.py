@@ -5992,6 +5992,72 @@ def test_scaffold_and_runtime_preserve_explicit_solar_orbit_interaction(
     }
 
 
+def test_solar_interaction_owns_eight_planet_cardinality_without_outline_split(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=1,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "太阳系有八位行星朋友",
+            "message": "观察八大行星的大小和离太阳远近。",
+            "layout": "行星卡片",
+            "visual": "八个可爱行星徽章按顺序排列成两排。",
+            "bullets": ["记住顺序", "比较大小", "观察距离"],
+        }
+    )
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "请制作一份PPT，八大行星能转起来、能看清谁大谁小和离太阳远近。".encode()
+    ).decode()
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cards-grid-v1",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert len(deck["slides"]) == 1
+    assert deck["slides"][0]["layout_id"] == "cards-grid-v1"
+    assert "source_outline_item_range" not in deck["slides"][0]
+    assert deck["interaction_contract"] == {
+        "mode": "solar_orbit",
+        "target_slide_id": "slide-01",
+        "required": True,
+    }
+
+    rendered = _run(
+        "render_deck_html.js",
+        "deck.json",
+        "--out",
+        "index.html",
+        cwd=output,
+        env=env,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    assert (output / "index.html").read_text(encoding="utf-8").count(
+        'class="deck-planet"'
+    ) == 8
+
+
 def test_scaffold_renders_explicit_360_interaction_with_source_visual(
     tmp_path: Path,
 ) -> None:

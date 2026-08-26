@@ -2,6 +2,7 @@
 Session integration tests - Testing multi-turn conversations and session management
 """
 
+import base64
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -77,6 +78,27 @@ def test_multi_turn_conversation(mock_llm_client, temp_workspace):
     assert len(user_messages) == 2
     assert user_messages[0].content == "Hello"
     assert user_messages[1].content == "Help me create a file"
+
+
+def test_user_source_binding_accumulates_and_updates_bash_env(
+    mock_llm_client,
+    temp_workspace,
+):
+    bash = BashTool(workspace_dir=temp_workspace)
+    agent = Agent(
+        llm_client=mock_llm_client,
+        system_prompt="System",
+        tools=[bash],
+        workspace_dir=temp_workspace,
+    )
+
+    assert agent.bind_user_source_text("原始事实 A") == "原始事实 A"
+    assert agent.bind_user_source_text("补充事实 B") == "原始事实 A\n\n补充事实 B"
+
+    source_text = base64.b64decode(
+        bash._subprocess_env["BOX_AGENT_SOURCE_TEXT_B64"]
+    ).decode("utf-8")
+    assert source_text == "原始事实 A\n\n补充事实 B"
 
 
 def test_session_history_management(mock_llm_client, temp_workspace):

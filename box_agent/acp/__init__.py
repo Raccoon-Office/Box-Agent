@@ -27,7 +27,6 @@ kernel persists across prompts within the same session.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json as _json
 import logging
 import platform
@@ -923,30 +922,13 @@ class SessionState:
     mcp_fallback_tools: dict[str, Any] = field(default_factory=dict)
 
 
-_MAX_SOURCE_TEXT_ENV_CHARS = 120_000
 _CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS = 4_096
 _TITLE_MAX_OUTPUT_TOKENS = 8_000
 
 
 def _bind_user_source_text(state: SessionState, user_request: str) -> None:
-    """Expose accumulated real user text to local provenance-aware tools.
-
-    The value is base64 encoded only to preserve arbitrary punctuation and
-    newlines across subprocess boundaries; it is not a secrecy mechanism.
-    """
-    request = user_request.strip()
-    if request:
-        state.source_text = (
-            f"{state.source_text.rstrip()}\n\n{request}"
-            if state.source_text.strip()
-            else request
-        )
-        if len(state.source_text) > _MAX_SOURCE_TEXT_ENV_CHARS:
-            state.source_text = state.source_text[-_MAX_SOURCE_TEXT_ENV_CHARS:]
-    encoded = base64.b64encode(state.source_text.encode("utf-8")).decode("ascii")
-    bash_tool = state.agent.tools.get("bash")
-    if bash_tool is not None and hasattr(bash_tool, "update_runtime_env"):
-        bash_tool.update_runtime_env({"BOX_AGENT_SOURCE_TEXT_B64": encoded})
+    """Bind one real ACP user turn through the shared Agent contract."""
+    state.source_text = state.agent.bind_user_source_text(user_request)
 
 
 class BoxACPAgent:
