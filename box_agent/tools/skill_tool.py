@@ -83,9 +83,10 @@ class GetSkillTool(Tool):
         # Auto-reload if the user skills directory has been touched since last scan
         self.skill_loader.maybe_reload()
 
-        skill = self.skill_loader.get_skill(
-            skill_name,
-            include_disabled=self.include_disabled,
+        skill = (
+            self.skill_loader.get_skill_by_ref(skill_name, include_disabled=self.include_disabled)
+            if ":" in skill_name
+            else self.skill_loader.get_skill(skill_name, include_disabled=self.include_disabled)
         )
 
         if not skill:

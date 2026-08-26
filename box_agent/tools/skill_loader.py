@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 import yaml
 
 SkillSource = Literal["builtin", "user"]
+SkillDirectorySource = Literal["builtin", "user", "managed"]
 
 MANIFEST_FILENAME = "_manifest.json"
 
@@ -95,6 +96,19 @@ def _read_disabled_skill_names(settings_path: Optional[Path]) -> Set[str]:
     }
 
 
+def _read_disabled_skill_refs(settings_path: Optional[Path]) -> Set[str]:
+    if settings_path is None:
+        return set()
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    raw_refs = data.get("disabledSkillRefs") if isinstance(data, dict) else None
+    if not isinstance(raw_refs, list):
+        return set()
+    return {value for value in raw_refs if isinstance(value, str) and re.match(r"^(builtin|user|hub|bootstrap):[^:]+$", value)}
+
+
 @dataclass
 class Skill:
     """Skill data structure.
@@ -126,6 +140,8 @@ class Skill:
     workflow: Optional[str] = None
     broken: bool = False
     broken_reason: Optional[str] = None
+    ref: Optional[str] = None
+    version_id: Optional[str] = None
 
     def to_prompt(self) -> str:
         """Convert skill to prompt format.
@@ -178,6 +194,8 @@ All files and references in this skill are relative to this directory.
             "workflow": self.workflow,
             "broken": self.broken,
             "broken_reason": self.broken_reason,
+            "ref": self.ref,
+            "version_id": self.version_id,
         }
 
 
@@ -186,7 +204,7 @@ class _SourceEntry:
     """Internal: a single skills source directory with a label."""
 
     directory: Path
-    source: SkillSource
+    source: SkillDirectorySource
     last_mtime: float = 0.0
     signature: Tuple[Tuple[str, int, int], ...] = field(default_factory=tuple)
     # Optional whitelist of skill names. None means "no manifest, accept all".
@@ -195,6 +213,7 @@ class _SourceEntry:
     # Optional manifest-listed SKILL.md paths. None means "scan with rglob".
     manifest_paths: Optional[Tuple[Path, ...]] = None
     manifest_loaded: bool = False
+    manifest_refs: Dict[Path, Tuple[str, Optional[str]]] = field(default_factory=dict)
 
 
 class SkillLoader:
@@ -211,7 +230,7 @@ class SkillLoader:
 
     def __init__(
         self,
-        sources: Optional[List[Tuple[str | Path, SkillSource]] | str | Path] = None,
+        sources: Optional[List[Tuple[str | Path, SkillDirectorySource]] | str | Path] = None,
         skills_dir: Optional[str] = None,
         skill_settings_path: Optional[str | Path] = None,
     ):
@@ -243,10 +262,14 @@ class SkillLoader:
         self._skill_settings_signature: tuple[str, int, int] | None = None
         self.loaded_skills: Dict[str, Skill] = {}
         self._all_skills: Dict[str, Skill] = {}
+        self._skills_by_ref: Dict[str, Skill] = {}
+        self._disabled_skill_names: Set[str] = set()
+        self._disabled_skill_refs: Set[str] = set()
         # Accumulated (path, reason) pairs from the most recent discover_skills
         # run. Reset at the start of each discovery so callers can react to a
         # single pass without seeing stale data from earlier reloads.
         self.parse_errors: List[Tuple[Path, str]] = []
+        self._frozen = False
 
     @staticmethod
     def _parse_skill_name_list(raw_value: object) -> Optional[List[str]]:
@@ -529,12 +552,11 @@ class SkillLoader:
         """Discover skills from all sources; user overrides builtin on name conflict."""
         self.loaded_skills = {}
         self._all_skills = {}
+        self._skills_by_ref = {}
         # Reset per-run parse errors so callers always see the current pass only.
         self.parse_errors = []
         orphan_count = 0
         discovered: List[Skill] = []
-        disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path)
-
         # Reverse order: load lower-priority sources first, then higher-priority
         # ones overwrite by dict assignment.
         for entry in reversed(self._sources):
@@ -544,16 +566,28 @@ class SkillLoader:
             # Manifest only applies to builtin sources. For user skills we
             # never want to hide SKILL.md files the user (or officev3) dropped
             # in at runtime.
-            if entry.source == "builtin":
+            if entry.source in ("builtin", "managed"):
                 self._load_manifest(entry)
 
             for skill_file in self._iter_skill_files(entry):
-                skill = self.load_skill(skill_file, source=entry.source)
+                skill = self.load_skill(skill_file, source="builtin" if entry.source == "managed" else entry.source)
                 if skill is None:
                     continue
 
+                identity = entry.manifest_refs.get(skill_file.resolve())
+                if entry.source == "managed" and identity:
+                    skill.ref = f"builtin:{identity[0]}"
+                    skill.version_id = identity[1]
+                elif entry.source == "builtin":
+                    skill.ref = f"bootstrap:{skill.name}"
+                elif entry.source == "user":
+                    skill.ref = self._user_skill_ref(skill_file.parent, skill.name)
+
+                if skill.ref:
+                    self._skills_by_ref[skill.ref] = skill
+
                 if (
-                    entry.source == "builtin"
+                    entry.source in ("builtin", "managed")
                     and entry.manifest_names is not None
                     and skill.name not in entry.manifest_names
                 ):
@@ -564,18 +598,12 @@ class SkillLoader:
 
                 self._all_skills[skill.name] = skill
 
-                if skill.name in disabled_skill_names:
-                    self.loaded_skills.pop(skill.name, None)
-                    continue
-
-                self.loaded_skills[skill.name] = skill
-
             # Cache a cheap signature for reload detection. Keep last_mtime for
             # backward compatibility with older tests/debug code that may read it.
             entry.signature = self._source_signature(entry)
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
-        self._skill_settings_signature = self._file_signature(self._skill_settings_path)
+        self._apply_disabled_skill_settings()
         discovered = list(self.loaded_skills.values())
 
         # Aggregate diagnostics: one line total, not one per broken file. The
@@ -602,6 +630,23 @@ class SkillLoader:
 
         return discovered
 
+    @staticmethod
+    def _user_skill_ref(skill_dir: Path, name: str) -> str:
+        for filename in (".skill-installation.json", ".installation.json"):
+            try:
+                raw = json.loads((skill_dir / filename).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(raw, dict):
+                installation_id = raw.get("installationId")
+                source = raw.get("source")
+                if isinstance(installation_id, str) and installation_id:
+                    skill_id = raw.get("skillId")
+                    if source == "hub" and isinstance(skill_id, str) and skill_id:
+                        return f"hub:{skill_id}"
+                    return f"user:{installation_id}"
+        return f"user:{name}"
+
     def _skill_pool(self, include_disabled: bool = False) -> Dict[str, Skill]:
         if include_disabled:
             return getattr(self, "_all_skills", self.loaded_skills) or self.loaded_skills
@@ -616,7 +661,7 @@ class SkillLoader:
         officev3-authored skills are picked up without regenerating a manifest.
         """
         if (
-            entry.source == "builtin"
+            entry.source in ("builtin", "managed")
             and entry.manifest_names is not None
             and entry.manifest_paths is not None
         ):
@@ -627,15 +672,15 @@ class SkillLoader:
     def _load_manifest(self, entry: _SourceEntry) -> None:
         """Populate ``entry.manifest_names`` from ``_manifest.json`` if present.
 
-        Missing manifest → ``manifest_names`` stays ``None`` (no filtering),
-        preserving backward compatibility with builtin skills directories that
-        pre-date the manifest (dev trees, third-party bundles, etc.).
+        Managed sources fail closed. Legacy packaged builtin sources retain
+        compatibility with development trees that pre-date manifests.
         """
 
         manifest_path = entry.directory / MANIFEST_FILENAME
         if not manifest_path.is_file():
-            entry.manifest_names = None
-            entry.manifest_paths = None
+            entry.manifest_names = set() if entry.source == "managed" else None
+            entry.manifest_paths = tuple() if entry.source == "managed" else None
+            entry.manifest_refs = {}
             entry.manifest_loaded = True
             return
 
@@ -644,10 +689,11 @@ class SkillLoader:
         except (OSError, json.JSONDecodeError) as exc:
             _warn(
                 f"⚠️  Failed to read builtin skills manifest at {manifest_path}: {exc}. "
-                f"Falling back to unfiltered discovery."
+                f"{'Loading zero managed skills.' if entry.source == 'managed' else 'Falling back to unfiltered discovery.'}"
             )
-            entry.manifest_names = None
-            entry.manifest_paths = None
+            entry.manifest_names = set() if entry.source == "managed" else None
+            entry.manifest_paths = tuple() if entry.source == "managed" else None
+            entry.manifest_refs = {}
             entry.manifest_loaded = True
             return
 
@@ -655,31 +701,75 @@ class SkillLoader:
         if not isinstance(raw_skills, list):
             _warn(
                 f"⚠️  Builtin skills manifest {manifest_path} is malformed "
-                f"(missing 'skills' list); falling back to unfiltered discovery."
+                f"(missing 'skills' list)."
             )
-            entry.manifest_names = None
-            entry.manifest_paths = None
+            entry.manifest_names = set() if entry.source == "managed" else None
+            entry.manifest_paths = tuple() if entry.source == "managed" else None
+            entry.manifest_refs = {}
             entry.manifest_loaded = True
             return
 
         names: Set[str] = set()
         paths: list[Path] = []
+        refs: Dict[Path, Tuple[str, Optional[str]]] = {}
         all_paths_known = True
+        ids: Set[str] = set()
+        invalid = False
+        root = entry.directory.resolve()
         for item in raw_skills:
             if isinstance(item, dict) and isinstance(item.get("name"), str):
+                name = item["name"].strip()
+                raw_id = item.get("id")
+                if not name or name in names or (raw_id is not None and (not isinstance(raw_id, str) or not raw_id or raw_id in ids)):
+                    invalid = True
+                    break
                 if not self._manifest_item_is_available(item):
                     continue
-                names.add(item["name"])
+                names.add(name)
+                if isinstance(raw_id, str):
+                    ids.add(raw_id)
                 raw_path = item.get("path")
                 if isinstance(raw_path, str) and raw_path.strip():
-                    paths.append(entry.directory / raw_path)
+                    if entry.source == "managed" and ("\\" in raw_path or Path(raw_path).is_absolute()):
+                        invalid = True
+                        break
+                    candidate = (entry.directory / raw_path).resolve()
+                    try:
+                        candidate.relative_to(root)
+                    except ValueError:
+                        invalid = True
+                        break
+                    if entry.source == "managed" and (candidate.name != "SKILL.md" or not candidate.is_file()):
+                        invalid = True
+                        break
+                    paths.append(candidate)
+                    if entry.source == "managed" and isinstance(raw_id, str):
+                        version_id = item.get("versionId")
+                        refs[candidate] = (raw_id, version_id if isinstance(version_id, str) else None)
                 else:
+                    if entry.source == "managed":
+                        invalid = True
+                        break
                     all_paths_known = False
             elif isinstance(item, str):
+                if entry.source == "managed" or item in names:
+                    invalid = True
+                    break
                 names.add(item)
                 all_paths_known = False
+            else:
+                invalid = True
+                break
+        if invalid:
+            _warn(f"⚠️  Managed skills manifest {manifest_path} is invalid; loading zero managed skills.")
+            entry.manifest_names = set()
+            entry.manifest_paths = tuple()
+            entry.manifest_refs = {}
+            entry.manifest_loaded = True
+            return
         entry.manifest_names = names
         entry.manifest_paths = tuple(paths) if all_paths_known else None
+        entry.manifest_refs = refs
         entry.manifest_loaded = True
 
     @staticmethod
@@ -747,7 +837,7 @@ class SkillLoader:
             candidates.append(manifest)
 
         if (
-            entry.source == "builtin"
+            entry.source in ("builtin", "managed")
             and entry.manifest_names is not None
             and entry.manifest_paths is not None
         ):
@@ -789,13 +879,16 @@ class SkillLoader:
         Returns:
             True if a reload was performed, False otherwise.
         """
-        changed = False
-        if hasattr(self, "_skill_settings_path"):
-            if (
-                self._file_signature(self._skill_settings_path)
-                != self._skill_settings_signature
-            ):
-                changed = True
+        settings_changed = hasattr(self, "_skill_settings_path") and (
+            self._file_signature(self._skill_settings_path)
+            != self._skill_settings_signature
+        )
+        if getattr(self, "_frozen", False):
+            if settings_changed:
+                self._apply_disabled_skill_settings()
+            return settings_changed
+
+        changed = settings_changed
         for entry in self._sources:
             current = self._source_signature(entry)
             if current != entry.signature:
@@ -806,9 +899,57 @@ class SkillLoader:
             self.discover_skills()
         return changed
 
+    def _apply_disabled_skill_settings(self) -> None:
+        """Apply current enable/disable settings without rediscovering sources.
+
+        Session snapshots use this to keep a stable skill file/version view while
+        still honoring an updated desktop enable/disable policy on later turns.
+        """
+        self._disabled_skill_names = _read_disabled_skill_names(
+            self._skill_settings_path
+        )
+        self._disabled_skill_refs = _read_disabled_skill_refs(
+            self._skill_settings_path
+        )
+        self.loaded_skills = {
+            name: skill
+            for name, skill in self._all_skills.items()
+            if name not in self._disabled_skill_names
+            and (skill.ref is None or skill.ref not in self._disabled_skill_refs)
+        }
+        self._skill_settings_signature = self._file_signature(
+            self._skill_settings_path
+        )
+
     def get_skill(self, name: str, *, include_disabled: bool = False) -> Optional[Skill]:
         """Get a loaded skill by name."""
         return self._skill_pool(include_disabled=include_disabled).get(name)
+
+    def get_skill_by_ref(self, ref: str, *, include_disabled: bool = False) -> Optional[Skill]:
+        skill = self._skills_by_ref.get(ref)
+        if skill is None:
+            return None
+        if not include_disabled and (
+            ref in self._disabled_skill_refs or skill.name in self._disabled_skill_names
+        ):
+            return None
+        return skill
+
+    def require_skill_refs(self, refs: List[str], *, include_disabled: bool = False) -> None:
+        missing = [ref for ref in refs if not self.get_skill_by_ref(ref, include_disabled=include_disabled)]
+        if missing:
+            raise ValueError("依赖的 Skill 当前不可用: " + ", ".join(missing))
+
+    def snapshot(self) -> "SkillLoader":
+        clone = SkillLoader(sources=[(entry.directory, entry.source) for entry in self._sources], skill_settings_path=self._skill_settings_path)
+        clone.loaded_skills = dict(self.loaded_skills)
+        clone._all_skills = dict(self._all_skills)
+        clone._skills_by_ref = dict(self._skills_by_ref)
+        clone._disabled_skill_names = set(self._disabled_skill_names)
+        clone._disabled_skill_refs = set(self._disabled_skill_refs)
+        clone._skill_settings_signature = self._skill_settings_signature
+        clone._frozen = True
+        return clone
 
     def list_skills(self, *, include_disabled: bool = False) -> List[str]:
         """List all loaded skill names."""
@@ -989,7 +1130,7 @@ class SkillLoader:
                 # one of these.
                 broken_prefix = "⚠️ " if skill.broken else ""
                 prompt_parts.append(
-                    f"- {broken_prefix}`{skill.name}` ({skill.source}): {skill.description}{routing_suffix}"
+                    f"- {broken_prefix}`{skill.ref or skill.name}` ({skill.source}, name={skill.name}): {skill.description}{routing_suffix}"
                 )
 
         return "\n".join(prompt_parts)

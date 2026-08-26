@@ -343,7 +343,7 @@ def test_builtin_manifest_filters_orphan_skills():
             create_test_skill(sd, name, f"{name} desc", f"{name} content")
         _write_manifest(builtin_dir, ["kept"])
 
-        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader = SkillLoader(sources=[(builtin_dir, "managed")])
         loader.discover_skills()
 
         assert loader.get_skill("kept") is not None
@@ -404,7 +404,7 @@ def test_builtin_manifest_reload_signature_ignores_resource_files():
         asset.write_text("bundle v1", encoding="utf-8")
         _write_manifest(builtin_dir, ["kept"])
 
-        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader = SkillLoader(sources=[(builtin_dir, "managed")])
         loader.discover_skills()
 
         asset.write_text("bundle v2 with unrelated resource changes", encoding="utf-8")
@@ -566,8 +566,37 @@ def test_skill_settings_change_triggers_reload():
         assert loader.get_skill("toggle-skill") is None
 
 
-def test_missing_manifest_falls_back_to_unfiltered():
-    """No manifest in builtin dir → behave like before (load everything)."""
+def test_frozen_snapshot_refreshes_settings_without_reloading_skill_content(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "toggle-skill"
+    skill_dir.mkdir(parents=True)
+    create_test_skill(skill_dir, "toggle-skill", "toggle desc", "original content")
+    settings_path = tmp_path / "skill-settings.json"
+    settings_path.write_text('{"disabledSkillNames":[]}', encoding="utf-8")
+
+    loader = SkillLoader(skills_dir, skill_settings_path=settings_path)
+    loader.discover_skills()
+    frozen = loader.snapshot()
+
+    settings_path.write_text(
+        '{"disabledSkillNames":["toggle-skill"]}', encoding="utf-8"
+    )
+    assert frozen.maybe_reload() is True
+    assert frozen.get_skill("toggle-skill") is None
+
+    create_test_skill(skill_dir, "toggle-skill", "new desc", "new content")
+    assert frozen.maybe_reload() is False
+
+    settings_path.write_text('{"disabledSkillNames":[]}', encoding="utf-8")
+    assert frozen.maybe_reload() is True
+    restored = frozen.get_skill("toggle-skill")
+    assert restored is not None
+    assert restored.description == "toggle desc"
+    assert "original content" in restored.content
+
+
+def test_missing_manifest_fails_closed():
+    """No manifest in a builtin dir must load zero managed skills."""
     with tempfile.TemporaryDirectory() as tmpdir:
         builtin_dir = Path(tmpdir) / "builtin"
         builtin_dir.mkdir()
@@ -577,14 +606,14 @@ def test_missing_manifest_falls_back_to_unfiltered():
         create_test_skill(sd, "any-skill", "x", "x")
         # no _manifest.json written
 
-        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader = SkillLoader(sources=[(builtin_dir, "managed")])
         loader.discover_skills()
 
-        assert loader.get_skill("any-skill") is not None
+        assert loader.get_skill("any-skill") is None
 
 
-def test_malformed_manifest_falls_back_to_unfiltered():
-    """Malformed manifest → warn + load everything (don't break startup)."""
+def test_malformed_manifest_fails_closed():
+    """Malformed builtin manifest must not expose orphan packages."""
     with tempfile.TemporaryDirectory() as tmpdir:
         builtin_dir = Path(tmpdir) / "builtin"
         builtin_dir.mkdir()
@@ -594,7 +623,138 @@ def test_malformed_manifest_falls_back_to_unfiltered():
         create_test_skill(sd, "any-skill", "x", "x")
         (builtin_dir / "_manifest.json").write_text("not json {", encoding="utf-8")
 
-        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader = SkillLoader(sources=[(builtin_dir, "managed")])
         loader.discover_skills()
 
-        assert loader.get_skill("any-skill") is not None
+        assert loader.get_skill("any-skill") is None
+
+
+def test_manifest_path_escape_fails_closed(tmp_path):
+    builtin_dir = tmp_path / "builtin"
+    outside = tmp_path / "outside"
+    builtin_dir.mkdir()
+    outside.mkdir()
+    create_test_skill(outside, "escaped", "x", "x")
+    (builtin_dir / "_manifest.json").write_text(
+        json.dumps({"schemaVersion": 2, "skills": [{"id": "id", "name": "escaped", "path": "../outside/SKILL.md"}]}),
+        encoding="utf-8",
+    )
+    loader = SkillLoader(sources=[(builtin_dir, "managed")])
+    assert loader.discover_skills() == []
+
+
+def test_managed_manifest_exposes_stable_ref_and_snapshot_pins_version(tmp_path):
+    builtin_dir = tmp_path / "managed"
+    skill_dir = builtin_dir / "packages" / "skill-id" / "version-id"
+    skill_dir.mkdir(parents=True)
+    create_test_skill(skill_dir, "stable", "x", "x")
+    (builtin_dir / "_manifest.json").write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "skills": [{"id": "skill-id", "name": "stable", "versionId": "version-id", "path": "packages/skill-id/version-id/SKILL.md"}],
+        }),
+        encoding="utf-8",
+    )
+    settings_path = tmp_path / "skill-settings.json"
+    settings_path.write_text('{"disabledSkillRefs":[]}', encoding="utf-8")
+    loader = SkillLoader(
+        sources=[(builtin_dir, "managed")],
+        skill_settings_path=settings_path,
+    )
+    loader.discover_skills()
+    skill = loader.get_skill_by_ref("builtin:skill-id")
+    assert skill is not None
+    assert skill.version_id == "version-id"
+    frozen = loader.snapshot()
+
+    settings_path.write_text(
+        '{"disabledSkillRefs":["builtin:skill-id"]}', encoding="utf-8"
+    )
+    assert frozen.maybe_reload() is True
+    assert frozen.get_skill_by_ref("builtin:skill-id") is None
+
+    (builtin_dir / "_manifest.json").unlink()
+    settings_path.write_text('{"disabledSkillRefs":[]}', encoding="utf-8")
+    assert frozen.maybe_reload() is True
+    restored = frozen.get_skill_by_ref("builtin:skill-id")
+    assert restored is not None
+    assert restored.skill_path == skill.skill_path
+
+
+def test_required_stable_ref_never_falls_back_to_same_name(tmp_path):
+    user_dir = tmp_path / "user"
+    user_skill = user_dir / "stable"
+    user_skill.mkdir(parents=True)
+    create_test_skill(user_skill, "stable", "user", "user")
+    loader = SkillLoader(sources=[(user_dir, "user")])
+    loader.discover_skills()
+    with pytest.raises(ValueError, match="依赖的 Skill 当前不可用"):
+        loader.require_skill_refs(["builtin:missing"])
+
+
+def test_stable_ref_resolves_exact_source_when_user_and_managed_names_collide(tmp_path):
+    user_dir = tmp_path / "user"
+    user_skill = user_dir / "stable"
+    user_skill.mkdir(parents=True)
+    create_test_skill(user_skill, "stable", "user", "user content")
+
+    managed_dir = tmp_path / "managed"
+    managed_skill = managed_dir / "packages" / "managed-id" / "version-id"
+    managed_skill.mkdir(parents=True)
+    create_test_skill(managed_skill, "stable", "managed", "managed content")
+    (managed_dir / "_manifest.json").write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "skills": [{
+                "id": "managed-id", "name": "stable", "versionId": "version-id",
+                "path": "packages/managed-id/version-id/SKILL.md",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(sources=[(user_dir, "user"), (managed_dir, "managed")])
+    loader.discover_skills()
+    assert "user content" in loader.get_skill("stable").content
+    exact = loader.get_skill_by_ref("builtin:managed-id")
+    assert exact is not None
+    assert "managed content" in exact.content
+    loader.require_skill_refs(["builtin:managed-id"])
+
+
+def test_managed_skill_takes_over_bootstrap_and_bootstrap_remains_offline_fallback(tmp_path):
+    managed_dir = tmp_path / "managed"
+    managed_skill = managed_dir / "packages" / "managed-id" / "version-id"
+    managed_skill.mkdir(parents=True)
+    create_test_skill(managed_skill, "shared", "managed", "managed content")
+    (managed_dir / "_manifest.json").write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "skills": [{
+                "id": "managed-id",
+                "name": "shared",
+                "versionId": "version-id",
+                "path": "packages/managed-id/version-id/SKILL.md",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    bootstrap_dir = tmp_path / "bootstrap"
+    bootstrap_skill = bootstrap_dir / "shared"
+    bootstrap_skill.mkdir(parents=True)
+    create_test_skill(bootstrap_skill, "shared", "bootstrap", "bootstrap content")
+    (bootstrap_dir / "_manifest.json").write_text(
+        json.dumps({"skills": [{"name": "shared", "path": "shared/SKILL.md"}]}),
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(sources=[(managed_dir, "managed"), (bootstrap_dir, "builtin")])
+    loader.discover_skills()
+    assert loader.get_skill("shared").ref == "builtin:managed-id"
+    assert "managed content" in loader.get_skill("shared").content
+
+    (managed_dir / "_manifest.json").unlink()
+    loader.discover_skills()
+    assert loader.get_skill("shared").ref == "bootstrap:shared"
+    assert "bootstrap content" in loader.get_skill("shared").content
