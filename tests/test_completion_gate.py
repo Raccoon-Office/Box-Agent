@@ -2747,11 +2747,21 @@ async def test_stale_research_report_is_revalidated_by_runtime_before_model(tmp_
         (*dimensions, cross_verification, insight),
     )
     llm = MockLLM([_final("done")])
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=None,
+        research_mode="deep",
+    )
+    policy._research_direct_source_text["https://example.com/official"] = (
+        "exampleentitypublishedverifiedinformationin2026"
+    )
+    messages = _msgs()
+    messages[-1].content = "hi https://example.com/official"
 
     events = await collect(
         run_agent_loop(
             llm=llm,
-            messages=_msgs(),
+            messages=messages,
             tools={"bash": bash_tool},
             max_steps=5,
             completion_gate=CompletionGate(
@@ -2759,6 +2769,7 @@ async def test_stale_research_report_is_revalidated_by_runtime_before_model(tmp_
                 workflow_options={"research_mode": "deep"},
                 max_continuations=0,
             ),
+            workflow_policy=policy,
             workspace_dir=str(tmp_path),
         )
     )
