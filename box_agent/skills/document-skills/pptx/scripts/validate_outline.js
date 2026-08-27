@@ -515,7 +515,7 @@ function validate(outline, opts) {
             "bullets contain the exact unavailable-data placeholder"
           );
         } else if (frameworkDelivery) {
-          warnings.push(
+          issues.push(
             `${label}: framework research page without evidence must put the exact ` +
             `${FRAMEWORK_UNAVAILABLE_FACT_PLACEHOLDER} placeholder in message or bullets`
           );

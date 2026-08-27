@@ -9125,7 +9125,7 @@ def test_outline_accepts_framework_structural_pages_without_evidence(
         ),
     ],
 )
-def test_outline_framework_data_page_missing_exact_gap_is_advisory(
+def test_outline_framework_data_page_requires_exact_gap_in_message_or_bullets(
     tmp_path: Path,
     title: str,
     message: str,
@@ -9176,11 +9176,65 @@ def test_outline_framework_data_page_missing_exact_gap_is_advisory(
         str(research_report),
     )
 
-    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.returncode == 1, result.stderr or result.stdout
     payload = json.loads(result.stdout)
     assert any(
-        warning.startswith("slide-02: framework research page")
-        for warning in payload["warnings"]
+        issue.startswith("slide-02: framework research page")
+        for issue in payload["issues"]
+    )
+
+
+def test_outline_framework_rejects_unsupported_qualitative_claims(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=2)
+    outline["slides"][0].update(
+        {"layout": "cover", "visual": "封面", "evidence": []}
+    )
+    outline["slides"][1].update(
+        {
+            "title": "品牌竞争格局",
+            "message": "本土品牌已经形成稳定领先优势。",
+            "bullets": ["用户关注度持续上升", "热门车型竞争加剧"],
+            "layout": "cards",
+            "visual": "品牌对比卡片",
+            "evidence": [],
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    research_report = tmp_path / "research_check.json"
+    research_report.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "framework",
+                    "verified_facts": [],
+                    "gaps": ["No verified public facts"],
+                    "quality_summary": {"quality_ok": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "validate_outline.js",
+        str(outline_path),
+        "--min-slides",
+        "2",
+        "--max-slides",
+        "2",
+        "--research-handoff",
+        str(research_report),
+    )
+
+    assert result.returncode == 1, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert any(
+        "framework research page without evidence" in issue
+        for issue in payload["issues"]
     )
 
 
