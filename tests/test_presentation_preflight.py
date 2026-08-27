@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from box_agent.acp import BoxACPAgent
-from box_agent.schema import LLMResponse
+from box_agent.schema import LLMResponse, StreamEvent
 from box_agent.workflows.presentation_preflight import (
     classify_presentation_request,
     build_presentation_preflight_result,
@@ -49,8 +49,39 @@ class _FakeLLM:
         )
         return LLMResponse(content=self.content, finish_reason="stop")
 
+    async def generate_stream(
+        self,
+        messages,
+        tools=None,
+        *,
+        thinking_enabled: bool = False,
+        session_id: str = "",
+        turn_id: str = "",
+        title: str = "",
+        call_kind: str = "",
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "title": title,
+                "call_kind": call_kind,
+            }
+        )
+        yield StreamEvent(type="text", delta=self.content)
+        yield StreamEvent(type="finish", finish_reason="stop")
+
 
 class _FailingLLM(_FakeLLM):
+    async def generate_stream(self, messages, tools=None, **kwargs):
+        self.calls.append(
+            {"messages": messages, "tools": tools, "call_kind": kwargs.get("call_kind", "")}
+        )
+        raise RuntimeError("provider unavailable")
+        yield
+
     async def generate(
         self,
         messages,
@@ -67,6 +98,14 @@ class _FailingLLM(_FakeLLM):
 
 
 class _SlowLLM(_FakeLLM):
+    async def generate_stream(self, messages, tools=None, **kwargs):
+        self.calls.append(
+            {"messages": messages, "tools": tools, "call_kind": kwargs.get("call_kind", "")}
+        )
+        await asyncio.sleep(0.05)
+        yield StreamEvent(type="text", delta=self.content)
+        yield StreamEvent(type="finish", finish_reason="stop")
+
     async def generate(
         self,
         messages,

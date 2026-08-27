@@ -1337,8 +1337,23 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(tmp_p
 
         async def generate_stream(self, messages, tools=None, **kwargs):
             self.stream_calls += 1
-            raise AssertionError("batch_files must not enter run_agent_loop")
-            yield
+            self.messages = messages
+            self.tools = tools
+            self.generate_kwargs = kwargs
+            encoding = tiktoken.get_encoding("cl100k_base")
+            prompt_tokens = sum(
+                len(encoding.encode(str(message.content))) for message in messages
+            )
+            yield StreamEvent(type="text", delta="ranked all 20 projects")
+            yield StreamEvent(
+                type="finish",
+                finish_reason="stop",
+                usage=TokenUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=100,
+                    total_tokens=prompt_tokens + 100,
+                ),
+            )
 
     llm = BatchLLM()
     read_tool = CountingReadTool()
@@ -1359,8 +1374,8 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(tmp_p
     assert result.content == "ranked all 20 projects"
     assert sorted(read_tool.calls) == sorted(paths)
     assert len(read_tool.calls) == 20
-    assert llm.generate_calls == 1
-    assert llm.stream_calls == 0
+    assert llm.generate_calls == 0
+    assert llm.stream_calls == 1
     assert llm.tools is None
     assert "session_id" not in llm.generate_kwargs
     assert llm.generate_kwargs["call_kind"] == "subagent_step"
@@ -1410,8 +1425,9 @@ async def test_batch_files_uses_parent_permission_negotiator_and_retries(tmp_pat
             return LLMResponse(content="inventory complete", finish_reason="stop")
 
         async def generate_stream(self, messages, tools=None, **kwargs):
-            raise AssertionError("batch_files must not enter run_agent_loop")
-            yield
+            assert "pdf" in messages[-1].content
+            yield StreamEvent(type="text", delta="inventory complete")
+            yield StreamEvent(type="finish", finish_reason="stop")
 
     read_tool = CountingReadTool()
     negotiator = FilesystemNegotiator(store)
@@ -1559,7 +1575,7 @@ async def test_batch_files_uses_configurable_synthesis_timeout():
     assert result.success is False
     assert result.raw_output["code"] == "BATCH_SYNTHESIS_TIMEOUT"
     assert result.raw_output["timeout_seconds"] == 0.01
-    assert "configured 0.01 second runtime limit" in result.raw_output["message"]
+    assert "configured 0.01 second idle limit" in result.raw_output["message"]
 
 
 @pytest.mark.parametrize(

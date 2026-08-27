@@ -74,6 +74,7 @@ from .events import (
 )
 from .hooks import HookManager
 from .logger import AgentLogger
+from .llm.buffered_stream import generate_buffered_stream
 from .llm.capabilities import image_input_support
 from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from .model_history import is_model_history_placeholder
@@ -1499,7 +1500,8 @@ async def _create_summary(
 
     if not messages:
         return ""
-    response: LLMResponse = await llm.generate(
+    response: LLMResponse = await generate_buffered_stream(
+        llm,
         messages=[*messages, Message(role="user", content=_SUMMARY_REQUEST)],
         tools=None,
         thinking_enabled=False,

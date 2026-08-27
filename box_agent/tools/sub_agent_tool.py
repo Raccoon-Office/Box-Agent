@@ -32,6 +32,7 @@ from ..events import (
     ThinkingEvent,
     WebSearchEvent,
 )
+from ..llm.buffered_stream import generate_buffered_stream
 from ..llm.model_routing import resolve_model_client
 from ..schema import Message
 from ..session_log import SessionLog
@@ -1157,27 +1158,27 @@ class SubAgentTool(EventEmittingTool):
             event=StepStart(step=1, max_steps=1),
         )
         try:
-            synthesis = llm.generate(
+            synthesis = generate_buffered_stream(
+                llm,
                 messages=messages,
                 tools=None,
                 thinking_enabled=False,
                 call_kind="subagent_step",
+                idle_timeout=(
+                    self._batch_synthesis_timeout_seconds
+                    if self._batch_synthesis_timeout_seconds > 0
+                    else None
+                ),
             )
-            if self._batch_synthesis_timeout_seconds > 0:
-                response = await asyncio.wait_for(
-                    synthesis,
-                    timeout=self._batch_synthesis_timeout_seconds,
-                )
-            else:
-                response = await synthesis
+            response = await synthesis
         except asyncio.TimeoutError:
             payload = {
                 **diagnostic,
                 "type": "sub_agent_delegation_error",
                 "code": "BATCH_SYNTHESIS_TIMEOUT",
                 "message": (
-                    "The batch synthesis model call exceeded the configured "
-                    f"{self._batch_synthesis_timeout_seconds:g} second runtime limit."
+                    "The batch synthesis model stream had no activity for the configured "
+                    f"{self._batch_synthesis_timeout_seconds:g} second idle limit."
                 ),
                 "retryable": True,
                 "timeout_seconds": self._batch_synthesis_timeout_seconds,

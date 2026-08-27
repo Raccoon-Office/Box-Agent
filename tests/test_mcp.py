@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from box_agent.config import Config
 from box_agent.tools import mcp_loader
 from box_agent.tools.browser_runtime_scope import (
     BrowserRuntimeCoordinator,
@@ -41,6 +42,21 @@ from box_agent.tools.model_tool_context import (
 )
 from box_agent.tools.setup import merge_mcp_tools, register_mcp_tools
 from box_agent.tools.base import Tool, ToolResult
+
+
+_CONFIG_PATH = Path("box_agent/config/config.yaml")
+_MCP_CONFIG_PATH = Path("box_agent/config/mcp.json")
+
+
+async def _load_configured_mcp_tools():
+    """Load integration MCP tools with the configured rotating auth file."""
+    if not _CONFIG_PATH.exists():
+        pytest.skip("box_agent/config/config.yaml missing — integration test skipped")
+    config = Config.from_yaml(_CONFIG_PATH.resolve())
+    return await load_mcp_tools_async(
+        str(_MCP_CONFIG_PATH),
+        auth_file=config.llm.auth_file,
+    )
 
 
 def test_streamable_http_client_is_available():
@@ -1202,7 +1218,7 @@ async def test_mcp_tools_loading():
 
     try:
         # Load MCP tools
-        tools = await load_mcp_tools_async("box_agent/config/mcp.json")
+        tools = await _load_configured_mcp_tools()
 
         print(f"Loaded {len(tools)} MCP tools")
 
@@ -1230,7 +1246,7 @@ async def test_git_mcp_loading(mcp_config):
 
     try:
         # Load MCP tools
-        tools = await load_mcp_tools_async("box_agent/config/mcp.json")
+        tools = await _load_configured_mcp_tools()
 
         print("\n✅ Loaded successfully!")
         print("\n📊 Statistics:")
@@ -1262,7 +1278,7 @@ async def test_git_mcp_tool_availability():
     print("\n=== Testing Git MCP Tool Availability ===")
 
     try:
-        tools = await load_mcp_tools_async("box_agent/config/mcp.json")
+        tools = await _load_configured_mcp_tools()
 
         if not tools:
             pytest.skip("No MCP tools loaded")
@@ -1288,7 +1304,7 @@ async def test_mcp_tool_execution():
     print("\n=== Testing MCP Tool Execution ===")
 
     try:
-        tools = await load_mcp_tools_async("box_agent/config/mcp.json")
+        tools = await _load_configured_mcp_tools()
 
         if not tools:
             print("⚠️  No MCP tools loaded, skipping execution test")

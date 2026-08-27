@@ -10,6 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from box_agent.llm.buffered_stream import generate_buffered_stream
 from box_agent.llm.capabilities import image_input_support
 from box_agent.schema import Message
 from box_agent.tools.base import Tool, ToolResult
@@ -204,14 +205,17 @@ class ImageInspectionTool(Tool):
             ),
         ]
         try:
-            response = await asyncio.wait_for(
-                self.llm.generate(messages=messages, tools=None, call_kind="utility"),
-                timeout=_IMAGE_INSPECTION_TIMEOUT,
+            response = await generate_buffered_stream(
+                self.llm,
+                messages=messages,
+                tools=None,
+                call_kind="utility",
+                idle_timeout=_IMAGE_INSPECTION_TIMEOUT,
             )
         except asyncio.TimeoutError:
             return self._error(
                 "IMAGE_REQUEST_FAILED",
-                f"image inspection timed out after {_IMAGE_INSPECTION_TIMEOUT:.0f}s",
+                f"image inspection stream was idle for {_IMAGE_INSPECTION_TIMEOUT:.0f}s",
             )
         except Exception as exc:  # pragma: no cover - provider exceptions vary
             if self._is_unsupported_image_input_error(str(exc)):

@@ -2,8 +2,8 @@
 
 Single-shot prompts (titles, summaries, rewrites) that must
 NOT spin up an Agent session, load tools/skills/MCP, touch memory, or write
-to conversation history. Wraps :func:`LLMClient.generate` with a hard
-timeout, no tools, no extended thinking, and a structured result.
+to conversation history. Buffers :func:`LLMClient.generate_stream` with an
+idle timeout, no tools, no extended thinking, and a structured result.
 
 The ACP ``llm/prompt`` extension method is a thin shell around this
 service — see :meth:`box_agent.acp.BoxACPAgent.extMethod`.
@@ -17,6 +17,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING
 
 from ..schema import Message
+from .buffered_stream import generate_buffered_stream
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from .llm_wrapper import LLMClient
@@ -91,7 +92,7 @@ async def run_lightweight_prompt(
         session_id: Optional caller-owned session id for upstream trace grouping.
         turn_id: Optional caller-owned turn id for upstream trace grouping.
         title: Optional upstream trace title.
-        timeout: Hard wall-clock cap in seconds. Raised as
+        timeout: Maximum seconds without a stream event. Raised as
             :class:`LightweightTimeout` on expiry.
 
     Returns:
@@ -100,7 +101,7 @@ async def run_lightweight_prompt(
 
     Raises:
         LightweightInvalidArgs: ``prompt`` is empty or ``timeout`` is non-positive.
-        LightweightTimeout: The LLM call exceeded ``timeout`` seconds.
+        LightweightTimeout: The LLM stream was idle for ``timeout`` seconds.
         LightweightContentFiltered: The provider refused on moderation grounds.
         LightweightPromptError: Any other LLM-side failure.
     """
@@ -117,21 +118,20 @@ async def run_lightweight_prompt(
 
     started = perf_counter()
     try:
-        response = await asyncio.wait_for(
-            llm.generate(
-                messages=messages,
-                tools=None,
-                thinking_enabled=False,
-                session_id=session_id,
-                turn_id=turn_id,
-                title=title,
-                call_kind=call_kind,
-            ),
-            timeout=timeout,
+        response = await generate_buffered_stream(
+            llm,
+            messages=messages,
+            tools=None,
+            thinking_enabled=False,
+            session_id=session_id,
+            turn_id=turn_id,
+            title=title,
+            call_kind=call_kind,
+            idle_timeout=timeout,
         )
     except asyncio.TimeoutError as exc:
         raise LightweightTimeout(
-            f"lightweight prompt timed out after {timeout:.1f}s"
+            f"lightweight prompt was idle for {timeout:.1f}s"
         ) from exc
     except asyncio.CancelledError:
         raise

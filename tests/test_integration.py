@@ -10,7 +10,6 @@ from box_agent import LLMClient
 from box_agent.agent import Agent
 from box_agent.config import Config
 from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
-from box_agent.tools.mcp_loader import load_mcp_tools_async
 
 
 @pytest.mark.asyncio
@@ -29,7 +28,7 @@ async def test_basic_agent_usage():
     if not config_path.exists():
         pytest.skip("config.yaml not found")
 
-    config = Config.from_yaml(config_path)
+    config = Config.from_yaml(config_path.resolve())
 
     # Check API key
     if not config.llm.api_key or config.llm.api_key == "YOUR_API_KEY_HERE":
@@ -47,8 +46,11 @@ async def test_basic_agent_usage():
         # Initialize LLM client
         llm_client = LLMClient(
             api_key=config.llm.api_key,
+            provider=config.llm.provider,
             api_base=config.llm.api_base,
             model=config.llm.model,
+            auth_file=config.llm.auth_file,
+            timeout=config.llm.timeout,
         )
 
         # Initialize basic tools
@@ -56,23 +58,8 @@ async def test_basic_agent_usage():
             ReadTool(workspace_dir=workspace_dir),
             WriteTool(workspace_dir=workspace_dir),
             EditTool(workspace_dir=workspace_dir),
-            BashTool(),
+            BashTool(workspace_dir=workspace_dir),
         ]
-
-        # Load MCP tools (optional) - with timeout protection
-        try:
-            # MCP tools are disabled by default to prevent test hangs
-            # Enable specific MCP servers in mcp.json if needed
-            mcp_tools = await load_mcp_tools_async(
-                config_path="box_agent/config/mcp.json"
-            )
-            if mcp_tools:
-                print(f"✓ Loaded {len(mcp_tools)} MCP tools")
-                tools.extend(mcp_tools)
-            else:
-                print("⚠️  No MCP tools configured (mcp.json is empty)")
-        except Exception as e:
-            print(f"⚠️  MCP tools not loaded: {e}")
 
         # Create agent
         agent = Agent(
