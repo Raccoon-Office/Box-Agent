@@ -32,7 +32,10 @@ from ..workflow_checkpoint_store import (
     WorkflowPauseCheckpoint,
     checkpoint_resume_instruction,
 )
-from .presentation_checkpoint import build_checkpoint_text
+from .presentation_checkpoint import (
+    build_checkpoint_text,
+    presentation_outline_handoff_path,
+)
 from .presentation_contract import (
     CHECKPOINT_MARKER,
     WORKFLOW_KIND,
@@ -555,47 +558,6 @@ def _is_outline_validation_call(
         supplied_script.is_absolute()
         and supplied_script.resolve() == _VALIDATE_OUTLINE_SCRIPT
     )
-
-
-def _latest_valid_outline_research_handoff(artifact_root: Path) -> Path | None:
-    """Return the newest valid handoff, including a framework fallback status."""
-    qa_root = artifact_root / "research" / "qa"
-    candidates = [
-        *qa_root.glob("*_research_check.json"),
-        *qa_root.glob("*_presentation_handoff.json"),
-        qa_root / "research_status.json",
-    ]
-    valid: list[tuple[int, Path]] = []
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            handoff = (
-                payload.get("presentation_handoff")
-                if isinstance(payload, dict)
-                else None
-            )
-            if not isinstance(handoff, dict):
-                handoff = payload if isinstance(payload, dict) else None
-            delivery_mode = handoff.get("delivery_mode") if handoff else None
-            verified_facts = handoff.get("verified_facts") if handoff else None
-            schema_version = handoff.get("schema_version") if handoff else None
-            if (
-                schema_version != 1
-                or delivery_mode not in {"full", "partial", "framework"}
-                or not isinstance(verified_facts, list)
-                or (
-                    delivery_mode in {"full", "partial"}
-                    and not verified_facts
-                )
-                or (delivery_mode == "framework" and verified_facts)
-            ):
-                continue
-            valid.append((path.stat().st_mtime_ns, path))
-        except (OSError, json.JSONDecodeError):
-            continue
-    return max(valid, key=lambda item: item[0])[1] if valid else None
 
 
 def _outline_validation_failure_signature(
@@ -2822,8 +2784,9 @@ class ControlledPresentationPolicy:
         if artifact_root is not None and self.stage == "outline_qa":
             outline_path = artifact_root / "outline.json"
             report_path = artifact_root / "qa" / "outline_check.json"
-            research_handoff = _latest_valid_outline_research_handoff(
-                artifact_root
+            research_handoff = presentation_outline_handoff_path(
+                self.workspace_dir,
+                artifact_root,
             )
             research_argument = (
                 f" --research-handoff {shlex.quote(str(research_handoff))}"

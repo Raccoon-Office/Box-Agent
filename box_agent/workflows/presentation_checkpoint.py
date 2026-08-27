@@ -356,15 +356,11 @@ def _presentation_research_artifacts(
         [
             *research_root.rglob("*.md"),
             *research_root.glob("*_evidence.json"),
+            *research_root.rglob("*_presentation_handoff.json"),
             research_root / "qa" / "research_status.json",
         ]
     )
-    report_paths = non_empty(
-        [
-            *research_root.rglob("*_research_check.json"),
-            *research_root.rglob("*_presentation_handoff.json"),
-        ]
-    )
+    report_paths = non_empty(research_root.rglob("*_research_check.json"))
     for report_path in sorted(
         report_paths,
         key=lambda path: path.stat().st_mtime_ns,
@@ -395,44 +391,32 @@ def _presentation_research_artifacts(
         evidence_file_value = payload.get("evidence_file")
         verified_evidence_count = len(verified_evidence)
         if has_generic_handoff:
-            context_files = []
-            for relative_path in handoff["context_files"]:
-                candidate = research_root / relative_path
-                try:
-                    if candidate.resolve().is_relative_to(research_root.resolve()):
-                        context_files.append(candidate)
-                except OSError:
-                    continue
-            handoff_files = tuple(
-                dict.fromkeys([*non_empty(context_files), report_path])
-            )
-            topic_dependencies = (
-                non_empty(
-                    [
-                        *research_root.glob(f"{topic}_*.md"),
-                        research_root / f"{topic}_evidence.json",
-                    ]
+            reported_verified_evidence = payload.get("verified_evidence")
+            reported_verified_count = payload.get("verified_evidence_count")
+            if (
+                payload.get("validator") != "research-synthesis"
+                or payload.get("delivery_allowed") is not True
+                or payload.get("handoff_status") != handoff_status
+                or not isinstance(reported_verified_evidence, list)
+                or not all(
+                    isinstance(item, dict) for item in reported_verified_evidence
                 )
-                if isinstance(topic, str) and topic.strip()
-                else list(handoff_files[:-1])
-            )
-            try:
-                report_mtime = report_path.stat().st_mtime_ns
-                if any(
-                    path.stat().st_mtime_ns > report_mtime
-                    for path in topic_dependencies
-                ):
-                    continue
-            except OSError:
+                or not isinstance(reported_verified_count, int)
+                or reported_verified_count != len(reported_verified_evidence)
+                or reported_verified_count != verified_evidence_count
+                or [item.get("canonical") for item in reported_verified_evidence]
+                != [item.get("canonical") for item in verified_evidence]
+            ):
                 continue
-            return (True, handoff_files)
         if (
-            route not in {"A", "B"}
+            payload.get("validator") != "research-synthesis"
+            or route not in {"A", "B"}
             or not isinstance(topic, str)
             or not topic.strip()
             or not isinstance(min_dimensions, int)
             or min_dimensions < 1
             or not isinstance(dimension_count, int)
+            or not isinstance(verified_evidence_count, int)
             or verified_evidence_count < 0
         ):
             continue
@@ -452,7 +436,11 @@ def _presentation_research_artifacts(
             or not _validated_research_source(item)
             or not isinstance(item.get("canonical"), str)
             or not item["canonical"].strip()
-            for item in verified_evidence
+            for item in (
+                payload.get("verified_evidence")
+                if isinstance(payload.get("verified_evidence"), list)
+                else verified_evidence
+            )
         ):
             continue
         evidence_file = research_root / f"{topic}_evidence.json"
@@ -505,13 +493,59 @@ def _presentation_research_artifacts(
     return (False, tuple(dict.fromkeys([*observed, *report_paths])))
 
 
+def presentation_outline_handoff_path(
+    workspace_dir: str | Path,
+    artifact_root_dir: str | Path | None = None,
+) -> Path | None:
+    """Return a fresh validator report or an explicit runtime fallback status."""
+    research_ready, research_files = _presentation_research_artifacts(
+        workspace_dir,
+        artifact_root_dir,
+    )
+    if research_ready:
+        return next(
+            (
+                path
+                for path in research_files
+                if path.name.endswith("_research_check.json")
+            ),
+            None,
+        )
+
+    artifact_root = artifact_scan_root(workspace_dir, artifact_root_dir)
+    if artifact_root is None:
+        return None
+    status_path = artifact_root / "research" / "qa" / "research_status.json"
+    if not _research_fallback_available((status_path,)):
+        return None
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    handoff = _normalized_presentation_handoff(payload)
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("workflow") != WORKFLOW_KIND
+        or payload.get("research_mode") != "deep"
+        or payload.get("continued_to") != "outline"
+        or not isinstance(payload.get("reason"), str)
+        or not payload["reason"].strip()
+        or not isinstance(payload.get("attempt_summary"), dict)
+        or handoff.get("delivery_mode") != "framework"
+    ):
+        return None
+    return status_path
+
+
 def _presentation_handoff(research_files: tuple[Path, ...]) -> dict[str, object]:
     """Return the normalized presentation handoff from the selected report."""
     report_path = next(
         (
             path
             for path in research_files
-            if path.name.endswith(("_research_check.json", "_presentation_handoff.json"))
+            if path.name.endswith("_research_check.json")
         ),
         None,
     )
@@ -539,7 +573,7 @@ def _stale_research_revalidation(
     report_paths = [
         path
         for path in research_files
-        if path.name.endswith(("_research_check.json", "_presentation_handoff.json"))
+        if path.name.endswith("_research_check.json")
         and path.is_file()
     ]
     if not report_paths or not canonical_research_root.is_dir():

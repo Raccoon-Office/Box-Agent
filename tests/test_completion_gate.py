@@ -1360,7 +1360,6 @@ def test_deep_research_checkpoint_accepts_partial_delivery_handoff(tmp_path):
             },
         }
     )
-    report.pop("validator")
     report_path.write_text(json.dumps(report), encoding="utf-8")
 
     checkpoint = completion_gate_progress_text(gate, str(tmp_path))
@@ -2508,6 +2507,8 @@ def test_stale_research_report_forces_one_exact_revalidation(tmp_path):
             "market_insight.md",
         ],
     }
+    report_payload["delivery_allowed"] = True
+    report_payload["handoff_status"] = "full"
     report.write_text(json.dumps(report_payload), encoding="utf-8")
     newer = report.stat().st_mtime_ns + 10_000_000
     changed = research / "market_dim02.md"
@@ -2694,10 +2695,22 @@ def test_runtime_owned_outline_validation_uses_framework_fallback_handoff(tmp_pa
     fallback.write_text(
         json.dumps(
             {
+                "schema_version": 1,
+                "workflow": "controlled_presentation",
+                "research_mode": "deep",
+                "status": "fallback",
+                "report_available": False,
+                "generation_continues": True,
+                "continued_to": "outline",
+                "reason": "research_sources_unavailable",
+                "attempt_summary": {},
                 "presentation_handoff": {
                     "schema_version": 1,
                     "delivery_mode": "framework",
                     "verified_facts": [],
+                    "gaps": ["No validated public research facts are available."],
+                    "quality_summary": {"quality_ok": False},
+                    "context_files": [],
                 }
             }
         ),
@@ -2716,6 +2729,68 @@ def test_runtime_owned_outline_validation_uses_framework_fallback_handoff(tmp_pa
     assert action.capability == "controlled_presentation.outline_validate"
     assert f"--research-handoff {fallback}" in action.arguments["command"]
     assert "topic_research_check.json" not in action.arguments["command"]
+
+
+def test_outline_validation_ignores_newer_unvalidated_standalone_handoff(tmp_path):
+    artifact_root = tmp_path / "output" / "tasks" / "task-1"
+    research = artifact_root / "research"
+    research.mkdir(parents=True)
+    for index in range(1, 4):
+        (research / f"market_dim{index:02d}.md").write_text(
+            f"dimension {index}",
+            encoding="utf-8",
+        )
+    (research / "market_cross_verification.md").write_text(
+        "cross verification",
+        encoding="utf-8",
+    )
+    (research / "market_insight.md").write_text("insight", encoding="utf-8")
+    valid_report = _write_valid_research_report(research, topic="market")
+    unvalidated = research / "qa" / "newer_presentation_handoff.json"
+    unvalidated.write_text(
+        json.dumps(
+            {
+                "presentation_handoff": {
+                    "schema_version": 1,
+                    "delivery_mode": "full",
+                    "verified_facts": [
+                        {
+                            "status": "verified",
+                            "entity": "Unvalidated Entity",
+                            "claim": "Unvalidated Entity claimed 99% market share.",
+                            "source_type": "secondary",
+                            "source_url": "https://example.org/unvalidated",
+                            "canonical": (
+                                "Unvalidated Entity | Unvalidated Entity claimed 99% "
+                                "market share. | secondary | "
+                                "https://example.org/unvalidated"
+                            ),
+                        }
+                    ],
+                    "gaps": [],
+                    "quality_summary": {"quality_ok": True},
+                    "context_files": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    newer = valid_report.stat().st_mtime_ns + 10_000_000
+    os.utime(unvalidated, ns=(newer, newer))
+    (artifact_root / "outline.json").write_text("{}", encoding="utf-8")
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=artifact_root,
+        research_mode="deep",
+        stage="outline_qa",
+    )
+
+    action = policy.next_deterministic_action()
+
+    assert action is not None
+    assert action.capability == "controlled_presentation.outline_validate"
+    assert f"--research-handoff {valid_report}" in action.arguments["command"]
+    assert str(unvalidated) not in action.arguments["command"]
 
 
 @pytest.mark.asyncio
