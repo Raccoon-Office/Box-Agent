@@ -71,6 +71,18 @@ A user may ask you to create, edit, or analyze the contents of an .xlsx file. Yo
 
 **Excel Export**: Use Python-native libraries (`pandas`, `openpyxl`) as the default for creating and editing `.xlsx` files. LibreOffice (`soffice`) is a **system-level dependency** that may or may not be installed — never assume it is available. Only attempt LibreOffice-based recalculation when formula values must be baked into the file, and always check for `soffice` availability first via `recalc.py` (which handles the check gracefully)
 
+### Excel table and AutoFilter compatibility
+
+- Never set `worksheet.auto_filter.ref` on a range that overlaps an Excel `Table` on the same worksheet. A table owns its own filter definition; writing both filters over the same cells creates an OOXML package that Excel repairs by deleting the table/filter.
+- For a formatted, filterable data region, prefer a `Table` and omit `worksheet.auto_filter.ref`:
+  ```python
+  table = Table(displayName="DataTable", ref="A1:C11")
+  sheet.add_table(table)
+  # Do not also set sheet.auto_filter.ref = "A1:C11"
+  ```
+- Use `worksheet.auto_filter.ref` only for a plain cell range that does not overlap any table.
+- Before delivering every `.xlsx` or `.xlsm` file, run `python scripts/validate_xlsx.py <excel_file>`. Treat an `invalid` result as a blocking error, fix every reported overlap, and rerun until the script returns `valid`.
+
 ## Reading and analyzing data
 
 ### Data analysis with pandas
@@ -146,6 +158,11 @@ This applies to ALL calculations - totals, percentages, ratios, differences, etc
      - `#DIV/0!`: Division by zero
      - `#VALUE!`: Wrong data type in formula
      - `#NAME?`: Unrecognized formula name
+7. **Validate Excel package compatibility (required for every `.xlsx`/`.xlsm`)**:
+   ```bash
+   python scripts/validate_xlsx.py output.xlsx
+   ```
+   A successful `openpyxl.load_workbook()` call alone is not sufficient: `openpyxl` can reopen files that Microsoft Excel must repair. The validator detects worksheet AutoFilter ranges that overlap table ranges.
 
 ### Creating new Excel files
 
