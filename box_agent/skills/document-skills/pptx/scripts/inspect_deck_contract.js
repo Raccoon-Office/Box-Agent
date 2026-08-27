@@ -1269,11 +1269,125 @@ function mentionedSourceImageFiles(sourceText, deckFile) {
   return mentioned;
 }
 
+function normalizedSourceReference(value) {
+  return String(value || "").replace(/\\/g, "/").toLowerCase();
+}
+
+function outlineSlideMediaText(slide) {
+  if (!slide || typeof slide !== "object") return "";
+  return [
+    slide.title,
+    slide.message,
+    slide.visual,
+    slide.notes,
+    ...(Array.isArray(slide.bullets) ? slide.bullets : []),
+  ].filter(Boolean).join("\n");
+}
+
+function outlineMentionsSourceFile(slide, sourcePath) {
+  const slideText = normalizedSourceReference(outlineSlideMediaText(slide));
+  const sourceName = normalizedSourceReference(path.basename(sourcePath));
+  return Boolean(sourceName && slideText.includes(sourceName));
+}
+
+function outlineRequestsSourceMedia(slide) {
+  const slideText = outlineSlideMediaText(slide);
+  return [
+    /(?:用户|客户|附件|本地|现有|已有|原始|真实|上传|提供|给定|标注)[^\n。；;]{0,12}(?:图片|照片|截图|图像|剧照|概念图|手写信|邮件)/iu,
+    /(?:图片|照片|截图|图像|剧照|概念图|手写信|邮件)[^\n。；;]{0,12}(?:素材|附件|原图|标注|上传|提供)/iu,
+    /(?:source|provided|uploaded|attached|existing|local|original|annotated)[\s_-]*(?:image|photo|screenshot|still|media)/iu,
+  ].some(pattern => pattern.test(slideText));
+}
+
+function sourcePageHint(sourceText, sourcePath) {
+  const normalizedText = normalizedSourceReference(sourceText);
+  const sourceName = normalizedSourceReference(path.basename(sourcePath));
+  if (!sourceName) return null;
+  const hints = new Set();
+  let offset = 0;
+  while (offset < normalizedText.length) {
+    const matchIndex = normalizedText.indexOf(sourceName, offset);
+    if (matchIndex < 0) break;
+    const segmentStart = Math.max(
+      normalizedText.lastIndexOf("\n", matchIndex),
+      normalizedText.lastIndexOf("。", matchIndex),
+      normalizedText.lastIndexOf("；", matchIndex),
+      normalizedText.lastIndexOf(";", matchIndex)
+    ) + 1;
+    const followingBoundaries = ["\n", "。", "；", ";"]
+      .map(separator => normalizedText.indexOf(separator, matchIndex + sourceName.length))
+      .filter(index => index >= 0);
+    const segmentEnd = followingBoundaries.length
+      ? Math.min(...followingBoundaries)
+      : normalizedText.length;
+    const segment = normalizedText.slice(segmentStart, segmentEnd);
+    const sourceStart = matchIndex - segmentStart;
+    const sourceEnd = sourceStart + sourceName.length;
+    const markers = [];
+    for (const pattern of [
+      /第\s*(\d{1,3})\s*页/giu,
+      /(?:slide|page)\s*#?\s*(\d{1,3})\b/giu,
+      /\b(\d{1,3})(?:st|nd|rd|th)\s+(?:slide|page)\b/giu,
+    ]) {
+      for (const match of segment.matchAll(pattern)) {
+        const markerStart = match.index;
+        const markerEnd = markerStart + match[0].length;
+        markers.push({
+          page: Number(match[1]),
+          side: markerEnd <= sourceStart
+            ? "before"
+            : markerStart >= sourceEnd
+              ? "after"
+              : "overlap",
+          distance: markerEnd <= sourceStart
+            ? sourceStart - markerEnd
+            : markerStart >= sourceEnd
+              ? markerStart - sourceEnd
+              : 0,
+        });
+      }
+    }
+    if (markers.length) {
+      const precedingMarkers = markers.filter(marker => marker.side === "before");
+      const relevantMarkers = precedingMarkers.length ? precedingMarkers : markers;
+      const closestDistance = Math.min(
+        ...relevantMarkers.map(marker => marker.distance)
+      );
+      const closestPages = new Set(
+        relevantMarkers
+          .filter(marker => marker.distance === closestDistance)
+          .map(marker => marker.page)
+      );
+      if (closestPages.size === 1) hints.add([...closestPages][0]);
+    }
+    offset = matchIndex + sourceName.length;
+  }
+  return hints.size === 1 ? [...hints][0] : null;
+}
+
+function sourceRequestsSpinInteraction(sourceText, sourcePath) {
+  const normalizedText = normalizedSourceReference(sourceText);
+  const sourceName = normalizedSourceReference(path.basename(sourcePath));
+  if (!sourceName) return false;
+  const matchIndex = normalizedText.indexOf(sourceName);
+  if (matchIndex < 0) return false;
+  const context = normalizedText.slice(
+    Math.max(0, matchIndex - 48),
+    Math.min(normalizedText.length, matchIndex + sourceName.length + 48)
+  );
+  return [
+    /(?:360\s*(?:度|°)?|三百六十度)[^\n。；;]{0,18}(?:转|旋转|拖拽|立体)/iu,
+    /(?:转|旋转|拖拽)[^\n。；;]{0,18}(?:360\s*(?:度|°)?|三百六十度)/iu,
+  ].some(pattern => pattern.test(context));
+}
+
 function automaticImageAssetSpecs(
   sourceFiles,
   explicitSpecs,
   orderedLayouts,
   outlineSlides,
+  sourceText,
+  interactionContract,
 ) {
   const explicitSlides = new Set(explicitSpecs.map(spec => spec.slide));
   const explicitSources = new Set(explicitSpecs.map(spec => path.resolve(spec.sourcePath)));
@@ -1287,18 +1401,72 @@ function automaticImageAssetSpecs(
       && Array.isArray(item.strategies)
       && item.strategies.includes("use_existing")
     ));
+    const outlineSlide = outlineSlides[index] || {};
     return slot
-      ? [{ slide: index + 1, slot: slot.id }]
+      ? [{
+        slide: index + 1,
+        slot: slot.id,
+        outlineSlide,
+        sourceOutlinePage: Number(outlineSlide.page) || index + 1,
+      }]
       : [];
   });
   const remaining = sourceFiles.filter(file => !explicitSources.has(path.resolve(file)));
-  const specs = remaining.slice(0, candidates.length).map((sourcePath, index) => ({
-    ...candidates[index],
-    sourcePath,
-  }));
+  const available = [...candidates];
+  const specs = [];
+  const unbound = [];
+  remaining.forEach(sourcePath => {
+    const pageHint = sourcePageHint(sourceText, sourcePath);
+    const directMatches = available.filter(candidate => (
+      outlineMentionsSourceFile(candidate.outlineSlide, sourcePath)
+    ));
+    const pageMatches = pageHint == null
+      ? []
+      : available.filter(candidate => candidate.sourceOutlinePage === pageHint);
+    const interactionTarget = interactionContract
+      && interactionContract.mode === "spin_360"
+      && sourceRequestsSpinInteraction(sourceText, sourcePath)
+      ? available.find(candidate => (
+        `slide-${String(candidate.slide).padStart(2, "0")}`
+          === interactionContract.target_slide_id
+      ))
+      : null;
+    let selected = null;
+    let reason = null;
+    if (pageHint != null) {
+      selected = directMatches.find(candidate => candidate.sourceOutlinePage === pageHint)
+        || pageMatches.find(candidate => outlineRequestsSourceMedia(candidate.outlineSlide))
+        || pageMatches[0]
+        || null;
+      reason = selected ? "source_page_hint" : null;
+    } else if (directMatches.length) {
+      selected = directMatches[0];
+      reason = "outline_file_reference";
+    } else if (interactionTarget) {
+      selected = interactionTarget;
+      reason = "source_interaction_request";
+    } else {
+      selected = available.find(candidate => outlineRequestsSourceMedia(
+        candidate.outlineSlide
+      )) || null;
+      reason = selected ? "outline_source_media_intent" : null;
+    }
+    if (!selected) {
+      unbound.push(sourcePath);
+      return;
+    }
+    specs.push({
+      slide: selected.slide,
+      slot: selected.slot,
+      sourceOutlinePage: selected.sourceOutlinePage,
+      bindingReason: reason,
+      sourcePath,
+    });
+    available.splice(available.indexOf(selected), 1);
+  });
   return {
     specs,
-    unbound: remaining.slice(candidates.length),
+    unbound,
   };
 }
 
@@ -1739,6 +1907,8 @@ function main() {
       opts.imageAssets,
       orderedLayouts,
       authoringSlides,
+      runtimeBinding.source_text,
+      interactionContract,
     );
     automaticallyBoundSourceAssets = automaticAssets.specs;
     unboundMentionedSourceAssets = automaticAssets.unbound;
@@ -1788,6 +1958,8 @@ function main() {
           slide: spec.slide,
           slot: spec.slot,
           source: path.basename(spec.sourcePath),
+          source_outline_page: spec.sourceOutlinePage,
+          reason: spec.bindingReason,
         })),
         unbound: unboundMentionedSourceAssets.map(sourcePath => path.basename(sourcePath)),
       },
@@ -1916,6 +2088,8 @@ function main() {
           slide: spec.slide,
           slot: spec.slot,
           source: path.basename(spec.sourcePath),
+          source_outline_page: spec.sourceOutlinePage,
+          reason: spec.bindingReason,
         })),
         unbound: unboundMentionedSourceAssets.map(sourcePath => path.basename(sourcePath)),
       },

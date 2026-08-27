@@ -46,6 +46,18 @@ Rules:
    `assets/source/`, hashes them, and records `decision: "use_existing"`.
    Reference that portable copied path from `deck.json`; never leave the final
    deck pointing at the user's original machine path.
+9. An explicit `--image-asset` binding always wins. When the bound user request
+   mentions local image files without explicit bindings, automatic binding is
+   conservative: first use an exact page hint next to the filename, then an
+   exact filename reference in the corresponding outline page. A filename tied
+   to an explicit 360-degree request binds to the registered spin-interaction
+   target. Otherwise, use stable source-file order only across outline pages
+   that explicitly request supplied/source media. Outline pages created by
+   deterministic splitting keep their original `source_outline_page`; a
+   filename in a narrowed bullet slice binds to that generated page. Never fill
+   an unrelated optional cover slot merely because it appears first. Ambiguous
+   files stay under `source_assets.unbound` in the image manifest and require an
+   explicit `--image-asset` binding.
 
 ## 2. Trigger rules
 

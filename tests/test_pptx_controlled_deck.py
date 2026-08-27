@@ -6001,6 +6001,212 @@ def test_scaffold_auto_binds_user_mentioned_source_images_to_media_pages(
     assert validated.returncode == 0, validated.stdout + validated.stderr
 
 
+def test_scaffold_binds_source_image_to_explicit_outline_page_hint(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    source = inputs / "castle.png"
+    source.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+            "/x8AAusB9Wl2YvQAAAAASUVORK5CYII="
+        )
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(outline_path, page_count=3, source_mode="user_provided")
+    outline["slides"][0].update(
+        {"layout": "cover", "visual": "极简文字封面"}
+    )
+    outline["slides"][2].update(
+        {"layout": "feature", "visual": "右侧保留视觉区域"}
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "请制作一份PPT，第 3 页使用 inputs/castle.png。".encode("utf-8")
+    ).decode("ascii")
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-hero-v1",
+        "cards-grid-v1",
+        "image-hero-split-v1",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert deck["slides"][2]["props"]["image"]["src"] == (
+        "assets/source/slide-03-image.png"
+    )
+    manifest = json.loads(
+        (output / "assets" / "generated" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["source_assets"]["automatically_bound"] == [
+        {
+            "slide": 3,
+            "slot": "image",
+            "source": "castle.png",
+            "source_outline_page": 3,
+            "reason": "source_page_hint",
+        }
+    ]
+
+
+def test_scaffold_matches_source_images_to_outline_file_references(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Wl2YvQAAAAASUVORK5CYII="
+    )
+    (inputs / "first.png").write_bytes(image_bytes)
+    (inputs / "second.jpg").write_bytes(image_bytes)
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(outline_path, page_count=2, source_mode="user_provided")
+    outline["slides"][0].update(
+        {"layout": "case", "visual": "使用 inputs/second.jpg 作为案例原图"}
+    )
+    outline["slides"][1].update(
+        {"layout": "case", "visual": "使用 inputs/first.png 作为案例原图"}
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        (
+            "请制作一份PPT。素材文件：inputs/first.png、"
+            "inputs/second.jpg。"
+        ).encode("utf-8")
+    ).decode("ascii")
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "image-hero-split-v1",
+        "image-hero-split-v1",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert [slide["props"]["image"]["src"] for slide in deck["slides"]] == [
+        "assets/source/slide-01-image.jpg",
+        "assets/source/slide-02-image.png",
+    ]
+
+
+def test_scaffold_uses_nearest_page_hint_for_each_source_file(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Wl2YvQAAAAASUVORK5CYII="
+    )
+    (inputs / "first.png").write_bytes(image_bytes)
+    (inputs / "second.jpg").write_bytes(image_bytes)
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(outline_path, page_count=2, source_mode="user_provided")
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        (
+            "请制作一份PPT，第 2 页用 inputs/second.jpg，"
+            "第 1 页用 inputs/first.png。"
+        ).encode("utf-8")
+    ).decode("ascii")
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "image-hero-split-v1",
+        "image-hero-split-v1",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads((output / "deck.json").read_text(encoding="utf-8"))
+    assert [slide["props"]["image"]["src"] for slide in deck["slides"]] == [
+        "assets/source/slide-01-image.png",
+        "assets/source/slide-02-image.jpg",
+    ]
+
+
+def test_scaffold_leaves_ambiguous_source_image_unbound(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    source = inputs / "reference.png"
+    source.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+            "/x8AAusB9Wl2YvQAAAAASUVORK5CYII="
+        )
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    outline_path = output / "outline.json"
+    outline = _write_outline(outline_path, page_count=1, source_mode="user_provided")
+    outline["slides"][0].update(
+        {"layout": "cover", "visual": "仅用大标题和留白构成封面"}
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    env = os.environ.copy()
+    env["BOX_AGENT_OUTPUT_DIR"] = str(output)
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "请制作一份PPT。参考文件：inputs/reference.png。".encode("utf-8")
+    ).decode("ascii")
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-hero-v1",
+        "--outline",
+        "outline.json",
+        "--out",
+        "deck.json",
+        cwd=output,
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    manifest = json.loads(
+        (output / "assets" / "generated" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["source_assets"]["automatically_bound"] == []
+    assert manifest["source_assets"]["unbound"] == ["reference.png"]
+
+
 def test_scaffold_and_runtime_preserve_explicit_solar_orbit_interaction(
     tmp_path: Path,
 ) -> None:

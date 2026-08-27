@@ -434,6 +434,23 @@ and tables should normally skip backgrounds or use only a faint low-detail
 texture. Prefer one dominant media treatment: a hero or a background, not both,
 unless the background is intentionally subordinate.
 
+## Interaction contract
+
+The controlled scaffold may add one deck-level `interaction_contract` when the
+bound request explicitly requires either `solar_orbit` or `spin_360`. The
+contract records a registered mode, one `target_slide_id`, and `required: true`;
+the runtime probe then verifies that the requested interaction initialized. A
+solar-orbit target renders exactly eight orbiting planets. A spin target renders
+one rotatable visual and uses the target slide's bound media when available.
+
+These interactions are an HTML-runtime capability. Playback supports pause/
+resume, and the spin visual also supports pointer dragging. During screenshot or
+PPTX export, editor chrome and interaction controls are hidden and animation is
+stopped, so the exported slide preserves a representative static state rather
+than executable motion or drag behavior. Never claim that the editable `.pptx`
+retains the HTML interaction; deliver the controlled HTML when the requested
+motion itself is required.
+
 ## Editor boundary
 
 The embedded editor supports plain-text edits, image replacement, adding a page
