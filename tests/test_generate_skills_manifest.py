@@ -16,6 +16,7 @@ from scripts.generate_skills_manifest import (
         "storymap-generate-person",
         "autohot-skill",
         "film-tv-license-application-assistant",
+        "yayoi-kusama-style",
     ],
 )
 def test_recommended_skills_stay_out_of_builtin_manifest(source_dir):

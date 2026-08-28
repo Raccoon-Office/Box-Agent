@@ -49,6 +49,7 @@ EXCLUDED_SKILL_DIRS: frozenset[str] = frozenset(
         "city-travel-planner",
         "autohot-skill",
         "film-tv-license-application-assistant",
+        "yayoi-kusama-style",
     }
 )
 

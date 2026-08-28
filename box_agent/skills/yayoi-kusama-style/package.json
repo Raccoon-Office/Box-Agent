@@ -1,0 +1,18 @@
+{
+  "name": "yayoi-kusama-style",
+  "version": "1.2.0",
+  "displayName": "草间弥生风格",
+  "description": "用草间弥生的波点、无限之网、南瓜、镜屋与自我消融逻辑，生成画面方案、AIGC 提示词、空间构想与产品致敬降级方案。",
+  "keywords": [
+    "草间弥生",
+    "Yayoi Kusama",
+    "波点",
+    "无限镜屋",
+    "南瓜",
+    "自我消融",
+    "AIGC",
+    "视觉风格"
+  ],
+  "license": "UNLICENSED",
+  "private": true
+}
