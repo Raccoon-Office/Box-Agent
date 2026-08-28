@@ -20,7 +20,7 @@ class StopReason(str, Enum):
     MAX_TOKENS = "max_tokens"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
-    CHECKPOINT_PAUSED = "checkpoint_paused"
+    WAITING_FOR_USER = "waiting_for_user"
     ERROR = "error"
 
 
@@ -270,21 +270,6 @@ class DoneEvent:
     final_content: str
 
 
-@dataclass(frozen=True)
-class ContextCheckpointEvent:
-    """Durable workflow checkpoint saved before an internal pause."""
-
-    checkpoint_id: str
-    workflow_kind: str
-    adapter_id: str
-    schema_version: int
-    workspace_identity: str
-    path: str
-    stage: str | None = None
-    artifact_count: int = 0
-    artifact_set_sha256: str = ""
-
-
 # ── Memory ─────────────────────────────────────────────────────
 
 
@@ -438,7 +423,6 @@ AgentEvent = Union[
     MemoryProposalEvent,
     ErrorEvent,
     LogFileEvent,
-    ContextCheckpointEvent,
     DoneEvent,
     SubAgentEvent,
     PermissionRequestEvent,

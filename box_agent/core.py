@@ -49,7 +49,6 @@ from .events import (
     AgentEvent,
     ArtifactEvent,
     ContentEvent,
-    ContextCheckpointEvent,
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
@@ -85,11 +84,6 @@ from .loop_guards import (
     SEARCH_FILES_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     STREAM_REPEAT_MIN_CHUNKS,
-    CompletionGate,
-    completion_budget_reserve_text,
-    completion_gate_gaps,
-    completion_gate_tool_satisfies_requirements,
-    completion_gate_text,
     delegated_tool_call_budget_message,
     delegated_tool_call_budget_wrapup_text,
     format_injected_message,
@@ -109,9 +103,7 @@ from .loop_guards import (
     truncation_continuation_text,
 )
 
-# Re-exported for backward compatibility: ``CompletionGate`` now lives in
-# ``loop_guards`` but callers historically import it from ``core``.
-__all__ = ["run_agent_loop", "CompletionGate"]
+__all__ = ["run_agent_loop"]
 
 _log = logging.getLogger(__name__)
 _DEFAULT_AGENT_CONFIG = AgentConfig()
@@ -217,7 +209,7 @@ async def _stream_with_activity(
                 await closer()
             except (RuntimeError, asyncio.CancelledError):
                 pass
-from .schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
+from .schema import LLMResponse, Message, StreamEvent
 from .tools.base import (
     EventEmittingTool,
     Tool,
@@ -233,11 +225,6 @@ from .turn_policy import (
     text_is_short_acknowledgement,
     text_is_short_non_task_reply,
     text_requests_plan_start,
-)
-from .workflow_policy import WorkflowAction, WorkflowPolicy
-from .workflow_checkpoint_store import (
-    clear_workflow_checkpoint,
-    save_workflow_checkpoint,
 )
 
 # Type alias — consumers supply a zero-arg callable that returns True
@@ -332,6 +319,7 @@ _PLAN_APPROVAL_SKIP_MESSAGE = (
 )
 
 _PLAN_APPROVAL_DONE_CONTENT = "计划已生成，等待用户确认后再执行。"
+_WAITING_FOR_USER_DONE_CONTENT = "Waiting for the user's response."
 
 FINAL_SUMMARY_TOOL_CALL_THRESHOLD: Final[int] = (
     ToolLimitsConfig().general.final_summary_after_calls
@@ -1367,10 +1355,11 @@ _SUMMARY_MARKER = (
 )
 _SUMMARY_MESSAGE_PREFIX = f"{_SUMMARY_MARKER}\n\nSummary:\n"
 _SUMMARY_MESSAGE_SUFFIX = (
-    "\n\nContinue the conversation from where it left off without asking the user "
-    "any further questions. Resume directly — do not acknowledge the summary, "
-    "do not recap what was happening, do not preface with \"I'll continue\" or "
-    "similar. Pick up the last task as if the break never happened."
+    "\n\nContinue the conversation from where it left off. Do not acknowledge the "
+    "summary, recap what was happening, or ask the user to repeat information "
+    "solely because compaction occurred. If genuinely required information is "
+    "still missing, use the normal user-input or decision tool. Otherwise, pick "
+    "up the last task as if the break never happened."
 )
 _LEGACY_SUMMARY_MARKER = "[Assistant Execution Summary]"
 _RUNTIME_STATE_MARKER = "[Post-Compaction Runtime State]"
@@ -1955,7 +1944,6 @@ async def _maybe_summarize(
     api_prompt_tokens: int | None = None,
     tools: dict[str, Tool] | None = None,
     summary_llm: Any | None = None,
-    workflow_checkpoint: str | None = None,
     allow_llm_summary: bool = True,
     session_log: SessionLog | None = None,
     session_turn: int | None = None,
@@ -1994,59 +1982,6 @@ async def _maybe_summarize(
             mode="blocked",
             trigger_source=trigger_source,
         )
-
-    if (
-        workflow_checkpoint
-        and len(workflow_checkpoint) <= _RECENT_MESSAGE_CHAR_LIMIT
-    ):
-        latest_user_index = user_indices[-1]
-        retained_messages, retained_indices = _select_recent_messages(messages)
-        if latest_user_index not in retained_indices:
-            retained_indices.add(latest_user_index)
-            retained_messages = [
-                messages[index] for index in sorted(retained_indices)
-            ]
-        retained_messages = _bound_retained_messages(retained_messages)
-        runtime_state = await _restore_runtime_state(messages, tools)
-        checkpoint_message = Message(
-            role="user",
-            content=(
-                f"{_WORKFLOW_CHECKPOINT_MARKER}\n\n"
-                f"{workflow_checkpoint}"
-            ),
-        )
-        checkpoint_surface_messages = [
-            messages[0],
-            *retained_messages,
-        ]
-        if runtime_state is not None:
-            checkpoint_surface_messages.append(runtime_state)
-        checkpoint_request_messages = [
-            *checkpoint_surface_messages,
-            checkpoint_message,
-        ]
-        checkpoint_estimate = _fallback_context_estimate(
-            checkpoint_request_messages,
-            tools,
-        )
-        if checkpoint_estimate <= token_limit:
-            _log.info(
-                "context compaction session=%s mode=checkpoint before=%d "
-                "after=%d limit=%d summary_calls=0 protected_messages=%d",
-                session_id,
-                estimated,
-                checkpoint_estimate,
-                token_limit,
-                len(retained_messages),
-            )
-            return CompactionOutcome(
-                checkpoint_surface_messages,
-                estimated,
-                checkpoint_estimate,
-                mode="checkpoint",
-                summary_calls=0,
-                trigger_source=trigger_source,
-            )
 
     latest_user_index = user_indices[-1]
     retained_messages, retained_indices = _select_recent_messages(messages)
@@ -2856,28 +2791,6 @@ def _cleanup_incomplete_messages(messages: list[Message]) -> int:
     return removed
 
 
-def _discard_ephemeral_writes_before_checkpoint(
-    tools: dict[str, Tool],
-    workflow_policy: WorkflowPolicy | None,
-) -> list[dict[str, Any]]:
-    """End non-durable writes before persisting a cross-turn checkpoint."""
-    write_tool = tools.get("write_file")
-    discard = getattr(write_tool, "discard_pending_writes", None)
-    if not callable(discard):
-        return []
-    records = discard(reason="durable_checkpoint")
-    if not records or workflow_policy is None:
-        return records
-    record_cleanup = getattr(workflow_policy, "record_tool_cleanup", None)
-    if callable(record_cleanup):
-        record_cleanup("write_file", records)
-    _log.info(
-        "workflow_checkpoint/discarded_ephemeral_writes count=%d",
-        len(records),
-    )
-    return records
-
-
 # ── Main loop ───────────────────────────────────────────────────
 
 
@@ -2890,6 +2803,7 @@ async def run_agent_loop(
     max_steps: int = _DEFAULT_AGENT_CONFIG.max_steps,
     tool_limits: ToolLimitsConfig | None = None,
     max_tool_calls: int | None = None,
+    max_delegated_tool_calls: int | None = None,
     web_search_total_limit: int | None = None,
     token_limit: int = 113400,
     is_cancelled: CancelChecker | None = None,
@@ -2918,7 +2832,6 @@ async def run_agent_loop(
     max_parallel_tools: int = 8,
     parallel_tool_timeout_seconds: float | None = 900.0,
     provider_stale_seconds: float | None = None,
-    completion_gate: CompletionGate | None = None,
     truncation_continuation_enabled: bool = True,
     max_truncation_continuations: int = 3,
     max_truncated_tool_call_retries: int = 3,
@@ -2928,7 +2841,6 @@ async def run_agent_loop(
     cache_fingerprint_context: dict[str, Any] | None = None,
     cache_fingerprint_sink: Callable[[dict[str, Any]], None] | None = None,
     active_skill_activator: ActiveSkillActivator | None = None,
-    workflow_policy: WorkflowPolicy | None = None,
     current_turn_text: str | None = None,
     context_resource_ledger: ContextResourceLedger | None = None,
     context_resource_dedup_enabled: bool = True,
@@ -2948,8 +2860,10 @@ async def run_agent_loop(
         messages: Message history (mutated in-place).
         tools: ``{name: Tool}`` dict.
         max_steps: Maximum LLM call iterations.
-        tool_limits: Typed product limits for search, wrap-up, and child workflows.
+        tool_limits: Typed limits for search, wrap-up, and delegated runs.
         max_tool_calls: Optional hard cap across all tool executions in this loop.
+        max_delegated_tool_calls: Optional aggregate cap for tool calls reported by
+            successful delegated sub-agent runs.
         web_search_total_limit: Optional per-turn web search override.
         token_limit: Token threshold for triggering summarization.
         is_cancelled: Optional callable — return ``True`` to stop.
@@ -3007,8 +2921,6 @@ async def run_agent_loop(
             cache-sensitive request fingerprints, such as selected skill names.
         cache_fingerprint_sink: Optional callback that receives each fingerprint
             before the LLM request, for hosts that do not use ``AgentLogger``.
-        workflow_policy: Optional host-neutral workflow hooks composed by
-            ``box_agent.runtime``. The kernel never selects a concrete workflow.
         current_turn_text: Optional host-sanitized latest user request used to
             gate tools that access the user's active browser tab. When omitted,
             the latest user message is used.
@@ -3042,26 +2954,9 @@ async def run_agent_loop(
     result_storage.set_context_token_limit(token_limit)
     result_storage.initialize_history(messages)
     hook_mgr = HookManager(hooks)
-    if (
-        max_tool_calls is None
-        and completion_gate is not None
-        and completion_gate.max_tool_calls is not None
-    ):
-        max_tool_calls = completion_gate.max_tool_calls
-    budget_exempt_tools = (
-        completion_gate.budget_exempt_tools
-        if completion_gate is not None
-        else frozenset()
-    )
     tool_call_limits = {
         WEB_SEARCH_TOOL_NAME: effective_tool_limits.web_search.total_calls,
     }
-    if (
-        web_search_total_limit is None
-        and completion_gate is not None
-        and completion_gate.web_search_total_limit is not None
-    ):
-        web_search_total_limit = completion_gate.web_search_total_limit
     if web_search_total_limit is not None:
         tool_call_limits[WEB_SEARCH_TOOL_NAME] = max(
             0,
@@ -3217,14 +3112,7 @@ async def run_agent_loop(
     # preserve existing behavior.
     no_progress_steps = 0
 
-    # Completion gate (opt-in via ``completion_gate``). ``succeeded_tools``
-    # accumulates tool names that produced ≥1 successful, non-empty result;
-    # ``gate_continuations`` bounds how many times the gate may force the
-    # loop to continue past a natural END_TURN. Both inert when the gate is
-    # disabled (None).
-    succeeded_tools: set[str] = set()
-    gate_continuations = 0
-    workflow_checkpoint_message: Message | None = None
+    plan_write_succeeded = False
     # Suspected-truncation continuation (opt-in via
     # ``truncation_continuation_enabled``). Bounds how many times the loop
     # may re-prompt the model to finish a reply that ended mid-sentence
@@ -3303,7 +3191,6 @@ async def run_agent_loop(
     tool_call_total = 0
     delegated_tool_call_total = 0
     delegated_budget_guidance_injected = False
-    completion_reserve_injected = False
     tool_budget_wrapup_injected: set[str] = set()
     visible_tool_call_total = 0
     final_summary_guidance_injected = False
@@ -3353,37 +3240,7 @@ async def run_agent_loop(
             "guidance. Do not retry the unchanged call."
         )
 
-    def _record_workflow_visible_evidence(
-        tool_name: str,
-        arguments: dict[str, Any],
-        result: ToolResult,
-        visible_content: str,
-    ) -> None:
-        """Record URL evidence from the exact result exposed to the model."""
-        if workflow_policy is None or not result.success or not visible_content.strip():
-            return
-        record_visible = getattr(workflow_policy, "record_visible_tool_result", None)
-        if callable(record_visible):
-            record_visible(tool_name, arguments, result, visible_content)
-        evidence_urls = getattr(workflow_policy, "evidence_urls", None)
-        if callable(evidence_urls):
-            urls = evidence_urls(tool_name, arguments, result)
-        elif workflow_policy.is_direct_evidence_read_tool(tool_name):
-            direct_url = workflow_policy.direct_evidence_url(
-                tool_name,
-                arguments,
-                result,
-            )
-            urls = (direct_url,) if direct_url else ()
-        else:
-            urls = ()
-        for url in urls:
-            normalized = _normalize_search_url(url)
-            if normalized:
-                verified_evidence_urls.add(normalized)
-
     for step in range(max_steps):
-        workflow_action: WorkflowAction | None = None
         if resource_ledger is not None:
             invalidated = resource_ledger.reconcile(messages)
             if invalidated:
@@ -3404,57 +3261,6 @@ async def run_agent_loop(
             yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
             return
 
-        # A workflow checkpoint is regenerated from disk before each model
-        # request. Remove the prior object before compaction so it cannot
-        # accumulate in history or be folded into a summary. The current
-        # checkpoint is appended again below even when the stage is unchanged:
-        # tool output (especially search/discovery output) must not displace the
-        # authoritative next action and let a long deck run drift sideways.
-        # Only the injected event/log is deduplicated for an unchanged stage.
-        checkpoint_marker = getattr(
-            workflow_policy,
-            "checkpoint_injection_id",
-            None,
-        )
-        if workflow_checkpoint_message is not None or checkpoint_marker:
-            retained_messages = [
-                message
-                for message in messages
-                if message is not workflow_checkpoint_message
-                and not (
-                    isinstance(checkpoint_marker, str)
-                    and checkpoint_marker
-                    and isinstance(message.content, str)
-                    and checkpoint_marker in message.content
-                    and message.content.lstrip().startswith(
-                        (
-                            "The host runtime supplied the following internal state update",
-                            "The user sent the following message while the current task was already running",
-                            _WORKFLOW_CHECKPOINT_MARKER,
-                        )
-                    )
-                )
-            ]
-            checkpoint_message_removed = len(retained_messages) != len(messages)
-            messages[:] = retained_messages
-            if (
-                checkpoint_message_removed
-                and session_log is not None
-                and session_turn is not None
-                and messages[1:]
-            ):
-                # Older Session Logs may already contain a rotating workflow
-                # checkpoint as a user message. Migrate that transient runtime
-                # context out of the durable conversation Surface before the
-                # next append-only prefix check.
-                session_log.replace_surface(
-                    messages[1:],
-                    turn=session_turn,
-                    step=step + 1,
-                )
-                session_log.flush()
-            workflow_checkpoint_message = None
-
         step_start = perf_counter()
         web_search_step_seen = False
         web_search_step_executed = 0
@@ -3464,7 +3270,6 @@ async def run_agent_loop(
         web_search_step_duplicate_results = 0
         web_search_step_structured_results = 0
         web_search_step_labels: list[str] = []
-        workflow_evidence_read_step_executed = 0
         model_history_placeholder_auto_repair_requested = False
 
         # ── Drain inject queue (in-stream injection) ───────
@@ -3557,15 +3362,13 @@ async def run_agent_loop(
                 )
                 yield InjectedMessageEvent(content=budget_text, injection_id=None, user_visible=False)
         if (
-            completion_gate is not None
-            and completion_gate.max_delegated_tool_calls is not None
-            and delegated_tool_call_total
-            >= completion_gate.max_delegated_tool_calls
+            max_delegated_tool_calls is not None
+            and delegated_tool_call_total >= max_delegated_tool_calls
             and not delegated_budget_guidance_injected
         ):
             delegated_budget_guidance_injected = True
             delegated_text = delegated_tool_call_budget_wrapup_text(
-                completion_gate.max_delegated_tool_calls
+                max_delegated_tool_calls
             )
             messages.append(
                 Message(role="user", content=format_injected_message(delegated_text))
@@ -3592,37 +3395,6 @@ async def run_agent_loop(
                 user_visible=False,
             )
         if (
-            completion_gate is not None
-            and max_tool_calls is not None
-            and completion_gate.completion_reserve_tool_calls > 0
-            and not completion_reserve_injected
-            and tool_call_total
-            >= max_tool_calls - completion_gate.completion_reserve_tool_calls
-            and completion_gate.pause_tools.isdisjoint(succeeded_tools)
-        ):
-            gaps = completion_gate_gaps(
-                completion_gate,
-                succeeded_tools,
-                workspace_dir,
-            )
-            if gaps:
-                completion_reserve_injected = True
-                reserve_text = completion_budget_reserve_text(
-                    gaps,
-                    completion_gate.completion_reserve_tool_calls,
-                )
-                messages.append(
-                    Message(
-                        role="user",
-                        content=format_injected_message(reserve_text),
-                    )
-                )
-                yield InjectedMessageEvent(
-                    content=reserve_text,
-                    injection_id=None,
-                    user_visible=False,
-                )
-        if (
             max_tool_calls is not None
             and tool_call_total >= max_tool_calls
             and "__total__" not in tool_budget_wrapup_injected
@@ -3637,35 +3409,6 @@ async def run_agent_loop(
                 injection_id=None,
                 user_visible=False,
             )
-
-        checkpoint_text: str | None = None
-        checkpoint_changed = False
-        if (
-            completion_gate is not None
-            and workflow_policy is not None
-            and not wrapup_injected
-            and (max_tool_calls is None or tool_call_total < max_tool_calls)
-        ):
-            checkpoint_text = workflow_policy.build_checkpoint()
-            if checkpoint_text is not None:
-                checkpoint_update = workflow_policy.update_checkpoint(
-                    checkpoint_text
-                )
-                checkpoint_text = checkpoint_update.text
-                checkpoint_changed = checkpoint_update.changed
-                verified_evidence_urls.update(
-                    checkpoint_update.recovered_evidence_urls
-                )
-                if not (
-                    force_plan_for_turn and "plan_write" not in succeeded_tools
-                ):
-                    next_action = getattr(
-                        workflow_policy,
-                        "next_deterministic_action",
-                        None,
-                    )
-                    if callable(next_action):
-                        workflow_action = next_action()
 
         # ── Fresh tool-result aggregate budget (Layer 1) ───
         # This runs immediately before the next LLM request. Decisions are
@@ -3710,7 +3453,6 @@ async def run_agent_loop(
             api_prompt_tokens=api_prompt_tokens,
             tools=tools,
             summary_llm=summary_llm,
-            workflow_checkpoint=checkpoint_text,
             allow_llm_summary=summary_failure_cooldown_steps == 0,
             session_log=session_log,
             session_turn=session_turn,
@@ -3742,48 +3484,35 @@ async def run_agent_loop(
                     )
                 )
             if session_log is not None and session_turn is not None:
-                if result.mode == "checkpoint":
-                    session_log.append(
-                        "compaction/prune",
-                        {
-                            "turn": session_turn,
-                            "step": step + 1,
-                            "mode": result.mode,
-                            "estimatedBefore": est_before,
-                            "estimatedAfter": result.estimated_after,
-                        },
-                    )
-                else:
-                    session_log.append(
-                        "compaction/summary",
-                        {
-                            "turn": session_turn,
-                            "step": step + 1,
-                            "mode": result.mode,
-                            "message": new_msgs[1].model_dump(
-                                mode="json",
-                                exclude_none=True,
-                            ),
-                            "estimatedBefore": est_before,
-                            "estimatedAfter": result.estimated_after,
-                            "error": result.error,
-                        },
-                    )
+                session_log.append(
+                    "compaction/summary",
+                    {
+                        "turn": session_turn,
+                        "step": step + 1,
+                        "mode": result.mode,
+                        "message": new_msgs[1].model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        ),
+                        "estimatedBefore": est_before,
+                        "estimatedAfter": result.estimated_after,
+                        "error": result.error,
+                    },
+                )
                 session_log.replace_surface(
                     new_msgs[1:],
                     turn=session_turn,
                     step=step + 1,
                 )
-                if result.mode != "checkpoint":
-                    session_log.append(
-                        "compaction/end",
-                        {
-                            "turn": session_turn,
-                            "step": step + 1,
-                            "mode": result.mode,
-                            "error": result.error,
-                        },
-                    )
+                session_log.append(
+                    "compaction/end",
+                    {
+                        "turn": session_turn,
+                        "step": step + 1,
+                        "mode": result.mode,
+                        "error": result.error,
+                    },
+                )
                 session_log.flush()
             messages.clear()
             messages.extend(new_msgs)
@@ -3805,132 +3534,12 @@ async def run_agent_loop(
                 error_type=result.error_type,
                 trigger_source=result.trigger_source,
             )
-        tool_budget_checkpoint_required = (
-            workflow_policy is not None
-            and completion_gate is not None
-            and max_tool_calls is not None
-            and tool_call_total >= max_tool_calls
-            and bool(
-                completion_gate_gaps(
-                    completion_gate,
-                    succeeded_tools,
-                    workspace_dir,
-                )
-            )
-        )
-        if result.blocked or tool_budget_checkpoint_required:
-            pause_checkpoint = None
-            checkpoint_error: Exception | None = None
-            if workflow_policy is not None:
-                try:
-                    _discard_ephemeral_writes_before_checkpoint(
-                        tools,
-                        workflow_policy,
-                    )
-                    pause_checkpoint = await asyncio.to_thread(
-                        save_workflow_checkpoint,
-                        workflow_policy,
-                        workspace_dir=workspace_dir,
-                        artifact_root_dir=artifact_root_dir,
-                    )
-                except Exception as exc:
-                    checkpoint_error = exc
-                    _log.warning(
-                        "workflow_checkpoint/save_failed workflow=%s error=%s",
-                        getattr(workflow_policy, "kind", "unknown"),
-                        exc,
-                    )
-            if pause_checkpoint is not None:
-                pause_message = (
-                    "Tool-call budget reached the safe continuation boundary. Progress "
-                    "was saved to a durable workspace checkpoint; continue this task to "
-                    "resume from canonical artifacts."
-                    if tool_budget_checkpoint_required and not result.blocked
-                    else
-                    "Context reached the safe continuation boundary. Progress was "
-                    "saved to a durable workspace checkpoint; continue this task to "
-                    "resume from canonical artifacts."
-                )
-                _log.info(
-                    "workflow_checkpoint/paused checkpoint_id=%s workflow=%s "
-                    "schema_version=%d artifact_count=%d",
-                    pause_checkpoint.checkpoint_id,
-                    pause_checkpoint.workflow_kind,
-                    pause_checkpoint.schema_version,
-                    pause_checkpoint.artifact_count,
-                )
-                original_message_count = len(messages)
-                retained_messages = [
-                    message for message in messages if message.role == "system"
-                ]
-                retained_system_count = len(retained_messages)
-                retained_messages.append(
-                    Message(role="assistant", content=pause_message)
-                )
-                removed_message_count = original_message_count - retained_system_count
-                if session_log is not None and session_turn is not None:
-                    session_log.append_unlogged_messages(
-                        messages[1:],
-                        turn=session_turn,
-                        step=step + 1,
-                    )
-                    session_log.append(
-                        "compaction/prune",
-                        {
-                            "turn": session_turn,
-                            "step": step + 1,
-                            "mode": "workflow_checkpoint",
-                        },
-                    )
-                    session_log.replace_surface(
-                        retained_messages[1:],
-                        turn=session_turn,
-                        step=step + 1,
-                    )
-                    session_log.flush()
-                messages.clear()
-                messages.extend(retained_messages)
-                if resource_ledger is not None:
-                    resource_ledger.rotate_epoch()
-                yield ContextCheckpointEvent(
-                    checkpoint_id=pause_checkpoint.checkpoint_id,
-                    workflow_kind=pause_checkpoint.workflow_kind,
-                    adapter_id=pause_checkpoint.adapter_id,
-                    schema_version=pause_checkpoint.schema_version,
-                    workspace_identity=pause_checkpoint.workspace_identity,
-                    path=pause_checkpoint.path,
-                    stage=pause_checkpoint.stage,
-                    artifact_count=pause_checkpoint.artifact_count,
-                    artifact_set_sha256=pause_checkpoint.artifact_set_sha256,
-                )
-                _log.info(
-                    "workflow_checkpoint/history_reset checkpoint_id=%s "
-                    "removed_messages=%d retained_messages=%d",
-                    pause_checkpoint.checkpoint_id,
-                    removed_message_count,
-                    len(retained_messages),
-                )
-                if hook_mgr.hooks:
-                    await hook_mgr.fire_done(
-                        stop_reason=StopReason.CHECKPOINT_PAUSED,
-                        final_content=pause_message,
-                    )
-                yield DoneEvent(
-                    stop_reason=StopReason.CHECKPOINT_PAUSED,
-                    final_content=pause_message,
-                )
-                return
+        if result.blocked:
             msg = (
-                "The workflow reached its tool-call continuation boundary, but a durable "
-                "checkpoint could not be saved."
-                if tool_budget_checkpoint_required and not result.blocked
-                else
                 "Context remains above the safe input limit after bounded compaction "
                 f"({result.estimated_after} estimated tokens; limit {token_limit}). "
                 "Start a new session or reduce active instructions/tool output before retrying."
             )
-            if checkpoint_error is not None:
-                msg += " A durable workflow checkpoint could not be saved."
             if hook_mgr.hooks:
                 await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
                 await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
@@ -3971,28 +3580,6 @@ async def run_agent_loop(
             )
             yield InjectedMessageEvent(content=stall_text, injection_id=None, user_visible=False)
 
-        # ── Filesystem-backed workflow checkpoint ─────────
-        # Let the selected workflow re-derive its state from canonical
-        # artifacts and make the next action the freshest instruction. This is
-        # skipped once any terminal wrap-up or total tool budget has fired.
-        if (
-            completion_gate is not None
-            and workflow_policy is not None
-            and not wrapup_injected
-            and (max_tool_calls is None or tool_call_total < max_tool_calls)
-        ):
-            if checkpoint_text is not None:
-                workflow_checkpoint_message = Message(
-                    role="user",
-                    content=format_runtime_context_update(checkpoint_text),
-                )
-                if checkpoint_changed:
-                    yield InjectedMessageEvent(
-                        content=checkpoint_text,
-                        injection_id=workflow_policy.checkpoint_injection_id,
-                        user_visible=False,
-                    )
-
         # ── Step start ──────────────────────────────────────
         yield StepStart(step=step + 1, max_steps=max_steps)
         if hook_mgr.hooks:
@@ -4013,68 +3600,23 @@ async def run_agent_loop(
             for tool in tool_list
             if browser_intent_policy.is_tool_visible(tool.name)
         ]
-        hidden_tool_names = getattr(
-            workflow_policy,
-            "hidden_tool_names",
-            None,
-        )
-        if callable(hidden_tool_names):
-            hidden = hidden_tool_names()
-            tool_list = [tool for tool in tool_list if tool.name not in hidden]
-        if (
-            completion_gate is not None
-            and completion_gate.restrict_tools_until_required_succeed
-        ):
-            pending_required_tools = completion_gate.required_tools - succeeded_tools
-            if pending_required_tools:
-                tool_list = [
-                    tool
-                    for tool in tool_list
-                    if tool.name in pending_required_tools
-                    or (
-                        tool_exposure_manager is not None
-                        and (
-                            tool.name == "tool_search"
-                            or tool.name in offered_mcp_generations
-                        )
-                    )
-                ]
         offered_tools_by_name = {tool.name: tool for tool in tool_list}
         offered_tools_by_call_name = build_tool_name_index(tool_list)
         offered_tool_names = frozenset(offered_tools_by_name)
-        if workflow_action is not None:
-            action_tool = offered_tools_by_name.get(workflow_action.tool_name)
-            supported_actions = getattr(
-                action_tool,
-                "runtime_workflow_actions",
-                frozenset(),
-            )
-            if workflow_action.capability not in supported_actions:
-                _log.warning(
-                    "workflow/action_unsupported action_id=%s capability=%s tool=%s",
-                    workflow_action.action_id,
-                    workflow_action.capability,
-                    workflow_action.tool_name,
-                )
-                workflow_action = None
-
         request_context_messages = [
             message
-            for message in (
-                auto_memory_context_message,
-                workflow_checkpoint_message,
-            )
+            for message in (auto_memory_context_message,)
             if message is not None
         ]
-        workflow_request_messages = (
+        request_messages = (
             [*messages, *request_context_messages]
             if request_context_messages
             else messages
         )
         provider_request_messages = (
-            [*workflow_request_messages, transient_message]
+            [*request_messages, transient_message]
             if transient_message is not None
-            else workflow_request_messages
+            else request_messages
         )
 
         if session_log is not None and session_turn is not None:
@@ -4118,26 +3660,6 @@ async def run_agent_loop(
                     "tokenLimit": token_limit,
                     **(
                         {
-                            "workflowCheckpoint": {
-                                "workflowKind": getattr(workflow_policy, "kind", None),
-                                "stage": getattr(workflow_policy, "stage", None),
-                                "injectionId": getattr(
-                                    workflow_policy,
-                                    "checkpoint_injection_id",
-                                    None,
-                                ),
-                                "sha256": hashlib.sha256(
-                                    checkpoint_text.encode("utf-8")
-                                ).hexdigest(),
-                                "chars": len(checkpoint_text),
-                            }
-                        }
-                        if checkpoint_text is not None
-                        and workflow_checkpoint_message is not None
-                        else {}
-                    ),
-                    **(
-                        {
                             "autoMemoryContext": {
                                 "sha256": hashlib.sha256(
                                     str(auto_memory_context_message.content).encode("utf-8")
@@ -4176,7 +3698,7 @@ async def run_agent_loop(
             )
 
         cache_fingerprint = build_cache_fingerprint(
-            messages=workflow_request_messages,
+            messages=request_messages,
             tools=tool_list,
             context=cache_fingerprint_context,
         )
@@ -4185,16 +3707,16 @@ async def run_agent_loop(
                 cache_fingerprint_sink(cache_fingerprint)
             except Exception:
                 _log.debug("cache fingerprint sink failed", exc_info=True)
-        if logger and workflow_action is None:
+        if logger:
             logger.log_request(
-                messages=workflow_request_messages,
+                messages=request_messages,
                 tools=tool_list,
                 cache_fingerprint=cache_fingerprint,
             )
 
         llm_debug_sink_token = (
             set_llm_debug_sink(logger.log_llm_debug_record)
-            if logger and workflow_action is None
+            if logger
             else None
         )
         try:
@@ -4218,52 +3740,14 @@ async def run_agent_loop(
                 "turn_id": turn_id,
                 "title": title,
             }
-            effective_call_kind = call_kind
-            workflow_call_kind = getattr(
-                workflow_policy,
-                "llm_call_kind",
-                None,
-            )
-            if callable(workflow_call_kind):
-                effective_call_kind = workflow_call_kind()
-            if effective_call_kind:
-                stream_kwargs["call_kind"] = effective_call_kind
+            if call_kind:
+                stream_kwargs["call_kind"] = call_kind
             request_only_input_tokens = (
                 pending_transient_followup_tokens
-                if workflow_action is None and transient_message is not None
+                if transient_message is not None
                 else 0
             )
-            if workflow_action is None:
-                llm_stream = llm.generate_stream(**stream_kwargs)
-            else:
-                action = workflow_action
-                tool_call_id = "workflow_" + hashlib.sha256(
-                    action.action_id.encode("utf-8")
-                ).hexdigest()[:24]
-
-                async def _deterministic_action_stream() -> AsyncIterator[StreamEvent]:
-                    yield StreamEvent(
-                        type="finish",
-                        finish_reason="tool",
-                        tool_calls=[
-                            ToolCall(
-                                id=tool_call_id,
-                                type="function",
-                                function=FunctionCall(
-                                    name=action.tool_name,
-                                    arguments=action.arguments,
-                                ),
-                            )
-                        ],
-                    )
-
-                _log.info(
-                    "workflow/action_dispatch action_id=%s capability=%s tool=%s",
-                    action.action_id,
-                    action.capability,
-                    action.tool_name,
-                )
-                llm_stream = _deterministic_action_stream()
+            llm_stream = llm.generate_stream(**stream_kwargs)
             async for chunk in _stream_with_activity(
                 llm_stream, stale_seconds=effective_provider_stale_seconds
             ):
@@ -4356,30 +3840,29 @@ async def run_agent_loop(
                 oversized_tool_calls=finish_event.oversized_tool_calls,
             )
             provider_request_id = finish_event.provider_request_id
-            if workflow_action is None:
-                yield LLMOutputEvent(
-                    step=step + 1,
-                    content=response.content,
-                    thinking=response.thinking,
-                    tool_calls=(
-                        [tc.model_dump() for tc in response.tool_calls]
-                        if response.tool_calls
-                        else None
-                    ),
-                    finish_reason=response.finish_reason,
-                    usage=(
-                        response.usage.model_dump(
-                            include={
-                                "prompt_tokens",
-                                "completion_tokens",
-                                "total_tokens",
-                            }
-                        )
-                        if response.usage
-                        else None
-                    ),
-                    provider_request_id=provider_request_id,
-                )
+            yield LLMOutputEvent(
+                step=step + 1,
+                content=response.content,
+                thinking=response.thinking,
+                tool_calls=(
+                    [tc.model_dump() for tc in response.tool_calls]
+                    if response.tool_calls
+                    else None
+                ),
+                finish_reason=response.finish_reason,
+                usage=(
+                    response.usage.model_dump(
+                        include={
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "total_tokens",
+                        }
+                    )
+                    if response.usage
+                    else None
+                ),
+                provider_request_id=provider_request_id,
+            )
 
         except Exception as exc:
             from .llm.error_messages import structured_llm_error
@@ -4459,11 +3942,11 @@ async def run_agent_loop(
             yield TokenUsageEvent(total_tokens=api_total_tokens)
 
         # ── Hook: LLM response ─────────────────────────────
-        if hook_mgr.hooks and workflow_action is None:
+        if hook_mgr.hooks:
             await hook_mgr.fire_llm_response(response=response)
 
         # ── Log response ────────────────────────────────────
-        if logger and workflow_action is None:
+        if logger:
             logger.log_response(
                 content=response.content,
                 thinking=response.thinking,
@@ -4520,7 +4003,7 @@ async def run_agent_loop(
 
         # Raw image blocks are a one-shot request overlay. Retain them only
         # when an empty provider-stale response will be retried verbatim.
-        if workflow_action is None and (
+        if (
             response.finish_reason != "provider_stale"
             or (response.content or "").strip()
             or (response.thinking or "").strip()
@@ -4885,7 +4368,7 @@ async def run_agent_loop(
         if not response.tool_calls:
             if (
                 force_plan_for_turn
-                and "plan_write" not in succeeded_tools
+                and not plan_write_succeeded
                 and not forced_plan_retry_injected
             ):
                 forced_plan_retry_injected = True
@@ -4924,192 +4407,6 @@ async def run_agent_loop(
                     await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                 yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                 continue
-
-            # ── Completion gate (opt-in) ────────────────────
-            # Intercept this natural END_TURN: if a verifiable requirement is
-            # unmet and we're still within the continuation/time budget, inject
-            # a continuation nudge naming the gaps and keep looping instead of
-            # finishing. The bounded counter + optional deadline guarantee the
-            # gate releases rather than trapping the agent forever.
-            if (
-                completion_gate is not None
-                and (
-                    workflow_policy is None
-                    or workflow_policy.allows_completion_continuation()
-                )
-                and gate_continuations < completion_gate.max_continuations
-                and completion_gate.pause_tools.isdisjoint(succeeded_tools)
-                # Once the hard tool budget is exhausted, another completion
-                # continuation cannot close an artifact gap. Let the model's
-                # current wrap-up end the turn instead of nudging it into an
-                # impossible tool-call loop.
-                and (max_tool_calls is None or tool_call_total < max_tool_calls)
-                and (
-                    completion_gate.deadline_seconds is None
-                    or (perf_counter() - run_start) < completion_gate.deadline_seconds
-                )
-            ):
-                gaps = completion_gate_gaps(completion_gate, succeeded_tools, workspace_dir)
-                if gaps:
-                    gate_continuations += 1
-                    nudge = completion_gate_text(gaps)
-                    messages.append(
-                        Message(role="user", content=format_injected_message(nudge))
-                    )
-                    yield InjectedMessageEvent(content=nudge, injection_id=None, user_visible=False)
-                    elapsed = perf_counter() - step_start
-                    total = perf_counter() - run_start
-                    if hook_mgr.hooks:
-                        await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-                    yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-                    continue
-
-            exhausted_gate_gaps = (
-                completion_gate_gaps(
-                    completion_gate,
-                    succeeded_tools,
-                    workspace_dir,
-                )
-                if completion_gate is not None
-                and workflow_policy is not None
-                and completion_gate.pause_tools.isdisjoint(succeeded_tools)
-                and (
-                    gate_continuations >= completion_gate.max_continuations
-                    or (
-                        completion_gate.deadline_seconds is not None
-                        and (perf_counter() - run_start)
-                        >= completion_gate.deadline_seconds
-                    )
-                )
-                else []
-            )
-            if exhausted_gate_gaps:
-                pause_checkpoint = None
-                checkpoint_error: Exception | None = None
-                try:
-                    _discard_ephemeral_writes_before_checkpoint(
-                        tools,
-                        workflow_policy,
-                    )
-                    pause_checkpoint = await asyncio.to_thread(
-                        save_workflow_checkpoint,
-                        workflow_policy,
-                        workspace_dir=workspace_dir,
-                        artifact_root_dir=artifact_root_dir,
-                    )
-                except Exception as exc:
-                    checkpoint_error = exc
-                    _log.warning(
-                        "workflow_checkpoint/save_failed workflow=%s error=%s",
-                        getattr(workflow_policy, "kind", "unknown"),
-                        exc,
-                    )
-                if pause_checkpoint is not None:
-                    pause_message = (
-                        "The recoverable workflow reached its bounded continuation "
-                        "boundary with delivery work remaining. Progress was saved to "
-                        "a durable workspace checkpoint; continue this task to resume "
-                        "from canonical artifacts."
-                    )
-                    _log.info(
-                        "workflow_checkpoint/paused checkpoint_id=%s workflow=%s "
-                        "schema_version=%d artifact_count=%d reason=continuation_exhausted",
-                        pause_checkpoint.checkpoint_id,
-                        pause_checkpoint.workflow_kind,
-                        pause_checkpoint.schema_version,
-                        pause_checkpoint.artifact_count,
-                    )
-                    original_message_count = len(messages)
-                    retained_messages = [
-                        message for message in messages if message.role == "system"
-                    ]
-                    retained_system_count = len(retained_messages)
-                    retained_messages.append(
-                        Message(role="assistant", content=pause_message)
-                    )
-                    if session_log is not None and session_turn is not None:
-                        session_log.append_unlogged_messages(
-                            messages[1:],
-                            turn=session_turn,
-                            step=step + 1,
-                        )
-                        session_log.append(
-                            "compaction/prune",
-                            {
-                                "turn": session_turn,
-                                "step": step + 1,
-                                "mode": "workflow_checkpoint",
-                            },
-                        )
-                        session_log.replace_surface(
-                            retained_messages[1:],
-                            turn=session_turn,
-                            step=step + 1,
-                        )
-                        session_log.flush()
-                    messages.clear()
-                    messages.extend(retained_messages)
-                    if resource_ledger is not None:
-                        resource_ledger.rotate_epoch()
-                    yield ContextCheckpointEvent(
-                        checkpoint_id=pause_checkpoint.checkpoint_id,
-                        workflow_kind=pause_checkpoint.workflow_kind,
-                        adapter_id=pause_checkpoint.adapter_id,
-                        schema_version=pause_checkpoint.schema_version,
-                        workspace_identity=pause_checkpoint.workspace_identity,
-                        path=pause_checkpoint.path,
-                        stage=pause_checkpoint.stage,
-                        artifact_count=pause_checkpoint.artifact_count,
-                        artifact_set_sha256=pause_checkpoint.artifact_set_sha256,
-                    )
-                    _log.info(
-                        "workflow_checkpoint/history_reset checkpoint_id=%s "
-                        "removed_messages=%d retained_messages=%d",
-                        pause_checkpoint.checkpoint_id,
-                        original_message_count - retained_system_count,
-                        len(retained_messages),
-                    )
-                    elapsed = perf_counter() - step_start
-                    total = perf_counter() - run_start
-                    if hook_mgr.hooks:
-                        await hook_mgr.fire_step_end(
-                            step=step + 1,
-                            elapsed_seconds=elapsed,
-                            total_elapsed_seconds=total,
-                        )
-                        await hook_mgr.fire_done(
-                            stop_reason=StopReason.CHECKPOINT_PAUSED,
-                            final_content=pause_message,
-                        )
-                    yield StepEnd(
-                        step=step + 1,
-                        elapsed_seconds=elapsed,
-                        total_elapsed_seconds=total,
-                    )
-                    yield DoneEvent(
-                        stop_reason=StopReason.CHECKPOINT_PAUSED,
-                        final_content=pause_message,
-                    )
-                    return
-                msg = (
-                    "The recoverable workflow reached its bounded continuation "
-                    "boundary, but a durable checkpoint could not be saved."
-                )
-                if checkpoint_error is not None:
-                    msg += f" {type(checkpoint_error).__name__}: {checkpoint_error}"
-                if hook_mgr.hooks:
-                    await hook_mgr.fire_error(
-                        message=msg,
-                        is_fatal=True,
-                        exception=checkpoint_error,
-                    )
-                    await hook_mgr.fire_done(
-                        stop_reason=StopReason.ERROR,
-                        final_content=msg,
-                    )
-                yield ErrorEvent(message=msg, is_fatal=True)
-                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
-                return
 
             # ── Suspected-truncation continuation (opt-in) ──
             # The provider reported a normal finish with no tool calls, but
@@ -5208,17 +4505,6 @@ async def run_agent_loop(
 
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
-            if completion_gate is not None and workflow_policy is not None:
-                final_gaps = completion_gate_gaps(
-                    completion_gate,
-                    succeeded_tools,
-                    workspace_dir,
-                )
-                if not final_gaps:
-                    clear_workflow_checkpoint(
-                        workspace_dir=workspace_dir,
-                        workflow_kind=getattr(workflow_policy, "kind", None),
-                    )
             if hook_mgr.hooks:
                 await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                 await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=response.content)
@@ -5339,12 +4625,26 @@ async def run_agent_loop(
             )
         )
 
+        # A successful interactive tool is a turn boundary. Preserve the
+        # model's exact call order for the whole step so only calls before that
+        # boundary can run; later siblings receive deterministic skip results.
+        step_has_turn_ending_tool = any(
+            getattr(
+                offered_tools_by_name.get(tc.function.name),
+                "ends_turn_on_success",
+                False,
+            )
+            for tc in unique_tool_calls
+        )
+
         # Split unique calls into regular (sequential) and parallel_safe groups.
         regular_calls = []
         parallel_calls = []
         for tc in unique_tool_calls:
             fn_name = tc.function.name
-            if _model_history_placeholder_argument(fn_name, tc.function.arguments):
+            if step_has_turn_ending_tool:
+                regular_calls.append(tc)
+            elif _model_history_placeholder_argument(fn_name, tc.function.arguments):
                 # Placeholder repair is stateful and must be handled by the
                 # sequential branch even if a future mutation tool is marked
                 # parallel-safe.
@@ -5378,7 +4678,7 @@ async def run_agent_loop(
         # no-progress circuit breaker. Set True in either execution branch.
         step_made_progress = False
         step_tool_success_by_id: dict[str, bool] = {}
-        completed_pause_tool: str | None = None
+        completed_turn_ending_tool: str | None = None
 
         def _reserve_tool_budget(tool_name: str) -> tuple[bool, str | None]:
             nonlocal tool_call_total
@@ -5390,27 +4690,16 @@ async def run_agent_loop(
                 return False, search_files_empty_result_message(
                     search_files_empty_result_limit
                 )
-            is_workflow_budget_exempt = (
-                workflow_policy is not None
-                and workflow_policy.exempts_tool_budget(tool_name)
-            )
-            is_budgeted = (
-                tool_name not in budget_exempt_tools
-                and not is_workflow_budget_exempt
-            )
             if (
                 tool_name == "sub_agent"
-                and completion_gate is not None
-                and completion_gate.max_delegated_tool_calls is not None
-                and delegated_tool_call_total
-                >= completion_gate.max_delegated_tool_calls
+                and max_delegated_tool_calls is not None
+                and delegated_tool_call_total >= max_delegated_tool_calls
             ):
                 return False, delegated_tool_call_budget_message(
-                    completion_gate.max_delegated_tool_calls
+                    max_delegated_tool_calls
                 )
             if (
-                is_budgeted
-                and max_tool_calls is not None
+                max_tool_calls is not None
                 and tool_call_total >= max_tool_calls
             ):
                 return False, total_tool_call_budget_message(max_tool_calls)
@@ -5419,20 +4708,17 @@ async def run_agent_loop(
                 return False, tool_call_budget_message(tool_name, limit)
             if limit is not None:
                 tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
-            if is_budgeted:
-                tool_call_total += 1
+            tool_call_total += 1
             return True, None
 
         def _record_nested_tool_budget(
             tool_name: str,
             result: ToolResult,
         ) -> None:
-            """Track child executions without consuming the parent delivery budget."""
+            """Track child executions against the direct aggregate budget."""
             nonlocal delegated_tool_call_total
             if (
-                workflow_policy is None
-                or completion_gate is None
-                or completion_gate.max_delegated_tool_calls is None
+                max_delegated_tool_calls is None
                 or tool_name != "sub_agent"
                 or not isinstance(result.raw_output, dict)
                 or result.raw_output.get("type") != "sub_agent_delegation"
@@ -5447,11 +4733,11 @@ async def run_agent_loop(
                 return
             delegated_tool_call_total += nested_tool_calls
             _log.info(
-                "workflow_budget/delegated_tool_calls count=%d total=%d limit=%d "
+                "tool_budget/delegated_tool_calls count=%d total=%d limit=%d "
                 "parent_total=%d",
                 nested_tool_calls,
                 delegated_tool_call_total,
-                completion_gate.max_delegated_tool_calls,
+                max_delegated_tool_calls,
                 tool_call_total,
             )
 
@@ -5508,29 +4794,6 @@ async def run_agent_loop(
             web_search_step_executed += 1
             return True, None
 
-        def _reserve_workflow_evidence_read_call(
-            tool_name: str,
-        ) -> tuple[bool, str | None]:
-            nonlocal workflow_evidence_read_step_executed
-            batch_size = (
-                workflow_policy.evidence_read_batch_size
-                if workflow_policy is not None
-                else 2
-            )
-            if workflow_evidence_read_step_executed >= batch_size:
-                return (
-                    False,
-                    "Public-source page read deferred by runtime batching "
-                    f"(batch size {batch_size}). Review the "
-                    "completed page reads and search evidence before requesting another "
-                    "specific missing source.",
-                )
-            allowed_by_budget, budget_error = _reserve_tool_budget(tool_name)
-            if not allowed_by_budget:
-                return False, budget_error
-            workflow_evidence_read_step_executed += 1
-            return True, None
-
         # 1. Sequential execution for regular tools (preserves ordering)
         for tc in regular_calls:
             tc_id = tc.id
@@ -5565,11 +4828,11 @@ async def run_agent_loop(
 
             offered_error = _tool_offer_error(fn_name)
 
-            if completed_pause_tool is not None:
+            if completed_turn_ending_tool is not None:
                 allowed_to_execute = False
                 internal_skip_error = (
-                    f"Skipped because pause tool '{completed_pause_tool}' already "
-                    "completed in this model step. Resume after the host returns the user response."
+                    f"Skipped because interactive tool '{completed_turn_ending_tool}' "
+                    "already completed in this model step. Resume after the user responds."
                 )
             elif offered_error is not None:
                 allowed_to_execute = False
@@ -5607,44 +4870,11 @@ async def run_agent_loop(
             elif browser_snapshot_path_error is not None:
                 allowed_to_execute = False
                 internal_skip_error = browser_snapshot_path_error
-            elif (
-                workflow_policy is not None
-                and (
-                    plan_scope_error := workflow_policy.plan_scope_error(
-                        fn_name,
-                        fn_args,
-                    )
-                )
-                is not None
-            ):
-                allowed_to_execute = False
-                internal_skip_error = plan_scope_error
             elif plan_approval_gate_active and fn_name != "plan_write":
                 allowed_to_execute = False
                 internal_skip_error = _PLAN_APPROVAL_SKIP_MESSAGE
-            elif (
-                workflow_policy is not None
-                and (
-                    workflow_error := workflow_policy.tool_call_error(
-                        fn_name,
-                        fn_args,
-                        verified_evidence_urls=verified_evidence_urls,
-                    )
-                )
-                is not None
-            ):
-                allowed_to_execute = False
-                internal_skip_error = workflow_error
             elif fn_name == WEB_SEARCH_TOOL_NAME:
                 allowed_to_execute, internal_skip_error = _reserve_web_search_call(fn_args)
-            elif (
-                workflow_policy is not None
-                and workflow_policy.uses_evidence_read_budget(fn_name)
-            ):
-                (
-                    allowed_to_execute,
-                    internal_skip_error,
-                ) = _reserve_workflow_evidence_read_call(fn_name)
             else:
                 allowed_to_execute, internal_skip_error = _reserve_tool_budget(fn_name)
             tool_user_visible = (
@@ -5930,22 +5160,20 @@ async def run_agent_loop(
                 )
             )
             _record_nested_tool_budget(fn_name, result)
-            if workflow_policy is not None:
-                begin_tool_decision = getattr(
-                    workflow_policy,
-                    "begin_tool_decision",
-                    None,
-                )
-                if callable(begin_tool_decision):
-                    begin_tool_decision(step + 1)
-                workflow_policy.record_tool_result(
-                    fn_name,
-                    fn_args,
-                    result,
-                    executed=allowed_to_execute,
-                )
             _record_search_files_result(fn_name, result)
             step_tool_success_by_id[tc_id] = result.success
+            if result.success and fn_name == "plan_write":
+                plan_write_succeeded = True
+            if (
+                allowed_to_execute
+                and result.success
+                and getattr(
+                    offered_tools_by_name.get(fn_name),
+                    "ends_turn_on_success",
+                    False,
+                )
+            ):
+                completed_turn_ending_tool = fn_name
 
             # Progress signal for the no-progress breaker: a successful tool
             # call with non-empty content counts as making progress.
@@ -5955,20 +5183,6 @@ async def run_agent_loop(
                 and not search_files_result_is_empty(result)
             ):
                 step_made_progress = True
-                if (
-                    completion_gate is None
-                    or completion_gate_tool_satisfies_requirements(
-                        completion_gate,
-                        fn_name,
-                        fn_args,
-                    )
-                ):
-                    succeeded_tools.add(fn_name)
-                    if (
-                        completion_gate is not None
-                        and fn_name in completion_gate.pause_tools
-                    ):
-                        completed_pause_tool = fn_name
 
             # Hook: tool result (interceptor — may modify content/error)
             tc_content = result.content
@@ -5998,13 +5212,6 @@ async def run_agent_loop(
                 if inspected:
                     web_search_step_structured_results += 1
                 web_search_step_labels.extend(new_labels[:3])
-            _record_workflow_visible_evidence(
-                fn_name,
-                fn_args,
-                result,
-                tc_content,
-            )
-
             # Append the tool message BEFORE yielding any events. The yields
             # below hand control back to the consumer, which may suspend or
             # raise; if we yielded first and only appended on resumption,
@@ -6189,35 +5396,9 @@ async def run_agent_loop(
                 elif browser_snapshot_path_error is not None:
                     allowed_to_execute = False
                     internal_skip_error = browser_snapshot_path_error
-                elif (
-                    workflow_policy is not None
-                    and (
-                        plan_scope_error := workflow_policy.plan_scope_error(
-                            tc.function.name,
-                            par_fn_args,
-                        )
-                    )
-                    is not None
-                ):
-                    allowed_to_execute = False
-                    internal_skip_error = plan_scope_error
                 elif plan_approval_gate_active and tc.function.name != "plan_write":
                     allowed_to_execute = False
                     internal_skip_error = _PLAN_APPROVAL_SKIP_MESSAGE
-                elif (
-                    workflow_policy is not None
-                    and (
-                        workflow_error := workflow_policy.tool_call_error(
-                            tc.function.name,
-                            par_fn_args,
-                            verified_evidence_urls=verified_evidence_urls,
-                            parallel=True,
-                        )
-                    )
-                    is not None
-                ):
-                    allowed_to_execute = False
-                    internal_skip_error = workflow_error
                 elif tc.function.name == WEB_SEARCH_TOOL_NAME:
                     allowed_to_execute, internal_skip_error = _reserve_web_search_call(par_fn_args)
                 else:
@@ -6565,22 +5746,10 @@ async def run_agent_loop(
                     pending_transient_followup_blocks.extend(transient_blocks)
                     pending_transient_followup_tokens += transient_estimate
                 _record_nested_tool_budget(fn_name, result)
-                if workflow_policy is not None:
-                    begin_tool_decision = getattr(
-                        workflow_policy,
-                        "begin_tool_decision",
-                        None,
-                    )
-                    if callable(begin_tool_decision):
-                        begin_tool_decision(step + 1)
-                    workflow_policy.record_tool_result(
-                        fn_name,
-                        fn_args,
-                        result,
-                        executed=tc_id not in par_budget_errors,
-                    )
                 _record_search_files_result(fn_name, result)
                 step_tool_success_by_id[tc_id] = result.success
+                if result.success and fn_name == "plan_write":
+                    plan_write_succeeded = True
 
                 # Progress signal for the no-progress breaker.
                 if (
@@ -6589,15 +5758,6 @@ async def run_agent_loop(
                     and not search_files_result_is_empty(result)
                 ):
                     step_made_progress = True
-                    if (
-                        completion_gate is None
-                        or completion_gate_tool_satisfies_requirements(
-                            completion_gate,
-                            fn_name,
-                            par_fn_args,
-                        )
-                    ):
-                        succeeded_tools.add(fn_name)
 
                 # Hook: tool result (interceptor)
                 par_content = result.content
@@ -6627,13 +5787,6 @@ async def run_agent_loop(
                     if inspected:
                         web_search_step_structured_results += 1
                     web_search_step_labels.extend(new_labels[:3])
-                _record_workflow_visible_evidence(
-                    fn_name,
-                    par_fn_args,
-                    result,
-                    par_content,
-                )
-
                 # Append the tool message BEFORE yielding any events — see
                 # the equivalent comment in the sequential branch above for
                 # the protocol-state rationale.
@@ -6894,52 +6047,7 @@ async def run_agent_loop(
                 user_visible=False,
             )
 
-        if completed_pause_tool is not None and workflow_policy is not None:
-            try:
-                _discard_ephemeral_writes_before_checkpoint(
-                    tools,
-                    workflow_policy,
-                )
-                pause_checkpoint = await asyncio.to_thread(
-                    save_workflow_checkpoint,
-                    workflow_policy,
-                    workspace_dir=workspace_dir,
-                    artifact_root_dir=artifact_root_dir,
-                )
-            except Exception as exc:
-                _log.warning(
-                    "workflow_checkpoint/save_failed workflow=%s pause_tool=%s error=%s",
-                    getattr(workflow_policy, "kind", "unknown"),
-                    completed_pause_tool,
-                    exc,
-                )
-                pause_checkpoint = None
-            if pause_checkpoint is None:
-                message = (
-                    "The task requested user input, but its durable workflow checkpoint "
-                    "could not be saved. The task was stopped without reporting completion."
-                )
-                if hook_mgr.hooks:
-                    await hook_mgr.fire_error(message=message, is_fatal=True, exception=None)
-                    await hook_mgr.fire_done(
-                        stop_reason=StopReason.ERROR,
-                        final_content=message,
-                    )
-                yield ErrorEvent(message=message, is_fatal=True)
-                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=message)
-                return
-            pause_message = "Waiting for the user's decision to continue this task."
-            yield ContextCheckpointEvent(
-                checkpoint_id=pause_checkpoint.checkpoint_id,
-                workflow_kind=pause_checkpoint.workflow_kind,
-                adapter_id=pause_checkpoint.adapter_id,
-                schema_version=pause_checkpoint.schema_version,
-                workspace_identity=pause_checkpoint.workspace_identity,
-                path=pause_checkpoint.path,
-                stage=pause_checkpoint.stage,
-                artifact_count=pause_checkpoint.artifact_count,
-                artifact_set_sha256=pause_checkpoint.artifact_set_sha256,
-            )
+        if completed_turn_ending_tool is not None:
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -6949,13 +6057,17 @@ async def run_agent_loop(
                     total_elapsed_seconds=total,
                 )
                 await hook_mgr.fire_done(
-                    stop_reason=StopReason.CHECKPOINT_PAUSED,
-                    final_content=pause_message,
+                    stop_reason=StopReason.WAITING_FOR_USER,
+                    final_content=_WAITING_FOR_USER_DONE_CONTENT,
                 )
-            yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            yield StepEnd(
+                step=step + 1,
+                elapsed_seconds=elapsed,
+                total_elapsed_seconds=total,
+            )
             yield DoneEvent(
-                stop_reason=StopReason.CHECKPOINT_PAUSED,
-                final_content=pause_message,
+                stop_reason=StopReason.WAITING_FOR_USER,
+                final_content=_WAITING_FOR_USER_DONE_CONTENT,
             )
             return
 
@@ -7031,15 +6143,6 @@ async def run_agent_loop(
         if (
             visible_tool_call_total > final_summary_after_calls
             and not final_summary_guidance_injected
-            # Controlled presentations already have a filesystem-backed next
-            # action, a total delivery budget, and a completion gate.  A generic
-            # "stop calling tools" nudge while that workflow is incomplete
-            # conflicts with the authoritative checkpoint and caused research-
-            # complete runs to stop before outline/deck/HTML authoring.
-            and not (
-                workflow_policy is not None
-                and workflow_policy.suppresses_generic_final_summary()
-            )
         ):
             final_summary_guidance_injected = True
             summary_text = final_summary_wrapup_text(

@@ -12,6 +12,7 @@ from box_agent.session_log import (
     SessionLog,
     SessionLogCorrupted,
     SessionLogInUseError,
+    SessionLogWorkspaceMismatch,
 )
 
 
@@ -19,10 +20,10 @@ def test_session_log_rejects_second_writer_until_owner_closes(tmp_path):
     owner = SessionLog.create(tmp_path, session_id="single-writer", cwd=tmp_path)
 
     with pytest.raises(SessionLogInUseError, match="already has an active writer"):
-        SessionLog.open(tmp_path, session_id="single-writer")
+        SessionLog.open(tmp_path, session_id="single-writer", cwd=tmp_path)
 
     owner.close()
-    successor = SessionLog.open(tmp_path, session_id="single-writer")
+    successor = SessionLog.open(tmp_path, session_id="single-writer", cwd=tmp_path)
     successor.close()
 
 
@@ -38,7 +39,7 @@ import os
 import sys
 from box_agent.session_log import SessionLog
 
-log = SessionLog.open(sys.argv[1], session_id="process-owner")
+log = SessionLog.open(sys.argv[1], session_id="process-owner", cwd=sys.argv[1])
 print("ready", flush=True)
 sys.stdin.readline()
 os._exit(0)
@@ -54,14 +55,14 @@ os._exit(0)
         assert owner.stdout is not None
         assert owner.stdout.readline() == "ready\n"
         with pytest.raises(SessionLogInUseError):
-            SessionLog.open(tmp_path, session_id="process-owner")
+            SessionLog.open(tmp_path, session_id="process-owner", cwd=tmp_path)
 
         assert owner.stdin is not None
         owner.stdin.write("exit\n")
         owner.stdin.flush()
         assert owner.wait(timeout=30) == 0
 
-        successor = SessionLog.open(tmp_path, session_id="process-owner")
+        successor = SessionLog.open(tmp_path, session_id="process-owner", cwd=tmp_path)
         successor.close()
     finally:
         if owner.poll() is None:
@@ -77,11 +78,11 @@ def test_session_log_does_not_repair_tail_without_writer_ownership(tmp_path):
     torn_bytes = owner.path.read_bytes()
 
     with pytest.raises(SessionLogInUseError):
-        SessionLog.open(tmp_path, session_id="locked-tail")
+        SessionLog.open(tmp_path, session_id="locked-tail", cwd=tmp_path)
 
     assert owner.path.read_bytes() == torn_bytes
     owner.close()
-    successor = SessionLog.open(tmp_path, session_id="locked-tail")
+    successor = SessionLog.open(tmp_path, session_id="locked-tail", cwd=tmp_path)
     successor.close()
     assert owner.path.read_bytes().endswith(b"\n")
 
@@ -104,12 +105,112 @@ def test_session_log_replays_a_durable_user_message(tmp_path):
     path = log.path
     log.close()
 
-    restored = SessionLog.open(tmp_path, session_id="product-session-1")
+    restored = SessionLog.open(
+        tmp_path,
+        session_id="product-session-1",
+        cwd=tmp_path,
+    )
 
     assert path.name == "session.jsonl"
     assert restored.header["id"] == "product-session-1"
     assert restored.replay().messages == [
         Message(role="user", content="keep this context")
+    ]
+    restored.close()
+
+
+def test_session_log_rejects_workspace_change_without_mutating_log(tmp_path):
+    root = tmp_path / "sessions"
+    workspace = tmp_path / "workspace"
+    other_workspace = tmp_path / "other-workspace"
+    workspace.mkdir()
+    other_workspace.mkdir()
+    log = SessionLog.create(root, session_id="fixed-cwd", cwd=workspace)
+    log.append(
+        "user/message",
+        Message(role="user", content="keep me").model_dump(mode="json"),
+        surface_op="append",
+    )
+    log.flush()
+    path = log.path
+    log.close()
+    before = path.read_bytes()
+
+    with pytest.raises(SessionLogWorkspaceMismatch, match="immutable workspace"):
+        SessionLog.open(root, session_id="fixed-cwd", cwd=other_workspace)
+
+    assert path.read_bytes() == before
+    restored = SessionLog.open(root, session_id="fixed-cwd", cwd=workspace)
+    assert restored.replay().messages == [Message(role="user", content="keep me")]
+    restored.close()
+
+
+def test_session_log_rejects_symlink_alias_for_same_workspace(tmp_path):
+    if os.name == "nt":
+        pytest.skip("symlink creation is not reliably available on Windows")
+    root = tmp_path / "sessions"
+    workspace = tmp_path / "workspace"
+    alias = tmp_path / "workspace-alias"
+    workspace.mkdir()
+    alias.symlink_to(workspace, target_is_directory=True)
+    log = SessionLog.create(root, session_id="fixed-cwd-alias", cwd=workspace)
+    log.close()
+
+    with pytest.raises(SessionLogWorkspaceMismatch, match="immutable workspace"):
+        SessionLog.open(root, session_id="fixed-cwd-alias", cwd=alias)
+
+
+def test_session_log_accepts_only_equivalent_cwd_syntax(tmp_path):
+    root = tmp_path / "sessions"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    equivalent = os.path.join(os.fspath(workspace), "unused", os.pardir)
+    log = SessionLog.create(root, session_id="normalized-cwd", cwd=equivalent)
+    log.close()
+
+    restored = SessionLog.open(root, session_id="normalized-cwd", cwd=workspace)
+    assert restored.header["cwd"] == os.path.abspath(os.fspath(workspace))
+    restored.close()
+
+
+def test_replay_filters_only_known_legacy_workflow_context(tmp_path):
+    log = SessionLog.create(tmp_path, session_id="legacy-workflow", cwd=tmp_path)
+    messages = [
+        "Please explain [Post-Compaction Workflow Checkpoint] to me.",
+        "[Post-Compaction Workflow Checkpoint]\n\nlegacy state",
+        (
+            "The host runtime supplied the following internal state update while the "
+            "current task was running.\n\n"
+            "Runtime state update:\nCONTROLLED_PRESENTATION_STAGE=scaffold"
+        ),
+        (
+            "The user sent the following message while the current task was already "
+            "running.\n\n"
+            "Mid-turn user message:\n[BOX_AGENT_EXTERNAL_SKILL_CHECKPOINT]"
+        ),
+        (
+            "The host runtime supplied the following internal state update while the "
+            "current task was running.\n\nRuntime state update:\nordinary generic state"
+        ),
+    ]
+    for content in messages:
+        log.append(
+            "user/message",
+            Message(role="user", content=content).model_dump(mode="json"),
+            surface_op="append",
+        )
+    log.flush()
+    log.close()
+
+    restored = SessionLog.open(
+        tmp_path,
+        session_id="legacy-workflow",
+        cwd=tmp_path,
+    )
+
+    assert [message.content for message in restored.replay().messages] == [
+        messages[0],
+        messages[4],
     ]
     restored.close()
 
@@ -130,7 +231,7 @@ def test_session_log_truncates_only_an_incomplete_final_record(tmp_path):
     with path.open("ab") as handle:
         handle.write(b'{"type":"assistant/message"')
 
-    restored = SessionLog.open(tmp_path, session_id="crash-tail")
+    restored = SessionLog.open(tmp_path, session_id="crash-tail", cwd=tmp_path)
 
     assert restored.replay().messages == [Message(role="user", content="committed")]
     restored.close()
@@ -157,7 +258,7 @@ def test_session_log_rejects_corruption_before_the_final_record(tmp_path):
 
     for _ in range(2):
         with pytest.raises(SessionLogCorrupted, match="record 1"):
-            SessionLog.open(tmp_path, session_id="middle-corrupt")
+            SessionLog.open(tmp_path, session_id="middle-corrupt", cwd=tmp_path)
 
 
 def test_session_log_rejects_non_contiguous_seq_and_second_header(tmp_path):
@@ -173,7 +274,7 @@ def test_session_log_rejects_non_contiguous_seq_and_second_header(tmp_path):
     seq_path.write_text("\n".join(records) + "\n", encoding="utf-8")
 
     with pytest.raises(SessionLogCorrupted, match="non-contiguous seq"):
-        SessionLog.open(tmp_path, session_id="bad-seq")
+        SessionLog.open(tmp_path, session_id="bad-seq", cwd=tmp_path)
 
     header_log = SessionLog.create(tmp_path, session_id="second-header", cwd=tmp_path)
     header_log.append("session", {"id": "second-header"})
@@ -181,7 +282,7 @@ def test_session_log_rejects_non_contiguous_seq_and_second_header(tmp_path):
     header_log.close()
 
     with pytest.raises(SessionLogCorrupted, match="unknown required event"):
-        SessionLog.open(tmp_path, session_id="second-header")
+        SessionLog.open(tmp_path, session_id="second-header", cwd=tmp_path)
 
 
 def test_surface_replacement_restores_compacted_context_without_deleting_history(
@@ -213,7 +314,7 @@ def test_surface_replacement_restores_compacted_context_without_deleting_history
     log.flush()
     log.close()
 
-    restored = SessionLog.open(tmp_path, session_id="compacted")
+    restored = SessionLog.open(tmp_path, session_id="compacted", cwd=tmp_path)
 
     assert restored.replay().messages == [
         Message(role="user", content="summary checkpoint")
@@ -329,7 +430,11 @@ def test_compaction_recovery_uses_replacement_as_commit_point(tmp_path):
     before.flush()
     before.close()
 
-    restored_before = SessionLog.open(tmp_path, session_id="before-replace")
+    restored_before = SessionLog.open(
+        tmp_path,
+        session_id="before-replace",
+        cwd=tmp_path,
+    )
     assert restored_before.replay().messages == [
         Message(role="user", content="old surface")
     ]
@@ -350,7 +455,11 @@ def test_compaction_recovery_uses_replacement_as_commit_point(tmp_path):
     after.flush()
     after.close()
 
-    restored_after = SessionLog.open(tmp_path, session_id="after-replace")
+    restored_after = SessionLog.open(
+        tmp_path,
+        session_id="after-replace",
+        cwd=tmp_path,
+    )
     assert restored_after.replay().messages == [
         Message(role="user", content="new surface")
     ]
@@ -392,7 +501,7 @@ def test_repair_closes_a_dispatched_tool_with_unknown_outcome(tmp_path):
     log.flush()
     log.close()
 
-    restored = SessionLog.open(tmp_path, session_id="tool-crash")
+    restored = SessionLog.open(tmp_path, session_id="tool-crash", cwd=tmp_path)
     closers = restored.repair_interrupted_turn()
     restored.flush()
 
@@ -433,7 +542,11 @@ def test_repair_marks_an_undispatched_assistant_call_not_started(tmp_path):
     log.flush()
     log.close()
 
-    restored = SessionLog.open(tmp_path, session_id="tool-not-started")
+    restored = SessionLog.open(
+        tmp_path,
+        session_id="tool-not-started",
+        cwd=tmp_path,
+    )
     closers = restored.repair_interrupted_turn()
 
     assert closers[0]["data"]["error"]["code"] == "TOOL_NOT_STARTED"
@@ -448,7 +561,11 @@ def test_prepare_resume_closes_interrupted_prefix_before_end_seed(tmp_path):
     log.flush()
     log.close()
 
-    restored = SessionLog.open(tmp_path, session_id="resume-boundary")
+    restored = SessionLog.open(
+        tmp_path,
+        session_id="resume-boundary",
+        cwd=tmp_path,
+    )
     appended = restored.prepare_resume()
 
     assert [event["type"] for event in appended] == [
@@ -469,14 +586,14 @@ def test_unknown_required_event_rejects_restore_but_ignorable_event_is_skipped(
     required.close()
 
     with pytest.raises(SessionLogCorrupted, match="unknown required event"):
-        SessionLog.open(tmp_path, session_id="future-required")
+        SessionLog.open(tmp_path, session_id="future-required", cwd=tmp_path)
 
     ignorable = SessionLog.create(tmp_path, session_id="future-info", cwd=tmp_path)
     ignorable.append("future/diagnostic", {"value": 1}, ignorable=True)
     ignorable.flush()
     ignorable.close()
 
-    restored = SessionLog.open(tmp_path, session_id="future-info")
+    restored = SessionLog.open(tmp_path, session_id="future-info", cwd=tmp_path)
     assert restored.replay().messages == []
     restored.close()
 
@@ -498,7 +615,7 @@ def test_replay_restores_latest_box_agent_domain_state(tmp_path):
     log.flush()
     log.close()
 
-    restored = SessionLog.open(tmp_path, session_id="domain-state")
+    restored = SessionLog.open(tmp_path, session_id="domain-state", cwd=tmp_path)
     projection = restored.replay()
 
     assert projection.goal is None

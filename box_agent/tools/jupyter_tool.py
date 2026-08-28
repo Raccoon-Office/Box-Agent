@@ -1608,31 +1608,6 @@ Output formats:
                     "chunk_index/final."
                 ),
             )
-        if self._looks_like_python_pptx_new_deck(code):
-            return ToolResult(
-                success=False,
-                content="",
-                error=(
-                    "PYTHON_PPTX_NEW_DECK_BLOCKED: execute_code must not create "
-                    "new PPT/PPTX decks with python-pptx. Use the pptx skill's "
-                    "HTML-first workflow (deck.html -> screenshots -> images_to_pptx) "
-                    "or confirmed PptxGenJS native workflow instead. Python is "
-                    "allowed for data preparation, extraction, QA, and narrow edits "
-                    "to existing decks."
-                ),
-            )
-        if self._looks_like_controlled_deck_rewrite(code):
-            return ToolResult(
-                success=False,
-                content="",
-                error=(
-                    "CONTROLLED_DECK_REWRITE_BLOCKED: execute_code must not rewrite "
-                    "deck.json or its controlled manifests. Use the pptx skill's "
-                    "apply_deck_patch.js for a validated batch update, or edit_file "
-                    "for a focused repair. Read-only inspection remains allowed."
-                ),
-            )
-
         # Ensure sandbox environment is ready
         env = self._get_sandbox_env()
         try:
@@ -1801,70 +1776,6 @@ Output formats:
         "sqlalchemy": "SQLAlchemy",
         "dotenv": "python-dotenv",
     }
-
-    @staticmethod
-    def _looks_like_python_pptx_new_deck(code: str) -> bool:
-        """Detect python-pptx code that creates a brand-new presentation."""
-        if not code:
-            return False
-        if not re.search(r"^\s*(?:from\s+pptx\s+import|import\s+pptx\b)", code, re.MULTILINE):
-            return False
-        # Reading/editing existing decks uses Presentation(path). A bare
-        # Presentation() call is the python-pptx new-deck constructor and has
-        # repeatedly bypassed the HTML-first PPT workflow in ACP sessions.
-        return bool(re.search(r"\bPresentation\s*\(\s*\)", code))
-
-    @staticmethod
-    def _looks_like_controlled_deck_rewrite(code: str) -> bool:
-        """Reject Python writes that bypass the controlled deck patch contract."""
-        if not code:
-            return False
-        target = (
-            r"(?:deck\.json|assets[/\\]generated[/\\]manifest\.json|"
-            r"layouts[/\\]manifest\.json)"
-        )
-        open_write = re.search(
-            rf"\bopen\s*\([^\n)]*{target}[^\n)]*,\s*['\"][wax+]",
-            code,
-            re.IGNORECASE,
-        )
-        path_write = re.search(
-            rf"(?:Path\s*\([^\n)]*{target}[^\n)]*\)|"
-            rf"['\"][^'\"]*{target}['\"])[^\n]*\.write_(?:text|bytes)\s*\(",
-            code,
-            re.IGNORECASE,
-        )
-        path_open_write = re.search(
-            rf"Path\s*\([^\n)]*{target}[^\n)]*\)[^\n]*\.open\s*\(\s*['\"][wax+]",
-            code,
-            re.IGNORECASE,
-        )
-        assigned_targets = set(re.findall(
-            rf"^\s*([A-Za-z_]\w*)\s*=\s*(?:Path\s*\([^\n)]*{target}[^\n)]*\)|"
-            rf"['\"][^'\"]*{target}['\"])",
-            code,
-            re.IGNORECASE | re.MULTILINE,
-        ))
-        assigned_targets.update(re.findall(
-            rf"^\s*([A-Za-z_]\w*)\s*=\s*[^\n#]*{target}[^\n#]*$",
-            code,
-            re.IGNORECASE | re.MULTILINE,
-        ))
-        assigned_write = any(
-            re.search(
-                rf"\b{re.escape(variable)}\s*\.\s*(?:write_(?:text|bytes)\s*\(|"
-                rf"open\s*\(\s*['\"][wax+])",
-                code,
-                re.IGNORECASE,
-            )
-            or re.search(
-                rf"\bopen\s*\(\s*{re.escape(variable)}\s*,\s*['\"][wax+]",
-                code,
-                re.IGNORECASE,
-            )
-            for variable in assigned_targets
-        )
-        return bool(open_write or path_write or path_open_write or assigned_write)
 
     def _get_workspace(self, session_id: str) -> Path:
         """Get the directory the kernel chdirs into for a session.

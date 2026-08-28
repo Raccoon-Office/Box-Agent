@@ -33,6 +33,8 @@ _FORBIDDEN_AUTO_SUBMIT_KINDS = frozenset(
 class RequestUserDecisionTool(Tool):
     """Pause for one user-visible execution decision without losing task state."""
 
+    ends_turn_on_success = True
+
     @property
     def name(self) -> str:
         return "request_user_decision"

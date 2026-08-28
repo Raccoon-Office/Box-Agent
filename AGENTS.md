@@ -52,8 +52,8 @@ protocol for repository work.
    user's branch, or rewrite existing changes to make the task easier.
 3. Classify the behavior before choosing files:
    - host/protocol translation belongs in `box_agent/acp/` or `box_agent/cli.py`
-   - tools, skills, providers, storage, and reusable workflow policy belong in
-     their capability modules
+   - tools, skills, providers, storage, and domain workflow policy belong in
+     their capability modules or self-contained Skills/plugins
    - shared contracts and loop invariants belong in the stable API/kernel layer
 4. Inspect the nearest existing implementation and its tests before adding a
    new helper, abstraction, directory, dependency, or configuration surface.
@@ -70,7 +70,8 @@ protocol for repository work.
   adapters; do not maintain parallel copies of the same runtime policy.
 - Do not modify `core.py` or another stable-kernel file for product-specific
   behavior that can be expressed through a Tool, Skill, Hook, event consumer,
-  run option, completion gate, or `WorkflowPolicy`.
+  run option, or plugin. Session Log is the only durable session-state source;
+  domain state machines belong in their owning Skill or plugin.
 - Preserve public API compatibility unless the task explicitly changes the
   contract. Prefer additive event and option changes; document migrations for
   removals or semantic changes.

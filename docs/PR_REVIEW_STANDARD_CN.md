@@ -109,7 +109,7 @@ Review Agent 默认只读。除非任务明确要求修复，否则不得提交�
 
 | 改动类型 | 最小 Proof |
 | --- | --- |
-| 共享核心循环、事件、取消、goal、completion gate | 聚焦回归测试 + 相关 core/ACP 测试 |
+| 共享核心循环、事件、取消、goal、Session Log | 聚焦回归测试 + 相关 core/持久化/ACP 测试 |
 | CLI-only 行为 | 聚焦 CLI 测试或命令输出 + 无 ACP 重复实现的确认 |
 | ACP/runtime 行为 | ACP 测试或真实探针 + stdout/stderr 边界检查 |
 | Tool 行为 | 成功路径、关键失败路径和工作区/权限边界的直接测试 |

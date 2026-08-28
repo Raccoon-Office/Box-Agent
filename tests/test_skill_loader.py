@@ -64,7 +64,6 @@ metadata:
   author: Test Author
   version: "1.0"
 capabilities: [presentation.authoring]
-workflow: controlled_presentation
 required_skills: [html-templates]
 related-skills: "research-synthesis, research-to-deck-outline"
 ---
@@ -88,11 +87,10 @@ Skill content here.
             "research-to-deck-outline",
         ]
         assert skill.capabilities == ["presentation.authoring"]
-        assert skill.workflow == "controlled_presentation"
         metadata = skill.to_metadata_dict()
         assert metadata["allowed_tools"] == ["read_file", "write_file"]
         assert metadata["capabilities"] == ["presentation.authoring"]
-        assert metadata["workflow"] == "controlled_presentation"
+        assert "workflow" not in metadata
 
 
 def test_allowed_tools_are_normalized_and_rendered_as_routing_metadata(tmp_path):

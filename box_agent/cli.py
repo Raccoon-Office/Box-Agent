@@ -44,7 +44,6 @@ from box_agent.agent import (
     should_continue_goal_autopilot,
 )
 from box_agent.config import AgentConfig, Config
-from box_agent.completion import build_auto_completion_gate
 from box_agent.events import StopReason
 from box_agent.llm.model_routing import resolve_model_client
 from box_agent.schema import LLMProvider, Message
@@ -57,6 +56,7 @@ from box_agent.tools.mcp_loader import (
 )
 from box_agent.tools.skill_preload import (
     build_auto_loaded_skills_prompt,
+    resolve_explicit_skill_invocation,
     turn_preload_skill_names,
 )
 from box_agent.tools.setup import (
@@ -83,11 +83,6 @@ from box_agent.trace_viewer import launch_trace_viewer
 from box_agent.utils import calculate_display_width
 from box_agent.acp.project_context import build_project_startup_context_prompt
 from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryError
-from box_agent.workflows import (
-    CONTROLLED_PRESENTATION_WORKFLOW_KIND,
-    build_external_skill_completion_gate,
-    resolve_explicit_skill_invocation,
-)
 
 
 _CLI_PROBE_MAX_OUTPUT_TOKENS = 4_096
@@ -447,6 +442,8 @@ def _print_config_summary(summary: dict[str, Any]) -> None:
     print(f"\n{Colors.BOLD}Tool limits{Colors.RESET}")
     print(
         "  general/search    : "
+        f"tools {tool_limits['general']['max_tool_calls']}+"
+        f"{tool_limits['general']['max_delegated_tool_calls']} delegated, "
         f"summary>{tool_limits['general']['final_summary_after_calls']}, "
         f"web {tool_limits['web_search']['total_calls']}/"
         f"{tool_limits['web_search']['deep_research_total_calls']} "
@@ -454,18 +451,8 @@ def _print_config_summary(summary: dict[str, Any]) -> None:
         f"concurrency {tool_limits['web_search']['concurrency']})"
     )
     print(
-        "  workflows         : "
-        f"skill {tool_limits['external_skill']['max_tool_calls']}+"
-        f"{tool_limits['external_skill']['max_delegated_tool_calls']} delegated, "
-        f"presentation {tool_limits['presentation']['max_tool_calls']}/"
-        f"{tool_limits['presentation']['deep_research_max_tool_calls']}+"
-        f"{tool_limits['presentation']['max_delegated_tool_calls']} delegated, "
-        f"sub-agent {tool_limits['sub_agent']['general_max_tool_calls']}"
-    )
-    print(
-        "  completion gate   : "
-        f"{tool_limits['completion']['max_continuations']} continuations / "
-        f"{tool_limits['completion']['deadline_seconds']}s"
+        "  sub-agent         : "
+        f"{tool_limits['sub_agent']['general_max_tool_calls']} calls"
     )
 
     tools = summary["tools"]
@@ -1086,11 +1073,6 @@ Examples:
         "--force-plan-start",
         action="store_true",
         help="Force the next agent turn to publish a structured plan first",
-    )
-    parser.add_argument(
-        "--no-completion-gate",
-        action="store_true",
-        help="Disable automatic deliverable-artifact completion checks in --task mode",
     )
     parser.add_argument(
         "--no-goal-autopilot",
@@ -1799,7 +1781,6 @@ async def run_agent(
     json_summary: bool = False,
     deep_think: bool = False,
     force_plan_start: bool = False,
-    completion_gate_enabled: bool = True,
     goal_autopilot_enabled: bool = True,
 ) -> int:
     """Run Agent in interactive or non-interactive mode.
@@ -1813,7 +1794,6 @@ async def run_agent(
         json_summary: If True in non-interactive mode, append a JSON execution summary
         deep_think: If True, enable thinking mode for the run
         force_plan_start: If True, require the next turn to publish a plan first
-        completion_gate_enabled: If True, guard deliverable tasks from ending before artifact creation
         goal_autopilot_enabled: If True, continue active goals in --task mode within configured budgets
     """
     session_start = datetime.now()
@@ -2273,15 +2253,20 @@ async def run_agent(
         _sync_cli_cache_fingerprint_context()
         return skill_selector.matched_skill_names
 
-    def _apply_cli_auto_loaded_skills(completion_gate, user_input: str) -> None:
+    def _apply_cli_auto_loaded_skills(user_input: str) -> None:
         if skill_loader is None or skill_selector is None:
             _sync_cli_cache_fingerprint_context()
             return
+        explicit_skill = resolve_explicit_skill_invocation(skill_loader, user_input)
         preload_names = turn_preload_skill_names(
             skill_selector.matched_skill_names,
-            completion_gate,
             cli_env_context,
             user_input,
+            selected_skill_names=(
+                (explicit_skill.name,)
+                if explicit_skill is not None
+                else ()
+            ),
         )
         if not preload_names and not cli_preloaded_skill_names:
             _sync_cli_cache_fingerprint_context()
@@ -2311,31 +2296,6 @@ async def run_agent(
                 f"{Colors.DIM}Auto-loaded skills: "
                 f"{', '.join(result.loaded_names)}{Colors.RESET}"
             )
-
-    def _build_cli_completion_gate(user_input: str):
-        if not completion_gate_enabled:
-            return None
-        explicit_skill = resolve_explicit_skill_invocation(skill_loader, user_input)
-        if (
-            explicit_skill is not None
-            and explicit_skill.workflow != CONTROLLED_PRESENTATION_WORKFLOW_KIND
-        ):
-            return build_external_skill_completion_gate(
-                user_text=user_input,
-                workspace_dir=workspace_dir,
-                skill=explicit_skill,
-                tool_limits=config.tool_limits,
-            )
-        return build_auto_completion_gate(
-            user_input,
-            workspace_dir,
-            confirmed_presentation=(
-                explicit_skill is not None
-                and explicit_skill.workflow
-                == CONTROLLED_PRESENTATION_WORKFLOW_KIND
-            ),
-            tool_limits=config.tool_limits,
-        )
 
     async def _refresh_mcp_after_auth_change() -> None:
         results = await reconnect_auth_failed_mcp_servers_if_token_changed()
@@ -2372,12 +2332,8 @@ async def run_agent(
             register_mcp_tools(agent.tools, loaded_mcp_tools)
         await _refresh_mcp_after_auth_change()
         _apply_skill_filter(task)
-        completion_gate = _build_cli_completion_gate(task)
-        _apply_cli_auto_loaded_skills(completion_gate, task)
+        _apply_cli_auto_loaded_skills(task)
         agent.add_user_message(task)
-        if completion_gate is not None:
-            patterns = ", ".join(completion_gate.required_changed_artifact_globs)
-            print(f"{Colors.DIM}Completion gate enabled for deliverable artifacts: {patterns}{Colors.RESET}")
         ok = True
         error: str | None = None
         auto_continuations = 0
@@ -2394,7 +2350,6 @@ async def run_agent(
         try:
             final_content = await agent.run(
                 force_plan_start=force_plan_start,
-                completion_gate=completion_gate,
                 current_turn_text=task,
             )
             while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
@@ -2420,7 +2375,7 @@ async def run_agent(
                     )
                 )
                 before_signature = goal_autopilot_progress_signature(agent.goal)
-                final_content = await agent.run(completion_gate=completion_gate)
+                final_content = await agent.run()
                 after_signature = goal_autopilot_progress_signature(agent.goal)
                 if should_continue_goal_autopilot(agent, agent.last_stop_reason):
                     if after_signature == before_signature:
@@ -2463,14 +2418,18 @@ async def run_agent(
                     )
             print_stats(agent, session_start)
             if json_summary:
-                paused = agent.last_stop_reason == StopReason.CHECKPOINT_PAUSED.value
+                waiting_for_user = (
+                    agent.last_stop_reason == StopReason.WAITING_FOR_USER.value
+                )
                 _json_print({
                     "ok": ok,
                     "error": error,
-                    "runStatus": "paused" if paused else ("completed" if ok else "error"),
-                    "completed": ok and not paused,
-                    "recoverable": paused,
-                    "checkpoint": agent.last_checkpoint if paused else None,
+                    "runStatus": (
+                        "waiting_for_user"
+                        if waiting_for_user
+                        else ("completed" if ok else "error")
+                    ),
+                    "completed": ok and not waiting_for_user,
                     "workspace": str(workspace_dir),
                     "task": task,
                     "goal": goal_payload(agent.goal),
@@ -2724,8 +2683,7 @@ async def run_agent(
                 f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
             )
             _apply_skill_filter(user_input)
-            preload_gate = _build_cli_completion_gate(user_input)
-            _apply_cli_auto_loaded_skills(preload_gate, user_input)
+            _apply_cli_auto_loaded_skills(user_input)
             agent.add_user_message(user_input)
 
             # Create cancellation event
@@ -2786,7 +2744,6 @@ async def run_agent(
                 agent_task = asyncio.create_task(
                     agent.run(
                         force_plan_start=force_plan_next_turn,
-                        completion_gate=preload_gate,
                         current_turn_text=user_input,
                     )
                 )
@@ -2945,7 +2902,6 @@ def main() -> int:
                 json_summary=args.json,
                 deep_think=args.deep_think,
                 force_plan_start=args.force_plan_start,
-                completion_gate_enabled=not args.no_completion_gate,
                 goal_autopilot_enabled=not args.no_goal_autopilot,
             )
         )

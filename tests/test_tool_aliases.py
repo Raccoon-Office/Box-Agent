@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from box_agent.events import ErrorEvent, ToolCallResult, ToolCallStart
-from box_agent.loop_guards import CompletionGate
 from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.bash_tool import BashTool
@@ -339,41 +338,6 @@ async def test_alias_is_canonicalized_before_empty_argument_loop_detection() -> 
     error = next(event for event in events if isinstance(event, ErrorEvent))
     assert "2x in a row" in error.message
     assert "echo" in error.message
-
-
-@pytest.mark.asyncio
-async def test_alias_cannot_call_tool_hidden_from_current_step() -> None:
-    hidden = RecordingTool()
-    required = NamedTool("required")
-    llm = SequenceLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[_tool_call("hidden-alias", "legacy_echo")],
-                finish_reason="tool",
-            )
-        ]
-    )
-
-    events = await _collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_messages(),
-            tools={hidden.name: hidden, required.name: required},
-            max_steps=1,
-            completion_gate=CompletionGate(
-                required_tools=frozenset({"required"}),
-                restrict_tools_until_required_succeed=True,
-            ),
-        )
-    )
-
-    result = next(event for event in events if isinstance(event, ToolCallResult))
-    assert llm.offered_names[0] == ["required"]
-    assert hidden.calls == []
-    assert result.tool_name == "legacy_echo"
-    assert result.success is False
-    assert result.error == "Unknown tool: legacy_echo"
 
 
 @pytest.mark.asyncio

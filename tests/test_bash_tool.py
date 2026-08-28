@@ -96,20 +96,6 @@ async def test_pipeline_propagates_upstream_failure():
     assert result.exit_code != 0
 
 
-@pytest.mark.asyncio
-async def test_blocks_pptx_self_check_bypass_command():
-    bash_tool = BashTool()
-    command = (
-        "node -e \"const fs=require('fs'); const src='html_to_editable_pptx.js'; "
-        "fs.writeFileSync('export_skipcheck.js', fs.readFileSync(src,'utf8').replace('runSelfCheck(htmlPath, opts.width, opts.height, selfCheckReport);',''));\""
-    )
-
-    result = await bash_tool.execute(command=command)
-
-    assert not result.success
-    assert result.exit_code == 1
-    assert "PPTX HTML self-check bypass blocked" in result.error
-
 
 @pytest.mark.asyncio
 async def test_command_timeout():

@@ -22,12 +22,11 @@ from box_agent.core import (
     text_requests_plan_start,
 )
 from box_agent.core import FINAL_SUMMARY_TOOL_CALL_THRESHOLD as _FS_THRESHOLD
-from box_agent.loop_guards import CompletionGate, repeated_stream_pattern
+from box_agent.loop_guards import repeated_stream_pattern
 from box_agent.runtime import run_agent_loop
 from box_agent.events import (
     ArtifactEvent,
     ContentEvent,
-    ContextCheckpointEvent,
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
@@ -42,10 +41,6 @@ from box_agent.events import (
     ToolCallResult,
     ToolCallStart,
 )
-from box_agent.workflow_policy import WorkflowCheckpointUpdate
-from box_agent.workflow_checkpoint_store import load_workflow_checkpoint
-from box_agent.workflows import EXTERNAL_SKILL_WORKFLOW_KIND, ExternalSkillRunPolicy
-from box_agent.workflows.controlled_presentation import ControlledPresentationPolicy
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.session_log import SessionLog
 from box_agent.tools.base import EventEmittingTool, Tool, ToolResult
@@ -121,54 +116,6 @@ class MockLLM:
         )
 
 
-class _RecoverablePresentationPolicy:
-    kind = "controlled_presentation"
-    checkpoint_injection_id = "CONTROLLED_PRESENTATION_STAGE="
-    evidence_read_batch_size = 1
-    stage = "outline"
-
-    def build_checkpoint(self) -> str:
-        return "CONTROLLED_PRESENTATION_STAGE=outline"
-
-    def update_checkpoint(self, text: str) -> WorkflowCheckpointUpdate:
-        return WorkflowCheckpointUpdate(text=text, changed=True)
-
-    def next_deterministic_action(self):
-        return None
-
-    def plan_scope_error(self, tool_name, arguments):
-        return None
-
-    def tool_call_error(
-        self,
-        tool_name,
-        arguments,
-        *,
-        verified_evidence_urls,
-        parallel=False,
-    ):
-        return None
-
-    def record_tool_result(self, tool_name, arguments, result, *, executed=True):
-        return None
-
-    def exempts_tool_budget(self, tool_name):
-        return False
-
-    def uses_evidence_read_budget(self, tool_name):
-        return False
-
-    def is_direct_evidence_read_tool(self, tool_name):
-        return False
-
-    def direct_evidence_url(self, tool_name, arguments, result):
-        return None
-
-    def allows_completion_continuation(self):
-        return True
-
-    def suppresses_generic_final_summary(self):
-        return False
 
 class CapturingStreamLLM(MockLLM):
     """Mock LLM that keeps a snapshot of each message list it receives."""
@@ -305,69 +252,30 @@ async def test_transient_image_over_budget_becomes_a_safe_tool_failure():
     )
 
 
-@pytest.mark.asyncio
-async def test_context_limit_pauses_only_after_durable_workflow_checkpoint(
-    tmp_path,
-) -> None:
-    (tmp_path / "output").mkdir()
-    (tmp_path / "output" / "outline.json").write_text(
-        '{"slides": []}\n',
-        encoding="utf-8",
-    )
-    messages = [Message(role="system", content="system instructions exceed limit")]
-
-    events = [
-        event
-        async for event in run_agent_loop(
-            llm=MockLLM([]),
-            messages=messages,
-            tools={},
-            max_steps=1,
-            token_limit=1,
-            workspace_dir=str(tmp_path),
-            workflow_policy=_RecoverablePresentationPolicy(),
-        )
-    ]
-
-    checkpoint = next(event for event in events if isinstance(event, ContextCheckpointEvent))
-    done = next(event for event in events if isinstance(event, DoneEvent))
-    assert checkpoint.workflow_kind == "controlled_presentation"
-    assert checkpoint.stage == "outline"
-    assert done.stop_reason is StopReason.CHECKPOINT_PAUSED
-    assert not any(isinstance(event, ErrorEvent) for event in events)
-    assert Path(checkpoint.path).is_file()
-    assert [message.role for message in messages] == ["system", "assistant"]
-    assert messages[-1].content == done.final_content
 
 
 @pytest.mark.asyncio
-async def test_context_limit_keeps_error_for_unregistered_workflow(tmp_path) -> None:
-    class UnregisteredPolicy(_RecoverablePresentationPolicy):
-        kind = "third_party_untrusted"
-
-    events = [
-        event
-        async for event in run_agent_loop(
+async def test_context_limit_returns_error_without_domain_recovery_state(tmp_path) -> None:
+    events = await collect(
+        run_agent_loop(
             llm=MockLLM([]),
             messages=[Message(role="system", content="system instructions exceed limit")],
             tools={},
             max_steps=1,
             token_limit=1,
             workspace_dir=str(tmp_path),
-            workflow_policy=UnregisteredPolicy(),
         )
-    ]
+    )
 
-    assert not any(isinstance(event, ContextCheckpointEvent) for event in events)
     assert any(isinstance(event, ErrorEvent) for event in events)
-    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason is StopReason.ERROR
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.stop_reason is StopReason.ERROR
 
 
 @pytest.mark.asyncio
-async def test_successful_pause_tool_saves_checkpoint_without_another_model_step(
+async def test_successful_interactive_tool_waits_for_user(
     tmp_path,
 ) -> None:
-    (tmp_path / "output").mkdir()
     llm = MockLLM(
         [
             LLMResponse(
@@ -397,27 +305,17 @@ async def test_successful_pause_tool_saves_checkpoint_without_another_model_step
             messages=_msgs(),
             tools={"request_user_input": RequestUserInputTool()},
             max_steps=3,
-            completion_gate=CompletionGate(
-                workflow_checkpoint_kind="controlled_presentation",
-                pause_tools=frozenset({"request_user_input"}),
-            ),
             workspace_dir=str(tmp_path),
-            workflow_policy=ControlledPresentationPolicy(
-                workspace_dir=str(tmp_path),
-                artifact_root_dir=tmp_path / "output",
-            ),
         )
     )
 
     assert llm._idx == 1
-    assert any(isinstance(event, ContextCheckpointEvent) for event in events)
     done = next(event for event in events if isinstance(event, DoneEvent))
-    assert done.stop_reason is StopReason.CHECKPOINT_PAUSED
+    assert done.stop_reason is StopReason.WAITING_FOR_USER
 
 
 @pytest.mark.asyncio
-async def test_tool_budget_pauses_incomplete_recoverable_workflow(tmp_path) -> None:
-    (tmp_path / "output").mkdir()
+async def test_direct_tool_budget_requests_a_final_answer(tmp_path) -> None:
     messages = _msgs()
     llm = MockLLM(
         [
@@ -434,7 +332,8 @@ async def test_tool_budget_pauses_incomplete_recoverable_workflow(tmp_path) -> N
                     )
                 ],
                 finish_reason="tool",
-            )
+            ),
+            LLMResponse(content="budget-aware final", finish_reason="stop"),
         ]
     )
 
@@ -444,188 +343,19 @@ async def test_tool_budget_pauses_incomplete_recoverable_workflow(tmp_path) -> N
             messages=messages,
             tools={"echo": EchoTool()},
             max_steps=3,
-            completion_gate=CompletionGate(
-                required_changed_artifact_globs=("output/**/*.pptx",),
-                max_tool_calls=1,
-                workflow_checkpoint_kind="controlled_presentation",
-            ),
+            max_tool_calls=1,
             workspace_dir=str(tmp_path),
         )
     )
-
-    checkpoint = next(
-        event for event in events if isinstance(event, ContextCheckpointEvent)
-    )
     done = next(event for event in events if isinstance(event, DoneEvent))
-    assert checkpoint.workflow_kind == "controlled_presentation"
-    assert done.stop_reason is StopReason.CHECKPOINT_PAUSED
-    assert "Tool-call budget" in done.final_content
+    assert done.stop_reason is StopReason.END_TURN
+    assert done.final_content == "budget-aware final"
     assert not any(isinstance(event, ErrorEvent) for event in events)
-    assert Path(checkpoint.path).is_file()
-    assert [message.role for message in messages] == ["system", "assistant"]
-
-
-@pytest.mark.asyncio
-async def test_durable_pause_discards_pending_write_before_checkpoint(tmp_path) -> None:
-    output = tmp_path / "output"
-    output.mkdir()
-    (output / "outline.json").write_text(
-        json.dumps(
-            {
-                "slides": [
-                    {
-                        "page": 1,
-                        "title": "Exact title",
-                        "message": "Exact message",
-                        "bullets": ["Exact bullet"],
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
+    assert any(
+        isinstance(event, InjectedMessageEvent)
+        and "工具调用总预算" in event.content
+        for event in events
     )
-    qa = output / "qa"
-    qa.mkdir()
-    (qa / "outline_check.json").write_text('{"ok": true}', encoding="utf-8")
-    (output / "deck.json").write_text(
-        json.dumps(
-            {
-                "slides": [
-                    {
-                        "id": "slide-01",
-                        "layout_id": "cover-hero-v1",
-                        "source_outline_page": 1,
-                        "props": {"title": "输入演示标题"},
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    write_tool = WriteTool(
-        workspace_dir=str(tmp_path),
-        relative_root_dir=str(output),
-    )
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="partial-patch",
-                        type="function",
-                        function=FunctionCall(
-                            name="write_file",
-                            arguments={
-                                "path": "deck.patch.json",
-                                "content": '{"slides":',
-                                "chunk_index": 0,
-                                "final": False,
-                            },
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            )
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_msgs(),
-            tools={"write_file": write_tool},
-            max_steps=3,
-            completion_gate=CompletionGate(
-                required_changed_artifact_globs=("output/**/*.pptx",),
-                max_tool_calls=1,
-                workflow_checkpoint_kind="controlled_presentation",
-            ),
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    checkpoint = next(
-        event for event in events if isinstance(event, ContextCheckpointEvent)
-    )
-    done = next(event for event in events if isinstance(event, DoneEvent))
-    assert done.stop_reason is StopReason.CHECKPOINT_PAUSED
-    assert checkpoint.artifact_count == 3
-    assert not list(output.glob("*.part"))
-    payload = json.loads(Path(checkpoint.path).read_text(encoding="utf-8"))
-    assert not any(
-        item["path"].endswith(".part") for item in payload["state"]["artifacts"]
-    )
-
-    restarted = await write_tool.execute(
-        path="deck.patch.json",
-        content='{"slides":{}}',
-        chunk_index=0,
-        final=True,
-    )
-    assert restarted.success is True
-
-
-@pytest.mark.asyncio
-async def test_tool_budget_pauses_external_skill_with_data_only_checkpoint(
-    tmp_path,
-) -> None:
-    (tmp_path / "output").mkdir()
-    messages = _msgs()
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="external-skill-budget-call",
-                        type="function",
-                        function=FunctionCall(
-                            name="echo",
-                            arguments={"text": "progress"},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            )
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=messages,
-            tools={"echo": EchoTool()},
-            max_steps=3,
-            completion_gate=CompletionGate(
-                required_changed_artifact_globs=("output/**/*.pptx",),
-                max_tool_calls=1,
-                workflow_checkpoint_kind=EXTERNAL_SKILL_WORKFLOW_KIND,
-                workflow_options={
-                    "skill_name": "ppt-master",
-                    "skill_source": "user",
-                    "task_text": "/ppt-master topic",
-                    "artifact_globs": '["output/**/*.pptx"]',
-                },
-            ),
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    checkpoint_event = next(
-        event for event in events if isinstance(event, ContextCheckpointEvent)
-    )
-    done = next(event for event in events if isinstance(event, DoneEvent))
-    assert checkpoint_event.workflow_kind == EXTERNAL_SKILL_WORKFLOW_KIND
-    assert done.stop_reason is StopReason.CHECKPOINT_PAUSED
-    checkpoint = load_workflow_checkpoint(
-        workspace_dir=tmp_path,
-        workflow_kind=EXTERNAL_SKILL_WORKFLOW_KIND,
-    )
-    assert checkpoint is not None
-    assert checkpoint.workflow_options["skill_name"] == "ppt-master"
-    assert checkpoint.adapter_id == "box-agent.external-skill.v1"
 
 
 class NestedDelegationTool(Tool):
@@ -661,10 +391,9 @@ class NestedDelegationTool(Tool):
 
 
 @pytest.mark.asyncio
-async def test_nested_tool_calls_do_not_consume_parent_workflow_budget(
+async def test_nested_tool_calls_do_not_consume_parent_tool_budget(
     tmp_path,
 ) -> None:
-    (tmp_path / "output").mkdir()
     messages = _msgs()
     llm = MockLLM(
         [
@@ -685,11 +414,6 @@ async def test_nested_tool_calls_do_not_consume_parent_workflow_budget(
         ]
     )
     nested_tool = NestedDelegationTool(nested_tool_calls=200)
-    workflow_policy = ExternalSkillRunPolicy(
-        workspace_dir=str(tmp_path),
-        artifact_root_dir=None,
-        skill_name="test-skill",
-    )
 
     events = await collect(
         run_agent_loop(
@@ -697,14 +421,9 @@ async def test_nested_tool_calls_do_not_consume_parent_workflow_budget(
             messages=messages,
             tools={"sub_agent": nested_tool},
             max_steps=3,
-            completion_gate=CompletionGate(
-                required_tools=frozenset({"sub_agent"}),
-                max_tool_calls=2,
-                max_delegated_tool_calls=512,
-                workflow_checkpoint_kind="controlled_presentation",
-            ),
+            max_tool_calls=2,
+            max_delegated_tool_calls=512,
             workspace_dir=str(tmp_path),
-            workflow_policy=workflow_policy,
         )
     )
 
@@ -712,12 +431,10 @@ async def test_nested_tool_calls_do_not_consume_parent_workflow_budget(
     assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason is (
         StopReason.END_TURN
     )
-    assert not any(isinstance(event, ContextCheckpointEvent) for event in events)
 
 
 @pytest.mark.asyncio
 async def test_delegated_tool_budget_blocks_only_new_subagents(tmp_path) -> None:
-    (tmp_path / "output").mkdir()
     messages = _msgs()
     llm = MockLLM(
         [
@@ -751,12 +468,6 @@ async def test_delegated_tool_budget_blocks_only_new_subagents(tmp_path) -> None
         ]
     )
     nested_tool = NestedDelegationTool(nested_tool_calls=2)
-    workflow_policy = ExternalSkillRunPolicy(
-        workspace_dir=str(tmp_path),
-        artifact_root_dir=None,
-        skill_name="test-skill",
-        artifact_globs=("output/**/*.pptx",),
-    )
 
     events = await collect(
         run_agent_loop(
@@ -764,15 +475,9 @@ async def test_delegated_tool_budget_blocks_only_new_subagents(tmp_path) -> None
             messages=messages,
             tools={"sub_agent": nested_tool},
             max_steps=3,
-            completion_gate=CompletionGate(
-                required_changed_artifact_globs=("output/**/*.pptx",),
-                max_continuations=3,
-                max_tool_calls=10,
-                max_delegated_tool_calls=2,
-                workflow_checkpoint_kind="controlled_presentation",
-            ),
+            max_tool_calls=10,
+            max_delegated_tool_calls=2,
             workspace_dir=str(tmp_path),
-            workflow_policy=workflow_policy,
         )
     )
 
@@ -791,40 +496,6 @@ async def test_delegated_tool_budget_blocks_only_new_subagents(tmp_path) -> None
         for event in events
     )
 
-
-@pytest.mark.asyncio
-async def test_completion_continuation_exhaustion_pauses_recoverable_workflow(
-    tmp_path,
-) -> None:
-    (tmp_path / "output").mkdir()
-    messages = _msgs()
-    llm = MockLLM(
-        [
-            LLMResponse(content="Still working.", finish_reason="stop"),
-            LLMResponse(content="Delivery remains incomplete.", finish_reason="stop"),
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=messages,
-            tools={},
-            max_steps=3,
-            completion_gate=CompletionGate(
-                required_changed_artifact_globs=("output/**/*.pptx",),
-                max_continuations=1,
-                workflow_checkpoint_kind="controlled_presentation",
-            ),
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    done = next(event for event in events if isinstance(event, DoneEvent))
-    assert done.stop_reason is StopReason.CHECKPOINT_PAUSED
-    assert "bounded continuation boundary" in done.final_content
-    assert any(isinstance(event, ContextCheckpointEvent) for event in events)
-    assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
 class ActiveSkillTool(Tool):
@@ -3593,643 +3264,12 @@ async def test_tool_heavy_turn_injects_hidden_final_summary_guidance():
     assert done[-1].final_content == "结论：已完成。"
 
 
-@pytest.mark.asyncio
-async def test_controlled_presentation_does_not_receive_conflicting_final_summary_nudge(
-    tmp_path,
-):
-    """An incomplete filesystem-backed deck stage owns the next action.
-
-    The generic >50-call wrap-up instruction must not tell the model to stop
-    before outline/deck/HTML delivery is complete.
-    """
-    gate = CompletionGate(workflow_checkpoint_kind="controlled_presentation")
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=_echo_tool_calls(_FS_THRESHOLD + 1),
-                finish_reason="tool",
-            ),
-            LLMResponse(content="continuing", finish_reason="stop"),
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_msgs(),
-            tools={"echo": EchoTool()},
-            max_steps=5,
-            completion_gate=gate,
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
-    assert any("CONTROLLED_PRESENTATION_STAGE=outline" in e.content for e in injected)
-    assert not any("many visible tool calls" in e.content for e in injected)
 
 
-@pytest.mark.asyncio
-async def test_workflow_checkpoint_is_request_context_not_session_surface(tmp_path):
-    session_root = tmp_path / "sessions"
-    session_log = SessionLog.create(
-        session_root,
-        session_id="workflow-request-context",
-        cwd=tmp_path,
-    )
-    messages = _msgs()
-    session_log.append("turn/start", {"turn": 1})
-    session_log.append_unlogged_messages(messages[1:], turn=1, step=None)
-    llm = CapturingStreamLLM(
-        [
-            LLMResponse(
-                content="working",
-                tool_calls=[
-                    ToolCall(
-                        id="echo-checkpoint",
-                        type="function",
-                        function=FunctionCall(
-                            name="echo",
-                            arguments={"text": "checkpoint"},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(content="done", finish_reason="stop"),
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=messages,
-            tools={"echo": EchoTool()},
-            max_steps=3,
-            completion_gate=CompletionGate(
-                workflow_checkpoint_kind="controlled_presentation"
-            ),
-            workspace_dir=str(tmp_path),
-            workflow_policy=_RecoverablePresentationPolicy(),
-            session_log=session_log,
-            session_turn=1,
-        )
-    )
-
-    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason is (
-        StopReason.END_TURN
-    )
-    assert len(llm.message_calls) == 2
-    assert all(
-        any(
-            "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
-            for message in request
-        )
-        for request in llm.message_calls
-    )
-    assert not any(
-        "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
-        for message in messages
-    )
-    assert not any(
-        "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
-        for message in session_log.replay().messages
-    )
-    checkpoint_contexts = [
-        event["data"]["workflowCheckpoint"]
-        for event in session_log.events
-        if event["type"] == "request/context"
-        and "workflowCheckpoint" in event["data"]
-    ]
-    assert len(checkpoint_contexts) == 2
-    assert all(context["stage"] == "outline" for context in checkpoint_contexts)
-    assert all(len(context["sha256"]) == 64 for context in checkpoint_contexts)
-    session_log.close()
 
 
-@pytest.mark.asyncio
-async def test_legacy_session_surface_checkpoint_is_migrated_to_request_context(
-    tmp_path,
-):
-    session_log = SessionLog.create(
-        tmp_path / "sessions",
-        session_id="legacy-workflow-surface",
-        cwd=tmp_path,
-    )
-    legacy_checkpoint = Message(
-        role="user",
-        content=core.format_runtime_context_update(
-            "CONTROLLED_PRESENTATION_STAGE=outline"
-        ),
-    )
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="make a deck"),
-        legacy_checkpoint,
-        Message(role="assistant", content="continuing"),
-    ]
-    session_log.append("turn/start", {"turn": 1})
-    session_log.append_unlogged_messages(messages[1:], turn=1, step=None)
-    llm = CapturingStreamLLM(
-        [LLMResponse(content="done", finish_reason="stop")]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=messages,
-            tools={},
-            max_steps=1,
-            completion_gate=CompletionGate(
-                workflow_checkpoint_kind="controlled_presentation"
-            ),
-            workspace_dir=str(tmp_path),
-            workflow_policy=_RecoverablePresentationPolicy(),
-            session_log=session_log,
-            session_turn=1,
-        )
-    )
-
-    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason is (
-        StopReason.END_TURN
-    )
-    assert legacy_checkpoint not in messages
-    assert legacy_checkpoint not in session_log.replay().messages
-    assert any(
-        "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
-        for message in llm.message_calls[0]
-    )
-    session_log.close()
 
 
-@pytest.mark.asyncio
-async def test_research_evidence_calls_preserve_controlled_deck_delivery_budget(tmp_path):
-    """Search/browser evidence has a separate guard from artifact production."""
-    browser = CountingBrowserReadTool()
-    echo = EchoTool()
-    gate = CompletionGate(
-        workflow_checkpoint_kind="controlled_presentation",
-        workflow_options={"research_mode": "deep"},
-        max_tool_calls=1,
-    )
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="browser-1",
-                        type="function",
-                        function=FunctionCall(
-                            name="user_browser_read_page",
-                            arguments={"url": "https://example.com/source"},
-                        ),
-                    ),
-                    ToolCall(
-                        id="artifact-1",
-                        type="function",
-                        function=FunctionCall(
-                            name="echo",
-                            arguments={"text": "artifact"},
-                        ),
-                    ),
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(content="done", finish_reason="stop"),
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_msgs(),
-            tools={"user_browser_read_page": browser, "echo": echo},
-            max_steps=5,
-            completion_gate=gate,
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    results = [e for e in events if isinstance(e, ToolCallResult)]
-    assert [result.success for result in results[:2]] == [True, True]
-
-
-@pytest.mark.asyncio
-async def test_controlled_research_serializes_public_page_reads(tmp_path):
-    browser = CountingBrowserReadTool()
-    calls = [
-        ToolCall(
-            id=f"browser-{index}",
-            type="function",
-            function=FunctionCall(
-                name="user_browser_read_page",
-                arguments={"url": f"https://example.com/source-{index}"},
-            ),
-        )
-        for index in range(1, 5)
-    ]
-    llm = MockLLM(
-        [
-            LLMResponse(content="", tool_calls=calls, finish_reason="tool"),
-            LLMResponse(content="done", finish_reason="stop"),
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_msgs(),
-            tools={"user_browser_read_page": browser},
-            max_steps=5,
-            completion_gate=CompletionGate(
-                workflow_checkpoint_kind="controlled_presentation",
-                workflow_options={"research_mode": "deep"},
-                max_continuations=0,
-            ),
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    assert browser.urls == ["https://example.com/source-1"]
-    results = {
-        event.tool_call_id: event
-        for event in events
-        if isinstance(event, ToolCallResult)
-    }
-    for call_id in ("browser-2", "browser-3", "browser-4"):
-        assert results[call_id].success is False
-        assert results[call_id].user_visible is False
-        assert "page read deferred by runtime batching" in (
-            results[call_id].error or ""
-        )
-
-
-@pytest.mark.asyncio
-async def test_controlled_research_binds_snapshot_body_to_navigated_url(tmp_path):
-    source_url = "https://example.com/report"
-    excerpt = "Example Entity published verified information in 2026."
-    output_dir = tmp_path / "output"
-    research_dir = output_dir / "research"
-    research_dir.mkdir(parents=True)
-    (research_dir / "market_evidence.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "topic": "market",
-                "target_entities": [
-                    {
-                        "entity": "Example Entity",
-                        "aliases": ["Example"],
-                        "official_domains": ["example.com"],
-                    }
-                ],
-                "evidence": [
-                    {
-                        "entity": "Example Entity",
-                        "claim": excerpt,
-                        "source_url": source_url,
-                        "source_type": "first_party",
-                        "evidence_excerpt": excerpt,
-                        "confidence": "high",
-                        "status": "verified",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    class MetadataNavigateTool(Tool):
-        @property
-        def name(self):
-            return "managed_browser_navigate"
-
-        @property
-        def description(self):
-            return "Navigate to one public URL"
-
-        @property
-        def parameters(self):
-            return {"type": "object", "properties": {"url": {"type": "string"}}}
-
-        async def execute(self, url: str = ""):
-            return ToolResult(
-                success=True,
-                content=(
-                    "### Page\n"
-                    f"- Page URL: {url}\n"
-                    "- Page Title: Example report\n"
-                    "### Snapshot\n"
-                    "- [Snapshot](.playwright-mcp/page.yml)"
-                ),
-            )
-
-    class SnapshotBodyTool(Tool):
-        @property
-        def name(self):
-            return "managed_browser_snapshot"
-
-        @property
-        def description(self):
-            return "Return the current page body"
-
-        @property
-        def parameters(self):
-            return {"type": "object", "properties": {}}
-
-        async def execute(self):
-            return ToolResult(success=True, content=f"Page heading\n{excerpt}")
-
-    class CountingBashTool(Tool):
-        def __init__(self):
-            self.calls = 0
-
-        @property
-        def name(self):
-            return "bash"
-
-        @property
-        def description(self):
-            return "Run validator"
-
-        @property
-        def parameters(self):
-            return {"type": "object", "properties": {"command": {"type": "string"}}}
-
-        async def execute(self, command: str = ""):
-            self.calls += 1
-            return ToolResult(success=True, content="validator ran")
-
-    bash = CountingBashTool()
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="navigate",
-                        type="function",
-                        function=FunctionCall(
-                            name="managed_browser_navigate",
-                            arguments={"url": source_url},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="snapshot",
-                        type="function",
-                        function=FunctionCall(
-                            name="managed_browser_snapshot",
-                            arguments={},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="validator",
-                        type="function",
-                        function=FunctionCall(
-                            name="bash",
-                            arguments={
-                                "command": (
-                                    "python validate_research_artifacts.py "
-                                    "--research-dir research --topic market"
-                                )
-                            },
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(content="done", finish_reason="stop"),
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_msgs(),
-            tools={
-                "managed_browser_navigate": MetadataNavigateTool(),
-                "managed_browser_snapshot": SnapshotBodyTool(),
-                "bash": bash,
-            },
-            max_steps=8,
-            completion_gate=CompletionGate(
-                workflow_checkpoint_kind="controlled_presentation",
-                workflow_options={"research_mode": "deep"},
-                max_continuations=0,
-            ),
-            workspace_dir=str(tmp_path),
-            artifact_root_dir=output_dir,
-        )
-    )
-
-    assert bash.calls == 1
-    validator_result = next(
-        event
-        for event in events
-        if isinstance(event, ToolCallResult) and event.tool_call_id == "validator"
-    )
-    assert validator_result.success is True
-
-
-@pytest.mark.asyncio
-async def test_controlled_outline_accepts_url_from_prior_web_search(tmp_path):
-    query = "official product release"
-    source_url = "https://example.gov/releases/latest"
-    outline_content = json.dumps(
-        {
-            "source_mode": "public_authoritative_research",
-            "slides": [{"evidence": [source_url]}],
-        }
-    )
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="search-evidence",
-                        type="function",
-                        function=FunctionCall(
-                            name="web_search",
-                            arguments={"query": query},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="write-outline",
-                        type="function",
-                        function=FunctionCall(
-                            name="write_file",
-                            arguments={
-                                "path": "outline.json",
-                                "content": outline_content,
-                            },
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-        ]
-    )
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_msgs(),
-            tools={
-                "web_search": JsonWebSearchTool({query: source_url}),
-                "write_file": WriteTool(workspace_dir=str(tmp_path)),
-            },
-            max_steps=2,
-            completion_gate=CompletionGate(
-                workflow_checkpoint_kind="controlled_presentation",
-                workflow_options={"research_mode": "deep"},
-            ),
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    write_result = next(
-        event
-        for event in events
-        if isinstance(event, ToolCallResult)
-        and event.tool_call_id == "write-outline"
-    )
-    assert write_result.success is True
-    assert (tmp_path / "outline.json").is_file()
-
-
-@pytest.mark.asyncio
-async def test_controlled_research_accepts_url_bound_search_summary(tmp_path):
-    query = "official report"
-    source_url = "https://example.gov/reports/latest"
-    research = tmp_path / "research"
-    research.mkdir()
-    (research / "topic_evidence.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "topic": "topic",
-                "target_entities": [],
-                "evidence": [
-                    {
-                        "entity": "Example",
-                        "claim": "Snippet for official report",
-                        "source_url": source_url,
-                        "source_type": "secondary",
-                        "evidence_excerpt": "Snippet for official report",
-                        "evidence_basis": "search_summary",
-                        "confidence": "medium",
-                        "status": "verified",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    class CountingBashTool(Tool):
-        def __init__(self):
-            self.calls = 0
-
-        @property
-        def name(self):
-            return "bash"
-
-        @property
-        def description(self):
-            return "Runs a command"
-
-        @property
-        def parameters(self):
-            return {"type": "object", "properties": {"command": {"type": "string"}}}
-
-        async def execute(self, command: str = ""):
-            self.calls += 1
-            return ToolResult(success=True, content=command)
-
-    validator_command = (
-        "python validate_research_artifacts.py --research-dir research "
-        "--topic topic --route B --report research/qa/topic_research_check.json"
-    )
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="search-only",
-                        type="function",
-                        function=FunctionCall(
-                            name="web_search",
-                            arguments={"query": query},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="validate-without-read",
-                        type="function",
-                        function=FunctionCall(
-                            name="bash",
-                            arguments={"command": validator_command},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-        ]
-    )
-    bash = CountingBashTool()
-
-    events = await collect(
-        run_agent_loop(
-            llm=llm,
-            messages=_msgs(),
-            tools={
-                "web_search": JsonWebSearchTool({query: source_url}),
-                "bash": bash,
-            },
-            max_steps=2,
-            completion_gate=CompletionGate(
-                workflow_checkpoint_kind="controlled_presentation",
-                workflow_options={"research_mode": "deep"},
-            ),
-            workspace_dir=str(tmp_path),
-        )
-    )
-
-    result = next(
-        event
-        for event in events
-        if isinstance(event, ToolCallResult)
-        and event.tool_call_id == "validate-without-read"
-    )
-    assert bash.calls == 1
-    assert result.success is True
 
 
 @pytest.mark.asyncio
@@ -4499,7 +3539,7 @@ async def test_web_search_budget_synthesizes_result_and_allows_final_answer():
 
 
 @pytest.mark.asyncio
-async def test_completion_gate_can_apply_a_stricter_web_search_budget():
+async def test_direct_run_option_can_apply_a_stricter_web_search_budget():
     tool_calls = [
         ToolCall(
             id=f"web-presentation-{index}",
@@ -4524,7 +3564,7 @@ async def test_completion_gate_can_apply_a_stricter_web_search_budget():
             messages=_msgs(),
             tools={"web_search": web_search},
             max_steps=5,
-            completion_gate=CompletionGate(web_search_total_limit=4),
+            web_search_total_limit=4,
         )
     )
 
@@ -6787,39 +5827,6 @@ async def test_maybe_summarize_uses_dedicated_summary_llm():
 
 
 @pytest.mark.asyncio
-async def test_maybe_summarize_prefers_workflow_checkpoint_without_llm_call():
-    from box_agent.core import _maybe_summarize
-
-    latest_user = Message(role="user", content="继续完成演示文稿")
-    llm = _FakeSummaryLLM("should not be called")
-    outcome = await _maybe_summarize(
-        llm,
-        [
-            Message(role="system", content="system"),
-            latest_user,
-            Message(role="assistant", content="large " * 10_000),
-        ],
-        token_limit=2_000,
-        api_total_tokens=0,
-        skip_check=False,
-        workflow_checkpoint=(
-            "CONTROLLED_PRESENTATION_CHECKPOINT=content_patch\n"
-            "PATCH_INPUT={\"path\":\"deck.patch.json\"}"
-        ),
-    )
-
-    assert outcome.mode == "checkpoint"
-    assert outcome.summary_calls == 0
-    assert outcome.estimated_after < outcome.estimated_before
-    assert latest_user in outcome.messages
-    assert llm.calls == []
-    assert not any(
-        "CONTROLLED_PRESENTATION_CHECKPOINT=content_patch" in str(message.content)
-        for message in outcome.messages
-    )
-
-
-@pytest.mark.asyncio
 async def test_create_summary_does_not_truncate_model_output():
     from box_agent.core import _create_summary
 
@@ -6919,7 +5926,14 @@ async def test_maybe_summarize_inserts_summary_marker():
     assert "<summary>" not in str(new_msgs[1].content)
     assert "</summary>" not in str(new_msgs[1].content)
     assert str(new_msgs[1].content).endswith(_SUMMARY_MESSAGE_SUFFIX)
-    assert "Pick up the last task as if the break never happened." in str(
+    assert "solely because compaction occurred" in str(new_msgs[1].content)
+    assert "use the normal user-input or decision tool" in str(
+        new_msgs[1].content
+    )
+    assert "without asking the user any further questions" not in str(
+        new_msgs[1].content
+    )
+    assert "pick up the last task as if the break never happened." in str(
         new_msgs[1].content
     )
     assert new_msgs[2:] == msgs[1:]

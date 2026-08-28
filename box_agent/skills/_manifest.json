@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "box_agent_version": "0.9.7",
-  "generated_at": "2026-08-31T02:34:35Z",
+  "generated_at": "2026-08-31T08:52:28Z",
   "skills": [
     {
       "name": "browser-use",

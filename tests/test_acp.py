@@ -21,8 +21,7 @@ from box_agent.acp import (
     _user_decision_response_from_meta,
 )
 from box_agent.acp.stdio_compat import _READ_LIMIT
-from box_agent.completion import should_resume_pending_completion_gate
-from box_agent.events import ContextCheckpointEvent, DoneEvent, StopReason
+from box_agent.events import DoneEvent, StopReason
 from box_agent.config import (
     AgentConfig,
     Config,
@@ -38,9 +37,9 @@ from box_agent.config import (
 )
 from box_agent.memory import MemoryManager
 from box_agent.llm import SessionBoundLLM
-from box_agent.loop_guards import CompletionGate
 from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
+from box_agent.session_log import SessionLogWorkspaceMismatch
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.bash_tool import BackgroundShellManager
 from box_agent.tools.jupyter_tool import MAX_EXECUTE_CODE_CHARS
@@ -51,7 +50,6 @@ from box_agent.tools.setup import (
     build_file_delivery_prompt,
     build_sandbox_info_prompt,
 )
-from box_agent.workflows import EXTERNAL_SKILL_WORKFLOW_KIND, recover_completion_gate
 from box_agent.workspace_registry import WorkspaceRegistry
 
 
@@ -1104,6 +1102,49 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
         ("assistant", "done"),
     ]
     state.agent.session_log.close()
+
+
+@pytest.mark.asyncio
+async def test_acp_rejects_workspace_change_without_dropping_existing_session(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(first_workspace)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    first = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(first_workspace),
+            field_meta={"session_id": "immutable-workspace-session"},
+        )
+    )
+
+    with pytest.raises(SessionLogWorkspaceMismatch, match="immutable workspace"):
+        await agent.newSession(
+            SimpleNamespace(
+                cwd=str(second_workspace),
+                field_meta={"session_id": "immutable-workspace-session"},
+            )
+        )
+
+    assert first.sessionId in agent._sessions
+    response = await agent.prompt(
+        SimpleNamespace(
+            sessionId=first.sessionId,
+            prompt=[{"text": "continue in the original workspace"}],
+            field_meta={},
+        )
+    )
+    assert response.stopReason == "end_turn"
+    agent._sessions[first.sessionId].agent.session_log.close()
 
 
 @pytest.mark.asyncio
@@ -3030,7 +3071,7 @@ async def test_acp_project_artifact_mode_publishes_generated_artifact(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_project_artifact_mode_keeps_host_execution_gate(tmp_path):
+async def test_acp_project_artifact_mode_uses_generic_run_options(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
@@ -3043,7 +3084,7 @@ async def test_acp_project_artifact_mode_keeps_host_execution_gate(tmp_path):
     captured: dict[str, object] = {}
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured["gate"] = kwargs.get("completion_gate")
+        captured["kwargs"] = kwargs
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -3065,10 +3106,7 @@ async def test_acp_project_artifact_mode_keeps_host_execution_gate(tmp_path):
     )
 
     assert response.stopReason == "end_turn"
-    gate = captured["gate"]
-    assert isinstance(gate, CompletionGate)
-    assert "report_execution_result" in gate.required_tools
-    assert gate.execution_result_criteria_count == 2
+    assert "completion_gate" not in captured["kwargs"]
 
 
 @pytest.mark.asyncio
@@ -3343,7 +3381,7 @@ async def test_acp_marks_injected_message_at_step_boundary(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_auto_completion_gate_continues_until_ppt_artifact(tmp_path):
+async def test_acp_does_not_hide_continuation_behind_artifact_completion(tmp_path):
     old = tmp_path / "output" / "old.html"
     old.parent.mkdir()
     old.write_text("old")
@@ -3367,15 +3405,15 @@ async def test_acp_auto_completion_gate_continues_until_ppt_artifact(tmp_path):
     )
 
     assert response.stopReason == "end_turn"
-    assert llm.calls == 3
-    assert (tmp_path / "output" / "bid-proposal.pptx").read_text() == "fake pptx payload"
+    assert llm.calls == 1
+    assert not (tmp_path / "output" / "bid-proposal.pptx").exists()
     rendered = "\n".join(str(update) for update in conn.updates)
-    assert "PPT 已生成" in rendered
+    assert "PPT 已生成" not in rendered
     assert "尚未满足完成条件" not in rendered
 
 
 @pytest.mark.asyncio
-async def test_acp_completion_gate_ignores_historical_deliverable_on_plain_continue(tmp_path):
+async def test_acp_plain_continue_does_not_reinterpret_historical_deliverable(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=5, workspace_dir=str(tmp_path)),
@@ -3410,136 +3448,13 @@ async def test_acp_completion_gate_ignores_historical_deliverable_on_plain_conti
     assert "尚未满足完成条件" not in rendered
 
 
-def test_pending_completion_gate_resume_detection_is_session_scoped():
-    assert should_resume_pending_completion_gate(
-        "输出 HTML",
-        waiting_for_user_input=False,
-    )
-    assert should_resume_pending_completion_gate(
-        "TAM 120 亿元，SAM 30 亿元，SOM 3 亿元",
-        waiting_for_user_input=True,
-    )
-    assert not should_resume_pending_completion_gate(
-        "这个主题色是什么意思？",
-        waiting_for_user_input=False,
-    )
-    assert not should_resume_pending_completion_gate(
-        "取消，不用继续",
-        waiting_for_user_input=True,
-    )
-    assert not should_resume_pending_completion_gate(
-        "优化这个“继续制作 PPT 并输出 HTML”的提示词",
-        waiting_for_user_input=True,
-    )
 
 
-def test_recover_controlled_presentation_gate_does_not_claim_research_only(tmp_path):
-    research = tmp_path / "output" / "research"
-    research.mkdir(parents=True)
-    (research / "topic_insight.md").write_text("validated evidence", encoding="utf-8")
 
-    gate = recover_completion_gate(tmp_path)
-
-    assert gate is None
-
-
-def test_recover_controlled_presentation_gate_from_source_first_outline(tmp_path):
-    output = tmp_path / "output"
-    output.mkdir()
-    (output / "outline.json").write_text(
-        json.dumps(
-            {
-                "slides": [
-                    {
-                        "title": "Intro",
-                        "message": "Message",
-                        "bullets": ["One"],
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    gate = recover_completion_gate(tmp_path)
-
-    assert gate is not None
-    assert gate.workflow_checkpoint_kind == "controlled_presentation"
-    assert gate.workflow_options["research_mode"] == "auto"
-
-
-def test_recover_controlled_presentation_gate_rejects_foreign_nested_deck(
-    tmp_path,
-    caplog,
-):
-    foreign = tmp_path / "output" / "vendor" / ".workbench" / "deck.json"
-    foreign.parent.mkdir(parents=True)
-    foreign.write_text(
-        json.dumps(
-            {
-                "deckFormat": "static-html-v2",
-                "slides": [
-                    {
-                        "pageNo": 1,
-                        "htmlPath": "slides/slide_01.html",
-                        "htmlReady": False,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with caplog.at_level("INFO"):
-        assert recover_completion_gate(tmp_path) is None
-    assert "reason=foreign_deck_schema" in caplog.text
-
-
-def test_recover_controlled_presentation_gate_does_not_reopen_complete_deck(tmp_path):
-    output = tmp_path / "output"
-    qa = output / "qa"
-    qa.mkdir(parents=True)
-    (output / "outline.json").write_text(
-        json.dumps(
-            {
-                "slides": [
-                    {"title": "Intro", "message": "Message", "bullets": ["One"]}
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    (output / "deck.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "theme_id": "soft-editorial",
-                "slides": [
-                    {"id": "slide-1", "layout_id": "cover-hero-v1", "props": {}}
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (output / "index.html").write_text("<html></html>", encoding="utf-8")
-    for report_name in (
-        "outline_check.json",
-        "deck_contract.json",
-        "deck_spec.json",
-        "truth_check.json",
-        "image_manifest.json",
-        "html_self_check.json",
-        "runtime_probe.json",
-    ):
-        (qa / report_name).write_text('{"ok": true}', encoding="utf-8")
-
-    gate = recover_completion_gate(tmp_path)
-
-    assert gate is None
 
 
 @pytest.mark.asyncio
-async def test_acp_recovers_controlled_deck_after_new_session_from_filesystem(tmp_path):
+async def test_acp_ignores_legacy_workflow_files_without_mutating_them(tmp_path):
     research = tmp_path / "output" / "research"
     research.mkdir(parents=True)
     (research / "topic_insight.md").write_text("validated evidence", encoding="utf-8")
@@ -3553,6 +3468,12 @@ async def test_acp_recovers_controlled_deck_after_new_session_from_filesystem(tm
         ),
         encoding="utf-8",
     )
+    checkpoint_path = tmp_path / ".box-agent" / "checkpoints" / "legacy.json"
+    owner_path = tmp_path / ".box-agent" / "workflow-owners" / "legacy.json"
+    checkpoint_path.parent.mkdir(parents=True)
+    owner_path.parent.mkdir(parents=True)
+    checkpoint_path.write_text('{"stage":"outline"}\n', encoding="utf-8")
+    owner_path.write_text('{"workflow":"controlled_presentation"}\n', encoding="utf-8")
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
@@ -3562,11 +3483,10 @@ async def test_acp_recovers_controlled_deck_after_new_session_from_filesystem(tm
     session = await agent.newSession(
         SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
     )
-    state = agent._sessions[session.sessionId]
     captured: dict[str, object] = {}
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured["gate"] = kwargs.get("completion_gate")
+        captured["kwargs"] = kwargs
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -3586,13 +3506,16 @@ async def test_acp_recovers_controlled_deck_after_new_session_from_filesystem(tm
     )
 
     assert response.stopReason == "end_turn"
-    assert captured["gate"] is not None
-    assert captured["gate"] is state.pending_completion_gate
-    assert state.pending_completion_gate.workflow_options["research_mode"] == "deep"
+    assert "completion_gate" not in captured["kwargs"]
+    state = agent._sessions[session.sessionId]
+    assert not hasattr(state, "pending_completion_gate")
+    assert not hasattr(state, "last_checkpoint")
+    assert checkpoint_path.read_text(encoding="utf-8") == '{"stage":"outline"}\n'
+    assert owner_path.read_text(encoding="utf-8") == '{"workflow":"controlled_presentation"}\n'
 
 
 @pytest.mark.asyncio
-async def test_acp_output_html_followup_reuses_pending_presentation_gate(tmp_path):
+async def test_acp_output_html_followup_has_no_legacy_runtime_state(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
@@ -3603,15 +3526,10 @@ async def test_acp_output_html_followup_reuses_pending_presentation_gate(tmp_pat
         SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
     )
     state = agent._sessions[session.sessionId]
-    pending_gate = CompletionGate(
-        required_changed_artifact_globs=("output/**/*.html",),
-        workflow_checkpoint_kind="controlled_presentation",
-    )
-    state.pending_completion_gate = pending_gate
     captured: dict[str, object] = {}
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured["gate"] = kwargs.get("completion_gate")
+        captured["kwargs"] = kwargs
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -3624,18 +3542,19 @@ async def test_acp_output_html_followup_reuses_pending_presentation_gate(tmp_pat
     )
 
     assert response.stopReason == "end_turn"
-    assert captured["gate"] is pending_gate
-    assert state.pending_completion_gate is pending_gate
-    assert response.field_meta["deliveryStatus"] == "incomplete"
-    assert response.field_meta["recoverable"] is True
-    assert response.field_meta["deliveryGaps"]
+    assert "completion_gate" not in captured["kwargs"]
+    assert not hasattr(state, "pending_completion_gate")
     assert response.field_meta["ok"] is True
-    assert response.field_meta["runStatus"] == "incomplete"
-    assert response.field_meta["completed"] is False
+    assert response.field_meta["runStatus"] == "completed"
+    assert response.field_meta["completed"] is True
+    assert "deliveryStatus" not in response.field_meta
+    assert "deliveryGaps" not in response.field_meta
+    assert "recoverable" not in response.field_meta
+
 
 
 @pytest.mark.asyncio
-async def test_acp_checkpoint_pause_overrides_incomplete_and_maps_metadata(tmp_path):
+async def test_acp_maps_waiting_for_user_to_end_turn_without_completion(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
@@ -3645,87 +3564,30 @@ async def test_acp_checkpoint_pause_overrides_incomplete_and_maps_metadata(tmp_p
     session = await agent.newSession(
         SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
     )
-    state = agent._sessions[session.sessionId]
-    state.pending_completion_gate = CompletionGate(
-        required_changed_artifact_globs=("output/**/*.pptx",),
-        workflow_checkpoint_kind="controlled_presentation",
-    )
 
-    async def checkpoint_pause(state_arg, session_id, **kwargs):
-        state_arg.last_checkpoint = {
-            "type": "context_checkpoint",
-            "checkpointId": "checkpoint-1",
-            "workflowKind": "controlled_presentation",
-            "recoverable": True,
-        }
-        return "checkpoint_paused"
+    async def waiting_for_user(state_arg, session_id, **kwargs):
+        return StopReason.WAITING_FOR_USER.value
 
-    agent._run_turn = checkpoint_pause  # type: ignore[method-assign]
+    agent._run_turn = waiting_for_user  # type: ignore[method-assign]
 
     response = await agent.prompt(
         SimpleNamespace(
             sessionId=session.sessionId,
-            prompt=[{"text": "继续输出 PPTX"}],
+            prompt=[{"text": "Ask me for the missing value."}],
         )
     )
 
     assert response.stopReason == "end_turn"
     assert response.field_meta["ok"] is True
-    assert response.field_meta["runStatus"] == "paused"
+    assert response.field_meta["lastStopReason"] == "waiting_for_user"
+    assert response.field_meta["runStatus"] == "waiting_for_user"
     assert response.field_meta["completed"] is False
-    assert response.field_meta["paused"] is True
-    assert response.field_meta["deliveryStatus"] == "paused"
-    assert response.field_meta["deliveryGaps"] == []
-    assert response.field_meta["recoverable"] is True
-    assert response.field_meta["checkpoint"]["checkpointId"] == "checkpoint-1"
-    assert response.field_meta["lastStopReason"] == "checkpoint_paused"
+    assert response.field_meta["paused"] is False
+
 
 
 @pytest.mark.asyncio
-async def test_acp_run_turn_maps_context_checkpoint_event_to_host_metadata(tmp_path):
-    config = Config(
-        llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
-        tools=ToolsConfig(),
-    )
-    conn = DummyConn()
-    agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
-    )
-    state = agent._sessions[session.sessionId]
-
-    async def checkpoint_events(*args, **kwargs):
-        yield ContextCheckpointEvent(
-            checkpoint_id="checkpoint-1",
-            workflow_kind="controlled_presentation",
-            adapter_id="box-agent.controlled-presentation.v1",
-            schema_version=1,
-            workspace_identity="workspace-hash",
-            path=str(tmp_path / ".box-agent" / "checkpoints" / "checkpoint.json"),
-            stage="outline",
-            artifact_count=2,
-            artifact_set_sha256="artifact-hash",
-        )
-        yield DoneEvent(
-            stop_reason=StopReason.CHECKPOINT_PAUSED,
-            final_content="Progress saved.",
-        )
-
-    state.agent.run_events = checkpoint_events  # type: ignore[method-assign]
-
-    reason = await agent._run_turn(state, session.sessionId)
-
-    assert reason == "checkpoint_paused"
-    assert state.last_error is None
-    assert state.last_checkpoint is not None
-    assert state.last_checkpoint["checkpointId"] == "checkpoint-1"
-    assert state.last_checkpoint["status"] == "paused"
-    assert any("context_checkpoint" in str(update) for update in conn.updates)
-
-
-@pytest.mark.asyncio
-async def test_acp_resumes_controlled_deck_after_required_user_input(tmp_path):
+async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
     output_dir = tmp_path / "output"
     completion_tool = CompleteDeckTool(output_dir)
     config = Config(
@@ -3761,12 +3623,11 @@ async def test_acp_resumes_controlled_deck_after_required_user_input(tmp_path):
     state = agent._sessions[session.sessionId]
 
     assert first.stopReason == "end_turn"
-    assert state.pending_completion_gate is not None
-    assert state.waiting_for_user_input is True
     assert not (output_dir / "index.html").exists()
-    assert first.field_meta["deliveryStatus"] == "paused"
-    assert first.field_meta["recoverable"] is True
-    assert first.field_meta["deliveryGaps"] == []
+    assert first.field_meta["runStatus"] == "waiting_for_user"
+    assert first.field_meta["completed"] is False
+    assert first.field_meta["paused"] is False
+    assert "deliveryStatus" not in first.field_meta
 
     second = await agent.prompt(
         SimpleNamespace(
@@ -3776,14 +3637,24 @@ async def test_acp_resumes_controlled_deck_after_required_user_input(tmp_path):
     )
 
     assert second.stopReason == "end_turn"
+    assert llm.calls == 2
+    assert completion_tool.calls == 0
+    assert not (output_dir / "index.html").exists()
+    assert second.field_meta["runStatus"] == "completed"
+
+    third = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "继续完成并交付。"}],
+        )
+    )
+
+    assert third.stopReason == "end_turn"
     assert llm.calls == 4
     assert completion_tool.calls == 1
     assert (output_dir / "index.html").is_file()
-    assert state.pending_completion_gate is None
-    assert state.waiting_for_user_input is False
-    assert second.field_meta["deliveryStatus"] == "complete"
-    assert second.field_meta["recoverable"] is False
-    assert second.field_meta["deliveryGaps"] == []
+    assert third.field_meta["runStatus"] == "completed"
+    assert "deliveryStatus" not in third.field_meta
     assert "TAM 120 亿元" in state.source_text
     rendered = "\n".join(str(update) for update in conn.updates)
     assert "已根据补充数据继续完成 HTML" in rendered
@@ -3855,7 +3726,6 @@ async def test_acp_unloads_auto_preloaded_skill_after_it_is_disabled(tmp_path):
         "name: pptx\n"
         "description: Create editable PowerPoint PPTX slide decks.\n"
         "capabilities: [presentation.authoring]\n"
-        "workflow: controlled_presentation\n"
         "---\n"
         "# PPTX FULL RULES\n",
         encoding="utf-8",
@@ -3910,7 +3780,7 @@ async def test_acp_unloads_auto_preloaded_skill_after_it_is_disabled(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_host_presentation_config_guarantees_presentation_provider(tmp_path):
+async def test_acp_host_selected_skill_preloads_exact_skill(tmp_path):
     skills_dir = tmp_path / "skills"
     pptx_dir = skills_dir / "pptx"
     pptx_dir.mkdir(parents=True)
@@ -3919,7 +3789,6 @@ async def test_acp_host_presentation_config_guarantees_presentation_provider(tmp
         "name: pptx\n"
         "description: Create editable PowerPoint PPTX slide decks.\n"
         "capabilities: [presentation.authoring]\n"
-        "workflow: controlled_presentation\n"
         "---\n"
         "# PPTX FULL RULES\n",
         encoding="utf-8",
@@ -3945,7 +3814,7 @@ async def test_acp_host_presentation_config_guarantees_presentation_provider(tmp
     captured: dict[str, object] = {}
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured["gate"] = kwargs.get("completion_gate")
+        captured["kwargs"] = kwargs
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -3954,24 +3823,16 @@ async def test_acp_host_presentation_config_guarantees_presentation_provider(tmp
         SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "继续"}],
-            field_meta={
-                "presentation_config": {
-                    "schema_version": 1,
-                    "intent": "create",
-                    "confirmed_by": "user",
-                }
-            },
+            field_meta={"selected_skill_names": ["pptx"]},
         )
     )
 
-    gate = captured["gate"]
-    assert isinstance(gate, CompletionGate)
-    assert gate.workflow_checkpoint_kind == "controlled_presentation"
+    assert "completion_gate" not in captured["kwargs"]
     assert agent._sessions[session.sessionId].preloaded_skill_names == ["pptx"]
 
 
 @pytest.mark.asyncio
-async def test_acp_explicit_external_skill_gets_lifecycle_and_stays_preloaded_on_resume(
+async def test_acp_explicit_external_skill_preloads_without_lifecycle_state(
     tmp_path,
 ):
     skills_dir = tmp_path / "skills"
@@ -4004,10 +3865,10 @@ async def test_acp_explicit_external_skill_gets_lifecycle_and_stays_preloaded_on
     session = await agent.newSession(
         SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
     )
-    captured: list[CompletionGate | None] = []
+    captured: list[dict[str, object]] = []
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured.append(kwargs.get("completion_gate"))
+        captured.append(kwargs)
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -4018,11 +3879,7 @@ async def test_acp_explicit_external_skill_gets_lifecycle_and_stays_preloaded_on
             prompt=[{"text": "请使用 /ppt-master 介绍内马尔最辉煌的1个赛季"}],
         )
     )
-    first_gate = captured[-1]
-    assert isinstance(first_gate, CompletionGate)
-    assert first_gate.workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND
-    assert first_gate.required_changed_artifact_globs == ("output/**/*.pptx",)
-    assert first_gate.workflow_options["skill_name"] == "ppt-master"
+    assert "completion_gate" not in captured[-1]
     state = agent._sessions[session.sessionId]
     assert state.preloaded_skill_names == ["ppt-master"]
     assert "# PPT MASTER RULES" in state.agent.system_prompt
@@ -4033,15 +3890,12 @@ async def test_acp_explicit_external_skill_gets_lifecycle_and_stays_preloaded_on
             prompt=[{"text": "确认制作"}],
         )
     )
-    resumed_gate = captured[-1]
-    assert isinstance(resumed_gate, CompletionGate)
-    assert resumed_gate.workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND
-    assert resumed_gate.workflow_options["skill_name"] == "ppt-master"
-    assert state.preloaded_skill_names == ["ppt-master"]
+    assert "completion_gate" not in captured[-1]
+    assert state.preloaded_skill_names == []
 
 
 @pytest.mark.asyncio
-async def test_acp_external_skill_owner_survives_new_acp_session(
+async def test_acp_does_not_read_or_rewrite_legacy_external_skill_owner(
     tmp_path,
     monkeypatch,
 ):
@@ -4073,10 +3927,13 @@ async def test_acp_external_skill_owner_survives_new_acp_session(
         f"system\n\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
-    captured: list[CompletionGate | None] = []
+    owner_path = tmp_path / "owners" / "stable-session.json"
+    owner_path.parent.mkdir(parents=True)
+    owner_path.write_text('{"workflow_kind":"external_skill"}\n', encoding="utf-8")
+    captured: list[dict[str, object]] = []
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured.append(kwargs.get("completion_gate"))
+        captured.append(kwargs)
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -4106,14 +3963,12 @@ async def test_acp_external_skill_owner_survives_new_acp_session(
     )
 
     assert len(captured) == 2
-    assert all(isinstance(gate, CompletionGate) for gate in captured)
-    assert captured[0].workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND
-    assert captured[1].workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND
-    assert captured[1].workflow_options["skill_name"] == "ppt-master"
+    assert all("completion_gate" not in kwargs for kwargs in captured)
+    assert owner_path.read_text(encoding="utf-8") == '{"workflow_kind":"external_skill"}\n'
 
 
 @pytest.mark.asyncio
-async def test_acp_user_skill_cannot_select_builtin_controlled_adapter(tmp_path):
+async def test_acp_explicit_user_skill_does_not_create_legacy_runtime_state(tmp_path):
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "foreign-ppt"
     skill_dir.mkdir(parents=True)
@@ -4121,7 +3976,6 @@ async def test_acp_user_skill_cannot_select_builtin_controlled_adapter(tmp_path)
         "---\n"
         "name: foreign-ppt\n"
         "description: Generate editable PPTX presentations.\n"
-        "workflow: controlled_presentation\n"
         "---\n"
         "# FOREIGN RULES\n",
         encoding="utf-8",
@@ -4146,7 +4000,7 @@ async def test_acp_user_skill_cannot_select_builtin_controlled_adapter(tmp_path)
     captured = {}
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured["gate"] = kwargs.get("completion_gate")
+        captured["kwargs"] = kwargs
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -4157,14 +4011,14 @@ async def test_acp_user_skill_cannot_select_builtin_controlled_adapter(tmp_path)
         )
     )
 
-    gate = captured["gate"]
-    assert isinstance(gate, CompletionGate)
-    assert gate.workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND
-    assert gate.workflow_options["skill_name"] == "foreign-ppt"
+    assert "completion_gate" not in captured["kwargs"]
+    state = agent._sessions[session.sessionId]
+    assert state.preloaded_skill_names == ["foreign-ppt"]
+    assert not hasattr(state, "pending_completion_gate")
 
 
 @pytest.mark.asyncio
-async def test_acp_plain_skill_mention_does_not_force_external_lifecycle(tmp_path):
+async def test_acp_plain_skill_mention_does_not_force_activation(tmp_path):
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "ppt-master"
     skill_dir.mkdir(parents=True)
@@ -4197,7 +4051,7 @@ async def test_acp_plain_skill_mention_does_not_force_external_lifecycle(tmp_pat
     captured: dict[str, object] = {}
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured["gate"] = kwargs.get("completion_gate")
+        captured["kwargs"] = kwargs
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -4208,10 +4062,7 @@ async def test_acp_plain_skill_mention_does_not_force_external_lifecycle(tmp_pat
         )
     )
 
-    gate = captured["gate"]
-    assert gate is None or not isinstance(gate, CompletionGate) or (
-        gate.workflow_checkpoint_kind != EXTERNAL_SKILL_WORKFLOW_KIND
-    )
+    assert "completion_gate" not in captured["kwargs"]
 
 
 @pytest.mark.asyncio
@@ -4236,7 +4087,6 @@ async def test_acp_generic_ppt_request_does_not_preload_matched_lark_slides(tmp_
         "name: pptx\n"
         "description: Create editable PowerPoint PPTX slide decks.\n"
         "capabilities: [presentation.authoring]\n"
-        "workflow: controlled_presentation\n"
         "---\n"
         "# PPTX FULL RULES\n",
         encoding="utf-8",
@@ -4271,13 +4121,6 @@ async def test_acp_generic_ppt_request_does_not_preload_matched_lark_slides(tmp_
         SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "制作一份哈利波特主题介绍 PPT"}],
-            field_meta={
-                "presentation_config": {
-                    "schema_version": 1,
-                    "intent": "create",
-                    "confirmed_by": "implicit",
-                }
-            },
         )
     )
 
@@ -4288,7 +4131,7 @@ async def test_acp_generic_ppt_request_does_not_preload_matched_lark_slides(tmp_
 
 
 @pytest.mark.asyncio
-async def test_acp_host_config_uses_matched_legacy_presentation_skill(tmp_path):
+async def test_acp_host_selected_skill_prefers_exact_user_skill(tmp_path):
     user_root = tmp_path / "user-skills"
     builtin_root = tmp_path / "builtin-skills"
     legacy_dir = user_root / "legacy-slides"
@@ -4308,7 +4151,6 @@ async def test_acp_host_config_uses_matched_legacy_presentation_skill(tmp_path):
         "name: pptx\n"
         "description: Create editable PowerPoint PPTX slide decks.\n"
         "capabilities: [presentation.authoring]\n"
-        "workflow: controlled_presentation\n"
         "---\n"
         "# PPTX FULL RULES\n",
         encoding="utf-8",
@@ -4336,7 +4178,7 @@ async def test_acp_host_config_uses_matched_legacy_presentation_skill(tmp_path):
     captured: dict[str, object] = {}
 
     async def capture_run_turn(state_arg, session_id, **kwargs):
-        captured["gate"] = kwargs.get("completion_gate")
+        captured["kwargs"] = kwargs
         return "end_turn"
 
     agent._run_turn = capture_run_turn  # type: ignore[method-assign]
@@ -4345,23 +4187,11 @@ async def test_acp_host_config_uses_matched_legacy_presentation_skill(tmp_path):
         SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "用飞书创建幻灯片"}],
-            field_meta={
-                "presentation_config": {
-                    "schema_version": 1,
-                    "intent": "create",
-                    "confirmed_by": "implicit",
-                }
-            },
+            field_meta={"selected_skill_names": ["legacy-slides"]},
         )
     )
 
-    gate = captured["gate"]
-    assert isinstance(gate, CompletionGate)
-    assert gate.workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND
-    assert gate.workflow_options["skill_name"] == "legacy-slides"
-    assert gate.max_tool_calls == 160
-    assert gate.completion_reserve_tool_calls == 0
-    assert gate.required_changed_artifact_globs == ()
+    assert "completion_gate" not in captured["kwargs"]
     assert agent._sessions[session.sessionId].preloaded_skill_names == [
         "legacy-slides"
     ]
@@ -5997,10 +5827,10 @@ async def test_acp_registry_failure_cannot_report_task_complete(tmp_path, monkey
     )
 
     assert response.field_meta["completed"] is False
-    assert response.field_meta["deliveryStatus"] == "incomplete"
-    assert response.field_meta["deliveryGaps"] == [
-        "Box-Agent task/artifact registry could not persist terminal state"
-    ]
+    assert response.field_meta["runStatus"] == "error"
+    assert "registry unavailable" in response.field_meta["error"]
+    assert response.field_meta["taskRegistryError"] == "registry unavailable"
+    assert "deliveryStatus" not in response.field_meta
 
 
 @pytest.mark.asyncio

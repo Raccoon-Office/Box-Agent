@@ -62,7 +62,11 @@ async def test_agent_persists_request_before_provider_and_restores_messages(tmp_
 
     assert llm.saw_durable_request
     assert any(isinstance(event, DoneEvent) for event in events)
-    restored = SessionLog.open(tmp_path / "sessions", session_id=session_id)
+    restored = SessionLog.open(
+        tmp_path / "sessions",
+        session_id=session_id,
+        cwd=tmp_path,
+    )
     assert [(message.role, message.content) for message in restored.replay().messages] == [
         ("user", "persist me"),
         ("assistant", "durable answer"),
@@ -174,7 +178,7 @@ async def test_tool_side_effect_starts_only_after_exact_call_is_durable(tmp_path
     assert any(isinstance(event, DoneEvent) for event in events)
     assert tool.executed
     assert tool.saw_durable_call
-    restored = SessionLog.open(root, session_id=session_id)
+    restored = SessionLog.open(root, session_id=session_id, cwd=tmp_path)
     durable_result = next(
         event
         for event in restored.events
@@ -325,7 +329,11 @@ async def test_agent_restores_goal_plan_and_todos_from_session_log(tmp_path):
     assert plan_result.success and todo_result.success
     log.close()
 
-    restored_log = SessionLog.open(root, session_id="domain-restore")
+    restored_log = SessionLog.open(
+        root,
+        session_id="domain-restore",
+        cwd=tmp_path,
+    )
     restored_plan_store = PlanStore()
     restored_todo_store = TodoStore()
     restored_agent = Agent(
@@ -432,7 +440,11 @@ def test_active_skill_metadata_restores_only_with_matching_content(tmp_path):
     log.close()
 
     assert persisted[0]["name"] == "review"
-    restored_log = SessionLog.open(root, session_id="skill-restore")
+    restored_log = SessionLog.open(
+        root,
+        session_id="skill-restore",
+        cwd=tmp_path,
+    )
     restored = Agent(
         llm_client=_ToolCallingLLM(),
         system_prompt="system",

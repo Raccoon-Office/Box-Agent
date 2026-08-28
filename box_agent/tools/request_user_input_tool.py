@@ -11,6 +11,7 @@ class RequestUserInputTool(Tool):
     """Record one focused clarification request without discarding task state."""
 
     aliases = ("clarify",)
+    ends_turn_on_success = True
 
     @property
     def name(self) -> str:

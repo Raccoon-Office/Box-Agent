@@ -32,7 +32,7 @@
 
 | 改动类型 | 最小 proof |
 | --- | --- |
-| 共享核心循环、事件、取消、goal、completion gate | 聚焦回归测试 + 相关 core/ACP 现有测试 |
+| 共享核心循环、事件、取消、goal、Session Log | 聚焦回归测试 + 相关 core/持久化/ACP 测试 |
 | CLI-only 行为 | 聚焦 CLI 测试或命令输出，并确认没有复制 ACP 行为 |
 | ACP/runtime 行为 | ACP 测试或探针，并考虑 stdout/stderr 边界 |
 | Tool 行为 | 覆盖成功路径和关键失败路径的直接 tool 测试 |

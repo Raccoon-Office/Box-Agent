@@ -29,6 +29,18 @@ def _write_config(path: Path, api_key: str = "sk-test-key") -> None:
     )
 
 
+def test_parse_args_rejects_removed_no_completion_gate(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["box-agent", "--no-completion-gate"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.parse_args()
+
+    assert exc_info.value.code == 2
+
+
 def test_cmd_config_get_reads_expanded_config_defaults(
     tmp_path: Path,
     monkeypatch,
@@ -66,16 +78,13 @@ def test_cmd_config_set_updates_nested_tool_limit(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
 
     exit_code = cli.cmd_config(
-        set_pair=("tool_limits.external_skill.max_tool_calls", "96")
+        set_pair=("tool_limits.general.max_tool_calls", "96")
     )
 
     assert exit_code == 0
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert data["tool_limits"]["external_skill"]["max_tool_calls"] == 96
-    assert (
-        cli.Config.from_yaml(config_path).tool_limits.external_skill.max_tool_calls
-        == 96
-    )
+    assert data["tool_limits"]["general"]["max_tool_calls"] == 96
+    assert cli.Config.from_yaml(config_path).tool_limits.general.max_tool_calls == 96
 
 
 def test_cmd_config_set_updates_relaxed_timeout_controls(
@@ -129,6 +138,22 @@ def test_cmd_config_json_masks_secret_values(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["llm"]["api_key"] == "sk-s****oken"
+
+
+def test_cmd_config_human_summary_uses_generic_tool_limits(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
+
+    assert cli.cmd_config() == 0
+    output = capsys.readouterr().out
+    assert "tools 160+512 delegated" in output
+    assert "completion gate" not in output
+    assert "presentation" not in output
 
 
 def test_config_parses_goal_autopilot_settings(tmp_path: Path) -> None:
@@ -190,14 +215,10 @@ def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> Non
     default_path = tmp_path / "default.yaml"
     _write_config(default_path)
     defaults = cli.Config.from_yaml(default_path).tool_limits
+    assert defaults.general.max_tool_calls == 160
+    assert defaults.general.max_delegated_tool_calls == 512
     assert defaults.web_search.concurrency == 2
     assert defaults.web_search.total_calls == 80
-    assert defaults.completion.max_continuations == 5
-    assert defaults.completion.deadline_seconds == 1800.0
-    assert defaults.external_skill.max_tool_calls == 160
-    assert defaults.external_skill.max_delegated_tool_calls == 512
-    assert defaults.presentation.max_delegated_tool_calls == 512
-    assert defaults.presentation.deep_research_max_tool_calls == 240
     assert defaults.sub_agent.general_max_steps == 80
     assert defaults.sub_agent.general_max_tool_calls == 48
     assert defaults.sub_agent.no_progress_steps == 8
@@ -207,18 +228,13 @@ def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> Non
     with override_path.open("a", encoding="utf-8") as f:
         f.write(
             "tool_limits:\n"
-            "  completion:\n"
-            "    max_continuations: 7\n"
-            "    deadline_seconds: 2400\n"
+            "  general:\n"
+            "    max_tool_calls: 96\n"
+            "    max_delegated_tool_calls: 333\n"
             "  web_search:\n"
             "    batch_size: 4\n"
             "    concurrency: 3\n"
             "    total_calls: 40\n"
-            "  external_skill:\n"
-            "    max_tool_calls: 96\n"
-            "    max_delegated_tool_calls: 333\n"
-            "  presentation:\n"
-            "    research_rounds: 5\n"
             "  sub_agent:\n"
             "    general_max_steps: 20\n"
             "    legacy_max_steps: 60\n"
@@ -229,12 +245,8 @@ def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> Non
     assert limits.web_search.concurrency == 3
     assert limits.web_search.total_calls == 40
     assert limits.web_search.deep_research_total_calls == 150
-    assert limits.completion.max_continuations == 7
-    assert limits.completion.deadline_seconds == 2400.0
-    assert limits.external_skill.max_tool_calls == 96
-    assert limits.external_skill.max_delegated_tool_calls == 333
-    assert limits.external_skill.completion_reserve_calls == 10
-    assert limits.presentation.research_rounds == 5
+    assert limits.general.max_tool_calls == 96
+    assert limits.general.max_delegated_tool_calls == 333
     assert limits.sub_agent.general_max_steps == 20
     assert limits.sub_agent.legacy_max_steps == 60
 
@@ -270,6 +282,20 @@ def test_config_rejects_invalid_tool_limits(tmp_path: Path) -> None:
         cli.Config.from_yaml(config_path)
 
 
+@pytest.mark.parametrize("removed_section", ["completion", "external_skill", "presentation"])
+def test_config_rejects_removed_domain_tool_limit_sections(
+    tmp_path: Path,
+    removed_section: str,
+) -> None:
+    config_path = tmp_path / f"{removed_section}.yaml"
+    _write_config(config_path)
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write(f"tool_limits:\n  {removed_section}: {{}}\n")
+
+    with pytest.raises(ValueError):
+        cli.Config.from_yaml(config_path)
+
+
 def test_config_rejects_web_search_concurrency_above_batch_size() -> None:
     with pytest.raises(ValueError, match="concurrency cannot exceed batch_size"):
         ToolLimitsConfig(web_search={"batch_size": 2, "concurrency": 3})
@@ -280,19 +306,13 @@ def test_config_rejects_web_search_concurrency_above_batch_size() -> None:
     [
         (("general", "final_summary_after_calls"), 512),
         (("general", "wrapup_remaining_steps"), 50),
-        (("completion", "max_continuations"), 20),
-        (("completion", "deadline_seconds"), 14400),
+        (("general", "max_tool_calls"), 512),
+        (("general", "max_delegated_tool_calls"), 4096),
         (("web_search", "batch_size"), 32),
         (("web_search", "concurrency"), 32),
         (("web_search", "total_calls"), 512),
         (("web_search", "deep_research_total_calls"), 512),
         (("search_files", "consecutive_empty_limit"), 50),
-        (("external_skill", "max_tool_calls"), 512),
-        (("external_skill", "completion_reserve_calls"), 128),
-        (("presentation", "max_tool_calls"), 512),
-        (("presentation", "completion_reserve_calls"), 128),
-        (("presentation", "deep_research_max_tool_calls"), 512),
-        (("presentation", "research_rounds"), 20),
         (("sub_agent", "general_max_steps"), 256),
         (("sub_agent", "general_max_tool_calls"), 256),
         (("sub_agent", "legacy_max_steps"), 256),
@@ -304,11 +324,6 @@ def test_tool_limit_upper_bounds(path: tuple[str, str], maximum: int) -> None:
     section_values = {field: maximum}
     if field == "concurrency":
         section_values["batch_size"] = maximum
-    if field == "completion_reserve_calls":
-        section_values["max_tool_calls"] = 512
-        if section == "presentation":
-            section_values["deep_research_max_tool_calls"] = 512
-
     accepted = ToolLimitsConfig(**{section: section_values})
     assert getattr(getattr(accepted, section), field) == maximum
 
@@ -327,7 +342,7 @@ def test_cmd_config_set_rolls_back_tool_limit_above_maximum(
     monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
 
     exit_code = cli.cmd_config(
-        set_pair=("tool_limits.external_skill.max_tool_calls", "513")
+        set_pair=("tool_limits.general.max_tool_calls", "513")
     )
 
     assert exit_code == 1
@@ -579,7 +594,7 @@ def test_main_returns_run_agent_exit_code(
         assert kwargs["json_summary"] is True
         assert kwargs["deep_think"] is True
         assert kwargs["force_plan_start"] is True
-        assert kwargs["completion_gate_enabled"] is False
+        assert "completion_gate_enabled" not in kwargs
         assert kwargs["goal_autopilot_enabled"] is False
         assert kwargs["initial_goal"] == "ship goal"
         return 7
@@ -593,7 +608,6 @@ def test_main_returns_run_agent_exit_code(
         no_verify_api=True,
         deep_think=True,
         force_plan_start=True,
-        no_completion_gate=True,
         no_goal_autopilot=True,
         no_sandbox=False,
     ))
@@ -633,7 +647,6 @@ def test_main_persists_code_workspace_type_without_creating_output(
             no_verify_api=True,
             deep_think=False,
             force_plan_start=False,
-            no_completion_gate=True,
             no_goal_autopilot=True,
             no_sandbox=False,
         ),

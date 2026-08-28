@@ -110,13 +110,13 @@ entries.
 
 - `box_agent/core.py` is a changeable but low-churn kernel owned by the core team. Product and capability modules must use `Agent.run_events()` or the explicit shared APIs; they must not import the Core implementation directly.
 - Agent-loop invariants, event semantics, scheduling, cancellation, tool-call closure, and security enforcement points belong to the stable kernel/contracts. Core changes require a core-maintainer review.
-- Reusable tools, skills, providers, storage, and workflow policy belong in the capability layer unless they require a new host-neutral kernel contract. Put stateful workflows in `box_agent/workflows/`, implement `WorkflowPolicy`, and compose them through `runtime.py` instead of importing them from Core.
+- Reusable tools, skills, providers, and storage belong in the capability layer unless they require a new host-neutral kernel contract. Put stateful domain workflows in a self-contained Skill or plugin; do not add a second durable state source beside Session Log.
 - CLI code should handle terminal interaction, rendering, slash commands, and local prompts. It should not fork core behavior that ACP also needs.
 - ACP code should translate shared events into ACP protocol updates and host extension methods. Keep stdout protocol-clean; diagnostics belong on stderr or structured logs.
 - Provider-specific wire behavior belongs in `box_agent/llm/`; do not spread provider assumptions into tools, skills, CLI, or ACP.
 - Tool behavior belongs in `box_agent/tools/` and should return structured `ToolResult` data. Add direct regression tests for new tool semantics.
 - Built-in skill loading is controlled by `box_agent/skill_loader.py`, `box_agent/skills/`, and `box_agent/skills/_manifest.json`. When built-in skills change, regenerate the manifest before review.
-- PPT/document capabilities are skill-driven unless there is an explicit core contract change. PPT intent routing, checkpoints, and tool policy belong in `box_agent/completion.py` and `box_agent/workflows/presentation_*`; do not add hidden PPT-specific modes to the core loop or `loop_guards.py`.
+- PPT/document capabilities are Skill-driven unless there is an explicit host-neutral core contract change. Intent routing, progress derivation, validation, and recovery instructions belong in the owning Skill or plugin; do not add hidden format-specific modes to the core loop, adapters, or generic tools.
 - Packaged runtime behavior is not proven by source edits alone. If officev3 or a standalone runtime depends on the change, document the runtime rebuild/install/probe status.
 
 #### TPR Pull Request Standard

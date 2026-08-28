@@ -9,10 +9,7 @@ from typing import Any, Literal, Mapping
 
 from box_agent.config import ToolLimitsConfig
 from box_agent.execution_profile import ExecutionProfile
-from box_agent.loop_guards import CompletionGate
-from box_agent.tools.skill_loader import SkillLoader
-from box_agent.workflows.external_skill import EXTERNAL_SKILL_WORKFLOW_KIND
-from box_agent.workflows.presentation_contract import RESEARCH_MODE_OPTION
+from box_agent.tools.skill_loader import Skill, SkillLoader
 
 AUTO_LOADED_SKILLS_HEADING = "## Auto-Loaded Skill Instructions"
 ACTIVE_SKILLS_HEADING = "## Active Skill Instructions"
@@ -23,11 +20,39 @@ DOCUMENT_SKILL_ARTIFACT_SUFFIXES: dict[str, tuple[str, ...]] = {
     "xlsx": (".xlsx", ".xls"),
     "pdf": (".pdf",),
 }
-GATE_REQUIRED_DOCUMENT_SKILL_ARTIFACT_SUFFIXES: dict[str, tuple[str, ...]] = {
-    "pptx": DOCUMENT_SKILL_ARTIFACT_SUFFIXES["pptx"],
-    "docx": DOCUMENT_SKILL_ARTIFACT_SUFFIXES["docx"],
-    "xlsx": DOCUMENT_SKILL_ARTIFACT_SUFFIXES["xlsx"],
-}
+MATCHED_PRELOAD_SKILLS: frozenset[str] = frozenset(
+    {*DOCUMENT_SKILL_ARTIFACT_SUFFIXES, "research-synthesis"}
+)
+_DOCUMENT_ARTIFACT_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "pptx",
+        re.compile(
+            r"(?<![a-z0-9])(?:pptx?|powerpoint|slide[\s-]+deck|presentation)(?![a-z0-9])|"
+            r"演示文稿|幻灯片",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "docx",
+        re.compile(r"(?<![a-z0-9])(?:docx?|word)(?![a-z0-9])|文档", re.IGNORECASE),
+    ),
+    (
+        "xlsx",
+        re.compile(r"(?<![a-z0-9])(?:xlsx?|excel)(?![a-z0-9])|电子表格", re.IGNORECASE),
+    ),
+    ("pdf", re.compile(r"(?<![a-z0-9])pdf(?![a-z0-9])", re.IGNORECASE)),
+)
+_DOCUMENT_TASK_INTENT_RE = re.compile(
+    r"\b(?:analy[sz]e|build|convert|create|edit|export|extract|generate|inspect|"
+    r"make|modify|open|output|read|render|review|summarize|translate|update)\b|"
+    r"(?:制作|创建|生成|输出|导出|转换|转成|编辑|修改|更新|读取|打开|检查|"
+    r"审阅|分析|总结|翻译|做一|做个|帮我)",
+    re.IGNORECASE,
+)
+_EXPLICIT_SKILL_RE = re.compile(
+    r"(?<![\w/])/(?P<name>[a-z0-9][a-z0-9._-]*)(?![\w/])",
+    re.IGNORECASE,
+)
 HOST_RUNTIME_PRELOAD_SKILLS: frozenset[str] = frozenset(
     {"browser-use", "hyperframes-video"}
 )
@@ -146,6 +171,33 @@ class AutoLoadedSkillsPrompt:
     changed: bool
 
 
+def resolve_explicit_skill_invocation(
+    skill_loader: SkillLoader | None,
+    user_text: str,
+) -> Skill | None:
+    """Resolve an installed, enabled Skill named by a standalone slash token."""
+    if skill_loader is None:
+        return None
+    match = _EXPLICIT_SKILL_RE.search(user_text)
+    if match is None:
+        return None
+    requested = match.group("name")
+    canonical = next(
+        (
+            name
+            for name in skill_loader.list_skills()
+            if name.casefold() == requested.casefold()
+        ),
+        None,
+    )
+    if canonical is None:
+        return None
+    skill = skill_loader.get_skill(canonical)
+    if skill is None or skill.broken:
+        return None
+    return skill
+
+
 def strip_auto_loaded_skills(system_prompt: str) -> str:
     marker = f"\n\n{AUTO_LOADED_SKILLS_HEADING}\n"
     if marker in system_prompt:
@@ -181,48 +233,6 @@ def build_active_skills_prompt(
         "or runtime boundaries in this system prompt.\n\n"
         + "\n\n".join(blocks)
     )
-
-
-def document_preload_skill_names(
-    matched_skill_names: tuple[str, ...],
-    completion_gate: CompletionGate | None,
-    *,
-    presentation_skill_name: str | None = "pptx",
-) -> list[str]:
-    if completion_gate is None:
-        return []
-    if completion_gate.workflow_checkpoint_kind == EXTERNAL_SKILL_WORKFLOW_KIND:
-        skill_name = completion_gate.workflow_options.get("skill_name")
-        return [skill_name] if isinstance(skill_name, str) and skill_name else []
-    patterns = tuple(completion_gate.required_changed_artifact_globs)
-    preload: list[str] = []
-    if (
-        completion_gate.workflow_checkpoint_kind == "controlled_presentation"
-        and presentation_skill_name
-    ):
-        preload.append(presentation_skill_name)
-    for skill_name, suffixes in GATE_REQUIRED_DOCUMENT_SKILL_ARTIFACT_SUFFIXES.items():
-        if (
-            skill_name == "pptx"
-            and completion_gate.workflow_checkpoint_kind == "controlled_presentation"
-        ):
-            continue
-        if any(suffix in pattern for pattern in patterns for suffix in suffixes):
-            preload.append(skill_name)
-    for skill_name in matched_skill_names:
-        suffixes = DOCUMENT_SKILL_ARTIFACT_SUFFIXES.get(skill_name)
-        if (
-            skill_name not in preload
-            and suffixes
-            and any(suffix in pattern for pattern in patterns for suffix in suffixes)
-        ):
-            preload.append(skill_name)
-    if (
-        completion_gate.workflow_options.get(RESEARCH_MODE_OPTION) == "deep"
-        and "research-synthesis" not in preload
-    ):
-        preload.append("research-synthesis")
-    return preload
 
 
 def web_search_total_limit_for_active_skills(
@@ -308,6 +318,14 @@ def semantic_artifact_preload_skill_names(
     user_text: str | None,
 ) -> list[str]:
     """Preload entry-independent artifact skills on strong semantic intent."""
+    if user_text and _DOCUMENT_TASK_INTENT_RE.search(user_text):
+        document_matches = [
+            skill_name
+            for skill_name, pattern in _DOCUMENT_ARTIFACT_SIGNALS
+            if pattern.search(user_text)
+        ]
+        if document_matches:
+            return document_matches
     if (
         "roadmap" in matched_skill_names
         and has_roadmap_artifact_intent(user_text)
@@ -343,23 +361,23 @@ def host_runtime_preload_skill_names(
 
 def turn_preload_skill_names(
     matched_skill_names: tuple[str, ...],
-    completion_gate: CompletionGate | None,
     env_context: Any | None,
     user_text: str | None,
     *,
-    presentation_skill_name: str | None = "pptx",
-    force_presentation_skill: bool = False,
+    selected_skill_names: tuple[str, ...] = (),
 ) -> list[str]:
     preload: list[str] = []
-    if force_presentation_skill and presentation_skill_name:
-        preload.append(presentation_skill_name)
-    for skill_name in document_preload_skill_names(
-        matched_skill_names,
-        completion_gate,
-        presentation_skill_name=presentation_skill_name,
-    ):
-        if skill_name not in preload:
-            preload.append(skill_name)
+    _unique_append(preload, selected_skill_names)
+    if selected_skill_names:
+        return preload
+    _unique_append(
+        preload,
+        tuple(
+            skill_name
+            for skill_name in matched_skill_names
+            if skill_name in MATCHED_PRELOAD_SKILLS
+        ),
+    )
     for skill_name in semantic_artifact_preload_skill_names(
         matched_skill_names,
         user_text,

@@ -45,10 +45,7 @@ box-agent/
 │   ├── core.py              # Execution core — run_agent_loop() (the agent loop)
 │   ├── agent.py             # Public API wrapper (Agent class)
 │   ├── runtime.py           # Composition root and stable Core bridge
-│   ├── completion.py        # Generic deliverable-router composition
-│   ├── delivery.py          # Generic deliverable-intent classification
-│   ├── workflow_policy.py   # Stable workflow contract consumed by Core
-│   ├── workflows/           # Workflow routing, checkpoints, and policies
+│   ├── session_log.py       # Durable generic session facts and replay
 │   ├── artifacts.py         # Shared artifact contract helpers
 │   ├── turn_policy.py       # Shared turn classification policies
 │   ├── llm/                 # Provider clients and LLM wrapper

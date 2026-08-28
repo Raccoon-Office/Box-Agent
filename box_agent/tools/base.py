@@ -52,10 +52,9 @@ class Tool:
 
     aliases: tuple[str, ...] = ()
     parallel_safe: bool = False
-    # Trusted workflow policies may synthesize calls only for capabilities a
-    # concrete tool explicitly opts into. This keeps the workflow seam from
-    # becoming a general-purpose way to invoke arbitrary tools.
-    runtime_workflow_actions: frozenset[str] = frozenset()
+    # Trusted interactive tools may stop the current Agent turn after a
+    # successful invocation. Dynamic/MCP and ordinary tools inherit False.
+    ends_turn_on_success: bool = False
     # Explicit opt-in for the transient Tool -> next-model-request seam. MCP and
     # ordinary tools remain unable to inject request-only user content.
     transient_followup_allowed: bool = False

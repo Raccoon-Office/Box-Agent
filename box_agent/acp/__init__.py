@@ -113,7 +113,6 @@ from box_agent.turn_policy import (
 from box_agent.events import (
     ArtifactEvent,
     ContentEvent,
-    ContextCheckpointEvent,
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
@@ -147,38 +146,7 @@ from box_agent.task_registry import (
     finish_task,
     register_artifact_revision,
 )
-from box_agent.workflow_owner_store import (
-    clear_workflow_owner,
-    load_workflow_owner,
-    save_workflow_owner,
-)
-from box_agent.completion import (
-    build_auto_completion_gate,
-    cancels_pending_completion_gate,
-    completion_gate_has_workflow_lifecycle,
-    has_explicit_external_research_action,
-    pending_completion_gate_for_storage,
-    rebase_pending_completion_gate,
-    should_resume_pending_completion_gate,
-)
-from box_agent.loop_guards import (
-    CompletionGate,
-    completion_gate_gaps,
-)
-from box_agent.workflows import (
-    CONTROLLED_PRESENTATION_WORKFLOW_KIND,
-    EXTERNAL_SKILL_WORKFLOW_KIND,
-    build_external_skill_completion_gate,
-    completion_gate_from_owner,
-    build_presentation_preflight_analysis_text,
-    build_presentation_preflight_result,
-    build_presentation_recommendation_prompt,
-    load_presentation_preflight_config,
-    parse_host_presentation_config,
-    recover_completion_gate,
-    resolve_explicit_skill_invocation,
-    resolve_presentation_skill_provider,
-)
+from box_agent.tools.skill_preload import resolve_explicit_skill_invocation
 from box_agent.acp.action_hints import (
     ActionHintStreamNormalizer,
     build_action_hints_prompt,
@@ -215,7 +183,6 @@ from box_agent.tools.runtime import (
 from box_agent.tools.skill_preload import (
     SkillPreloadAttribution,
     build_auto_loaded_skills_prompt,
-    document_preload_skill_names,
     host_runtime_preload_skill_names,
     strip_auto_loaded_skills,
     turn_preload_skill_names,
@@ -1019,24 +986,21 @@ class SessionState:
     )
     follow_up_suggestions_enabled: bool = False
     follow_up_suggestions_task: asyncio.Task[None] | None = None
+    waiting_for_user_input: bool = False
     turn_counter: int = 0
     continuation_applied: bool = False
     current_turn_id: str = ""
     source_text: str = ""  # accumulated real user requests for source-bound artifact checks
-    pending_completion_gate: CompletionGate | None = None
-    waiting_for_user_input: bool = False
     last_error: str | None = None
     last_error_code: int | str | None = None
     last_error_category: str | None = None
     last_error_details: dict[str, Any] | None = None
-    last_checkpoint: dict[str, Any] | None = None
     mcp_fallback_tools: dict[str, Any] = field(default_factory=dict)
 
 
 _MAX_SOURCE_TEXT_ENV_CHARS = 120_000
 _CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS = 4_096
 _TITLE_MAX_OUTPUT_TOKENS = 8_000
-_PRESENTATION_PREFLIGHT_MAX_OUTPUT_TOKENS = 4_096
 
 
 def _bind_user_source_text(state: SessionState, user_request: str) -> None:
@@ -1243,19 +1207,6 @@ class BoxACPAgent:
             preloaded_skills=",".join(fingerprint.get("preloaded_skill_names") or []),
         )
 
-    def _document_preload_skill_names(
-        self,
-        matched_skill_names: tuple[str, ...],
-        completion_gate: CompletionGate | None,
-        *,
-        presentation_skill_name: str | None = "pptx",
-    ) -> list[str]:
-        return document_preload_skill_names(
-            matched_skill_names,
-            completion_gate,
-            presentation_skill_name=presentation_skill_name,
-        )
-
     def _host_runtime_preload_skill_names(
         self,
         matched_skill_names: tuple[str, ...],
@@ -1271,20 +1222,16 @@ class BoxACPAgent:
     def _turn_preload_skill_names(
         self,
         matched_skill_names: tuple[str, ...],
-        completion_gate: CompletionGate | None,
         env_context: EnvContext | None,
         user_text: str | None,
         *,
-        presentation_skill_name: str | None = "pptx",
-        force_presentation_skill: bool = False,
+        selected_skill_names: tuple[str, ...] = (),
     ) -> list[str]:
         return turn_preload_skill_names(
             matched_skill_names,
-            completion_gate,
             env_context,
             user_text,
-            presentation_skill_name=presentation_skill_name,
-            force_presentation_skill=force_presentation_skill,
+            selected_skill_names=selected_skill_names,
         )
 
     def _apply_auto_loaded_skills(
@@ -1970,6 +1917,7 @@ class BoxACPAgent:
                     )
                 existing_log = existing_state.agent.session_log
                 if existing_log is not None:
+                    existing_log.assert_workspace(workspace)
                     existing_log.close()
                 del self._sessions[existing_handle]
             session_root = Path.home() / ".box-agent" / "sessions"
@@ -1977,6 +1925,7 @@ class BoxACPAgent:
                 session_log = SessionLog.open(
                     session_root,
                     session_id=upstream_session_id,
+                    cwd=workspace,
                 )
             except FileNotFoundError:
                 session_log = SessionLog.create(
@@ -2524,7 +2473,6 @@ class BoxACPAgent:
             pending_suggestions.cancel()
         state.follow_up_suggestions_task = None
         state.cancelled = False
-        was_waiting_for_user_input = state.waiting_for_user_input
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
         plan_detection_text = _latest_user_request_for_plan_detection(user_text)
         source_binding_text = (
@@ -2826,334 +2774,55 @@ class BoxACPAgent:
             if state.skill_selector is not None
             else ()
         )
-        current_skill_names = (
-            tuple(
-                skill.name
-                for skill in state.skill_loader.filter_by_query(plan_detection_text)
-            )
-            if state.skill_loader is not None and plan_detection_text.strip()
-            else ()
-        )
         explicit_skill = resolve_explicit_skill_invocation(
             state.skill_loader,
             plan_detection_text,
         )
+        requested_host_skills = (
+            _meta_string_list(prompt_meta, "selected_skill_names", limit=8)
+            or _meta_string_list(prompt_meta, "selectedSkillNames", limit=8)
+        )
+        host_selected_skill_names = tuple(
+            name
+            for name in requested_host_skills
+            if state.skill_loader is not None
+            and state.skill_loader.get_skill(name) is not None
+        )
         state.explicitly_allowed_skill_names.clear()
         if explicit_skill is not None:
             state.explicitly_allowed_skill_names.add(explicit_skill.name)
-        if (
-            state.execution_profile == "fast"
-            and has_explicit_external_research_action(plan_detection_text)
-        ):
-            state.explicitly_allowed_skill_names.add("research-synthesis")
-        explicit_skill_uses_controlled_workflow = (
-            explicit_skill is not None
-            and explicit_skill.source == "builtin"
-            and explicit_skill.workflow == CONTROLLED_PRESENTATION_WORKFLOW_KIND
-        )
+        state.explicitly_allowed_skill_names.update(host_selected_skill_names)
         if explicit_skill is not None:
             log.info(
                 "skill/invocation",
                 session_id=session_id,
                 skill=explicit_skill.name,
                 source=explicit_skill.source,
-                workflow=explicit_skill.workflow,
-                lifecycle=(
-                    "controlled"
-                    if explicit_skill_uses_controlled_workflow
-                    else "external"
-                ),
             )
-        host_presentation_config = parse_host_presentation_config(prompt_meta)
-        if host_presentation_config is not None and cancels_pending_completion_gate(
-            plan_detection_text
-        ):
-            host_presentation_config = None
-        presentation_provider = (
-            resolve_presentation_skill_provider(
-                state.skill_loader,
-                current_skill_names,
-                preferred_skill=(
-                    host_presentation_config.preferred_skill
-                    if host_presentation_config is not None
-                    else None
-                ),
-                query=plan_detection_text,
-            )
-            if state.skill_loader is not None
-            else None
-        )
-        if host_presentation_config is not None:
+        if host_selected_skill_names:
             log.info(
-                "presentation/provider",
+                "skill/host_selected",
                 session_id=session_id,
-                skill=(
-                    presentation_provider.skill_name
-                    if presentation_provider is not None
-                    else None
-                ),
-                workflow=(
-                    presentation_provider.workflow
-                    if presentation_provider is not None
-                    else None
-                ),
-                source=(
-                    presentation_provider.source
-                    if presentation_provider is not None
-                    else None
-                ),
-                confirmed_by=host_presentation_config.confirmed_by,
-            )
-
-        provider_uses_controlled_workflow = (
-            presentation_provider is not None
-            and presentation_provider.source == "builtin"
-            and presentation_provider.uses_controlled_workflow
-        )
-        presentation_provider_skill = (
-            state.skill_loader.get_skill(presentation_provider.skill_name)
-            if state.skill_loader is not None
-            and presentation_provider is not None
-            else None
-        )
-        detected_completion_gate = (
-            build_auto_completion_gate(
-                plan_detection_text,
-                state.agent.workspace_dir,
-                confirmed_presentation=True,
-                allow_controlled_presentation=True,
-                tool_limits=self._config.tool_limits,
-                execution_profile=state.execution_profile,
-            )
-            if explicit_skill is not None
-            and explicit_skill_uses_controlled_workflow
-            else build_external_skill_completion_gate(
-                user_text=plan_detection_text,
-                workspace_dir=state.agent.workspace_dir,
-                skill=explicit_skill,
-                tool_limits=self._config.tool_limits,
-            )
-            if explicit_skill is not None
-            else build_external_skill_completion_gate(
-                user_text=plan_detection_text,
-                workspace_dir=state.agent.workspace_dir,
-                skill=presentation_provider_skill,
-                tool_limits=self._config.tool_limits,
-            )
-            if host_presentation_config is not None
-            and presentation_provider is not None
-            and presentation_provider_skill is not None
-            and not provider_uses_controlled_workflow
-            else build_auto_completion_gate(
-                plan_detection_text,
-                state.agent.workspace_dir,
-                confirmed_presentation=(
-                    host_presentation_config is not None
-                    and provider_uses_controlled_workflow
-                ),
-                allow_controlled_presentation=(
-                    host_presentation_config is None
-                    or provider_uses_controlled_workflow
-                ),
-                tool_limits=self._config.tool_limits,
-                execution_profile=state.execution_profile,
-            )
-        )
-        if (
-            state.artifact_mode == "project"
-            and detected_completion_gate is not None
-            and "report_execution_result"
-            in detected_completion_gate.required_tools
-        ):
-            fresh_completion_gate = CompletionGate(
-                required_tools=frozenset({"report_execution_result"}),
-                execution_result_criteria_count=(
-                    detected_completion_gate.execution_result_criteria_count
-                ),
-                max_continuations=detected_completion_gate.max_continuations,
-                deadline_seconds=detected_completion_gate.deadline_seconds,
-            )
-        else:
-            fresh_completion_gate = (
-                None
-                if state.artifact_mode == "project"
-                else detected_completion_gate
-            )
-        if (
-            fresh_completion_gate is not None
-            and completion_gate_has_workflow_lifecycle(fresh_completion_gate)
-        ):
-            fresh_completion_gate = replace(
-                fresh_completion_gate,
-                workflow_options={
-                    **fresh_completion_gate.workflow_options,
-                    "task_id": task_id,
-                    **(
-                        {"artifact_root_dir": state.output_dir}
-                        if state.output_dir
-                        else {}
-                    ),
-                },
-            )
-        pending_task_id = (
-            normalize_task_id(
-                state.pending_completion_gate.workflow_options.get("task_id")
-            )
-            if state.pending_completion_gate is not None
-            else None
-        )
-        resume_pending_gate = (
-            state.pending_completion_gate is not None
-            and (pending_task_id is None or pending_task_id == task_id)
-            and should_resume_pending_completion_gate(
-                plan_detection_text,
-                waiting_for_user_input=state.waiting_for_user_input,
-            )
-        )
-        recover_from_workspace = should_resume_pending_completion_gate(
-            plan_detection_text,
-            waiting_for_user_input=False,
-        )
-        workflow_owner_session_id = state.upstream_session_id
-        owned_completion_gate = None
-        if (
-            explicit_skill is None
-            and workflow_owner_session_id
-            and recover_from_workspace
-            and fresh_completion_gate is None
-        ):
-            owner = load_workflow_owner(session_id=workflow_owner_session_id)
-            if owner is not None:
-                owner_task_id = normalize_task_id(owner.workflow_options.get("task_id"))
-                if owner_task_id is not None and owner_task_id != task_id:
-                    owner = None
-            if owner is not None:
-                owned_completion_gate = completion_gate_from_owner(
-                    owner,
-                    workspace_dir=state.agent.workspace_dir,
-                    tool_limits=self._config.tool_limits,
-                )
-                if owned_completion_gate is not None:
-                    log.info(
-                        "workflow/owner_resumed",
-                        session_id=session_id,
-                        owner_session_id=workflow_owner_session_id,
-                        workflow=owner.workflow_kind,
-                    )
-        recovered_completion_gate = (
-            None
-            if (
-                state.artifact_mode == "project"
-                or resume_pending_gate
-                or owned_completion_gate is not None
-                or fresh_completion_gate is not None
-                or not recover_from_workspace
-            )
-            else recover_completion_gate(
-                state.agent.workspace_dir,
-                tool_limits=self._config.tool_limits,
-            )
-        )
-        if resume_pending_gate:
-            completion_gate = state.pending_completion_gate
-            state.waiting_for_user_input = False
-            completion_gate_source = "resumed"
-        elif owned_completion_gate is not None:
-            completion_gate = owned_completion_gate
-            state.pending_completion_gate = owned_completion_gate
-            state.waiting_for_user_input = False
-            completion_gate_source = "owner"
-        elif recovered_completion_gate is not None:
-            completion_gate = recovered_completion_gate
-            state.pending_completion_gate = recovered_completion_gate
-            state.waiting_for_user_input = False
-            completion_gate_source = "filesystem"
-        else:
-            completion_gate = fresh_completion_gate
-            completion_gate_source = "new"
-            if fresh_completion_gate is not None:
-                state.waiting_for_user_input = False
-                if completion_gate_has_workflow_lifecycle(fresh_completion_gate):
-                    state.pending_completion_gate = fresh_completion_gate
-                elif state.pending_completion_gate is not None:
-                    # A distinct deliverable request replaces the older pending
-                    # workflow. Terse continuations such as "输出 HTML" are
-                    # handled by the resume branch above.
-                    state.pending_completion_gate = None
-            elif cancels_pending_completion_gate(plan_detection_text):
-                state.pending_completion_gate = None
-                state.waiting_for_user_input = False
-                if workflow_owner_session_id:
-                    clear_workflow_owner(session_id=workflow_owner_session_id)
-        if was_waiting_for_user_input:
-            # The first subsequent user prompt resumes a paused decision or
-            # missing-input request. This also supports a host-side "cancel
-            # card and continue in the composer" action without a synthetic
-            # hidden prompt.
-            state.waiting_for_user_input = False
-        if completion_gate is not None:
-            completion_gate = rebase_pending_completion_gate(
-                completion_gate,
-                plan_detection_text,
-            )
-            if completion_gate_has_workflow_lifecycle(completion_gate):
-                state.pending_completion_gate = pending_completion_gate_for_storage(
-                    completion_gate
-                )
-                if workflow_owner_session_id:
-                    saved_owner = save_workflow_owner(
-                        session_id=workflow_owner_session_id,
-                        workflow_kind=completion_gate.workflow_checkpoint_kind,
-                        workflow_options=completion_gate.workflow_options,
-                    )
-                    if saved_owner is not None:
-                        log.info(
-                            "workflow/owner_selected",
-                            session_id=session_id,
-                            owner_session_id=workflow_owner_session_id,
-                            workflow=saved_owner.workflow_kind,
-                            source=completion_gate_source,
-                        )
-        if completion_gate is not None:
-            log.info(
-                "completion_gate/enabled",
-                session_id=session_id,
-                patterns=",".join(completion_gate.required_changed_artifact_globs),
-                source=completion_gate_source,
+                skills=",".join(host_selected_skill_names),
             )
 
         if state.skill_selector is not None:
             preload_names = self._turn_preload_skill_names(
                 state.skill_selector.matched_skill_names,
-                completion_gate,
                 state.env_context,
                 plan_detection_text,
-                presentation_skill_name=(
-                    presentation_provider.skill_name
-                    if presentation_provider is not None
-                    else None
-                ),
-                force_presentation_skill=(
-                    host_presentation_config is not None
-                    and presentation_provider is not None
+                selected_skill_names=(
+                    tuple(
+                        dict.fromkeys(
+                            (
+                                *((explicit_skill.name,) if explicit_skill else ()),
+                                *host_selected_skill_names,
+                            )
+                        )
+                    )
                 ),
             )
-            lifecycle_skill_name = (
-                explicit_skill.name
-                if explicit_skill is not None
-                else (
-                    completion_gate.workflow_options.get("skill_name")
-                    if completion_gate is not None
-                    and completion_gate.workflow_checkpoint_kind
-                    == EXTERNAL_SKILL_WORKFLOW_KIND
-                    else None
-                )
-            )
-            if (
-                lifecycle_skill_name
-                and lifecycle_skill_name not in preload_names
-            ):
-                preload_names.insert(0, lifecycle_skill_name)
+            state.explicitly_allowed_skill_names.update(preload_names)
             if preload_names:
                 self._apply_auto_loaded_skills(state, session_id, preload_names)
             elif state.preloaded_skill_names:
@@ -3201,7 +2870,6 @@ class BoxACPAgent:
                 require_plan_approval=require_plan_approval,
                 plan_approval=plan_approval,
                 auto_approve_plan=auto_approve_plan,
-                completion_gate=completion_gate,
                 plan_start_text=plan_detection_text,
                 ui_language=ui_language,
                 clear_prompt_grants=False,
@@ -3241,7 +2909,6 @@ class BoxACPAgent:
                     turn_id=turn_id,
                     billing_session_id=billing_session_id,
                     auto_approve_plan=auto_approve_plan,
-                    completion_gate=completion_gate,
                     plan_start_text=plan_detection_text,
                     clear_prompt_grants=False,
                 )
@@ -3356,50 +3023,11 @@ class BoxACPAgent:
                 reset_browser_runtime_owner(browser_owner_token)
             turn_meter = get_token_meter()
             reset_token_meter(meter_token)
-        paused = stop_reason == StopReason.CHECKPOINT_PAUSED.value
-        delivery_status: str | None = "paused" if paused else None
-        delivery_gaps: list[str] = []
-        if (
-            not paused
-            and completion_gate is not None
-            and completion_gate_has_workflow_lifecycle(completion_gate)
-        ):
-            delivery_gaps = completion_gate_gaps(
-                completion_gate,
-                set(),
-                state.agent.workspace_dir,
-            )
-            if delivery_gaps:
-                state.pending_completion_gate = completion_gate
-                delivery_status = (
-                    "waiting_for_user"
-                    if state.waiting_for_user_input
-                    else "incomplete"
-                )
-                log.info(
-                    "completion_gate/pending",
-                    session_id=session_id,
-                    gap_count=len(delivery_gaps),
-                    waiting_for_user=state.waiting_for_user_input,
-                )
-            else:
-                state.pending_completion_gate = None
-                state.waiting_for_user_input = False
-                delivery_status = "complete"
-                if state.upstream_session_id:
-                    clear_workflow_owner(session_id=state.upstream_session_id)
-                log.info(
-                    "completion_gate/complete",
-                    session_id=session_id,
-                )
-        if state.task_registry_error:
-            delivery_status = "incomplete"
-            delivery_gaps.append(
-                "Box-Agent task/artifact registry could not persist canonical lineage"
-            )
+        waiting_for_user = stop_reason == StopReason.WAITING_FOR_USER.value
+        state.waiting_for_user_input = waiting_for_user
         execution_status = (
-            "paused"
-            if paused
+            "waiting_for_user"
+            if waiting_for_user
             else "error"
             if stop_reason == StopReason.ERROR.value
             else "completed"
@@ -3409,22 +3037,16 @@ class BoxACPAgent:
                 state.agent.workspace_dir,
                 task_context,
                 execution_status=execution_status,
-                delivery_status=delivery_status,
                 artifact_root_dir=state.output_dir,
             )
         except Exception as exc:
             state.task_registry_error = str(exc)
-            delivery_status = "incomplete"
-            delivery_gaps.append(
-                "Box-Agent task/artifact registry could not persist terminal state"
-            )
             log.warn(
                 "task_registry/finish_failed",
                 session_id=session_id,
                 task_id=task_id,
                 error=str(exc),
             )
-        delivery_incomplete = delivery_status in {"incomplete", "waiting_for_user"}
         turn_total_tokens = turn_meter.total_tokens if turn_meter else 0
         duration_ms = int((perf_counter() - prompt_start) * 1000)
 
@@ -3443,8 +3065,6 @@ class BoxACPAgent:
                     },
                     "goal_autopilot_continuations": auto_continuations,
                     "task_id": task_id,
-                    "delivery_status": delivery_status,
-                    "delivery_gap_count": len(delivery_gaps),
                 },
             )
 
@@ -3460,8 +3080,6 @@ class BoxACPAgent:
             goal_autopilot_budget_exhausted=auto_budget_exhausted,
             goal_autopilot_no_progress_exhausted=auto_no_progress_exhausted,
             goal_autopilot_no_progress_turns=auto_no_progress_turns,
-            delivery_status=delivery_status,
-            delivery_gap_count=len(delivery_gaps),
         )
         # Map box-agent stop reasons to ACP-valid StopReason values.
         # ACP only accepts: "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"
@@ -3470,7 +3088,7 @@ class BoxACPAgent:
             "cancelled": "cancelled",
             "max_steps": "max_turn_requests",
             "max_tokens": "max_tokens",
-            "checkpoint_paused": "end_turn",
+            "waiting_for_user": "end_turn",
             "error": "end_turn",
         }
         acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")
@@ -3480,28 +3098,37 @@ class BoxACPAgent:
             and state.agent.goal.status == "active"
         ):
             acp_stop_reason = "max_turn_requests"
-        failed = stop_reason == StopReason.ERROR.value
+        failed = (
+            stop_reason == StopReason.ERROR.value
+            or bool(state.task_registry_error)
+        )
         # ACP has no generic error stop reason. Keep stopReason protocol-valid
         # and expose the internal outcome in stable response metadata instead.
         response_meta: dict[str, Any] = {
             "ok": not failed,
             "error": (
-                state.last_error or "Agent execution failed."
+                state.last_error
+                or (
+                    f"Task registry persistence failed: {state.task_registry_error}"
+                    if state.task_registry_error
+                    else "Agent execution failed."
+                )
                 if failed
                 else None
             ),
             "lastStopReason": stop_reason,
             "runStatus": (
-                "paused"
-                if paused
+                "waiting_for_user"
+                if waiting_for_user
                 else "error"
                 if failed
-                else delivery_status
-                if delivery_incomplete
                 else "completed"
             ),
-            "completed": not failed and not paused and not delivery_incomplete,
-            "paused": paused,
+            "completed": (
+                not failed
+                and not waiting_for_user
+            ),
+            "paused": False,
             "usage": {
                 "totalTokens": turn_total_tokens,
                 "sessionId": billing_session_id,
@@ -3521,15 +3148,8 @@ class BoxACPAgent:
                 "noProgressTurns": auto_no_progress_turns,
                 "lastStopReason": stop_reason,
             }
-        if paused:
-            response_meta["deliveryStatus"] = "paused"
-            response_meta["deliveryGaps"] = []
-            response_meta["recoverable"] = True
-            response_meta["checkpoint"] = state.last_checkpoint
-        elif delivery_status is not None:
-            response_meta["deliveryStatus"] = delivery_status
-            response_meta["deliveryGaps"] = delivery_gaps
-            response_meta["recoverable"] = delivery_status != "complete"
+        if state.task_registry_error:
+            response_meta["taskRegistryError"] = state.task_registry_error
         if failed and state.last_error_code is not None:
             response_meta["errorCode"] = state.last_error_code
         if failed and state.last_error_category:
@@ -3722,8 +3342,6 @@ class BoxACPAgent:
             return await self._memory_proposal_apply(params)
         if method == "llm/prompt":
             return await self._llm_prompt(params)
-        if method == "presentation/preflight":
-            return await self._presentation_preflight(params)
         if method == "workspace/list":
             try:
                 registry = WorkspaceRegistry()
@@ -3924,83 +3542,6 @@ class BoxACPAgent:
 
     ext_method = extMethod
 
-    async def _presentation_preflight(
-        self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Recommend bounded startup options for a new presentation task."""
-        prompt = params.get("prompt", "")
-        if not isinstance(prompt, str) or not prompt.strip():
-            return {
-                "error": {
-                    "code": "invalid_args",
-                    "message": "prompt must be a non-empty string",
-                }
-            }
-        has_existing_presentation = params.get("hasExistingPresentation") is True
-        raw_reference_context = params.get("referenceContext", "")
-        reference_context = (
-            raw_reference_context.strip()
-            if isinstance(raw_reference_context, str)
-            else ""
-        )
-        baseline_result = build_presentation_preflight_result(
-            prompt,
-            has_existing_presentation=has_existing_presentation,
-            reference_context=reference_context,
-        )
-        if not baseline_result.get("matched") or not baseline_result.get("shouldShow"):
-            return baseline_result
-
-        config = load_presentation_preflight_config()
-        missing_fields = baseline_result.get("missingFields", [])
-        model_text = ""
-        if missing_fields:
-            raw_meta = params.get("_meta")
-            preflight_meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
-            preflight_meta["purpose"] = "presentation_preflight"
-            recommendation_text = build_presentation_preflight_analysis_text(
-                prompt,
-                reference_context,
-            )
-            llm_result = await self._llm_prompt(
-                {
-                    "prompt": build_presentation_recommendation_prompt(
-                        recommendation_text,
-                        config,
-                        missing_fields,
-                    ),
-                    "systemPrompt": (
-                        "你是演示文稿配置分类器。严格从给定枚举中选择并只输出 JSON。"
-                    ),
-                    "timeoutMs": params.get("timeoutMs", 8000),
-                    "workspaceLabel": "presentation-preflight",
-                    "_meta": preflight_meta,
-                }
-            )
-            if isinstance(llm_result.get("text"), str):
-                model_text = llm_result["text"]
-            elif isinstance(llm_result.get("error"), dict):
-                log.warn(
-                    "presentation/preflight_fallback",
-                    code=llm_result["error"].get("code"),
-                    message=llm_result["error"].get("message"),
-                )
-
-        result = build_presentation_preflight_result(
-            prompt,
-            model_text=model_text,
-            has_existing_presentation=has_existing_presentation,
-            reference_context=reference_context,
-        )
-        log.info(
-            "presentation/preflight",
-            matched=result.get("matched"),
-            should_show=result.get("shouldShow"),
-            missing_fields=result.get("missingFields"),
-        )
-        return result
-
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/rewrites).
 
@@ -4068,10 +3609,6 @@ class BoxACPAgent:
             routing_tags = ("summary", "rewrite", "fast")
             routing_ability = 1
             max_output_tokens_cap = _TITLE_MAX_OUTPUT_TOKENS
-        elif "presentation" in normalized_purpose:
-            routing_tags = ("presentation", "analysis")
-            routing_ability = 2
-            max_output_tokens_cap = _PRESENTATION_PREFLIGHT_MAX_OUTPUT_TOKENS
         elif "summary" in normalized_purpose:
             routing_tags = ("summary", "fast")
             routing_ability = 1
@@ -4425,7 +3962,6 @@ class BoxACPAgent:
         require_plan_approval: bool = False,
         plan_approval: dict[str, Any] | None = None,
         auto_approve_plan: bool = False,
-        completion_gate: CompletionGate | None = None,
         plan_start_text: str | None = None,
         ui_language: str = "zh",
         clear_prompt_grants: bool = True,
@@ -4443,7 +3979,6 @@ class BoxACPAgent:
         state.last_error_code = None
         state.last_error_category = None
         state.last_error_details = None
-        state.last_checkpoint = None
 
         # Clear prompt-level grants at the start of each prompt
         if clear_prompt_grants and state.grant_store:
@@ -4883,7 +4418,6 @@ class BoxACPAgent:
                 tool_limits=self._config.tool_limits,
                 execution_profile=state.execution_profile,
             ),
-            completion_gate=completion_gate,
             artifact_detection_enabled=state.output_dir is not None,
             artifact_root_dir=state.output_dir,
             cache_fingerprint_sink=lambda fingerprint: self._log_cache_fingerprint(
@@ -5090,13 +4624,6 @@ class BoxACPAgent:
                                 error=err,
                                 user_visible=user_visible,
                             )
-                        if ok and tname in {"request_user_input", "request_user_decision"}:
-                            state.waiting_for_user_input = True
-                            log.info(
-                                "completion_gate/waiting_for_user",
-                                session_id=session_id,
-                                tool_call_id=tid,
-                            )
                         _update_pending_plan_approval_from_raw(state, raw_output)
                         skill_usage_payload = (
                             _record_skill_usage(skill_name_by_tool_call_id.get(tid))
@@ -5211,31 +4738,6 @@ class BoxACPAgent:
                         # Don't return yet — let the loop consume the subsequent DoneEvent
                         # so the async generator is properly exhausted.
 
-                    case ContextCheckpointEvent() as checkpoint:
-                        checkpoint_payload = {
-                            "type": "context_checkpoint",
-                            "status": "paused",
-                            "checkpointId": checkpoint.checkpoint_id,
-                            "workflowKind": checkpoint.workflow_kind,
-                            "adapterId": checkpoint.adapter_id,
-                            "schemaVersion": checkpoint.schema_version,
-                            "workspaceIdentity": checkpoint.workspace_identity,
-                            "path": checkpoint.path,
-                            "stage": checkpoint.stage,
-                            "artifactCount": checkpoint.artifact_count,
-                            "artifactSetSha256": checkpoint.artifact_set_sha256,
-                            "recoverable": True,
-                        }
-                        state.last_checkpoint = checkpoint_payload
-                        await self._send(
-                            session_id,
-                            update_tool_call(
-                                f"context-checkpoint-{checkpoint.checkpoint_id[:12]}",
-                                status="completed",
-                                raw_output=checkpoint_payload,
-                            ),
-                        )
-
                     case InjectedMessageEvent(content=text, injection_id=injection_id, user_visible=user_visible):
                         log.info(
                             "session/injected",
@@ -5270,7 +4772,6 @@ class BoxACPAgent:
                             state.follow_up_suggestions_enabled
                             and reason == StopReason.END_TURN
                             and state.pending_plan_approval is None
-                            and not state.waiting_for_user_input
                             and (state.agent.goal is None or state.agent.goal.status != "active")
                         ):
                             if suggestions:

@@ -251,7 +251,6 @@ def test_cli_ctrl_d_exits_without_empty_error(
             workspace,
             sandbox_mode=False,
             verify_api=False,
-            completion_gate_enabled=False,
             goal_autopilot_enabled=False,
         )
     )
@@ -263,7 +262,7 @@ def test_cli_ctrl_d_exits_without_empty_error(
     assert "❌ Error:" not in output
 
 
-def test_interactive_cli_passes_explicit_skill_gate_to_agent(
+def test_interactive_cli_preloads_explicit_skill_without_completion_gate(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -312,7 +311,12 @@ def test_interactive_cli_passes_explicit_skill_gate_to_agent(
         return [GetSkillTool(skill_loader)], skill_loader, None, None
 
     async def fake_run(self, *args, **kwargs):
-        run_options.append(kwargs)
+        run_options.append(
+            {
+                "kwargs": kwargs,
+                "system_prompt": self.messages[0].content,
+            }
+        )
         return "done"
 
     monkeypatch.setattr(
@@ -346,9 +350,8 @@ def test_interactive_cli_passes_explicit_skill_gate_to_agent(
 
     assert exit_code == 0
     assert len(run_options) == 1
-    gate = run_options[0]["completion_gate"]
-    assert gate.workflow_checkpoint_kind == "external_skill"
-    assert gate.workflow_options["skill_name"] == "report-skill"
+    assert "completion_gate" not in run_options[0]["kwargs"]
+    assert "Generate the requested report." in run_options[0]["system_prompt"]
 
 
 def test_cli_workspace_tools_receive_self_managed_node_runtime(
@@ -486,7 +489,6 @@ def test_cli_uses_saved_code_workspace_mode(tmp_path: Path, monkeypatch) -> None
             task="fix the project",
             sandbox_mode=True,
             verify_api=False,
-            completion_gate_enabled=False,
             goal_autopilot_enabled=False,
         )
     )
@@ -652,7 +654,6 @@ def test_cli_task_returns_failure_for_done_error(
             sandbox_mode=False,
             verify_api=False,
             json_summary=True,
-            completion_gate_enabled=False,
             goal_autopilot_enabled=False,
         )
     )
@@ -665,7 +666,7 @@ def test_cli_task_returns_failure_for_done_error(
     assert summary["goalAutopilot"]["lastStopReason"] == "error"
 
 
-def test_cli_json_reports_checkpoint_pause_without_error_or_completion(
+def test_cli_json_reports_waiting_for_user_without_completion(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -699,12 +700,8 @@ def test_cli_json_reports_checkpoint_pause_without_error_or_completion(
         return [], None, None, None
 
     async def fake_run(self, *args, **kwargs):
-        self.last_stop_reason = "checkpoint_paused"
-        self.last_checkpoint = {
-            "checkpointId": "checkpoint-1",
-            "workflowKind": "controlled_presentation",
-        }
-        return "Progress saved."
+        self.last_stop_reason = "waiting_for_user"
+        return "Waiting for user input."
 
     monkeypatch.setattr(cli.Config, "get_default_config_path", staticmethod(lambda: config_path))
     monkeypatch.setattr(cli.Config, "from_yaml", staticmethod(lambda _path: config))
@@ -720,7 +717,6 @@ def test_cli_json_reports_checkpoint_pause_without_error_or_completion(
             sandbox_mode=False,
             verify_api=False,
             json_summary=True,
-            completion_gate_enabled=False,
             goal_autopilot_enabled=False,
         )
     )
@@ -730,7 +726,7 @@ def test_cli_json_reports_checkpoint_pause_without_error_or_completion(
     assert exit_code == 0
     assert summary["ok"] is True
     assert summary["error"] is None
-    assert summary["runStatus"] == "paused"
+    assert summary["runStatus"] == "waiting_for_user"
     assert summary["completed"] is False
-    assert summary["recoverable"] is True
-    assert summary["checkpoint"]["checkpointId"] == "checkpoint-1"
+    assert "recoverable" not in summary
+    assert "checkpoint" not in summary

@@ -1045,70 +1045,7 @@ def test_write_tool_schema_names_active_relative_root(tmp_path):
     assert "Absolute paths are used exactly as supplied" in description
 
 
-@pytest.mark.asyncio
-async def test_write_tool_blocks_pptx_skipcheck_exporter():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        file_path = Path(tmpdir) / "export_skipcheck.js"
-        tool = WriteTool()
-        result = await tool.execute(
-            path=str(file_path),
-            content='await window.domToPptx.exportToPptx([]); require("./dom-to-pptx.bundle.js");',
-        )
 
-        assert not result.success
-        assert "PPTX HTML self-check bypass blocked" in result.error
-        assert not file_path.exists()
-
-
-@pytest.mark.asyncio
-async def test_write_tool_blocks_pptx_bypass_split_across_chunks(tmp_path):
-    target = tmp_path / "export.js"
-    target.write_text("original", encoding="utf-8")
-    tool = WriteTool(workspace_dir=str(tmp_path))
-
-    first = await tool.execute(
-        path="export.js",
-        content="await window.domToPptx.exportTo",
-        chunk_index=0,
-        final=False,
-    )
-    blocked = await tool.execute(
-        path="export.js",
-        content='Pptx([]); require("./dom-to-pptx.bundle.js");',
-        chunk_index=1,
-        final=True,
-    )
-
-    assert first.success is True
-    assert blocked.success is False
-    assert "PPTX HTML self-check bypass blocked" in blocked.error
-    assert target.read_text(encoding="utf-8") == "original"
-
-    recovered = await tool.execute(path="export.js", content="safe replacement")
-
-    assert recovered.success is True
-    assert target.read_text(encoding="utf-8") == "safe replacement"
-
-
-@pytest.mark.asyncio
-async def test_append_tool_allows_theme_css_after_canonical_pptx_comments(tmp_path):
-    file_path = tmp_path / "common.css"
-    file_path.write_text(
-        "/* rejected by html_self_check.js / html_to_editable_pptx.js; "
-        "everything below is yours to replace */\n"
-        ".slide { width: 1920px; height: 1080px; }\n",
-        encoding="utf-8",
-    )
-
-    result = await AppendTool().execute(
-        path=str(file_path),
-        content=".theme-dark { background: #05070d; }\n",
-    )
-
-    assert result.success, result.error
-    assert file_path.read_text(encoding="utf-8").endswith(
-        ".theme-dark { background: #05070d; }\n"
-    )
 
 
 @pytest.mark.asyncio
@@ -1181,25 +1118,6 @@ async def test_edit_tool_rejects_model_history_placeholder():
     finally:
         Path(temp_path).unlink()
 
-
-@pytest.mark.asyncio
-async def test_edit_tool_blocks_removing_pptx_self_check():
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".js") as f:
-        f.write('runSelfCheck(htmlPath, width, height, reportPath); require("./html_to_editable_pptx.js");')
-        temp_path = f.name
-
-    try:
-        tool = EditTool()
-        result = await tool.execute(
-            path=temp_path,
-            old_str="runSelfCheck(htmlPath, width, height, reportPath);",
-            new_str="// removed to skip self-check",
-        )
-
-        assert not result.success
-        assert "PPTX HTML self-check bypass blocked" in result.error
-    finally:
-        Path(temp_path).unlink()
 
 
 @pytest.mark.asyncio

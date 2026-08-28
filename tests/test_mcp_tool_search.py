@@ -10,7 +10,6 @@ import pytest
 
 from box_agent.agent import Agent
 from box_agent.events import ToolCallResult, ToolCallStart
-from box_agent.loop_guards import CompletionGate
 from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools import mcp_loader
@@ -822,94 +821,6 @@ async def test_search_then_real_tool_is_exposed_on_next_step() -> None:
     assert real_result.tool_id == "mcp:crm/lookup"
     assert real_result.server_name == "crm"
 
-
-@pytest.mark.asyncio
-async def test_restrictive_gate_preserves_tool_search_activation() -> None:
-    catalog = MCPToolCatalog()
-    lookup = FakeMCPTool("lookup", "crm", "Lookup")
-    catalog.replace_server("crm", [lookup])
-    activated = OrderedDict()
-    manager = MCPToolExposureManager(catalog, activated)
-    search = ToolSearchTool(catalog, activated)
-    generate_image = FakeCoreTool("generate_image")
-    fallback = FakeCoreTool("fallback")
-    llm = MockLLM(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="search-call",
-                        type="function",
-                        function=FunctionCall(
-                            name="tool_search",
-                            arguments={"query": "lookup"},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="lookup-call",
-                        type="function",
-                        function=FunctionCall(name="lookup", arguments={}),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="image-call",
-                        type="function",
-                        function=FunctionCall(
-                            name="generate_image",
-                            arguments={},
-                        ),
-                    )
-                ],
-                finish_reason="tool",
-            ),
-            LLMResponse(content="done", tool_calls=[], finish_reason="stop"),
-        ]
-    )
-
-    await _collect(
-        run_agent_loop(
-            llm=llm,
-            messages=[Message(role="system", content="test")],
-            tools={
-                "generate_image": generate_image,
-                "fallback": fallback,
-                "tool_search": search,
-            },
-            max_steps=4,
-            tool_exposure_manager=manager,
-            completion_gate=CompletionGate(
-                required_tools=frozenset({"generate_image"}),
-                restrict_tools_until_required_succeed=True,
-            ),
-        )
-    )
-
-    assert set(llm.offered_names[0]) == {"generate_image", "tool_search"}
-    assert set(llm.offered_names[1]) == {
-        "generate_image",
-        "lookup",
-        "tool_search",
-    }
-    assert "fallback" not in llm.offered_names[2]
-    assert set(llm.offered_names[3]) == {
-        "fallback",
-        "generate_image",
-        "lookup",
-        "tool_search",
-    }
-    assert lookup.calls == 1
 
 
 @pytest.mark.asyncio

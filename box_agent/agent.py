@@ -23,7 +23,6 @@ from .events import (
     AgentEvent,
     ArtifactEvent,
     ContentEvent,
-    ContextCheckpointEvent,
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
@@ -44,7 +43,6 @@ from .context_resources import ContextResourceLedger
 from .config import AgentConfig, ToolLimitsConfig
 from .llm import LLMClient
 from .logger import AgentLogger
-from .loop_guards import CompletionGate
 from .runtime import run_agent_loop
 from .schema import Message
 from .session_log import SessionLog
@@ -58,7 +56,6 @@ from .tools.mcp_tool_search import (
 from .tools.skill_preload import build_active_skills_prompt
 from .tool_result_storage import ToolResultStorage
 from .utils import calculate_display_width
-from .workflow_policy import WorkflowPolicy
 from .session_continuation import ContinuationMessage
 
 
@@ -96,14 +93,13 @@ class AgentRunOptions:
     plan_start_text: str | None = None
     pause_after_plan_write: bool = False
     max_tool_calls: int | None = None
+    max_delegated_tool_calls: int | None = None
     web_search_total_limit: int | None = None
     no_progress_limit: int | None = None
-    completion_gate: CompletionGate | None = None
     artifact_detection_enabled: bool = True
     artifact_root_dir: str | Path | None = None
     cache_fingerprint_context: dict[str, Any] | None = None
     cache_fingerprint_sink: Callable[[dict[str, Any]], None] | None = None
-    workflow_policy: WorkflowPolicy | None = None
     current_turn_text: str | None = None
 
 
@@ -558,7 +554,7 @@ class Agent:
                 "it does not by itself define every path the runtime may allow. "
                 "Relative tool paths resolve from each tool's active "
                 "project/artifact root; in output mode, prefer the artifact-relative "
-                "paths named by the active Skill or checkpoint instead of deriving "
+                "paths named by the active Skill or durable artifact state instead of deriving "
                 "absolute paths from this workspace."
             )
             system_prompt = system_prompt + workspace_info
@@ -602,7 +598,6 @@ class Agent:
         self.cache_fingerprint_context: dict[str, object] = {}
         self._streaming_active: bool = False  # Track if streaming output needs trailing newline
         self.last_stop_reason: str | None = None
-        self.last_checkpoint: dict[str, Any] | None = None
         self.goal: GoalState | None = None
         self.tools["goal_read"] = _GoalReadTool(self)
         self.tools["goal_write"] = _GoalWriteTool(self)
@@ -1001,6 +996,10 @@ class Agent:
             memory_manager=getattr(self._memory_extractor, "_mgr", None),
             memory_extractor=self._memory_extractor,
             inject_queue=self.inject_queue,
+            max_tool_calls=self.tool_limits.general.max_tool_calls,
+            max_delegated_tool_calls=(
+                self.tool_limits.general.max_delegated_tool_calls
+            ),
             cache_fingerprint_context=self.cache_fingerprint_context,
         )
 
@@ -1015,7 +1014,6 @@ class Agent:
         require_plan_approval: bool | None = None,
         plan_approval: dict | None = None,
         pause_after_plan_write: bool | None = None,
-        completion_gate: CompletionGate | None = None,
         artifact_detection_enabled: bool | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Execute the agent loop, yielding structured events.
@@ -1043,8 +1041,6 @@ class Agent:
             legacy_overrides["plan_approval"] = plan_approval
         if pause_after_plan_write is not None:
             legacy_overrides["pause_after_plan_write"] = pause_after_plan_write
-        if completion_gate is not None:
-            legacy_overrides["completion_gate"] = completion_gate
         if artifact_detection_enabled is not None:
             legacy_overrides["artifact_detection_enabled"] = artifact_detection_enabled
         if legacy_overrides:
@@ -1080,6 +1076,7 @@ class Agent:
             max_steps=self.max_steps,
             tool_limits=self.tool_limits,
             max_tool_calls=effective_options.max_tool_calls,
+            max_delegated_tool_calls=effective_options.max_delegated_tool_calls,
             web_search_total_limit=effective_options.web_search_total_limit,
             token_limit=self.token_limit,
             is_cancelled=effective_options.is_cancelled,
@@ -1107,7 +1104,6 @@ class Agent:
             plan_start_text=effective_options.plan_start_text,
             pause_after_plan_write=effective_options.pause_after_plan_write,
             no_progress_limit=effective_options.no_progress_limit,
-            completion_gate=effective_options.completion_gate,
             truncation_continuation_enabled=self.truncation_continuation_enabled,
             max_truncation_continuations=self.max_truncation_continuations,
             max_truncated_tool_call_retries=self.max_truncated_tool_call_retries,
@@ -1117,7 +1113,6 @@ class Agent:
             cache_fingerprint_context=effective_options.cache_fingerprint_context,
             cache_fingerprint_sink=effective_options.cache_fingerprint_sink,
             active_skill_activator=self.activate_skill_instructions,
-            workflow_policy=effective_options.workflow_policy,
             current_turn_text=effective_options.current_turn_text,
             context_resource_ledger=self.context_resource_ledger,
             context_resource_dedup_enabled=self.context_resource_dedup_enabled,
@@ -1247,7 +1242,6 @@ class Agent:
         require_plan_approval: bool = False,
         plan_approval: dict | None = None,
         pause_after_plan_write: bool = False,
-        completion_gate: CompletionGate | None = None,
         artifact_detection_enabled: bool = True,
         current_turn_text: str | None = None,
     ) -> str:
@@ -1258,7 +1252,6 @@ class Agent:
         """
         final_content = ""
         self.last_stop_reason = None
-        self.last_checkpoint = None
         options = self.default_run_options()
         if current_turn_text is not None:
             options = replace(options, current_turn_text=current_turn_text)
@@ -1269,7 +1262,6 @@ class Agent:
             require_plan_approval=require_plan_approval,
             plan_approval=plan_approval,
             pause_after_plan_write=pause_after_plan_write,
-            completion_gate=completion_gate,
             artifact_detection_enabled=artifact_detection_enabled,
         ):
             self._render_event(event)
@@ -1281,18 +1273,6 @@ class Agent:
             if isinstance(event, DoneEvent):
                 final_content = event.final_content
                 self.last_stop_reason = event.stop_reason.value
-            elif isinstance(event, ContextCheckpointEvent):
-                self.last_checkpoint = {
-                    "checkpointId": event.checkpoint_id,
-                    "workflowKind": event.workflow_kind,
-                    "adapterId": event.adapter_id,
-                    "schemaVersion": event.schema_version,
-                    "workspaceIdentity": event.workspace_identity,
-                    "path": event.path,
-                    "stage": event.stage,
-                    "artifactCount": event.artifact_count,
-                    "artifactSetSha256": event.artifact_set_sha256,
-                }
         return final_content
 
     # ── Terminal renderer ───────────────────────────────────
@@ -1412,13 +1392,6 @@ class Agent:
 
             case ErrorEvent(message=msg):
                 print(f"\n{Colors.BRIGHT_RED}❌ Error:{Colors.RESET} {msg}")
-
-            case ContextCheckpointEvent(checkpoint_id=checkpoint_id, stage=stage):
-                stage_text = f" · stage {stage}" if stage else ""
-                print(
-                    f"\n{Colors.BRIGHT_YELLOW}⏸️  Progress saved and task paused"
-                    f"{stage_text} · checkpoint {checkpoint_id[:12]}.{Colors.RESET}"
-                )
 
             case PermissionRequestEvent(scope=scope, requested_scope=req_scope, path=path, reason=reason):
                 print(f"\n{Colors.BRIGHT_YELLOW}🔒 Permission required: {scope} → {req_scope}{Colors.RESET}")

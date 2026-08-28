@@ -42,7 +42,6 @@ KNOWN_EVENT_TYPES = frozenset(
         "skill/change",
         "compaction/start",
         "compaction/summary",
-        "compaction/prune",
         "compaction/end",
         "subagent/descriptor",
     }
@@ -59,6 +58,10 @@ class SessionLogDurabilityError(OSError):
 
 class SessionLogInUseError(RuntimeError):
     """Another writer owns this Session Log."""
+
+
+class SessionLogWorkspaceMismatch(ValueError):
+    """The requested cwd does not own this immutable Session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,36 @@ def _encode_record(record: dict[str, Any]) -> bytes:
 def _session_dir(root: Path, session_id: str) -> Path:
     key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
     return root / key
+
+
+def _normalize_cwd(cwd: str | Path) -> str:
+    """Normalize cwd syntax without resolving symlink identity."""
+
+    return os.path.normcase(os.path.abspath(os.fspath(cwd)))
+
+
+_LEGACY_WORKFLOW_CHECKPOINT_PREFIX = "[Post-Compaction Workflow Checkpoint]"
+_LEGACY_RUNTIME_CONTEXT_PREFIXES = (
+    "The host runtime supplied the following internal state update",
+    "The user sent the following message while the current task was already running",
+)
+_LEGACY_WORKFLOW_MARKERS = (
+    "CONTROLLED_PRESENTATION_STAGE=",
+    "[BOX_AGENT_EXTERNAL_SKILL_CHECKPOINT]",
+)
+
+
+def _is_legacy_workflow_context(message: Message) -> bool:
+    """Identify only framework-authored workflow context from older logs."""
+
+    if message.role != "user" or not isinstance(message.content, str):
+        return False
+    content = message.content.lstrip()
+    if content.startswith(_LEGACY_WORKFLOW_CHECKPOINT_PREFIX):
+        return True
+    return content.startswith(_LEGACY_RUNTIME_CONTEXT_PREFIXES) and any(
+        marker in content for marker in _LEGACY_WORKFLOW_MARKERS
+    )
 
 
 def _acquire_writer_lock(path: Path) -> BinaryIO:
@@ -159,6 +192,17 @@ class SessionLog:
     def failed(self) -> bool:
         return self._failed
 
+    def assert_workspace(self, cwd: str | Path) -> None:
+        """Reject a workspace change without resolving symlink aliases."""
+
+        stored_cwd = self.header.get("cwd")
+        requested_cwd = _normalize_cwd(cwd)
+        if stored_cwd != requested_cwd:
+            raise SessionLogWorkspaceMismatch(
+                "session cwd does not match the immutable workspace "
+                f"(stored={stored_cwd!r}, requested={requested_cwd!r})"
+            )
+
     @classmethod
     def create(
         cls,
@@ -182,7 +226,7 @@ class SessionLog:
             "version": SESSION_LOG_VERSION,
             "id": session_id,
             "createdAt": int(time.time() * 1000),
-            "cwd": str(Path(cwd).resolve()),
+            "cwd": _normalize_cwd(cwd),
         }
         if parent_session is not None:
             header["parentSession"] = parent_session
@@ -210,6 +254,7 @@ class SessionLog:
         root: str | Path,
         *,
         session_id: str,
+        cwd: str | Path,
     ) -> "SessionLog":
         directory = _session_dir(Path(root), session_id)
         path = directory / "session.jsonl"
@@ -218,32 +263,47 @@ class SessionLog:
             handle = path.open("r+b")
             try:
                 raw = handle.read()
-                if raw and not raw.endswith(b"\n"):
-                    committed_end = raw.rfind(b"\n") + 1
-                    if committed_end == 0:
-                        raise ValueError("session log has no complete header")
-                    handle.truncate(committed_end)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                    raw = raw[:committed_end]
-                raw_lines = raw.splitlines()
-                if not raw_lines:
-                    raise ValueError("session log is empty")
-                records: list[Any] = []
-                for index, line in enumerate(raw_lines):
-                    try:
-                        records.append(json.loads(line))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        raise SessionLogCorrupted(
-                            f"session log record {index} is invalid JSON"
-                        ) from exc
-                header = records[0]
+                header_end = raw.find(b"\n")
+                if header_end < 0:
+                    raise SessionLogCorrupted(
+                        "session log has no complete header"
+                    )
+                try:
+                    header = json.loads(raw[:header_end])
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise SessionLogCorrupted(
+                        "session log header is invalid JSON"
+                    ) from exc
                 if not isinstance(header, dict) or header.get("type") != "session":
                     raise SessionLogCorrupted("session log header is invalid")
                 if header.get("version") != SESSION_LOG_VERSION:
                     raise ValueError("session log version is unsupported")
                 if header.get("id") != session_id:
                     raise ValueError("session log id does not match requested session")
+                stored_cwd = header.get("cwd")
+                if not isinstance(stored_cwd, str) or not stored_cwd:
+                    raise SessionLogCorrupted("session log header has an invalid cwd")
+                requested_cwd = _normalize_cwd(cwd)
+                if stored_cwd != requested_cwd:
+                    raise SessionLogWorkspaceMismatch(
+                        "session cwd does not match the immutable workspace "
+                        f"(stored={stored_cwd!r}, requested={requested_cwd!r})"
+                    )
+                if raw and not raw.endswith(b"\n"):
+                    committed_end = raw.rfind(b"\n") + 1
+                    handle.truncate(committed_end)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    raw = raw[:committed_end]
+                raw_lines = raw.splitlines()
+                records: list[Any] = [header]
+                for index, line in enumerate(raw_lines[1:], start=1):
+                    try:
+                        records.append(json.loads(line))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise SessionLogCorrupted(
+                            f"session log record {index} is invalid JSON"
+                        ) from exc
                 events = records[1:]
                 for seq, event in enumerate(events):
                     if not isinstance(event, dict):
@@ -583,7 +643,11 @@ class SessionLog:
                 )
             surface[start_index : end_index + 1] = [node]
         return SessionProjection(
-            messages=[message for _, message in surface],
+            messages=[
+                message
+                for _, message in surface
+                if not _is_legacy_workflow_context(message)
+            ],
             goal=goal,
             plan=plan,
             todos=todos,

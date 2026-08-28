@@ -97,7 +97,6 @@ def test_turn_preload_uses_semantic_roadmap_route_without_a_document_gate() -> N
     assert turn_preload_skill_names(
         ("roadmap",),
         None,
-        None,
         "生成未来三个月路线图，按团队分泳道",
     ) == ["roadmap"]
 

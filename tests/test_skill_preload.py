@@ -4,7 +4,6 @@ import pytest
 
 from box_agent.config import ToolLimitsConfig
 from box_agent.core import _maybe_summarize
-from box_agent.loop_guards import CompletionGate
 from box_agent.schema import LLMResponse, Message
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.skill_preload import (
@@ -12,79 +11,58 @@ from box_agent.tools.skill_preload import (
     AUTO_LOADED_SKILLS_HEADING,
     build_active_skills_prompt,
     build_auto_loaded_skills_prompt,
-    document_preload_skill_names,
     has_browser_operation_intent,
     host_runtime_preload_skill_names,
     resolve_skill_preload_attributions,
     strip_active_skills,
+    turn_preload_skill_names,
     web_search_total_limit_for_active_skills,
 )
-from box_agent.workflows.external_skill import EXTERNAL_SKILL_WORKFLOW_KIND
 
 
 def test_deep_presentation_preloads_research_synthesis_with_pptx() -> None:
-    gate = CompletionGate(
-        required_changed_artifact_globs=(
-            "output/**/*.html",
-            "output/**/*.pptx",
-        ),
-        workflow_options={"research_mode": "deep"},
-    )
-
-    assert document_preload_skill_names(("pptx",), gate) == [
+    assert turn_preload_skill_names(
+        ("pptx", "research-synthesis"),
+        None,
+        "Create a researched presentation",
+    ) == [
         "pptx",
         "research-synthesis",
     ]
 
 
 def test_non_deep_presentation_keeps_the_normal_pptx_preload() -> None:
-    gate = CompletionGate(
-        required_changed_artifact_globs=(
-            "output/**/*.html",
-            "output/**/*.pptx",
-        ),
-        workflow_options={"research_mode": "content_ready"},
-    )
-
-    assert document_preload_skill_names(("pptx",), gate) == ["pptx"]
+    assert turn_preload_skill_names(("pptx",), None, "Create a deck") == ["pptx"]
 
 
-def test_controlled_presentation_gate_preloads_pptx_even_for_html_artifacts() -> None:
-    gate = CompletionGate(
-        required_changed_artifact_globs=(
-            "output/**/*.html",
-            "output/**/*.htm",
-        ),
-        workflow_checkpoint_kind="controlled_presentation",
-    )
-
-    assert document_preload_skill_names((), gate) == ["pptx"]
+def test_semantic_presentation_preloads_pptx_when_keyword_filter_misses_it() -> None:
+    assert turn_preload_skill_names(
+        ("lark-noise",),
+        None,
+        "做一份 12 页新员工入职培训 PPT，1920×1080 可编辑",
+    ) == ["pptx"]
 
 
-def test_controlled_presentation_gate_preloads_resolved_provider_without_builtin() -> None:
-    gate = CompletionGate(
-        required_changed_artifact_globs=("output/**/*.pptx",),
-        workflow_checkpoint_kind="controlled_presentation",
-    )
+def test_no_match_or_host_selection_does_not_preload_document_skill() -> None:
+    assert turn_preload_skill_names((), None, "Create an HTML page") == []
 
-    assert document_preload_skill_names(
-        (),
-        gate,
-        presentation_skill_name="custom-decks",
+
+def test_host_selected_skill_is_authoritative_over_semantic_preloads() -> None:
+    assert turn_preload_skill_names(
+        ("pptx",),
+        None,
+        "Create a presentation",
+        selected_skill_names=("custom-decks",),
     ) == ["custom-decks"]
 
 
-def test_external_skill_gate_preloads_selected_skill_not_builtin_document_skill() -> None:
-    gate = CompletionGate(
-        required_changed_artifact_globs=(
-            "output/**/*.html",
-            "output/**/*.pptx",
-        ),
-        workflow_checkpoint_kind=EXTERNAL_SKILL_WORKFLOW_KIND,
-        workflow_options={"skill_name": "sn-ppt-entry"},
-    )
-
-    assert document_preload_skill_names(("sn-ppt-entry",), gate) == [
+def test_explicit_skill_selection_preloads_exact_skill() -> None:
+    assert turn_preload_skill_names(
+        ("sn-ppt-entry",),
+        None,
+        "/sn-ppt-entry topic",
+        selected_skill_names=("sn-ppt-entry",),
+    ) == [
         "sn-ppt-entry"
     ]
 

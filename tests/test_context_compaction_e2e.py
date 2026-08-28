@@ -80,7 +80,7 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
     )
     assert "<summary>" not in str(compacted_summary.content)
     assert "</summary>" not in str(compacted_summary.content)
-    assert "Pick up the last task as if the break never happened." in str(
+    assert "pick up the last task as if the break never happened." in str(
         compacted_summary.content
     )
     assert old_user not in llm.normal_messages
