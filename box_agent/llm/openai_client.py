@@ -42,7 +42,6 @@ _DEFAULT_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
 _SENSENOVA_MODEL_PREFIXES_ENV = "BOX_AGENT_SENSENOVA_MODEL_PREFIXES"
 _SENSENOVA_PREFIX_BOUNDARIES = frozenset("-_/:.")
 _GLM_5_3_MODEL_MARKERS = ("glm-5-3", "glm-5.3")
-_GEMINI_NO_DISABLE_MARKERS = ("gemini-2.5-pro", "gemini-3.1-pro")
 _SENSENOVA_PSEUDO_TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*<function=([A-Za-z_][\w.-]*)>\s*(.*?)\s*</function>\s*</tool_call>",
     re.DOTALL,
@@ -116,17 +115,8 @@ def _apply_thinking_params(
     if "qwen" in normalized_model:
         params["extra_body"] = {"enable_thinking": thinking_enabled}
         return
-    if "gemini" in normalized_model:
-        if thinking_enabled:
-            params["reasoning_effort"] = _DEEP_THINK_REASONING_EFFORT
-        elif not any(marker in normalized_model for marker in _GEMINI_NO_DISABLE_MARKERS):
-            params["reasoning_effort"] = "none"
-        return
     if thinking_enabled:
         params["reasoning_effort"] = _DEEP_THINK_REASONING_EFFORT
-        return
-    if _is_sensenova_model(model):
-        params["reasoning_effort"] = "none"
 
 
 def _tool_parameter_types(
