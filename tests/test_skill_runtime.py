@@ -1004,6 +1004,8 @@ def test_skill_execution_env_uses_windows_global_bin_layout(tmp_path: Path) -> N
         / f"Python{sys.version_info.major}{sys.version_info.minor}"
         / "site-packages"
     )
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
     assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == str(chromium)
 
 

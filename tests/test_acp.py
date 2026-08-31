@@ -517,6 +517,19 @@ def test_project_sandbox_prompt_does_not_point_at_output_dir():
     assert "cwd 已是 `{workspace}/output/`" not in prompt
 
 
+def test_output_prompts_use_stable_workspace_path_for_uploaded_files():
+    sandbox_prompt = build_sandbox_info_prompt(use_output_dir=True)
+    delivery_prompt = build_file_delivery_prompt(use_output_dir=True)
+
+    for prompt in (sandbox_prompt, delivery_prompt):
+        assert "BOX_AGENT_WORKSPACE_DIR" in prompt
+        assert "按当前工具的路径语法拼接文件名" in prompt
+        assert "${BOX_AGENT_WORKSPACE_DIR}" not in prompt
+        assert "$env:BOX_AGENT_WORKSPACE_DIR" not in prompt
+        assert "../<name>" not in prompt
+        assert "host" in prompt
+
+
 def test_file_delivery_prompt_uses_dynamic_loopback_preview_and_reclaims_it():
     prompt = build_file_delivery_prompt(use_output_dir=True)
 
@@ -2977,18 +2990,22 @@ async def test_acp_injects_standard_box_agent_image_generation_policy(tmp_path):
 @pytest.mark.asyncio
 async def test_acp_uses_host_artifact_root_dir_for_output_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "session-a"
+    workspace.mkdir()
+    attachment = workspace / "高级配色-新标题.pptx"
+    attachment.write_bytes(b"pptx fixture")
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(workspace)),
         tools=ToolsConfig(allow_full_access=True),
     )
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
-    artifact_root = tmp_path / "session-a" / "output"
+    artifact_root = workspace / "output" / "tasks" / "task-1"
 
     session = await agent.newSession(
         SimpleNamespace(
-            cwd=str(tmp_path),
+            cwd=str(workspace),
             field_meta={
                 "session_id": "office-session-a",
                 "workspace_layout": {"artifact_root_dir": str(artifact_root)},
@@ -2997,12 +3014,24 @@ async def test_acp_uses_host_artifact_root_dir_for_output_mode(tmp_path, monkeyp
     )
     state = agent._sessions[session.sessionId]
     sandbox_tool = state.agent.tools["execute_code"]
+    bash_tool = state.agent.tools["bash"]
 
     assert artifact_root.is_dir()
     assert state.output_dir == str(artifact_root.resolve())
     assert state.upstream_session_id == "office-session-a"
     assert not (tmp_path / "output").exists()
     assert sandbox_tool._get_workspace("ignored") == artifact_root.resolve()
+    assert bash_tool._subprocess_env["BOX_AGENT_WORKSPACE_DIR"] == str(
+        workspace.resolve()
+    )
+    assert bash_tool._subprocess_env["BOX_AGENT_OUTPUT_DIR"] == str(
+        artifact_root.resolve()
+    )
+    assert (
+        Path(bash_tool._subprocess_env["BOX_AGENT_WORKSPACE_DIR"])
+        / attachment.name
+    ).is_file()
+    assert not (Path(bash_tool.workspace_dir).parent / attachment.name).exists()
 
 
 def test_acp_artifact_raw_output_gets_session_metadata():
@@ -5207,6 +5236,8 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(tmp_
     assert execute_code_env["BOX_AGENT_SCRATCH_DIR"] == str(
         workspace / ".box-agent-scratch"
     )
+    assert bash_env["BOX_AGENT_WORKSPACE_DIR"] == str(workspace.resolve())
+    assert execute_code_env["BOX_AGENT_WORKSPACE_DIR"] == str(workspace.resolve())
     assert bash_env["NODE_PATH"].split(os.pathsep)[-1] == str(node_modules)
     assert bash_env["NPM_CONFIG_PREFIX"] == str(
         Path.home() / ".box-agent" / "skill-tools"
