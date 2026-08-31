@@ -10628,6 +10628,10 @@ def test_example_validates_and_renders_deterministically(tmp_path: Path) -> None
     assert ">▶</button>" in html
     assert "▶ 播放" not in html
     assert 'data-action="export-pptx"' in html
+    assert 'class="toolbar-export"' in html
+    assert 'class="toolbar-nav"' not in html
+    assert 'data-action="previous"' not in html
+    assert 'data-action="next"' not in html
     assert 'data-role="thumbnail-list"' in html
     assert 'data-save-state="download"' in html
     assert 'id="deck-layout-picker"' in html
