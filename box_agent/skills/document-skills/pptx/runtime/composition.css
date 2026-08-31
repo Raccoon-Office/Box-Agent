@@ -3667,8 +3667,40 @@ body[data-deck-composition="technical-schematic"][data-deck-composition-variant=
 }
 
 body[data-deck-composition="technical-schematic"][data-deck-composition-variant="spec-sheet"] .composition-schematic-spec-rail {
-  left: 128px;
+  left: 48px;
   width: 32px;
+}
+
+body[data-deck-theme-id="factory-floor"][data-deck-composition="technical-schematic"]
+  .slide
+  :is(.slide-header, .cover-copy) {
+  border-left: 0;
+}
+
+body[data-deck-theme-id="factory-floor"][data-deck-composition="technical-schematic"]
+  .slide
+  .eyebrow {
+  display: inline-flex;
+  align-self: start;
+  width: fit-content;
+  padding: 6px 10px;
+  border: 0;
+  background: var(--deck-primary);
+  color: var(--deck-bg);
+}
+
+body[data-deck-theme-id="factory-floor"][data-deck-composition="technical-schematic"]
+  .layout-data-table
+  .data-table-wrap {
+  margin-left: 0;
+  padding: 20px 28px 24px;
+}
+
+body[data-deck-theme-id="factory-floor"][data-deck-composition="technical-schematic"]
+  .table-comparison
+  .data-table
+  :is(th, td):first-child {
+  width: 20%;
 }
 
 body[data-deck-composition="technical-schematic"] .layout-maturity-model .slide-header,

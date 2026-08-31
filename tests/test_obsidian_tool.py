@@ -216,12 +216,18 @@ async def test_permission_request_then_retry_launches_app(
     assert calls == [[str(cli), "create", "path=t.md", "content=c", "open"]]
 
 
-def test_obsidian_skill_is_discoverable() -> None:
+def test_obsidian_skill_remains_discoverable_after_market_install() -> None:
     skills_dir = Path(__file__).resolve().parent.parent / "box_agent" / "skills"
-    loader = SkillLoader(sources=[(skills_dir, "builtin")])
+    builtin_loader = SkillLoader(sources=[(skills_dir, "builtin")])
+    builtin_loader.discover_skills()
+    assert builtin_loader.get_skill("obsidian") is None
+
+    loader = SkillLoader(sources=[(skills_dir / "obsidian", "user")])
     loader.discover_skills()
 
-    assert loader.get_skill("obsidian") is not None
+    skill = loader.get_skill("obsidian")
+    assert skill is not None
+    assert skill.source == "user"
     assert "obsidian" in loader.list_skills()
 
 

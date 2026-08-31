@@ -41,6 +41,7 @@ _DEEP_THINK_REASONING_EFFORT = "high"
 _DEFAULT_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
 _SENSENOVA_MODEL_PREFIXES_ENV = "BOX_AGENT_SENSENOVA_MODEL_PREFIXES"
 _SENSENOVA_PREFIX_BOUNDARIES = frozenset("-_/:.")
+_GLM_5_3_MODEL_MARKERS = ("glm-5-3", "glm-5.3")
 _GEMINI_NO_DISABLE_MARKERS = ("gemini-2.5-pro", "gemini-3.1-pro")
 _SENSENOVA_PSEUDO_TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*<function=([A-Za-z_][\w.-]*)>\s*(.*?)\s*</function>\s*</tool_call>",
@@ -104,6 +105,9 @@ def _apply_thinking_params(
 ) -> None:
     """Map the session deep-think flag to the provider request dialect."""
     normalized_model = (model or "").strip().casefold()
+    if any(marker in normalized_model for marker in _GLM_5_3_MODEL_MARKERS):
+        params["reasoning_effort"] = "max" if thinking_enabled else "low"
+        return
     if "deepseek" in normalized_model or "doubao" in normalized_model:
         params["extra_body"] = _litellm_extra_body(
             {"thinking": {"type": "enabled" if thinking_enabled else "disabled"}}
@@ -557,7 +561,7 @@ class OpenAIClient(LLMClientBase):
             thinking_enabled=thinking_enabled,
         )
 
-        auth_headers = self._auth_headers(
+        auth_headers = await self._auth_headers(
             self._request_headers(session_id, turn_id, title, call_kind)
         )
         if auth_headers:
@@ -936,7 +940,7 @@ class OpenAIClient(LLMClientBase):
             request_params["tools"] and _is_sensenova_model(self.model)
         )
 
-        auth_headers = self._auth_headers(
+        auth_headers = await self._auth_headers(
             self._request_headers(session_id, turn_id, title, call_kind)
         )
         if auth_headers:

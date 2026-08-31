@@ -260,6 +260,60 @@ def test_compaction_replacement_commits_exact_new_surface_and_keeps_old_events(
     log.close()
 
 
+def test_live_surface_rewrite_is_reconciled_without_failing_the_task(
+    tmp_path,
+    caplog,
+):
+    log = SessionLog.create(tmp_path, session_id="result-budget", cwd=tmp_path)
+    original_messages = [
+        Message(role="user", content="research"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="search-1",
+                    type="function",
+                    function=FunctionCall(name="web_search", arguments={"q": "x"}),
+                )
+            ],
+        ),
+        Message(
+            role="tool",
+            name="web_search",
+            tool_call_id="search-1",
+            content="x" * 1_000,
+        ),
+    ]
+    log.append_unlogged_messages(original_messages, turn=1, step=1)
+    original_event_count = len(log.events)
+    rewritten_messages = [
+        *original_messages[:2],
+        original_messages[2].model_copy(
+            update={"content": "<persisted-output>tool-results/search-1.txt</persisted-output>"}
+        ),
+    ]
+
+    with caplog.at_level("WARNING", logger="box_agent.session_log"):
+        replacement = log.append_unlogged_messages(
+            rewritten_messages,
+            turn=1,
+            step=2,
+        )
+    log.flush()
+
+    assert log.replay().messages == rewritten_messages
+    assert len(log.events) == original_event_count + len(rewritten_messages)
+    assert replacement[0]["surfaceOp"] == {
+        "op": "replace",
+        "start": 0,
+        "end": 2,
+    }
+    assert "session_log/surface_diverged" in caplog.text
+    assert "action=replace_surface" in caplog.text
+    log.close()
+
+
 def test_compaction_recovery_uses_replacement_as_commit_point(tmp_path):
     before = SessionLog.create(tmp_path, session_id="before-replace", cwd=tmp_path)
     before.append_unlogged_messages(

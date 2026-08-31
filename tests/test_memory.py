@@ -58,6 +58,35 @@ def test_legacy_aliases(mgr: MemoryManager):
     assert "legacy content" in mgr.read_all()
 
 
+# ── OpenClaw import ────────────────────────────────────────────
+
+
+async def test_openclaw_import_caps_utility_model_output(
+    mgr: MemoryManager,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(mgr, "_read_openclaw_raw", lambda: "- prefers concise replies")
+
+    base_llm = MagicMock()
+    base_llm.model = "sn-sensenova-6-8-flash-lite"
+    base_llm.max_output_tokens = 80_000
+    capped_llm = MagicMock()
+    response = MagicMock()
+    response.content = "- prefers concise replies"
+    capped_llm.generate = AsyncMock(return_value=response)
+    base_llm.for_model.return_value = capped_llm
+
+    imported = await mgr.import_openclaw(base_llm)
+
+    base_llm.for_model.assert_called_once_with(
+        "sn-sensenova-6-8-flash-lite",
+        max_output_tokens=4_096,
+    )
+    assert imported == "- prefers concise replies"
+    assert "prefers concise replies" in mgr.read_core()
+    assert mgr._openclaw_imported_marker.read_text(encoding="utf-8") == "done\n"
+
+
 # ── Context memory (CONTEXT.md) ──────────────────────────────
 
 

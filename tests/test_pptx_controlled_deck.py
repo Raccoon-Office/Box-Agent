@@ -172,6 +172,20 @@ def _contrast_ratio(left: str, right: str) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def _mix_hex(foreground: str, background: str, foreground_weight: float) -> str:
+    foreground_channels = [
+        int(foreground[index : index + 2], 16) for index in (1, 3, 5)
+    ]
+    background_channels = [
+        int(background[index : index + 2], 16) for index in (1, 3, 5)
+    ]
+    channels = [
+        round(front * foreground_weight + back * (1 - foreground_weight))
+        for front, back in zip(foreground_channels, background_channels, strict=True)
+    ]
+    return "#" + "".join(f"{channel:02X}" for channel in channels)
+
+
 def test_layout_manifest_is_generated_from_registry() -> None:
     result = _run("build_layout_manifest.js", "--check")
 
@@ -641,8 +655,215 @@ def test_every_visual_dna_theme_has_complete_contrast_safe_runtime_tokens() -> N
         primary_text = palette.get("primary_text", palette["primary"])
         assert _contrast_ratio(palette["text"], palette["background"]) >= 4.5, theme["id"]
         assert _contrast_ratio(palette["muted"], palette["background"]) >= 3, theme["id"]
+        assert _contrast_ratio(palette["text"], palette["surface"]) >= 4.5, theme["id"]
+        assert _contrast_ratio(palette["muted"], palette["surface"]) >= 3, theme["id"]
         assert _contrast_ratio(primary_text, palette["background"]) >= 3, theme["id"]
         assert _contrast_ratio(palette["inverse"], palette["primary"]) >= 4.5, theme["id"]
+
+
+def test_spec_sheet_measurement_rail_uses_one_consistent_left_gutter() -> None:
+    composition_css = (SKILL_DIR / "runtime" / "composition.css").read_text()
+
+    assert (
+        'body[data-deck-composition="technical-schematic"]'
+        '[data-deck-composition-variant="spec-sheet"] '
+        ".composition-schematic-spec-rail {\n"
+        "  left: 48px;"
+    ) in composition_css
+    assert (
+        'body[data-deck-composition="technical-schematic"]'
+        '[data-deck-composition-variant="spec-sheet"] .data-table-wrap {\n'
+        "  margin-left: 150px;"
+    ) in composition_css
+
+
+def test_factory_floor_uses_role_based_page_rhythm() -> None:
+    manifest = json.loads((SKILL_DIR / "layouts" / "manifest.json").read_text())
+    factory_floor = next(
+        theme for theme in manifest["themes"] if theme["id"] == "factory-floor"
+    )
+    palette = factory_floor["palette"]
+
+    assert palette["alt_background"] == "#173F5F"
+    assert palette["alt_primary"] == "#F2C94C"
+    assert _contrast_ratio(palette["alt_text"], palette["alt_background"]) >= 4.5
+    assert _contrast_ratio(palette["alt_muted"], palette["alt_background"]) >= 3
+
+    deck_css = (SKILL_DIR / "runtime" / "deck.css").read_text()
+    assert (
+        'body[data-deck-theme="factory-floor"] .layout-kpis .kpi-card:first-child'
+        " { background: var(--deck-primary-soft); }"
+    ) in deck_css
+    assert 'body[data-deck-theme="factory-floor"] .layout-statement {' in deck_css
+    assert 'body[data-deck-theme="factory-floor"] .layout-closing {' in deck_css
+    assert "  --deck-bg: #F2C94C;" in deck_css
+
+    composition_css = (SKILL_DIR / "runtime" / "composition.css").read_text()
+    assert (
+        'body[data-deck-theme-id="factory-floor"]'
+        '[data-deck-composition="technical-schematic"]\n'
+        "  .slide\n"
+        "  :is(.slide-header, .cover-copy) {\n"
+        "  border-left: 0;"
+    ) in composition_css
+    assert (
+        'body[data-deck-theme-id="factory-floor"]'
+        '[data-deck-composition="technical-schematic"]\n'
+        "  .slide\n"
+        "  .eyebrow {"
+    ) in composition_css
+    assert "  background: var(--deck-primary);" in composition_css
+    assert "  color: var(--deck-bg);" in composition_css
+    assert (
+        'body[data-deck-theme-id="factory-floor"]'
+        '[data-deck-composition="technical-schematic"]\n'
+        "  .layout-data-table\n"
+        "  .data-table-wrap {\n"
+        "  margin-left: 0;"
+    ) in composition_css
+
+
+def test_comparison_table_emphasizes_body_column_without_tinting_header() -> None:
+    deck_css = (SKILL_DIR / "runtime" / "deck.css").read_text()
+
+    assert (
+        ".table-comparison .data-table td:last-child {\n"
+        "  background: var(--deck-primary-soft);"
+    ) in deck_css
+    assert (
+        ".table-comparison .data-table th:last-child,\n"
+        ".table-comparison .data-table td:last-child"
+    ) not in deck_css
+
+
+def test_all_themes_receive_contrast_safe_role_surface_rhythm() -> None:
+    manifest = json.loads((SKILL_DIR / "layouts" / "manifest.json").read_text())
+    for theme in manifest["themes"]:
+        palette = theme["palette"]
+        role_surface = _mix_hex(palette["primary"], palette["surface"], 0.1)
+        assert _contrast_ratio(palette["text"], role_surface) >= 4.5, theme["id"]
+
+    deck_css = (SKILL_DIR / "runtime" / "deck.css").read_text()
+    assert ".slide.layout-kpis .kpi-card:first-child," in deck_css
+    assert ".slide.layout-comparison .comparison-right," in deck_css
+    assert ".slide.layout-timeline .timeline-step:nth-child(even)" in deck_css
+    assert "var(--deck-primary) 10%, var(--deck-surface)" in deck_css
+    assert ".layout-statement," in deck_css
+
+
+def test_flagship_themes_define_distinct_contrast_safe_role_pages() -> None:
+    manifest = json.loads((SKILL_DIR / "layouts" / "manifest.json").read_text())
+    themes = {theme["id"]: theme for theme in manifest["themes"]}
+
+    orbit = themes["8-bit-orbit"]["palette"]
+    for background in (orbit["chart"][0], orbit["chart"][3], orbit["chart"][1]):
+        assert _contrast_ratio(orbit["inverse"], background) >= 4.5
+
+    daisy_text = themes["daisy-days"]["palette"]["text"]
+    for background in ("#A8E6CF", "#F7C8D4", "#FDE68A"):
+        assert _contrast_ratio(daisy_text, background) >= 4.5
+
+    editorial_text = themes["soft-editorial"]["palette"]["text"]
+    for background in ("#B7C7A8", "#E8C9B6", "#D6DD63"):
+        assert _contrast_ratio(editorial_text, background) >= 4.5
+
+    studio = themes["studio"]["palette"]
+    assert _contrast_ratio(studio["alt_text"], studio["alt_background"]) >= 4.5
+    intelligence = themes["data-intelligence"]["palette"]
+    assert (
+        _contrast_ratio(
+            intelligence["alt_text"], intelligence["alt_background"]
+        )
+        >= 4.5
+    )
+
+    deck_css = (SKILL_DIR / "runtime" / "deck.css").read_text()
+    for theme_id in ("8-bit-orbit", "daisy-days", "soft-editorial", "factory-floor"):
+        assert f'body[data-deck-theme="{theme_id}"] .layout-statement' in deck_css
+        assert f'body[data-deck-theme="{theme_id}"] .layout-closing' in deck_css
+    assert 'body[data-deck-theme="studio"] .layout-statement' in deck_css
+    assert themes["studio"]["style"]["alternation"] == "section"
+    assert (
+        'body[data-deck-theme="data-intelligence"] :is('
+        ".layout-comparison, .layout-data-table)"
+    ) in deck_css
+    assert themes["data-intelligence"]["style"]["alternation"] == "section"
+
+
+def test_outline_role_pages_choose_role_layouts_and_preserve_overflow(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=5, source_mode="user_provided")
+    outline["slides"] = [
+        {
+            "page": 1,
+            "title": "第一章",
+            "message": "从问题背景进入主题。",
+            "bullets": [],
+            "layout": "章节页",
+            "visual": "章节分隔页",
+            "evidence": [],
+        },
+        {
+            "page": 2,
+            "title": "核心结论",
+            "message": "一句话说明最需要被记住的判断。",
+            "bullets": ["证明点甲", "证明点乙", "证明点丙"],
+            "layout": "观点页",
+            "visual": "单一核心结论与三个证明点",
+            "evidence": [],
+        },
+        {
+            "page": 3,
+            "title": "四项总结",
+            "message": "四项内容必须全部保留。",
+            "bullets": ["总结甲", "总结乙", "总结丙", "总结丁"],
+            "layout": "观点页",
+            "visual": "核心结论要点",
+            "evidence": [],
+        },
+        {
+            "page": 4,
+            "title": "行动式收尾",
+            "message": "把结论落实为三个后续动作。",
+            "bullets": ["行动甲", "行动乙", "行动丙"],
+            "layout": "closing-next-steps-v1",
+            "visual": "行动式收尾",
+            "evidence": [],
+        },
+        {
+            "page": 5,
+            "title": "五项后续行动",
+            "message": "五项行动必须全部保留。",
+            "bullets": ["行动一", "行动二", "行动三", "行动四", "行动五"],
+            "layout": "closing-next-steps-v1",
+            "visual": "行动式收尾",
+            "evidence": [],
+        },
+    ]
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--theme",
+        "blue-professional",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert [slide["layout_id"] for slide in deck["slides"]] == [
+        "section-marker-v1",
+        "statement-focus-v1",
+        "cards-grid-v1",
+        "closing-next-steps-v1",
+        "cards-grid-v1",
+    ]
 
 
 def test_every_registered_theme_renders_all_controlled_layouts(tmp_path: Path) -> None:
@@ -1245,6 +1466,291 @@ def test_wine_keyword_rule_does_not_match_broad_alcohol_terms(
         item["signal"] for item in report["theme_selection"]["matched_signals"]
     }
     assert "keyword rule: wine and vineyard" not in signals
+
+
+@pytest.mark.parametrize(
+    ("theme_id", "prompt", "expected_signal"),
+    [
+        (
+            "block-frame-mono-blue",
+            "黑白新野兽主义结构，只用克制的电光蓝点缀，硬阴影和零圆角。",
+            "user intent rule: monochrome electric-blue neo-brutalism",
+        ),
+        (
+            "creative-mode",
+            "创意机构作品汇报，使用绿色、粉色、橙色和黄色的高饱和色块海报。",
+            "user intent rule: multicolor creative-agency poster",
+        ),
+        (
+            "retro-windows",
+            "用 Windows 95 复古电脑窗口界面介绍软件发展历史。",
+            "user intent rule: classic desktop operating-system interface",
+        ),
+        (
+            "studio",
+            "创意工作室品牌提案，黑底配电光黄，高冲击大字与克制图形。",
+            "user intent rule: warm-black and electric-yellow studio",
+        ),
+    ],
+)
+def test_distinctive_visual_briefs_reach_registered_theme(
+    tmp_path: Path,
+    theme_id: str,
+    prompt: str,
+    expected_signal: str,
+) -> None:
+    deck_path = tmp_path / theme_id / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-hero-v1",
+        "cards-grid-v1",
+        "closing-next-steps-v1",
+        "--theme",
+        "auto",
+        "--title",
+        prompt,
+        "--fact",
+        prompt,
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    assert report["theme_selection"]["theme_id"] == theme_id
+    assert report["theme_selection"]["confidence"] == "high"
+    assert expected_signal in {
+        item["signal"]
+        for item in report["theme_selection"]["matched_signals"]
+    }
+
+
+def test_auto_theme_prompts_cover_every_registered_theme(tmp_path: Path) -> None:
+    manifest = json.loads(
+        (SKILL_DIR / "layouts" / "manifest.json").read_text(encoding="utf-8")
+    )
+    distinctive_prompts = {
+        "block-frame-mono-blue": (
+            "黑白新野兽主义结构，只用克制的电光蓝点缀，"
+            "硬阴影和零圆角。"
+        ),
+        "capsule": "小红书春季年轻美妆与护肤新品发布，清新活泼。",
+        "creative-mode": (
+            "创意机构作品汇报，使用绿色、粉色、橙色和黄色的"
+            "高饱和色块海报。"
+        ),
+        "daisy-days": (
+            "给小学生做一份儿童科普课堂课件，气质亲切活泼，"
+            "使用奶油底和彩虹粉彩。"
+        ),
+        "legal-docket": (
+            "法律意见书与案件分析，整理证据链、诉讼策略和合规审查。"
+        ),
+        "retro-windows": "用 Windows 95 复古电脑窗口界面介绍软件发展历史。",
+        "retro-zine": (
+            "为独立乐队新专辑和巡演制作发布演示，"
+            "地下音乐杂志与 riso 油墨。"
+        ),
+        "studio": (
+            "创意工作室品牌提案，黑底配电光黄，"
+            "高冲击大字与克制图形。"
+        ),
+        "vellum": "介绍哈利波特与霍格沃茨魔法世界的奇幻文学演示。",
+    }
+    missed = []
+
+    for theme in manifest["themes"]:
+        theme_id = theme["id"]
+        selection = theme["selection"]
+        prompt = distinctive_prompts.get(theme_id)
+        if prompt is None:
+            industries = "、".join(selection["industry_fit"][:3])
+            moods = "、".join(selection["mood_keywords"][:5])
+            prompt = (
+                f"请制作一份关于 {industries} 的演示。"
+                f"视觉希望 {moods}，{selection['scheme']} 配色，"
+                f"{selection.get('formality', 'medium')} 正式度。"
+            )
+
+        deck_path = tmp_path / theme_id / "deck.json"
+        scaffold = _run(
+            "inspect_deck_contract.js",
+            "cover-editorial-v1",
+            "--theme",
+            "auto",
+            "--title",
+            f"Auto selection coverage: {theme_id}",
+            "--fact",
+            prompt,
+            "--out",
+            str(deck_path),
+        )
+        assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+        report = json.loads(
+            (deck_path.parent / "qa" / "deck_contract.json").read_text()
+        )
+        selected = report["theme_selection"]["theme_id"]
+        if selected != theme_id:
+            missed.append((theme_id, selected))
+
+    assert missed == []
+
+
+def test_theme_rank_preflight_returns_bounded_model_shortlist() -> None:
+    prompt = "创意机构年度品牌活动复盘，现代大胆，不要复古或像素风。"
+    ranked = _run(
+        "inspect_deck_contract.js",
+        "--rank-themes",
+        "--title",
+        "品牌活动复盘",
+        "--fact",
+        prompt,
+    )
+
+    assert ranked.returncode == 0, ranked.stdout + ranked.stderr
+    payload = json.loads(ranked.stdout)
+    assert payload["mode"] == "theme_shortlist"
+    assert 5 <= payload["candidate_count"] <= 8
+    assert payload["candidate_count"] == len(payload["candidates"])
+    assert len({item["id"] for item in payload["candidates"]}) == len(
+        payload["candidates"]
+    )
+    assert "creative-mode" in {item["id"] for item in payload["candidates"]}
+    assert all(
+        isinstance(item["eligible_for_model_choice"], bool)
+        and "deterministic_score" in item
+        and "matched_signals" in item
+        and "hard_conflicts" in item
+        for item in payload["candidates"]
+    )
+    assert payload["model_choice_contract"]["choose_from_candidates_only"] is True
+
+
+def test_model_theme_choice_reranks_only_within_deterministic_shortlist(
+    tmp_path: Path,
+) -> None:
+    prompt = "创意机构年度品牌活动复盘，现代大胆，不要复古或像素风。"
+    deck_path = tmp_path / "accepted" / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "cards-grid-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "creative-mode",
+        "--theme-model-reason",
+        "创意机构场景与多彩海报语法更匹配。",
+        "--title",
+        "品牌活动复盘",
+        "--fact",
+        prompt,
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    selection = report["theme_selection"]
+    assert selection["theme_id"] == "creative-mode"
+    assert selection["source"] == "model_reranked"
+    assert selection["model_choice"] == {
+        "theme_id": "creative-mode",
+        "reason": "创意机构场景与多彩海报语法更匹配。",
+        "accepted": True,
+    }
+    assert selection["deterministic_recommendation"]["theme_id"] != "creative-mode"
+
+
+def test_model_theme_choice_outside_shortlist_is_rejected(tmp_path: Path) -> None:
+    prompt = "创意机构年度品牌活动复盘，现代大胆，不要复古或像素风。"
+    deck_path = tmp_path / "rejected" / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "8-bit-orbit",
+        "--theme-model-reason",
+        "尝试使用像素主题。",
+        "--title",
+        "品牌活动复盘",
+        "--fact",
+        prompt,
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    selection = report["theme_selection"]
+    assert selection["theme_id"] != "8-bit-orbit"
+    assert selection["source"] == "model_choice_rejected"
+    assert selection["model_choice"]["accepted"] is False
+    assert selection["model_choice"]["rejection_reason"] == (
+        "outside_deterministic_shortlist"
+    )
+
+
+def test_model_theme_choice_cannot_override_protected_subject_rule(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "protected" / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "data-intelligence",
+        "--theme-model-reason",
+        "复盘包含经营数据。",
+        "--title",
+        "智能制造工厂运营复盘",
+        "--fact",
+        "生产线 OEE、良率、精益生产与质量管理。",
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    selection = report["theme_selection"]
+    assert selection["theme_id"] == "factory-floor"
+    assert selection["source"] == "model_choice_rejected"
+    assert selection["model_choice"]["rejection_reason"] == (
+        "protected_deterministic_signal"
+    )
+
+
+def test_model_theme_choice_cannot_impersonate_explicit_user_lock(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "--theme",
+        "studio",
+        "--lock-theme",
+        "--theme-model-choice",
+        "creative-mode",
+        "--theme-model-reason",
+        "模型偏好。",
+        "--out",
+        str(tmp_path / "deck.json"),
+    )
+
+    assert result.returncode != 0
+    assert "--theme-model-choice requires --theme auto" in result.stderr
 
 
 def test_comic_brief_auto_selects_comic_panel_theme(tmp_path: Path) -> None:
@@ -10180,7 +10686,15 @@ def test_example_validates_and_renders_deterministically(tmp_path: Path) -> None
     assert "outline: 1px solid #A8A8A2" in html
 
 
-def test_toolbar_groups_fit_embedded_editor_viewport(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("viewport_width", "expect_thumbnails"),
+    [(520, False), (1100, True)],
+)
+def test_toolbar_groups_fit_embedded_editor_viewport(
+    tmp_path: Path,
+    viewport_width: int,
+    expect_thumbnails: bool,
+) -> None:
     html_path = tmp_path / "toolbar.html"
     render = _run("render_deck_html.js", str(EXAMPLE), "--out", str(html_path))
     assert render.returncode == 0, render.stderr
@@ -10189,7 +10703,7 @@ def test_toolbar_groups_fit_embedded_editor_viewport(tmp_path: Path) -> None:
         "probe_deck_runtime.js",
         str(html_path),
         "--viewport",
-        "1100x800",
+        f"{viewport_width}x800",
     )
     if probe.returncode != 0 and (
         "Cannot find module 'playwright'" in probe.stderr
@@ -10200,10 +10714,10 @@ def test_toolbar_groups_fit_embedded_editor_viewport(tmp_path: Path) -> None:
     assert probe.returncode == 0, probe.stderr or probe.stdout
     runtime = json.loads(probe.stdout)
     assert runtime["ok"] is True
-    assert runtime["editor"]["thumbnailsVisible"] is True
+    assert runtime["editor"]["thumbnailsVisible"] is expect_thumbnails
     assert runtime["editor"]["toolbar"]["hasOverflow"] is False
     assert runtime["editor"]["toolbar"]["left"] >= 0
-    assert runtime["editor"]["toolbar"]["right"] <= 1100
+    assert runtime["editor"]["toolbar"]["right"] <= viewport_width
     assert runtime["editor"]["toolbarMenus"] == {
         "design": {"available": True, "open": True, "expanded": True},
         "page": {"available": True, "open": True, "expanded": True},
@@ -10897,6 +11411,46 @@ def test_priority_and_high_frequency_themes_own_dedicated_css() -> None:
     assert 'content: "SITE / ASSET / VALUE"' in css
     assert 'content: "SKU / CONVERSION / RETENTION"' in css
     assert 'content: "ORIGIN / TRANSIT / DELIVERY"' in css
+
+
+def test_near_duplicate_themes_own_distinct_composition_overrides() -> None:
+    css = (SKILL_DIR / "runtime" / "deck.css").read_text(encoding="utf-8")
+
+    assert 'body[data-deck-theme-id="coral"] .layout-cards' in css
+    assert (
+        'body[data-deck-theme-id="coral"][data-deck-composition] '
+        ".cards-count-3 .cards-grid"
+    ) in css
+    assert (
+        'body[data-deck-theme-id="block-frame-mono-blue"]'
+        '[data-deck-composition] .layout-cards.cards-count-3 .cards-grid'
+    ) in css
+    assert (
+        'body[data-deck-theme-id="creative-mode"][data-deck-composition] '
+        ".cards-count-3 .cards-grid"
+    ) in css
+    assert 'body[data-deck-theme-id="creative-mode"] .layout-cover-editorial' in css
+    assert 'body[data-deck-theme-id="coral"] [data-pptx-diagram]' not in css
+    assert (
+        'body[data-deck-theme-id="block-frame-mono-blue"] [data-pptx-diagram]'
+        not in css
+    )
+    assert 'body[data-deck-theme-id="creative-mode"] [data-pptx-diagram]' not in css
+    assert (
+        'body[data-deck-theme-id="consulting-navy"] '
+        ".layout-cover-editorial .editorial-cover-copy::after"
+    ) in css
+    assert (
+        'body[data-deck-theme-id="consulting-navy"][data-deck-composition] '
+        ".layout-cards.cards-count-3 .cards-grid"
+    ) in css
+    assert 'body[data-deck-theme-id="monochrome"] .composition-ledger-rail' in css
+    assert (
+        'body[data-deck-theme-id="monochrome"][data-deck-composition] '
+        ".layout-cards.cards-count-3 .cards-grid"
+    ) in css
+    assert 'body[data-deck-theme-id="consulting-navy"] [data-pptx-diagram]' not in css
+    assert 'body[data-deck-theme-id="monochrome"] [data-pptx-diagram]' not in css
 
 
 @pytest.mark.parametrize(

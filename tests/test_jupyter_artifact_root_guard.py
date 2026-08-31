@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from box_agent.tools.jupyter_tool import JupyterSandboxTool
+from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment
 
 
 @pytest.mark.asyncio
@@ -14,6 +14,17 @@ async def test_execute_code_blocks_session_root_writes_and_allows_output_writes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    async def skip_unrelated_package_verification(
+        _self: SandboxEnvironment,
+        _on_progress=None,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        SandboxEnvironment,
+        "_verify_packages",
+        skip_unrelated_package_verification,
+    )
     session_root = tmp_path / "session"
     session_root.mkdir()
     (session_root / "input.txt").write_text("source", encoding="utf-8")

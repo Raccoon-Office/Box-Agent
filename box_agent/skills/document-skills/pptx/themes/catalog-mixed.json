@@ -17,8 +17,8 @@
       },
       "palette": {
         "background": "#1A1A1A",
-        "surface": "#F5F0E8",
-        "surface_strong": "#E8E0D4",
+        "surface": "#26201F",
+        "surface_strong": "#352826",
         "primary": "#E85D5D",
         "primary_soft": "#462727",
         "text": "#F5F0E8",
@@ -31,7 +31,7 @@
         "alt_muted": "#6B6B6B",
         "alt_border": "#BEB4A8",
         "alt_primary": "#D44A4A",
-        "chart": ["#E85D5D", "#F5F0E8", "#A56E68", "#D44A4A"]
+        "chart": ["#E85D5D", "#F5F0E8", "#A56E68", "#4F7C78"]
       },
       "typography": {
         "display": "Bebas Neue, Arial Narrow, Noto Sans SC, PingFang SC, sans-serif",

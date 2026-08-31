@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_OPENCLAW_IMPORT_MAX_OUTPUT_TOKENS = 4_096
+
+
 # ── Token / Jaccard helpers (shared with MemoryMaintainer) ──────
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
@@ -1222,6 +1225,7 @@ class MemoryManager:
                 strategy="utility",
                 task_tags=("summary", "analysis"),
                 required_ability_level=1,
+                max_output_tokens_cap=_OPENCLAW_IMPORT_MAX_OUTPUT_TOKENS,
             )
             response = await memory_llm.generate(
                 messages=[

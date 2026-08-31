@@ -2,22 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
 import pytest
 
 from box_agent.auth import (
+    HostedAuthRefreshError,
     bearer_auth_headers,
     read_auth_token_file,
+    refresh_hosted_auth_token_if_needed,
     resolve_auth_token,
     should_attach_auth_header,
 )
 from box_agent.config import Config, LLMConfig, derive_context_token_limit
 from box_agent.llm import AnthropicClient, OpenAIClient
 from box_agent.tools import mcp_loader
+
+
+def _jwt_with_exp(exp: int) -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
+    payload = (
+        base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode())
+        .decode()
+        .rstrip("=")
+    )
+    return f"{header}.{payload}.signature"
 
 
 def test_resolve_auth_token_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,6 +88,181 @@ def test_read_auth_token_file_prefers_token_over_access_token(tmp_path: Path) ->
     )
 
     assert read_auth_token_file(auth_file) == "override-token"
+
+
+@pytest.mark.asyncio
+async def test_refresh_hosted_auth_token_skips_fresh_token(tmp_path: Path) -> None:
+    now = int(time.time())
+    access_token = _jwt_with_exp(now + 3600)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps({"access_token": access_token, "refresh_token": "refresh-one"}),
+        encoding="utf-8",
+    )
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        resolved = await refresh_hosted_auth_token_if_needed(
+            "https://xiaohuanxiong.com/api/web/llm/v2",
+            auth_file,
+            now=now,
+            http_client=client,
+        )
+
+    assert resolved == access_token
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_hosted_auth_token_rotates_and_atomically_persists(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    old_access_token = _jwt_with_exp(now + 120)
+    next_access_token = _jwt_with_exp(now + 3600)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": old_access_token,
+                "refresh_token": "refresh-one",
+                "office_identity": "employee",
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "access_token": next_access_token,
+                    "refresh_token": "refresh-two",
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        resolved = await refresh_hosted_auth_token_if_needed(
+            "https://xiaohuanxiong.com/api/web/llm/v2",
+            auth_file,
+            now=now,
+            http_client=client,
+        )
+
+    assert resolved == next_access_token
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://xiaohuanxiong.com/api/web/auth/v1/refresh"
+    assert json.loads(requests[0].content) == {"refresh_token": "refresh-one"}
+    assert json.loads(auth_file.read_text(encoding="utf-8")) == {
+        "access_token": next_access_token,
+        "refresh_token": "refresh-two",
+        "office_identity": "employee",
+    }
+    assert auth_file.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_refresh_hosted_auth_token_deduplicates_concurrent_requests(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    next_access_token = _jwt_with_exp(now + 3600)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": _jwt_with_exp(now - 1),
+                "refresh_token": "refresh-one",
+            }
+        ),
+        encoding="utf-8",
+    )
+    request_count = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={"data": {"access_token": next_access_token}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = await asyncio.gather(
+            refresh_hosted_auth_token_if_needed(
+                "https://code-test.xiaohuanxiong.com/api/web/llm/v2",
+                auth_file,
+                now=now,
+                http_client=client,
+            ),
+            refresh_hosted_auth_token_if_needed(
+                "https://code-test.xiaohuanxiong.com/api/web/llm/v2",
+                auth_file,
+                now=now,
+                http_client=client,
+            ),
+        )
+
+    assert results == [next_access_token, next_access_token]
+    assert request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_hosted_auth_token_skips_non_xiaohuanxiong_provider(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    access_token = _jwt_with_exp(now - 1)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps({"access_token": access_token, "refresh_token": "refresh-one"}),
+        encoding="utf-8",
+    )
+
+    resolved = await refresh_hosted_auth_token_if_needed(
+        "https://llm.example.com/v1",
+        auth_file,
+        now=now,
+    )
+
+    assert resolved == access_token
+
+
+@pytest.mark.asyncio
+async def test_refresh_hosted_auth_token_reports_expired_refresh_login(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    old_access_token = _jwt_with_exp(now - 1)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {"access_token": old_access_token, "refresh_token": "refresh-one"}
+        ),
+        encoding="utf-8",
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(HostedAuthRefreshError, match="登录态已过期"):
+            await refresh_hosted_auth_token_if_needed(
+                "https://xiaohuanxiong.com/api/web/llm/v2",
+                auth_file,
+                now=now,
+                http_client=client,
+            )
+
+    assert read_auth_token_file(auth_file) == old_access_token
 
 
 def test_bearer_auth_headers_preserves_existing_authorization() -> None:

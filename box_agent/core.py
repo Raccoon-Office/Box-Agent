@@ -1083,7 +1083,7 @@ def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] 
 async def _auto_match_memory_for_latest_prompt(
     messages: list[Message],
     memory_manager: Any,
-) -> ToolCallResult | None:
+) -> tuple[ToolCallResult | None, Message | None]:
     """Conservatively match v2 experience memory against the latest user prompt.
 
     Matches are injected as weak, one-turn context: the model is told these
@@ -1093,28 +1093,35 @@ async def _auto_match_memory_for_latest_prompt(
     """
     latest_user = next((msg for msg in reversed(messages) if msg.role == "user"), None)
     if latest_user is None:
-        return None
+        return None, None
 
-    user_text = latest_user.content if isinstance(latest_user.content, str) else str(latest_user.content)
+    user_text = (
+        latest_user.content
+        if isinstance(latest_user.content, str)
+        else str(latest_user.content)
+    )
     try:
         matches = await asyncio.to_thread(
             memory_manager.auto_match_context,
             user_text,
         )
     except Exception:
-        return None
+        return None, None
 
     if not matches:
-        return None
+        return None, None
 
     memory_lines = "\n".join(item["text"] for item in matches)
-    latest_user.content = (
-        f"{user_text.rstrip()}\n\n"
-        "## Possibly relevant memory\n"
-        "The following memories were automatically matched from prior context. "
-        "Use them only if they are clearly relevant to the user's current request. "
-        "If the user is starting a new task or the memories do not fit, ignore them and do not assume continuity.\n\n"
-        f"{memory_lines}"
+    memory_context = Message(
+        role="user",
+        content=format_runtime_context_update(
+            "## Possibly relevant memory\n"
+            "The following memories were automatically matched from prior context. "
+            "Use them only if they are clearly relevant to the user's current request. "
+            "If the user is starting a new task or the memories do not fit, ignore "
+            "them and do not assume continuity.\n\n"
+            f"{memory_lines}"
+        ),
     )
 
     raw_output = {
@@ -1123,12 +1130,15 @@ async def _auto_match_memory_for_latest_prompt(
         "query": user_text,
         "matched_memories": matches,
     }
-    return ToolCallResult(
-        tool_call_id="memory-auto-match",
-        tool_name="memory_search",
-        success=True,
-        content=f"Auto-matched {len(matches)} possible context memor{'y' if len(matches) == 1 else 'ies'}.",
-        raw_output=raw_output,
+    return (
+        ToolCallResult(
+            tool_call_id="memory-auto-match",
+            tool_name="memory_search",
+            success=True,
+            content=f"Auto-matched {len(matches)} possible context memor{'y' if len(matches) == 1 else 'ies'}.",
+            raw_output=raw_output,
+        ),
+        memory_context,
     )
 
 
@@ -2005,15 +2015,18 @@ async def _maybe_summarize(
                 f"{workflow_checkpoint}"
             ),
         )
-        checkpoint_messages = [
+        checkpoint_surface_messages = [
             messages[0],
             *retained_messages,
-            checkpoint_message,
         ]
         if runtime_state is not None:
-            checkpoint_messages.append(runtime_state)
+            checkpoint_surface_messages.append(runtime_state)
+        checkpoint_request_messages = [
+            *checkpoint_surface_messages,
+            checkpoint_message,
+        ]
         checkpoint_estimate = _fallback_context_estimate(
-            checkpoint_messages,
+            checkpoint_request_messages,
             tools,
         )
         if checkpoint_estimate <= token_limit:
@@ -2027,7 +2040,7 @@ async def _maybe_summarize(
                 len(retained_messages),
             )
             return CompactionOutcome(
-                checkpoint_messages,
+                checkpoint_surface_messages,
                 estimated,
                 checkpoint_estimate,
                 mode="checkpoint",
@@ -3065,8 +3078,9 @@ async def run_agent_loop(
     if hook_mgr.hooks:
         await hook_mgr.fire_agent_start(messages=messages, tools=tools, max_steps=max_steps)
 
+    auto_memory_context_message: Message | None = None
     if memory_manager:
-        injected = await _auto_match_memory_for_latest_prompt(
+        injected, auto_memory_context_message = await _auto_match_memory_for_latest_prompt(
             messages,
             memory_manager,
         )
@@ -3403,7 +3417,7 @@ async def run_agent_loop(
             None,
         )
         if workflow_checkpoint_message is not None or checkpoint_marker:
-            messages[:] = [
+            retained_messages = [
                 message
                 for message in messages
                 if message is not workflow_checkpoint_message
@@ -3421,6 +3435,24 @@ async def run_agent_loop(
                     )
                 )
             ]
+            checkpoint_message_removed = len(retained_messages) != len(messages)
+            messages[:] = retained_messages
+            if (
+                checkpoint_message_removed
+                and session_log is not None
+                and session_turn is not None
+                and messages[1:]
+            ):
+                # Older Session Logs may already contain a rotating workflow
+                # checkpoint as a user message. Migrate that transient runtime
+                # context out of the durable conversation Surface before the
+                # next append-only prefix check.
+                session_log.replace_surface(
+                    messages[1:],
+                    turn=session_turn,
+                    step=step + 1,
+                )
+                session_log.flush()
             workflow_checkpoint_message = None
 
         step_start = perf_counter()
@@ -3950,24 +3982,10 @@ async def run_agent_loop(
             and (max_tool_calls is None or tool_call_total < max_tool_calls)
         ):
             if checkpoint_text is not None:
-                if result.mode == "checkpoint":
-                    workflow_checkpoint_message = next(
-                        (
-                            message
-                            for message in messages
-                            if isinstance(message.content, str)
-                            and message.content.startswith(
-                                _WORKFLOW_CHECKPOINT_MARKER
-                            )
-                        ),
-                        None,
-                    )
-                else:
-                    workflow_checkpoint_message = Message(
-                        role="user",
-                        content=format_runtime_context_update(checkpoint_text),
-                    )
-                    messages.append(workflow_checkpoint_message)
+                workflow_checkpoint_message = Message(
+                    role="user",
+                    content=format_runtime_context_update(checkpoint_text),
+                )
                 if checkpoint_changed:
                     yield InjectedMessageEvent(
                         content=checkpoint_text,
@@ -4040,6 +4058,25 @@ async def run_agent_loop(
                 )
                 workflow_action = None
 
+        request_context_messages = [
+            message
+            for message in (
+                auto_memory_context_message,
+                workflow_checkpoint_message,
+            )
+            if message is not None
+        ]
+        workflow_request_messages = (
+            [*messages, *request_context_messages]
+            if request_context_messages
+            else messages
+        )
+        provider_request_messages = (
+            [*workflow_request_messages, transient_message]
+            if transient_message is not None
+            else workflow_request_messages
+        )
+
         if session_log is not None and session_turn is not None:
             request_provider = getattr(llm, "provider", None)
             if not isinstance(request_provider, str):
@@ -4079,6 +4116,38 @@ async def run_agent_loop(
                     "provider": request_provider,
                     "model": request_model,
                     "tokenLimit": token_limit,
+                    **(
+                        {
+                            "workflowCheckpoint": {
+                                "workflowKind": getattr(workflow_policy, "kind", None),
+                                "stage": getattr(workflow_policy, "stage", None),
+                                "injectionId": getattr(
+                                    workflow_policy,
+                                    "checkpoint_injection_id",
+                                    None,
+                                ),
+                                "sha256": hashlib.sha256(
+                                    checkpoint_text.encode("utf-8")
+                                ).hexdigest(),
+                                "chars": len(checkpoint_text),
+                            }
+                        }
+                        if checkpoint_text is not None
+                        and workflow_checkpoint_message is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "autoMemoryContext": {
+                                "sha256": hashlib.sha256(
+                                    str(auto_memory_context_message.content).encode("utf-8")
+                                ).hexdigest(),
+                                "chars": len(str(auto_memory_context_message.content)),
+                            }
+                        }
+                        if auto_memory_context_message is not None
+                        else {}
+                    ),
                 },
             )
             session_log.flush()
@@ -4107,7 +4176,7 @@ async def run_agent_loop(
             )
 
         cache_fingerprint = build_cache_fingerprint(
-            messages=messages,
+            messages=workflow_request_messages,
             tools=tool_list,
             context=cache_fingerprint_context,
         )
@@ -4118,7 +4187,7 @@ async def run_agent_loop(
                 _log.debug("cache fingerprint sink failed", exc_info=True)
         if logger and workflow_action is None:
             logger.log_request(
-                messages=messages,
+                messages=workflow_request_messages,
                 tools=tool_list,
                 cache_fingerprint=cache_fingerprint,
             )
@@ -4142,11 +4211,7 @@ async def run_agent_loop(
             thinking_chunk_count = 0
 
             stream_kwargs = {
-                "messages": (
-                    [*messages, transient_message]
-                    if transient_message is not None
-                    else messages
-                ),
+                "messages": provider_request_messages,
                 "tools": tool_list,
                 "thinking_enabled": thinking_enabled,
                 "session_id": session_id,

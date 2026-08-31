@@ -138,12 +138,12 @@ def test_automatic_child_routing_selects_from_host_allowlist():
             {
                 "model": "model-general",
                 "tags": ["general", "code"],
-                "abilityLevel": 2,
+                "abilityLevel": 3,
             },
             {
                 "model": "model-html",
                 "tags": ["html", "frontend"],
-                "abilityLevel": 2,
+                "abilityLevel": 3,
                 "maxTokens": 50000,
             },
         )
@@ -183,6 +183,55 @@ def test_manual_child_routing_inherits_parent_model():
 
     assert child_llm is llm
     assert diagnostic == {"mode": "inherit", "reason": "no_auto_model_pool"}
+
+
+def test_each_automatic_child_creation_selects_its_own_model():
+    class RoutingLLM:
+        auto_model_candidates = (
+            {
+                "model": "model-light",
+                "tags": ["general", "chat", "rewrite", "summary", "fast"],
+                "abilityLevel": 1,
+            },
+            {
+                "model": "model-standard",
+                "tags": ["office"],
+                "abilityLevel": 2,
+            },
+            {
+                "model": "model-advanced",
+                "tags": ["analysis", "code", "debug", "reasoning", "vision"],
+                "abilityLevel": 3,
+            },
+        )
+
+        def __init__(self):
+            self.bound = []
+
+        def for_model(self, model, *, max_output_tokens=None):
+            self.bound.append(model)
+            return f"bound:{model}"
+
+    llm = RoutingLLM()
+    tool = SubAgentTool(llm=llm, parent_tools={})
+
+    summary_llm, _ = tool._resolve_task_llm(
+        task="总结这段文字",
+        strategy="general_loop",
+    )
+    code_llm, _ = tool._resolve_task_llm(
+        task="开发并调试这段代码",
+        strategy="general_loop",
+    )
+    rewrite_llm, _ = tool._resolve_task_llm(
+        task="润色这句话",
+        strategy="general_loop",
+    )
+
+    assert summary_llm == "bound:model-light"
+    assert code_llm == "bound:model-advanced"
+    assert rewrite_llm == "bound:model-light"
+    assert llm.bound == ["model-light", "model-advanced", "model-light"]
 
 
 async def test_only_explicit_required_tools_influence_model_routing(monkeypatch):

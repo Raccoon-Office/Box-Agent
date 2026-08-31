@@ -22,6 +22,13 @@
     "muted": "#53636D",
     "border": "#81939D",
     "inverse": "#FFFFFF",
+    "alt_background": "#173F5F",
+    "alt_surface": "#214E70",
+    "alt_text": "#F7FAFC",
+    "alt_muted": "#CFDAE0",
+    "alt_border": "#6F8798",
+    "alt_primary": "#F2C94C",
+    "alt_primary_text": "#F2C94C",
     "chart": ["#173F5F", "#F2C94C", "#27896F", "#D55E3B"]
   },
   "typography": {

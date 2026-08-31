@@ -47,6 +47,7 @@ from box_agent.workflow_checkpoint_store import load_workflow_checkpoint
 from box_agent.workflows import EXTERNAL_SKILL_WORKFLOW_KIND, ExternalSkillRunPolicy
 from box_agent.workflows.controlled_presentation import ControlledPresentationPolicy
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
+from box_agent.session_log import SessionLog
 from box_agent.tools.base import EventEmittingTool, Tool, ToolResult
 from box_agent.tools.file_tools import AppendTool, EditTool, ReadTool, WriteTool
 from box_agent.tools.request_user_input_tool import RequestUserInputTool
@@ -122,7 +123,7 @@ class MockLLM:
 
 class _RecoverablePresentationPolicy:
     kind = "controlled_presentation"
-    checkpoint_injection_id = "test-checkpoint"
+    checkpoint_injection_id = "CONTROLLED_PRESENTATION_STAGE="
     evidence_read_batch_size = 1
     stage = "outline"
 
@@ -131,6 +132,43 @@ class _RecoverablePresentationPolicy:
 
     def update_checkpoint(self, text: str) -> WorkflowCheckpointUpdate:
         return WorkflowCheckpointUpdate(text=text, changed=True)
+
+    def next_deterministic_action(self):
+        return None
+
+    def plan_scope_error(self, tool_name, arguments):
+        return None
+
+    def tool_call_error(
+        self,
+        tool_name,
+        arguments,
+        *,
+        verified_evidence_urls,
+        parallel=False,
+    ):
+        return None
+
+    def record_tool_result(self, tool_name, arguments, result, *, executed=True):
+        return None
+
+    def exempts_tool_budget(self, tool_name):
+        return False
+
+    def uses_evidence_read_budget(self, tool_name):
+        return False
+
+    def is_direct_evidence_read_tool(self, tool_name):
+        return False
+
+    def direct_evidence_url(self, tool_name, arguments, result):
+        return None
+
+    def allows_completion_continuation(self):
+        return True
+
+    def suppresses_generic_final_summary(self):
+        return False
 
 class CapturingStreamLLM(MockLLM):
     """Mock LLM that keeps a snapshot of each message list it receives."""
@@ -3171,9 +3209,18 @@ async def test_large_generic_tool_arguments_remain_in_model_history():
 
 
 @pytest.mark.asyncio
-async def test_auto_memory_match_injects_weak_context_before_llm_call():
-    llm = MockLLM([LLMResponse(content="done", finish_reason="stop")])
+async def test_auto_memory_match_injects_weak_request_context_without_mutating_session_surface(
+    tmp_path,
+):
+    llm = CapturingStreamLLM([LLMResponse(content="done", finish_reason="stop")])
     messages = _msgs()
+    session_log = SessionLog.create(
+        tmp_path / "sessions",
+        session_id="auto-memory-request-context",
+        cwd=tmp_path,
+    )
+    session_log.append("turn/start", {"turn": 1})
+    session_log.append_unlogged_messages(messages[1:], turn=1, step=None)
     memory = MemoryManagerStub([
         {
             "id": "context:7",
@@ -3184,7 +3231,15 @@ async def test_auto_memory_match_injects_weak_context_before_llm_call():
     ])
 
     events = await collect(
-        run_agent_loop(llm=llm, messages=messages, tools={}, max_steps=5, memory_manager=memory)
+        run_agent_loop(
+            llm=llm,
+            messages=messages,
+            tools={},
+            max_steps=5,
+            memory_manager=memory,
+            session_log=session_log,
+            session_turn=1,
+        )
     )
 
     results = [e for e in events if isinstance(e, ToolCallResult)]
@@ -3204,9 +3259,25 @@ async def test_auto_memory_match_injects_weak_context_before_llm_call():
         ],
     }
     user_message = next(msg for msg in messages if msg.role == "user")
-    assert "Possibly relevant memory" in user_message.content
-    assert "Use them only if they are clearly relevant" in user_message.content
-    assert "ignore them and do not assume continuity" in user_message.content
+    assert user_message.content == "hi"
+    request_memory_context = next(
+        message
+        for message in llm.message_calls[0]
+        if "Possibly relevant memory" in str(message.content)
+    )
+    assert "Use them only if they are clearly relevant" in request_memory_context.content
+    assert "ignore them and do not assume continuity" in request_memory_context.content
+    assert not any(
+        "Possibly relevant memory" in str(message.content)
+        for message in session_log.replay().messages
+    )
+    request_context = next(
+        event["data"]
+        for event in session_log.events
+        if event["type"] == "request/context"
+    )
+    assert len(request_context["autoMemoryContext"]["sha256"]) == 64
+    session_log.close()
 
 
 @pytest.mark.asyncio
@@ -3557,6 +3628,139 @@ async def test_controlled_presentation_does_not_receive_conflicting_final_summar
     injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
     assert any("CONTROLLED_PRESENTATION_STAGE=outline" in e.content for e in injected)
     assert not any("many visible tool calls" in e.content for e in injected)
+
+
+@pytest.mark.asyncio
+async def test_workflow_checkpoint_is_request_context_not_session_surface(tmp_path):
+    session_root = tmp_path / "sessions"
+    session_log = SessionLog.create(
+        session_root,
+        session_id="workflow-request-context",
+        cwd=tmp_path,
+    )
+    messages = _msgs()
+    session_log.append("turn/start", {"turn": 1})
+    session_log.append_unlogged_messages(messages[1:], turn=1, step=None)
+    llm = CapturingStreamLLM(
+        [
+            LLMResponse(
+                content="working",
+                tool_calls=[
+                    ToolCall(
+                        id="echo-checkpoint",
+                        type="function",
+                        function=FunctionCall(
+                            name="echo",
+                            arguments={"text": "checkpoint"},
+                        ),
+                    )
+                ],
+                finish_reason="tool",
+            ),
+            LLMResponse(content="done", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=messages,
+            tools={"echo": EchoTool()},
+            max_steps=3,
+            completion_gate=CompletionGate(
+                workflow_checkpoint_kind="controlled_presentation"
+            ),
+            workspace_dir=str(tmp_path),
+            workflow_policy=_RecoverablePresentationPolicy(),
+            session_log=session_log,
+            session_turn=1,
+        )
+    )
+
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason is (
+        StopReason.END_TURN
+    )
+    assert len(llm.message_calls) == 2
+    assert all(
+        any(
+            "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
+            for message in request
+        )
+        for request in llm.message_calls
+    )
+    assert not any(
+        "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
+        for message in messages
+    )
+    assert not any(
+        "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
+        for message in session_log.replay().messages
+    )
+    checkpoint_contexts = [
+        event["data"]["workflowCheckpoint"]
+        for event in session_log.events
+        if event["type"] == "request/context"
+        and "workflowCheckpoint" in event["data"]
+    ]
+    assert len(checkpoint_contexts) == 2
+    assert all(context["stage"] == "outline" for context in checkpoint_contexts)
+    assert all(len(context["sha256"]) == 64 for context in checkpoint_contexts)
+    session_log.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_session_surface_checkpoint_is_migrated_to_request_context(
+    tmp_path,
+):
+    session_log = SessionLog.create(
+        tmp_path / "sessions",
+        session_id="legacy-workflow-surface",
+        cwd=tmp_path,
+    )
+    legacy_checkpoint = Message(
+        role="user",
+        content=core.format_runtime_context_update(
+            "CONTROLLED_PRESENTATION_STAGE=outline"
+        ),
+    )
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="make a deck"),
+        legacy_checkpoint,
+        Message(role="assistant", content="continuing"),
+    ]
+    session_log.append("turn/start", {"turn": 1})
+    session_log.append_unlogged_messages(messages[1:], turn=1, step=None)
+    llm = CapturingStreamLLM(
+        [LLMResponse(content="done", finish_reason="stop")]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=messages,
+            tools={},
+            max_steps=1,
+            completion_gate=CompletionGate(
+                workflow_checkpoint_kind="controlled_presentation"
+            ),
+            workspace_dir=str(tmp_path),
+            workflow_policy=_RecoverablePresentationPolicy(),
+            session_log=session_log,
+            session_turn=1,
+        )
+    )
+
+    assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason is (
+        StopReason.END_TURN
+    )
+    assert legacy_checkpoint not in messages
+    assert legacy_checkpoint not in session_log.replay().messages
+    assert any(
+        "CONTROLLED_PRESENTATION_STAGE=outline" in str(message.content)
+        for message in llm.message_calls[0]
+    )
+    session_log.close()
 
 
 @pytest.mark.asyncio
@@ -6609,7 +6813,7 @@ async def test_maybe_summarize_prefers_workflow_checkpoint_without_llm_call():
     assert outcome.estimated_after < outcome.estimated_before
     assert latest_user in outcome.messages
     assert llm.calls == []
-    assert any(
+    assert not any(
         "CONTROLLED_PRESENTATION_CHECKPOINT=content_patch" in str(message.content)
         for message in outcome.messages
     )

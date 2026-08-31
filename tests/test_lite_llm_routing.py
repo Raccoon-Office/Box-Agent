@@ -1,5 +1,6 @@
 """Lite LLM routing: fallback when unconfigured, separate client when present."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,7 @@ from box_agent.config import (
     ToolsConfig,
 )
 from box_agent.llm import LLMClient
-from box_agent.llm.model_routing import resolve_model_client
+from box_agent.llm.model_routing import resolve_model_client, select_auto_model
 from box_agent.schema import LLMProvider, LLMResponse, StreamEvent
 
 
@@ -151,6 +152,94 @@ def test_internal_model_resolver_uses_tags_only_with_auto_pool():
     assert large_context_diagnostic["estimated_input_tokens"] == 100_000
 
 
+@pytest.mark.parametrize(
+    ("task", "original_tag", "backend_tag", "expected_model"),
+    [
+        ("制作一个前端页面", "frontend", "html", "html-model"),
+        ("制作一个 dashboard", "visualization", "analysis", "analysis-model"),
+        ("整理 Excel 表格", "data-analysis", "analysis", "analysis-model"),
+        ("制作一份 PPT", "presentation", "office", "office-model"),
+        ("联网查资料", "research", "analysis", "analysis-model"),
+        ("整理这份 PDF", "document", "office", "office-model"),
+    ],
+)
+def test_task_tags_include_backend_catalog_aliases(
+    task,
+    original_tag,
+    backend_tag,
+    expected_model,
+):
+    selected, diagnostic = select_auto_model(
+        [
+            {"model": "generic-model", "tags": ["general"], "abilityLevel": 2},
+            {"model": "html-model", "tags": ["html"], "abilityLevel": 3},
+            {"model": "analysis-model", "tags": ["analysis"], "abilityLevel": 3},
+            {"model": "office-model", "tags": ["office"], "abilityLevel": 2},
+        ],
+        task=task,
+    )
+
+    assert selected["model"] == expected_model
+    assert original_tag in diagnostic["task_tags"]
+    assert backend_tag in diagnostic["task_tags"]
+
+
+def test_explicit_task_tags_include_backend_catalog_aliases():
+    selected, diagnostic = select_auto_model(
+        [
+            {"model": "generic-model", "tags": ["general"], "abilityLevel": 2},
+            {"model": "office-model", "tags": ["office"], "abilityLevel": 2},
+        ],
+        task="prepare slides",
+        task_tags=("presentation",),
+    )
+
+    assert selected["model"] == "office-model"
+    assert diagnostic["task_tags"] == ["office", "presentation"]
+
+
+@pytest.mark.parametrize(
+    ("task", "expected_ability"),
+    [
+        ("你好，帮我改写这句话", 1),
+        ("制作一份产品介绍 PPT", 2),
+        ("整理这份 PDF 合同", 2),
+        ("帮我生成一张产品海报图片", 2),
+        ("开发一个 React 项目", 3),
+        ("联网调研 AI Agent 市场", 3),
+        ("分析 Excel 数据并制作图表", 3),
+        ("查看截图并排查报错", 3),
+        ("证明这道数学题", 3),
+    ],
+)
+def test_automatic_routing_assigns_three_ability_levels(task, expected_ability):
+    selected, diagnostic = select_auto_model(
+        [
+            {"model": "light-model", "tags": ["general", "chat", "rewrite"], "abilityLevel": 1},
+            {"model": "standard-model", "tags": ["office"], "abilityLevel": 2},
+            {
+                "model": "advanced-model",
+                "tags": ["analysis", "code", "debug", "reasoning", "vision"],
+                "abilityLevel": 3,
+            },
+        ],
+        task=task,
+    )
+
+    assert selected is not None
+    assert diagnostic["required_ability_level"] == expected_ability
+
+
+def test_automatic_routing_rejects_missing_hard_vision_capability():
+    with pytest.raises(ValueError, match="required capability: vision"):
+        select_auto_model(
+            [
+                {"model": "text-model", "tags": ["analysis"], "abilityLevel": 3},
+            ],
+            task="识别这张截图的内容",
+        )
+
+
 def test_llm_client_for_model_preserves_endpoint_auth_and_default(tmp_path):
     auth_file = tmp_path / "auth.json"
     client = LLMClient(
@@ -225,6 +314,87 @@ async def test_conversation_sessions_bind_models_without_mutating_each_other(tmp
     assert second_state.agent.llm.max_output_tokens == 16000
     assert first_state.agent.token_limit == 104400
     assert second_state.agent.token_limit == 100800
+
+
+@pytest.mark.asyncio
+async def test_profile_bound_sessions_keep_distinct_endpoints(tmp_path, monkeypatch):
+    registry = tmp_path / "model-profiles.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": {
+                    "revision-a": {
+                        "profileId": "profile-a",
+                        "profileRevision": "revision-a",
+                        "provider": "openai",
+                        "apiBase": "https://profile-a.example/v1",
+                        "apiKey": "key-a",
+                        "authFile": "",
+                        "defaultModel": "model-a",
+                        "contextWindow": 180000,
+                        "maxTokens": 16000,
+                    },
+                    "revision-b": {
+                        "profileId": "profile-b",
+                        "profileRevision": "revision-b",
+                        "provider": "openai",
+                        "apiBase": "https://profile-b.example/v1",
+                        "apiKey": "key-b",
+                        "authFile": "",
+                        "defaultModel": "model-b",
+                        "contextWindow": 180000,
+                        "maxTokens": 16000,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
+    agent, _main, _lite = _make_agent(tmp_path, lite=True)
+
+    first = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={
+                "llm_binding": {
+                    "source": "profile",
+                    "version": 2,
+                    "profileId": "profile-a",
+                    "profileRevision": "revision-a",
+                    "routingMode": "manual",
+                    "model": "model-a-selected",
+                }
+            },
+        )
+    )
+    second = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={
+                "llm_binding": {
+                    "source": "profile",
+                    "version": 2,
+                    "profileId": "profile-b",
+                    "profileRevision": "revision-b",
+                    "routingMode": "manual",
+                    "model": "model-b-selected",
+                }
+            },
+        )
+    )
+
+    first_llm = agent._sessions[first.sessionId].session_llm
+    second_llm = agent._sessions[second.sessionId].session_llm
+    assert (first_llm.api_base, first_llm.model) == (
+        "https://profile-a.example/v1",
+        "model-a-selected",
+    )
+    assert (second_llm.api_base, second_llm.model) == (
+        "https://profile-b.example/v1",
+        "model-b-selected",
+    )
 
 
 @pytest.mark.asyncio

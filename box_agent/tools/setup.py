@@ -98,7 +98,7 @@ def _image_capable_llm(llm: Any | None) -> Any | None:
             strategy="utility",
             auto_model_candidates=vision_candidates,
             task_tags=("vision", "analysis"),
-            required_ability_level=2,
+            required_ability_level=3,
         )
         return resolved if diagnostic.get("mode") == "auto" else None
 

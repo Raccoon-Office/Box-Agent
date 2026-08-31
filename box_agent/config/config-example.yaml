@@ -28,8 +28,9 @@ provider: "anthropic"
 # comma/whitespace-separated; built-ins are always kept:
 #   export BOX_AGENT_SENSENOVA_MODEL_PREFIXES="my-family-,another-"
 # Hosted officev3 login auth lives outside config.yaml so token refreshes do not
-# mark model/provider config dirty. By default Box-Agent reads auth.json next to
-# this file before every LLM request and URL-based MCP connection.
+# mark model/provider config dirty. Before each LLM request, xiaohuanxiong.com
+# providers refresh a near-expiry JWT with auth.json's refresh_token and
+# atomically persist rotated tokens. URL-based MCP connections read the same file.
 # auth_file: "/path/to/auth.json"
 
 # Model token budget. `context_window` is the total context the model accepts;

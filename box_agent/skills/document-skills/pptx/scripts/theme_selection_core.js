@@ -2,6 +2,11 @@
 
 const { familyForTheme } = require("./composition_core.js");
 
+const THEME_SHORTLIST_LIMIT = 8;
+const THEME_SHORTLIST_PRIMARY_COUNT = 5;
+const HARD_CONFLICT_WEIGHT = -10;
+const PROTECTED_SIGNAL_WEIGHT = 18;
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -266,6 +271,30 @@ const THEME_KEYWORD_RULES = Object.freeze([
     weight: 18,
   }),
   Object.freeze({
+    theme_id: "block-frame-mono-blue",
+    signal: "user intent rule: monochrome electric-blue neo-brutalism",
+    pattern: /(?:(?:新野兽主义|neo[- ]?brutal(?:ism|ist)?)[^。；;\n]{0,56}(?:黑白|单色|电光蓝|monochrome|black\s+and\s+white|electric\s+blue|mono[- ]?blue)|(?:黑白|单色|电光蓝|monochrome|black\s+and\s+white|electric\s+blue|mono[- ]?blue)[^。；;\n]{0,56}(?:新野兽主义|neo[- ]?brutal(?:ism|ist)?))/i,
+    weight: 24,
+  }),
+  Object.freeze({
+    theme_id: "creative-mode",
+    signal: "user intent rule: multicolor creative-agency poster",
+    pattern: /(?:(?:创意机构|创意工作室|广告创意|creative\s+agency|design\s+studio|ad\s+shop)[^。；;\n]{0,56}(?:多彩海报|高饱和色块|彩色拼块|multicolor|poster\s+blocks?|campaign\s+creative)|(?:多彩海报|高饱和色块|彩色拼块|multicolor|poster\s+blocks?|campaign\s+creative)[^。；;\n]{0,56}(?:创意机构|创意工作室|广告创意|creative\s+agency|design\s+studio|ad\s+shop))/i,
+    weight: 22,
+  }),
+  Object.freeze({
+    theme_id: "retro-windows",
+    signal: "user intent rule: classic desktop operating-system interface",
+    pattern: /(?:Windows\s*95|Windows\s*98|Win\s*95|Win\s*98|复古电脑窗口|复古桌面界面|旧式操作系统界面|retro\s+windows|classic\s+desktop\s+(?:UI|interface)|old[- ]school\s+operating[- ]system\s+interface)/i,
+    weight: 26,
+  }),
+  Object.freeze({
+    theme_id: "studio",
+    signal: "user intent rule: warm-black and electric-yellow studio",
+    pattern: /(?:(?:黑底|暖黑|warm[- ]?black|black\s+canvas)[^。；;\n]{0,56}(?:电光黄|高压黄|electric\s+yellow|high[- ]voltage\s+yellow)|(?:电光黄|高压黄|electric\s+yellow|high[- ]voltage\s+yellow)[^。；;\n]{0,56}(?:黑底|暖黑|warm[- ]?black|black\s+canvas))/i,
+    weight: 24,
+  }),
+  Object.freeze({
     theme_id: "peoples-platform",
     signal: "user intent rule: public-interest and community campaign",
     pattern: /(?:公益活动|公益项目|志愿者活动|社区倡议|社会行动|流浪动物|动物领养|环境倡议|public[- ]?interest\s+campaign|nonprofit\s+campaign|community\s+initiative|volunteer\s+campaign|animal\s+adoption|social\s+impact)/i,
@@ -445,6 +474,91 @@ function applyTaxonomyMatches(rules, dimension, text, profile, add) {
     const profileText = dimension === "industry" ? profile.industry : profile.mood;
     if (rule.profile.test(profileText)) add(rule.signal, rule.weight);
   });
+}
+
+function buildThemeShortlist(
+  ranked,
+  themes,
+  matchesByTheme,
+  selectedThemeId,
+  limit = THEME_SHORTLIST_LIMIT
+) {
+  const themeById = new Map(themes.map(theme => [theme.id, theme]));
+  const rankedById = new Map(ranked.map((item, index) => [
+    item.theme_id,
+    { ...item, rank: index + 1 },
+  ]));
+  const selected = [];
+  const selectedIds = new Set();
+  const selectedFamilies = new Set();
+  const add = themeId => {
+    if (!themeId || selectedIds.has(themeId) || selected.length >= limit) return;
+    const rankedItem = rankedById.get(themeId);
+    const theme = themeById.get(themeId);
+    if (!rankedItem || !theme) return;
+    selectedIds.add(themeId);
+    selectedFamilies.add(familyForTheme(theme));
+    selected.push(rankedItem);
+  };
+
+  ranked.slice(0, THEME_SHORTLIST_PRIMARY_COUNT).forEach(item => add(item.theme_id));
+  add(selectedThemeId);
+  ranked.forEach(item => {
+    const theme = themeById.get(item.theme_id);
+    if (theme && !selectedFamilies.has(familyForTheme(theme))) add(item.theme_id);
+  });
+  ranked.forEach(item => add(item.theme_id));
+
+  return selected.map(item => {
+    const theme = themeById.get(item.theme_id);
+    const matchedSignals = matchesByTheme.get(item.theme_id) || [];
+    const hardConflicts = matchedSignals.filter(match => match.weight <= HARD_CONFLICT_WEIGHT);
+    const protectedSignals = matchedSignals.filter(match => match.weight >= PROTECTED_SIGNAL_WEIGHT);
+    return {
+      theme_id: item.theme_id,
+      score: item.score,
+      rank: item.rank,
+      family: familyForTheme(theme),
+      matched_signals: matchedSignals,
+      hard_conflicts: hardConflicts,
+      protected_signals: protectedSignals,
+      eligible_for_model_choice: hardConflicts.length === 0,
+    };
+  });
+}
+
+function evaluateModelThemeChoice(inference, requestedThemeId) {
+  const normalizedId = String(requestedThemeId || "").trim();
+  if (!normalizedId) {
+    return { accepted: false, reason: "missing_theme_id", candidate: null };
+  }
+  const shortlist = Array.isArray(inference && inference.shortlist)
+    ? inference.shortlist
+    : [];
+  const candidate = shortlist.find(item => item.theme_id === normalizedId) || null;
+  if (!candidate) {
+    return { accepted: false, reason: "outside_deterministic_shortlist", candidate: null };
+  }
+  if (candidate.eligible_for_model_choice === false) {
+    return { accepted: false, reason: "candidate_has_hard_conflict", candidate };
+  }
+
+  const deterministicTop = shortlist.find(item => item.rank === 1) || shortlist[0] || null;
+  const protectedTop = deterministicTop
+    && Array.isArray(deterministicTop.protected_signals)
+    && deterministicTop.protected_signals.length > 0;
+  if (
+    protectedTop
+    && deterministicTop.theme_id !== candidate.theme_id
+    && deterministicTop.score - candidate.score > 4
+  ) {
+    return {
+      accepted: false,
+      reason: "protected_deterministic_signal",
+      candidate,
+    };
+  }
+  return { accepted: true, reason: "accepted", candidate };
 }
 
 function inferTheme(themes, content, defaultThemeId = "blue-professional") {
@@ -719,6 +833,12 @@ function inferTheme(themes, content, defaultThemeId = "blue-professional") {
       ? "medium"
       : "low";
   const themeId = confidence === "low" ? defaultThemeId : top.theme_id;
+  const shortlist = buildThemeShortlist(
+    ranked,
+    candidates,
+    matchesByTheme,
+    themeId
+  );
   return {
     theme_id: themeId,
     source: confidence === "low" ? "fallback_default" : "content_inference",
@@ -727,10 +847,12 @@ function inferTheme(themes, content, defaultThemeId = "blue-professional") {
     margin,
     matched_signals: matchesByTheme.get(themeId) || [],
     ranking: ranked.slice(0, 5).map(({ theme_id, score }) => ({ theme_id, score })),
+    shortlist,
   };
 }
 
 module.exports = {
+  evaluateModelThemeChoice,
   inferPreferences,
   inferTheme,
   selectionIntentText,

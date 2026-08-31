@@ -28,7 +28,8 @@ this semantic check is not complete.
 If a spec issue class repeats twice, stop automatic repair and follow the
 structural repair rules in `SKILL.md`. Never start a repair loop for a
 source/truth advisory; keep scaffolded `source_facts`/`research_facts` and
-summarize the advisory under `Source` or `Limitations`.
+summarize only its user-visible impact under the localized usage-note label
+defined in `SKILL.md` §6.
 
 For HTML-first decks exported with `scripts/html_to_editable_pptx.js` and
 `dom-to-pptx`, inspect both the source HTML preview PNGs and the rendered PPTX
@@ -146,12 +147,26 @@ Before final handoff, inspect the output folder.
 
 ## Reporting Format
 
-Use short sections. Put each result on its own line and leave a blank line
-between progress blocks; do not concatenate all QA steps into one paragraph.
+QA reports remain machine-readable files under `qa/`. Retain their summary
+counts and relevant paths under the generation-details heading localized for
+the active response language. Render `qa_ok` and `qa_warnings` with the matching
+QA labels from `SKILL.md` §6; never expose those raw key names.
+Keep technical artifact names such as `deck.patch.json` and directories such as
+`qa/` and `research/` literal. Do not enumerate validator or script names.
 
-1. `Created`: output `.pptx` path.
-2. `Source`: generator script and asset paths.
-3. `QA`: package validation, text extraction, placeholder scan, rendering.
-4. `Fixes`: issues found and corrected.
-5. `Limitations`: blocked renderers, Quick Look-only checks, missing fonts,
-   unsupported objects, or post-generation source/URL/private-fact advisories.
+Translate QA into concise user impact in the active response language:
+
+1. Localized complete status: preview and editing are available and no finding requires
+   user action.
+2. Localized complete status + usage note: preview and editing are available, but a
+   concrete note changes how the result should be published or completed.
+3. Localized editable-draft status: a usable artifact exists, but a named presentation issue
+   may affect display, editing, or export.
+4. Localized incomplete status: no trustworthy primary presentation artifact exists.
+
+Purely structural or diagnostic warnings may contribute to the localized QA
+notice count in generation details, but they do not require a usage-note explanation.
+When a finding matters, state whether it affects preview, editing, download,
+export, or public use and tell the user what action is recommended. Technical
+evidence remains available in the QA files and the host's collapsed process
+details.

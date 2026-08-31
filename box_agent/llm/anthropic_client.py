@@ -127,7 +127,7 @@ class AnthropicClient(LLMClientBase):
         if thinking_enabled:
             params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
 
-        auth_headers = self._auth_headers(
+        auth_headers = await self._auth_headers(
             self._request_headers(session_id, turn_id, title, call_kind)
         )
         if auth_headers:
@@ -485,7 +485,7 @@ class AnthropicClient(LLMClientBase):
         if thinking_enabled:
             params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
 
-        auth_headers = self._auth_headers(
+        auth_headers = await self._auth_headers(
             self._request_headers(session_id, turn_id, title, call_kind)
         )
         if auth_headers:

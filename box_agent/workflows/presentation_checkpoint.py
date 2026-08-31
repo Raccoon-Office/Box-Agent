@@ -64,6 +64,37 @@ _CONTROLLED_PRESENTATION_REPORTS: Final[tuple[str, ...]] = (
 )
 
 
+def _presentation_delivery_contract(
+    qa_ready: int,
+    qa_warnings: int,
+) -> str:
+    """Return language-aware labels for the user-visible delivery summary."""
+    qa_total = len(_CONTROLLED_PRESENTATION_REPORTS)
+    return (
+        "Use the active user-visible response language: an explicit user language "
+        "request wins, otherwise follow the host ui_language instruction when "
+        "present, then the language of the user's task. Never override that "
+        "contract with a locale-specific default. Select one matching label set: "
+        "ui_language=zh => completion `演示文稿已完成`, editable draft "
+        "`已生成可编辑草稿`, incomplete `演示文稿尚未完成`, usage note "
+        "`使用前注意`, heading `## 生成详情`, "
+        f"QA passed `质量检查：{qa_ready}/{qa_total} 项通过`, "
+        f"QA notices `检查提示：{qa_warnings} 项`; "
+        "ui_language=en => completion `Presentation complete`, editable draft "
+        "`Editable draft ready`, incomplete `Presentation not complete`, usage "
+        "note `Before use`, heading `## Generation details`, "
+        f"QA passed `Quality checks: {qa_ready}/{qa_total} passed`, "
+        f"QA notices `Check notices: {qa_warnings}`; "
+        "ui_language=ja => completion `プレゼンテーションが完成しました`, editable "
+        "draft `編集可能な下書きができました`, incomplete "
+        "`プレゼンテーションは未完成です`, usage note `ご利用前の注意`, heading "
+        "`## 生成の詳細`, "
+        f"QA passed `品質チェック：{qa_ready}/{qa_total} 項目合格`, "
+        f"QA notices `確認事項：{qa_warnings} 件`. If the user explicitly requests "
+        "another language, translate the same semantic roles consistently."
+    )
+
+
 def _newest_file(paths: list[Path]) -> Path | None:
     existing = [path for path in paths if path.is_file()]
     if not existing:
@@ -1774,6 +1805,7 @@ def build_checkpoint_text(
         )
         for name in _CONTROLLED_PRESENTATION_REPORTS
     )
+    delivery_contract = _presentation_delivery_contract(qa_ready, qa_warnings)
 
     outline_report_path = report_dir / "outline_check.json"
     outline_repair_input = (
@@ -1985,27 +2017,39 @@ def build_checkpoint_text(
         if not missing_reports:
             stage = "complete"
             next_action = (
-                "All required QA reports are ok. Stop calling tools and return "
-                "the editable HTML deliverable to the user. "
-                f"The reports contain {qa_warnings} warning(s); state that count "
-                "as pass-with-warnings in Limitations and do not call the run "
-                "clean, all-green, or warning-free when the count is non-zero."
+                "All required presentation checks are complete. Stop calling tools "
+                "and return a concise delivery summary that follows the delivery "
+                "language contract below. Start "
+                "with the user-visible completion state, identify only the primary "
+                "editable presentation, explain only findings that change how the "
+                "user should preview, edit, download, or publicly use it, and end "
+                "with concrete next steps in the same language. Then add a compact "
+                "block with the matching localized generation-details heading; the "
+                "host places it before the existing generated-files module. "
+                "Do not print the raw checkpoint "
+                "keys qa_ok or qa_warnings; use the matching localized QA labels "
+                "from the delivery contract. Retain relevant technical artifact "
+                "names and directories such as deck.patch.json, qa/, and research/ "
+                "literally for traceability. Do not expose validator names, commands, "
+                "or internal research delivery-mode ids such as framework or partial. "
+                "Purely structural or diagnostic warnings belong in the localized QA "
+                "notice count but require no usage-note explanation."
                 + (
                     " Research completed in fallback mode without a validated "
-                    "report. State clearly that a conservative HTML version was "
-                    "generated, that unsupported facts were omitted or marked "
-                    "暂无可验证公开数据, and offer two concrete choices: keep the "
-                    "current version, or continue research / provide data to replace "
-                    "the unavailable facts. Do not label this completed fallback "
-                    "delivery as Created without the limitation."
+                    "report. In the localized usage-note section, say that the editable "
+                    "presentation can be previewed and edited, but some content uses "
+                    "conservative wording because its sources are incomplete. For "
+                    "public sharing, recommend providing data or continuing source "
+                    "verification. Do not expose the fallback mode name."
                     if research_fallback
                     else ""
                 )
                 + (
                     " Research quality did not fully pass, but its fresh report "
-                    f"authorized a {research_delivery_mode} delivery. State that "
-                    "status separately from presentation QA and offer to enrich the "
-                    "verified subset after delivery."
+                    "authorized delivery. In the localized usage-note section, explain that "
+                    "preview and editing are available, while public sharing should "
+                    "use only the verified subset or continue source verification. "
+                    "Do not expose the internal research delivery-mode id."
                     if research_ready and research_delivery_mode != "full"
                     else ""
                 )
@@ -2586,6 +2630,11 @@ def build_checkpoint_text(
         f"qa_warnings={qa_warnings}.\n"
         "Hard rule: never move backward, never recreate an existing deck, and "
         "never pass --force to the scaffold command after downstream artifacts exist.\n"
+        "Visibility rule: raw checkpoint key names and internal mode ids above are "
+        "internal-only. In the user response, use the matching localized labels "
+        "from DELIVERY_CONTRACT. Technical filenames and report directories may be "
+        "retained literally under the localized generation-details heading.\n"
+        f"DELIVERY_CONTRACT={delivery_contract}\n"
         + (f"SCAFFOLD_INPUT={scaffold_input}\n" if scaffold_input is not None else "")
         + (f"IMAGE_INPUT={image_input}\n" if image_input is not None else "")
         + (f"PATCH_INPUT={patch_input}\n" if patch_input is not None else "")

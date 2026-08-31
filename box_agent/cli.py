@@ -46,6 +46,7 @@ from box_agent.agent import (
 from box_agent.config import AgentConfig, Config
 from box_agent.completion import build_auto_completion_gate
 from box_agent.events import StopReason
+from box_agent.llm.model_routing import resolve_model_client
 from box_agent.schema import LLMProvider, Message
 from box_agent.tools.base import Tool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
@@ -87,6 +88,9 @@ from box_agent.workflows import (
     build_external_skill_completion_gate,
     resolve_explicit_skill_invocation,
 )
+
+
+_CLI_PROBE_MAX_OUTPUT_TOKENS = 4_096
 
 
 def run_setup_wizard(config_path: Path) -> bool:
@@ -1454,8 +1458,17 @@ def _doctor_config_status() -> tuple[dict[str, Any], Config | None]:
 
 async def _probe_llm_api(client: LLMClient):
     """Run one tool-free connectivity probe classified as an internal helper call."""
-    return await client.generate(
+    probe_llm, _ = resolve_model_client(
+        client,
+        task="验证模型服务连通性",
+        strategy="utility",
+        task_tags=("general", "fast"),
+        required_ability_level=1,
+        max_output_tokens_cap=_CLI_PROBE_MAX_OUTPUT_TOKENS,
+    )
+    return await probe_llm.generate(
         messages=[Message(role="user", content="hi")],
+        thinking_enabled=False,
         call_kind="utility",
     )
 

@@ -35,6 +35,7 @@ from box_agent.workflows.presentation_checkpoint import (
     _deck_spec_failure_is_degradable,
     _image_manifest_failure_is_degradable,
     _outline_repair_input,
+    _presentation_delivery_contract,
     build_checkpoint_text,
     completion_gate_progress_text,
 )
@@ -4604,6 +4605,50 @@ def test_legacy_semantic_and_image_reports_can_resume_through_finalizer(
     assert _deck_spec_failure_is_degradable(spec_report) is False
 
 
+@pytest.mark.parametrize(
+    ("locale", "complete", "details_heading", "qa_passed", "qa_notice"),
+    (
+        (
+            "zh",
+            "演示文稿已完成",
+            "## 生成详情",
+            "质量检查：7/7 项通过",
+            "检查提示：2 项",
+        ),
+        (
+            "en",
+            "Presentation complete",
+            "## Generation details",
+            "Quality checks: 7/7 passed",
+            "Check notices: 2",
+        ),
+        (
+            "ja",
+            "プレゼンテーションが完成しました",
+            "## 生成の詳細",
+            "品質チェック：7/7 項目合格",
+            "確認事項：2 件",
+        ),
+    ),
+)
+def test_presentation_delivery_contract_covers_supported_host_languages(
+    locale,
+    complete,
+    details_heading,
+    qa_passed,
+    qa_notice,
+):
+    contract = _presentation_delivery_contract(7, 2)
+
+    assert f"ui_language={locale}" in contract
+    assert complete in contract
+    assert details_heading in contract
+    assert qa_passed in contract
+    assert qa_notice in contract
+    assert "explicit user language request wins" in contract
+    assert "Never override that contract with a locale-specific default" in contract
+
+
 def test_controlled_presentation_checkpoint_tracks_filesystem_stages(tmp_path):
     gate = CompletionGate(workflow_checkpoint_kind="controlled_presentation")
 
@@ -4818,7 +4863,23 @@ def test_controlled_presentation_checkpoint_tracks_filesystem_stages(tmp_path):
     assert checkpoint is not None
     assert f"{CONTROLLED_PRESENTATION_CHECKPOINT_MARKER}complete" in checkpoint
     assert "qa_warnings=2" in checkpoint
-    assert "pass-with-warnings" in checkpoint
+    assert "active user-visible response language" in checkpoint
+    assert "explicit user language request wins" in checkpoint
+    assert "ui_language=zh" in checkpoint
+    assert "ui_language=en" in checkpoint
+    assert "ui_language=ja" in checkpoint
+    assert "质量检查：7/7 项通过" in checkpoint
+    assert "检查提示：2 项" in checkpoint
+    assert "Quality checks: 7/7 passed" in checkpoint
+    assert "Check notices: 2" in checkpoint
+    assert "品質チェック：7/7 項目合格" in checkpoint
+    assert "確認事項：2 件" in checkpoint
+    assert "matching localized generation-details heading" in checkpoint
+    assert "before the existing generated-files module" in checkpoint
+    assert "deliverable card" not in checkpoint
+    assert "Do not print the raw checkpoint keys qa_ok or qa_warnings" in checkpoint
+    assert "deck.patch.json, qa/, and research/" in checkpoint
+    assert "state that count" not in checkpoint
 
 
 def test_controlled_presentation_checkpoint_ignores_other_task_artifacts(tmp_path):
@@ -4988,7 +5049,12 @@ def test_controlled_checkpoint_completes_with_current_failed_truth_report(tmp_pa
 
     assert f"{CONTROLLED_PRESENTATION_CHECKPOINT_MARKER}complete" in update.text
     assert "qa_warnings=2" in update.text
-    assert "pass-with-warnings" in update.text
+    assert "active user-visible response language" in update.text
+    assert "质量检查：7/7 项通过" in update.text
+    assert "检查提示：2 项" in update.text
+    assert "Quality checks: 7/7 passed" in update.text
+    assert "品質チェック：7/7 項目合格" in update.text
+    assert "state that count" not in update.text
     assert policy.allows_completion_continuation() is False
 
 

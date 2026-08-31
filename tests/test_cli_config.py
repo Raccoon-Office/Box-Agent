@@ -519,7 +519,7 @@ def test_cmd_doctor_json_returns_structured_status(monkeypatch, capsys) -> None:
     assert payload["checks"]["api"]["message"] == "api ok"
 
 
-def test_cli_api_probe_is_classified_as_utility() -> None:
+def test_cli_api_probe_is_capped_and_disables_thinking(monkeypatch) -> None:
     class CapturingClient:
         def __init__(self) -> None:
             self.kwargs = None
@@ -529,10 +529,19 @@ def test_cli_api_probe_is_classified_as_utility() -> None:
             return SimpleNamespace(content="ok")
 
     client = CapturingClient()
+    captured = {}
+
+    def fake_resolve_model_client(resolved_client, **kwargs):
+        captured.update(kwargs)
+        return resolved_client, {"mode": "test"}
+
+    monkeypatch.setattr(cli, "resolve_model_client", fake_resolve_model_client)
     response = asyncio.run(cli._probe_llm_api(client))
 
     assert response.content == "ok"
+    assert captured["max_output_tokens_cap"] == 4_096
     assert client.kwargs["call_kind"] == "utility"
+    assert client.kwargs["thinking_enabled"] is False
     assert client.kwargs["messages"][0].role == "user"
     assert client.kwargs["messages"][0].content == "hi"
 

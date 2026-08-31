@@ -75,6 +75,22 @@ class _OwnedSession:
         return True
 
 
+@pytest.fixture
+def ready_sandbox(monkeypatch):
+    """Keep timeout tests independent of real sandbox bootstrap state."""
+
+    class _ReadySandbox:
+        async def ensure_ready(self, on_progress=None) -> None:
+            return None
+
+    sandbox = _ReadySandbox()
+    monkeypatch.setattr(
+        JupyterSandboxTool,
+        "_get_sandbox_env",
+        lambda _self: sandbox,
+    )
+
+
 def test_low_level_execute_returns_timeout_sentinel_when_kernel_stays_busy(tmp_path):
     """The actual JupyterKernelSession.execute() must surface a hard-timeout
     sentinel (not silently succeed) when the idle status never arrives."""
@@ -135,7 +151,10 @@ def test_low_level_execute_happy_path_still_succeeds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_outer_execute_discards_session_on_timeout_sentinel(tmp_path):
+async def test_outer_execute_discards_session_on_timeout_sentinel(
+    tmp_path,
+    ready_sandbox,
+):
     """When a session's execute() returns the timeout sentinel (real low-level
     behavior), the tool must discard the session and report a timeout."""
     tool = JupyterSandboxTool(workspace_dir=str(tmp_path / "workspace"))
@@ -193,7 +212,7 @@ class _TimingOutSession:
 
 
 @pytest.mark.asyncio
-async def test_execute_timeout_discards_session(tmp_path):
+async def test_execute_timeout_discards_session(tmp_path, ready_sandbox):
     tool = JupyterSandboxTool(workspace_dir=str(tmp_path / "workspace"))
     ws = tmp_path / "workspace"
     ws.mkdir(parents=True, exist_ok=True)
@@ -213,7 +232,11 @@ async def test_execute_timeout_discards_session(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_execute_after_timeout_rebuilds_fresh_session(tmp_path, monkeypatch):
+async def test_execute_after_timeout_rebuilds_fresh_session(
+    tmp_path,
+    monkeypatch,
+    ready_sandbox,
+):
     """After a timeout discards the session, the next call must build a NEW
     session rather than reuse the corrupted one."""
     tool = JupyterSandboxTool(workspace_dir=str(tmp_path / "workspace"))
