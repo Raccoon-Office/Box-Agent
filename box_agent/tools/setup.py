@@ -113,8 +113,11 @@ def build_sandbox_info_prompt(use_output_dir: bool = True) -> str:
             "（或 host 指定的当前会话 output 根），"
             "存盘用相对路径（如 `plt.savefig(\"chart.png\")`）；禁写 `/mnt/data/`、"
             "`sandbox:` 前缀；读取用户上传文件时优先原样使用 host 在当前消息中提供的完整路径；"
-            "若仅有文件名，使用运行环境中的 `BOX_AGENT_WORKSPACE_DIR` 作为会话根目录，"
-            "并按当前工具的路径语法拼接文件名。"
+            "若仅有文件名，先用 `../<name>` 回会话根。若遇到 `FileNotFoundError` 或 "
+            "`No such file or directory`，不要继续猜测 `../` 层级；改用 host 提供的完整路径，"
+            "若 host 未提供完整路径，则调用 `search_files`，以 `File Access Context` 中的 "
+            "`Current workspace` 为 `path`、原文件名为 `pattern`、`target=\"files\"` 精确定位，"
+            "找到唯一结果后重试；无结果或有多个同名结果时停止并请用户确认。"
         )
     else:
         location_line = (
@@ -166,8 +169,11 @@ def build_file_delivery_prompt(use_output_dir: bool = True) -> str:
             "不要写到 `~/.box-agent/` 等内部目录。\n"
             "- **相对路径**：bash、文件工具、`generate_image` 和视觉检查的相对路径都已从当前 output 根开始；"
             "使用 `assets/generated/a.png`，不要再添加 `output/` 前缀。读取上传文件时优先原样使用 host 提供的完整路径；"
-            "若仅提供文件名，使用运行环境中的 `BOX_AGENT_WORKSPACE_DIR` 作为会话根目录，"
-            "并按当前工具的路径语法拼接文件名，不要猜测父目录层级。\n"
+            "若仅提供文件名，先尝试 `../<name>`。若工具返回 `FileNotFoundError` 或 "
+            "`No such file or directory`，不要继续猜测 `../` 层级；改用 host 完整路径，"
+            "若 host 未提供完整路径，则调用 `search_files`，以 `File Access Context` 中的 "
+            "`Current workspace` 为 `path`、原文件名为 `pattern`、`target=\"files\"` 精确定位，"
+            "找到唯一结果后重试；无结果或有多个同名结果时停止并请用户确认。\n"
             "- **命名**：新产物使用描述性小写名称和 `-` 分隔；除非用户要求，不加时间戳或 UUID。\n"
             "- **桌面交付**：完成后说明文件名即可。宿主会从结构化 ArtifactEvent 渲染可打开的文件卡。\n"
             "- **多文件交付**：用户需要单一下载包时才用 `zip -r bundle.zip 文件1 文件2` 将多文件打包为 ZIP。"
@@ -601,7 +607,6 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Relative tool paths use the project root or the active artifact root.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
     runtime_env = build_skill_execution_env(runtime_context)
-    runtime_env["BOX_AGENT_WORKSPACE_DIR"] = str(workspace_dir.resolve())
     skill_scratch_dir = None
     if artifact_root is not None:
         # Make the canonical delivery root available to subprocess-backed
@@ -720,7 +725,6 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:
         sandbox_runtime_env = runtime_context.env()
-        sandbox_runtime_env["BOX_AGENT_WORKSPACE_DIR"] = str(workspace_dir.resolve())
         if artifact_root is not None and skill_scratch_dir is not None:
             sandbox_runtime_env["BOX_AGENT_OUTPUT_DIR"] = str(artifact_root)
             sandbox_runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
