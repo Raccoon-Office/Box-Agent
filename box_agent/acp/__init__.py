@@ -844,6 +844,80 @@ def _artifact_root_from_meta(meta: Any, workspace: Path) -> Path | None:
     return root.resolve()
 
 
+def _workspace_layout_path(
+    layout: Any,
+    workspace: Path,
+    *keys: str,
+) -> Path | None:
+    if not isinstance(layout, dict):
+        return None
+    raw = None
+    for key in keys:
+        value = layout.get(key)
+        if isinstance(value, str) and value.strip():
+            raw = value.strip()
+            break
+    if raw is None:
+        return None
+    try:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = workspace / path
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _workspace_layout_prompt(
+    *,
+    workspace: Path,
+    artifact_root: Path,
+    layout: Any,
+    artifact_mode: str,
+) -> str:
+    """Describe host, task, and artifact roots without conflating their roles."""
+    selected_root = _workspace_layout_path(
+        layout,
+        workspace,
+        "selected_root_dir",
+        "selectedRootDir",
+    ) or workspace
+    task_root = _workspace_layout_path(
+        layout,
+        workspace,
+        "session_workspace_dir",
+        "sessionWorkspaceDir",
+    ) or workspace
+    resolved_artifact_root = _workspace_layout_path(
+        layout,
+        workspace,
+        "artifact_root_dir",
+        "artifactRootDir",
+    ) or artifact_root
+
+    lines = [
+        "## Workspace Layout",
+        f"- 工作区（selected workspace root）：`{selected_root}`",
+        f"- 当前任务目录（current task root）：`{task_root}`",
+        f"- 交付物目录（artifact root）：`{resolved_artifact_root}`",
+        (
+            "- 目录语义：用户说“工作区”时指 selected workspace root；"
+            "说“当前任务”或“当前目录”时指 current task root；"
+            "只有明确说“输出目录”或“交付物目录”时才指 artifact root。"
+        ),
+        (
+            "- 查看工作区或当前任务内容时，使用上面对应根目录的绝对路径，"
+            "不要根据工具的相对路径根猜测目录身份。"
+        ),
+    ]
+    if artifact_mode != "project":
+        lines.append(
+            "- Output 模式下，`pwd`、bash cwd 和文件工具相对路径默认位于 "
+            "artifact root；这只是工具执行/交付边界，不得称为工作区或当前任务目录。"
+        )
+    return "\n".join(lines)
+
+
 def _goal_payload(agent: Agent) -> dict[str, Any] | None:
     return goal_payload(agent.goal)
 
@@ -1760,6 +1834,12 @@ class BoxACPAgent:
             skill_runtime_context=skill_runtime_context,
             expert_context=expert_context,
             artifact_mode=artifact_mode,
+            artifact_root=output_path,
+            workspace_layout=(
+                meta.get("workspace_layout") or meta.get("workspaceLayout")
+                if isinstance(meta, dict)
+                else None
+            ),
             follow_up_suggestions_enabled=follow_up_suggestions_enabled,
         )
 
@@ -2189,6 +2269,8 @@ class BoxACPAgent:
         skill_runtime_context: SkillRuntimeContext | None = None,
         expert_context: ExpertSessionContext | None = None,
         artifact_mode: str = "output",
+        artifact_root: Path | None = None,
+        workspace_layout: Any = None,
         follow_up_suggestions_enabled: bool = False,
     ) -> str:
         """Build system prompt with conditional mode-specific injection."""
@@ -2218,6 +2300,13 @@ class BoxACPAgent:
             base_prompt = f"{base_prompt.rstrip()}\n\n{project_mode_prompt}"
         if workspace is not None:
             base_prompt = f"{base_prompt.rstrip()}\n\n{self._filesystem_access_prompt(workspace, policy)}"
+            layout_prompt = _workspace_layout_prompt(
+                workspace=workspace,
+                artifact_root=artifact_root or (workspace / "output").resolve(),
+                layout=workspace_layout,
+                artifact_mode=artifact_mode,
+            )
+            base_prompt = f"{base_prompt.rstrip()}\n\n{layout_prompt}"
 
         if session_mode == "code_agent" and workspace is not None:
             base_prompt = f"{base_prompt.rstrip()}\n\n{build_project_startup_context_prompt(workspace)}"

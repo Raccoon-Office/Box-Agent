@@ -3133,6 +3133,47 @@ async def test_acp_uses_host_artifact_root_dir_for_output_mode(tmp_path, monkeyp
     assert sandbox_tool._get_workspace("ignored") == artifact_root.resolve()
 
 
+@pytest.mark.asyncio
+async def test_acp_workspace_layout_prompt_distinguishes_root_roles(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    selected_root = tmp_path / "workbench"
+    task_root = selected_root / "2026-08-31-task"
+    artifact_root = task_root / "output" / "tasks" / "task-1"
+    task_root.mkdir(parents=True)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(task_root)),
+        tools=ToolsConfig(allow_full_access=True),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(task_root),
+            field_meta={
+                "artifact_mode": "output",
+                "workspace_layout": {
+                    "selected_root_dir": str(selected_root),
+                    "session_workspace_dir": str(task_root),
+                    "artifact_root_dir": str(artifact_root),
+                },
+            },
+        )
+    )
+    state = agent._sessions[session.sessionId]
+    prompt = state.agent.system_prompt
+
+    assert f"工作区（selected workspace root）：`{selected_root}`" in prompt
+    assert f"当前任务目录（current task root）：`{task_root}`" in prompt
+    assert f"交付物目录（artifact root）：`{artifact_root}`" in prompt
+    assert "说“当前任务”或“当前目录”时指 current task root" in prompt
+    assert "不得称为工作区或当前任务目录" in prompt
+    assert Path(state.agent.tools["bash"].workspace_dir) == artifact_root.resolve()
+
+
 def test_acp_artifact_raw_output_gets_session_metadata():
     output = _tool_result_raw_output(
         {"type": "artifact", "filename": "deck.pptx", "abs_path": "/tmp/deck.pptx"},
