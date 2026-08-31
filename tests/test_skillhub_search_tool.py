@@ -6,6 +6,7 @@ import pytest
 
 from box_agent.schema import FunctionCall, Message, ToolCall
 from box_agent.tools.skillhub_search_tool import (
+    HARD_CAPABILITY_GAP_PROMPT,
     SkillHubSearchTool,
     capability_snapshot,
 )
@@ -145,9 +146,14 @@ async def test_skillhub_search_preserves_empty_and_unavailable_states(
     assert expected_text in result.content
     assert result.raw_output["items"] == []
 
+    if expected_status == "empty":
+        assert "scoped only to the Skill marketplace" in result.model_context
+        assert "Do not end the turn" in result.model_context
+        assert "broader discovery" in result.model_context
+
 
 @pytest.mark.asyncio
-async def test_explicit_install_request_can_search_without_deferred_tool_discovery() -> None:
+async def test_explicit_marketplace_request_skips_deferred_tool_discovery() -> None:
     calls = []
 
     async def searcher(payload):
@@ -163,12 +169,21 @@ async def test_explicit_install_request_can_search_without_deferred_tool_discove
     )
 
     result = await tool.execute(
-        **_arguments(request_kind="explicit_install_request")
+        **_arguments(request_kind="explicit_marketplace_request")
     )
 
     assert result.success
     assert len(calls) == 2
-    assert result.raw_output["requestKind"] == "explicit_install_request"
+    assert result.raw_output["requestKind"] == "explicit_marketplace_request"
+
+
+def test_marketplace_prompt_uses_product_name_and_scopes_direct_sources() -> None:
+    normalized_prompt = " ".join(HARD_CAPABILITY_GAP_PROMPT.split())
+
+    assert "Skill marketplace capability-gap fallback" in normalized_prompt
+    assert "repository URL" in normalized_prompt
+    assert "not an explicit marketplace request" in normalized_prompt
+    assert "SkillHub" not in normalized_prompt
 
 
 @pytest.mark.asyncio
@@ -227,7 +242,7 @@ async def test_install_capable_search_retains_exact_candidate_for_follow_up() ->
     tool = SkillHubSearchTool(searcher, installation_available=True)
 
     result = await tool.execute(
-        **_arguments(request_kind="explicit_install_request")
+        **_arguments(request_kind="explicit_marketplace_request")
     )
 
     assert result.success

@@ -363,7 +363,7 @@ default and must not be added to the built-in allowlist:
 
    Verify the script logs `info: excluding '<skill-slug>/SKILL.md'` and that
    `box_agent/skills/_manifest.json` does not list the skill.
-4. Publish and install the marketplace package through SkillHub. Installed
+4. Publish and install the package through the Skill marketplace. Installed
    skills live under `~/.box-agent/skills/` and are discovered as user skills.
 
 During migration, directories required by existing recommended/expert install
@@ -371,7 +371,7 @@ flows remain physically bundled in the runtime. Manifest exclusion controls
 built-in discovery only; it does not mean the marketplace package has already
 been removed from the ACP artifact.
 
-#### Conversational SkillHub installation
+#### Conversational Skill marketplace installation
 
 An ACP host may enable read-only recommendation and confirmed conversational
 installation independently:
@@ -386,6 +386,10 @@ installation independently:
 ```
 
 `search_skillhub` retains only candidates returned by the host for that session.
+The `skillhub_*` names are compatibility identifiers for the product's Skill
+marketplace protocol, not the user-facing product name. Direct-source and broad
+discovery routing is defined by the shared system prompt; an empty marketplace
+result is scoped to that source and cannot terminate other requested discovery.
 `install_skillhub_skill` accepts one exact retained `skill_id`, emits a one-shot
 ACP permission request, and calls `session/skillhub_install` only after approval.
 The host owns authenticated download, integrity checks, conflict handling, and

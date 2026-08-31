@@ -334,12 +334,12 @@ uv run python scripts/generate_skills_manifest.py
    ```
 
    确认脚本输出 `info: excluding '<skill-slug>/SKILL.md'`，并确认 `box_agent/skills/_manifest.json` 中没有这个技能。
-4. 通过 SkillHub 发布和安装市场包。安装后的技能位于 `~/.box-agent/skills/`，由用户来源动态加载。
+4. 通过 Skill 市场发布和安装市场包。安装后的技能位于 `~/.box-agent/skills/`，由用户来源动态加载。
 
 市场迁移期间，已有推荐/专家安装链路依赖的技能目录暂时继续随 runtime 打包。
 从 `_manifest.json` 排除只负责隔离内置加载，不代表市场包已经从 ACP 物理移除。
 
-#### 对话式 SkillHub 安装
+#### 对话式 Skill 市场安装
 
 ACP 宿主可以分别声明只读推荐和确认后对话安装能力：
 
@@ -352,7 +352,9 @@ ACP 宿主可以分别声明只读推荐和确认后对话安装能力：
 }
 ```
 
-`search_skillhub` 只在当前会话中保留宿主真实返回的候选项。
+`search_skillhub` 只在当前会话中保留宿主真实返回的候选项。`skillhub_*`
+是 Skill 市场协议的兼容标识，不是面向用户的产品名称。直接来源和广泛发现由
+共享系统提示负责路由；市场空结果只代表该来源未命中，不能终止其他已请求的发现。
 `install_skillhub_skill` 只接受其中一个精确 `skill_id`，先发起一次性 ACP
 权限确认，得到同意后才调用 `session/skillhub_install`。宿主负责带认证下载、
 完整性校验、冲突处理以及安装到 `~/.box-agent/skills/`。反向请求包含

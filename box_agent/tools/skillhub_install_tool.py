@@ -1,4 +1,4 @@
-"""Confirmed, host-backed installation of SkillHub recommendations."""
+"""Confirmed Skill marketplace installation over the internal skillhub protocol."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _text(value: object, *, limit: int) -> str:
 
 
 class SkillHubInstallTool(Tool):
-    """Install only a previously returned SkillHub candidate after confirmation."""
+    """Install only a previously returned marketplace candidate after confirmation."""
 
     parallel_safe = False
     max_result_size_chars = 4_000
@@ -52,9 +52,10 @@ class SkillHubInstallTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Install one exact SkillHub candidate returned by search_skillhub. Use this "
-            "for both capability-gap recommendations and direct user requests to install "
-            "a market Skill. Pass only the candidate's exact skill_id. This tool always "
+            "Install one exact candidate returned by the Skill marketplace search "
+            "(`search_skillhub`). Use this for both capability-gap recommendations and direct "
+            "user requests to install a marketplace Skill. Pass only the candidate's exact "
+            "skill_id. This tool always "
             "requests one-shot user confirmation before installation, delegates download "
             "and verification to the host, refreshes the live Skill catalog, and never "
             "accepts a model-invented name or URL. Do not use get_skill until this tool "
@@ -108,13 +109,14 @@ class SkillHubInstallTool(Tool):
                     candidate_hint = (
                         " Available candidates: "
                         + "; ".join(rendered)
-                        + ". Use an exact skill_id; do not guess or bypass SkillHub with "
+                        + ". Use an exact skill_id; do not guess or bypass the Skill "
+                        "marketplace with "
                         "another installer or online service."
                     )
             return self._error(
                 "SEARCH_REQUIRED",
-                "Search SkillHub first and use the exact ID of a candidate returned in this "
-                f"session.{candidate_hint}",
+                "Search the Skill marketplace first and use the exact ID of a candidate "
+                f"returned in this session.{candidate_hint}",
                 skill_id=normalized_id,
             )
 
@@ -130,7 +132,7 @@ class SkillHubInstallTool(Tool):
         if not normalized_candidate["slug"] or not normalized_candidate["name"]:
             return self._error(
                 "INVALID_CANDIDATE",
-                "The selected SkillHub candidate is incomplete and cannot be installed.",
+                "The selected Skill marketplace candidate is incomplete and cannot be installed.",
                 skill_id=normalized_id,
             )
 
@@ -149,14 +151,14 @@ class SkillHubInstallTool(Tool):
             publisher = normalized_candidate["publisherDisplayName"] or "unknown publisher"
             return ToolResult(
                 success=False,
-                error="USER_CONFIRMATION_REQUIRED: SkillHub installation needs approval.",
+                error="USER_CONFIRMATION_REQUIRED: Skill marketplace installation needs approval.",
                 permission_request={
                     "type": "permission_request",
                     "scope": "skillhub",
                     "requested_scope": f"install:{normalized_id}",
                     "reason": (
-                        f"Install SkillHub Skill '{normalized_candidate['name']}' "
-                        f"from {publisher}"
+                        f"Install '{normalized_candidate['name']}' from the Skill marketplace, "
+                        f"published by {publisher}"
                     ),
                     "temporary_supported": True,
                     "persistent_supported": False,
@@ -201,7 +203,7 @@ class SkillHubInstallTool(Tool):
             )
             return self._error(
                 "INSTALL_FAILED",
-                detail or "The host reported that SkillHub installation failed.",
+                detail or "The host reported that Skill marketplace installation failed.",
                 skill_id=normalized_id,
             )
 
@@ -256,7 +258,8 @@ class SkillHubInstallTool(Tool):
         if visible:
             verb = "was already installed" if status == "already_installed" else "was installed"
             content = (
-                f"SkillHub Skill '{candidate['name']}' {verb} successfully and is available "
+                f"Skill '{candidate['name']}' {verb} successfully from the Skill marketplace "
+                "and is available "
                 f"as Skill '{visible_name}'. Call get_skill with skill_name={visible_name!r}, "
                 "follow its instructions, and continue the user's original task with the minimum "
                 "necessary actions. After creating the requested artifact, use only direct, "
@@ -266,7 +269,8 @@ class SkillHubInstallTool(Tool):
             )
         else:
             content = (
-                f"SkillHub Skill '{candidate['name']}' was installed by the host, but the live "
+                f"Skill '{candidate['name']}' was installed from the Skill marketplace, but "
+                "the live "
                 "Skill catalog could not see it yet. Do not claim the original task is complete; "
                 "ask the user to start a fresh turn or restart the host."
             )

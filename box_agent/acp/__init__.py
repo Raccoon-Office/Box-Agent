@@ -5458,7 +5458,7 @@ class BoxACPAgent:
         session_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Search through a host-owned SkillHub without exposing host credentials."""
+        """Search the host-owned Skill marketplace without exposing credentials."""
 
         send_ext = getattr(self._conn, "ext_method", None) or getattr(
             self._conn, "extMethod", None
@@ -5478,7 +5478,7 @@ class BoxACPAgent:
                 "skillhub/search_error",
                 session_id=session_id,
                 error=type(exc).__name__,
-                message="Host SkillHub search failed",
+                message="Host Skill marketplace search failed",
             )
             return {"status": "unavailable"}
         return response if isinstance(response, dict) else {"status": "unavailable"}
@@ -5510,7 +5510,7 @@ class BoxACPAgent:
                 "skillhub/install_error",
                 session_id=session_id,
                 error=type(exc).__name__,
-                message="Host SkillHub installation failed",
+                message="Host Skill marketplace installation failed",
             )
             return {"status": "unavailable"}
         return response if isinstance(response, dict) else {"status": "unavailable"}

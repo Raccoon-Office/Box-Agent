@@ -55,7 +55,7 @@ async def test_unknown_id_reports_exact_known_candidate_instead_of_inviting_gues
     assert not result.success
     assert f"skill_id='{CANDIDATE['id']}'" in result.error
     assert "slug='edge-tts'" in result.error
-    assert "do not guess or bypass SkillHub" in result.error
+    assert "do not guess or bypass the Skill marketplace" in result.error
 
 
 @pytest.mark.asyncio
@@ -76,7 +76,7 @@ async def test_install_requires_one_shot_confirmation_before_host_call() -> None
         "type": "permission_request",
         "scope": "skillhub",
         "requested_scope": f"install:{CANDIDATE['id']}",
-        "reason": "Install SkillHub Skill '文字转语音' from 林",
+        "reason": "Install '文字转语音' from the Skill marketplace, published by 林",
         "temporary_supported": True,
         "persistent_supported": False,
         "skill_id": CANDIDATE["id"],

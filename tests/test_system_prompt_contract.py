@@ -83,6 +83,15 @@ def test_system_prompt_separates_source_content_from_search_clues():
     assert "不得声称已读取、打开或核对" in prompt
 
 
+def test_system_prompt_routes_direct_sources_before_marketplace_search():
+    prompt = _prompt()
+
+    assert "先读取并核对该直接来源" in prompt
+    assert "不要把直接来源请求改写为市场搜索" in prompt
+    assert "单个目录、服务或 Skill 市场的空结果只代表该来源未命中" in prompt
+    assert "存在其他安全可用来源时不得据此结束任务" in prompt
+
+
 def test_system_prompt_forbids_reusing_model_history_placeholders():
     prompt = _prompt()
 

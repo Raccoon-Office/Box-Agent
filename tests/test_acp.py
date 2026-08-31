@@ -306,7 +306,7 @@ async def test_acp_registers_skillhub_search_only_for_capable_host(tmp_path) -> 
     capable_agent = agent._sessions[capable.sessionId].agent
     assert "search_skillhub" in capable_agent.tools
     assert "install_skillhub_skill" not in capable_agent.tools
-    assert "## SkillHub capability-gap fallback" in capable_agent.system_prompt
+    assert "## Skill marketplace capability-gap fallback" in capable_agent.system_prompt
     assert capable.field_meta["capabilities"]["skillhub_search_versions"] == [1]
     install_capable_agent = agent._sessions[install_capable.sessionId].agent
     assert "search_skillhub" in install_capable_agent.tools
@@ -372,7 +372,7 @@ async def test_acp_skillhub_install_uses_host_rpc_after_confirmation(tmp_path) -
 
     search_result = await tools["search_skillhub"].invoke(
         {
-            "request_kind": "explicit_install_request",
+            "request_kind": "explicit_marketplace_request",
             "requested_outcome": "Install edge-tts",
             "missing_capability": "edge-tts",
             "gap_type": "missing_tool_or_runtime",

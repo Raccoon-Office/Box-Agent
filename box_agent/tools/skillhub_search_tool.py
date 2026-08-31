@@ -1,4 +1,4 @@
-"""ACP host-backed SkillHub search for confirmed hard capability gaps."""
+"""Host-backed Skill marketplace search over the internal skillhub protocol."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ SKILLHUB_SEARCH_CAPABILITY_VERSION = 1
 
 SEARCH_REQUEST_KINDS = (
     "capability_gap",
-    "explicit_install_request",
+    "explicit_marketplace_request",
 )
 
 GAP_TYPES = (
@@ -35,7 +35,7 @@ CapabilitySnapshotProvider = Callable[[], Mapping[str, Any]]
 SkillHubSearcher = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
-HARD_CAPABILITY_GAP_PROMPT = """## SkillHub capability-gap fallback
+HARD_CAPABILITY_GAP_PROMPT = """## Skill marketplace capability-gap fallback
 When the user requests an executable outcome that the currently installed Skills and
 available tools cannot faithfully deliver, first use `tool_search` if deferred MCP
 tools are available. If a hard capability gap still remains, call `search_skillhub`
@@ -43,12 +43,13 @@ with `request_kind=capability_gap` once before concluding the turn. Missing inpu
 ambiguity, authentication, permission, unsupported platform, and transient failures
 are not hard capability gaps.
 
-When the user explicitly asks to find or install a Skill from the product's SkillHub,
-call `search_skillhub` with `request_kind=explicit_install_request`; this direct market
-request does not require `tool_search` first. Never use `get_skill` to install anything:
-it only loads Skills that are already installed.
+When the user explicitly asks to find or install a Skill from the product's Skill
+marketplace, call `search_skillhub` with `request_kind=explicit_marketplace_request`;
+this direct marketplace request does not require `tool_search` first. A repository URL
+or a request for general web discovery is not an explicit marketplace request. Never use
+`get_skill` to install anything: it only loads Skills that are already installed.
 
-SkillHub search is read-only and never installs a Skill. Search with 2-5 short,
+Skill marketplace search is read-only and never installs a Skill. Search with 2-5 short,
 independent, non-sensitive capability keywords: include the user's language plus an
 English synonym or known tool/Skill alias when possible. Prefer terms such as `TTS`,
 `text-to-speech`, and `语音合成` over one long task description. Never send conversation
@@ -58,11 +59,12 @@ exact `skill_id`; that tool owns the mandatory user confirmation. Do not offer p
 lettered installation choices. If several candidates are genuinely plausible, use
 `request_user_decision` to select one, end that turn, then install the selected ID after
 the host resumes the task. If installation is unavailable, direct the user to the host's
-SkillHub card. If installation is denied or fails, respect that result and do not bypass
+Skill marketplace card. If installation is denied or fails, respect that result and do not bypass
 it with package managers, shell commands, browser automation, or an unrelated installer.
-If every search succeeds with no matches, explicitly say no matching Skill was found,
-then provide the safest useful best-effort answer. If search is unavailable, say it could
-not be performed, then provide the same bounded fallback. In legal, medical, financial,
+If every marketplace query succeeds with no matches, explicitly say the Skill marketplace
+returned no matching Skill, then provide the safest useful best-effort answer. If marketplace
+search is unavailable, say it could not be performed, then provide the same bounded fallback.
+In legal, medical, financial,
 compliance, engineering-signoff, or other high-risk domains, best effort is informational
 only and must not fabricate a professional verdict, approval, guarantee, or validated
 deliverable.
@@ -130,7 +132,7 @@ def _normalize_candidate(value: object) -> dict[str, Any] | None:
 
 
 class SkillHubSearchTool(Tool):
-    """Search SkillHub for a hard gap or an explicit market-install request."""
+    """Search the Skill marketplace for a hard gap or explicit market request."""
 
     parallel_safe = False
     max_result_size_chars = 8_000
@@ -170,13 +172,14 @@ class SkillHubSearchTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search SkillHub once either after a hard capability gap has been confirmed "
-            "or because the user explicitly asked to find or install a market Skill. "
+            "Search the Skill marketplace once either after a hard capability gap has been "
+            "confirmed or because the user explicitly asked to find or install a marketplace "
+            "Skill. "
             "Capability-gap searches require relevant deferred MCP discovery first; direct "
-            "market-install requests do not. Do not use for missing input, ambiguity, auth, "
-            "permission, platform, transient failures, or optional quality upgrades. Search "
-            "is read-only; never claim a candidate is installed and never install without "
-            "user confirmation."
+            "marketplace requests do not. Do not use for a user-supplied repository URL, general "
+            "web discovery, missing input, ambiguity, auth, permission, platform, transient "
+            "failures, or optional quality upgrades. Search is read-only; never claim a "
+            "candidate is installed and never install without user confirmation."
         )
 
     @property
@@ -195,8 +198,9 @@ class SkillHubSearchTool(Tool):
                     "enum": list(SEARCH_REQUEST_KINDS),
                     "description": (
                         "Use capability_gap after local discovery proves an executable "
-                        "capability is missing. Use explicit_install_request when the user "
-                        "directly asks to find or install a Skill from SkillHub."
+                        "capability is missing. Use explicit_marketplace_request when the user "
+                        "directly asks to find or install a Skill from the Skill marketplace, "
+                        "not when they supply a repository URL or request general web discovery."
                     ),
                 },
                 "missing_capability": {
@@ -269,7 +273,7 @@ class SkillHubSearchTool(Tool):
         if request_kind not in SEARCH_REQUEST_KINDS:
             return self._guard_error(
                 "INVALID_SEARCH_REQUEST",
-                "Unsupported SkillHub search request kind.",
+                "Unsupported Skill marketplace search request kind.",
             )
         if gap_type not in GAP_TYPES:
             return self._guard_error("NOT_CAPABILITY_GAP", "Unsupported capability-gap type.")
@@ -292,7 +296,8 @@ class SkillHubSearchTool(Tool):
         if self._searched_this_turn:
             return self._guard_error(
                 "SEARCH_ALREADY_PERFORMED",
-                "Do not search SkillHub again this turn. Continue with the existing result or best effort.",
+                "Do not search the Skill marketplace again this turn. Continue with the "
+                "existing result or best effort.",
             )
 
         snapshot = dict(self._snapshot_provider() or {})
@@ -303,7 +308,8 @@ class SkillHubSearchTool(Tool):
         ):
             return self._guard_error(
                 "LOCAL_DISCOVERY_REQUIRED",
-                "Use tool_search once to check deferred MCP capabilities before SkillHub.",
+                "Use tool_search once to check deferred MCP capabilities before the "
+                "Skill marketplace.",
             )
 
         self._searched_this_turn = True
@@ -367,11 +373,11 @@ class SkillHubSearchTool(Tool):
                 if self._installation_available
                 else (
                     "Installation is not available in this host. Direct the user to the "
-                    "SkillHub recommendation card to review and confirm installation."
+                    "Skill marketplace recommendation card to review and confirm installation."
                 )
             )
             content = (
-                f"SkillHub found {len(candidates)} candidate Skill(s): {names}. "
+                f"The Skill marketplace found {len(candidates)} candidate Skill(s): {names}. "
                 f"They are not installed. {installation_guidance} You may also provide "
                 "bounded interim help without claiming the missing capability is available."
             )
@@ -381,7 +387,7 @@ class SkillHubSearchTool(Tool):
                 for candidate in candidates
             )
             model_context = (
-                f"{content}\n\nExact SkillHub candidates returned for this session:\n"
+                f"{content}\n\nExact Skill marketplace candidates returned for this session:\n"
                 f"{candidate_context}\nUse the exact skill_id value above; never substitute "
                 "the name, slug, translated text, or a guessed identifier."
             )
@@ -390,10 +396,15 @@ class SkillHubSearchTool(Tool):
             self._candidates_by_id = {}
             query_summary = ", ".join(repr(query) for query in searched_queries)
             content = (
-                f"SkillHub was searched for {query_summary} and returned no matching Skill. "
-                f"Say this explicitly, then use existing capabilities to help as far as safely "
-                f"possible. State that the missing capability is: {missing_capability}. "
-                "For high-risk work, provide informational guidance only and no professional verdict."
+                f"The Skill marketplace was searched for {query_summary} and returned no "
+                "matching Skill. This result is scoped only to the Skill marketplace; it "
+                "does not establish that a supplied "
+                "repository or another external source has no matching Skill. Do not end the "
+                "turn solely because of this result. Inspect any user-supplied source, or "
+                "continue broader discovery with relevant available external search tools when "
+                f"the user requested it. The missing capability is: {missing_capability}. "
+                "For high-risk work, provide informational guidance only and no professional "
+                "verdict."
             )
             normalized_status = "empty"
             candidates = []
@@ -401,8 +412,8 @@ class SkillHubSearchTool(Tool):
         else:
             self._candidates_by_id = {}
             content = (
-                "SkillHub could not be searched right now. Do not say that no matching Skill "
-                f"exists. Continue with the safest best-effort response and state that the "
+                "The Skill marketplace could not be searched right now. Do not say that no "
+                "matching Skill exists. Continue with the safest best-effort response and state that the "
                 f"missing capability is: {missing_capability}. For high-risk work, provide "
                 "informational guidance only and no professional verdict."
             )
