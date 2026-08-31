@@ -39,6 +39,9 @@ const CAUSE_TREE_RE = /(?:根因(?:树|分析)?|原因树|因果树|鱼骨图|fi
 const NUMBERED_ACTIONS_RE = /(?:行动清单|编号行动|(?<![上下第])[一二三四五六七八九十0-9]+步(?:行动|清单|流程)|numbered\s+actions?)/i;
 const COMPARISON_RE = /(?:双栏对比|前后对比|方案对比|two[- ]column\s*comparison|before\s*(?:and|\/)?\s*after)/i;
 const COVER_RE = /(?:封面|\bcover\b|cover[_-]|\bopening\b)/i;
+const SECTION_RE = /(?:章节页|章节分隔|章节标题|章节过渡|section\s*(?:divider|marker)|chapter\s*(?:divider|marker)|\bdivider\b)/i;
+const STATEMENT_RE = /(?:核心结论|关键结论|一句话结论|核心观点|关键观点|结论页|观点页|single\s+statement|key\s+takeaway|thesis\s+statement)/i;
+const CLOSING_RE = /(?:行动式收尾|行动收尾|结尾页|结束页|感谢页|下一步行动|后续行动|closing|next\s+steps?|thank\s+you|call\s+to\s+action)/i;
 const TAG_RE = /(?:标签|主线卡|关键词|\btags?\b|\bchips?\b)/i;
 const MEDIA_RE = /(?:照片|人物|海报|主视觉|插画|概念图|界面|截图|样机|hero|photo|portrait|poster|illustration|concept\s*art|interface|screenshot|mockup)/i;
 
@@ -387,6 +390,47 @@ function analyzeOutlineLayoutIntent(
       ["comparison-two-column-v1", "table-data-v1"],
       "outline asks for an explicit side-by-side comparison"
     );
+  }
+  const bulletCount = Array.isArray(slide && slide.bullets)
+    ? slide.bullets.filter(item => String(item || "").trim()).length
+    : 0;
+  if (SECTION_RE.test(all)) {
+    return semanticRule(
+      "section-divider",
+      "section-marker-v1",
+      ["section-marker-v1"],
+      "outline explicitly asks for a chapter or section transition"
+    );
+  }
+  if (CLOSING_RE.test(all)) {
+    return bulletCount > 4
+      ? semanticRule(
+        "closing-overflow",
+        "cards-grid-v1",
+        ["cards-grid-v1"],
+        "outline closing contains more than four actions, so preserve every item in editable cards"
+      )
+      : semanticRule(
+        "closing",
+        "closing-next-steps-v1",
+        ["closing-next-steps-v1"],
+        "outline explicitly asks for an action-oriented closing page"
+      );
+  }
+  if (STATEMENT_RE.test(all)) {
+    return bulletCount > 3
+      ? semanticRule(
+        "statement-overflow",
+        "cards-grid-v1",
+        ["cards-grid-v1"],
+        "outline conclusion contains more than three proof points, so preserve every point in editable cards"
+      )
+      : semanticRule(
+        "statement",
+        "statement-focus-v1",
+        ["statement-focus-v1"],
+        "outline explicitly asks for one core conclusion with a small proof set"
+      );
   }
   if (/^(?:timeline|roadmap|时间轴|路线图)$/i.test(layout)) {
     return semanticRule(

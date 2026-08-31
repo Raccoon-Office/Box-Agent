@@ -325,12 +325,18 @@ Edit `mcp.json` to add a new MCP Server:
 Built-in skills are committed under `box_agent/skills/` and loaded through `box_agent/skills/_manifest.json`.
 No git submodule setup is required for normal development.
 
-The current manifest lists 32 built-in skills, including:
+The current manifest lists only 12 core built-in skills:
 
-- 📄 **Document Processing**: Create and edit PDF, DOCX, XLSX, PPTX
-- 🎨 **Design Creation**: Generate artwork, posters, GIF animations
-- 🧪 **Development & Testing**: Web automation testing (Playwright), MCP server development
-- 🏢 **Enterprise Applications**: Internal communication, brand guidelines, theme customization
+- **System foundations**: `memory-guide`, `browser-use`, `mcp-config`, `scheduled-task`
+- **Office core**: `docx`, `pdf`, `xlsx`, `pptx`
+- **Core artifacts**: `data-dashboard`
+- **Workflow contracts**: `roadmap`, `research-synthesis`
+- **Internal dependency**: `html-templates`
+
+`BUILTIN_SKILL_NAMES` in `scripts/generate_skills_manifest.py` is the explicit
+allowlist. Other repository skills may remain physically present in the
+wheel/runtime during the marketplace migration, but they are omitted from
+`_manifest.json` and are not visible to ordinary sessions as built-ins.
 
 Before release, regenerate and commit the manifest if built-in skills change:
 
@@ -338,18 +344,17 @@ Before release, regenerate and commit the manifest if built-in skills change:
 uv run python scripts/generate_skills_manifest.py
 ```
 
-#### Recommended Skills for officev3
+#### Marketplace Skills
 
-Some submitted skills should ship inside the Box-Agent runtime so officev3 can
-show them as installable recommendation cards, but they should not load as
-always-on builtin skills. Add those skills through both repositories:
+New professional, third-party, and community skills are marketplace skills by
+default and must not be added to the built-in allowlist:
 
 1. Put the skill directory under `box_agent/skills/<skill-slug>/`. Keep
    `SKILL.md` frontmatter complete, including `name`, `description`, and
    `author` when the card should show attribution.
-2. Add the top-level directory name to `EXCLUDED_SKILL_DIRS` in
-   `scripts/generate_skills_manifest.py`. This leaves the skill on disk for
-   packaging, while keeping it out of the builtin `_manifest.json` whitelist.
+2. Do not add the skill name to `BUILTIN_SKILL_NAMES` in
+   `scripts/generate_skills_manifest.py`. Only direct host runtime contracts
+   and core Office workflows belong in that allowlist.
 3. Regenerate the manifest:
 
    ```bash
@@ -358,14 +363,42 @@ always-on builtin skills. Add those skills through both repositories:
 
    Verify the script logs `info: excluding '<skill-slug>/SKILL.md'` and that
    `box_agent/skills/_manifest.json` does not list the skill.
-4. In the officev3 repository, add the recommendation card to
-   `electron/main/skillManager.ts` in `DEFAULT_RECOMMENDED`. Use `sourcePath`
-   matching the skill directory under `box_agent/skills/`, set
-   `installable: true`, and use category `featured` for community
-   recommendations.
-5. Rebuild or sync the Box-Agent runtime used by officev3. The recommendation
-   card can only install successfully when the runtime contains the physical
-   skill directory; the manifest exclusion only controls builtin loading.
+4. Publish and install the marketplace package through SkillHub. Installed
+   skills live under `~/.box-agent/skills/` and are discovered as user skills.
+
+During migration, directories required by existing recommended/expert install
+flows remain physically bundled in the runtime. Manifest exclusion controls
+built-in discovery only; it does not mean the marketplace package has already
+been removed from the ACP artifact.
+
+#### Conversational SkillHub installation
+
+An ACP host may enable read-only recommendation and confirmed conversational
+installation independently:
+
+```json
+{
+  "host_capabilities": {
+    "skillhub_search": 1,
+    "skillhub_install": 1
+  }
+}
+```
+
+`search_skillhub` retains only candidates returned by the host for that session.
+`install_skillhub_skill` accepts one exact retained `skill_id`, emits a one-shot
+ACP permission request, and calls `session/skillhub_install` only after approval.
+The host owns authenticated download, integrity checks, conflict handling, and
+installation into `~/.box-agent/skills/`. The reverse request contains
+`sessionId`, `skillId`, `slug`, `displayName`, `publisherDisplayName`, and the
+recommended `version`. It returns
+`{"status":"installed","skill":{"name":"<skill-slug>"}}` or
+`{"status":"already_installed",...}`. Failures return `status: "failed"` with
+an optional bounded `error`; an unavailable host returns `status: "unavailable"`.
+After success Box-Agent refreshes the live `SkillLoader`, loads the installed
+Skill through `get_skill`, and continues the original task. A model-provided
+name, slug, URL, or prose choice is never sufficient authority to select an
+installation target.
 
 **More information:**
 

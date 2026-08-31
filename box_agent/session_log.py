@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import time
 from copy import deepcopy
@@ -13,6 +14,9 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from .schema import Message
+
+
+_log = logging.getLogger(__name__)
 
 
 SESSION_LOG_VERSION = 1
@@ -327,7 +331,13 @@ class SessionLog:
         step: int | None,
         tool_result_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Append the live Surface suffix, rejecting divergent in-memory state."""
+        """Append the live Surface suffix, reconciling legitimate live rewrites.
+
+        The Session Log is a recovery aid and must not terminate the active task
+        merely because runtime context management rewrote the in-memory Surface.
+        Stored-log corruption still fails in ``replay()``; only a valid stored
+        Surface that differs from the valid live Surface is replaced here.
+        """
 
         persisted = self.replay().messages
         persisted_payloads = [
@@ -337,8 +347,25 @@ class SessionLog:
             message.model_dump(mode="json", exclude_none=True) for message in messages
         ]
         if live_payloads[: len(persisted_payloads)] != persisted_payloads:
-            raise SessionLogCorrupted(
-                "live conversation is not an append-only extension of the Session Log Surface"
+            if not messages:
+                _log.warning(
+                    "session_log/surface_diverged session_id=%s persisted=%d live=0 "
+                    "action=retain_persisted",
+                    self.header.get("id"),
+                    len(persisted_payloads),
+                )
+                return []
+            _log.warning(
+                "session_log/surface_diverged session_id=%s persisted=%d live=%d "
+                "action=replace_surface",
+                self.header.get("id"),
+                len(persisted_payloads),
+                len(live_payloads),
+            )
+            return self.replace_surface(
+                messages,
+                turn=turn,
+                step=step if step is not None else 0,
             )
 
         appended: list[dict[str, Any]] = []

@@ -11,7 +11,9 @@ _TASK_TAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "vision",
         re.compile(
-            r"看图|识图|分析.{0,6}(?:图片|图像|照片)|(?:图片|图像|截图|照片).{0,6}(?:内容|识别|分析)|"
+            r"inspect_images|看图|识图|分析.{0,6}(?:图片|图像|照片)|"
+            r"(?:读取|查看|检查|提取|统计).{0,80}(?:图片|图像|截图|照片|[^\s]+\.(?:avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp))|"
+            r"(?:图片|图像|截图|照片).{0,12}(?:内容|文字|文本|第一行|气泡|识别|分析)|视觉识别|"
             r"vision|image recognition|analy[sz]e.{0,8}image|screenshot|photo",
             re.I,
         ),
@@ -31,11 +33,36 @@ _TASK_TAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("rewrite", re.compile(r"改写|润色|校对|翻译|rewrite|polish|proofread|translate", re.I)),
     ("document", re.compile(r"文档|文件|报告|合同|PDF|Word|document|report|file", re.I)),
 )
-_COMPLEX_TASK_RE = re.compile(
-    r"分析|研究|调研|数据|代码|开发|项目|调试|修复|重构|测试|架构|报告|PPT|工作流|多步骤|"
-    r"analysis|research|data|code|develop|debug|refactor|test|architecture|report|slides?|workflow|multi-step",
+_TASK_TAG_ALIASES: dict[str, tuple[str, ...]] = {
+    "frontend": ("html",),
+    "visualization": ("analysis",),
+    "data-analysis": ("analysis",),
+    "presentation": ("office",),
+    "research": ("analysis",),
+    "document": ("office",),
+}
+_ADVANCED_TASK_RE = re.compile(
+    r"分析|比较|评估|研究|调研|搜索|联网|数据|表格|图表|可视化|代码|编程|开发|项目|网站|网页|应用|调试|排查|修复|报错|错误|"
+    r"重构|测试|数据库|架构|推理|论证|逻辑|证明|工作流|多步骤|analysis|compare|evaluate|research|search|data|chart|code|develop|debug|fix|error|refactor|test|database|architecture|reasoning|proof|workflow|multi-step",
     re.I,
 )
+_STANDARD_TASK_RE = re.compile(
+    r"办公|邮件|纪要|公文|报告|文档|文件|合同|PDF|Word|PPT|PPTX|演示文稿|幻灯片|方案|生成图片|生图|海报|"
+    r"office|email|minutes|report|document|file|presentation|slides?",
+    re.I,
+)
+_ADVANCED_TASK_TAGS = {
+    "analysis",
+    "code",
+    "data-analysis",
+    "debug",
+    "frontend",
+    "reasoning",
+    "research",
+    "vision",
+    "visualization",
+}
+_STANDARD_TASK_TAGS = {"document", "html", "office", "presentation"}
 _IMAGE_FILE_RE = re.compile(r"\.(?:avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp)$", re.I)
 
 
@@ -186,13 +213,24 @@ def select_auto_model(
     )
     if not resolved_task_tags:
         resolved_task_tags = ["general", "chat"]
-    complex_task = bool(_COMPLEX_TASK_RE.search(task)) or (
-        strategy == "general_loop" and bool(list(required_tools))
+    expanded_task_tags = set(resolved_task_tags)
+    for tag in tuple(expanded_task_tags):
+        expanded_task_tags.update(_TASK_TAG_ALIASES.get(tag, ()))
+    resolved_task_tags = sorted(expanded_task_tags)
+    task_tag_set = set(resolved_task_tags)
+    advanced_task = bool(_ADVANCED_TASK_RE.search(task)) or bool(
+        task_tag_set & _ADVANCED_TASK_TAGS
+    )
+    standard_task = (
+        bool(_STANDARD_TASK_RE.search(task))
+        or bool(task_tag_set & _STANDARD_TASK_TAGS)
+        or len(task) > 600
+        or (strategy == "general_loop" and bool(list(required_tools)))
     )
     required_ability = (
         required_ability_level
         if isinstance(required_ability_level, int) and required_ability_level > 0
-        else 2 if complex_task else 1
+        else 3 if advanced_task else 2 if standard_task else 1
     )
     if (
         estimated_input_tokens is not None
@@ -234,9 +272,17 @@ def select_auto_model(
         model for model in context_pool if model.get("abilityLevel", 1) >= required_ability
     ]
     if not ability_pool:
-        ability_pool = context_pool
+        raise ValueError(
+            f"no auto model satisfies required ability level: {required_ability}"
+        )
 
     required_tags = set(resolved_task_tags)
+    if "vision" in required_tags:
+        ability_pool = [
+            model for model in ability_pool if "vision" in set(model.get("tags", ()))
+        ]
+        if not ability_pool:
+            raise ValueError("no auto model supports required capability: vision")
 
     def score(model: dict[str, Any]) -> int:
         tags = set(model.get("tags", ()))

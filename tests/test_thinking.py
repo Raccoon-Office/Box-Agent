@@ -695,6 +695,10 @@ async def test_sensenova_sdk_sends_reasoning_effort_in_wire_body(
         ("sn-sensenova-6-8-flash-lite", False, {"reasoning_effort": "none"}),
         ("sn-glm-5-2", True, {"reasoning_effort": "high"}),
         ("sn-glm-5-2", False, {}),
+        ("sn-glm-5-3", True, {"reasoning_effort": "max"}),
+        ("sn-glm-5-3", False, {"reasoning_effort": "low"}),
+        ("GLM-5.3-FLASH", True, {"reasoning_effort": "max"}),
+        ("glm-5.3-flash", False, {"reasoning_effort": "low"}),
         (
             "SN-DeepSeek-V4-Pro",
             True,

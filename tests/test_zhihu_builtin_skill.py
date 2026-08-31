@@ -12,36 +12,23 @@ from box_agent.tools.skill_loader import SkillLoader
 SKILLS_ROOT = Path(__file__).resolve().parents[1] / "box_agent" / "skills"
 
 
-def test_zhihu_skill_is_only_discoverable_with_officev3_cli(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_zhihu_skill_is_a_marketplace_source_not_builtin() -> None:
     manifest = json.loads((SKILLS_ROOT / "_manifest.json").read_text(encoding="utf-8"))
     entries = {item["name"]: item for item in manifest["skills"]}
 
-    assert entries["zhihu"] == {
-        "name": "zhihu",
-        "path": "zhihu/SKILL.md",
-        "availability": {
-            "platforms": ["darwin", "win32"],
-            "required_env_paths": ["ZHIHU_CLI_HOME"],
-        },
-    }
+    assert "zhihu" not in entries
+    assert (SKILLS_ROOT / "zhihu" / "SKILL.md").is_file()
 
-    monkeypatch.setattr("box_agent.tools.skill_loader.sys.platform", "win32")
-    monkeypatch.delenv("ZHIHU_CLI_HOME", raising=False)
     loader = SkillLoader(sources=[(SKILLS_ROOT, "builtin")])
     loader.discover_skills()
     assert loader.get_skill("zhihu") is None
 
-    cli_home = tmp_path / "zhihu-cli"
-    cli_home.mkdir()
-    monkeypatch.setenv("ZHIHU_CLI_HOME", str(cli_home))
-    loader = SkillLoader(sources=[(SKILLS_ROOT, "builtin")])
+    loader = SkillLoader(sources=[(SKILLS_ROOT / "zhihu", "user")])
     loader.discover_skills()
     skill = loader.get_skill("zhihu")
 
     assert skill is not None
-    assert skill.source == "builtin"
+    assert skill.source == "user"
     assert skill.skill_path == SKILLS_ROOT / "zhihu" / "SKILL.md"
     assert (SKILLS_ROOT / "zhihu" / "scripts" / "run.ps1").is_file()
     assert (SKILLS_ROOT / "zhihu" / "scripts" / "run.sh").is_file()

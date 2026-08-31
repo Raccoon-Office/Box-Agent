@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ..auth import request_auth_headers
+from ..auth import refresh_hosted_auth_token_if_needed, request_auth_headers
 from ..client_info import current_client_headers
 from ..retry import RetryConfig
 from ..schema import LLMResponse, Message, StreamEvent
@@ -56,14 +56,17 @@ class LLMClientBase(ABC):
         # Callback for tracking retry count
         self.retry_callback = None
 
-    def _auth_headers(
+    async def _auth_headers(
         self,
         existing: dict[str, str | bytes] | None = None,
     ) -> dict[str, str | bytes]:
-        """Read current login auth and return request headers."""
+        """Refresh hosted login auth when needed and return request headers."""
         headers = dict(existing or {})
         if self.api_key.strip() not in HOSTED_AUTH_API_KEY_PLACEHOLDERS:
             return headers
+
+        if not self.auth_token.strip():
+            await refresh_hosted_auth_token_if_needed(self.api_base, self.auth_file)
 
         return request_auth_headers(
             auth_file=self.auth_file,

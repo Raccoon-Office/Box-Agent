@@ -665,7 +665,7 @@ class MemoryMaintainer_Conflict:  # placeholder — bound onto MemoryMaintainer 
                     task="分析仲裁冲突记忆",
                     strategy="utility",
                     task_tags=("analysis", "reasoning"),
-                    required_ability_level=2,
+                    required_ability_level=3,
                 )
                 response = await maintenance_llm.generate(
                     messages=[

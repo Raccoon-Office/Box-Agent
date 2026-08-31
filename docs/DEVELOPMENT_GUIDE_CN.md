@@ -303,12 +303,17 @@ CLI `--task` 模式和 ACP 会话会对持久 goal 启用有边界的自动续�
 内置 skills 已提交在 `box_agent/skills/` 下，并通过 `box_agent/skills/_manifest.json` 加载。
 正常开发不需要执行 git submodule 初始化。
 
-当前 manifest 列出 32 个内置 skills，包括：
+当前 manifest 只列出 12 个核心内置 skills：
 
-- 📄 **文档处理**：轻松创建和编辑 PDF、DOCX、XLSX、PPTX 等格式的文档。
-- 🎨 **设计创作**：生成富有创意的艺术作品、海报和 GIF 动画。
-- 🧪 **开发与测试**：支持 Web 自动化测试 (Playwright) 和 MCP 服务器开发。
-- 🏢 **企业应用**：高效处理内部沟通、品牌指南应用和主题定制等任务。
+- **系统基础**：`memory-guide`、`browser-use`、`mcp-config`、`scheduled-task`
+- **Office 核心**：`docx`、`pdf`、`xlsx`、`pptx`
+- **核心产物**：`data-dashboard`
+- **工作流契约**：`roadmap`、`research-synthesis`
+- **内部依赖**：`html-templates`
+
+`scripts/generate_skills_manifest.py` 中的 `BUILTIN_SKILL_NAMES` 是显式白名单。
+仓库中其他 skills 在市场迁移期仍可随 wheel/runtime 存在，但不会进入
+`_manifest.json`，普通会话也不会把它们识别为内置技能。
 
 如果内置 skills 发生变化，发布前需要重新生成并提交 manifest：
 
@@ -316,12 +321,12 @@ CLI `--task` 模式和 ACP 会话会对持久 goal 启用有边界的自动续�
 uv run python scripts/generate_skills_manifest.py
 ```
 
-#### officev3 推荐 Skills
+#### 市场 Skills
 
-有些投稿技能需要随 Box-Agent runtime 一起发布，让 officev3 显示成可一键安装的推荐卡片，但又不应该作为始终加载的内置技能启用。这类技能需要同时改 Box-Agent 和 officev3：
+新增的专业、第三方或社区技能默认属于市场，不应加入内置白名单：
 
-1. 将技能目录放到 `box_agent/skills/<skill-slug>/`。`SKILL.md` frontmatter 需要包含完整的 `name`、`description`，推荐卡片需要署名时还要填写 `author`。
-2. 在 `scripts/generate_skills_manifest.py` 的 `EXCLUDED_SKILL_DIRS` 中加入这个顶层目录名。这样技能会继续随包存在于磁盘上，但不会进入内置 `_manifest.json` 白名单。
+1. 将技能目录放到 `box_agent/skills/<skill-slug>/`。`SKILL.md` frontmatter 需要包含完整的 `name`、`description`，需要署名时填写 `author`。
+2. 不要把技能名加入 `scripts/generate_skills_manifest.py` 的 `BUILTIN_SKILL_NAMES`。只有宿主运行时或核心 Office 工作流直接依赖的技能才能进入该白名单。
 3. 重新生成 manifest：
 
    ```bash
@@ -329,8 +334,35 @@ uv run python scripts/generate_skills_manifest.py
    ```
 
    确认脚本输出 `info: excluding '<skill-slug>/SKILL.md'`，并确认 `box_agent/skills/_manifest.json` 中没有这个技能。
-4. 在 officev3 仓库的 `electron/main/skillManager.ts` 中，把推荐卡片加入 `DEFAULT_RECOMMENDED`。`sourcePath` 要和 `box_agent/skills/` 下的技能目录匹配，`installable` 设为 `true`，社区投稿推荐位使用 `featured` 分类。
-5. 重新构建或同步 officev3 使用的 Box-Agent runtime。推荐卡片只有在 runtime 里实际包含这个技能目录时才能安装成功；从 `_manifest.json` 排除只负责避免它被当作内置技能自动加载。
+4. 通过 SkillHub 发布和安装市场包。安装后的技能位于 `~/.box-agent/skills/`，由用户来源动态加载。
+
+市场迁移期间，已有推荐/专家安装链路依赖的技能目录暂时继续随 runtime 打包。
+从 `_manifest.json` 排除只负责隔离内置加载，不代表市场包已经从 ACP 物理移除。
+
+#### 对话式 SkillHub 安装
+
+ACP 宿主可以分别声明只读推荐和确认后对话安装能力：
+
+```json
+{
+  "host_capabilities": {
+    "skillhub_search": 1,
+    "skillhub_install": 1
+  }
+}
+```
+
+`search_skillhub` 只在当前会话中保留宿主真实返回的候选项。
+`install_skillhub_skill` 只接受其中一个精确 `skill_id`，先发起一次性 ACP
+权限确认，得到同意后才调用 `session/skillhub_install`。宿主负责带认证下载、
+完整性校验、冲突处理以及安装到 `~/.box-agent/skills/`。反向请求包含
+`sessionId`、`skillId`、`slug`、`displayName`、`publisherDisplayName` 和推荐
+`version`。成功响应为
+`{"status":"installed","skill":{"name":"<skill-slug>"}}`，已安装则返回
+`status: "already_installed"`；失败可返回 `status: "failed"` 和受限长度的
+`error`，宿主不可用时返回 `status: "unavailable"`。成功后 Box-Agent 刷新
+当前 `SkillLoader`，通过 `get_skill` 加载新 Skill，并继续原任务。模型生成的
+名称、slug、URL 或普通文本选项都不能单独决定安装目标。
 
 **更多信息：**
 

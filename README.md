@@ -115,7 +115,7 @@ model: "your-model"
 ### More
 
 - **MCP Tools**: Connect to any [MCP server](https://github.com/modelcontextprotocol/servers) — web search, knowledge graphs, databases
-- **Claude Skills**: 32 built-in skills for documents (DOCX, PDF, PPTX, XLSX), canvas design, Obsidian, web app testing, and more
+- **Claude Skills**: 12 built-in runtime, Office, and artifact skills, plus on-demand marketplace skill sources
 - **ACP Protocol**: Embed Box Agent in Electron apps, Zed Editor, or any ACP-compatible host via JSON-RPC over stdio
 - **Standalone Runtime**: PyInstaller binary bundles Python + all dependencies. No external Python needed — download and run
 - **Cross-session Memory**: Persistent memory lets the agent retain key information across conversations

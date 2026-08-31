@@ -40,7 +40,10 @@ const {
   outlineHasQuantitativeEvidence,
   outlineIntentRecord,
 } = require("./outline_layout_contract.js");
-const { inferTheme } = require("./theme_selection_core.js");
+const {
+  evaluateModelThemeChoice,
+  inferTheme,
+} = require("./theme_selection_core.js");
 const { inferDesignContract } = require("./design_contract_core.js");
 
 const AUTO_COVER_IMAGE_BRIEF_RE = /(?:融资|路演|投资人|\bvc\b|fundrais|investor|pitch\s*deck|发布会|产品发布|品牌提案|高端|premium)/i;
@@ -155,6 +158,59 @@ function resolveThemeInput(themeId) {
 function selectTheme(opts, context) {
   const inference = inferTheme(listThemes(), context, DEFAULT_THEME_ID);
   if (String(opts.themeId || "").trim().toLowerCase() === "auto") {
+    if (opts.themeModelChoice) {
+      const evaluation = evaluateModelThemeChoice(
+        inference,
+        opts.themeModelChoice
+      );
+      const deterministicRecommendation = {
+        theme_id: inference.theme_id,
+        source: inference.source,
+        confidence: inference.confidence,
+        score: inference.score,
+        margin: inference.margin,
+      };
+      if (evaluation.accepted) {
+        return {
+          theme: getTheme(evaluation.candidate.theme_id),
+          normalization: null,
+          selection: {
+            theme_id: evaluation.candidate.theme_id,
+            source: "model_reranked",
+            confidence: null,
+            score: evaluation.candidate.score,
+            margin: null,
+            matched_signals: evaluation.candidate.matched_signals,
+            ranking: inference.ranking,
+            shortlist: inference.shortlist,
+            requested_theme_id: "auto",
+            deterministic_recommendation: deterministicRecommendation,
+            model_choice: {
+              theme_id: evaluation.candidate.theme_id,
+              reason: opts.themeModelReason,
+              accepted: true,
+            },
+          },
+        };
+      }
+      return {
+        theme: getTheme(inference.theme_id),
+        normalization: null,
+        selection: {
+          ...inference,
+          source: "model_choice_rejected",
+          requested_theme_id: "auto",
+          deterministic_source: inference.source,
+          deterministic_recommendation: deterministicRecommendation,
+          model_choice: {
+            theme_id: opts.themeModelChoice,
+            reason: opts.themeModelReason,
+            accepted: false,
+            rejection_reason: evaluation.reason,
+          },
+        },
+      };
+    }
     return {
       theme: getTheme(inference.theme_id),
       normalization: null,
@@ -215,6 +271,43 @@ function selectTheme(opts, context) {
   };
 }
 
+function themeShortlistPayload(context) {
+  const inference = inferTheme(listThemes(), context, DEFAULT_THEME_ID);
+  return {
+    mode: "theme_shortlist",
+    default_theme_id: DEFAULT_THEME_ID,
+    deterministic_recommendation: {
+      theme_id: inference.theme_id,
+      source: inference.source,
+      confidence: inference.confidence,
+      score: inference.score,
+      margin: inference.margin,
+      matched_signals: inference.matched_signals,
+    },
+    candidate_count: inference.shortlist.length,
+    candidates: inference.shortlist.map(candidate => {
+      const theme = getTheme(candidate.theme_id);
+      const discovery = themeDiscoveryRecord(theme);
+      return {
+        ...discovery,
+        theme_id: candidate.theme_id,
+        deterministic_rank: candidate.rank,
+        deterministic_score: candidate.score,
+        matched_signals: candidate.matched_signals,
+        hard_conflicts: candidate.hard_conflicts,
+        protected_signals: candidate.protected_signals,
+        eligible_for_model_choice: candidate.eligible_for_model_choice,
+      };
+    }),
+    model_choice_contract: {
+      choose_from_candidates_only: true,
+      hard_conflicts_are_ineligible: true,
+      protected_deterministic_signals_limit_override: true,
+      submit_with: "--theme auto --theme-model-choice THEME_ID --theme-model-reason REASON",
+    },
+  };
+}
+
 function compactThemeSelection(selection) {
   return {
     requested_theme_id: selection.requested_theme_id,
@@ -224,6 +317,12 @@ function compactThemeSelection(selection) {
     ...(Array.isArray(selection.matched_signals) && selection.matched_signals.length
       ? {
         matched_signals: selection.matched_signals.map(item => item.signal),
+      }
+      : {}),
+    ...(selection.model_choice
+      ? {
+        model_choice: selection.model_choice,
+        deterministic_recommendation: selection.deterministic_recommendation,
       }
       : {}),
   };
@@ -321,6 +420,8 @@ function parseArgs(argv) {
     layoutIds: [],
     themeId: "auto",
     themeLocked: false,
+    themeModelChoice: null,
+    themeModelReason: null,
     designSeed: null,
     family: null,
     title: "Untitled deck",
@@ -337,6 +438,7 @@ function parseArgs(argv) {
     report: null,
     force: false,
     listThemes: false,
+    rankThemes: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -346,6 +448,12 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--lock-theme") {
       opts.themeLocked = true;
+    } else if (arg === "--theme-model-choice" && value) {
+      opts.themeModelChoice = value;
+      index += 1;
+    } else if (arg === "--theme-model-reason" && value) {
+      opts.themeModelReason = value;
+      index += 1;
     } else if (arg === "--design-seed" && value) {
       opts.designSeed = value;
       index += 1;
@@ -405,15 +513,18 @@ function parseArgs(argv) {
       opts.force = true;
     } else if (arg === "--list-themes") {
       opts.listThemes = true;
+    } else if (arg === "--rank-themes") {
+      opts.rankThemes = true;
     } else if (arg === "--help" || arg === "-h") {
       console.log(
         "Usage: inspect_deck_contract.js [LAYOUT_ID ...] " +
-        "[--theme auto|THEME_ID] [--lock-theme] [--family FAMILY_ID] [--design-seed SEED] [--title TITLE] [--truth-mode MODE] " +
+        "[--theme auto|THEME_ID] [--lock-theme] [--theme-model-choice THEME_ID] " +
+        "[--theme-model-reason REASON] [--family FAMILY_ID] [--design-seed SEED] [--title TITLE] [--truth-mode MODE] " +
         "[--image-mode auto|creative_image_mode] [--no-images] " +
         "[--image-asset SLIDE:SLOT=PATH ...] " +
         "[--fact TEXT ...] [--research-fact TEXT ...] [--assumption TEXT ...] " +
         "[--require-field SLIDE:FIELD ...] [--outline outline.json] [--out deck.json] " +
-        "[--report qa/deck_contract.json] [--force] [--list-themes]"
+        "[--report qa/deck_contract.json] [--force] [--list-themes | --rank-themes]"
       );
       process.exit(0);
     } else if (arg.startsWith("-")) {
@@ -515,7 +626,16 @@ function alignScaffoldVisualCardinality(layoutId, props, outlineSlide) {
     || (Number.isInteger(contract.maxItems) && expected > contract.maxItems)
   ) return;
   if (collection.length > expected) collection.splice(expected);
-  const seed = collection.length ? collection[collection.length - 1] : null;
+  const collectionName = field.split(".").filter(Boolean).at(-1);
+  const editorCollection = layout
+    && layout.editor
+    && layout.editor.controls
+    && layout.editor.controls.collections
+    && layout.editor.controls.collections[collectionName];
+  const editorItemDefault = editorCollection && editorCollection.itemDefault;
+  const seed = collection.length
+    ? collection[collection.length - 1]
+    : editorItemDefault || null;
   while (collection.length < expected) {
     const item = seed === null ? "待填充" : JSON.parse(JSON.stringify(seed));
     const ordinal = collection.length + 1;
@@ -1252,6 +1372,9 @@ function findDownstreamArtifacts(deckFile) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
+  if (opts.listThemes && opts.rankThemes) {
+    throw new Error("Use either --list-themes or --rank-themes, not both");
+  }
   if (opts.listThemes) {
     if (opts.layoutIds.length || opts.out || opts.report) {
       throw new Error("--list-themes cannot be combined with layout ids, --out, or --report");
@@ -1265,6 +1388,41 @@ function main() {
       themes: listThemes().map(themeDiscoveryRecord),
     }));
     return;
+  }
+  if (opts.themeModelChoice && String(opts.themeId).toLowerCase() !== "auto") {
+    throw new Error("--theme-model-choice requires --theme auto");
+  }
+  if (opts.themeModelChoice && opts.themeLocked) {
+    throw new Error("--theme-model-choice cannot be combined with --lock-theme");
+  }
+  if (opts.themeModelChoice && !String(opts.themeModelReason || "").trim()) {
+    throw new Error("--theme-model-choice requires --theme-model-reason");
+  }
+  if (!opts.themeModelChoice && opts.themeModelReason) {
+    throw new Error("--theme-model-reason requires --theme-model-choice");
+  }
+  if (String(opts.themeModelReason || "").length > 240) {
+    throw new Error("--theme-model-reason must be 240 characters or fewer");
+  }
+  if (
+    opts.rankThemes
+    && (
+      opts.layoutIds.length
+      || opts.out
+      || opts.report
+      || opts.themeLocked
+      || opts.themeModelChoice
+      || opts.family
+      || opts.designSeed
+      || opts.noImages
+      || opts.imageAssets.length
+      || opts.requiredFields.length
+      || String(opts.themeId).toLowerCase() !== "auto"
+    )
+  ) {
+    throw new Error(
+      "--rank-themes accepts brief inputs only and cannot be combined with layouts, output, explicit themes, or model choice"
+    );
   }
   if (opts.report && !opts.out) {
     throw new Error("--report requires --out deck.json");
@@ -1303,6 +1461,17 @@ function main() {
   const outlineBinding = opts.outline
     ? readOutlineBinding(opts.outline, opts.layoutIds.length || null)
     : null;
+  const runtimeBinding = runtimeSourceBinding();
+  const designContext = {
+    title: opts.title,
+    source_facts: opts.sourceFacts,
+    source_text: runtimeBinding.source_text,
+    outline: outlineBinding ? outlineBinding.content : null,
+  };
+  if (opts.rankThemes) {
+    console.log(JSON.stringify(themeShortlistPayload(designContext), null, 2));
+    return;
+  }
   const assumptions = [...new Set(
     opts.assumptions.map(value => value.trim()).filter(Boolean)
   )];
@@ -1355,13 +1524,6 @@ function main() {
     outlineBinding ? { ...outlineBinding, slides: authoringSlides } : null,
     layoutPolicy
   );
-  const runtimeBinding = runtimeSourceBinding();
-  const designContext = {
-    title: opts.title,
-    source_facts: opts.sourceFacts,
-    source_text: runtimeBinding.source_text,
-    outline: outlineBinding ? outlineBinding.content : null,
-  };
   const themeResolution = selectTheme(opts, designContext);
   const designContract = inferDesignContract(
     designContext,

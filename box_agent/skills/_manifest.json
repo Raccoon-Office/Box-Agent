@@ -1,19 +1,11 @@
 {
   "schema_version": 1,
   "box_agent_version": "0.9.7",
-  "generated_at": "2026-08-27T11:48:56Z",
+  "generated_at": "2026-08-31T02:34:35Z",
   "skills": [
-    {
-      "name": "artifacts-builder",
-      "path": "artifacts-builder/SKILL.md"
-    },
     {
       "name": "browser-use",
       "path": "browser-use/SKILL.md"
-    },
-    {
-      "name": "canvas-design",
-      "path": "canvas-design/SKILL.md"
     },
     {
       "name": "data-dashboard",
@@ -36,20 +28,8 @@
       "path": "document-skills/xlsx/SKILL.md"
     },
     {
-      "name": "email-webmail-playwright",
-      "path": "email-webmail-playwright/SKILL.md"
-    },
-    {
       "name": "html-templates",
       "path": "html-templates/SKILL.md"
-    },
-    {
-      "name": "hyperframes-video",
-      "path": "hyperframes-video/SKILL.md"
-    },
-    {
-      "name": "internal-comms",
-      "path": "internal-comms/SKILL.md"
     },
     {
       "name": "mcp-config",
@@ -60,36 +40,8 @@
       "path": "memory-guide/SKILL.md"
     },
     {
-      "name": "midu-pinyin",
-      "path": "midu-pinyin/SKILL.md"
-    },
-    {
-      "name": "midu-proofread",
-      "path": "midu-proofread/SKILL.md"
-    },
-    {
-      "name": "midu-proofread-pinyin",
-      "path": "midu-proofread-pinyin/SKILL.md"
-    },
-    {
-      "name": "midu-st-convert",
-      "path": "midu-st-convert/SKILL.md"
-    },
-    {
-      "name": "midu-writing",
-      "path": "midu-writing/SKILL.md"
-    },
-    {
-      "name": "obsidian",
-      "path": "obsidian/SKILL.md"
-    },
-    {
       "name": "research-synthesis",
       "path": "research-synthesis/SKILL.md"
-    },
-    {
-      "name": "research-to-deck-outline",
-      "path": "research-to-deck-outline/SKILL.md"
     },
     {
       "name": "roadmap",
@@ -98,83 +50,6 @@
     {
       "name": "scheduled-task",
       "path": "scheduled-task/SKILL.md"
-    },
-    {
-      "name": "skill-architect",
-      "path": "skill-architect/SKILL.md"
-    },
-    {
-      "name": "skill-creator",
-      "path": "skill-creator/SKILL.md"
-    },
-    {
-      "name": "dev-branch-isolation",
-      "path": "superpowers/dev-branch-isolation/SKILL.md"
-    },
-    {
-      "name": "dev-code-init",
-      "path": "superpowers/dev-code-init/SKILL.md"
-    },
-    {
-      "name": "dev-code-review",
-      "path": "superpowers/dev-code-review/SKILL.md"
-    },
-    {
-      "name": "dev-debug",
-      "path": "superpowers/dev-debug/SKILL.md"
-    },
-    {
-      "name": "dev-execute-plan",
-      "path": "superpowers/dev-execute-plan/SKILL.md"
-    },
-    {
-      "name": "dev-finish",
-      "path": "superpowers/dev-finish/SKILL.md"
-    },
-    {
-      "name": "dev-plan",
-      "path": "superpowers/dev-plan/SKILL.md"
-    },
-    {
-      "name": "dev-review-response",
-      "path": "superpowers/dev-review-response/SKILL.md"
-    },
-    {
-      "name": "dev-spec",
-      "path": "superpowers/dev-spec/SKILL.md"
-    },
-    {
-      "name": "dev-tdd",
-      "path": "superpowers/dev-tdd/SKILL.md"
-    },
-    {
-      "name": "dev-verify",
-      "path": "superpowers/dev-verify/SKILL.md"
-    },
-    {
-      "name": "theme-factory",
-      "path": "theme-factory/SKILL.md"
-    },
-    {
-      "name": "webapp-testing",
-      "path": "webapp-testing/SKILL.md"
-    },
-    {
-      "name": "writing-workflow",
-      "path": "writing-workflow/SKILL.md"
-    },
-    {
-      "name": "zhihu",
-      "path": "zhihu/SKILL.md",
-      "availability": {
-        "platforms": [
-          "darwin",
-          "win32"
-        ],
-        "required_env_paths": [
-          "ZHIHU_CLI_HOME"
-        ]
-      }
     }
   ]
 }

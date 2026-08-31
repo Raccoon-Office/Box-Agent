@@ -307,6 +307,8 @@ async def test_extmethod_presentation_preflight_caps_output_at_four_thousand_tok
 
     assert resp["text"] == '{"matched":true}'
     assert captured["max_output_tokens_cap"] == 4_096
+    assert captured["task_tags"] == ("presentation", "analysis")
+    assert captured["required_ability_level"] == 2
     assert llm.calls[0]["thinking_enabled"] is False
 
 

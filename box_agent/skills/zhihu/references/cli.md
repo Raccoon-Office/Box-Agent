@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File <skill-dir>/scripts/run.ps1 status
 
 CLI 支持 macOS Apple Silicon、macOS Intel 和 Windows x64。Officev3 有可用内置 CLI 时通过 `ZHIHU_CLI_HOME` 注入绝对目录并优先使用；宿主没有提供时，脚本回退到官方默认用户目录。两种模式都不调用 PATH 中的同名程序。
 
-返回 `installed=false` 或 `CLI_NOT_INSTALLED` 时，引导用户修复或重新安装 Officev3。内置 Skill 的 `setup.sh` 和 `setup.ps1` 只返回 `HOST_MANAGED_INSTALL`，不会自行下载二进制；宿主缺失时仅复用官方默认用户目录中已经存在的兼容 CLI。
+返回 `installed=false` 或 `CLI_NOT_INSTALLED` 时，引导用户修复或重新安装 Officev3。Skill 的 `setup.sh` 和 `setup.ps1` 只返回 `HOST_MANAGED_INSTALL`，不会自行下载二进制；宿主缺失时仅复用官方默认用户目录中已经存在的兼容 CLI。
 
 查看当前 CLI 支持的能力，不需要 Access Secret：
 

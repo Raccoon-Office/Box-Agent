@@ -27,7 +27,7 @@ bash <skill-dir>/scripts/run.sh status
 powershell -ExecutionPolicy Bypass -File <skill-dir>/scripts/run.ps1 status
 ```
 
-Officev3 在 Windows 和 macOS 随应用打包兼容版本的官方 CLI，并通过 `ZHIHU_CLI_HOME` 注入绝对目录。脚本优先使用该目录，不调用 PATH 中来源不明的 `zhihu-cli`。宿主未注入可用 CLI 时，脚本只回退到官方默认用户目录中已经存在的兼容 CLI；本内置 Skill 不自行下载二进制。
+Officev3 在 Windows 和 macOS 随应用打包兼容版本的官方 CLI，并通过 `ZHIHU_CLI_HOME` 注入绝对目录。脚本优先使用该目录，不调用 PATH 中来源不明的 `zhihu-cli`。宿主未注入可用 CLI 时，脚本只回退到官方默认用户目录中已经存在的兼容 CLI；此 Skill 不自行下载二进制。
 
 根据返回 JSON 处理：
 

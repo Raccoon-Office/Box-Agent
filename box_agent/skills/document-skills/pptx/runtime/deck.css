@@ -3655,7 +3655,6 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
   border-bottom-color: var(--deck-primary);
 }
 
-.table-comparison .data-table th:last-child,
 .table-comparison .data-table td:last-child {
   background: var(--deck-primary-soft);
 }
@@ -4219,7 +4218,18 @@ body[data-deck-accent="dot"] :is(.accent-rule, .editorial-cover-rule, .statement
   border-radius: 50%;
 }
 
-body[data-deck-alternation="section"] :is(.layout-section, .statement-poster, .layout-closing) {
+.slide.layout-kpis .kpi-card:first-child,
+.slide.layout-comparison .comparison-right,
+.slide.layout-timeline .timeline-step:nth-child(even) {
+  background: color-mix(in srgb, var(--deck-primary) 10%, var(--deck-surface));
+}
+
+body[data-deck-alternation="section"] :is(
+  .layout-section,
+  .layout-statement,
+  .statement-poster,
+  .layout-closing
+) {
   --deck-bg: var(--deck-alt-bg);
   --deck-surface: var(--deck-alt-surface);
   --deck-surface-strong: var(--deck-alt-surface);
@@ -4231,7 +4241,7 @@ body[data-deck-alternation="section"] :is(.layout-section, .statement-poster, .l
   background-color: var(--deck-bg);
 }
 
-body[data-deck-alternation="section"] .statement-poster :is(
+body[data-deck-alternation="section"] :is(.layout-statement, .statement-poster) :is(
   h1,
   .eyebrow,
   .statement-support,
@@ -4242,7 +4252,7 @@ body[data-deck-alternation="section"] .statement-poster :is(
   color: var(--deck-text);
 }
 
-body[data-deck-alternation="section"] .statement-poster :is(
+body[data-deck-alternation="section"] :is(.layout-statement, .statement-poster) :is(
   .statement-rule,
   .statement-support,
   .proof-stack,
@@ -4798,6 +4808,18 @@ body[data-deck-theme="data-intelligence"] .technical-diagram-note {
   font-size: 14px;
 }
 
+body[data-deck-theme="data-intelligence"] :is(.layout-comparison, .layout-data-table) {
+  --deck-bg: var(--deck-alt-bg);
+  --deck-surface: var(--deck-alt-surface);
+  --deck-surface-strong: var(--deck-alt-surface);
+  --deck-text: var(--deck-alt-text);
+  --deck-muted: var(--deck-alt-muted);
+  --deck-border: var(--deck-alt-border);
+  --deck-primary: var(--deck-alt-primary);
+  --deck-primary-text: var(--deck-alt-primary);
+  background-color: var(--deck-bg);
+}
+
 /* Signal: institutional editorial authority, not a generic navy recolor. */
 body[data-deck-theme="signal"] .slide {
   background-color: var(--deck-bg);
@@ -5046,6 +5068,33 @@ body[data-deck-theme="daisy-days"] .data-table th {
   color: var(--deck-text);
 }
 
+body[data-deck-theme="daisy-days"] .layout-section {
+  --deck-bg: #A8E6CF;
+  --deck-surface: #F5F0E6;
+  --deck-surface-strong: #FDE68A;
+  --deck-text: #2D2D2D;
+  --deck-muted: #625F5A;
+  --deck-border: #2D2D2D;
+}
+
+body[data-deck-theme="daisy-days"] .layout-statement {
+  --deck-bg: #F7C8D4;
+  --deck-surface: #F5F0E6;
+  --deck-surface-strong: #D4A5E8;
+  --deck-text: #2D2D2D;
+  --deck-muted: #625F5A;
+  --deck-border: #2D2D2D;
+}
+
+body[data-deck-theme="daisy-days"] .layout-closing {
+  --deck-bg: #FDE68A;
+  --deck-surface: #F7C8D4;
+  --deck-surface-strong: #A8E6CF;
+  --deck-text: #2D2D2D;
+  --deck-muted: #625F5A;
+  --deck-border: #2D2D2D;
+}
+
 /* Soft Editorial: warm paper, magazine rules, asymmetric reading rhythm, and
    softly colored editorial blocks. */
 body[data-deck-theme="soft-editorial"] .slide {
@@ -5233,6 +5282,33 @@ body[data-deck-theme="soft-editorial"] .technical-diagram-note {
   font-family: var(--deck-display);
   font-size: 17px;
   font-style: italic;
+}
+
+body[data-deck-theme="soft-editorial"] .layout-section {
+  --deck-bg: #B7C7A8;
+  --deck-surface: #F2EEDF;
+  --deck-surface-strong: #D6DD63;
+  --deck-text: #2A241B;
+  --deck-muted: #756C5F;
+  --deck-border: #829877;
+}
+
+body[data-deck-theme="soft-editorial"] .layout-statement {
+  --deck-bg: #E8C9B6;
+  --deck-surface: #F2EEDF;
+  --deck-surface-strong: #B7C7A8;
+  --deck-text: #2A241B;
+  --deck-muted: #756C5F;
+  --deck-border: #C5967A;
+}
+
+body[data-deck-theme="soft-editorial"] .layout-closing {
+  --deck-bg: #D6DD63;
+  --deck-surface: #F2EEDF;
+  --deck-surface-strong: #E8C9B6;
+  --deck-text: #2A241B;
+  --deck-muted: #756C5F;
+  --deck-border: #AAB448;
 }
 
 /* Built-in Block Frame theme. Layout geometry remains registry-controlled;
@@ -5772,6 +5848,79 @@ body[data-deck-theme="comic-panel"] .closing-end-mark::after {
   transform: rotate(-7deg);
 }
 
+/* Studio: black/yellow broadcast graphics with deliberate light-mode reversals. */
+body[data-deck-theme="studio"] .slide-header {
+  border-top: 8px solid var(--deck-primary);
+  border-bottom: 1px solid var(--deck-border);
+}
+
+body[data-deck-theme="studio"] .eyebrow {
+  display: inline-flex;
+  width: fit-content;
+  padding: 8px 14px;
+  background: var(--deck-primary);
+  color: var(--deck-inverse);
+  font-family: var(--deck-label);
+  letter-spacing: 0.12em;
+}
+
+body[data-deck-theme="studio"] :is(.content-card, .kpi-card, .timeline-step, .comparison-column) {
+  border: 1px solid var(--deck-border);
+  border-radius: 0;
+  background: var(--deck-surface);
+  box-shadow: none;
+}
+
+body[data-deck-theme="studio"] .layout-kpis .kpi-card:first-child,
+body[data-deck-theme="studio"] .layout-comparison .comparison-right {
+  background: var(--deck-primary);
+  border-color: var(--deck-primary);
+}
+
+body[data-deck-theme="studio"] .layout-kpis .kpi-card:first-child :is(
+  .kpi-label,
+  .kpi-value,
+  .kpi-detail,
+  .kpi-delta
+),
+body[data-deck-theme="studio"] .layout-comparison .comparison-right :is(
+  .comparison-label,
+  h3,
+  li,
+  p
+) {
+  color: var(--deck-inverse);
+}
+
+body[data-deck-theme="studio"] .layout-timeline .timeline-step:nth-child(even) {
+  background: var(--deck-surface-strong);
+}
+
+body[data-deck-theme="studio"] :is(.chart-body, .data-table-wrap, .technical-diagram-stage) {
+  border: 1px solid var(--deck-border);
+  border-top: 6px solid var(--deck-primary);
+  border-radius: 0;
+  background: var(--deck-surface);
+}
+
+body[data-deck-theme="studio"] .data-table th {
+  border-top: 0;
+  background: var(--deck-primary);
+  color: var(--deck-inverse);
+  font-family: var(--deck-label);
+}
+
+body[data-deck-theme="studio"] .layout-statement {
+  --deck-bg: var(--deck-alt-bg);
+  --deck-surface: var(--deck-alt-surface);
+  --deck-surface-strong: var(--deck-alt-surface);
+  --deck-text: var(--deck-alt-text);
+  --deck-muted: var(--deck-alt-muted);
+  --deck-border: var(--deck-alt-border);
+  --deck-primary: var(--deck-alt-primary);
+  --deck-primary-text: var(--deck-alt-primary);
+}
+
 /* Built-in 8-Bit Orbit theme. The catalog entry predates this dedicated
    execution layer; these rules turn its generic retro-interface metadata into
    a real pixel-arcade system. DiagramSpec remains a clean SVG inside the
@@ -6188,6 +6337,42 @@ body[data-deck-theme="8-bit-orbit"] .closing-end-mark::after {
   font-weight: 700;
   letter-spacing: 0.02em;
   text-shadow: 7px 7px 0 #F0A6CA;
+}
+
+body[data-deck-theme="8-bit-orbit"] .layout-section {
+  --deck-bg: var(--deck-chart-1);
+  --deck-surface: color-mix(in srgb, var(--deck-chart-1) 78%, var(--deck-chart-4));
+  --deck-surface-strong: var(--deck-chart-4);
+  --deck-primary: var(--deck-chart-3);
+  --deck-primary-text: var(--deck-inverse);
+  --deck-primary-soft: color-mix(in srgb, var(--deck-inverse) 16%, var(--deck-chart-1));
+  --deck-text: var(--deck-inverse);
+  --deck-muted: color-mix(in srgb, var(--deck-inverse) 68%, var(--deck-chart-1));
+  --deck-border: var(--deck-inverse);
+}
+
+body[data-deck-theme="8-bit-orbit"] .layout-statement {
+  --deck-bg: var(--deck-chart-4);
+  --deck-surface: color-mix(in srgb, var(--deck-chart-4) 74%, var(--deck-chart-2));
+  --deck-surface-strong: var(--deck-chart-2);
+  --deck-primary: var(--deck-chart-2);
+  --deck-primary-text: var(--deck-inverse);
+  --deck-primary-soft: color-mix(in srgb, var(--deck-inverse) 14%, var(--deck-chart-4));
+  --deck-text: var(--deck-inverse);
+  --deck-muted: color-mix(in srgb, var(--deck-inverse) 66%, var(--deck-chart-4));
+  --deck-border: var(--deck-inverse);
+}
+
+body[data-deck-theme="8-bit-orbit"] .layout-closing {
+  --deck-bg: var(--deck-chart-2);
+  --deck-surface: color-mix(in srgb, var(--deck-chart-2) 72%, var(--deck-chart-4));
+  --deck-surface-strong: var(--deck-chart-4);
+  --deck-primary: var(--deck-chart-3);
+  --deck-primary-text: var(--deck-inverse);
+  --deck-primary-soft: color-mix(in srgb, var(--deck-inverse) 14%, var(--deck-chart-2));
+  --deck-text: var(--deck-inverse);
+  --deck-muted: color-mix(in srgb, var(--deck-inverse) 66%, var(--deck-chart-2));
+  --deck-border: var(--deck-inverse);
 }
 
 /* People Handbook: pinned paper, employee badge cues, and human annotations. */
@@ -8058,6 +8243,30 @@ body[data-deck-theme="factory-floor"] .factory-station:nth-child(3) .factory-sta
 body[data-deck-theme="factory-floor"] :is(.content-card, .kpi-card, .timeline-step, .dashboard-domain) { border: 2px solid var(--deck-primary); border-radius: 0; box-shadow: inset 0 8px 0 #F2C94C; }
 body[data-deck-theme="factory-floor"] :is(.chart-body, .data-table-wrap, .technical-diagram-stage) { border: 2px solid var(--deck-primary); border-radius: 0; }
 body[data-deck-theme="factory-floor"] .data-table th { background: var(--deck-primary); color: var(--deck-inverse); font-family: var(--deck-label); }
+body[data-deck-theme="factory-floor"] .layout-kpis .kpi-card:first-child { background: var(--deck-primary-soft); }
+body[data-deck-theme="factory-floor"] .layout-comparison .comparison-right { background: var(--deck-primary-soft); }
+body[data-deck-theme="factory-floor"] .layout-timeline .timeline-step:nth-child(even) { background: var(--deck-surface-strong); }
+body[data-deck-theme="factory-floor"] :is(.layout-chart-data, .layout-data-table) :is(.chart-body, .data-table-wrap) { background: var(--deck-surface); }
+body[data-deck-theme="factory-floor"] .layout-statement {
+  --deck-bg: var(--deck-alt-bg);
+  --deck-surface: var(--deck-alt-surface);
+  --deck-surface-strong: var(--deck-alt-surface);
+  --deck-primary: var(--deck-alt-primary);
+  --deck-primary-text: var(--deck-alt-primary-text);
+  --deck-text: var(--deck-alt-text);
+  --deck-muted: var(--deck-alt-muted);
+  --deck-border: var(--deck-alt-border);
+}
+body[data-deck-theme="factory-floor"] .layout-closing {
+  --deck-bg: #F2C94C;
+  --deck-surface: #F7D96A;
+  --deck-surface-strong: #173F5F;
+  --deck-primary: #173F5F;
+  --deck-primary-text: #173F5F;
+  --deck-text: #101820;
+  --deck-muted: #334A5B;
+  --deck-border: #173F5F;
+}
 
 /* Legal Docket: case-file paper, exhibit tabs, and oxblood rulings. */
 body[data-deck-theme="legal-docket"] .slide { background-color: var(--deck-bg); background-image: linear-gradient(90deg, transparent 0 92px, color-mix(in srgb, var(--deck-primary) 30%, transparent) 92px 94px, transparent 94px); }
@@ -8111,6 +8320,428 @@ body[data-deck-theme="logistics-control-tower"] .supply-node:nth-child(3) .suppl
 body[data-deck-theme="logistics-control-tower"] :is(.content-card, .kpi-card, .timeline-step, .dashboard-domain) { border: 2px solid var(--deck-primary); border-radius: 0; box-shadow: inset 0 8px 0 #E66A2C; }
 body[data-deck-theme="logistics-control-tower"] :is(.chart-body, .data-table-wrap, .technical-diagram-stage) { border: 2px solid var(--deck-primary); border-radius: 0; }
 body[data-deck-theme="logistics-control-tower"] .data-table th { background: var(--deck-primary); color: var(--deck-inverse); font-family: var(--deck-label); }
+
+/* Coral: warm magazine spreads alternate coral, cream, and ink instead of
+   inheriting Broadside's dark three-column newspaper rhythm. */
+body[data-deck-theme-id="coral"] .layout-cards,
+body[data-deck-theme-id="coral"] .layout-chart-data {
+  --deck-bg: #F5F0E8;
+  --deck-surface: #FFFDF8;
+  --deck-surface-strong: #E8E0D4;
+  --deck-primary: #E85D5D;
+  --deck-primary-text: #D44A4A;
+  --deck-primary-soft: #F2C7C2;
+  --deck-text: #1A1A1A;
+  --deck-muted: #6B625C;
+  --deck-border: #1A1A1A;
+}
+
+body[data-deck-theme-id="coral"][data-deck-composition] .cards-count-3 .cards-grid {
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-content: stretch;
+  padding: 28px 0 34px;
+}
+
+body[data-deck-theme-id="coral"] .cards-count-3 .content-card {
+  min-height: 0;
+  padding: 28px 30px;
+  border: 2px solid #1A1A1A;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+body[data-deck-theme-id="coral"] .cards-count-3 .content-card:first-child {
+  grid-row: 1 / span 2;
+  align-content: end;
+  background: #E85D5D;
+}
+
+body[data-deck-theme-id="coral"] .cards-count-3 .content-card:nth-child(2) {
+  background: #FFFDF8;
+}
+
+body[data-deck-theme-id="coral"] .cards-count-3 .content-card:nth-child(3) {
+  --deck-text: #F5F0E8;
+  --deck-muted: #CFC3B7;
+  --deck-primary-text: #E85D5D;
+  background: #1A1A1A;
+}
+
+body[data-deck-theme-id="coral"] .cards-count-3 .content-card::after {
+  right: 22px;
+  bottom: 22px;
+  width: 38px;
+  height: 38px;
+  border: 0;
+  border-radius: 0;
+  background: currentColor;
+  opacity: 0.12;
+}
+
+body[data-deck-theme-id="coral"] .layout-chart-data .chart-body {
+  border: 2px solid #1A1A1A;
+  border-top: 12px solid #E85D5D;
+  border-radius: 0;
+  background: #FFFDF8;
+  box-shadow: 14px 14px 0 #E85D5D;
+}
+
+body[data-deck-theme-id="coral"] .layout-chart-data .chart-footer {
+  margin: 0 -1px -1px;
+  padding: 16px 20px;
+  border-top: 2px solid #1A1A1A;
+  background: #E8E0D4;
+}
+
+/* Mono Blue: a dominant electric-blue panel with two compact satellites keeps
+   this restrained variant separate from Raw Grid's stacked ledger records. */
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .layout-cards.cards-count-3 .cards-grid {
+  grid-template-columns: minmax(0, 1.28fr) minmax(0, 0.72fr);
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  align-content: stretch;
+  padding: 28px 0 36px;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .cards-count-3 .content-card {
+  display: block;
+  min-height: 0;
+  padding: 30px 32px;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .cards-count-3 .content-card:first-child {
+  --deck-text: #FFFFFF;
+  --deck-muted: #E3E6FF;
+  --deck-primary-text: #FFFFFF;
+  grid-row: 1 / span 2;
+  background: #1E2BFA;
+  box-shadow: 14px 14px 0 #000000;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .cards-count-3 .content-card:nth-child(2) {
+  background: #FFFFFF;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .cards-count-3 .content-card:nth-child(3) {
+  background: #E3E6FF;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .cards-count-3 .card-copy {
+  display: block;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .cards-count-3 .card-index {
+  position: absolute;
+  top: 24px;
+  right: 26px;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"][data-deck-composition] .cards-count-3 :is(.card-kicker, .content-card h3, .card-body) {
+  max-width: 460px;
+  margin-right: 0;
+  padding: 0;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"] .layout-chart-data {
+  --deck-bg: #E3E6FF;
+}
+
+body[data-deck-theme-id="block-frame-mono-blue"] .layout-chart-data .chart-body {
+  border: 5px solid #000000;
+  border-radius: 0;
+  background: #FFFFFF;
+  box-shadow: 14px 14px 0 #1E2BFA;
+}
+
+/* Creative Mode: restore the source system's saturated poster-block grammar;
+   People's Platform keeps the calmer civic-card stage. */
+body[data-deck-theme-id="creative-mode"] .layout-cover-editorial {
+  background: linear-gradient(90deg, #EFE9D9 0 72%, #1F8A4C 72% 100%);
+}
+
+body[data-deck-theme-id="creative-mode"][data-deck-composition] .cards-count-3 .cards-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-content: stretch;
+  padding: 28px 0 34px;
+}
+
+body[data-deck-theme-id="creative-mode"][data-deck-composition] .cards-count-3 .content-card {
+  min-height: 0;
+  padding: 28px 30px;
+  border: 4px solid #0F0F0F;
+  border-radius: 0;
+  box-shadow: 10px 10px 0 #0F0F0F;
+}
+
+body[data-deck-theme-id="creative-mode"] .cards-count-3 .content-card:first-child {
+  --deck-text: #EFE9D9;
+  --deck-muted: #EFE9D9;
+  --deck-primary-text: #F5C518;
+  grid-column: 1 / span 7;
+  grid-row: 1 / span 2;
+  background: #1F8A4C;
+}
+
+body[data-deck-theme-id="creative-mode"] .cards-count-3 .content-card:nth-child(2) {
+  grid-column: 8 / -1;
+  background: #F06CA8;
+}
+
+body[data-deck-theme-id="creative-mode"] .cards-count-3 .content-card:nth-child(3) {
+  --deck-text: #EFE9D9;
+  --deck-muted: #EFE9D9;
+  --deck-primary-text: #F5C518;
+  grid-column: 8 / -1;
+  background: #E85A1F;
+}
+
+body[data-deck-theme-id="creative-mode"] .cards-count-3 .content-card::after {
+  right: 20px;
+  bottom: 18px;
+  width: 46px;
+  height: 46px;
+  border: 4px solid #0F0F0F;
+  border-radius: 0;
+  background: #F5C518;
+}
+
+body[data-deck-theme-id="creative-mode"] .layout-chart-data {
+  --deck-bg: #E4DCC4;
+}
+
+body[data-deck-theme-id="creative-mode"] .layout-chart-data .chart-body {
+  border: 4px solid #0F0F0F;
+  border-radius: 0;
+  background: #EFE9D9;
+  box-shadow: 14px 14px 0 #F06CA8;
+}
+
+body[data-deck-theme-id="creative-mode"] .layout-chart-data .chart-footer {
+  margin: 0 -1px -1px;
+  padding: 16px 20px;
+  border-top: 4px solid #0F0F0F;
+  background: #F5C518;
+}
+
+/* Consulting Navy: turn the neutral institutional rail into a decision pack
+   with a navy cover docket, executive-summary hierarchy, and review header. */
+body[data-deck-theme-id="consulting-navy"] .layout-cover-editorial {
+  background: linear-gradient(90deg, #F4F7FA 0 calc(100% - 430px), #173B63 calc(100% - 430px) 100%);
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-cover-editorial .editorial-cover-copy::after {
+  content: "DECISION PACK\A CONFIDENTIAL / REVIEW";
+  position: absolute;
+  right: 42px;
+  bottom: 76px;
+  z-index: 2;
+  width: 340px;
+  white-space: pre;
+  color: #FFFFFF;
+  font-family: var(--deck-label);
+  font-size: 18px;
+  line-height: 1.65;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-cover-editorial .editorial-cover-top,
+body[data-deck-theme-id="consulting-navy"] .layout-cover-editorial .editorial-cover-footer {
+  padding-right: 454px;
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-cover-editorial .editorial-cover-copy {
+  max-width: 1180px;
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-cover-editorial .editorial-cover-copy h1 {
+  max-width: 1120px;
+  font-size: 104px;
+  letter-spacing: -0.045em;
+}
+
+body[data-deck-theme-id="consulting-navy"][data-deck-composition] .layout-cards.cards-count-3 .cards-grid {
+  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-content: stretch;
+  padding: 30px 0 36px;
+}
+
+body[data-deck-theme-id="consulting-navy"] .cards-count-3 .content-card {
+  min-height: 0;
+  padding: 28px 32px;
+  border: 1px solid #9DAAB7;
+  border-left: 8px solid #173B63;
+  border-radius: 0;
+  background: #FFFFFF;
+  box-shadow: none;
+}
+
+body[data-deck-theme-id="consulting-navy"] .cards-count-3 .content-card:first-child {
+  --deck-text: #FFFFFF;
+  --deck-muted: #DCE7F1;
+  --deck-primary-text: #FFFFFF;
+  grid-row: 1 / span 2;
+  border: 0;
+  background: #173B63;
+}
+
+body[data-deck-theme-id="consulting-navy"] .cards-count-3 .content-card:first-child::before {
+  content: "EXECUTIVE\A SUMMARY";
+  display: block;
+  margin-bottom: 118px;
+  white-space: pre;
+  color: #AFC3D6;
+  font-family: var(--deck-label);
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+body[data-deck-theme-id="consulting-navy"] .cards-count-3 .content-card::after {
+  display: none;
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-chart-data .slide-header {
+  padding: 22px 28px;
+  border: 0;
+  background: #173B63;
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-chart-data .slide-header :is(.eyebrow, h2, .header-note) {
+  color: #FFFFFF;
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-chart-data .chart-body {
+  margin-top: 18px;
+  border: 1px solid #9DAAB7;
+  border-left: 14px solid #173B63;
+  border-radius: 0;
+  background: #FFFFFF;
+}
+
+body[data-deck-theme-id="consulting-navy"] .layout-chart-data .chart-footer {
+  padding: 16px 20px;
+  border-top: 1px solid #9DAAB7;
+  background: #E7EDF3;
+}
+
+/* Monochrome: remove the shared blue-professional rail and restore an austere
+   typeset ledger built from ink fields, rules, and asymmetric white space. */
+body[data-deck-theme-id="monochrome"] .composition-ledger-rail {
+  display: none;
+}
+
+body[data-deck-theme-id="monochrome"] .layout-cover-editorial {
+  background: linear-gradient(90deg, #1A1A16 0 35%, #FAFADF 35% 100%);
+}
+
+body[data-deck-theme-id="monochrome"] .layout-cover-editorial .editorial-cover-copy::after {
+  content: "MONO / LEDGER\A VOL. 01";
+  position: absolute;
+  top: 150px;
+  left: 82px;
+  z-index: 1;
+  white-space: pre;
+  color: #FAFADF;
+  font-family: var(--deck-label);
+  font-size: 18px;
+  line-height: 1.7;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+body[data-deck-theme-id="monochrome"] .layout-cover-editorial :is(
+  .editorial-cover-top,
+  .editorial-cover-copy,
+  .editorial-cover-footer
+) {
+  margin-left: 610px;
+}
+
+body[data-deck-theme-id="monochrome"] .layout-cover-editorial .editorial-cover-copy {
+  max-width: 990px;
+}
+
+body[data-deck-theme-id="monochrome"] .layout-cover-editorial .editorial-cover-copy h1 {
+  font-size: 102px;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+}
+
+body[data-deck-theme-id="monochrome"][data-deck-composition] .layout-cards.cards-count-3 .cards-grid {
+  grid-template-columns: minmax(0, 1.12fr) repeat(2, minmax(0, 0.94fr));
+  gap: 0;
+  align-content: stretch;
+  padding: 30px 0 38px;
+}
+
+body[data-deck-theme-id="monochrome"] .cards-count-3 .content-card {
+  min-height: 0;
+  padding: 46px 30px 34px;
+  border: 0;
+  border-top: 2px solid #1A1A16;
+  border-right: 1px solid #A9A994;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+body[data-deck-theme-id="monochrome"] .cards-count-3 .content-card:first-child {
+  --deck-text: #FAFADF;
+  --deck-muted: #D7D7BE;
+  --deck-primary-text: #FAFADF;
+  background: #1A1A16;
+}
+
+body[data-deck-theme-id="monochrome"] .cards-count-3 .content-card:last-child {
+  border-right: 0;
+}
+
+body[data-deck-theme-id="monochrome"] .cards-count-3 .content-card::after {
+  display: none;
+}
+
+body[data-deck-theme-id="monochrome"] .cards-count-3 .card-index {
+  position: static;
+  display: block;
+  margin-bottom: 96px;
+  font-family: var(--deck-display);
+  font-size: 54px;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+body[data-deck-theme-id="monochrome"] .cards-count-3 .content-card h3 {
+  font-size: 38px;
+  font-weight: 500;
+}
+
+body[data-deck-theme-id="monochrome"] .layout-chart-data .slide-header {
+  padding-top: 20px;
+  border-top: 6px double #1A1A16;
+  border-bottom: 1px solid #1A1A16;
+}
+
+body[data-deck-theme-id="monochrome"] .layout-chart-data .chart-body {
+  margin-top: 18px;
+  border: 0;
+  border-bottom: 1px solid #1A1A16;
+  border-radius: 0;
+  background: transparent;
+}
+
+body[data-deck-theme-id="monochrome"] .layout-chart-data .chart-footer {
+  padding: 14px 0;
+  border-top: 1px solid #A9A994;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .toolbar-location.is-updated {

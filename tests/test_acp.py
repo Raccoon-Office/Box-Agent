@@ -39,6 +39,7 @@ from box_agent.config import (
 from box_agent.memory import MemoryManager
 from box_agent.llm import SessionBoundLLM
 from box_agent.loop_guards import CompletionGate
+from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.bash_tool import BackgroundShellManager
@@ -271,6 +272,133 @@ class DummyLLM:
         else:
             yield StreamEvent(type="text", delta="done")
             yield StreamEvent(type="finish", finish_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_acp_registers_skillhub_search_only_for_capable_host(tmp_path) -> None:
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
+
+    plain = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    capable = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={"host_capabilities": {"skillhub_search": 1}},
+        )
+    )
+    install_capable = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={
+                "host_capabilities": {
+                    "skillhub_search": 1,
+                    "skillhub_install": 1,
+                }
+            },
+        )
+    )
+
+    assert "search_skillhub" not in agent._sessions[plain.sessionId].agent.tools
+    capable_agent = agent._sessions[capable.sessionId].agent
+    assert "search_skillhub" in capable_agent.tools
+    assert "install_skillhub_skill" not in capable_agent.tools
+    assert "## SkillHub capability-gap fallback" in capable_agent.system_prompt
+    assert capable.field_meta["capabilities"]["skillhub_search_versions"] == [1]
+    install_capable_agent = agent._sessions[install_capable.sessionId].agent
+    assert "search_skillhub" in install_capable_agent.tools
+    assert "install_skillhub_skill" in install_capable_agent.tools
+    assert install_capable.field_meta["capabilities"]["skillhub_install_versions"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_acp_skillhub_install_uses_host_rpc_after_confirmation(tmp_path) -> None:
+    class SkillHubConn(DummyConn):
+        def __init__(self):
+            super().__init__()
+            self.ext_calls = []
+
+        async def ext_method(self, method, request):
+            self.ext_calls.append((method, request))
+            if method == "session/skillhub_search":
+                if request["query"] != "edge-tts":
+                    return {"status": "empty", "items": []}
+                return {
+                    "status": "found",
+                    "items": [
+                        {
+                            "id": "skill-tts",
+                            "slug": "edge-tts",
+                            "name": "文字转语音",
+                            "publisherDisplayName": "林",
+                            "currentVersion": "1.0.0",
+                        }
+                    ],
+                }
+            if method == "session/skillhub_install":
+                return {
+                    "status": "installed",
+                    "skill": {"name": "edge-tts"},
+                }
+            raise AssertionError(f"unexpected method: {method}")
+
+    class Approver:
+        async def negotiate(self, permission_request):
+            assert permission_request["scope"] == "skillhub"
+            return True
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = SkillHubConn()
+    agent = BoxACPAgent(conn, config, DummyLLM(), [], "system")
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={
+                "host_capabilities": {
+                    "skillhub_search": 1,
+                    "skillhub_install": 1,
+                }
+            },
+        )
+    )
+    tools = agent._sessions[session.sessionId].agent.tools
+
+    search_result = await tools["search_skillhub"].invoke(
+        {
+            "request_kind": "explicit_install_request",
+            "requested_outcome": "Install edge-tts",
+            "missing_capability": "edge-tts",
+            "gap_type": "missing_tool_or_runtime",
+            "fallback_assessment": "The requested market Skill is not installed.",
+            "queries": ["edge-tts", "TTS"],
+        }
+    )
+    install_result, policy_decision = await invoke_tool_with_permissions(
+        tools["install_skillhub_skill"],
+        {"skill_id": "skill-tts"},
+        permission_negotiator=Approver(),
+    )
+
+    assert search_result.raw_output["status"] == "found"
+    assert install_result.success
+    assert policy_decision["decision"] == "approved"
+    assert [method for method, _request in conn.ext_calls] == [
+        "session/skillhub_search",
+        "session/skillhub_search",
+        "session/skillhub_install",
+    ]
+    install_request = conn.ext_calls[-1][1]
+    assert install_request["sessionId"] == session.sessionId
+    assert install_request["skillId"] == "skill-tts"
+    assert install_request["slug"] == "edge-tts"
+    assert install_request["displayName"] == "文字转语音"
 
 
 class ProjectArtifactLLM:

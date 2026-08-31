@@ -97,21 +97,20 @@ def _call_business_api(module, module_suffix: str, credential_source: str) -> No
         raise AssertionError(f"unknown Midu module: {module_suffix}")
 
 
-def test_midu_first_release_lists_only_five_builtin_skills() -> None:
+def test_midu_skills_are_marketplace_sources_not_builtin() -> None:
     manifest = json.loads((SKILLS_ROOT / "_manifest.json").read_text(encoding="utf-8"))
     entries = {item["name"]: item for item in manifest["skills"]}
 
-    assert MIDU_SKILL_NAMES <= entries.keys()
+    assert not MIDU_SKILL_NAMES & entries.keys()
     assert not REMOVED_MIDU_SKILL_NAMES & entries.keys()
     for skill_name in REMOVED_MIDU_SKILL_NAMES:
         assert not (SKILLS_ROOT / skill_name).exists()
 
-    loader = SkillLoader(sources=[(SKILLS_ROOT, "builtin")])
-    loader.discover_skills()
+    builtin_loader = SkillLoader(sources=[(SKILLS_ROOT, "builtin")])
+    builtin_loader.discover_skills()
     for name in MIDU_SKILL_NAMES:
-        skill = loader.get_skill(name)
-        assert skill is not None
-        assert skill.source == "builtin"
+        assert (SKILLS_ROOT / name / "SKILL.md").is_file()
+        assert builtin_loader.get_skill(name) is None
 
 
 def test_midu_skills_share_one_authentication_implementation() -> None:

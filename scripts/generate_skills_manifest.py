@@ -29,26 +29,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "box_agent" / "skills"
 MANIFEST_PATH = SKILLS_DIR / "_manifest.json"
 
-# Top-level skill directories that physically live under box_agent/skills/ (so
-# they ship inside the wheel/runtime) but must NOT be loaded as builtin —
-# including any nested sub-skills (e.g. viral-topic is a suite with
-# wechat-/x-/bilibili-/youtube-viral-topic). officev3 vendors these as
-# "featured" recommended cards and installs them on demand into the user skills
-# dir (~/.box-agent/skills/). Keeping them out of the manifest leaves them as
-# orphans here — ignored by the builtin SkillLoader, available for on-demand
-# install. Do NOT remove unless you intend to make them always-on builtin.
-EXCLUDED_SKILL_DIRS: frozenset[str] = frozenset(
+# Only host contracts and core Office workflows belong in the builtin catalog.
+# Every other SKILL.md may remain in the wheel/runtime during the marketplace
+# migration, but is intentionally omitted from _manifest.json and therefore
+# invisible to ordinary sessions. Marketplace installation copies those skills
+# into ~/.box-agent/skills/, where the user source is discovered independently
+# of this builtin whitelist.
+BUILTIN_SKILL_NAMES: frozenset[str] = frozenset(
     {
-        "viral-topic",
-        "viral-title",
-        "self-media-ad-workflow",
-        "landscape-drawing-review-skill",
-        "storymap-generate-person",
-        "skill-navigation-assistant-sl",
-        "city-travel-skill-developer-1.2.0",
-        "city-travel-planner",
-        "autohot-skill",
-        "film-tv-license-application-assistant",
+        "browser-use",
+        "data-dashboard",
+        "docx",
+        "html-templates",
+        "mcp-config",
+        "memory-guide",
+        "pdf",
+        "pptx",
+        "research-synthesis",
+        "roadmap",
+        "scheduled-task",
+        "xlsx",
     }
 )
 
@@ -117,30 +117,40 @@ def _collect_skills() -> List[Tuple[str, str]]:
     if not SKILLS_DIR.exists():
         raise SystemExit(f"error: skills directory not found: {SKILLS_DIR}")
 
-    entries: List[Tuple[str, str]] = []
+    discovered: List[Tuple[str, str]] = []
     for skill_md in sorted(SKILLS_DIR.rglob("SKILL.md")):
         rel = skill_md.relative_to(SKILLS_DIR).as_posix()
-        top_dir = rel.split("/", 1)[0]
-        if top_dir in EXCLUDED_SKILL_DIRS:
-            print(
-                f"info: excluding '{rel}' from builtin manifest "
-                f"(officev3 on-demand recommended skill)",
-                file=sys.stderr,
-            )
-            continue
         name = _parse_skill_name(skill_md)
         if not name:
             continue
-        entries.append((name, rel))
+        discovered.append((name, rel))
 
     seen: dict[str, str] = {}
-    for name, rel in entries:
+    for name, rel in discovered:
         if name in seen:
             raise SystemExit(
                 f"error: duplicate skill name '{name}' in builtin skills "
                 f"({seen[name]} vs {rel})"
             )
         seen[name] = rel
+
+    missing = BUILTIN_SKILL_NAMES - seen.keys()
+    if missing:
+        raise SystemExit(
+            "error: builtin skill whitelist references missing skills: "
+            + ", ".join(sorted(missing))
+        )
+
+    entries: List[Tuple[str, str]] = []
+    for name, rel in discovered:
+        if name not in BUILTIN_SKILL_NAMES:
+            print(
+                f"info: excluding '{rel}' from builtin manifest "
+                f"(marketplace skill source)",
+                file=sys.stderr,
+            )
+            continue
+        entries.append((name, rel))
 
     return entries
 

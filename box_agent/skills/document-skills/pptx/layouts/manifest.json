@@ -3125,8 +3125,8 @@
       },
       "palette": {
         "background": "#1A1A1A",
-        "surface": "#F5F0E8",
-        "surface_strong": "#E8E0D4",
+        "surface": "#26201F",
+        "surface_strong": "#352826",
         "primary": "#E85D5D",
         "primary_soft": "#462727",
         "text": "#F5F0E8",
@@ -3143,7 +3143,7 @@
           "#E85D5D",
           "#F5F0E8",
           "#A56E68",
-          "#D44A4A"
+          "#4F7C78"
         ]
       },
       "typography": {
@@ -4003,6 +4003,13 @@
         "muted": "#53636D",
         "border": "#81939D",
         "inverse": "#FFFFFF",
+        "alt_background": "#173F5F",
+        "alt_surface": "#214E70",
+        "alt_text": "#F7FAFC",
+        "alt_muted": "#CFDAE0",
+        "alt_border": "#6F8798",
+        "alt_primary": "#F2C94C",
+        "alt_primary_text": "#F2C94C",
         "chart": [
           "#173F5F",
           "#F2C94C",
@@ -5940,7 +5947,7 @@
       "palette": {
         "background": "#060507",
         "surface": "#171017",
-        "surface_strong": "#F5EDF1",
+        "surface_strong": "#3A2634",
         "primary": "#ED3D8C",
         "primary_soft": "#3B1028",
         "text": "#F5EDF1",
@@ -5957,7 +5964,7 @@
           "#ED3D8C",
           "#FF66A8",
           "#F5EDF1",
-          "#B81D67"
+          "#6F5AE8"
         ]
       },
       "typography": {
@@ -8263,11 +8270,11 @@
       "palette": {
         "background": "#1C1C1C",
         "surface": "#242422",
-        "surface_strong": "#F5D200",
+        "surface_strong": "#4B4212",
         "primary": "#F5D200",
         "primary_soft": "#3D3811",
-        "text": "#F5D200",
-        "muted": "#A79100",
+        "text": "#F4EEDC",
+        "muted": "#B8AA72",
         "border": "#4B4619",
         "inverse": "#1C1C1C",
         "alt_background": "#F5D200",
@@ -8278,9 +8285,9 @@
         "alt_primary": "#1C1C1C",
         "chart": [
           "#F5D200",
-          "#FFF28A",
-          "#A79100",
-          "#F0CC00"
+          "#F4EEDC",
+          "#8F9AA5",
+          "#E66A3D"
         ]
       },
       "typography": {

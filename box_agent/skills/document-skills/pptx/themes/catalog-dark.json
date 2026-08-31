@@ -118,7 +118,7 @@
       "palette": {
         "background": "#060507",
         "surface": "#171017",
-        "surface_strong": "#F5EDF1",
+        "surface_strong": "#3A2634",
         "primary": "#ED3D8C",
         "primary_soft": "#3B1028",
         "text": "#F5EDF1",
@@ -131,7 +131,7 @@
         "alt_muted": "#6D4A5A",
         "alt_border": "#C9A9B8",
         "alt_primary": "#B81D67",
-        "chart": ["#ED3D8C", "#FF66A8", "#F5EDF1", "#B81D67"]
+        "chart": ["#ED3D8C", "#FF66A8", "#F5EDF1", "#6F5AE8"]
       },
       "typography": {
         "display": "Instrument Serif, Noto Serif SC, Songti SC, Georgia, serif",
@@ -171,11 +171,11 @@
       "palette": {
         "background": "#1C1C1C",
         "surface": "#242422",
-        "surface_strong": "#F5D200",
+        "surface_strong": "#4B4212",
         "primary": "#F5D200",
         "primary_soft": "#3D3811",
-        "text": "#F5D200",
-        "muted": "#A79100",
+        "text": "#F4EEDC",
+        "muted": "#B8AA72",
         "border": "#4B4619",
         "inverse": "#1C1C1C",
         "alt_background": "#F5D200",
@@ -184,7 +184,7 @@
         "alt_muted": "#514800",
         "alt_border": "#1C1C1C",
         "alt_primary": "#1C1C1C",
-        "chart": ["#F5D200", "#FFF28A", "#A79100", "#F0CC00"]
+        "chart": ["#F5D200", "#F4EEDC", "#8F9AA5", "#E66A3D"]
       },
       "typography": {
         "display": "Barlow, Arial Black, Noto Sans SC, PingFang SC, sans-serif",
