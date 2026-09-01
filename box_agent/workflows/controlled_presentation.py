@@ -157,7 +157,16 @@ _REPAIR_STAGES: Final[frozenset[str]] = frozenset(
 )
 _POLICY_REJECTION_STAGES: Final[frozenset[str]] = (
     _REPAIR_STAGES
-    | frozenset({"research", "outline", "scaffold", "apply_patch", "apply_redesign"})
+    | frozenset(
+        {
+            "research",
+            "outline",
+            "scaffold",
+            "image_status_sync",
+            "apply_patch",
+            "apply_redesign",
+        }
+    )
 )
 _REPEATED_EXECUTION_FAILURE_LIMIT: Final[int] = 2
 _REPEATED_POLICY_REJECTION_LIMIT: Final[int] = 3
@@ -444,18 +453,54 @@ def _image_status_error(
     stage: str | None,
     tool_name: str,
     arguments: dict[str, Any],
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
 ) -> str | None:
     if stage != "image_status_sync":
         return None
     command = arguments.get("command")
+    if tool_name != "bash" or not isinstance(command, str):
+        return _IMAGE_STATUS_TOOL_ERROR
+    if "\n" in command or "\r" in command:
+        return _IMAGE_STATUS_TOOL_ERROR
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return _IMAGE_STATUS_TOOL_ERROR
+
+    artifact_root = artifact_scan_root(workspace_dir, artifact_root_dir)
+    if artifact_root is None:
+        return _IMAGE_STATUS_TOOL_ERROR
+    artifact_root = artifact_root.resolve(strict=False)
+
+    if len(tokens) >= 3 and tokens[0] == "cd" and tokens[2] == "&&":
+        supplied_root = Path(tokens[1].replace("\\", "/")).expanduser()
+        if supplied_root.resolve(strict=False) != artifact_root:
+            return _IMAGE_STATUS_TOOL_ERROR
+        tokens = tokens[3:]
+
+    if len(tokens) != 3:
+        return _IMAGE_STATUS_TOOL_ERROR
+    node_token, script_token, manifest_token = tokens
+    node_name = Path(node_token.replace("\\", "/")).name.casefold()
+    if node_name not in {"node", "node.exe"} and "BOX_AGENT_NODE" not in node_token:
+        return _IMAGE_STATUS_TOOL_ERROR
+
+    script_path = Path(script_token.replace("\\", "/")).expanduser()
     if (
-        tool_name == "bash"
-        and isinstance(command, str)
-        and "sync_image_manifest_status.js" in command
-        and "assets/generated/manifest.json" in command
+        not script_path.is_absolute()
+        or script_path.resolve(strict=False)
+        != _SYNC_IMAGE_STATUS_SCRIPT.resolve(strict=False)
     ):
-        return None
-    return _IMAGE_STATUS_TOOL_ERROR
+        return _IMAGE_STATUS_TOOL_ERROR
+
+    manifest_path = Path(manifest_token.replace("\\", "/")).expanduser()
+    if not manifest_path.is_absolute():
+        manifest_path = artifact_root / manifest_path
+    expected_manifest = artifact_root / "assets" / "generated" / "manifest.json"
+    if manifest_path.resolve(strict=False) != expected_manifest.resolve(strict=False):
+        return _IMAGE_STATUS_TOOL_ERROR
+    return None
 
 
 def _finalize_error(
@@ -3252,7 +3297,13 @@ class ControlledPresentationPolicy:
             )
         ):
             return _REDESIGN_REPAIR_TOOL_ERROR
-        image_status_error = _image_status_error(self.stage, tool_name, arguments)
+        image_status_error = _image_status_error(
+            self.stage,
+            tool_name,
+            arguments,
+            self.workspace_dir,
+            self.artifact_root_dir,
+        )
         if image_status_error is not None:
             return image_status_error
         apply_patch_error = _apply_patch_error(

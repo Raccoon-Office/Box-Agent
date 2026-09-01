@@ -81,6 +81,7 @@ APPLY_PATCH_SCRIPT = FINALIZER_SCRIPT.parent / "apply_deck_patch.js"
 APPLY_REDESIGN_SCRIPT = FINALIZER_SCRIPT.parent / "apply_deck_redesign.js"
 VALIDATE_OUTLINE_SCRIPT = FINALIZER_SCRIPT.parent / "validate_outline.js"
 REBASE_IMAGE_POLICY_SCRIPT = FINALIZER_SCRIPT.parent / "rebase_image_policy.js"
+SYNC_IMAGE_STATUS_SCRIPT = FINALIZER_SCRIPT.parent / "sync_image_manifest_status.js"
 
 
 def _write_valid_research_report(
@@ -6003,6 +6004,88 @@ async def test_controlled_image_status_sync_blocks_manual_manifest_edit(tmp_path
     assert "CONTROLLED_PRESENTATION_IMAGE_STATUS_SYNC_REQUIRED" in (
         blocked.error or ""
     )
+
+
+def test_controlled_image_status_sync_allows_windows_separator_command(tmp_path):
+    output = tmp_path / "output"
+    manifest = output / "assets" / "generated" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"image_plan":[]}', encoding="utf-8")
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=output,
+        research_mode="content_ready",
+        stage="image_status_sync",
+    )
+
+    def windows_path(path: Path) -> str:
+        return str(path).replace("/", "\\")
+
+    command = (
+        f"cd {shlex.quote(windows_path(output))} && node "
+        f"{shlex.quote(windows_path(SYNC_IMAGE_STATUS_SCRIPT))} "
+        f"{shlex.quote(windows_path(manifest))}"
+    )
+
+    assert policy.tool_call_error(
+        "bash",
+        {"command": command},
+        verified_evidence_urls=set(),
+    ) is None
+    assert policy.tool_call_error(
+        "bash",
+        {"command": f"{command} && echo bypass"},
+        verified_evidence_urls=set(),
+    ) is not None
+
+
+def test_controlled_image_status_sync_allows_its_deterministic_action(tmp_path):
+    output = tmp_path / "output"
+    manifest = output / "assets" / "generated" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"image_plan":[]}', encoding="utf-8")
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=output,
+        research_mode="content_ready",
+        stage="image_status_sync",
+    )
+
+    action = policy.next_deterministic_action()
+
+    assert action is not None
+    assert action.capability == "controlled_presentation.image_status_sync"
+    assert policy.tool_call_error(
+        action.tool_name,
+        action.arguments,
+        verified_evidence_urls=set(),
+    ) is None
+
+
+def test_controlled_image_status_policy_rejections_trip_repair_fuse(tmp_path):
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=tmp_path / "output",
+        research_mode="content_ready",
+        stage="image_status_sync",
+    )
+
+    for decision_id in range(1, 4):
+        policy.begin_tool_decision(decision_id)
+        blocked = policy.tool_call_error(
+            "read_file",
+            {"path": "assets/generated/manifest.json"},
+            verified_evidence_urls=set(),
+        )
+        assert blocked is not None
+        policy.record_tool_result(
+            "read_file",
+            {"path": "assets/generated/manifest.json"},
+            ToolResult(success=False, error=blocked),
+            executed=False,
+        )
+
+    assert policy.repair_stalled is True
 
 
 @pytest.mark.asyncio
