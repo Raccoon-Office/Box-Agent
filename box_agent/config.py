@@ -75,10 +75,10 @@ class LLMConfig(BaseModel):
     # Wall-clock cap (seconds) handed to the underlying provider SDK. For
     # streaming calls this bounds the gap between bytes (connect + per-read),
     # not the total generation, so a long answer is fine as long as tokens keep
-    # flowing. Defaults to the OpenAI/Anthropic SDK default of 600s; lower it to
+    # flowing. Product sessions allow up to 20 minutes by default; lower it to
     # fail fast and surface a clean error instead of hanging when a gateway
     # stalls before the first token.
-    timeout: float = 600.0
+    timeout: float = 1200.0
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
     @property
@@ -112,7 +112,8 @@ class LiteLLMConfig(BaseModel):
     provider: str = "openai"
     auth_file: str = ""
     max_output_tokens: int = 63999
-    # See ``LLMConfig.timeout``. Mirrors the main model's wall-clock cap.
+    # Lightweight calls keep the SDK's shorter default rather than inheriting
+    # the main model's long-running agent allowance.
     timeout: float = 600.0
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
@@ -492,7 +493,7 @@ class Config(BaseModel):
             auth_file=data.get("auth_file") or str(config_path.parent / "auth.json"),
             context_window=data.get("context_window", 180000),
             max_output_tokens=data.get("max_output_tokens", default_max_output_tokens),
-            timeout=float(data.get("timeout", 600.0) or 600.0),
+            timeout=float(data.get("timeout", 1200.0) or 1200.0),
             retry=retry_config,
         )
 

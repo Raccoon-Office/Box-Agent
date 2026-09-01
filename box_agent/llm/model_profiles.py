@@ -92,7 +92,7 @@ def load_model_profile_revision(
         "maxTokens": _positive_int(
             profile.get("maxTokens"), field="maxTokens", default=63_999
         ),
-        "timeout": float(profile.get("timeout") or 600.0),
+        "timeout": float(profile.get("timeout") or 1200.0),
     }
 
 

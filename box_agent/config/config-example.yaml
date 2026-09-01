@@ -45,10 +45,10 @@ max_output_tokens: 63999
 
 # Per-request wall-clock cap (seconds) handed to the provider SDK. For streaming
 # calls this bounds the gap between bytes (connect + per-read), not the total
-# generation — a long answer is fine as long as tokens keep flowing. Defaults to
-# the SDK default of 600. Lower it to fail fast with a clean error instead of
-# hanging when a gateway stalls before the first token.
-timeout: 600.0
+# generation — a long answer is fine as long as tokens keep flowing. Agent
+# sessions default to 1200 seconds. Lower it to fail fast with a clean error
+# instead of hanging when a gateway stalls before the first token.
+timeout: 1200.0
 
 # ===== Lite LLM (Optional) =====
 # Lightweight model for small, tool-free tasks: session-title generation,

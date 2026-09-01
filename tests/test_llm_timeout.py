@@ -89,6 +89,6 @@ def test_config_timeout_defaults_when_omitted():
         """
     )
     cfg = Config.from_yaml(path)
-    assert cfg.llm.timeout == 600.0
-    # Lite block absent -> default LiteLLMConfig still carries the default.
+    assert cfg.llm.timeout == 1200.0
+    # Lite block absent -> lightweight calls retain the shorter SDK default.
     assert cfg.lite_llm.timeout == 600.0
