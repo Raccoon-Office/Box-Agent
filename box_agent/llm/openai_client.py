@@ -106,7 +106,7 @@ def _apply_thinking_params(
     """Map the session deep-think flag to the provider request dialect."""
     normalized_model = (model or "").strip().casefold()
     if any(marker in normalized_model for marker in _GLM_5_3_MODEL_MARKERS):
-        params["reasoning_effort"] = "max" if thinking_enabled else "low"
+        params["reasoning_effort"] = "high" if thinking_enabled else "low"
         return
     if "deepseek" in normalized_model or "doubao" in normalized_model:
         params["extra_body"] = _litellm_extra_body(
