@@ -112,7 +112,12 @@ def build_sandbox_info_prompt(use_output_dir: bool = True) -> str:
             "沙箱有独立 `sys.executable`，cwd 已是 `{workspace}/output/`"
             "（或 host 指定的当前会话 output 根），"
             "存盘用相对路径（如 `plt.savefig(\"chart.png\")`）；禁写 `/mnt/data/`、"
-            "`sandbox:` 前缀；读用户上传文件用 `../<name>` 回 workspace 根。"
+            "`sandbox:` 前缀；读取用户上传文件时优先原样使用 host 在当前消息中提供的完整路径；"
+            "若仅有文件名，先用 `../<name>` 回会话根。若遇到 `FileNotFoundError` 或 "
+            "`No such file or directory`，不要继续猜测 `../` 层级；改用 host 提供的完整路径，"
+            "若 host 未提供完整路径，则调用 `search_files`，以 `File Access Context` 中的 "
+            "`Current workspace` 为 `path`、原文件名为 `pattern`、`target=\"files\"` 精确定位，"
+            "找到唯一结果后重试；无结果或有多个同名结果时停止并请用户确认。"
         )
     else:
         location_line = (
@@ -163,7 +168,12 @@ def build_file_delivery_prompt(use_output_dir: bool = True) -> str:
             "- **目录**：交付物落当前会话的 output 根目录；以沙箱 cwd 和 host 提供的工作区信息为准，"
             "不要写到 `~/.box-agent/` 等内部目录。\n"
             "- **相对路径**：bash、文件工具、`generate_image` 和视觉检查的相对路径都已从当前 output 根开始；"
-            "使用 `assets/generated/a.png`，不要再添加 `output/` 前缀。读取会话根的上传文件时使用 `../<name>`。\n"
+            "使用 `assets/generated/a.png`，不要再添加 `output/` 前缀。读取上传文件时优先原样使用 host 提供的完整路径；"
+            "若仅提供文件名，先尝试 `../<name>`。若工具返回 `FileNotFoundError` 或 "
+            "`No such file or directory`，不要继续猜测 `../` 层级；改用 host 完整路径，"
+            "若 host 未提供完整路径，则调用 `search_files`，以 `File Access Context` 中的 "
+            "`Current workspace` 为 `path`、原文件名为 `pattern`、`target=\"files\"` 精确定位，"
+            "找到唯一结果后重试；无结果或有多个同名结果时停止并请用户确认。\n"
             "- **命名**：新产物使用描述性小写名称和 `-` 分隔；除非用户要求，不加时间戳或 UUID。\n"
             "- **桌面交付**：完成后说明文件名即可。宿主会从结构化 ArtifactEvent 渲染可打开的文件卡。\n"
             "- **多文件交付**：用户需要单一下载包时才用 `zip -r bundle.zip 文件1 文件2` 将多文件打包为 ZIP。"

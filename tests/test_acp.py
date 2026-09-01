@@ -645,6 +645,25 @@ def test_project_sandbox_prompt_does_not_point_at_output_dir():
     assert "cwd 已是 `{workspace}/output/`" not in prompt
 
 
+def test_output_prompts_retry_legacy_attachment_path_without_env_contract():
+    sandbox_prompt = build_sandbox_info_prompt(use_output_dir=True)
+    delivery_prompt = build_file_delivery_prompt(use_output_dir=True)
+
+    for prompt in (sandbox_prompt, delivery_prompt):
+        assert "BOX_AGENT_WORKSPACE_DIR" not in prompt
+        assert "../<name>" in prompt
+        assert "FileNotFoundError" in prompt
+        assert "No such file or directory" in prompt
+        assert "不要继续猜测 `../` 层级" in prompt
+        assert "`search_files`" in prompt
+        assert "File Access Context" in prompt
+        assert "Current workspace" in prompt
+        assert '`target="files"`' in prompt
+        assert "找到唯一结果后重试" in prompt
+        assert "有多个同名结果时停止并请用户确认" in prompt
+        assert "host" in prompt
+
+
 def test_file_delivery_prompt_uses_dynamic_loopback_preview_and_reclaims_it():
     prompt = build_file_delivery_prompt(use_output_dir=True)
 
@@ -3105,18 +3124,23 @@ async def test_acp_injects_standard_box_agent_image_generation_policy(tmp_path):
 @pytest.mark.asyncio
 async def test_acp_uses_host_artifact_root_dir_for_output_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("BOX_AGENT_WORKSPACE_DIR", raising=False)
+    workspace = tmp_path / "session-a"
+    workspace.mkdir()
+    attachment = workspace / "高级配色-新标题.pptx"
+    attachment.write_bytes(b"pptx fixture")
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(workspace)),
         tools=ToolsConfig(allow_full_access=True),
     )
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
-    artifact_root = tmp_path / "session-a" / "output"
+    artifact_root = workspace / "output" / "tasks" / "task-1"
 
     session = await agent.newSession(
         SimpleNamespace(
-            cwd=str(tmp_path),
+            cwd=str(workspace),
             field_meta={
                 "session_id": "office-session-a",
                 "workspace_layout": {"artifact_root_dir": str(artifact_root)},
@@ -3125,12 +3149,32 @@ async def test_acp_uses_host_artifact_root_dir_for_output_mode(tmp_path, monkeyp
     )
     state = agent._sessions[session.sessionId]
     sandbox_tool = state.agent.tools["execute_code"]
+    bash_tool = state.agent.tools["bash"]
+    search_tool = state.agent.tools["search_files"]
 
     assert artifact_root.is_dir()
     assert state.output_dir == str(artifact_root.resolve())
     assert state.upstream_session_id == "office-session-a"
     assert not (tmp_path / "output").exists()
     assert sandbox_tool._get_workspace("ignored") == artifact_root.resolve()
+    assert "BOX_AGENT_WORKSPACE_DIR" not in bash_tool._subprocess_env
+    assert bash_tool._subprocess_env["BOX_AGENT_OUTPUT_DIR"] == str(
+        artifact_root.resolve()
+    )
+    assert attachment.is_file()
+    assert not (Path(bash_tool.workspace_dir).parent / attachment.name).exists()
+    assert str(workspace.resolve()) in state.agent.system_prompt
+
+    recovered = await search_tool.execute(
+        pattern=attachment.name,
+        target="files",
+        path=str(workspace.resolve()),
+        limit=2,
+    )
+    assert recovered.success is True
+    assert recovered.content == attachment.name
+    assert recovered.raw_output["returned_matches"] == 1
+    assert (workspace / recovered.content).is_file()
 
 
 @pytest.mark.asyncio
@@ -5319,7 +5363,10 @@ async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(tmp_path):
+async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("BOX_AGENT_WORKSPACE_DIR", raising=False)
     workspace = tmp_path / "workspace"
     python_path = tmp_path / "officev3" / "python" / "python.exe"
     node_path = tmp_path / "officev3" / "node" / "node.exe"
@@ -5376,6 +5423,8 @@ async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(tmp_
     assert execute_code_env["BOX_AGENT_SCRATCH_DIR"] == str(
         workspace / ".box-agent-scratch"
     )
+    assert "BOX_AGENT_WORKSPACE_DIR" not in bash_env
+    assert "BOX_AGENT_WORKSPACE_DIR" not in execute_code_env
     assert bash_env["NODE_PATH"].split(os.pathsep)[-1] == str(node_modules)
     assert bash_env["NPM_CONFIG_PREFIX"] == str(
         Path.home() / ".box-agent" / "skill-tools"
