@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -68,9 +69,30 @@ from .mcp_tool_catalog import get_mcp_tool_catalog
 from .model_tool_context import current_model_tool_context
 
 
+_MODEL_TOOL_NAME_MAX_LENGTH = 64
+_INVALID_MODEL_TOOL_NAME_CHARACTER = re.compile(r"[^a-zA-Z0-9_-]")
+
+
 def _warn(msg: str) -> None:
     """Write diagnostic message to stderr (never stdout)."""
     sys.stderr.write(msg + "\n")
+
+
+def _public_mcp_tool_name(server_name: str, remote_name: str) -> str:
+    """Return a stable provider-safe name while preserving the MCP name separately."""
+    mapped_name = public_browser_tool_name(server_name, remote_name)
+    if (
+        len(mapped_name) <= _MODEL_TOOL_NAME_MAX_LENGTH
+        and not _INVALID_MODEL_TOOL_NAME_CHARACTER.search(mapped_name)
+    ):
+        return mapped_name
+
+    digest = hashlib.sha256(
+        f"{server_name}\0{remote_name}".encode("utf-8")
+    ).hexdigest()[:12]
+    safe_stem = _INVALID_MODEL_TOOL_NAME_CHARACTER.sub("_", mapped_name)
+    safe_stem = safe_stem[: _MODEL_TOOL_NAME_MAX_LENGTH - len(digest) - 2]
+    return f"{safe_stem}__{digest}"
 
 
 def _replace_server_catalog(connection: "MCPServerConnection") -> None:
@@ -611,7 +633,7 @@ class MCPServerConnection:
             execute_timeout = self._get_execute_timeout()
             for tool in tools_list.tools:
                 parameters = tool.inputSchema if hasattr(tool, "inputSchema") else {}
-                public_name = public_browser_tool_name(self.name, tool.name)
+                public_name = _public_mcp_tool_name(self.name, tool.name)
                 fixed_arguments = browser_tool_fixed_arguments(self.name, parameters)
                 parameters = public_browser_tool_parameters(parameters, fixed_arguments)
                 mcp_tool = MCPTool(
