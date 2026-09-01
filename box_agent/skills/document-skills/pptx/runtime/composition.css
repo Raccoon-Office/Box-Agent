@@ -3927,10 +3927,11 @@ body:not(.deck-editing) .layout-cover.no-hero .cover-visual {
    cards-grid-v1 advertises three to six editable cards. Composition families
    may change the visual rhythm, but they must not make a valid collection
    depend on hidden overflow or unusually short placeholder copy. Four cards
-   use a stable two-by-two frame; five and six use two rows of three.
+   use a stable two-by-two frame; five and six use two rows of three. The
+   structural ledger-grid variant remains single-column and is excluded below.
    -------------------------------------------------------------------------- */
 
-body[data-deck-composition="institutional-grid"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .cards-grid,
+body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) :is(.cards-count-4, .cards-count-5, .cards-count-6) .cards-grid,
 body[data-deck-composition="editorial-spread"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .cards-grid,
 body[data-deck-composition="playful-collage"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .cards-grid,
 body[data-deck-composition="brutalist-frame"][data-deck-composition-variant="ledger-frame"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .cards-grid,
@@ -3942,7 +3943,7 @@ body[data-deck-composition="literary-minimal"][data-deck-composition-variant="as
   grid-auto-rows: minmax(0, 1fr);
 }
 
-body[data-deck-composition="institutional-grid"] .cards-count-4 .cards-grid,
+body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) .cards-count-4 .cards-grid,
 body[data-deck-composition="editorial-spread"] .cards-count-4 .cards-grid,
 body[data-deck-composition="playful-collage"] .cards-count-4 .cards-grid,
 body[data-deck-composition="brutalist-frame"][data-deck-composition-variant="ledger-frame"] .cards-count-4 .cards-grid,
@@ -3951,7 +3952,7 @@ body[data-deck-composition="literary-minimal"][data-deck-composition-variant="as
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-body[data-deck-composition="institutional-grid"] :is(.cards-count-5, .cards-count-6) .cards-grid,
+body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) :is(.cards-count-5, .cards-count-6) .cards-grid,
 body[data-deck-composition="editorial-spread"] :is(.cards-count-5, .cards-count-6) .cards-grid,
 body[data-deck-composition="playful-collage"] :is(.cards-count-5, .cards-count-6) .cards-grid,
 body[data-deck-composition="brutalist-frame"][data-deck-composition-variant="ledger-frame"] :is(.cards-count-5, .cards-count-6) .cards-grid,
@@ -3960,7 +3961,7 @@ body[data-deck-composition="literary-minimal"][data-deck-composition-variant="as
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-body[data-deck-composition="institutional-grid"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .content-card,
+body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) :is(.cards-count-4, .cards-count-5, .cards-count-6) .content-card,
 body[data-deck-composition="editorial-spread"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .content-card,
 body[data-deck-composition="playful-collage"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .content-card,
 body[data-deck-composition="brutalist-frame"][data-deck-composition-variant="ledger-frame"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .content-card,

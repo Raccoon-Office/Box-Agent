@@ -11756,6 +11756,43 @@ def test_every_composition_variant_preserves_card_capacity_contract(
                     f"{family}/{variant}: "
                     + "; ".join(report["issues"] + report["warnings"])
                 )
+            if family == "institutional-grid":
+                styles_by_count = {
+                    style["itemCount"]: style for style in report["cardGridStyles"]
+                }
+                for item_count in (4, 5, 6):
+                    style = styles_by_count.get(item_count)
+                    if style is None:
+                        failures.append(
+                            f"{family}/{variant}/{item_count}: missing computed style"
+                        )
+                        continue
+                    column_count = len(style["gridTemplateColumns"].split())
+                    expected_columns = 1
+                    if variant != "ledger-grid":
+                        expected_columns = {4: 2, 5: 3, 6: 3}[item_count]
+                    if column_count != expected_columns:
+                        failures.append(
+                            f"{family}/{variant}/{item_count}: expected "
+                            f"{expected_columns} columns, got "
+                            f"{style['gridTemplateColumns']}"
+                        )
+                    if variant == "ledger-grid":
+                        expected_ledger_styles = {
+                            "gridAutoRows": "auto",
+                            "rowGap": "0px",
+                            "columnGap": "0px",
+                            "paddingTop": "24px",
+                        }
+                        for property_name, expected_value in (
+                            expected_ledger_styles.items()
+                        ):
+                            if style[property_name] != expected_value:
+                                failures.append(
+                                    f"{family}/{variant}/{item_count}: expected "
+                                    f"{property_name}={expected_value}, got "
+                                    f"{style[property_name]}"
+                                )
 
     assert not failures, "\n".join(failures)
 

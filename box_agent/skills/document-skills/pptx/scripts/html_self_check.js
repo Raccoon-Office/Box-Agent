@@ -265,7 +265,7 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
 
       if (!slideEls.length) {
         issues.push("No .slide elements found.");
-        return { ok: false, slideCount: 0, issues, warnings };
+        return { ok: false, slideCount: 0, cardGridStyles: [], issues, warnings };
       }
 
       if (domToPptx) {
@@ -635,11 +635,27 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         });
       });
 
+      const cardGridStyles = slideEls.flatMap((slide, slideIndex) =>
+        Array.from(slide.querySelectorAll(".layout-cards .cards-grid")).map(grid => {
+          const style = getComputedStyle(grid);
+          return {
+            slide: slideIndex + 1,
+            itemCount: grid.querySelectorAll(":scope > .content-card").length,
+            gridTemplateColumns: style.gridTemplateColumns,
+            gridAutoRows: style.gridAutoRows,
+            rowGap: style.rowGap,
+            columnGap: style.columnGap,
+            paddingTop: style.paddingTop,
+          };
+        })
+      );
+
       return {
         ok: issues.length === 0,
         slideCount: slideEls.length,
         diagramCount: diagramSpecs.length,
         diagramSpecs,
+        cardGridStyles,
         issues,
         warnings,
       };
