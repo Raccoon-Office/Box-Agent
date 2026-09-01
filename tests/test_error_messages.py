@@ -87,6 +87,47 @@ def test_context_length_error():
     assert classify_llm_error(exc).category == "context_length"
 
 
+def test_sensenova_prompt_token_limit_error_is_concise_and_actionable():
+    exc = _FakeAPIError(
+        (
+            "Error code: 400 - {'error': {'code': '400', 'message': \""
+            "litellm.BadRequestError: Custom_raccoonException - the input prompt "
+            "token len 319439 + max_new_tokens 63999 > 262144No fallback model "
+            "group found for original model_group=sn-sensenova-6-8-flash-lite.\"}}"
+        ),
+        status_code=400,
+        body={
+            "error": {
+                "code": "400",
+                "message": (
+                    "litellm.BadRequestError: Custom_raccoonException - the input "
+                    "prompt token len 319439 + max_new_tokens 63999 > 262144No "
+                    "fallback model group found for original "
+                    "model_group=sn-sensenova-6-8-flash-lite."
+                ),
+            }
+        },
+    )
+
+    details = structured_llm_error(
+        exc,
+        provider="openai",
+        model="sn-sensenova-6-8-flash-lite",
+    )
+
+    assert details["category"] == "context_length"
+    assert details["reason"] == "context_length"
+    assert details["code"] == 400
+    assert details["httpStatus"] == 400
+    assert details["retryable"] is False
+    assert details["message"] == (
+        "当前对话内容过长，超出所选模型可处理的上限。"
+        "请新建会话，或精简历史消息、附件和本次输入后重试。"
+    )
+    assert "Error code" not in str(details["message"])
+    assert "fallback model group" not in str(details["message"])
+
+
 def test_server_error():
     exc = _FakeAPIError("Internal server error", status_code=500)
     assert classify_llm_error(exc).category == "server_error"

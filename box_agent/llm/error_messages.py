@@ -76,8 +76,9 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "context_length",
         ("context_length_exceeded", "context length", "maximum context",
-         "too long", "reduce the length", "max_tokens"),
-        "对话内容超出模型上下文长度上限。请使用 /clear 清空历史或精简输入后重试。",
+         "too long", "reduce the length", "max_tokens", "input prompt token len"),
+        "当前对话内容过长，超出所选模型可处理的上限。"
+        "请新建会话，或精简历史消息、附件和本次输入后重试。",
     ),
     (
         "model_not_found",
