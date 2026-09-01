@@ -188,14 +188,12 @@ function renderThumbnailNavigation() {
 function renderToolbar() {
   return [
     '<nav class="deck-toolbar" aria-label="Deck editor">',
-    '  <button type="button" class="toolbar-nav" data-action="previous" aria-label="上一页" title="上一页">←</button>',
     '  <div class="toolbar-location" aria-live="polite" aria-atomic="true">',
     '    <span class="toolbar-current-label">当前页</span>',
     '    <strong class="toolbar-current-page" data-role="current-page">01</strong>',
     '    <span class="toolbar-total"><span class="toolbar-total-separator" aria-hidden="true">/</span><span class="toolbar-total-prefix"> 共 </span><span data-role="total-pages">01</span><span class="toolbar-total-suffix"> 页</span></span>',
     '    <span class="toolbar-current-title" data-role="current-title">未命名页面</span>',
     '  </div>',
-    '  <button type="button" class="toolbar-nav" data-action="next" aria-label="下一页" title="下一页">→</button>',
     '  <span class="toolbar-divider" aria-hidden="true"></span>',
     '  <button type="button" class="toolbar-edit" data-action="edit" aria-label="编辑" title="编辑内容" aria-pressed="false"><span class="toolbar-compact-symbol" aria-hidden="true">✎</span><span class="toolbar-action-label">编辑</span></button>',
     '  <div class="toolbar-popover" data-toolbar-menu="design">',
