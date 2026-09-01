@@ -6062,6 +6062,41 @@ def test_controlled_image_status_sync_allows_its_deterministic_action(tmp_path):
     ) is None
 
 
+@pytest.mark.parametrize(
+    "node_token",
+    [
+        "nodeBOX_AGENT_NODE",
+        "./nodeBOX_AGENT_NODE",
+        "$(touch${IFS}/tmp/pwn_BOX_AGENT_NODE)",
+        "`touch${IFS}/tmp/pwn_BOX_AGENT_NODE`",
+    ],
+)
+def test_controlled_image_status_sync_rejects_disguised_node_tokens(
+    tmp_path,
+    node_token,
+):
+    output = tmp_path / "output"
+    manifest = output / "assets" / "generated" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"image_plan":[]}', encoding="utf-8")
+    policy = ControlledPresentationPolicy(
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=output,
+        research_mode="content_ready",
+        stage="image_status_sync",
+    )
+    command = (
+        f"{node_token} {shlex.quote(str(SYNC_IMAGE_STATUS_SCRIPT))} "
+        f"{shlex.quote(str(manifest))}"
+    )
+
+    assert policy.tool_call_error(
+        "bash",
+        {"command": command},
+        verified_evidence_urls=set(),
+    ) is not None
+
+
 def test_controlled_image_status_policy_rejections_trip_repair_fuse(tmp_path):
     policy = ControlledPresentationPolicy(
         workspace_dir=str(tmp_path),

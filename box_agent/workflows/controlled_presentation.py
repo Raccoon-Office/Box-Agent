@@ -482,8 +482,13 @@ def _image_status_error(
     if len(tokens) != 3:
         return _IMAGE_STATUS_TOOL_ERROR
     node_token, script_token, manifest_token = tokens
-    node_name = Path(node_token.replace("\\", "/")).name.casefold()
-    if node_name not in {"node", "node.exe"} and "BOX_AGENT_NODE" not in node_token:
+    if node_token not in {
+        "node",
+        "node.exe",
+        "$BOX_AGENT_NODE",
+        "${BOX_AGENT_NODE}",
+        "${BOX_AGENT_NODE:-node}",
+    }:
         return _IMAGE_STATUS_TOOL_ERROR
 
     script_path = Path(script_token.replace("\\", "/")).expanduser()
