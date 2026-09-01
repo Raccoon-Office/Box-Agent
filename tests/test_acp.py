@@ -645,21 +645,21 @@ def test_project_sandbox_prompt_does_not_point_at_output_dir():
     assert "cwd 已是 `{workspace}/output/`" not in prompt
 
 
-def test_output_prompts_retry_legacy_attachment_path_without_env_contract():
+def test_output_prompts_rebuild_absolute_attachment_path_from_workspace_search():
     sandbox_prompt = build_sandbox_info_prompt(use_output_dir=True)
     delivery_prompt = build_file_delivery_prompt(use_output_dir=True)
 
     for prompt in (sandbox_prompt, delivery_prompt):
         assert "BOX_AGENT_WORKSPACE_DIR" not in prompt
-        assert "../<name>" in prompt
+        assert "../<name>" not in prompt
         assert "FileNotFoundError" in prompt
         assert "No such file or directory" in prompt
-        assert "不要继续猜测 `../` 层级" in prompt
+        assert "不要猜测 `../` 层级" in prompt
         assert "`search_files`" in prompt
         assert "File Access Context" in prompt
         assert "Current workspace" in prompt
         assert '`target="files"`' in prompt
-        assert "找到唯一结果后重试" in prompt
+        assert "将搜索 `path` 与返回的相对路径拼接为绝对路径再重试" in prompt
         assert "有多个同名结果时停止并请用户确认" in prompt
         assert "host" in prompt
 
