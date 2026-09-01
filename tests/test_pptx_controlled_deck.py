@@ -11756,8 +11756,131 @@ def test_every_composition_variant_preserves_card_capacity_contract(
                     f"{family}/{variant}: "
                     + "; ".join(report["issues"] + report["warnings"])
                 )
+            if family == "institutional-grid":
+                styles_by_count = {
+                    style["itemCount"]: style for style in report["cardGridStyles"]
+                }
+                for item_count in (4, 5, 6):
+                    style = styles_by_count.get(item_count)
+                    if style is None:
+                        failures.append(
+                            f"{family}/{variant}/{item_count}: missing computed style"
+                        )
+                        continue
+                    column_count = len(style["gridTemplateColumns"].split())
+                    expected_columns = 1
+                    if variant != "ledger-grid":
+                        expected_columns = {4: 2, 5: 3, 6: 3}[item_count]
+                    if column_count != expected_columns:
+                        failures.append(
+                            f"{family}/{variant}/{item_count}: expected "
+                            f"{expected_columns} columns, got "
+                            f"{style['gridTemplateColumns']}"
+                        )
+                    if variant == "ledger-grid":
+                        expected_ledger_styles = {
+                            "gridAutoRows": "auto",
+                            "rowGap": "0px",
+                            "columnGap": "0px",
+                            "paddingTop": "24px",
+                        }
+                        for property_name, expected_value in (
+                            expected_ledger_styles.items()
+                        ):
+                            if style[property_name] != expected_value:
+                                failures.append(
+                                    f"{family}/{variant}/{item_count}: expected "
+                                    f"{property_name}={expected_value}, got "
+                                    f"{style[property_name]}"
+                                )
 
     assert not failures, "\n".join(failures)
+
+
+def test_institutional_balanced_grid_preserves_six_numbered_cards(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cards-grid-v1",
+        "--theme",
+        "product-console",
+        "--family",
+        "institutional-grid",
+        "--design-seed",
+        "numbered-capacity-003",
+        "--out",
+        str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["design"]["variant"] == "balanced-grid"
+    deck["slides"][0]["props"].update(
+        {
+            "eyebrow": "汇报结构",
+            "title": "汇报目录",
+            "subtitle": (
+                "本页以编号卡片网格完整呈现6个汇报板块，"
+                "便于管理层快速把握整体结构。"
+            ),
+            "variant": "numbered",
+            "items": [
+                {
+                    "kicker": f"{index:02d}",
+                    "title": title,
+                    "body": body,
+                }
+                for index, (title, body) in enumerate(
+                    [
+                        (
+                            "大会概况与产品发布",
+                            "概览大会基本信息、参会目标及重点产品发布内容。",
+                        ),
+                        (
+                            "论坛核心亮点",
+                            "梳理主论坛与专题论坛中的关键议题、观点输出和业务价值。",
+                        ),
+                        (
+                            "生态合作成果",
+                            "汇总合作伙伴互动、合作签约、联合发布及生态建设进展。",
+                        ),
+                        (
+                            "展区与产品展示",
+                            "呈现展区动线、重点展项、产品演示和现场反馈。",
+                        ),
+                        (
+                            "媒体传播成效",
+                            "总结媒体曝光、传播渠道、重点报道和品牌声量表现。",
+                        ),
+                        (
+                            "总结与后续计划",
+                            "提炼大会成效、待跟进事项和下一阶段行动安排。",
+                        ),
+                    ],
+                    start=1,
+                )
+            ],
+        }
+    )
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    report_path = tmp_path / "html_self_check.json"
+
+    rendered = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+    self_check = _run(
+        "html_self_check.js",
+        str(html_path),
+        "--dom-to-pptx",
+        "--report",
+        str(report_path),
+    )
+
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    assert self_check.returncode == 0, self_check.stdout + self_check.stderr
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["issues"] == []
+    assert report["warnings"] == []
 
 
 def test_comic_panel_theme_renders_story_panels_and_clean_diagrams(
