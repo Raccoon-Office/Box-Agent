@@ -64,14 +64,14 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "rate_limit",
         ("rate limit", "rate_limit", "too many requests", "429", "tpm", "rpm"),
-        "请求过于频繁，已触发服务商限流（429）。请稍候片刻再重试。",
+        "请求过于频繁，已触发服务限流（429）。请稍候片刻再重试。",
     ),
     (
         "quota",
         ("insufficient_quota", "insufficient quota", "exceeded your current quota",
          "insufficient_points", "1000007", "billing", "arrearage", "balance",
          "积分不足", "余额", "欠费"),
-        "账户额度不足或欠费，模型服务商已拒绝请求。请充值或检查账单后重试。",
+        "账户额度不足或欠费，模型已拒绝请求。请充值或检查账单后重试。",
     ),
     (
         "context_length",
@@ -101,7 +101,7 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "timeout",
         ("timeout", "timed out", "deadline"),
-        "请求模型服务超时。可能是网络或服务商响应缓慢，请重试。",
+        "请求模型服务超时。可能是网络或服务响应缓慢，请重试。",
     ),
     (
         "connection",
