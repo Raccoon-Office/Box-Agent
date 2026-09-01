@@ -224,9 +224,9 @@ def test_every_collection_layout_publishes_one_typed_count_contract() -> None:
         for dna_id in theme["selection"]["visual_dna_ids"]
     }
     assert len(visual_dna_ids) == 32
-    assert len(theme_ids) == 48
-    assert visual_dna_ids <= theme_ids
-    assert covered_dna_ids == visual_dna_ids | {
+    assert len(theme_ids) == 47
+    assert visual_dna_ids - theme_ids == {"playful"}
+    assert covered_dna_ids == (visual_dna_ids - {"playful"}) | {
         "comic-panel",
         "technical-blueprint",
         "product-console",
@@ -2796,8 +2796,9 @@ def test_compact_theme_and_layout_list_aliases_are_supported() -> None:
     layout_payload = json.loads(layouts.stdout)
     theme_ids = [item["id"] for item in theme_payload["themes"]]
     assert theme_payload["composition_directions"] == list(COMPOSITION_DIRECTIONS)
-    assert len(theme_ids) == 48
+    assert len(theme_ids) == 47
     assert theme_ids == sorted(theme_ids)
+    assert "playful" not in theme_ids
     assert {
         "signal",
         "studio",
@@ -2830,6 +2831,18 @@ def test_compact_theme_and_layout_list_aliases_are_supported() -> None:
         "table-data-v1",
     }
     assert len(themes.stdout) + len(layouts.stdout) < 40_000
+
+
+def test_removed_playful_theme_is_rejected_by_validation(tmp_path: Path) -> None:
+    deck = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    deck["theme_id"] = "playful"
+    deck_path = tmp_path / "removed-playful-theme.json"
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+
+    result = _run("validate_deck_spec.js", str(deck_path))
+
+    assert result.returncode == 1
+    assert "deck.theme_id: expected one of the registered themes" in result.stdout
 
 
 def test_scaffold_normalizes_known_semantic_theme_alias(tmp_path: Path) -> None:

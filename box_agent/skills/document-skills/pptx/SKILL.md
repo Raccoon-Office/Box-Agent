@@ -232,7 +232,7 @@ the same layout again. Common arrays are `cards-grid-v1.items`,
 5. Visual QA via rendering is optional, not required. See §4.2 for triggers.
 6. If render is attempted but blocked (missing `soffice`/PDF renderer), continue without it; do not treat it as a delivery blocker.
 7. `.slide` must be exactly `1920px × 1080px` (16:9). The controlled renderer owns this contract. On the legacy/custom-HTML route, copy `references/starter/common.css` to `drafts/common.css` and use its `.slide` block verbatim. `html_self_check.js` and `html_to_editable_pptx.js` hard-assert this exact size against every slide. **Do not pass `--width`/`--height`**; non-standard decks require the same explicit `--canvas WxH` on both scripts.
-8. The controlled theme catalog bundled under `themes/` is the runtime source of truth and includes an executable base theme for all 32 bundled Visual DNA ids. Eleven built-in composition families and their variants are selected and persisted under `design`, so a machine without `html-templates` still has both theme grammar and structural variety. Use `html-templates` as an optional richer matcher when it is available, but never block or invent a theme when it is absent. See §3.0.
+8. The controlled theme catalog bundled under `themes/` is the runtime source of truth and includes the curated executable Visual DNA set supported by this skill. Eleven built-in composition families and their variants are selected and persisted under `design`, so a machine without `html-templates` still has both theme grammar and structural variety. Use `html-templates` as an optional richer matcher when it is available, but never block or invent a theme when it is absent. See §3.0.
 9. The controlled route authors content through the scaffold plus `deck.patch.json`; do not hand-write the full `deck.json` or compiled multi-slide HTML. `scripts/render_deck_html.js` is the only writer of controlled `index.html`. The fragment workflow in §3.5 applies only to an explicit legacy/custom-HTML escape route.
 10. Any PPTX line geometry written by direct generation paths (`PptxGenJS` / OOXML / python-pptx / other direct generators, i.e., not `dom-to-pptx` HTML export) must avoid negative width/height. Normalize line geometry from start/end coordinates (`x1`,`y1`,`x2`,`y2`) into non-negative geometry before writing geometry boxes: `x=min(x1,x2)`, `y=min(y1,y2)`, `w=abs(x2-x1)`, `h=abs(y2-y1)`.
 11. When the task declares `creative_image_mode`, successful image generation is mandatory for a complete delivery: at least one `generate_image` call must complete and the generated asset must be referenced in `assets/generated/manifest.json`. If `generate_image` is unavailable or every call fails, do not present the PPT as completed. When the deck remains structurally renderable, still finalize and deliver an editable degraded `index.html`, explain under the localized usage-note label from §6 that the required image was not generated, and preserve the manifest findings as warnings so the user receives a usable artifact.
@@ -502,9 +502,9 @@ The `pptx` skill is self-contained. Its versioned `themes/*.json` catalog is
 always authoritative and is exposed by `scripts/inspect_deck_contract.js` and
 `layouts/manifest.json`. Select from those registered ids only. Each theme
 includes selection signals, palette, typography, shape tokens, and finite
-visual-style axes. The catalog provides an executable base theme for all 32
-bundled Visual DNA ids, so a machine without the separate `html-templates`
-skill can still create the full built-in style range.
+visual-style axes. The catalog provides the curated executable Visual DNA set
+supported by this skill, so a machine without the separate `html-templates`
+skill can still create the registered built-in style range.
 
 When `html-templates` is available, invoke it with the original brief, deck
 goal/audience, and intended density. Treat the returned Visual DNA

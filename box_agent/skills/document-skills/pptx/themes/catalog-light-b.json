@@ -102,53 +102,6 @@
       }
     },
     {
-      "id": "playful",
-      "name": "Playful",
-      "description": "Warm peach and sand with ink-black geometry and friendly cream surfaces.",
-      "source_reference": "beautiful-html-templates/playful",
-      "selection": {
-        "visual_dna_ids": ["playful"],
-        "mood_keywords": ["playful", "warm", "friendly", "peach", "geometric", "桃色", "亲和", "活泼"],
-        "industry_fit": ["consumer product", "education", "community", "wellness", "lifestyle", "startup"],
-        "density": "medium",
-        "scheme": "light",
-        "formality": "medium-low",
-        "fallback": false
-      },
-      "palette": {
-        "background": "#F0C8A0",
-        "surface": "#F7DEC6",
-        "surface_strong": "#E8B88E",
-        "primary": "#1A1A1A",
-        "primary_soft": "#F7DEC6",
-        "text": "#1A1A1A",
-        "muted": "#6E5543",
-        "border": "#1A1A1A",
-        "inverse": "#F7DEC6",
-        "chart": ["#1A1A1A", "#C76F52", "#8E5B45", "#E29D76"]
-      },
-      "typography": {
-        "display": "Syne, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
-        "body": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif",
-        "label": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif"
-      },
-      "shape": {
-        "radius_small": 16,
-        "radius_medium": 28,
-        "radius_large": 40,
-        "border_width": 2
-      },
-      "style": {
-        "canvas": "gradient",
-        "surface": "soft",
-        "shadow": "soft",
-        "heading": "standard",
-        "label": "pill",
-        "accent": "dot",
-        "alternation": "none"
-      }
-    },
-    {
       "id": "raw-grid",
       "name": "Raw Grid",
       "description": "White paper, system-black structure, and flat pink and sage blocks with offset shadows.",

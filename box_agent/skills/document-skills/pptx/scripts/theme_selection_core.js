@@ -786,16 +786,6 @@ function inferTheme(themes, content, defaultThemeId = "blue-professional") {
       add("cool consulting review signature", 8);
     }
     if (
-      theme.id === "playful"
-      && preferences.wants_friendly
-      && preferences.wants_lively
-      && !preferences.rejects_friendly
-      && !preferences.rejects_lively
-      && !preferences.rejects_collage
-    ) {
-      add("friendly lively signature", 6);
-    }
-    if (
       theme.id === "pin-and-paper"
       && preferences.internal_training
       && !preferences.rejects_handwritten

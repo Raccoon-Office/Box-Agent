@@ -388,7 +388,6 @@ const THEME_COMPOSITION_FAMILY = Object.freeze({
   "people-handbook": "editorial-spread",
   "pin-and-paper": "literary-minimal",
   "pink-script": "literary-minimal",
-  playful: "playful-collage",
   "product-console": "product-showcase",
   "property-atlas": "institutional-grid",
   "raw-grid": "brutalist-frame",
