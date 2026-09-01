@@ -2842,7 +2842,8 @@ def test_removed_playful_theme_is_rejected_by_validation(tmp_path: Path) -> None
     result = _run("validate_deck_spec.js", str(deck_path))
 
     assert result.returncode == 1
-    assert "deck.theme_id: expected one of the registered themes" in result.stdout
+    payload = json.loads(result.stdout.split("\nDeck spec validation", 1)[0])
+    assert payload["issues"][0].startswith('Unknown theme_id: "playful"')
 
 
 def test_scaffold_normalizes_known_semantic_theme_alias(tmp_path: Path) -> None:
