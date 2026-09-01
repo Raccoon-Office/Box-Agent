@@ -26,6 +26,7 @@ from box_agent.tools.mcp_loader import (
     MCPTimeoutConfig,
     WEB_SEARCH_MCP_MAX_CONCURRENCY,
     _determine_connection_type,
+    _public_mcp_tool_name,
     cleanup_mcp_connections,
     get_mcp_timeout_config,
     load_mcp_tools_async,
@@ -46,6 +47,55 @@ from box_agent.tools.base import Tool, ToolResult
 def test_streamable_http_client_is_available():
     """The loader resolves the client exported by the installed MCP SDK."""
     assert callable(mcp_loader.streamable_http_client)
+
+
+def test_public_mcp_tool_name_sanitizes_provider_invalid_remote_name():
+    remote_name = "mcp-law-search-service.search_article"
+
+    public_name = _public_mcp_tool_name("pkulaw", remote_name)
+
+    assert public_name.startswith("mcp-law-search-service_search_article__")
+    assert len(public_name) <= 64
+    assert all(
+        character.isascii() and (character.isalnum() or character in "_-")
+        for character in public_name
+    )
+    assert public_name == _public_mcp_tool_name("pkulaw", remote_name)
+    assert _public_mcp_tool_name("pkulaw", "search_law") == "search_law"
+
+
+def test_public_mcp_tool_name_avoids_sanitized_name_collisions():
+    dotted = _public_mcp_tool_name("pkulaw", "law.search")
+    slashed = _public_mcp_tool_name("pkulaw", "law/search")
+
+    assert dotted != slashed
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_uses_public_name_for_model_and_remote_name_for_execution():
+    class FakeSession:
+        called_name = None
+
+        async def call_tool(self, name, arguments):
+            self.called_name = name
+            return SimpleNamespace(content=[], isError=False)
+
+    session = FakeSession()
+    remote_name = "mcp-law-search-service.search_article"
+    tool = MCPTool(
+        name=_public_mcp_tool_name("pkulaw", remote_name),
+        remote_name=remote_name,
+        description="search law",
+        parameters={"type": "object"},
+        session=session,
+        server_name="pkulaw",
+    )
+
+    result = await tool.execute(query="民法典")
+
+    assert result.success is True
+    assert "." not in tool.name
+    assert session.called_name == remote_name
 
 
 @pytest.mark.asyncio
