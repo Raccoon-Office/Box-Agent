@@ -25,6 +25,10 @@ from pydantic import Field, model_validator
 from ..config import ToolsConfig
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
+from .pptx_safety import (
+    detect_pptx_image_status_command_bypass,
+    detect_pptx_self_check_bypass,
+)
 from .runtime import bundled_win_bash
 from .shell_inspection import inspect_shell_command
 from .safety import (
@@ -1258,6 +1262,29 @@ Examples:
                     exit_code=1,
                 )
             # --- Safety checks ---
+            bypass_error = detect_pptx_self_check_bypass(None, command)
+            if bypass_error:
+                return BashOutputResult(
+                    success=False,
+                    error=bypass_error,
+                    stdout="",
+                    stderr=bypass_error,
+                    exit_code=1,
+                )
+            image_status_error = detect_pptx_image_status_command_bypass(
+                command,
+                workspace_dir=self.workspace_dir,
+                runtime_env=self._subprocess_env,
+            )
+            if image_status_error:
+                return BashOutputResult(
+                    success=False,
+                    error=image_status_error,
+                    stdout="",
+                    stderr=image_status_error,
+                    exit_code=1,
+                )
+
             lark_identity_error = _detect_lark_user_mode_violation(command)
             if lark_identity_error:
                 return BashOutputResult(

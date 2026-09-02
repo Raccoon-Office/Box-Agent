@@ -116,7 +116,7 @@ entries.
 - Provider-specific wire behavior belongs in `box_agent/llm/`; do not spread provider assumptions into tools, skills, CLI, or ACP.
 - Tool behavior belongs in `box_agent/tools/` and should return structured `ToolResult` data. Add direct regression tests for new tool semantics.
 - Built-in skill loading is controlled by `box_agent/skill_loader.py`, `box_agent/skills/`, and `box_agent/skills/_manifest.json`. When built-in skills change, regenerate the manifest before review.
-- PPT/document capabilities are Skill-driven unless there is an explicit host-neutral core contract change. Intent routing, progress derivation, validation, and recovery instructions belong in the owning Skill or plugin; do not add hidden format-specific modes to the core loop, adapters, or generic tools.
+- PPT/document capabilities are Skill-driven unless there is an explicit host-neutral core contract change. Intent routing, progress derivation, validation, and recovery instructions belong in the owning Skill or plugin; do not add a hidden format-specific lifecycle to the core loop, adapters, or generic tools. Cross-cutting fail-closed Tool safety remains a shared Tool contract.
 - Packaged runtime behavior is not proven by source edits alone. If officev3 or a standalone runtime depends on the change, document the runtime rebuild/install/probe status.
 
 #### TPR Pull Request Standard

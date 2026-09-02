@@ -6598,6 +6598,9 @@ def test_deck_contract_normalizes_pitch_layout_and_required_field_aliases(
     scaffold_payload = json.loads(scaffold.stdout)
     for path_field in ("deck_file", "image_manifest", "contract_report"):
         scaffold_payload[path_field] = "<artifact-path>"
+    scaffold_payload["authoring_rules"]["write_policy"]["artifact_root"] = (
+        "<artifact-path>"
+    )
     normalized_stdout = (
         json.dumps(scaffold_payload, ensure_ascii=False, separators=(",", ":")) + "\n"
     )

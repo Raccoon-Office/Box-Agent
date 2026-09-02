@@ -21,6 +21,7 @@ from ..model_history import is_model_history_placeholder
 from .base import EventEmittingTool, Tool, ToolResult
 from .argument_limits import MAX_GENERATED_BODY_CHARS
 from .file.path_candidates import home_relative_path_candidates
+from .pptx_safety import detect_pptx_self_check_bypass
 from .safety import backup_file, validate_path_in_workspace
 
 if TYPE_CHECKING:
@@ -1054,6 +1055,15 @@ class WriteTool(Tool):
                 placeholder_error,
                 reason="model_history_placeholder",
             )
+        bypass_error = detect_pptx_self_check_bypass(
+            str(state.target), assembled_content
+        )
+        if bypass_error:
+            return self._discarded_result(
+                state,
+                bypass_error,
+                reason="pptx_self_check_bypass",
+            )
         digest = self._sha256_file(state.temporary)
         backup_path = backup_file(state.target)
         os.replace(state.temporary, state.target)
@@ -1342,6 +1352,13 @@ class AppendTool(Tool):
             if size_error:
                 return ToolResult(success=False, content="", error=size_error)
 
+            existing = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            bypass_error = detect_pptx_self_check_bypass(
+                str(file_path), f"{existing}\n{content}"
+            )
+            if bypass_error:
+                return ToolResult(success=False, content="", error=bypass_error)
+
             backup_file(file_path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             with file_path.open("a", encoding="utf-8") as f:
@@ -1464,6 +1481,12 @@ class EditTool(Tool):
                 )
                 if size_error:
                     return ToolResult(success=False, content="", error=size_error)
+
+            bypass_error = detect_pptx_self_check_bypass(
+                str(file_path), f"{content}\n{old_str}\n{new_str}"
+            )
+            if bypass_error:
+                return ToolResult(success=False, content="", error=bypass_error)
 
             if old_str not in content:
                 return ToolResult(

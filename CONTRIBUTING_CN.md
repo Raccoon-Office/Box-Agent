@@ -97,13 +97,13 @@ merge SHA；先记录 PR 和已有实现提交，合并后再核对补充。
 
 - `box_agent/core.py` 是可修改但低频变化、由核心团队维护的内核。产品层与能力层必须使用 `Agent.run_events()` 或明确的共享 API，不能直接导入 Core 实现。
 - Agent 循环不变量、事件语义、调度、取消、工具调用闭合和安全执行点属于稳定内核/契约；Core 改动需要核心维护者评审。
-- 可复用的工具、Skills、Provider、存储和工作流策略默认属于能力层，除非确实需要新增与宿主无关的内核契约。有状态工作流放入 `box_agent/workflows/`，实现 `WorkflowPolicy`，并由 `runtime.py` 组装，不要让 Core 导入具体实现。
+- 可复用的工具、Skills、Provider 和存储默认属于能力层，除非确实需要新增与宿主无关的内核契约。有状态的领域工作流应放在自包含的 Skill 或插件中；不得在 Session Log 之外新增第二个持久状态源。
 - CLI 代码负责终端交互、渲染、slash commands 和本地提示，不应复制 ACP 也需要的核心行为。
 - ACP 代码负责把共享事件翻译成 ACP protocol updates 和 host extension methods。stdout 必须保持协议纯净；诊断信息应走 stderr 或结构化日志。
 - Provider 特定的 wire 行为属于 `box_agent/llm/`，不要把 provider 假设散落到 tools、skills、CLI 或 ACP。
 - Tool 行为属于 `box_agent/tools/`，应返回结构化 `ToolResult`。新增工具语义需要直接回归测试。
 - 内置 skill 加载由 `box_agent/skill_loader.py`、`box_agent/skills/` 和 `box_agent/skills/_manifest.json` 控制。内置 skills 变化时，review 前必须重新生成 manifest。
-- PPT/文档能力默认由 skill 驱动，除非有明确的核心 contract 变化。PPT 意图路由、checkpoint 与工具策略属于 `box_agent/completion.py` 和 `box_agent/workflows/presentation_*`，不要向核心循环或 `loop_guards.py` 加入隐藏的 PPT 专用模式。
+- PPT/文档能力默认由 Skill 驱动，除非有明确且与宿主无关的核心 contract 变化。意图路由、进度推导、校验和恢复说明属于对应 Skill 或插件；不要向核心循环、适配器或通用工具加入隐藏的格式专用生命周期。跨能力共用的 fail-closed Tool 安全约束仍属于共享 Tool contract。
 - Packaged runtime 行为不能只靠源码改动证明。如果 officev3 或 standalone runtime 依赖本次改动，需要说明 runtime rebuild/install/probe 状态。
 
 #### TPR Pull Request 标准

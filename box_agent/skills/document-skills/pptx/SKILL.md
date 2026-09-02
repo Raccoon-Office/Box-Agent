@@ -164,10 +164,12 @@ After scaffold, `write_file(path="deck.json", ...)` and
 `write_file(path="assets/generated/manifest.json", ...)` are forbidden. For each
 `image_plan` entry whose decision is `generate`, call `generate_image` directly with
 `watermark: false`, then run
-`${BOX_AGENT_NODE:-node} scripts/sync_image_manifest_status.js assets/generated/manifest.json`
+`${BOX_AGENT_NODE:-node} <TRUSTED_SYNC_SCRIPT> assets/generated/manifest.json`
 once. Do not reread those files when their current contents are already in context. For a routine
 deck of roughly 12 slides or fewer, do not call
 `plan_write` or `todo_write`; avoid micro-turns that only update coordination.
+Use the loader-expanded absolute `scripts/sync_image_manifest_status.js` path
+as `<TRUSTED_SYNC_SCRIPT>`; a relative, copied, or renamed script is rejected.
 
 After authoring the slide content against the scaffold stdout, write one
 `deck.patch.json` with the
@@ -474,7 +476,7 @@ Do not switch routes based on convenience.
 | Scaffold ordered deck + image manifest + inspect exact contract | `cd "${BOX_AGENT_OUTPUT_DIR:-.}" && ${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js cover-hero-v1 cards-grid-v1 cards-grid-v1 --theme auto --theme-model-choice creative-mode --theme-model-reason "创意机构场景与多彩海报语法更匹配" --outline outline.json --title "Deck title" --out deck.json` |
 | Query controlled layouts | `${BOX_AGENT_NODE:-node} scripts/query_layouts.js --role comparison --density medium-high --media-count 0` |
 | Inspect a layout contract | `${BOX_AGENT_NODE:-node} scripts/inspect_layout.js comparison-two-column-v1` |
-| Sync generated image statuses | `${BOX_AGENT_NODE:-node} scripts/sync_image_manifest_status.js assets/generated/manifest.json` |
+| Sync generated image statuses | `${BOX_AGENT_NODE:-node} <TRUSTED_SYNC_SCRIPT> assets/generated/manifest.json` (use the loader-expanded absolute script path from §0) |
 | Apply one validated content patch | `${BOX_AGENT_NODE:-node} scripts/apply_deck_patch.js deck.json deck.patch.json` |
 | Apply an explicit controlled redesign | `${BOX_AGENT_NODE:-node} scripts/apply_deck_redesign.js deck.json deck.redesign.json` |
 | Validate deck spec | `${BOX_AGENT_NODE:-node} scripts/validate_deck_spec.js deck.json --report qa/deck_spec.json` |

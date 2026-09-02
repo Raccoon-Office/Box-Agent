@@ -147,12 +147,12 @@ def test_stable_kernel_contains_no_concrete_presentation_workflow() -> None:
     )
 
 
-def test_generic_tools_contain_no_presentation_workflow_enforcement() -> None:
+def test_generic_tools_contain_no_presentation_workflow_lifecycle() -> None:
     forbidden_tokens = (
         "controlled_presentation",
-        "pptx_self_check",
-        "PYTHON_PPTX_NEW_DECK_BLOCKED",
-        "CONTROLLED_DECK_REWRITE_BLOCKED",
+        "CompletionGate",
+        "WorkflowPolicy",
+        "runtime_workflow_actions",
     )
     generic_tool_paths = (
         PACKAGE_ROOT / "tools" / "base.py",
@@ -168,6 +168,28 @@ def test_generic_tools_contain_no_presentation_workflow_enforcement() -> None:
         if token in path.read_text(encoding="utf-8")
     ]
     assert violations == []
+
+
+def test_pptx_tool_safety_has_no_workflow_lifecycle_dependency() -> None:
+    safety_path = PACKAGE_ROOT / "tools" / "pptx_safety.py"
+    source = safety_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(safety_path))
+    imported_modules = [
+        node.module or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    ]
+
+    assert not any(
+        module == "box_agent.workflows"
+        or module.startswith("box_agent.workflows.")
+        or module == "workflows"
+        or module.startswith("workflows.")
+        for module in imported_modules
+    )
+    assert "controlled_presentation" not in source
+    assert "CompletionGate" not in source
+    assert "WorkflowPolicy" not in source
 
 
 def test_acp_has_no_legacy_workflow_lifecycle() -> None:
@@ -202,7 +224,6 @@ def test_legacy_workflow_provider_modules_are_removed() -> None:
         "workflow_checkpoint_store.py",
         "workflow_owner_store.py",
         "delivery.py",
-        "tools/pptx_safety.py",
     )
 
     assert all(
