@@ -232,6 +232,9 @@ function reconcileReadyManifestMedia(deck, deckPath, changes) {
             ? "AI 生成的演示文稿背景概念视觉"
             : "AI 生成的演示文稿概念视觉",
         origin,
+        ...(typeof entry.treatment === "string"
+          ? { treatment: entry.treatment }
+          : {}),
       },
       "演示文稿视觉",
       changes,

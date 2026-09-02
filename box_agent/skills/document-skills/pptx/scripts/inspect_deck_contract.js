@@ -53,6 +53,8 @@ const AUTO_COVER_TECH_VISUAL_RE = /(?:代码窗口|代码片段|协作节点|节
 const AUTO_GENERATIVE_VISUAL_MEDIUM_RE = /(?:主视觉|缩略图|实景|照片|插画|卡通(?:形象|插画|插图)?|儿童插画|儿童插图|概念图|效果图|界面|截图|样机|地图|地理分布|空间分布|场景|实物|特写|肖像|包装视觉|hero\s+image|thumbnail|photo|illustration|cartoon(?:\s+illustration)?|concept\s+art|interface|screenshot|mockup|map|geographic\s+distribution|scene|product\s+shot|object\s+study|close[- ]?up|portrait|packaging\s+visual)/i;
 const AUTO_PRIMARY_BITMAP_VISUAL_RE = /(?:主视觉|缩略图|实景|照片|插画|卡通(?:形象|插画|插图)?|儿童插画|儿童插图|概念图|效果图|样机|地图|场景|实物|特写|肖像|包装视觉|hero\s+image|thumbnail|photo|illustration|cartoon(?:\s+illustration)?|concept\s+art|mockup|map|scene|product\s+shot|object\s+study|close[- ]?up|portrait|packaging\s+visual)/i;
 const AUTO_DATA_VISUAL_RE = /(?:图表|表格|数据看板|KPI|指标|chart|table|dashboard|metrics?)/i;
+const AUTO_EDITABLE_STRUCTURE_RE = /(?:可编辑|图表|表格|数据看板|KPI|指标|矩阵|流程|时间轴|路线图|架构|关系图|组织图|甘特|热力|chart|table|dashboard|metrics?|matrix|process|timeline|roadmap|architecture|diagram|gantt|heatmap)/i;
+const AUTO_TYPOGRAPHY_LED_RE = /(?:纯文字|仅文字|文字排版|排版主导|标签排版|编辑式封面|typography|text[- ]only|editorial\s+cover)/i;
 const AUTO_COVER_IMAGE_OPTOUT_RE = /(?:不要|无需|不需要|不得|禁止|不)(?:生成|使用|添加)?(?:图片|生图|视觉图)|(?:纯文字|仅文字)|\b(?:no\s+(?:generated\s+)?images?|without\s+images?|text[- ]only)\b/i;
 const AUTO_SLIDE_LOCAL_IMAGE_OPTOUT_RE = /(?:第?\s*\d{1,2}\s*页|(?:页面|slide)\s*[:：#-]?\s*\d{1,2}|封面|首页|cover)[^。；;!?！？\n]{0,48}(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)|(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)[^。；;!?！？\n]{0,48}(?:封面|首页|cover)/i;
 const STRUCTURED_NEXT_STEPS_MATRIX_RE = /(?:表格|矩阵|table|matrix)|(?:(?:执行)?角色|负责人|责任人|owners?|assignees?|responsibilit(?:y|ies))[^\n。；;]{0,48}(?:姓名|成员|人员|names?|members?)/i;
@@ -1077,11 +1079,25 @@ function imagePrompt(context, slotRole) {
   const visualContext = String(
     context && (context.slideText || context.briefText) || ""
   );
+  const layoutContract = context && context.layoutContract;
+  const textRegionSummary = layoutContract && Array.isArray(layoutContract.text_regions)
+    ? layoutContract.text_regions.map(
+      region => `${region.name} x=${region.x},y=${region.y},w=${region.width},h=${region.height}`
+    ).join("; ")
+    : "";
+  const focusRegionSummary = layoutContract && Array.isArray(layoutContract.visual_focus_regions)
+    ? layoutContract.visual_focus_regions.map(
+      region => `${region.name} x=${region.x},y=${region.y},w=${region.width},h=${region.height}`
+    ).join("; ")
+    : "";
   const parts = [
     `Deck context: ${String(context && context.deckTitle || "presentation").trim()}.`,
     slide.title ? `Slide title: ${slide.title}.` : "",
     slide.message ? `Page intent: ${slide.message}.` : "",
     slide.visual ? `Visual direction: ${slide.visual}.` : "",
+    textRegionSummary
+      ? `Composition contract: keep text-safe region ${textRegionSummary} calm and low-detail.${focusRegionSummary ? ` Place the primary visual focus in ${focusRegionSummary}.` : " Use only atmospheric detail behind the copy."}`
+      : "",
     `Create one ${slotRole || "presentation"} visual with a clear focal subject and room for adjacent slide copy.`,
     AUTO_COVER_PRODUCT_VISUAL_RE.test(visualContext)
       ? "If showing software, make it an explicitly conceptual product-interface illustration rather than claiming to reproduce a real screenshot."
@@ -1132,6 +1148,14 @@ function buildImagePlanEntry(
     : background && Array.isArray(background.strategies)
       ? background.strategies
       : ["generate", "skip"];
+  const backgroundRequired = targetId === "background"
+    && background
+    && background.required === true;
+  const backgroundLayoutContract = targetId === "background"
+    && background
+    && background.layoutContract
+    ? JSON.parse(JSON.stringify(background.layoutContract))
+    : null;
   const briefText = String(context.briefText || "");
   const slideText = String(context.slideText || briefText);
   const slideVisualText = String(
@@ -1141,9 +1165,11 @@ function buildImagePlanEntry(
   );
   const generationForbidden = context.generationForbidden === true
     || AUTO_COVER_IMAGE_OPTOUT_RE.test(slideText);
+  const supportsPlannedBackground = Boolean(slot || backgroundLayoutContract);
   const creativeCover = !generationForbidden
     && imageMode === "creative_image_mode"
-    && index === 0;
+    && index === 0
+    && supportsPlannedBackground;
   const investorCoverBrief = AUTO_COVER_IMAGE_BRIEF_RE.test(briefText);
   // Cover-specific visual intent lives on the bound outline page. Looking only
   // at the deck-level goal misses concrete subjects such as a named athlete
@@ -1157,21 +1183,27 @@ function buildImagePlanEntry(
       || AUTO_PRIMARY_BITMAP_VISUAL_RE.test(slideVisualText)
     );
   const explicitOptionalVisual = Boolean(slot) && explicitGenerativeVisual;
+  const defaultVisualMedia = !AUTO_EDITABLE_STRUCTURE_RE.test(slideVisualText)
+    && !AUTO_TYPOGRAPHY_LED_RE.test(slideVisualText);
+  const defaultOptionalVisual = Boolean(slot)
+    && (defaultVisualMedia || layout.id === "project-case-study-v1");
   const autoCover = imageMode === "auto"
     && index === 0
     && !generationForbidden
+    && supportsPlannedBackground
     && (
       investorCoverBrief
       || visualStoryBrief
       || productVisualBrief
       || technicalVisualBrief
       || explicitGenerativeVisual
+      || defaultVisualMedia
     )
     && strategies.includes("generate");
   const autoOptional = imageMode === "auto"
     && index > 0
     && !generationForbidden
-    && explicitOptionalVisual
+    && (explicitOptionalVisual || defaultOptionalVisual)
     && strategies.includes("generate");
   const creativeOptional = imageMode === "creative_image_mode"
     && index > 0
@@ -1182,6 +1214,7 @@ function buildImagePlanEntry(
     && !creativeCover
     && strategies.includes("use_existing");
   const plannedGeneration = (slot && slot.required)
+    || backgroundRequired
     || creativeCover
     || creativeOptional
     || autoCover
@@ -1203,6 +1236,8 @@ function buildImagePlanEntry(
     decisionReason = "creative_image_mode requires a generated cover visual";
   } else if (slot && slot.required) {
     decisionReason = "the selected layout requires this media slot";
+  } else if (backgroundRequired) {
+    decisionReason = "the selected full-bleed layout requires one generated or source-backed slide background";
   } else if (autoCover) {
     if (productVisualBrief) {
       decisionReason = "the brief or outline explicitly calls for a product or interface cover visual";
@@ -1212,11 +1247,17 @@ function buildImagePlanEntry(
       decisionReason = "investor/pitch/launch brief benefits from a generated cover visual";
     } else if (explicitGenerativeVisual) {
       decisionReason = "the outline explicitly requests a generative visual medium such as a map, scene, photograph, or object study";
+    } else if (visualStoryBrief) {
+      decisionReason = "visual story brief benefits from a generated cover visual";
+    } else if (defaultVisualMedia) {
+      decisionReason = "auto mode defaults an eligible standard cover to a generated visual anchor";
     } else {
       decisionReason = "visual story brief benefits from a generated cover visual";
     }
   } else if (creativeOptional || autoOptional) {
-    decisionReason = "the page visual intent explicitly requests a generative visual medium";
+    decisionReason = explicitOptionalVisual
+      ? "the page visual intent explicitly requests a generative visual medium"
+      : "auto mode uses the layout's eligible media slot to add a meaningful visual anchor";
   } else if (index === 0) {
     decisionReason = "the outline supports a typography-led cover and does not request a concrete bitmap visual";
   }
@@ -1230,7 +1271,12 @@ function buildImagePlanEntry(
     decision,
     status,
     decision_reason: decisionReason,
-    prompt: generate ? imagePrompt(context, slot ? slot.role : "background") : "",
+    prompt: generate
+      ? imagePrompt(
+        { ...context, layoutContract: backgroundLayoutContract },
+        slot ? slot.role : "background"
+      )
+      : "",
     output_path: useExisting
       ? existingAsset.outputPath
       : generate
@@ -1243,6 +1289,23 @@ function buildImagePlanEntry(
       }
       : {}),
     allowed_strategies: generationForbidden ? ["skip"] : strategies,
+    ...(targetId === "background"
+      ? {
+        kind: "background",
+        placement: "full-slide",
+        purpose: "full-bleed slide background",
+        treatment: background && background.defaultTreatment
+          ? background.defaultTreatment
+          : "wash-light",
+      }
+      : {
+        kind: "image",
+        placement: "fixed-frame",
+        purpose: slot ? slot.role : "presentation visual",
+      }),
+    ...(backgroundLayoutContract
+      ? { layout_contract: backgroundLayoutContract }
+      : {}),
   };
 }
 
@@ -1511,7 +1574,13 @@ function main() {
     const requiredSlots = layout && layout.mediaSlots && Array.isArray(layout.mediaSlots.slots)
       ? layout.mediaSlots.slots.filter(slot => slot && slot.required === true)
       : [];
-    if (!requiredSlots.length) return layoutId;
+    const requiredBackground = Boolean(
+      layout
+      && layout.mediaSlots
+      && layout.mediaSlots.background
+      && layout.mediaSlots.background.required === true
+    );
+    if (!requiredSlots.length && !requiredBackground) return layoutId;
     if (!layout.noImageFallbackLayoutId || !getLayout(layout.noImageFallbackLayoutId)) {
       throw new Error(`Layout ${layoutId} requires media and has no registered no-image fallback.`);
     }

@@ -212,6 +212,15 @@ runtime, and the `调整` panel edits the underlying labels and values rather th
 the generated SVG. Presentation mode replays chart animation when the chart
 slide becomes current. The editable PPTX exporter maps the same controlled
 spec to a native PptxGenJS/PowerPoint chart instead of copying the ECharts SVG.
+
+Use `image-feature-v1` when one wide 16:9 image should dominate the page while
+the title, explanation, and caption remain editable below it. Use
+`image-full-bleed-v1` for an explicit full-slide visual, cinematic poster,
+campaign, divider, or future-state scene. The full-bleed layout requires a
+generated or source-backed background and publishes a fixed 1920×1080
+`layout_contract`: the left copy region stays calm while the primary visual
+focus remains on the right. `--no-images` deterministically falls back to
+`statement-focus-v1`.
 For bar/column data that visibly mixes units (for example minutes, percentages,
 and scores), the renderer automatically uses independently scaled small
 multiples. Each panel remains an animated ECharts view backed by the same

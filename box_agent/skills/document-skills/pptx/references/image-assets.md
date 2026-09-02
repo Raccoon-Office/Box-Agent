@@ -2,9 +2,16 @@
 
 The controlled manifest uses `mode: "auto"` for ordinary decks and
 `mode: "creative_image_mode"` only when the brief activates the strict creative
-contract below. In either mode, a layout-required `generate` entry must resolve
-to a real file before final QA; `auto` only removes the deck-wide minimum of one
-generated image for briefs without a promoted media requirement. Any scaffolded
+contract below. Ordinary `auto` decks are visual-first: an eligible cover
+defaults to one generated visual anchor unless the outline is explicitly
+typography-, data-, diagram-, or other editable-structure-led. An inner page
+with a declared optional fixed media slot also defaults to generation when its
+visual intent does not call for an editable structure; a project-case layout is
+the deliberate exception because its composition already reserves a separate
+image frame alongside editable metrics. In either mode, a
+layout-required `generate` entry must resolve to a real file before final QA;
+`auto` only removes the deck-wide minimum of one generated image for briefs
+without a promoted media requirement. Any scaffolded
 entry with `required: true` must resolve through `generate` or `use_existing`;
 changing it to `skip`/`blocked` fails manifest QA. Investor/fundraising/pitch/
 launch/premium briefs and visual stories such as biographies, sports, travel,
@@ -29,12 +36,13 @@ Rules:
 4. If no generated image succeeds, the image requirement is `blocked`; do not mark the PPT as completed and do not replace the required generated asset with `draw_in_html`, `skip`, or a decorative CSS-only visual. If the deck structure remains valid, still render and deliver a degraded editable `index.html` with the image failure preserved as an advisory warning.
 5. Preserve the scaffolded `decision: "generate"` and record failures with `status: "blocked"`, an updated `decision_reason`, `tool: "generate_image"`, and the attempted prompt/slide role so the user can retry after configuration or service recovery.
 6. Full-slide/background generated images must still follow the `layout_contract` rules below. Fixed-frame hero images may satisfy the mandatory generation requirement without a layout contract if they do not sit behind text.
+7. Prefer `image-full-bleed-v1` for an explicit entire-slide generated visual. It scaffolds the required background entry, fixed text-safe region, visual-focus region, prompt coordinates, and `wash-dark` treatment. Use `image-feature-v1` for a wide 16:9 image with editable supporting narrative.
 
 ## 1. Decision first
 
 1. Every slide must have one explicit `image_plan` entry.
 2. On the controlled route, `image_plan.decision` must be one of `generate`, `use_existing`, or `skip`, and must agree with the inspected slot/background strategies. Use `status: "blocked"` for a failed required generation attempt. `draw_in_html` is a legacy/custom-HTML planning label only; never write it into the controlled scaffold manifest.
-3. Prefer `generate` when a bitmap asset would make the slide faster to understand, more memorable, or visually credible.
+3. Prefer `generate` when a bitmap asset would make the slide faster to understand, more memorable, or visually credible. In ordinary `auto`, do not require explicit words such as “插画” when the chosen cover or inner-page media slot already establishes a clear image job.
 4. Do not use `skip` as the default. Use it only when the reason says why typography, data, or editable shapes are stronger than any bitmap.
 5. Use real or source-backed images for factual, screenshot, chart, logo, real-location, or person-accuracy content.
 6. Do not create generic decorative filler; generated images need a clear narrative job.
@@ -58,7 +66,7 @@ Rules:
 3. Use `generate` for investor pitch, fundraising, product-demo, premium B2B SaaS, executive keynote, or launch-event slides when the user gives visual direction such as high-end, premium, credible, dark, keynote-like, VC-facing, or "贵气/靠谱/发布会感". At minimum, choose `generate` for the cover and one solution/product/vision hero slide unless the user opts out or a real/source-backed asset is required.
 4. Use `generate` for realistic/semi-realistic product mockups, environments, textures, human scenes, or hero/card visuals that would be awkward or low-quality if drawn from PowerPoint shapes.
 5. Use `generate` when the user asks for image-rich, illustration, scene, poster, cinematic, magazine, campaign, or visual-metaphor output.
-6. On the controlled route, use the registered editable chart/table/timeline layout and `skip` bitmap media for dense data, maps, timelines, architecture, process, and tables. A conceptual code/system *cover* requested by the outline is the exception; keep the detailed architecture page editable. Use `draw_in_html` only on the explicit legacy/custom-HTML route.
+6. On the controlled route, use the registered editable chart/table/timeline layout and `skip` bitmap media for dense data, timelines, architecture, process, and tables. A conceptual code/system *cover* requested by the outline is the exception; keep the detailed architecture page editable. A map may be generated when it is explicitly the page's primary visual medium, but structured geographic data must remain recoverable. Use `draw_in_html` only on the explicit legacy/custom-HTML route.
 7. Use `skip` for data slides only when charts and text are stronger and no local visual frame would help.
 8. Use `use_existing` for supplied product photos, charts, official logos, real locations, screenshots, named people, or source-captured visuals.
 

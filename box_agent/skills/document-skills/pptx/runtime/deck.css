@@ -302,7 +302,8 @@ body.deck-editing .layout-cover.no-hero {
 
 .cover-image,
 .hero-image,
-.project-case-image {
+.project-case-image,
+.image-feature-image {
   display: block;
   width: 100%;
   height: 100%;
@@ -2908,6 +2909,103 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
   pointer-events: none;
 }
 
+/* Wide image feature */
+.layout-image-feature {
+  display: grid;
+  grid-template-rows: 610px minmax(0, 1fr);
+  gap: 34px;
+}
+
+.image-feature-media {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--deck-radius-large);
+  background: var(--deck-surface-strong);
+}
+
+.image-feature-media:has(.editor-placeholder-image) {
+  position: relative;
+}
+
+.image-feature-media:has(.editor-placeholder-image)::after {
+  content: "双击替换横向大图";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--deck-muted);
+  font-family: var(--deck-display);
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+.image-feature-copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+  gap: 64px;
+  align-items: start;
+}
+
+.image-feature-heading h2 {
+  margin-top: 18px;
+  font-size: 54px;
+  line-height: 1.02;
+}
+
+.image-feature-narrative .lead {
+  font-size: 28px;
+  line-height: 1.38;
+}
+
+.image-feature-narrative .image-caption {
+  margin-top: 22px;
+}
+
+/* Full-bleed generated image */
+.layout-image-full-bleed {
+  padding: 0;
+}
+
+.layout-image-full-bleed .slide-background::after {
+  background: linear-gradient(90deg, rgba(13, 14, 18, 0.94) 0%, rgba(13, 14, 18, 0.82) 42%, rgba(13, 14, 18, 0.24) 72%, rgba(13, 14, 18, 0.08) 100%);
+  opacity: 1;
+}
+
+.image-full-bleed-copy {
+  position: absolute;
+  left: 120px;
+  top: 170px;
+  width: 760px;
+  height: 650px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  color: var(--deck-text);
+}
+
+.image-full-bleed-copy h1 {
+  margin-top: 30px;
+  font-size: 82px;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+
+.image-full-bleed-copy .lead {
+  max-width: 700px;
+  margin-top: 34px;
+  font-size: 30px;
+  line-height: 1.36;
+}
+
+.image-full-bleed-copy .image-caption {
+  margin-top: 38px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.28);
+}
+
 [data-media-placeholder="true"] {
   display: flex;
   align-items: center;
@@ -2921,6 +3019,15 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
 
 /* Editorial cover */
 .layout-cover-editorial {
+  display: block;
+}
+
+.editorial-cover-safe {
+  position: absolute;
+  left: 92px;
+  top: 78px;
+  width: 1736px;
+  height: 930px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 34px;

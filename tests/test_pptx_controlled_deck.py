@@ -355,7 +355,7 @@ def test_every_collection_layout_publishes_one_typed_count_contract() -> None:
         "data-intelligence"
     ]
     assert data_intelligence["composition"]["family"] == "analytical-exhibit"
-    assert len(manifest["layouts"]) == 31
+    assert len(manifest["layouts"]) == 33
     assert {layout["id"] for layout in manifest["layouts"]} >= {
         "cover-hero-v1",
         "cover-editorial-v1",
@@ -375,6 +375,8 @@ def test_every_collection_layout_publishes_one_typed_count_contract() -> None:
         "maturity-model-v1",
         "cause-tree-v1",
         "project-case-study-v1",
+        "image-feature-v1",
+        "image-full-bleed-v1",
         "closing-next-steps-v1",
     }
     assert all(layout["editor"]["defaultProps"] for layout in manifest["layouts"])
@@ -570,6 +572,8 @@ def test_swimlane_requires_one_activity_per_phase(tmp_path: Path) -> None:
         ("客户旅程图：行为、触点、感受、痛点与机会", "customer-journey-map-v1"),
         ("五级能力成熟度模型，标记当前与目标状态", "maturity-model-v1"),
         ("根因树：核心问题、原因类别与影响因素", "cause-tree-v1"),
+        ("横向大图叙事，下面保留简短说明", "image-feature-v1"),
+        ("整页生图，左侧文字安全区、右侧视觉焦点", "image-full-bleed-v1"),
     ],
 )
 def test_scaffold_normalizes_business_semantics_to_dedicated_layouts(
@@ -2760,8 +2764,8 @@ console.log(JSON.stringify({ layouts: slides.length, migrations, enumControls, c
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
-        "layouts": 31,
-        "migrations": 961,
+        "layouts": 33,
+        "migrations": 1089,
         "enumControls": 29,
         "collectionControls": 31,
     }
@@ -2818,7 +2822,7 @@ def test_compact_theme_and_layout_list_aliases_are_supported() -> None:
         "commerce-pulse",
         "logistics-control-tower",
     } <= set(theme_ids)
-    assert layout_payload["count"] == 31
+    assert layout_payload["count"] == 33
     assert {item["id"] for item in layout_payload["layouts"]} >= {
         "architecture-layered-v1",
         "system-integration-v1",
@@ -2826,6 +2830,8 @@ def test_compact_theme_and_layout_list_aliases_are_supported() -> None:
         "dashboard-overview-v1",
         "project-case-study-v1",
         "image-hero-split-v1",
+        "image-feature-v1",
+        "image-full-bleed-v1",
         "chart-bar-v1",
         "chart-data-v1",
         "table-data-v1",
@@ -2978,7 +2984,8 @@ def test_deck_contract_scaffolds_ordered_repeated_layouts_once(tmp_path: Path) -
     assert image_payload["deck"]["design"] == payload["deck_skeleton"]["design"]
     assert len(image_payload["image_plan"]) == 3
     assert image_payload["image_plan"][0]["slot"] == "hero"
-    assert image_payload["image_plan"][0]["decision"] == "skip"
+    assert image_payload["image_plan"][0]["decision"] == "generate"
+    assert image_payload["image_plan"][0]["status"] == "pending"
     assert image_payload["image_plan"][1]["slot"] == "image"
     assert image_payload["image_plan"][1]["decision"] == "generate"
     assert image_payload["image_plan"][1]["status"] == "pending"
@@ -5992,6 +5999,16 @@ def test_creative_image_mode_scaffolds_a_required_cover_generation(
     assert manifest["image_plan"][0]["output_path"].endswith(
         f"slide-01-{expected_slot}.png"
     )
+    if expected_slot == "background":
+        assert manifest["image_plan"][0]["layout_contract"]["text_regions"] == [
+            {
+                "name": "editorial-cover-safe",
+                "x": 92,
+                "y": 78,
+                "width": 1736,
+                "height": 930,
+            }
+        ]
 
 
 def test_creative_image_mode_generates_only_explicit_inner_page_visuals(
@@ -6068,6 +6085,241 @@ def test_auto_image_mode_promotes_investor_pitch_cover_to_generation(
     assert cover["decision"] == "generate"
     assert cover["status"] == "pending"
     assert "investor/pitch/launch" in cover["decision_reason"]
+
+
+def test_auto_image_mode_generates_a_generic_standard_cover_by_default(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "cover-hero-v1",
+        "--title",
+        "季度经营复盘",
+        "--image-mode",
+        "auto",
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = json.loads(
+        (tmp_path / "assets" / "generated" / "manifest.json").read_text()
+    )
+    cover = manifest["image_plan"][0]
+    assert cover["required"] is True
+    assert cover["decision"] == "generate"
+    assert cover["status"] == "pending"
+    assert "defaults an eligible standard cover" in cover["decision_reason"]
+
+
+def test_auto_image_mode_uses_an_optional_inner_media_slot_by_default(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=2,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "年度作品集",
+            "layout": "cover",
+            "visual": "纯文字编辑式封面",
+        }
+    )
+    outline["slides"][1].update(
+        {
+            "title": "重点案例",
+            "layout": "project case",
+            "visual": "案例成果与关键指标",
+        }
+    )
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "project-case-study-v1",
+        "--outline",
+        str(outline_path),
+        "--image-mode",
+        "auto",
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = json.loads(
+        (tmp_path / "assets" / "generated" / "manifest.json").read_text()
+    )
+    cover, case_study = manifest["image_plan"]
+    assert cover["decision"] == "skip"
+    assert case_study["slot"] == "image"
+    assert case_study["required"] is True
+    assert case_study["decision"] == "generate"
+    assert "eligible media slot" in case_study["decision_reason"]
+
+
+def test_full_bleed_layout_scaffolds_a_required_background_contract(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=1,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "未来工作方式",
+            "message": "用一个沉浸场景建立未来愿景。",
+            "layout": "整页主视觉",
+            "visual": "整页生图，左侧文字安全区、右侧视觉焦点",
+        }
+    )
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--image-mode",
+        "auto",
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (tmp_path / "assets" / "generated" / "manifest.json").read_text()
+    )
+    entry = manifest["image_plan"][0]
+    assert deck["slides"][0]["layout_id"] == "image-full-bleed-v1"
+    assert entry["slot"] == "background"
+    assert entry["prop_path"] == "background"
+    assert entry["required"] is True
+    assert entry["decision"] == "generate"
+    assert entry["kind"] == "background"
+    assert entry["placement"] == "full-slide"
+    assert entry["treatment"] == "wash-dark"
+    assert entry["layout_contract"] == {
+        "slide_size": {"width": 1920, "height": 1080},
+        "text_regions": [
+            {
+                "name": "full-bleed-copy",
+                "x": 120,
+                "y": 170,
+                "width": 760,
+                "height": 650,
+            }
+        ],
+        "visual_focus_regions": [
+            {
+                "name": "primary-visual-focus",
+                "x": 1040,
+                "y": 80,
+                "width": 800,
+                "height": 920,
+            }
+        ],
+    }
+    assert "text-safe region" in entry["prompt"]
+    assert "primary-visual-focus" in entry["prompt"]
+
+
+def test_full_bleed_generated_background_binds_and_matches_dom_contract(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=1,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "未来工作方式",
+            "message": "用一个沉浸场景建立未来愿景。",
+            "layout": "整页主视觉",
+            "visual": "整页生图，左侧文字安全区、右侧视觉焦点",
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+
+    generated = tmp_path / "assets" / "generated" / "slide-01-background.png"
+    generated.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+    )
+    synced = _run(
+        "sync_image_manifest_status.js",
+        str(tmp_path / "assets" / "generated" / "manifest.json"),
+    )
+    assert synced.returncode == 0, synced.stdout + synced.stderr
+    patch_path = tmp_path / "deck.patch.json"
+    patch_path.write_text('{"slides":{}}', encoding="utf-8")
+    patched = _run("apply_deck_patch.js", str(deck_path), str(patch_path))
+    assert patched.returncode == 0, patched.stdout + patched.stderr
+
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["slides"][0]["background"]["treatment"] == "wash-dark"
+    html_path = tmp_path / "index.html"
+    rendered = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    html = html_path.read_text(encoding="utf-8")
+    assert "layout-image-full-bleed" in html
+    assert "background-wash-dark" in html
+
+    validated = _run(
+        "validate_image_layout_contract.js",
+        str(html_path),
+        str(tmp_path / "assets" / "generated" / "manifest.json"),
+    )
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+
+
+def test_no_images_uses_registered_fallback_for_full_bleed_layout(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "image-full-bleed-v1",
+        "--no-images",
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (tmp_path / "assets" / "generated" / "manifest.json").read_text()
+    )
+    assert deck["slides"][0]["layout_id"] == "statement-focus-v1"
+    assert manifest["image_plan"][0]["decision"] == "skip"
 
 
 def test_auto_image_mode_promotes_visual_story_cover_to_generation(
@@ -10152,6 +10404,39 @@ def test_outline_data_visual_detection_accepts_cover_and_named_charts(
     assert not any(
         "appears data-heavy but visual does not name" in warning
         for warning in payload["warnings"]
+    )
+
+
+def test_outline_requires_a_data_visual_for_multiple_real_values(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=3,
+        source_mode="user_provided",
+    )
+    outline["slides"][1].update(
+        {
+            "title": "业务增长",
+            "message": "ARR 从 500 万元增长到 800 万元。",
+            "bullets": ["上期 ARR 500 万元", "本期 ARR 800 万元"],
+            "layout": "业务进展页",
+            "visual": "三张摘要信息卡",
+        }
+    )
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = _run("validate_outline.js", str(outline_path))
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert any(
+        "appears data-heavy but visual does not name" in issue
+        for issue in payload["issues"]
     )
 
 

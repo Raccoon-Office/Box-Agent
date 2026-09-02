@@ -653,6 +653,13 @@ function validate(outline, opts) {
     }
 
     const combined = [slide.title, slide.message, slide.layout, slide.visual, slide.notes].map(text).join(" ");
+    const quantitativeContent = [
+      slide.title,
+      slide.message,
+      ...(Array.isArray(slide.bullets) ? slide.bullets : []),
+      ...(Array.isArray(slide.evidence) ? slide.evidence : []),
+    ].map(text).join(" ");
+    const quantitativeTokenCount = numberTokens(quantitativeContent).length;
     const isDataHeavy = includesAny(combined, dataHeavyTerms);
     const chartWorthy = numberTokens(combined).length > 0
       || includesAny(combined, chartWorthyTerms);
@@ -670,7 +677,9 @@ function validate(outline, opts) {
       && chartWorthy
       && !includesAny(slide.visual, dataDisplayTerms)
     ) {
-      warnings.push(`${label}: appears data-heavy but visual does not name a chart/table/KPI/dashboard data display`);
+      const message = `${label}: appears data-heavy but visual does not name a chart/table/KPI/dashboard data display`;
+      if (quantitativeTokenCount >= 2) issues.push(message);
+      else warnings.push(message);
     }
 
     const quantitativeSummary = numberTokens(message).length >= 2

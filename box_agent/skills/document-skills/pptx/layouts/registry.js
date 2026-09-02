@@ -91,11 +91,18 @@ function mediaSlots(min, max, ratios, options = {}) {
     background: {
       supported: true,
       path: "background",
+      required: options.backgroundRequired === true,
       strategies: ["generate", "use_existing", "skip"],
       preferredRatio: "16:9",
       treatments: ["wash-light", "wash-dark", "none"],
       requiresLayoutContract: true,
       textRegionNames: options.textRegionNames || [],
+      ...(options.backgroundLayoutContract
+        ? { layoutContract: deepClone(options.backgroundLayoutContract) }
+        : {}),
+      ...(options.backgroundTreatment
+        ? { defaultTreatment: options.backgroundTreatment }
+        : {}),
       ...(backgroundRules[backgroundMode] || backgroundRules.subtle),
     },
   };
@@ -1266,6 +1273,45 @@ function renderImageHero(slide, index) {
   );
 }
 
+function renderImageFeature(slide, index) {
+  const p = slide.props;
+  return slideFrame(
+    slide,
+    index,
+    "layout-image-feature",
+    [
+      `<div class="image-feature-media">${image("image.src", p.image, "image-feature-image")}</div>`,
+      '<div class="image-feature-copy" data-layout-region="image-feature-copy">',
+      '<div class="image-feature-heading">',
+      editableText("p", "eyebrow", p.eyebrow, "eyebrow"),
+      editableText("h2", "title", p.title),
+      "</div>",
+      '<div class="image-feature-narrative">',
+      editableText("p", "body", p.body, "lead"),
+      editableText("p", "caption", p.caption || "", "image-caption"),
+      "</div>",
+      "</div>",
+    ].join("\n")
+  );
+}
+
+function renderImageFullBleed(slide, index) {
+  const p = slide.props;
+  return slideFrame(
+    slide,
+    index,
+    "layout-image-full-bleed",
+    [
+      '<div class="image-full-bleed-copy" data-layout-region="full-bleed-copy">',
+      editableText("p", "eyebrow", p.eyebrow, "eyebrow"),
+      editableText("h1", "title", p.title),
+      editableText("p", "body", p.body, "lead"),
+      editableText("p", "caption", p.caption || "", "image-caption"),
+      "</div>",
+    ].join("\n")
+  );
+}
+
 function renderEditorialCover(slide, index) {
   const p = slide.props;
   const titleLength = Array.from(String(p.title || "").trim()).length;
@@ -1287,6 +1333,7 @@ function renderEditorialCover(slide, index) {
     index,
     `layout-cover-editorial cover-editorial-${p.alignment || "left"}`,
     [
+      '<div class="editorial-cover-safe" data-layout-region="editorial-cover-safe">',
       '<div class="editorial-cover-top" data-layout-region="editorial-cover-meta">',
       editableText("p", "eyebrow", p.eyebrow, "eyebrow"),
       editableText("p", "marker", p.marker || "", "editorial-cover-marker"),
@@ -1299,6 +1346,7 @@ function renderEditorialCover(slide, index) {
       '<div class="editorial-cover-footer" data-layout-region="editorial-cover-meta">',
       editableText("p", "meta", p.meta || "", "meta"),
       '<span class="editorial-cover-rule" aria-hidden="true"></span>',
+      "</div>",
       "</div>",
     ].join("\n")
   );
@@ -1912,7 +1960,19 @@ const layouts = [
     contentShape: ["headline", "typography", "metadata", "tags"],
     mediaSlots: mediaSlots(0, 0, [], {
       backgroundMode: "expressive",
-      textRegionNames: ["editorial-cover-copy", "editorial-cover-meta"],
+      backgroundTreatment: "wash-light",
+      textRegionNames: ["editorial-cover-safe"],
+      backgroundLayoutContract: {
+        slide_size: { width: 1920, height: 1080 },
+        text_regions: [{
+          name: "editorial-cover-safe",
+          x: 92,
+          y: 78,
+          width: 1736,
+          height: 930,
+        }],
+        visual_focus_regions: [],
+      },
       decisionRule: "Prefer a typography-led cover; use a generated or existing background only when it adds atmosphere without competing with the title.",
     }),
     capabilities: ["editable", "pptx-safe", "generated-background"],
@@ -3742,6 +3802,104 @@ const layouts = [
     },
     defaultProps: { caption: "", media_side: "right" },
     render: renderImageHero,
+  },
+  {
+    id: "image-feature-v1",
+    label: "Wide image feature with supporting narrative",
+    noImageFallbackLayoutId: "statement-focus-v1",
+    editor: {
+      label: "大图叙事",
+      description: "一张横向大图与下方双栏叙事",
+      controls: {},
+      defaultProps: {
+        eyebrow: "视觉故事",
+        title: "用大图建立这一页的核心场景",
+        body: "用一段简洁叙述解释图片与核心观点之间的关系。",
+        image: { src: EDITOR_PLACEHOLDER_IMAGE, alt: "双击替换横向大图" },
+        caption: "",
+      },
+    },
+    roles: ["visual-story", "product", "solution", "vision", "case-study"],
+    density: "medium-low",
+    contentShape: ["wide-media", "story", "caption"],
+    mediaSlots: mediaSlots(1, 1, ["16:9", "3:2"], {
+      backgroundMode: "subtle",
+      textRegionNames: ["image-feature-copy"],
+      decisionRule: "Resolve the required wide image from generation or a source-backed asset; keep the supporting narrative editable below it.",
+      slots: [{
+        id: "image",
+        propPath: "image",
+        role: "wide-story-visual",
+        required: true,
+        strategies: ["generate", "use_existing"],
+        preferredRatio: "16:9",
+        placementControlledBy: "layout",
+      }],
+    }),
+    capabilities: ["editable", "pptx-safe", "generated-image"],
+    variants: ["wide-image"],
+    fields: {
+      eyebrow: textField(32, { role: "label" }),
+      title: textField(72, { role: "heading" }),
+      body: textField(220, { role: "lead" }),
+      image: mediaField({ required: true, aspectRatio: "16:9" }),
+      caption: textField(80, { required: false, role: "caption" }),
+    },
+    defaultProps: { caption: "" },
+    render: renderImageFeature,
+  },
+  {
+    id: "image-full-bleed-v1",
+    label: "Full-bleed generated image with safe text region",
+    noImageFallbackLayoutId: "statement-focus-v1",
+    editor: {
+      label: "整页主视觉",
+      description: "整页背景图与固定文字安全区",
+      controls: {},
+      defaultProps: {
+        eyebrow: "VISION",
+        title: "用整页视觉承载一个值得记住的观点",
+        body: "文字保持精简，视觉焦点位于右侧安全区域之外。",
+        caption: "",
+      },
+    },
+    roles: ["full-bleed", "visual-story", "poster", "vision", "campaign", "divider"],
+    density: "low",
+    contentShape: ["full-slide-image", "headline", "short-narrative"],
+    mediaSlots: mediaSlots(0, 0, ["16:9"], {
+      backgroundMode: "expressive",
+      backgroundRequired: true,
+      backgroundTreatment: "wash-dark",
+      textRegionNames: ["full-bleed-copy"],
+      backgroundLayoutContract: {
+        slide_size: { width: 1920, height: 1080 },
+        text_regions: [{
+          name: "full-bleed-copy",
+          x: 120,
+          y: 170,
+          width: 760,
+          height: 650,
+        }],
+        visual_focus_regions: [{
+          name: "primary-visual-focus",
+          x: 1040,
+          y: 80,
+          width: 800,
+          height: 920,
+        }],
+      },
+      decisionRule: "Generate or bind one full-slide 16:9 image; keep the primary subject in the right focus region and the left text-safe region calm.",
+    }),
+    capabilities: ["editable", "pptx-safe", "generated-background", "full-bleed-image"],
+    variants: ["copy-left"],
+    fields: {
+      eyebrow: textField(32, { role: "label" }),
+      title: textField(72, { role: "display" }),
+      body: textField(180, { role: "lead" }),
+      caption: textField(80, { required: false, role: "caption" }),
+    },
+    defaultProps: { caption: "" },
+    render: renderImageFullBleed,
   },
   {
     id: "closing-next-steps-v1",

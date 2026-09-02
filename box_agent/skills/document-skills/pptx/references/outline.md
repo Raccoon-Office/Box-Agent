@@ -253,15 +253,22 @@ preserve any explicit user order or page count. The registry lives in
    Write the intended geometry precisely enough that this check is meaningful.
    When a slide contains quantities, rankings, trends, proportions, KPIs,
    market sizing, financials, benchmarks, or operational metrics, the `visual`
-   should normally name a concrete data display such as `KPI strip`, `bar
+   must name a concrete data display such as `KPI strip`, `bar
    chart`, `line chart`, `matrix`, `comparison table`, `heatmap`, or
-   `mini-dashboard`, not just `cards` or `text layout`. For scenario,
+   `mini-dashboard` whenever the page contains at least two real quantitative
+   values; with only one value this remains strongly preferred. Do not use just
+   `cards` or `text layout`. For scenario,
    use-case, capability, or demo pages, a plain `cards` layout is acceptable only
    when the cards are content-rich. If each card has just a title and 1-2 short
    lines, the `visual` must name a second layer such as a demo flow, customer
    journey, role swimlane, before/after comparison, KPI strip, icon/owner row,
    maturity ladder, cause tree, or capability matrix. Use the dedicated
    controlled layout when that relationship is the page's primary semantic.
+   When a page should be image-led, name the composition rather than only saying
+   “配图”: use `wide image feature` / `横向大图叙事` for
+   `image-feature-v1`, or `full-bleed image` / `整页生图` for
+   `image-full-bleed-v1`. Reserve the full-bleed form for one short message whose
+   fixed text-safe region can coexist with a right-side visual focus.
 6. Run `scripts/validate_outline.js outline.json` and fix failures before
    scaffolding `deck.json`.
 
@@ -290,8 +297,10 @@ preserve any explicit user order or page count. The registry lives in
 - Use a section-divider slide only when it helps pacing.
 - Put explicitly authorized assumptions in `evidence` or `notes` and disclose
   them visibly on the affected slide; do not hide missing data.
-- For data-heavy slides, prefer chart/table/KPI/dashboard visuals over plain
-  bullet lists unless the data is too sparse or text-only output was requested.
+- For data-heavy slides with at least two real values, require a chart/table/KPI/
+  dashboard visual instead of a plain bullet list. With only one value, prefer
+  the same visual treatment unless the data is too sparse or text-only output
+  was requested.
 - Keep page numbers consecutive and aligned with the final slide count.
 
 ## Validation
