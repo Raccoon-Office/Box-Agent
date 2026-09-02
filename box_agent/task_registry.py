@@ -15,7 +15,7 @@ from .events import ArtifactEvent
 from .task_context import TaskContext
 
 
-REGISTRY_SCHEMA_VERSION = 1
+REGISTRY_SCHEMA_VERSION = 2
 
 
 def _now() -> str:
@@ -73,7 +73,6 @@ def _initial_record(
             else None
         ),
         "execution_status": "running",
-        "delivery_status": None,
         "created_at": now,
         "updated_at": now,
         "artifacts": [],
@@ -99,6 +98,7 @@ def begin_task(
             "updated_at": _now(),
         }
     )
+    payload.pop("delivery_status", None)
     if artifact_root_dir is not None:
         payload["artifact_root_dir"] = str(
             Path(artifact_root_dir).expanduser().resolve()
@@ -113,22 +113,22 @@ def finish_task(
     context: TaskContext,
     *,
     execution_status: str,
-    delivery_status: str | None,
     artifact_root_dir: str | Path | None,
 ) -> Path:
-    """Persist terminal execution and delivery states without upgrading gaps."""
+    """Persist the terminal execution state without inferring delivery policy."""
     path = _registry_path(workspace_dir, context.task_id)
     payload = _read_record(path) or _initial_record(context, artifact_root_dir)
     payload.update(
         {
+            "schema_version": REGISTRY_SCHEMA_VERSION,
             "session_id": context.session_id,
             "task_id": context.task_id,
             "current_turn_id": context.turn_id,
             "execution_status": execution_status,
-            "delivery_status": delivery_status,
             "updated_at": _now(),
         }
     )
+    payload.pop("delivery_status", None)
     _write_record(path, payload)
     return path
 

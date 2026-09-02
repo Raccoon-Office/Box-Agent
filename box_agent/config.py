@@ -143,6 +143,8 @@ class ToolLimitsModel(BaseModel):
 class GeneralToolLimitsConfig(ToolLimitsModel):
     """Limits shared by ordinary top-level agent turns."""
 
+    max_tool_calls: int = Field(default=160, ge=1, le=512)
+    max_delegated_tool_calls: int = Field(default=512, ge=1, le=4096)
     final_summary_after_calls: int = Field(default=200, ge=1, le=512)
     wrapup_remaining_steps: int = Field(default=10, ge=0, le=50)
 
@@ -168,42 +170,6 @@ class SearchFilesLimitsConfig(ToolLimitsModel):
     consecutive_empty_limit: int = Field(default=8, ge=1, le=50)
 
 
-class CompletionGateLimitsConfig(ToolLimitsModel):
-    """Continuation budget shared by verifiable deliverable workflows."""
-
-    max_continuations: int = Field(default=5, ge=0, le=20)
-    deadline_seconds: float = Field(default=1800.0, gt=0, le=14400.0)
-
-
-class WorkflowToolLimitsConfig(ToolLimitsModel):
-    """Total-call and completion-reserve limits for artifact workflows."""
-
-    max_tool_calls: int = Field(default=160, ge=1, le=512)
-    max_delegated_tool_calls: int = Field(default=512, ge=1, le=4096)
-    completion_reserve_calls: int = Field(default=10, ge=0, le=128)
-
-    @model_validator(mode="after")
-    def validate_completion_reserve(self) -> "WorkflowToolLimitsConfig":
-        if self.completion_reserve_calls > self.max_tool_calls:
-            raise ValueError("completion_reserve_calls cannot exceed max_tool_calls")
-        return self
-
-
-class PresentationToolLimitsConfig(WorkflowToolLimitsConfig):
-    """Controlled-presentation budgets, including deep research."""
-
-    deep_research_max_tool_calls: int = Field(default=240, ge=1, le=512)
-    research_rounds: int = Field(default=5, ge=1, le=20)
-
-    @model_validator(mode="after")
-    def validate_deep_research_reserve(self) -> "PresentationToolLimitsConfig":
-        if self.completion_reserve_calls > self.deep_research_max_tool_calls:
-            raise ValueError(
-                "completion_reserve_calls cannot exceed deep_research_max_tool_calls"
-            )
-        return self
-
-
 class SubAgentToolLimitsConfig(ToolLimitsModel):
     """Sub-agent loop and stall-detection limits."""
 
@@ -218,15 +184,8 @@ class ToolLimitsConfig(ToolLimitsModel):
     """Single typed source for user-tunable tool execution limits."""
 
     general: GeneralToolLimitsConfig = Field(default_factory=GeneralToolLimitsConfig)
-    completion: CompletionGateLimitsConfig = Field(
-        default_factory=CompletionGateLimitsConfig
-    )
     web_search: WebSearchLimitsConfig = Field(default_factory=WebSearchLimitsConfig)
     search_files: SearchFilesLimitsConfig = Field(default_factory=SearchFilesLimitsConfig)
-    external_skill: WorkflowToolLimitsConfig = Field(default_factory=WorkflowToolLimitsConfig)
-    presentation: PresentationToolLimitsConfig = Field(
-        default_factory=PresentationToolLimitsConfig
-    )
     sub_agent: SubAgentToolLimitsConfig = Field(default_factory=SubAgentToolLimitsConfig)
 
 

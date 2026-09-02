@@ -66,21 +66,18 @@ flowchart TD
 outline.json -> deck.json -> validate -> render -> index.html
 ```
 
-对于一句话的事实型需求，受控检查点会在前面增加一段可恢复的研究交接：
+对于一句话的事实型需求，Skill 会在前面增加一段可恢复的研究交接：
 
 ```text
 output/research/* -> 研究 QA -> outline.json -> deck.json -> index.html
 ```
 
 演示制作工具以产物根目录为工作目录，因此工具看到的相对路径 `research/`，在宿主
-工作区中实际是 `output/research/`。新鲜且成功的研究报告会让文件系统检查点进入
-`outline`；搜索与浏览器读取使用独立的受限证据预算，任务续跑时可以复用这份已验证
-交接中的 URL，不需要重新做一遍广泛搜索。
-如果 officev3 或打包 runtime 重启，用户一句简短的“继续”会从这些持久化产物恢复
-尚未完成的受控任务；已经拥有新鲜 7/7 QA 的 deck 不会被重新打开。大纲校验失败时，
-检查点进入 `outline_repair`，自包含的 `REPAIR_INPUT` 会给出准确问题、当前完整大纲、
-允许复用的研究 URL 与不受支持的 URL。该阶段只允许一次受保护的 `write_file` 修复
-（或一次聚焦的用户补充请求），从机制上阻止重复读取、临时 shell 改写和来源绕过。
+工作区中实际是 `output/research/`。续跑时使用 Session Log 上下文，并重新验证持久的
+research、outline、deck 和 QA 文件，再决定下一项 Skill 步骤；有效研究交接中的 URL
+可以复用，不需要重新做一遍广泛搜索。已经拥有新鲜 7/7 QA 的 deck 不会被重新打开。
+大纲校验失败时，根据报告中的准确问题、当前完整大纲和允许复用的研究 URL 修复；
+这是 Skill 内部流程，不是 Agent runtime 状态机。
 
 renderer 会把规范化文档写入
 `<script type="application/json" id="deck-document">`。浏览器编辑器读取该模型，

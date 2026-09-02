@@ -320,7 +320,7 @@ When the user explicitly asks to browse or choose themes before authoring, run
 `scripts/render_theme_gallery.js --out theme-previews/index.html`. The default
 gallery renders a representative cross-family shortlist with the real compiler;
 `--all` renders the full catalog. This discovery artifact is created before the
-outline/scaffold checkpoint and does not alter the normal auto-matched path.
+outline/scaffold artifacts and does not alter the normal auto-matched path.
 
 Theme previews are not a reliable way to compare page grammar because palette,
 type, and surface styling can dominate the result. When the user asks to compare
@@ -328,7 +328,7 @@ composition types or says several types look alike, run
 `scripts/render_composition_gallery.js --out composition-previews/index.html`.
 It renders matched content across all eleven families and their thirty-three
 registered variants, grouped into five user-facing directions. Treat this atlas
-as disposable discovery output, not as a deck checkpoint.
+as disposable discovery output, not as canonical deck state.
 
 ## HTML composition layer
 

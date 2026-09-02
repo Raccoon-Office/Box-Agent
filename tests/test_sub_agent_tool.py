@@ -403,7 +403,7 @@ async def test_one_shot_child_has_independent_replayable_session_log(tmp_path):
     result = await tool.execute(task="Inspect isolated evidence", title="Evidence")
 
     child_id = result.raw_output["child_session_id"]
-    child = SessionLog.open(root, session_id=child_id)
+    child = SessionLog.open(root, session_id=child_id, cwd=tmp_path)
     assert child.header["parentSession"] == "parent-session"
     assert child.header["origin"] == "subagent"
     assert child.header["delegationDepth"] == 1

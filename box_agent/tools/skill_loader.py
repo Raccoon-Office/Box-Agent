@@ -124,7 +124,6 @@ class Skill:
     required_skills: Optional[List[str]] = None
     related_skills: Optional[List[str]] = None
     capabilities: Optional[List[str]] = None
-    workflow: Optional[str] = None
     broken: bool = False
     broken_reason: Optional[str] = None
 
@@ -176,7 +175,6 @@ All files and references in this skill are relative to this directory.
             "required_skills": self.required_skills or [],
             "related_skills": self.related_skills or [],
             "capabilities": self.capabilities or [],
-            "workflow": self.workflow,
             "broken": self.broken,
             "broken_reason": self.broken_reason,
         }
@@ -450,18 +448,6 @@ class SkillLoader:
                     ),
                 )
             )
-            workflow = self._parse_skill_name(
-                frontmatter.get(
-                    "workflow",
-                    frontmatter.get(
-                        "workflow_kind",
-                        metadata.get("workflow", metadata.get("workflow_kind"))
-                        if metadata
-                        else None,
-                    ),
-                )
-            )
-
             return Skill(
                 name=frontmatter["name"],
                 description=frontmatter["description"],
@@ -475,7 +461,6 @@ class SkillLoader:
                 required_skills=required_skills,
                 related_skills=related_skills,
                 capabilities=capabilities,
-                workflow=workflow,
             )
 
         except Exception as e:
@@ -993,8 +978,6 @@ class SkillLoader:
                     routing_hints.append(
                         f"capabilities: {', '.join(skill.capabilities)}"
                     )
-                if skill.workflow:
-                    routing_hints.append(f"workflow: {skill.workflow}")
                 routing_suffix = (
                     f" [{'; '.join(routing_hints)}]"
                     if routing_hints

@@ -31,16 +31,14 @@ git log --oneline <merge-base>..<change-ref> -- <relevant-paths>
 
 ## Freshness and known documentation drift
 
-This index was reconciled against `origin/main` at `3610807` on 2026-08-18.
+This index was reconciled against `origin/main` at `f6bac85` on 2026-09-02.
 Reviewers must inspect newer target commits rather than assuming this snapshot
 is still current.
 
-- [Release state](../RELEASE_STATE.md) is authoritative for the release
-  artifacts and hashes it actually records, but its current `Unreleased`
-  heading still says `0.8.85`. At this baseline, `pyproject.toml`,
-  `box_agent/__init__.py`, and `uv.lock` identify source version `0.8.87`.
-  Therefore the release document must not be used to claim the current source
-  version, publication, or an installed officev3 runtime.
+- [Release state](../RELEASE_STATE.md) records the published `v0.9.7`
+  artifacts and hashes. A later source-only PR does not update an installed
+  officev3 runtime; build, install, restart, probe, and fresh-task evidence
+  remain separate checkpoints.
 
 ## Quick routing by affected area
 
@@ -60,9 +58,9 @@ decision, read those entries together.
 | Context compression | `box_agent/core.py`, tool-call arguments, history summarization | Normal unsummarized history retains exact tool-call arguments; whole-history summarization remains a separate boundary. | Current at this baseline. | [PR #35](#2026-08-17--preserve-tool-call-arguments-in-normal-history-pr-35) |
 | MCP deferred loading | `mcp_tool_catalog.py`, `mcp_tool_search.py`, `tool_search` | Ordinary MCP schemas are hidden by default until session-scoped activation; `alwaysLoad` remains eager. | Current; later research hardening may also apply to research paths. | [PR #31](#2026-08-17--deferred-mcp-catalog-and-session-exposure-pr-31), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
 | Sub-agent delegation | `sub_agent_tool.py`, `sub_agent_capabilities.py`, `required_tools`, `write_scope`, `files` | The public request is flat; runtime-derived policy limits implicit tools to trusted local readers, keeps process/external/unknown MCP capabilities fail-closed, and scopes path writes. | Supersedes the caller-authored nested constraint contract while retaining its runtime enforcement goals. | [2026-08-19 flattened contract](#2026-08-19--flattened-sub-agent-contract-with-derived-policy) |
-| Workflow ownership | `workflow_owner_store.py`, explicit Skills, ACP decisions, presentation recovery | Runtime-selected owner precedes artifact discovery. Unknown Skills use the generic external lifecycle; foreign `deck.json` files cannot activate controlled finalization. | Pending implementation; hardens external-Skill and controlled-presentation recovery. | [2026-08-20 owner hardening](#2026-08-20--workflow-owner-precedence-for-third-party-skills) |
+| Session and workflow ownership | `session_log.py`, explicit Skills, `WAITING_FOR_USER`, legacy workflow files | Session Log is the sole durable Agent-session source. Skills/plugins own domain progress and recovery instructions; legacy checkpoint and owner files are ignored but not deleted. | PR #100 supersedes the proposed runtime owner/checkpoint lifecycle while retaining generic Tool safety boundaries. | [PR #100](#2026-09-02--session-log-only-recovery-pr-100), [earlier owner design](#2026-08-20--workflow-owner-precedence-for-third-party-skills) |
 | Agent Trace diagnostics | `box_agent/trace_viewer/`, `box-agent trace-viewer`, `box-agent-session-trace/v1` | The packaged viewer is a read-only v1 trace consumer; static access stays browser-local and the optional directory service is loopback-only, authority-validated, explicit-path, top-level JSONL, and size-bounded. | Pending review; adds diagnostics without changing the trace writer, Core, provider, or ACP contracts. | [2026-08-20 trace viewer](#2026-08-20--local-agent-trace-diagnostics) |
-| Model routing and controlled presentations | `box_agent/llm/model_routing.py`, `box_agent/workflows/presentation_*`, controlled PPTX | Automatic child-model routing uses a host allowlist, while presentation-specific state and recovery remain outside the generic kernel. | PR #30 is the main record; later research hardening must be checked where relevant. | [PR #30](#2026-08-14--runtime-routing-and-presentation-reliability-pr-30), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
+| Model routing and controlled presentations | `box_agent/llm/model_routing.py`, PPTX Skill, Session Log, controlled PPTX | Automatic child-model routing keeps its host allowlist. Presentation progress, validation, and recovery instructions belong to the Skill instead of an internal runtime state machine. | PR #100 supersedes the presentation-lifecycle portion of PR #30; model-routing constraints remain in force. | [PR #100](#2026-09-02--session-log-only-recovery-pr-100), [PR #30](#2026-08-14--runtime-routing-and-presentation-reliability-pr-30) |
 | Configurable operational limits | `box_agent/config.py`, `box_agent/core.py` (`provider_stale_seconds`), `image_generation_tool.py` (`max_dimension`), `setup.py` (`generate_image` gating), `openai_client.py` (SenseNova prefixes) | Hardcoded stale/image/thinking limits become config/env with unchanged defaults; generic image endpoints clamp oversized sizes and unconfigured `generate_image` is not registered. | Pending; defaults unchanged except the generic image clamp and `generate_image` gating. | [2026-08-21 configurable limits](#2026-08-21--configurable-runtime-operational-limits) |
 
 For research execution, Todo/progress behavior, browser routing, or contributor
@@ -72,6 +70,37 @@ Release, provider API, and ACP compatibility have their own sources under
 [long-lived release and compatibility history](#long-lived-release-and-compatibility-history).
 
 ## Pending material changes
+
+### 2026-09-02 — Session Log-only recovery (PR #100)
+
+- Change: [PR #100](https://github.com/Raccoon-Office/Box-Agent/pull/100);
+  the branch is rebased onto `origin/main` at `f6bac85`, with no merge or
+  packaged-runtime reference yet.
+- Durable contract: Session Log is the sole durable Agent-session source for
+  messages, tool calls/results, Goal, Plan, Todo, active Skill, compaction, and
+  turn boundaries. Domain Skills derive progress from that log plus durable
+  artifacts instead of CompletionGate, WorkflowPolicy, checkpoint, or owner
+  stores.
+- Wait and budget contract: interactive pauses use `WAITING_FOR_USER`; generic
+  execution budgets come from run options. CLI and ACP translate the shared
+  state without owning a second lifecycle.
+- Migration: legacy checkpoint and workflow-owner files are ignored but not
+  migrated or deleted. Removed completion/workflow configuration and metadata
+  require downstream consumers to use Session Log events and generic run
+  options.
+- Safety boundary: removing the presentation runtime does not remove generic
+  Tool enforcement. PPTX self-check bypass guards, direct-deck rewrite guards,
+  and exact image-status command validation remain fail closed with negative
+  regression tests.
+- Proof anchors: `tests/test_session_log.py`,
+  `tests/test_agent_session_persistence.py`,
+  `tests/test_waiting_for_user.py`, `tests/test_acp.py`, Tool safety tests,
+  the generated Skill manifest, repository preflight, and package build.
+- Runtime boundary: source tests and package construction do not prove an
+  installed officev3 runtime. Build/install/probe/restart/fresh-task evidence
+  remains a downstream release step.
+- Rollback: revert PR #100 as one architectural change and rebuild the prior
+  runtime. Do not delete legacy state files as part of rollback.
 
 ### 2026-08-21 — managed web-search/web-extract bootstrap and runtime dispatch
 

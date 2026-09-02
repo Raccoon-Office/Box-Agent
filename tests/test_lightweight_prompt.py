@@ -281,38 +281,6 @@ async def test_extmethod_title_prompt_caps_output_at_eight_thousand_tokens(monke
 
 
 @pytest.mark.asyncio
-async def test_extmethod_presentation_preflight_caps_output_at_four_thousand_tokens(
-    monkeypatch,
-):
-    llm = _FakeLLM(content='{"matched":true}')
-    agent = _StubAgent(llm)
-    captured: dict[str, Any] = {}
-
-    def fake_resolve_model_client(client, **kwargs):
-        captured.update(kwargs)
-        return client, {"mode": "test"}
-
-    monkeypatch.setattr(
-        "box_agent.acp.resolve_model_client",
-        fake_resolve_model_client,
-    )
-
-    resp = await agent.extMethod(
-        "llm/prompt",
-        {
-            "prompt": "classify this presentation request",
-            "_meta": {"purpose": "presentation_preflight"},
-        },
-    )
-
-    assert resp["text"] == '{"matched":true}'
-    assert captured["max_output_tokens_cap"] == 4_096
-    assert captured["task_tags"] == ("presentation", "analysis")
-    assert captured["required_ability_level"] == 2
-    assert llm.calls[0]["thinking_enabled"] is False
-
-
-@pytest.mark.asyncio
 async def test_extmethod_llm_prompt_empty_returns_error():
     agent = _StubAgent(_FakeLLM())
     resp = await agent.extMethod("llm/prompt", {"prompt": ""})

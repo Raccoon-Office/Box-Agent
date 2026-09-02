@@ -5,7 +5,9 @@ from box_agent.tools.request_user_input_tool import RequestUserInputTool
 
 @pytest.mark.asyncio
 async def test_request_user_input_tool_returns_resumable_payload():
-    result = await RequestUserInputTool().execute(
+    tool = RequestUserInputTool()
+    assert tool.ends_turn_on_success is True
+    result = await tool.execute(
         question="请补充市场规模口径。",
         missing_fields=["TAM", "SAM", "SOM"],
         reason="融资路演不能虚构市场数字。",

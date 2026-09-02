@@ -10,7 +10,6 @@ from box_agent.agent import Agent
 from box_agent.config import ToolLimitsConfig
 from box_agent.context_resources import ResourceClass, ResourceDescriptor
 from box_agent.events import DoneEvent, StopReason
-from box_agent.loop_guards import CompletionGate
 from box_agent.tools.skill_preload import ACTIVE_SKILLS_HEADING, strip_active_skills
 
 
@@ -31,7 +30,6 @@ async def test_agent_run_forwards_core_execution_options(
 
     monkeypatch.setattr(agent_module, "run_agent_loop", fake_run_agent_loop)
 
-    gate = CompletionGate(required_changed_artifact_globs=("output/**/*.md",))
     agent = Agent(
         llm_client=DummyLLM(),
         system_prompt="system",
@@ -43,14 +41,13 @@ async def test_agent_run_forwards_core_execution_options(
 
     result = await agent.run(
         force_plan_start=True,
-        completion_gate=gate,
         artifact_detection_enabled=False,
         current_turn_text="current user request",
     )
 
     assert result == "done"
     assert captured["force_plan_start"] is True
-    assert captured["completion_gate"] is gate
+    assert "completion_gate" not in captured
     assert captured["artifact_detection_enabled"] is False
     assert captured["thinking_enabled"] is True
     assert captured["tool_limits"].web_search.total_calls == 31
@@ -80,8 +77,6 @@ async def test_agent_run_events_forwards_host_run_options(
     )
     host_llm = object()
     artifact_root = tmp_path / "host-output"
-    workflow_policy = object()
-
     def fingerprint_sink(_payload: dict) -> None:
         pass
 
@@ -93,11 +88,11 @@ async def test_agent_run_events_forwards_host_run_options(
         turn_id="turn-1",
         title="Quarterly review",
         max_tool_calls=9,
+        max_delegated_tool_calls=12,
         web_search_total_limit=36,
         no_progress_limit=2,
         artifact_root_dir=artifact_root,
         cache_fingerprint_sink=fingerprint_sink,
-        workflow_policy=workflow_policy,
         current_turn_text="host current turn",
     )
 
@@ -110,11 +105,12 @@ async def test_agent_run_events_forwards_host_run_options(
     assert captured["turn_id"] == "turn-1"
     assert captured["title"] == "Quarterly review"
     assert captured["max_tool_calls"] == 9
+    assert captured["max_delegated_tool_calls"] == 12
     assert captured["web_search_total_limit"] == 36
     assert captured["no_progress_limit"] == 2
     assert captured["artifact_root_dir"] == artifact_root
     assert captured["cache_fingerprint_sink"] is fingerprint_sink
-    assert captured["workflow_policy"] is workflow_policy
+    assert "workflow_policy" not in captured
     assert captured["current_turn_text"] == "host current turn"
     assert captured["context_resource_ledger"] is agent.context_resource_ledger
 

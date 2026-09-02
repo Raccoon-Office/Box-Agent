@@ -20,6 +20,7 @@ OPTIONS = [
 def test_request_user_decision_contract_prefers_safe_progress():
     tool = RequestUserDecisionTool()
 
+    assert tool.ends_turn_on_success is True
     assert "Prefer progress over waiting" in tool.description
     assert "safely continues the user's explicit request" in tool.description
     assert "do not call this tool" in tool.description

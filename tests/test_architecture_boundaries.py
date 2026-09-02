@@ -12,7 +12,7 @@ APPLICATION_ADAPTER_MODULES = ("box_agent.acp", "box_agent.cli", "acp", "cli")
 STABLE_KERNEL_MODULES = (
     Path("core.py"),
     Path("loop_guards.py"),
-    Path("workflow_policy.py"),
+    Path("runtime.py"),
 )
 PRESENTATION_WORKFLOW_TOKENS = (
     "controlled_presentation",
@@ -105,7 +105,7 @@ def test_core_does_not_depend_on_application_adapters() -> None:
     assert forbidden == [], f"Core must not import application adapters: {forbidden}"
 
 
-def test_core_depends_on_workflow_contract_not_implementations() -> None:
+def test_core_has_no_workflow_state_machine_dependency() -> None:
     core_path = PACKAGE_ROOT / "core.py"
     tree = ast.parse(core_path.read_text(encoding="utf-8"), filename=str(core_path))
     imported_modules: list[str] = []
@@ -124,11 +124,12 @@ def test_core_depends_on_workflow_contract_not_implementations() -> None:
         or module == "workflows"
         or module.startswith("workflows.")
         for module in imported_modules
-    ), "Core must depend on WorkflowPolicy, not a concrete workflow package"
+    ), "Core must not depend on the removed workflow packages"
 
     source = core_path.read_text(encoding="utf-8")
     assert "controlled_presentation" not in source
-    assert "WorkflowPolicy" in source
+    assert "WorkflowPolicy" not in source
+    assert "CompletionGate" not in source
 
 
 def test_stable_kernel_contains_no_concrete_presentation_workflow() -> None:
@@ -141,12 +142,57 @@ def test_stable_kernel_contains_no_concrete_presentation_workflow() -> None:
                 violations.append(f"{relative_path}:{token}")
 
     assert violations == [], (
-        "Concrete PPT routing and checkpoint state belong under "
-        f"box_agent.workflows, not the stable kernel: {violations}"
+        "Presentation routing and state must stay outside the stable kernel: "
+        f"{violations}"
     )
 
 
-def test_acp_depends_on_generic_workflow_lifecycle_only() -> None:
+def test_generic_tools_contain_no_presentation_workflow_lifecycle() -> None:
+    forbidden_tokens = (
+        "controlled_presentation",
+        "CompletionGate",
+        "WorkflowPolicy",
+        "runtime_workflow_actions",
+    )
+    generic_tool_paths = (
+        PACKAGE_ROOT / "tools" / "base.py",
+        PACKAGE_ROOT / "tools" / "bash_tool.py",
+        PACKAGE_ROOT / "tools" / "file_tools.py",
+        PACKAGE_ROOT / "tools" / "jupyter_tool.py",
+    )
+
+    violations = [
+        f"{path.name}:{token}"
+        for path in generic_tool_paths
+        for token in forbidden_tokens
+        if token in path.read_text(encoding="utf-8")
+    ]
+    assert violations == []
+
+
+def test_pptx_tool_safety_has_no_workflow_lifecycle_dependency() -> None:
+    safety_path = PACKAGE_ROOT / "tools" / "pptx_safety.py"
+    source = safety_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(safety_path))
+    imported_modules = [
+        node.module or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    ]
+
+    assert not any(
+        module == "box_agent.workflows"
+        or module.startswith("box_agent.workflows.")
+        or module == "workflows"
+        or module.startswith("workflows.")
+        for module in imported_modules
+    )
+    assert "controlled_presentation" not in source
+    assert "CompletionGate" not in source
+    assert "WorkflowPolicy" not in source
+
+
+def test_acp_has_no_legacy_workflow_lifecycle() -> None:
     acp_path = PACKAGE_ROOT / "acp" / "__init__.py"
     tree = ast.parse(acp_path.read_text(encoding="utf-8"), filename=str(acp_path))
     concrete_imports: list[str] = []
@@ -166,6 +212,25 @@ def test_acp_depends_on_generic_workflow_lifecycle_only() -> None:
     source = acp_path.read_text(encoding="utf-8")
     assert concrete_imports == []
     assert '"controlled_presentation"' not in source
+    assert "CompletionGate" not in source
+    assert "WorkflowPolicy" not in source
+    assert "ContextCheckpointEvent" not in source
+
+
+def test_legacy_workflow_provider_modules_are_removed() -> None:
+    removed_files = (
+        "completion.py",
+        "workflow_policy.py",
+        "workflow_checkpoint_store.py",
+        "workflow_owner_store.py",
+        "delivery.py",
+    )
+
+    assert all(
+        not (PACKAGE_ROOT / relative_path).exists()
+        for relative_path in removed_files
+    )
+    assert not list((PACKAGE_ROOT / "workflows").glob("*.py"))
 
 
 def test_application_adapter_detector_rejects_submodule_imports(

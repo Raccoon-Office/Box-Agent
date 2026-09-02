@@ -8,7 +8,6 @@ from .events import AgentEvent, StopReason
 from .hooks import BaseHook, HookManager, load_hooks
 from .llm import LLMClient
 from .schema import FunctionCall, LLMProvider, LLMResponse, Message, ToolCall
-from .workflow_policy import WorkflowCheckpointUpdate, WorkflowPolicy
 
 __version__ = "0.9.7"
 
@@ -40,7 +39,5 @@ __all__ = [
     "Message",
     "StopReason",
     "ToolCall",
-    "WorkflowCheckpointUpdate",
-    "WorkflowPolicy",
     "load_hooks",
 ]

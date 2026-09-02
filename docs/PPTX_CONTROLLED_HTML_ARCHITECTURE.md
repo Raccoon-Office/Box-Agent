@@ -70,25 +70,20 @@ During generation:
 outline.json -> deck.json -> validate -> render -> index.html
 ```
 
-For a short factual brief, the controlled checkpoint prepends one durable
-research handoff:
+For a short factual brief, the Skill prepends one durable research handoff:
 
 ```text
 output/research/* -> research QA -> outline.json -> deck.json -> index.html
 ```
 
 Presentation tools run from the artifact root, so their relative `research/`
-directory is physically `output/research/` from the host workspace. A fresh
-successful research report advances the filesystem checkpoint to `outline`;
-search/browser calls use a separate bounded evidence allowance, and a resumed
-turn may reuse URLs from that validated handoff instead of researching again.
-If officev3 or the packaged runtime restarts, a terse continuation reconstructs
-an incomplete controlled-deck gate from these durable artifacts; a current 7/7
-deck remains complete and is not reopened. A failed outline report advances to
-`outline_repair`, whose self-contained `REPAIR_INPUT` supplies the exact issues,
-current outline, and allowed research URLs. That stage permits only one guarded
-`write_file` repair (or a focused user-input request), preventing repeated reads,
-ad-hoc shell rewrites, and provenance bypasses.
+directory is physically `output/research/` from the host workspace. A resumed
+turn uses Session Log context and validates the durable research, outline, deck,
+and QA files before deciding the next Skill step. It may reuse URLs from a valid
+research handoff instead of researching again. A current 7/7 deck remains
+complete and is not reopened. A failed outline report is repaired from the
+report's exact issues, the current outline, and allowed research URLs; this is
+Skill procedure, not an Agent runtime state machine.
 
 The renderer embeds the normalized document as
 `<script type="application/json" id="deck-document">`. The browser editor reads

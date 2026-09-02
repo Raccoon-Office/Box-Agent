@@ -25,7 +25,10 @@ from pydantic import Field, model_validator
 from ..config import ToolsConfig
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
-from .pptx_safety import detect_pptx_self_check_bypass
+from .pptx_safety import (
+    detect_pptx_image_status_command_bypass,
+    detect_pptx_self_check_bypass,
+)
 from .runtime import bundled_win_bash
 from .shell_inspection import inspect_shell_command
 from .safety import (
@@ -732,19 +735,6 @@ class BashTool(Tool):
     """
 
     aliases = ("exec", "terminal")
-    runtime_workflow_actions = frozenset(
-        {
-            "controlled_presentation.apply_patch",
-            "controlled_presentation.apply_redesign",
-            "controlled_presentation.finalize",
-            "controlled_presentation.image_policy_rebase",
-            "controlled_presentation.image_status_sync",
-            "controlled_presentation.outline_validate",
-            "controlled_presentation.research_validate",
-            "controlled_presentation.scaffold",
-        }
-    )
-
     max_result_size_chars = math.inf
 
     def __init__(
@@ -1279,6 +1269,19 @@ Examples:
                     error=bypass_error,
                     stdout="",
                     stderr=bypass_error,
+                    exit_code=1,
+                )
+            image_status_error = detect_pptx_image_status_command_bypass(
+                command,
+                workspace_dir=self.workspace_dir,
+                runtime_env=self._subprocess_env,
+            )
+            if image_status_error:
+                return BashOutputResult(
+                    success=False,
+                    error=image_status_error,
+                    stdout="",
+                    stderr=image_status_error,
                     exit_code=1,
                 )
 

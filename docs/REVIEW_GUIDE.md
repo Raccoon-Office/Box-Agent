@@ -37,7 +37,7 @@ If Task, Proof, or Risk is missing, ask for that before doing a deep style pass.
 
 | Change type | Minimum proof |
 | --- | --- |
-| Shared core loop, events, cancellation, goals, completion gate | Focused regression test plus relevant existing core/ACP tests |
+| Shared core loop, events, cancellation, goals, Session Log | Focused regression test plus relevant core/persistence/ACP tests |
 | CLI-only behavior | Focused CLI test or command output, plus no ACP duplication |
 | ACP/runtime behavior | ACP test or probe; stdout/stderr boundary considered |
 | Tool behavior | Direct tool test covering success and important failure path |

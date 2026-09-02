@@ -99,11 +99,10 @@ max_truncation_continuations: 1 # Max continuations per turn (loop guard)
 # specific values that should remain user-controlled across upgrades.
 # tool_limits:
 #   general:
+#     max_tool_calls: 160 # 1..512; total top-level tool-call budget
+#     max_delegated_tool_calls: 512 # 1..4096; aggregate child-tool budget
 #     final_summary_after_calls: 200 # 1..512; request a final summary after this many visible tool calls
 #     wrapup_remaining_steps: 10 # 0..50; start wrapping up this many steps before max_steps
-#   completion:
-#     max_continuations: 5 # 0..20; forced continuations for incomplete deliverables
-#     deadline_seconds: 1800 # 1..14400; continuation deadline, not a tool kill timeout
 #   web_search:
 #     batch_size: 8 # 1..32; web searches allowed in one agent step
 #     concurrency: 2 # 1..batch_size; parallel searches in a search-only agent step
@@ -111,16 +110,6 @@ max_truncation_continuations: 1 # Max continuations per turn (loop guard)
 #     deep_research_total_calls: 150 # 0..512; deep-research per-turn web-search budget
 #   search_files:
 #     consecutive_empty_limit: 8 # 1..50; stop repeated file searches after empty results
-#   external_skill:
-#     max_tool_calls: 160 # 1..512; total tool-call budget
-#     max_delegated_tool_calls: 512 # 1..4096; separate aggregate child-tool budget
-#     completion_reserve_calls: 10 # 0..128 and <= max_tool_calls
-#   presentation:
-#     max_tool_calls: 160 # 1..512; normal presentation budget
-#     max_delegated_tool_calls: 512 # 1..4096; separate aggregate child-tool budget
-#     completion_reserve_calls: 10 # 0..128 and <= both presentation call budgets
-#     deep_research_max_tool_calls: 240 # 1..512; deep-research presentation budget
-#     research_rounds: 5 # 1..20; research rounds before requiring artifact handoff
 #   sub_agent:
 #     general_max_steps: 80 # 1..256; declared sub-agent step cap
 #     legacy_max_steps: 60 # deprecated compatibility field; no separate legacy loop

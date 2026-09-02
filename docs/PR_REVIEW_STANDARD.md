@@ -98,16 +98,17 @@ GitHub state.
 ## 5. Ownership boundaries
 
 - Shared loop invariants, events, scheduling, cancellation, tool-call closure,
-  goals, and completion gates belong to stable shared contracts.
+  goals, and Session Log persistence belong to stable shared contracts.
 - CLI owns terminal UX and local rendering; ACP owns protocol translation and
   must keep stdout protocol-clean.
 - Provider wire behavior belongs in `box_agent/llm/`.
 - Tool semantics belong in `box_agent/tools/` and return structured results.
 - Skill loading belongs in `box_agent/skill_loader.py`, `box_agent/skills/`, and
   `_manifest.json`.
-- Stateful product workflows belong in `box_agent/workflows/` behind explicit
-  workflow policies.
-- PPT/document behavior remains Skill-driven unless a shared contract changes.
+- Stateful product workflows belong in self-contained Skills or plugins and
+  must not introduce a second durable session-state source.
+- PPT/document behavior remains Skill-driven unless a host-neutral shared
+  contract changes.
 - officev3 and standalone runtime behavior require runtime evidence; source edits
   alone do not prove packaged behavior.
 

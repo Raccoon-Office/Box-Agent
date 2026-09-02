@@ -1,62 +1,68 @@
-# Workflow Ownership and Third-party Skills
+# Session and Skill Ownership
 
-Box-Agent may run built-in workflows and arbitrary installed Skills in the same
-session workspace. Artifact filenames are therefore evidence inside a selected
-workflow, not a safe way to select the workflow itself.
+This document defines ownership after the removal of the checkpoint,
+Completion Gate, and workflow-owner runtimes.
 
-## Ownership selection
+## Durable session ownership
 
-For each stable upstream session, ACP selects at most one recoverable workflow:
+Session Log is the sole durable source for an Agent session. It owns generic
+facts only:
 
-1. An explicitly invoked installed Skill uses the generic `external_skill`
-   lifecycle unless it is bound to a trusted built-in workflow adapter.
-2. A host-selected built-in provider may select its registered workflow.
-3. The selected kind and bounded options are persisted by the runtime under
-   `~/.box-agent/sessions/<session>/workflow-owner.json`.
-4. A later ACP session resumes that owner before attempting filesystem-based
-   legacy recovery.
+- messages and tool call/result history;
+- Goal, Plan, Todo, and active Skill state;
+- compaction records and turn boundaries;
+- the immutable normalized session cwd.
 
-The owner file is runtime state outside the user artifact root. Skill-authored
-files and Skill metadata cannot register executable checkpoint code or grant
-tool authority.
+Opening a Session with a different cwd fails. Legacy checkpoint and owner files
+may remain on disk for audit, but Box-Agent does not read, rewrite, migrate, or
+delete them automatically.
 
-## Third-party Skill boundary
+Legacy synthetic workflow messages are filtered during replay. Recovery keeps
+the generic conversation and durable artifacts without rebuilding the old
+domain state machine.
 
-Unknown or user-installed Skills default to `external_skill`. The generic
-policy may infer expected output globs from static Skill metadata, but it does
-not run format-specific validators or finalizers. The Skill owns its authoring
-and export sequence; Box-Agent owns budgets, tool permissions, resumable user
-decisions, and artifact handoff.
+### Optional manual cleanup
 
-A future format-specific integration must be implemented as a registered
-runtime adapter with explicit artifact schema, checkpoint, validation,
-finalization, and completion contracts. A file named `deck.json` is not an
-adapter registration.
+Box-Agent intentionally leaves historical files in place. After stopping every
+Agent process for the workspace, an operator may inspect
 
-## Controlled-presentation legacy recovery
+- `<workspace>/.box-agent/checkpoints/`
+- `<workspace>/.box-agent/workflow-owners/`
 
-When no runtime owner or durable registered checkpoint exists, backward-
-compatible controlled-presentation recovery is intentionally narrow:
+and move individual reviewed files to an archive directory. Prefer an explicit
+per-file move over a recursive delete. Removing these files is not required for
+the new runtime because it never reads them.
 
-- only canonical `output/outline.json` or `output/deck.json` is considered;
-- an outline must contain non-empty structured slide narratives;
-- a deck must identify `schema_version: 1`, a theme, and slides with
-  `id + layout_id + props`;
-- recursively discovered or foreign deck schemas are logged and ignored.
+## Skill ownership
 
-Once a controlled workflow has selected a nested artifact root through its own
-checkpoint, generated validator/finalizer commands use absolute artifact paths
-so `BOX_AGENT_OUTPUT_DIR` cannot redirect them to another root.
+A Skill or plugin owns its domain terminology, stages, validators, scaffolders,
+finalizers, and quality rules. It should expose a small, verifiable interface
+and derive progress from Session Log context plus durable artifact files.
 
-## Lifecycle
+Skill activation comes from explicit invocation, the current matcher,
+host-selected Skill names, or generic capability metadata. A filename does not
+grant executable policy, and Skill metadata does not register code inside the
+Agent kernel.
 
-The owner is written when a recoverable workflow is selected, survives user
-decision/input pauses and new ACP session handles, and is removed after the
-delivery gate is satisfied or explicitly cancelled.
+Hosts select exact Skills with ACP `_meta.selected_skill_names` (camelCase
+`selectedSkillNames` is also accepted). Old presentation configuration no
+longer selects an internal provider. Configuration sections
+`tool_limits.completion`, `tool_limits.external_skill`, and
+`tool_limits.presentation` are removed; use `tool_limits.general.max_tool_calls`
+and `max_delegated_tool_calls` for generic turn budgets.
 
-Primary proof lives in:
+## Adapter ownership
 
-- `tests/test_workflow_owner_store.py`
-- `tests/test_workflow_checkpoint_store.py`
+CLI and ACP are adapters. They may select Skills, translate events, and render
+host metadata. They must not infer deliverable completeness or retain a second
+workflow lifecycle. ACP maps the internal `WAITING_FOR_USER` reason to
+`end_turn` while keeping the generic run status visible to the host.
+
+## Verification anchors
+
+- `tests/test_session_log.py`
+- `tests/test_agent_session_persistence.py`
+- `tests/test_waiting_for_user.py`
+- `tests/test_skill_preload.py`
 - `tests/test_acp.py`
-- `tests/test_completion_gate.py`
+- format-specific Skill tests such as `tests/test_pptx_controlled_deck.py`

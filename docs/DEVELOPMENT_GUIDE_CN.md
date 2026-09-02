@@ -44,10 +44,7 @@ box-agent/
 │   ├── core.py              # 执行核心 — run_agent_loop()（Agent 循环本体）
 │   ├── agent.py             # 公共 API 封装（Agent 类）
 │   ├── runtime.py           # 组装入口与 Core 稳定桥接
-│   ├── completion.py        # 通用交付物路由组装
-│   ├── delivery.py          # 通用交付意图判断
-│   ├── workflow_policy.py   # Core 使用的稳定工作流契约
-│   ├── workflows/           # 工作流路由、checkpoint 与策略实现
+│   ├── session_log.py       # 通用会话事实的持久化与回放
 │   ├── artifacts.py         # 共享产物契约工具
 │   ├── turn_policy.py       # 共享轮次分类策略
 │   ├── llm/                 # Provider 客户端和 LLM 包装器

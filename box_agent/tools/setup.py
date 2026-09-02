@@ -148,7 +148,7 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 - **Excel**：`pandas`+`openpyxl` 读写，`xlrd` 读 `.xls`；仅公式重算才考虑 LibreOffice。
 - **Word**：`python-docx` 读写；跨格式转换才用 `pandoc`。
 - **PDF**：`pypdf`（合并/拆分）、`pdfplumber`（文本/表格抽取）、`reportlab`（生成）。
-- **PowerPoint**：`python-pptx` 用于读取/抽取/检查/窄范围编辑；新建 PPT/PPTX 必须走 skill，不要直接用 `execute_code`+`python-pptx` 创建交付 PPT。
+- **PowerPoint**：`python-pptx` 可用于读取、抽取、检查和编辑；复杂创作任务优先遵循已激活的格式 Skill。
 
 **Skill vs Sandbox**：数据抽取/格式转换/表格处理 → 沙箱；复杂版式/OOXML 精操作/模板化生成/公式重算 → 先加载 skill。
 """
@@ -744,7 +744,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # Image inspection tool — only expose it when the bound model can actually
     # accept image blocks. Known text-only endpoints otherwise invite costly,
-    # futile resize/retry loops during presentation QA.
+    # futile resize/retry loops during visual inspection.
     image_llm = _image_capable_llm(llm)
     if image_llm is not None:
         tools.append(
