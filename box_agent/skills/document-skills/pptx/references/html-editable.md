@@ -107,11 +107,12 @@ renderer is available, ask the user to choose before authoring or exporting:
 deck.json` for controlled decks, `deck.html` for legacy decks); `PPTX` switches
 to native PptxGenJS.
 
-The script runs HTML self-check with `--dom-to-pptx --allow-local-images`, creates
-`slides/slide-*.png` preview images for visual QA, loads the skill-local
-`scripts/dom-to-pptx.bundle.js`, temporarily inlines local `<img>` paths in the
-browser DOM for export, writes `qa/html_self_check.json`, and writes
-`output.pptx`. It does not rewrite the source HTML. It passes `autoEmbedFonts: true`
+The script creates `slides/slide-*.png` preview images for visual QA, loads the
+skill-local `scripts/dom-to-pptx.bundle.js`, temporarily inlines local `<img>`
+paths in the browser DOM for export, and writes `output.pptx`. It does not run
+HTML self-check, write `qa/html_self_check.json`, or rewrite the source HTML.
+Run `html_self_check.js` separately when that QA evidence is required. The
+exporter passes `autoEmbedFonts: true`
 and defaults `svgAsVector: false` so SVGs are rasterized for pixel fidelity,
 closer to the in-browser button export path. Pass `--svg-vector true` only when
 PowerPoint vector editability is more important than visual fidelity. If
@@ -120,12 +121,12 @@ default and forces `svgAsVector: true` for the whole export. Every marked
 diagram must provide recoverable DiagramSpec data and exactly one direct inline
 `<svg>` root; `<img src="*.svg">` is not a supported technical-diagram path.
 The export summary records `diagramCount` and `diagramVectorExport: true`. If
-`qa/html_self_check.json` is missing, do not say HTML
+the separately generated `qa/html_self_check.json` is missing, do not say HTML
 self-check passed.
 
-If self-check or export fails after the route has been chosen, read the
-generated report and fix the HTML source. Follow the route-change, bounded
-repair, and official `--allow-self-check-issues` rules in `SKILL.md`.
+If a separately run self-check fails, read its report before deciding whether
+to repair the HTML source. An export failure is independent and should be
+diagnosed from the exporter error.
 
 Do not install the npm `dom-to-pptx` package for this workflow. The editable
 export must use this skill's bundled `scripts/dom-to-pptx.bundle.js`, which may
