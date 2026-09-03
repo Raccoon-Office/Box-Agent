@@ -83,7 +83,7 @@ with sync_playwright() as p:
 ✅ **Do** wait for `page.wait_for_load_state('networkidle')` before inspection
 
 ❌ **Don't** open local pages with `file://` or reserve a fixed preview port
-✅ **Do** start `${BOX_AGENT_PYTHON:-python3} -u -m http.server 0 --bind 127.0.0.1 --directory <dir>` with the background bash tool, read the selected port with `bash_output`, use the browser tools with `http://127.0.0.1:<port>/...`, and stop the shell with `bash_kill` in the same turn. The runtime also performs owner-scoped cleanup if the turn is cancelled.
+✅ **Do** start `${BOX_AGENT_PYTHON:-python3} -u -m http.server 0 --bind 127.0.0.1 --directory <dir>` with the background bash tool and read the selected port with `bash_output`. For agent-only validation, use `lifetime="turn"`, open `http://127.0.0.1:<port>/...`, and stop the shell with `bash_kill` in the same turn. When the user explicitly asks to open or inspect the service after the final response, use `lifetime="runtime"`, close only the automation browser after validation, keep the shell running, and report its URL, `bash_id`, and runtime-exit lifetime accurately.
 
 ## Best Practices
 

@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .base import Tool, ToolResult
+
+
+_RECOMMENDABLE_PREFERENCE_RE = re.compile(
+    r"(?:受众|面向谁|演示用途|使用场景|视觉风格|内容风格|页数|页面数量|"
+    r"交付范围|内容范围|交付格式|内容方向|侧重点|"
+    r"^用途(?:$|[（(])|\baudience\b|\bpresentation\s+purpose\b|"
+    r"\bvisual\s+style\b|\bpage\s+count\b|\bdelivery\s+scope\b|"
+    r"\bdelivery\s+format\b|\bcontent\s+direction\b)",
+    re.IGNORECASE,
+)
 
 
 class RequestUserInputTool(Tool):
@@ -25,7 +36,10 @@ class RequestUserInputTool(Tool):
             "that are actually required, then end the turn. Existing artifacts and the "
             "active delivery workflow are preserved; when the user replies in the same "
             "session, continue from those artifacts instead of restarting. Do not use "
-            "this for optional details that can safely be marked as pending or omitted."
+            "this for optional details that can safely be marked as pending or omitted. "
+            "Never use it for audience, purpose, style, page count, scope, format, or "
+            "content-direction preferences when you can propose finite choices; use "
+            "request_user_decision with a recommended default and countdown instead."
         )
 
     @property
@@ -84,6 +98,17 @@ class RequestUserInputTool(Tool):
             return ToolResult(
                 success=False,
                 error="missing_fields must name at least one required input",
+            )
+        if any(_RECOMMENDABLE_PREFERENCE_RE.search(field) for field in normalized_fields):
+            return ToolResult(
+                success=False,
+                error=(
+                    "Audience, purpose, style, page count, scope, format, and content "
+                    "direction are recommendable preferences, not missing factual input. "
+                    "Use request_user_decision with 2-6 choices, a recommended default, "
+                    "and a 30-second timeout when the choice is low-risk, reversible, and "
+                    "preserves the user's intent."
+                ),
             )
 
         payload = {

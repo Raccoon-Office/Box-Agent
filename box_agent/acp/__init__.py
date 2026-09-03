@@ -31,6 +31,7 @@ import base64
 import json as _json
 import logging
 import platform
+import signal
 import sys
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
@@ -82,7 +83,11 @@ from box_agent.tools.setup import (
     sync_mcp_tool_list,
     sync_mcp_tools,
 )
-from box_agent.tools.bash_tool import BashTool
+from box_agent.tools.bash_tool import (
+    BASH_LIFETIME_TURN,
+    BackgroundShellManager,
+    BashTool,
+)
 from box_agent.tools.file_tools import WriteTool
 from box_agent.tools.skill_scratch import (
     SkillScratchDirectory,
@@ -2788,6 +2793,14 @@ class BoxACPAgent:
             if state.skill_loader is not None
             and state.skill_loader.get_skill(name) is not None
         )
+        explicitly_selected_skill_names = tuple(
+            dict.fromkeys(
+                (
+                    *((explicit_skill.name,) if explicit_skill else ()),
+                    *host_selected_skill_names,
+                )
+            )
+        )
         state.explicitly_allowed_skill_names.clear()
         if explicit_skill is not None:
             state.explicitly_allowed_skill_names.add(explicit_skill.name)
@@ -2811,16 +2824,7 @@ class BoxACPAgent:
                 state.skill_selector.matched_skill_names,
                 state.env_context,
                 plan_detection_text,
-                selected_skill_names=(
-                    tuple(
-                        dict.fromkeys(
-                            (
-                                *((explicit_skill.name,) if explicit_skill else ()),
-                                *host_selected_skill_names,
-                            )
-                        )
-                    )
-                ),
+                selected_skill_names=explicitly_selected_skill_names,
             )
             state.explicitly_allowed_skill_names.update(preload_names)
             if preload_names:
@@ -2871,6 +2875,7 @@ class BoxACPAgent:
                 plan_approval=plan_approval,
                 auto_approve_plan=auto_approve_plan,
                 plan_start_text=plan_detection_text,
+                explicitly_selected_skill_names=explicitly_selected_skill_names,
                 ui_language=ui_language,
                 clear_prompt_grants=False,
             )
@@ -2956,12 +2961,15 @@ class BoxACPAgent:
             bash_tool = state.agent.tools.get("bash")
             if isinstance(bash_tool, BashTool):
                 try:
-                    terminated_bash_ids = await bash_tool.cleanup_background_processes()
+                    terminated_bash_ids = await bash_tool.cleanup_background_processes(
+                        lifetime=BASH_LIFETIME_TURN
+                    )
                     if terminated_bash_ids:
                         log.info(
                             "bash/session_cleanup",
                             session_id=session_id,
                             turn_id=turn_id,
+                            lifetime=BASH_LIFETIME_TURN,
                             count=len(terminated_bash_ids),
                             bash_ids=terminated_bash_ids,
                         )
@@ -3963,6 +3971,7 @@ class BoxACPAgent:
         plan_approval: dict[str, Any] | None = None,
         auto_approve_plan: bool = False,
         plan_start_text: str | None = None,
+        explicitly_selected_skill_names: tuple[str, ...] = (),
         ui_language: str = "zh",
         clear_prompt_grants: bool = True,
     ) -> str:
@@ -4261,6 +4270,17 @@ class BoxACPAgent:
             await self._send(
                 session_id,
                 update_tool_call(tool_call_id, raw_output=payload),
+            )
+
+        for explicitly_selected_skill_name in explicitly_selected_skill_names:
+            await _send_skill_usage(
+                f"explicit-skill-{uuid4().hex[:8]}",
+                {
+                    "type": "skills_usage",
+                    "skills": list(used_skill_names),
+                    "current": explicitly_selected_skill_name,
+                    "activationSource": "explicit",
+                },
             )
 
         async def _generate_follow_up_suggestions(
@@ -5473,6 +5493,16 @@ async def run_acp_server(config: Config | None = None) -> None:
         sys.stderr.write(msg + "\n")
         sys.stderr.flush()
 
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    installed_signal_handlers: list[signal.Signals] = []
+    for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(shutdown_signal, shutdown_event.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            continue
+        installed_signal_handlers.append(shutdown_signal)
+
     try:
         rcfg = config.llm.retry
         provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
@@ -5627,11 +5657,21 @@ async def run_acp_server(config: Config | None = None) -> None:
         log.info("server/ready", message="ACP server ready, listening on stdio")
         _stderr_print("✅ ACP protocol ready; MCP loading continues in background")
         mcp_start_gate.set()
-        await asyncio.Event().wait()
+        await shutdown_event.wait()
 
     except Exception as exc:
         log.exception("server/error", exc, message="ACP server failed to start")
         raise
+    finally:
+        terminated_bash_ids = await BackgroundShellManager.terminate_all()
+        if terminated_bash_ids:
+            log.info(
+                "bash/runtime_cleanup",
+                count=len(terminated_bash_ids),
+                bash_ids=terminated_bash_ids,
+            )
+        for shutdown_signal in installed_signal_handlers:
+            loop.remove_signal_handler(shutdown_signal)
 
 
 def main() -> None:

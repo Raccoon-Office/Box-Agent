@@ -161,7 +161,10 @@ def build_file_delivery_prompt(use_output_dir: bool = True) -> str:
         "\n- **本地 HTML 预览**：Playwright MCP 不要打开 `file://`。用 bash 后台启动仅监听 "
         "loopback 的动态端口预览：`${BOX_AGENT_PYTHON:-python3} -u -m http.server 0 "
         f"--bind 127.0.0.1 --directory {preview_directory}`，从 `bash_output` 读取实际端口后访问 "
-        "`http://127.0.0.1:<port>/...`；验证后立即 `bash_kill`。任务结束时 runtime 会兜底回收仍在运行的后台进程。"
+        "`http://127.0.0.1:<port>/...`。模型仅为自己验证时使用 `lifetime=\"turn\"`，验证后立即 "
+        "`bash_kill`，任务结束时 runtime 会兜底回收；用户明确要求在最终回复后亲自访问服务（如“启动服务我看一下”）时，"
+        "使用 `lifetime=\"runtime\"`，验证后只关闭自动化浏览器，不停止服务，最终回复提供链接、`bash_id`，"
+        "并说明服务会持续到显式 `bash_kill`、Box-Agent 重启或客户端退出。"
     )
     if use_output_dir:
         return (

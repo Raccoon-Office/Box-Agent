@@ -4,6 +4,10 @@ import asyncio
 import base64
 import json
 import os
+import shlex
+import socket
+import sys
+import urllib.request
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -466,8 +470,14 @@ class CorrelationCaptureLLM:
 
 
 class BackgroundBashLLM:
-    def __init__(self):
+    def __init__(
+        self,
+        lifetime: str | None = None,
+        command: str = "sleep 100",
+    ):
         self.calls = 0
+        self.lifetime = lifetime
+        self.command = command
 
     async def generate_stream(self, messages, tools, **_):
         self.calls += 1
@@ -482,8 +492,13 @@ class BackgroundBashLLM:
                         function=FunctionCall(
                             name="bash",
                             arguments={
-                                "command": "sleep 100",
+                                "command": self.command,
                                 "run_in_background": True,
+                                **(
+                                    {"lifetime": self.lifetime}
+                                    if self.lifetime is not None
+                                    else {}
+                                ),
                             },
                         ),
                     )
@@ -670,6 +685,9 @@ def test_file_delivery_prompt_uses_dynamic_loopback_preview_and_reclaims_it():
     assert "bash_output" in prompt
     assert "bash_kill" in prompt
     assert "任务结束时 runtime 会兜底回收" in prompt
+    assert 'lifetime="turn"' in prompt
+    assert 'lifetime="runtime"' in prompt
+    assert "启动服务我看一下" in prompt
 
 
 def test_file_delivery_prompt_uses_mode_specific_naming_and_overwrite_policy():
@@ -2249,6 +2267,64 @@ async def test_acp_prompt_reclaims_background_bash_at_turn_end(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell command quoting")
+async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
+    tmp_path,
+):
+    tmp_path.joinpath("index.html").write_text("service is alive", encoding="utf-8")
+    with socket.socket() as reserved_socket:
+        reserved_socket.bind(("127.0.0.1", 0))
+        port = reserved_socket.getsockname()[1]
+    command = (
+        f"{shlex.quote(sys.executable)} -u -m http.server {port} "
+        f"--bind 127.0.0.1 --directory {shlex.quote(str(tmp_path))}"
+    )
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(
+        DummyConn(),
+        config,
+        BackgroundBashLLM(lifetime="runtime", command=command),
+        [],
+        "system",
+    )
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    try:
+        response = await agent.prompt(
+            SimpleNamespace(
+                sessionId=session.sessionId,
+                prompt=[{"text": "start server for me to inspect"}],
+            )
+        )
+
+        bash_ids = BackgroundShellManager.get_available_ids(session.sessionId)
+        assert response.stopReason == "end_turn"
+        assert len(bash_ids) == 1
+        assert BackgroundShellManager.get(bash_ids[0]).lifetime == "runtime"
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/",
+                    timeout=0.2,
+                ) as http_response:
+                    assert http_response.status == 200
+                    assert http_response.read() == b"service is alive"
+                break
+            except OSError:
+                await asyncio.sleep(0.02)
+        else:
+            pytest.fail("runtime HTTP service did not remain reachable after turn end")
+    finally:
+        await BackgroundShellManager.terminate_owner(session.sessionId)
+
+
+@pytest.mark.asyncio
 async def test_acp_prompt_discards_uncommitted_staged_writes_at_turn_end(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
@@ -2486,6 +2562,88 @@ async def test_acp_emits_skills_usage_raw_output(tmp_path):
             for invocation in turn_usage_outputs[-1]["skillInvocations"]
         }
     ) == 2
+
+
+@pytest.mark.asyncio
+async def test_acp_emits_skill_usage_for_explicit_slash_but_not_semantic_preload(
+    tmp_path,
+):
+    skills_dir = tmp_path / "skills"
+    for name, description in (
+        ("eli5", "Create a beginner-friendly visual explanation."),
+        ("pptx", "Create editable PowerPoint PPTX slide decks."),
+    ):
+        skill_dir = skills_dir / name
+        skill_dir.mkdir(parents=True)
+        skill_dir.joinpath("SKILL.md").write_text(
+            "---\n"
+            f"name: {name}\n"
+            f"description: {description}\n"
+            "---\n"
+            f"# {name} instructions\n",
+            encoding="utf-8",
+        )
+    skill_loader = SkillLoader(skills_dir)
+    skill_loader.discover_skills()
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(
+        conn,
+        config,
+        DoneLLM(),
+        [],
+        f"system\n\n{SKILL_SLOT_SENTINEL}",
+        skill_loader=skill_loader,
+    )
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    first = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "/eli5 explain lift"}],
+        )
+    )
+    explicit_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "skills_usage"
+    ]
+
+    assert first.stopReason == "end_turn"
+    assert explicit_outputs == [
+        {
+            "type": "skills_usage",
+            "skills": ["eli5"],
+            "current": "eli5",
+            "activationSource": "explicit",
+        }
+    ]
+
+    conn.updates.clear()
+    second = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "生成一份季度汇报 PPT"}],
+        )
+    )
+    semantic_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "skills_usage"
+    ]
+
+    assert second.stopReason == "end_turn"
+    assert semantic_outputs == []
 
 
 @pytest.mark.asyncio

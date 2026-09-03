@@ -49,7 +49,10 @@ class RequestUserDecisionTool(Tool):
             "Provide 2-6 concise options with stable IDs. You may request a timeout default "
             "only when it preserves the user's stated intent, is low-risk, and is reversible. "
             "Prefer progress over waiting: when one option safely continues the user's explicit "
-            "request, set it as the default and request a 15-30 second timeout. If the model can "
+            "request, put that recommended option first, set it as the default, and request a "
+            "30 second timeout. Every call must supply the default, timeout, risk, reversibility, "
+            "and intent-preservation declarations; the runtime will deny automatic submission "
+            "for sensitive or unsafe choices. If the model can "
             "choose a safe path without changing the user-visible outcome, do not call this tool. "
             "The runtime decides whether automatic submission is actually allowed. After "
             "calling this tool, end the turn and do not repeat the options in Markdown."
@@ -106,10 +109,11 @@ class RequestUserDecisionTool(Tool):
                     "type": "integer",
                     "minimum": _MIN_AUTO_SUBMIT_SECONDS,
                     "maximum": _MAX_AUTO_SUBMIT_SECONDS,
+                    "default": 30,
                     "description": (
                         "Requested timeout. The runtime may remove it. Requires a default "
                         "option plus low risk, reversible, and intent-preserving declarations. "
-                        "Request 15-30 seconds when those conditions hold."
+                        "Request 30 seconds when those conditions hold."
                     ),
                 },
                 "risk_level": {
@@ -134,7 +138,16 @@ class RequestUserDecisionTool(Tool):
                     "description": "Why this user-visible decision is required.",
                 },
             },
-            "required": ["question", "decision_kind", "options"],
+            "required": [
+                "question",
+                "decision_kind",
+                "options",
+                "default_option_id",
+                "requested_auto_submit_seconds",
+                "risk_level",
+                "reversible",
+                "preserves_user_intent",
+            ],
             "additionalProperties": False,
         }
 
@@ -145,9 +158,9 @@ class RequestUserDecisionTool(Tool):
         options: list[dict[str, Any]],
         default_option_id: str = "",
         requested_auto_submit_seconds: int | None = None,
-        risk_level: str = "medium",
-        reversible: bool = False,
-        preserves_user_intent: bool = False,
+        risk_level: str | None = None,
+        reversible: bool | None = None,
+        preserves_user_intent: bool | None = None,
         allow_freeform: bool = False,
         reason: str = "",
     ) -> ToolResult:
@@ -204,10 +217,41 @@ class RequestUserDecisionTool(Tool):
             normalized_options.append(normalized_option)
 
         normalized_default = str(default_option_id).strip()
+        if not normalized_default:
+            return ToolResult(
+                success=False,
+                error="default_option_id is required for every user decision",
+            )
         if normalized_default and normalized_default not in option_ids:
             return ToolResult(
                 success=False,
                 error="default_option_id must match one of the supplied option ids",
+            )
+        if (
+            isinstance(requested_auto_submit_seconds, bool)
+            or not isinstance(requested_auto_submit_seconds, int)
+            or not (
+                _MIN_AUTO_SUBMIT_SECONDS
+                <= requested_auto_submit_seconds
+                <= _MAX_AUTO_SUBMIT_SECONDS
+            )
+        ):
+            return ToolResult(
+                success=False,
+                error="requested_auto_submit_seconds must contain an integer from 10 to 120",
+            )
+        normalized_risk = str(risk_level or "").strip().lower()
+        if normalized_risk not in {"low", "medium", "high"}:
+            return ToolResult(
+                success=False,
+                error="risk_level is required and must be low, medium, or high",
+            )
+        if not isinstance(reversible, bool):
+            return ToolResult(success=False, error="reversible must be explicitly declared")
+        if not isinstance(preserves_user_intent, bool):
+            return ToolResult(
+                success=False,
+                error="preserves_user_intent must be explicitly declared",
             )
         if len(normalized_reason) > 500:
             return ToolResult(success=False, error="reason must contain at most 500 characters")
@@ -216,7 +260,7 @@ class RequestUserDecisionTool(Tool):
             decision_kind=normalized_kind,
             default_option_id=normalized_default,
             requested_seconds=requested_auto_submit_seconds,
-            risk_level=risk_level,
+            risk_level=normalized_risk,
             reversible=reversible,
             preserves_user_intent=preserves_user_intent,
         )

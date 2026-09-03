@@ -3091,6 +3091,151 @@ def test_scaffold_derives_ordered_layout_plan_from_outline_when_ids_are_omitted(
     assert [slide["source_outline_page"] for slide in deck["slides"]] == [1, 2, 3]
 
 
+def test_auto_mode_promotes_one_generic_inner_page_to_image_feature(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=5,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {
+            "title": "季度业务复盘",
+            "layout": "cover",
+            "visual": "文字封面",
+        }
+    )
+    outline["slides"][-1].update(
+        {
+            "title": "下一步",
+            "layout": "closing",
+            "visual": "行动式收尾",
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--image-mode",
+        "auto",
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert [slide["layout_id"] for slide in deck["slides"]] == [
+        "cover-editorial-v1",
+        "image-feature-v1",
+        "cards-grid-v1",
+        "cards-grid-v1",
+        "closing-next-steps-v1",
+    ]
+    payload = json.loads(result.stdout)
+    assert {
+        "slide": 2,
+        "from": "cards-grid-v1",
+        "to": "image-feature-v1",
+        "reason": (
+            "ordinary multi-page deck promotes one eligible qualitative card "
+            "page to an image-led narrative"
+        ),
+    } in payload["layout_normalizations"]
+    manifest = json.loads(
+        (tmp_path / "assets" / "generated" / "manifest.json").read_text()
+    )
+    assert manifest["image_plan"][1]["decision"] == "generate"
+    assert manifest["image_plan"][1]["required"] is True
+
+
+def test_auto_inner_image_promotion_respects_no_images(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=5,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {"title": "季度业务复盘", "layout": "cover", "visual": "文字封面"}
+    )
+    outline["slides"][-1].update(
+        {"title": "下一步", "layout": "closing", "visual": "行动式收尾"}
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--image-mode",
+        "auto",
+        "--no-images",
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert "image-feature-v1" not in {
+        slide["layout_id"] for slide in deck["slides"]
+    }
+    manifest = json.loads(
+        (tmp_path / "assets" / "generated" / "manifest.json").read_text()
+    )
+    assert all(entry["decision"] == "skip" for entry in manifest["image_plan"])
+
+
+def test_auto_inner_image_promotion_skips_quantitative_page(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=5,
+        source_mode="user_provided",
+    )
+    outline["slides"][0].update(
+        {"title": "季度业务复盘", "layout": "cover", "visual": "文字封面"}
+    )
+    outline["slides"][1].update(
+        {
+            "title": "业务增长",
+            "message": "ARR 从 500 万元增长到 800 万元。",
+            "bullets": ["上期 ARR 500 万元", "本期 ARR 800 万元"],
+            "layout": "cards",
+            "visual": "摘要信息卡",
+        }
+    )
+    outline["slides"][-1].update(
+        {"title": "下一步", "layout": "closing", "visual": "行动式收尾"}
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    result = _run(
+        "inspect_deck_contract.js",
+        "--outline",
+        str(outline_path),
+        "--image-mode",
+        "auto",
+        "--out",
+        str(deck_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["slides"][1]["layout_id"] == "cards-grid-v1"
+    assert deck["slides"][2]["layout_id"] == "image-feature-v1"
+
+
 def test_scaffold_rejects_outline_count_and_normalizes_qualitative_quantitative_layout(
     tmp_path: Path,
 ) -> None:
@@ -9520,6 +9665,17 @@ def test_pptx_missing_facts_use_placeholders_without_pausing() -> None:
     assert "Source/URL/private-fact findings never trigger an automatic repair loop" in text
 
 
+def test_pptx_framing_choices_use_recommended_decision_with_countdown() -> None:
+    text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    outline = (SKILL_DIR / "references" / "outline.md").read_text(encoding="utf-8")
+
+    assert "never request them with `request_user_input`" in text
+    assert "request `requested_auto_submit_seconds: 30`" in text
+    assert 'declare `risk_level: "low"`' in text
+    assert "never use `request_user_input` for\n   them" in outline
+    assert "default with a 30-second timeout" in outline
+
+
 def test_outline_validator_writes_report_and_flags_reused_evidence(
     tmp_path: Path,
 ) -> None:
@@ -10432,6 +10588,72 @@ def test_outline_requires_a_data_visual_for_multiple_real_values(
         json.dumps(outline, ensure_ascii=False),
         encoding="utf-8",
     )
+
+    result = _run("validate_outline.js", str(outline_path))
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert any(
+        "appears data-heavy but visual does not name" in issue
+        for issue in payload["issues"]
+    )
+
+
+def test_outline_repeated_single_metric_remains_a_warning(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=3,
+        source_mode="user_provided",
+    )
+    outline["slides"][1].update(
+        {
+            "title": "业务进展",
+            "message": "当前 ARR 达到 800 万元。",
+            "bullets": ["本期 ARR 800 万元", "保持增长节奏"],
+            "layout": "业务进展页",
+            "visual": "三张摘要信息卡",
+            "evidence": ["用户提供：ARR 800 万元。"],
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+
+    result = _run("validate_outline.js", str(outline_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert not any(
+        "appears data-heavy but visual does not name" in issue
+        for issue in payload["issues"]
+    )
+    assert any(
+        "appears data-heavy but visual does not name" in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_outline_detects_two_values_when_data_terms_are_only_in_bullets(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=3,
+        source_mode="user_provided",
+    )
+    outline["slides"][1].update(
+        {
+            "title": "最新进展",
+            "message": "本期表现较上期明显改善。",
+            "bullets": ["ARR 从 500 万元提升", "本期收入达到 800 万元"],
+            "layout": "业务回顾",
+            "visual": "三张摘要信息卡",
+            "evidence": [],
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
 
     result = _run("validate_outline.js", str(outline_path))
 

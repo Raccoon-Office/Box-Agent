@@ -90,6 +90,11 @@ class _DecisionThenStopLLM:
                                     {"id": "full", "label": "保持完整版本"},
                                     {"id": "prototype", "label": "先做精简版本"},
                                 ],
+                                "default_option_id": "full",
+                                "requested_auto_submit_seconds": 30,
+                                "risk_level": "low",
+                                "reversible": True,
+                                "preserves_user_intent": True,
                             },
                         ),
                     )

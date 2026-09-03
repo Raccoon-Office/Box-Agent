@@ -68,9 +68,11 @@ research**. Pick the branch that fits:
    branch only if the requested deck becomes evidence-driven.
 
 3. **Only the structure/framing is unclear** (facts are available, but audience,
-   page count, ordering, emphasis, or plan-vs-build is ambiguous). **Ask back** —
-   one focused question with only the minimum fields, and where reasonable offer a sensible default
-   the user can simply confirm. Examples:
+   page count, ordering, emphasis, or plan-vs-build is ambiguous). These are
+   finite preferences, not missing facts: never use `request_user_input` for
+   them. Call `request_user_decision` with one focused question and 2-6 options,
+   put the recommended option first, and—when it is low-risk, reversible, and
+   preserves the request—set it as the default with a 30-second timeout. Examples:
    - "这套面向投资人还是内部评审?大概几页?" (then propose a default count)
    - "你已有这些要点,我按 问题→方案→市场→进展 的顺序排,可以吗?"
    Do not stall with an open-ended "tell me more", and do not silently guess an
@@ -270,6 +272,11 @@ preserve any explicit user order or page count. The registry lives in
    `image-feature-v1`, or `full-bleed image` / `整页生图` for
    `image-full-bleed-v1`. Reserve the full-bleed form for one short message whose
    fixed text-safe region can coexist with a right-side visual focus.
+   For an ordinary deck of four or more pages that contains no image-led inner
+   page, the scaffold promotes the first eligible qualitative cards page to
+   `image-feature-v1`. Data/diagram pages, explicit text-only pages, and content
+   requiring real or official imagery are not eligible for this automatic
+   promotion.
 6. Run `scripts/validate_outline.js outline.json` and fix failures before
    scaffolding `deck.json`.
 
@@ -298,10 +305,11 @@ preserve any explicit user order or page count. The registry lives in
 - Use a section-divider slide only when it helps pacing.
 - Put explicitly authorized assumptions in `evidence` or `notes` and disclose
   them visibly on the affected slide; do not hide missing data.
-- For data-heavy slides with at least two real values, require a chart/table/KPI/
+- For data-heavy slides with at least two distinct normalized real values, require a chart/table/KPI/
   dashboard visual instead of a plain bullet list. With only one value, prefer
   the same visual treatment unless the data is too sparse or text-only output
-  was requested.
+  was requested. Repeating one metric across message, bullets, and evidence
+  counts as one value.
 - Keep page numbers consecutive and aligned with the final slide count.
 
 ## Validation

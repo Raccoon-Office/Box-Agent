@@ -52,6 +52,9 @@ log = logging.getLogger(__name__)
 # budget. This mirrors Hermes terminal's 50K, 40%-head/60%-tail policy.
 MAX_BASH_OUTPUT_CHARS = 50_000
 _DEFAULT_TOOLS_CONFIG = ToolsConfig()
+BASH_LIFETIME_TURN = "turn"
+BASH_LIFETIME_RUNTIME = "runtime"
+_BASH_LIFETIMES = frozenset({BASH_LIFETIME_TURN, BASH_LIFETIME_RUNTIME})
 
 
 def _truncate_bash_output(text: str, label: str, limit: int = MAX_BASH_OUTPUT_CHARS) -> tuple[str, int]:
@@ -108,6 +111,7 @@ def _format_bash_result_content(
     stderr: str,
     *,
     bash_id: str | None = None,
+    lifetime: str | None = None,
     exit_code: int = 0,
 ) -> str:
     """Format Bash streams once for host display or shared persistence."""
@@ -117,6 +121,12 @@ def _format_bash_result_content(
         output += f"\n[stderr]:\n{stderr}"
     if bash_id:
         output += f"\n[bash_id]:\n{bash_id}"
+    if lifetime:
+        output += f"\n[lifetime]:\n{lifetime}"
+        output += (
+            "\n[will_survive_turn_end]:\n"
+            f"{'true' if lifetime == BASH_LIFETIME_RUNTIME else 'false'}"
+        )
     if exit_code:
         output += f"\n[exit_code]:\n{exit_code}"
     return output or "(no output)"
@@ -489,6 +499,10 @@ class BashOutputResult(ToolResult):
     stderr: str = Field(description="The command's standard error output")
     exit_code: int = Field(description="The command's exit code")
     bash_id: str | None = Field(default=None, description="Shell process ID (only when run_in_background=True)")
+    lifetime: str | None = Field(
+        default=None,
+        description="Background process lifetime: turn or runtime",
+    )
 
     @model_validator(mode="after")
     def format_content(self) -> "BashOutputResult":
@@ -497,6 +511,7 @@ class BashOutputResult(ToolResult):
             self.stdout,
             self.stderr,
             bash_id=self.bash_id,
+            lifetime=self.lifetime,
             exit_code=self.exit_code,
         )
         return self
@@ -516,12 +531,14 @@ class BackgroundShell:
         process: "asyncio.subprocess.Process",
         start_time: float,
         owner_id: str | None = None,
+        lifetime: str = BASH_LIFETIME_TURN,
     ):
         self.bash_id = bash_id
         self.command = command
         self.process = process
         self.start_time = start_time
         self.owner_id = owner_id
+        self.lifetime = lifetime
         self.output_lines: list[str] = []
         self.last_read_index = 0
         self.status = "running"
@@ -594,12 +611,18 @@ class BackgroundShellManager:
         return shell
 
     @classmethod
-    def get_available_ids(cls, owner_id: str | None = None) -> list[str]:
+    def get_available_ids(
+        cls,
+        owner_id: str | None = None,
+        *,
+        lifetime: str | None = None,
+    ) -> list[str]:
         """Get all available bash IDs."""
         return [
             bash_id
             for bash_id, shell in cls._shells.items()
-            if owner_id is None or shell.owner_id == owner_id
+            if (owner_id is None or shell.owner_id == owner_id)
+            and (lifetime is None or shell.lifetime == lifetime)
         ]
 
     @classmethod
@@ -702,9 +725,14 @@ class BackgroundShellManager:
         return shell
 
     @classmethod
-    async def terminate_owner(cls, owner_id: str) -> list[str]:
+    async def terminate_owner(
+        cls,
+        owner_id: str,
+        *,
+        lifetime: str | None = None,
+    ) -> list[str]:
         """Terminate and forget every background process owned by one session."""
-        bash_ids = cls.get_available_ids(owner_id)
+        bash_ids = cls.get_available_ids(owner_id, lifetime=lifetime)
         if not bash_ids:
             return []
 
@@ -718,6 +746,29 @@ class BackgroundShellManager:
                 log.warning(
                     "bash/session_cleanup_failed owner_id=%s bash_id=%s error=%s",
                     owner_id,
+                    bash_id,
+                    result,
+                )
+                continue
+            terminated.append(bash_id)
+        return terminated
+
+    @classmethod
+    async def terminate_all(cls) -> list[str]:
+        """Terminate every managed background process before runtime exit."""
+        bash_ids = cls.get_available_ids()
+        if not bash_ids:
+            return []
+
+        results = await asyncio.gather(
+            *(cls.terminate(bash_id) for bash_id in bash_ids),
+            return_exceptions=True,
+        )
+        terminated: list[str] = []
+        for bash_id, result in zip(bash_ids, results):
+            if isinstance(result, BaseException):
+                log.warning(
+                    "bash/runtime_cleanup_failed bash_id=%s error=%s",
                     bash_id,
                     result,
                 )
@@ -871,11 +922,18 @@ class BashTool(Tool):
             elif isinstance(value, str):
                 self._subprocess_env[key] = value
 
-    async def cleanup_background_processes(self) -> list[str]:
+    async def cleanup_background_processes(
+        self,
+        *,
+        lifetime: str | None = None,
+    ) -> list[str]:
         """Reclaim background processes created by this ACP session."""
         if self.process_owner_id is None:
             return []
-        return await BackgroundShellManager.terminate_owner(self.process_owner_id)
+        return await BackgroundShellManager.terminate_owner(
+            self.process_owner_id,
+            lifetime=lifetime,
+        )
 
     def approve_permission_request(self, permission_request: dict[str, Any]) -> None:
         """Record a one-shot approval before core retries a safety-gated command."""
@@ -1155,13 +1213,15 @@ Reserve bash for git, builds, tests, package managers, processes, scripts, and s
 Parameters:
   - command (required): PowerShell command to execute
   - timeout (optional): Timeout in seconds (default: {self.default_timeout_seconds}, max: {self.max_timeout_seconds}) for foreground commands
-  - run_in_background (optional): Set true for long-running commands (servers, etc.)
+  - run_in_background (optional): Set true for commands that must continue after the tool call
+  - lifetime (optional): `turn` (default) is reclaimed when the current turn ends; `runtime` survives the turn and is reclaimed when explicitly killed or when Box-Agent exits
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
   - Chain dependent commands with semicolon: git add . ; git commit -m "msg"
   - Use absolute paths instead of cd when possible
   - For background commands, monitor with bash_output and terminate with bash_kill
+  - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
 
 Examples:
   - git status
@@ -1176,13 +1236,15 @@ Reserve bash for git, builds, tests, package managers, processes, scripts, and s
 Parameters:
   - command (required): Bash command to execute
   - timeout (optional): Timeout in seconds (default: {self.default_timeout_seconds}, max: {self.max_timeout_seconds}) for foreground commands
-  - run_in_background (optional): Set true for long-running commands (servers, etc.)
+  - run_in_background (optional): Set true for commands that must continue after the tool call
+  - lifetime (optional): `turn` (default) is reclaimed when the current turn ends; `runtime` survives the turn and is reclaimed when explicitly killed or when Box-Agent exits
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
   - Chain dependent commands with &&: git add . && git commit -m "msg"
   - Use absolute paths instead of cd when possible
   - For background commands, monitor with bash_output and terminate with bash_kill
+  - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
 
 Examples:
   - git status
@@ -1224,6 +1286,19 @@ Examples:
                     "description": "Optional: Set to true to run the command in the background. Use this for long-running commands like servers. You can monitor output using bash_output tool.",
                     "default": False,
                 },
+                "lifetime": {
+                    "type": "string",
+                    "enum": [BASH_LIFETIME_TURN, BASH_LIFETIME_RUNTIME],
+                    "description": (
+                        "Optional background-process lifetime. 'turn' (default) "
+                        "is automatically reclaimed when the current turn ends. "
+                        "Use 'runtime' only when the user explicitly asks for a "
+                        "service or command to remain available after the final "
+                        "response; it remains manageable with bash_output/bash_kill "
+                        "until Box-Agent exits."
+                    ),
+                    "default": BASH_LIFETIME_TURN,
+                },
             },
             "required": ["command"],
             "additionalProperties": False,
@@ -1234,6 +1309,7 @@ Examples:
         command: str,
         timeout: int | None = None,
         run_in_background: bool = False,
+        lifetime: str = BASH_LIFETIME_TURN,
     ) -> ToolResult:
         """Execute shell command with optional background execution.
 
@@ -1241,12 +1317,36 @@ Examples:
             command: The shell command to execute
             timeout: Timeout in seconds. Uses the configured default when omitted.
             run_in_background: Set true to run command in background
+            lifetime: Background process lifetime (`turn` or `runtime`)
 
         Returns:
             BashExecutionResult with command output and status
         """
 
         try:
+            if lifetime not in _BASH_LIFETIMES:
+                error = (
+                    "BASH_INVALID_LIFETIME: lifetime must be 'turn' or 'runtime'."
+                )
+                return BashOutputResult(
+                    success=False,
+                    error=error,
+                    stdout="",
+                    stderr=error,
+                    exit_code=1,
+                )
+            if lifetime == BASH_LIFETIME_RUNTIME and not run_in_background:
+                error = (
+                    "BASH_INVALID_LIFETIME: lifetime='runtime' requires "
+                    "run_in_background=true."
+                )
+                return BashOutputResult(
+                    success=False,
+                    error=error,
+                    stdout="",
+                    stderr=error,
+                    exit_code=1,
+                )
             if len(command) > MAX_BASH_COMMAND_CHARS:
                 error = (
                     "BASH_ARGUMENT_TOO_LARGE: bash.command is "
@@ -1461,6 +1561,7 @@ Examples:
                     process=process,
                     start_time=time.time(),
                     owner_id=self.process_owner_id,
+                    lifetime=lifetime,
                 )
                 BackgroundShellManager.add(bg_shell)
 
@@ -1478,6 +1579,7 @@ Examples:
                     stderr="",
                     exit_code=0,
                     bash_id=bash_id,
+                    lifetime=lifetime,
                 )
 
             else:
@@ -1586,6 +1688,7 @@ class BashOutputTool(Tool):
         - Supports optional regex filtering to show only lines matching a pattern
         - Use this tool when you need to monitor or check the output of a long-running shell
         - Shell IDs can be found using the bash tool with run_in_background=true
+        - A `turn` shell is reclaimed when its turn ends; a `runtime` shell remains available until bash_kill or Box-Agent exit
 
         Process status values:
           - "running": Still executing
@@ -1678,6 +1781,7 @@ class BashOutputTool(Tool):
                 stderr="",  # Background shells combine stdout/stderr
                 exit_code=exit_code,
                 bash_id=bash_id,
+                lifetime=bg_shell.lifetime,
                 raw_output=raw_output,
                 persistence_content=complete_content if dropped else None,
             )
@@ -1712,6 +1816,7 @@ class BashKillTool(Tool):
         - Cleans up all resources associated with the shell
         - Use this tool when you need to terminate a long-running shell
         - Shell IDs can be found using the bash tool with run_in_background=true
+        - Both `turn` and `runtime` shells remain explicitly stoppable by their owning session
 
         Example: bash_kill(bash_id="abc12345")"""
 
@@ -1760,6 +1865,7 @@ class BashKillTool(Tool):
                 stderr="",
                 exit_code=bg_shell.exit_code if bg_shell.exit_code is not None else 0,
                 bash_id=bash_id,
+                lifetime=bg_shell.lifetime,
             )
 
         except ValueError as e:

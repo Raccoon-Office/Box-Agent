@@ -24,9 +24,17 @@ def test_request_user_decision_contract_prefers_safe_progress():
     assert "Prefer progress over waiting" in tool.description
     assert "safely continues the user's explicit request" in tool.description
     assert "do not call this tool" in tool.description
-    assert "Request 15-30 seconds" in tool.parameters["properties"][
+    assert "Request 30 seconds" in tool.parameters["properties"][
         "requested_auto_submit_seconds"
     ]["description"]
+    assert tool.parameters["properties"]["requested_auto_submit_seconds"]["default"] == 30
+    assert {
+        "default_option_id",
+        "requested_auto_submit_seconds",
+        "risk_level",
+        "reversible",
+        "preserves_user_intent",
+    } <= set(tool.parameters["required"])
 
 
 @pytest.mark.asyncio
@@ -124,12 +132,8 @@ async def test_request_user_decision_never_auto_submits_missing_safety_declarati
         requested_auto_submit_seconds=30,
     )
 
-    assert result.success is True
-    assert result.raw_output["autoSubmit"] == {
-        "allowed": False,
-        "requestedSeconds": 30,
-        "denialReason": "risk_not_low",
-    }
+    assert result.success is False
+    assert "risk_level is required" in (result.error or "")
 
 
 @pytest.mark.asyncio
@@ -145,9 +149,32 @@ async def test_request_user_decision_rejects_out_of_range_timeout_at_runtime():
         preserves_user_intent=True,
     )
 
-    assert result.success is True
-    assert result.raw_output["autoSubmit"] == {
-        "allowed": False,
-        "requestedSeconds": 999,
-        "denialReason": "invalid_timeout",
-    }
+    assert result.success is False
+    assert "integer from 10 to 120" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_request_user_decision_rejects_missing_default_and_timeout():
+    missing_default = await RequestUserDecisionTool().execute(
+        question="请选择演示用途。",
+        decision_kind="presentation_purpose",
+        options=OPTIONS,
+        requested_auto_submit_seconds=30,
+        risk_level="low",
+        reversible=True,
+        preserves_user_intent=True,
+    )
+    missing_timeout = await RequestUserDecisionTool().execute(
+        question="请选择演示用途。",
+        decision_kind="presentation_purpose",
+        options=OPTIONS,
+        default_option_id="keep_full",
+        risk_level="low",
+        reversible=True,
+        preserves_user_intent=True,
+    )
+
+    assert missing_default.success is False
+    assert "default_option_id is required" in (missing_default.error or "")
+    assert missing_timeout.success is False
+    assert "requested_auto_submit_seconds" in (missing_timeout.error or "")

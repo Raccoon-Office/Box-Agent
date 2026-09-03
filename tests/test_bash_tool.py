@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from box_agent.tools.bash_tool import (
+    BASH_LIFETIME_RUNTIME,
+    BASH_LIFETIME_TURN,
     MAX_BASH_OUTPUT_CHARS,
     BackgroundShellManager,
     BashKillTool,
@@ -326,6 +328,82 @@ async def test_background_processes_are_scoped_and_cleaned_by_owner():
     finally:
         await owner_a.cleanup_background_processes()
         await owner_b.cleanup_background_processes()
+
+
+@pytest.mark.asyncio
+async def test_turn_cleanup_preserves_runtime_background_process():
+    tool = BashTool(process_owner_id="session-lifetimes")
+    turn_process = await tool.execute(
+        command="sleep 100",
+        run_in_background=True,
+    )
+    runtime_process = await tool.execute(
+        command="sleep 100",
+        run_in_background=True,
+        lifetime=BASH_LIFETIME_RUNTIME,
+    )
+
+    try:
+        assert turn_process.lifetime == BASH_LIFETIME_TURN
+        assert runtime_process.lifetime == BASH_LIFETIME_RUNTIME
+        assert "[will_survive_turn_end]:\nfalse" in turn_process.content
+        assert "[will_survive_turn_end]:\ntrue" in runtime_process.content
+
+        cleaned = await tool.cleanup_background_processes(
+            lifetime=BASH_LIFETIME_TURN
+        )
+
+        assert cleaned == [turn_process.bash_id]
+        assert BackgroundShellManager.get(turn_process.bash_id) is None
+        assert BackgroundShellManager.get(runtime_process.bash_id) is not None
+
+        output = await BashOutputTool(
+            process_owner_id="session-lifetimes"
+        ).execute(bash_id=runtime_process.bash_id)
+        assert output.success is True
+        assert output.lifetime == BASH_LIFETIME_RUNTIME
+    finally:
+        await tool.cleanup_background_processes()
+
+
+@pytest.mark.asyncio
+async def test_runtime_lifetime_requires_background_execution():
+    tool = BashTool()
+
+    result = await tool.execute(
+        command="echo no",
+        lifetime=BASH_LIFETIME_RUNTIME,
+    )
+
+    assert result.success is False
+    assert "requires run_in_background=true" in result.error
+    assert tool.parameters["properties"]["lifetime"]["enum"] == [
+        BASH_LIFETIME_TURN,
+        BASH_LIFETIME_RUNTIME,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_cleanup_terminates_all_background_lifetimes():
+    owner_a = BashTool(process_owner_id="runtime-owner-a")
+    owner_b = BashTool(process_owner_id="runtime-owner-b")
+    first = await owner_a.execute(
+        command="sleep 100",
+        run_in_background=True,
+        lifetime=BASH_LIFETIME_RUNTIME,
+    )
+    second = await owner_b.execute(
+        command="sleep 100",
+        run_in_background=True,
+    )
+
+    try:
+        terminated = await BackgroundShellManager.terminate_all()
+
+        assert set(terminated) == {first.bash_id, second.bash_id}
+        assert BackgroundShellManager.get_available_ids() == []
+    finally:
+        await BackgroundShellManager.terminate_all()
 
 
 @pytest.mark.asyncio

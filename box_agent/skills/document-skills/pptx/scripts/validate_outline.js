@@ -270,6 +270,17 @@ function numberTokens(value) {
     });
 }
 
+function distinctQuantitativeValueTokens(value) {
+  const claimText = String(value || "")
+    .replace(/https?:\/\/[^\s|]+/gi, " ")
+    .replace(/第\s*\d+\s*页/giu, " ")
+    .replace(/(?:主题页|页面|页码)\s*[-:#]?\s*\d+/giu, " ")
+    .replace(/\b(?:page|slide)\s*[-:#]?\s*\d+\b/giu, " ")
+    .replace(/双\s*11/giu, "双十一")
+    .replace(/88\s*VIP/giu, "VIP");
+  return new Set(numberTokens(claimText));
+}
+
 function hasHttpUrl(value) {
   return /https?:\/\/[^\s|]+/i.test(String(value || ""));
 }
@@ -652,14 +663,24 @@ function validate(outline, opts) {
       else seenMessages.set(messageKey, label);
     }
 
-    const combined = [slide.title, slide.message, slide.layout, slide.visual, slide.notes].map(text).join(" ");
+    const combined = [
+      slide.title,
+      slide.message,
+      slide.layout,
+      slide.visual,
+      slide.notes,
+      ...(Array.isArray(slide.bullets) ? slide.bullets : []),
+      ...(Array.isArray(slide.evidence) ? slide.evidence : []),
+    ].map(value => text(value).replace(/https?:\/\/[^\s|]+/gi, " ")).join(" ");
     const quantitativeContent = [
       slide.title,
       slide.message,
       ...(Array.isArray(slide.bullets) ? slide.bullets : []),
       ...(Array.isArray(slide.evidence) ? slide.evidence : []),
     ].map(text).join(" ");
-    const quantitativeTokenCount = numberTokens(quantitativeContent).length;
+    const quantitativeTokenCount = distinctQuantitativeValueTokens(
+      quantitativeContent
+    ).size;
     const isDataHeavy = includesAny(combined, dataHeavyTerms);
     const chartWorthy = numberTokens(combined).length > 0
       || includesAny(combined, chartWorthyTerms);

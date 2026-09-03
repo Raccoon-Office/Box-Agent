@@ -15,6 +15,8 @@ def test_static_html_guidance_uses_ephemeral_http_and_cleanup() -> None:
     assert "http.server 0 --bind 127.0.0.1" in instructions
     assert "bash_output" in instructions
     assert "bash_kill" in instructions
+    assert 'lifetime="turn"' in instructions
+    assert 'lifetime="runtime"' in instructions
     assert "Using file:// URLs for local HTML" not in instructions
 
 

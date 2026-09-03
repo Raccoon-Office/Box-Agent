@@ -55,6 +55,14 @@ const AUTO_PRIMARY_BITMAP_VISUAL_RE = /(?:主视觉|缩略图|实景|照片|插�
 const AUTO_DATA_VISUAL_RE = /(?:图表|表格|数据看板|KPI|指标|chart|table|dashboard|metrics?)/i;
 const AUTO_EDITABLE_STRUCTURE_RE = /(?:可编辑|图表|表格|数据看板|KPI|指标|矩阵|流程|时间轴|路线图|架构|关系图|组织图|甘特|热力|chart|table|dashboard|metrics?|matrix|process|timeline|roadmap|architecture|diagram|gantt|heatmap)/i;
 const AUTO_TYPOGRAPHY_LED_RE = /(?:纯文字|仅文字|文字排版|排版主导|标签排版|编辑式封面|typography|text[- ]only|editorial\s+cover)/i;
+const AUTO_INNER_IMAGE_LAYOUT_IDS = new Set([
+  "image-feature-v1",
+  "image-full-bleed-v1",
+  "image-hero-split-v1",
+  "project-case-study-v1",
+]);
+const AUTO_INNER_IMAGE_PROMOTION_BLOCK_RE = /(?:纯文字|仅文字|不要图片|不用图片|无图|text[- ]only|without\s+images?|真实|官方|实拍|原图|截图|照片|肖像|人物|客户素材|source[- ]backed|documentary)/i;
+const AUTO_INNER_IMAGE_DATA_RE = /(?:市场规模|增长|收入|营收|融资|成本|财务|排名|占比|趋势|KPI|指标|数据|benchmark|competition|growth|revenue|financial|cost|metrics?|data)/i;
 const AUTO_COVER_IMAGE_OPTOUT_RE = /(?:不要|无需|不需要|不得|禁止|不)(?:生成|使用|添加)?(?:图片|生图|视觉图)|(?:纯文字|仅文字)|\b(?:no\s+(?:generated\s+)?images?|without\s+images?|text[- ]only)\b/i;
 const AUTO_SLIDE_LOCAL_IMAGE_OPTOUT_RE = /(?:第?\s*\d{1,2}\s*页|(?:页面|slide)\s*[:：#-]?\s*\d{1,2}|封面|首页|cover)[^。；;!?！？\n]{0,48}(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)|(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)[^。；;!?！？\n]{0,48}(?:封面|首页|cover)/i;
 const STRUCTURED_NEXT_STEPS_MATRIX_RE = /(?:表格|矩阵|table|matrix)|(?:(?:执行)?角色|负责人|责任人|owners?|assignees?|responsibilit(?:y|ies))[^\n。；;]{0,48}(?:姓名|成员|人员|names?|members?)/i;
@@ -958,6 +966,58 @@ function normalizeOutlineDrivenLayoutIds(
   return { layoutIds: capacityChecked, normalizations };
 }
 
+function promoteOrdinaryInnerImageLayout(
+  layoutResolution,
+  outlineBinding,
+  { imageMode = "auto", noImages = false } = {}
+) {
+  const layoutIds = layoutResolution.layoutIds.slice();
+  const normalizations = layoutResolution.normalizations.slice();
+  if (
+    !outlineBinding
+    || imageMode !== "auto"
+    || noImages
+    || layoutIds.length < 4
+    || layoutIds.slice(1).some(layoutId => AUTO_INNER_IMAGE_LAYOUT_IDS.has(layoutId))
+  ) {
+    return { layoutIds, normalizations };
+  }
+
+  const candidateIndex = layoutIds.findIndex((layoutId, index) => {
+    if (index === 0 || index === layoutIds.length - 1 || layoutId !== "cards-grid-v1") {
+      return false;
+    }
+    const slide = outlineBinding.slides[index];
+    if (!slide || analyzeOutlineLayoutIntent(slide, outlineBinding.sourceMode)) {
+      return false;
+    }
+    const slideText = [
+      slide.title,
+      slide.message,
+      slide.layout,
+      slide.visual,
+      ...(Array.isArray(slide.bullets) ? slide.bullets : []),
+    ].filter(Boolean).join("\n");
+    if (
+      outlineHasQuantitativeEvidence(slide, outlineBinding.sourceMode)
+      && AUTO_INNER_IMAGE_DATA_RE.test(slideText)
+    ) {
+      return false;
+    }
+    return !AUTO_INNER_IMAGE_PROMOTION_BLOCK_RE.test(slideText);
+  });
+  if (candidateIndex < 0) return { layoutIds, normalizations };
+
+  layoutIds[candidateIndex] = "image-feature-v1";
+  normalizations.push({
+    slide: candidateIndex + 1,
+    from: "cards-grid-v1",
+    to: "image-feature-v1",
+    reason: "ordinary multi-page deck promotes one eligible qualitative card page to an image-led narrative",
+  });
+  return { layoutIds, normalizations };
+}
+
 function balancedChunkSizes(total, maximum, minimum) {
   const partCount = Math.ceil(total / maximum);
   const base = Math.floor(total / partCount);
@@ -1558,10 +1618,14 @@ function main() {
         : "cards-grid-v1";
     });
   }
-  const layoutResolution = normalizeOutlineDrivenLayoutIds(
-    opts.layoutIds,
+  const layoutResolution = promoteOrdinaryInnerImageLayout(
+    normalizeOutlineDrivenLayoutIds(
+      opts.layoutIds,
+      outlineBinding,
+      layoutPolicy
+    ),
     outlineBinding,
-    layoutPolicy
+    { imageMode: opts.imageMode, noImages: opts.noImages }
   );
   const authoringPlan = expandOutlineDrivenPlan(
     layoutResolution.layoutIds,
