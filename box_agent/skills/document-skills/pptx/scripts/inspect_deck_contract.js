@@ -52,6 +52,8 @@ const AUTO_COVER_PRODUCT_VISUAL_RE = /(?:UI\s*截图|产品界面|客户端界�
 const AUTO_COVER_TECH_VISUAL_RE = /(?:代码窗口|代码片段|协作节点|节点连接|系统架构|技术架构|架构图|运行时|编译链|code\s+window|code\s+snippet|collaboration\s+nodes?|system\s+architecture|technical\s+architecture|runtime|compiler)/i;
 const AUTO_GENERATIVE_VISUAL_MEDIUM_RE = /(?:主视觉|缩略图|实景|照片|插画|卡通(?:形象|插画|插图)?|儿童插画|儿童插图|概念图|效果图|界面|截图|样机|地图|地理分布|空间分布|场景|实物|特写|肖像|包装视觉|hero\s+image|thumbnail|photo|illustration|cartoon(?:\s+illustration)?|concept\s+art|interface|screenshot|mockup|map|geographic\s+distribution|scene|product\s+shot|object\s+study|close[- ]?up|portrait|packaging\s+visual)/i;
 const AUTO_PRIMARY_BITMAP_VISUAL_RE = /(?:主视觉|缩略图|实景|照片|插画|卡通(?:形象|插画|插图)?|儿童插画|儿童插图|概念图|效果图|样机|地图|场景|实物|特写|肖像|包装视觉|hero\s+image|thumbnail|photo|illustration|cartoon(?:\s+illustration)?|concept\s+art|mockup|map|scene|product\s+shot|object\s+study|close[- ]?up|portrait|packaging\s+visual)/i;
+const AUTO_AI_IMAGE_SOURCE_RE = /(?:生图|AI\s*(?:生成|插画|视觉)|插画|插图|卡通|概念图|效果图|抽象|隐喻|超现实|未来场景|风格化|地图感|手绘|水彩|像素|等距|generated\s+image|AI[- ]generated|illustration|cartoon|concept\s+art|abstract|metaphor|surreal|futuristic|stylized|isometric|watercolor|pixel\s+art)/i;
+const AUTO_WEB_IMAGE_SOURCE_RE = /(?:真实|实景|实拍|摄影|照片|原图|新闻图|历史照片|纪实|肖像|人物|地标|建筑|城市|自然景观|产品实物|实物|工厂|酒厂|办公室|real[- ]world|documentary|photograph|photo|portrait|landmark|location|city|landscape|product\s+photo|product\s+shot|factory|office)/i;
 const AUTO_DATA_VISUAL_RE = /(?:图表|表格|数据看板|KPI|指标|chart|table|dashboard|metrics?)/i;
 const AUTO_EDITABLE_STRUCTURE_RE = /(?:可编辑|图表|表格|数据看板|KPI|指标|矩阵|流程|时间轴|路线图|架构|关系图|组织图|甘特|热力|chart|table|dashboard|metrics?|matrix|process|timeline|roadmap|architecture|diagram|gantt|heatmap)/i;
 const AUTO_TYPOGRAPHY_LED_RE = /(?:纯文字|仅文字|文字排版|排版主导|标签排版|编辑式封面|typography|text[- ]only|editorial\s+cover)/i;
@@ -1167,6 +1169,14 @@ function imagePrompt(context, slotRole) {
   return parts.join(" ");
 }
 
+function imageSearchQuery(context) {
+  const slide = context && context.slide ? context.slide : {};
+  const candidates = [slide.visual, slide.title, slide.message, context.deckTitle]
+    .map(value => String(value || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  return String(candidates[0] || "presentation visual").slice(0, 160);
+}
+
 function hasDeckWideImageOptOut(text) {
   return String(text || "")
     .split(/[。；;!?！？\n]+/)
@@ -1282,6 +1292,21 @@ function buildImagePlanEntry(
   const generate = !generationForbidden && !useExisting && Boolean(
     plannedGeneration
   );
+  const explicitAiSource = AUTO_AI_IMAGE_SOURCE_RE.test(slideVisualText);
+  const explicitWebSource = AUTO_WEB_IMAGE_SOURCE_RE.test(slideVisualText);
+  const searchFreeFirst = generate
+    && imageMode === "auto"
+    && strategies.includes("use_existing")
+    && !explicitAiSource
+    && !productVisualBrief
+    && !technicalVisualBrief
+    && (
+      explicitWebSource
+      || visualStoryBrief
+      || investorCoverBrief
+      || explicitGenerativeVisual
+      || defaultVisualMedia
+    );
   const required = !generationForbidden && Boolean(
     plannedGeneration
   );
@@ -1321,6 +1346,15 @@ function buildImagePlanEntry(
   } else if (index === 0) {
     decisionReason = "the outline supports a typography-led cover and does not request a concrete bitmap visual";
   }
+  if (searchFreeFirst) {
+    decisionReason += "; try free openly licensed web search first and generate only after that pool is exhausted";
+  }
+  const acquireVia = useExisting
+    ? "user"
+    : generate
+      ? (searchFreeFirst ? "web" : "ai")
+      : "none";
+  const generatedOutputPath = `assets/generated/${slideId}-${targetId}.png`;
   return {
     slide: slideNumber,
     slide_id: slideId,
@@ -1330,22 +1364,42 @@ function buildImagePlanEntry(
     required,
     decision,
     status,
+    acquire_via: acquireVia,
+    resolved_via: useExisting ? "user" : null,
     decision_reason: decisionReason,
     prompt: generate
-      ? imagePrompt(
-        { ...context, layoutContract: backgroundLayoutContract },
-        slot ? slot.role : "background"
-      )
+      ? [
+        imagePrompt(
+          { ...context, layoutContract: backgroundLayoutContract },
+          slot ? slot.role : "background"
+        ),
+        searchFreeFirst
+          ? "Use this only if free image search is exhausted. If the page names a real person, place, product, or event, create an obviously conceptual editorial substitute rather than fabricated documentary evidence."
+          : "",
+      ].filter(Boolean).join(" ")
       : "",
     output_path: useExisting
       ? existingAsset.outputPath
       : generate
-        ? `assets/generated/${slideId}-${targetId}.png`
+        ? generatedOutputPath
         : null,
     ...(useExisting
       ? {
         origin: "uploaded",
         asset_hash: existingAsset.hash,
+      }
+      : {}),
+    ...(searchFreeFirst
+      ? {
+        search: {
+          tier: "free",
+          providers: ["openverse", "wikimedia"],
+          query: imageSearchQuery(context),
+          output_path: `assets/source/${slideId}-${targetId}.jpg`,
+          status: "pending",
+          fallback: "generate",
+          fallback_output_path: generatedOutputPath,
+        },
       }
       : {}),
     allowed_strategies: generationForbidden ? ["skip"] : strategies,

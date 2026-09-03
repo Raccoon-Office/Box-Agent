@@ -4227,6 +4227,168 @@ def test_web_search_reranks_entity_matches_and_marks_direct_read_candidates():
     ]
 
 
+def test_web_search_emits_normalized_refs_for_global_image_results():
+    from box_agent.core import (
+        _dedupe_web_search_content,
+        _extract_web_search_payload,
+    )
+
+    content = json.dumps(
+        {
+            "ResponseMetadata": {"RequestId": "request-1"},
+            "Result": {
+                "TotalDocCount": 1,
+                "Documents": [
+                    {
+                        "Rank": 0,
+                        "Url": "https://example.com/shandong-university",
+                        "Title": "山东大学",
+                        "Snippet": [
+                            {"Type": "text", "Text": "山东大学校园建筑"},
+                            {
+                                "Type": "image",
+                                "Image": {
+                                    "Width": 1600,
+                                    "Height": 900,
+                                    "ImageUrl": (
+                                        "https://cdn.example.com/campus.jpg"
+                                        "?x-expires=1&x-signature=a%2Bb"
+                                    ),
+                                    "Alt": "山东大学校园",
+                                },
+                            },
+                        ],
+                        "DocumentInfo": {
+                            "Filetype": "image",
+                            "PublishTime": "2026-09-03",
+                        },
+                        "HostInfo": {"Hostname": "example.com"},
+                    }
+                ],
+                "ErrorCode": 0,
+                "ErrorMsg": "",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    normalized, new_count, duplicate_count, _, inspected = (
+        _dedupe_web_search_content(
+            content,
+            set(),
+            {"Query": "山东大学", "SearchType": "image"},
+        )
+    )
+    payload = _extract_web_search_payload("web_search", normalized)
+
+    assert inspected is True
+    assert new_count == 1
+    assert duplicate_count == 0
+    assert payload == {
+        "type": "web_search",
+        "refs": [
+            {
+                "date": "2026-09-03",
+                "images": [
+                    "https://cdn.example.com/campus.jpg?x-expires=1&x-signature=a%2Bb"
+                ],
+                "score": 0,
+                "title": "山东大学",
+                "url": "https://example.com/shandong-university",
+                "domain": "example.com",
+                "passage": "山东大学校园建筑",
+                "type": "web",
+                "reference_tag": "ref_1",
+                "image_details": [
+                    {
+                        "url": (
+                            "https://cdn.example.com/campus.jpg"
+                            "?x-expires=1&x-signature=a%2Bb"
+                        ),
+                        "width": 1600,
+                        "height": 900,
+                        "alt": "山东大学校园",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_web_search_emits_normalized_refs_for_custom_image_results():
+    from box_agent.core import _extract_web_search_payload
+
+    payload = _extract_web_search_payload(
+        "web_search",
+        json.dumps(
+            {
+                "Result": {
+                    "ResultCount": 1,
+                    "WebResults": None,
+                    "SearchContext": {
+                        "OriginQuery": "凯尔特人赛程",
+                        "SearchType": "image",
+                    },
+                    "ImageResults": [
+                        {
+                            "SortId": 1,
+                            "Title": "凯尔特人赛程",
+                            "SiteName": "头条图片",
+                            "Url": "",
+                            "PublishTime": "2026-08-27T18:30:50+08:00",
+                            "Image": {
+                                "Url": "https://cdn.example.com/schedule.jpg?signature=a%2Bb",
+                                "Width": 786,
+                                "Height": 479,
+                                "Shape": "横长方形",
+                                "BlurDes": "清晰",
+                                "Category": "新闻",
+                                "Watermark": "0",
+                                "Features": {
+                                    "Description": "凯尔特人赛程列表",
+                                    "StyleType": "数据图",
+                                },
+                            },
+                            "RankScore": 0.53,
+                        }
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert payload == {
+        "type": "web_search",
+        "refs": [
+            {
+                "date": "2026-08-27T18:30:50+08:00",
+                "images": ["https://cdn.example.com/schedule.jpg?signature=a%2Bb"],
+                "score": 0.53,
+                "title": "凯尔特人赛程",
+                "url": "https://cdn.example.com/schedule.jpg?signature=a%2Bb",
+                "domain": "头条图片",
+                "passage": "",
+                "type": "web",
+                "reference_tag": "ref_1",
+                "image_details": [
+                    {
+                        "url": "https://cdn.example.com/schedule.jpg?signature=a%2Bb",
+                        "width": 786,
+                        "height": 479,
+                        "shape": "横长方形",
+                        "clarity": "清晰",
+                        "category": "新闻",
+                        "watermark": "0",
+                        "description": "凯尔特人赛程列表",
+                        "style_type": "数据图",
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def test_web_search_site_query_reports_provider_empty_state():
     from box_agent.core import _dedupe_web_search_content
 

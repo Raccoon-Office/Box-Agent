@@ -130,6 +130,9 @@ function main() {
   const imagePlan = imagePlanFromManifest(manifest);
   const successfulGenerated = imagePlan.filter(item => isSuccessfulGenerate(item, manifestPath));
   const successfulExisting = imagePlan.filter(item => isSuccessfulExisting(item, manifestPath));
+  const successfulSourced = successfulExisting.filter(
+    item => item && (item.resolved_via === "web" || item.origin === "sourced")
+  );
   const unresolvedGenerated = imagePlan.filter(
     item => item && item.decision === "generate" && !isSuccessfulGenerate(item, manifestPath)
   );
@@ -143,6 +146,70 @@ function main() {
   if (!imagePlan.length) {
     issues.push("manifest.image_plan is missing or empty.");
   }
+
+  imagePlan.forEach(item => {
+    if (!item || item.acquire_via === undefined) return;
+    const acquireVia = item.acquire_via;
+    if (!["ai", "web", "user", "none"].includes(acquireVia)) {
+      issues.push(
+        `slide ${item.slide || "?"}: acquire_via must be ai, web, user, or none.`
+      );
+      return;
+    }
+    if (acquireVia === "none" && item.decision !== "skip") {
+      issues.push(`slide ${item.slide || "?"}: acquire_via none requires decision skip.`);
+    }
+    if (acquireVia === "user" && item.decision !== "use_existing") {
+      issues.push(
+        `slide ${item.slide || "?"}: acquire_via user requires decision use_existing.`
+      );
+    }
+    if (acquireVia === "ai" && item.decision === "generate" && item.resolved_via === "web") {
+      issues.push(`slide ${item.slide || "?"}: acquire_via ai cannot resolve via web.`);
+    }
+    if (acquireVia !== "web") return;
+    const search = item.search;
+    if (!search || typeof search !== "object" || Array.isArray(search)) {
+      issues.push(`slide ${item.slide || "?"}: acquire_via web requires a search object.`);
+      return;
+    }
+    if (search.tier !== "free") {
+      issues.push(`slide ${item.slide || "?"}: initial web search tier must be free.`);
+    }
+    if (!Array.isArray(search.providers) || search.providers.length === 0) {
+      issues.push(`slide ${item.slide || "?"}: free web search requires providers.`);
+    }
+    if (search.fallback !== "generate") {
+      issues.push(`slide ${item.slide || "?"}: free web search fallback must be generate.`);
+    }
+    if (item.decision === "use_existing") {
+      if (item.resolved_via !== "web" || search.status !== "sourced") {
+        issues.push(
+          `slide ${item.slide || "?"}: sourced web image must resolve via web with search.status sourced.`
+        );
+      }
+      if (
+        !item.source
+        || typeof item.source !== "object"
+        || item.source.license_tier !== "no-attribution"
+        || !String(item.source.provider || "").trim()
+        || !String(item.source.source_page_url || "").trim()
+      ) {
+        issues.push(
+          `slide ${item.slide || "?"}: sourced web image requires provider, source page, and no-attribution license provenance.`
+        );
+      }
+    } else if (item.decision === "generate") {
+      if (!["exhausted", "unavailable"].includes(search.status)) {
+        issues.push(
+          `slide ${item.slide || "?"}: web-first generation fallback requires free search to be exhausted or unavailable.`
+        );
+      }
+      if (item.resolved_via && item.resolved_via !== "ai") {
+        issues.push(`slide ${item.slide || "?"}: web-first fallback must resolve via ai.`);
+      }
+    }
+  });
 
   if (opts.mode && manifest.mode !== opts.mode) {
     issues.push(`manifest.mode must be "${opts.mode}", got ${JSON.stringify(manifest.mode)}.`);
@@ -284,6 +351,7 @@ function main() {
     requiredImageCount: imagePlan.filter(item => item && item.required === true).length,
     successfulGeneratedCount: successfulGenerated.length,
     successfulExistingCount: successfulExisting.length,
+    successfulSourcedCount: successfulSourced.length,
     successfulGenerated: successfulGenerated.map(item => ({
       slide: item.slide || null,
       kind: item.kind || null,

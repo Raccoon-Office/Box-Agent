@@ -3,9 +3,9 @@
 The controlled manifest uses `mode: "auto"` for ordinary decks and
 `mode: "creative_image_mode"` only when the brief activates the strict creative
 contract below. Ordinary `auto` decks are visual-first: an eligible cover
-defaults to one generated visual anchor unless the outline is explicitly
+defaults to one bitmap visual anchor unless the outline is explicitly
 typography-, data-, diagram-, or other editable-structure-led. An inner page
-with a declared optional fixed media slot also defaults to generation when its
+with a declared optional fixed media slot also defaults to acquisition when its
 visual intent does not call for an editable structure; a project-case layout is
 the deliberate exception because its composition already reserves a separate
 image frame alongside editable metrics. In either mode, a
@@ -41,10 +41,10 @@ Rules:
 ## 1. Decision first
 
 1. Every slide must have one explicit `image_plan` entry.
-2. On the controlled route, `image_plan.decision` must be one of `generate`, `use_existing`, or `skip`, and must agree with the inspected slot/background strategies. Use `status: "blocked"` for a failed required generation attempt. `draw_in_html` is a legacy/custom-HTML planning label only; never write it into the controlled scaffold manifest.
-3. Prefer `generate` when a bitmap asset would make the slide faster to understand, more memorable, or visually credible. In ordinary `auto`, do not require explicit words such as “插画” when the chosen cover or inner-page media slot already establishes a clear image job.
+2. On the controlled route, `image_plan.decision` remains the compatibility/execution state `generate`, `use_existing`, or `skip`; `acquire_via` is the source decision `ai`, `web`, `user`, or `none`. They must agree with the inspected slot/background strategies. Use `status: "blocked"` for a failed required generation attempt. `draw_in_html` is a legacy/custom-HTML planning label only; never write it into the controlled scaffold manifest.
+3. Prefer a bitmap asset when it makes the slide faster to understand, more memorable, or visually credible. Choose `web` for real people, places, products, evidence, documentary subjects, and ordinary photographic atmosphere; choose `ai` for invented or deliberately stylized scenes, illustration, metaphor, abstract backgrounds, conceptual interfaces, and decorative image treatments. In ordinary `auto`, do not require explicit words such as “插画” when the chosen cover or inner-page media slot already establishes a clear image job.
 4. Do not use `skip` as the default. Use it only when the reason says why typography, data, or editable shapes are stronger than any bitmap.
-5. Use real or source-backed images for factual, screenshot, chart, logo, real-location, or person-accuracy content.
+5. Use supplied or free-web source-backed images for factual, screenshot, chart, logo, real-location, or person-accuracy content. When no acceptable free image exists, any generated fallback is visibly labelled as a concept and never presented as documentary evidence.
 6. Do not create generic decorative filler; generated images need a clear narrative job.
 7. A generated visual used in a project/case-study slot is concept art unless the user supplied the real project asset. Set `origin: "generated"` and label its alt/caption explicitly (for example `AI 概念视觉，实际项目图待补充`) so viewers cannot mistake it for documentary evidence.
 8. Bind a user-supplied local image during scaffold with repeated
@@ -54,18 +54,19 @@ Rules:
    `assets/source/`, hashes them, and records `decision: "use_existing"`.
    Reference that portable copied path from `deck.json`; never leave the final
    deck pointing at the user's original machine path.
+9. A `web` row searches the free Openverse/Wikimedia chain before any generation call. Successful CC0/Public Domain results become `use_existing`, `resolved_via: web`, and retain source provenance; no match or provider unavailability keeps the row as `generate` with the search status and fallback reason preserved. Paid providers are a future adapter behind the same search object, not a new manifest mode.
 
 ## 2. Trigger rules
 
-1. Use `generate` for cover, divider, poster, campaign, launch, vision, abstract concept, future-state, transformation, and emotionally led closing slides.
+1. Use `ai` directly for explicitly generated covers, dividers, posters, campaigns, abstract concepts, future-state scenes, transformations, illustrations, metaphors, and emotionally led closing slides.
 2. In `auto`, use `generate` when the bound cover outline explicitly asks for a
    product/client interface, browser/device mockup, code window, collaboration
    nodes, or system-connection visual. Product UI generation is a labelled
    concept illustration, never a claim that it reproduces a real screenshot;
    use `use_existing` when a real screenshot was supplied.
-3. Use `generate` for investor pitch, fundraising, product-demo, premium B2B SaaS, executive keynote, or launch-event slides when the user gives visual direction such as high-end, premium, credible, dark, keynote-like, VC-facing, or "贵气/靠谱/发布会感". At minimum, choose `generate` for the cover and one solution/product/vision hero slide unless the user opts out or a real/source-backed asset is required.
-4. Use `generate` for realistic/semi-realistic product mockups, environments, textures, human scenes, or hero/card visuals that would be awkward or low-quality if drawn from PowerPoint shapes.
-5. Use `generate` when the user asks for image-rich, illustration, scene, poster, cinematic, magazine, campaign, or visual-metaphor output.
+3. For ordinary investor, fundraising, premium B2B, executive-keynote, and factual visual-story pages, try `web` first unless the requested visual is explicitly conceptual or stylized. Product-demo interfaces remain `ai` concepts unless a real screenshot was supplied.
+4. Use `web` first for realistic environments, human scenes, real products, locations, portraits, and photographic hero/card visuals. Use `ai` directly only when the brief asks for a constructed or stylized interpretation.
+5. Use `ai` when the user asks for illustration, concept art, abstract imagery, visual metaphor, stylized poster/campaign art, or another generated treatment.
 6. On the controlled route, use the registered editable chart/table/timeline layout and `skip` bitmap media for dense data, timelines, architecture, process, and tables. A conceptual code/system *cover* requested by the outline is the exception; keep the detailed architecture page editable. A map may be generated when it is explicitly the page's primary visual medium, but structured geographic data must remain recoverable. Use `draw_in_html` only on the explicit legacy/custom-HTML route.
 7. Use `skip` for data slides only when charts and text are stronger and no local visual frame would help.
 8. Use `use_existing` for supplied product photos, charts, official logos, real locations, screenshots, named people, or source-captured visuals.
@@ -95,6 +96,8 @@ Rules:
   "required": true,
   "decision": "generate",
   "status": "pending",
+  "acquire_via": "ai",
+  "resolved_via": null,
   "decision_reason": "The page message benefits from one fixed-frame visual anchor",
   "prompt": "Deck context: AI operating-model transformation for executives. Subject: three abstract data streams converging into one node. Composition: right-side fixed hero; no embedded text or watermark. Style: crisp editorial vector, indigo/cyan/amber palette.",
   "output_path": "assets/generated/slide-03-hero.png",
@@ -115,6 +118,18 @@ Rules:
 2. Do not delegate image calls to a sub-agent merely to avoid waiting. The parent must receive the actual output paths before it can update the manifest, bind media props, render, and run QA; fire-and-forget would create a race.
 3. A sub-agent is useful only for a genuinely independent task such as image research or prompt planning with deterministic output files. It is not the default image execution path, and a one-image deck gains no latency benefit from it.
 4. After the files exist, run `scripts/sync_image_manifest_status.js assets/generated/manifest.json` once. Do not reread the manifest or manually edit one status at a time.
+
+## 4.1 Free search before generation
+
+For every `acquire_via: web` row, run `scripts/search_free_image.py` once before
+calling `generate_image`. The default provider registry contains only Openverse
+and Wikimedia. It accepts no-attribution CC0/Public Domain images, checks actual
+download dimensions, writes the localized JPEG under `assets/source/`, and
+records provider, source page, license, query, and dimensions in the same plan
+entry. A successful row becomes `use_existing`; an exhausted or unavailable
+row remains `generate` and may then use its existing prompt as an AI fallback.
+Do not describe an unavailable provider as an empty result, and do not present
+an AI fallback for a named real subject as factual evidence.
 
 ## 5. Style anchor reuse
 

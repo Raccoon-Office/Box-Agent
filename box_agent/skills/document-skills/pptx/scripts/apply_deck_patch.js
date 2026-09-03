@@ -222,12 +222,18 @@ function reconcileReadyManifestMedia(deck, deckPath, changes) {
       ? entry.prop_path.trim()
       : "";
     if (!propPath) continue;
+    const sourcedFromWeb = entry.resolved_via === "web" || entry.origin === "sourced";
     const origin = entry.decision === "use_existing" ? "asset" : "generated";
+    const sourceTitle = isPlainObject(entry.source)
+      ? String(entry.source.title || "").trim()
+      : "";
     const media = generatedMedia(
       {
         src: outputPath,
-        alt: entry.decision === "use_existing"
-          ? "用户提供的演示文稿视觉"
+        alt: sourcedFromWeb
+          ? sourceTitle || "免费开放图库来源的演示文稿视觉"
+          : entry.decision === "use_existing"
+            ? "用户提供的演示文稿视觉"
           : propPath === "background"
             ? "AI 生成的演示文稿背景概念视觉"
             : "AI 生成的演示文稿概念视觉",
