@@ -99,6 +99,36 @@ async def test_mcp_tool_uses_public_name_for_model_and_remote_name_for_execution
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_preserves_inline_image_content_for_host_persistence():
+    class FakeSession:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(text="screenshot complete"),
+                    SimpleNamespace(data="aW1hZ2U=", mimeType="image/png"),
+                ],
+                isError=False,
+            )
+
+    tool = MCPTool(
+        name="managed_browser_take_screenshot",
+        remote_name="browser_take_screenshot",
+        description="screenshot",
+        parameters={"type": "object"},
+        session=FakeSession(),
+        server_name="playwright",
+    )
+
+    result = await tool.execute()
+
+    assert result.success is True
+    assert result.content == "screenshot complete"
+    assert result.raw_output == {
+        "mcp_inline_images": [{"data": "aW1hZ2U=", "mime_type": "image/png"}]
+    }
+
+
+@pytest.mark.asyncio
 async def test_auth_refresh_reconnects_structured_401_and_403_failures(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(mcp_loader, "_mcp_auth_token", "old-token")

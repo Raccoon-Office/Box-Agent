@@ -423,9 +423,15 @@ class MCPTool(Tool):
 
             # MCP tool results are a list of content items
             content_parts = []
+            inline_images: list[dict[str, str]] = []
             for item in result.content:
                 if hasattr(item, "text"):
                     content_parts.append(item.text)
+                elif hasattr(item, "data") and hasattr(item, "mimeType"):
+                    data = item.data
+                    mime_type = item.mimeType
+                    if isinstance(data, str) and isinstance(mime_type, str):
+                        inline_images.append({"data": data, "mime_type": mime_type})
                 else:
                     content_parts.append(str(item))
 
@@ -453,7 +459,16 @@ class MCPTool(Tool):
                 self._server_name == "playwright"
                 and self._remote_name == "browser_snapshot"
             )
-            return ToolResult(success=True, content=content_str, error=None)
+            return ToolResult(
+                success=True,
+                content=content_str,
+                error=None,
+                raw_output=(
+                    {"mcp_inline_images": inline_images}
+                    if inline_images
+                    else None
+                ),
+            )
 
         except TimeoutError:
             release_browser_runtime_after_call = browser_runtime_acquired

@@ -938,6 +938,46 @@ def test_empty_runtime_env_does_not_inject_python_vars():
         assert "BOX_AGENT_PYTHON3" not in tool._subprocess_env
 
 
+def test_description_uses_injected_python_and_reserved_scratch_directory():
+    description = BashTool(
+        runtime_env={"BOX_AGENT_PYTHON": "/runtime/python"}
+    ).description
+
+    assert '"$BOX_AGENT_PYTHON" -u -m http.server' in description
+    assert 'under "$BOX_AGENT_SCRATCH_DIR"' in description
+    assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
+
+
+@pytest.mark.asyncio
+async def test_malformed_runtime_fallback_fails_without_approval():
+    tool = BashTool(runtime_env={"BOX_AGENT_PYTHON": "/runtime/python"})
+
+    result = await tool.execute(command='"$BOX_AGENT_PYTHON:-python3" -c "print(1)"')
+
+    assert not result.success
+    assert result.exit_code == 1
+    assert "BASH_INVALID_RUNTIME_EXECUTABLE" in result.error
+    assert '"$BOX_AGENT_PYTHON"' in result.error
+    assert result.permission_request is None
+
+
+@pytest.mark.asyncio
+async def test_reserved_scratch_subdirectory_can_be_removed_without_approval(tmp_path):
+    scratch = tmp_path / "scratch"
+    preview = scratch / "preview_shots"
+    preview.mkdir(parents=True)
+    (preview / "frame.png").write_bytes(b"frame")
+    tool = BashTool(runtime_env={"BOX_AGENT_SCRATCH_DIR": str(scratch)})
+
+    result = await tool.execute(
+        command='rm -rf "$BOX_AGENT_SCRATCH_DIR/preview_shots"'
+    )
+
+    assert result.success, result.error
+    assert result.permission_request is None
+    assert not preview.exists()
+
+
 @pytest.mark.asyncio
 async def test_verified_runtime_node_reference_runs_without_approval(tmp_path):
     node_path = tmp_path / "node"
@@ -1110,6 +1150,22 @@ async def test_foreground_timeout_reaps_process_no_zombie():
     assert proc is not None
     # Reaped: returncode is set (not None) after _kill_process_tree awaited wait().
     assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_foreground_resource_limit_stops_process_tree_and_allows_fallback(monkeypatch):
+    bash_tool = BashTool()
+    monkeypatch.setattr(
+        bash_tool,
+        "_process_tree_rss_bytes",
+        lambda process: 3 * 1024 * 1024 * 1024,
+    )
+
+    result = await bash_tool.execute(command="sleep 10", timeout=30)
+
+    assert not result.success
+    assert "BASH_RESOURCE_LIMIT" in result.error
+    assert "continue with a warning" in result.error
 
 
 @pytest.mark.asyncio

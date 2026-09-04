@@ -5333,6 +5333,62 @@ def test_artifact_detect_data_kind(tmp_path):
     assert arts[0].rel_path == "output/results.csv"
 
 
+def test_browser_screenshot_is_persisted_inside_artifact_root(tmp_path):
+    output_dir = tmp_path / "output"
+    arguments = {"filename": "qa/slide-01.png"}
+
+    target, error = core._prepare_browser_screenshot_output(
+        "managed_browser_take_screenshot",
+        arguments,
+        str(tmp_path),
+        output_dir,
+    )
+    result = core._persist_browser_screenshot_output(
+        ToolResult(
+            success=True,
+            content="captured",
+            raw_output={
+                "mcp_inline_images": [
+                    {"data": "aW1hZ2U=", "mime_type": "image/png"}
+                ]
+            },
+        ),
+        target,
+    )
+
+    assert error is None
+    assert arguments == {}
+    assert (output_dir / "qa/slide-01.png").read_bytes() == b"image"
+    assert result.success is True
+    assert "Screenshot persisted" in result.content
+
+
+def test_browser_screenshot_persistence_failure_is_advisory(tmp_path):
+    target = tmp_path / "qa" / "slide-01.png"
+
+    result = core._persist_browser_screenshot_output(
+        ToolResult(success=True, content="captured"),
+        target,
+    )
+
+    assert result.success is True
+    assert "visual QA may be skipped" in result.content
+
+
+def test_inline_screenshot_bytes_are_redacted_from_trace_payload():
+    payload = core._trace_safe_tool_raw_output(
+        {
+            "mcp_inline_images": [
+                {"data": "aW1hZ2U=", "mime_type": "image/png"}
+            ]
+        }
+    )
+
+    assert payload == {
+        "mcp_inline_images": [{"mime_type": "image/png", "encoded_chars": 8}]
+    }
+
+
 def test_artifact_detect_ignores_workspace_root(tmp_path):
     """Files at workspace root (user-supplied inputs) are NOT picked up."""
     (tmp_path / "user-upload.png").write_bytes(b"\x89PNG")

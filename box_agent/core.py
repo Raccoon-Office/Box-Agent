@@ -571,6 +571,92 @@ def _persist_browser_snapshot_output(
         update={"content": f"{content.rstrip()}\n\nSnapshot persisted to {target_path}"}
     )
 
+
+def _prepare_browser_screenshot_output(
+    tool_name: str,
+    arguments: dict[str, Any],
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
+) -> tuple[Path | None, str | None]:
+    """Request an inline Playwright screenshot for Box-Agent-managed persistence."""
+    if tool_name != "managed_browser_take_screenshot":
+        return None, None
+    filename = arguments.get("filename")
+    if not isinstance(filename, str) or not filename.strip():
+        return None, None
+    supplied_path = Path(filename).expanduser()
+    artifact_root = _artifact_scan_root(workspace_dir, artifact_root_dir)
+    if artifact_root is None:
+        return None, None
+    artifact_root = artifact_root.resolve()
+    resolved_path = (
+        supplied_path.resolve()
+        if supplied_path.is_absolute()
+        else (artifact_root / supplied_path).resolve()
+    )
+    if not resolved_path.is_relative_to(artifact_root):
+        if supplied_path.is_absolute():
+            return None, None
+        return None, (
+            "BROWSER_SCREENSHOT_OUTPUT_PATH_INVALID: filename must stay inside "
+            "the artifact root"
+        )
+    arguments.pop("filename", None)
+    return resolved_path, None
+
+
+def _persist_browser_screenshot_output(
+    result: ToolResult,
+    target_path: Path | None,
+) -> ToolResult:
+    """Persist an inline MCP image; persistence failure remains advisory."""
+    if target_path is None or not result.success:
+        return result
+    raw_output = result.raw_output if isinstance(result.raw_output, dict) else {}
+    images = raw_output.get("mcp_inline_images")
+    image = images[0] if isinstance(images, list) and images else None
+    content = (result.content or "").rstrip()
+    if not isinstance(image, dict) or not isinstance(image.get("data"), str):
+        warning = (
+            "Browser screenshot was not returned inline; visual QA may be skipped: "
+            f"{target_path}"
+        )
+        return result.model_copy(update={"content": f"{content}\n\n{warning}".strip()})
+    try:
+        import base64
+
+        payload = base64.b64decode(image["data"], validate=True)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(payload)
+    except (OSError, ValueError) as exc:
+        warning = (
+            f"Could not persist browser screenshot at {target_path}: {exc}. "
+            "Visual QA may be skipped."
+        )
+        return result.model_copy(update={"content": f"{content}\n\n{warning}".strip()})
+    return result.model_copy(
+        update={"content": f"{content}\n\nScreenshot persisted to {target_path}".strip()}
+    )
+
+
+def _trace_safe_tool_raw_output(raw_output: Any) -> Any:
+    """Keep inline MCP image payloads out of durable JSONL traces."""
+    if not isinstance(raw_output, dict) or "mcp_inline_images" not in raw_output:
+        return raw_output
+    images = raw_output.get("mcp_inline_images")
+    metadata = []
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict):
+                data = image.get("data")
+                metadata.append(
+                    {
+                        "mime_type": image.get("mime_type"),
+                        "encoded_chars": len(data) if isinstance(data, str) else None,
+                    }
+                )
+    return {**raw_output, "mcp_inline_images": metadata}
+
 # Pattern to match <!--PLOT_DATA:...--> markers embedded by code execution.
 # These carry interactive chart payloads already sent to the frontend via SSE;
 # they must NOT be fed back into the model context.
@@ -5177,6 +5263,18 @@ async def run_agent_loop(
                 workspace_dir,
                 artifact_root_dir,
             )
+            (
+                browser_screenshot_target,
+                browser_screenshot_path_error,
+            ) = _prepare_browser_screenshot_output(
+                fn_name,
+                fn_args,
+                workspace_dir,
+                artifact_root_dir,
+            )
+            browser_snapshot_path_error = (
+                browser_snapshot_path_error or browser_screenshot_path_error
+            )
             placeholder_argument = _model_history_placeholder_argument(fn_name, fn_args)
             can_auto_repair_placeholder = (
                 placeholder_argument is not None
@@ -5459,7 +5557,7 @@ async def run_agent_loop(
                     result_success=result.success,
                     result_content=result.content if result.success else None,
                     result_error=result.error if not result.success else None,
-                    raw_output=result.raw_output,
+                    raw_output=_trace_safe_tool_raw_output(result.raw_output),
                     tool_id=tool_id,
                     server_name=server_name,
                 )
@@ -5478,7 +5576,7 @@ async def run_agent_loop(
                             result_error=(
                                 retry_result.error if not retry_result.success else None
                             ),
-                            raw_output=retry_result.raw_output,
+                            raw_output=_trace_safe_tool_raw_output(retry_result.raw_output),
                             tool_id=tool_id,
                             server_name=server_name,
                         )
@@ -5506,6 +5604,10 @@ async def run_agent_loop(
             result = _persist_browser_snapshot_output(
                 result,
                 browser_snapshot_target,
+            )
+            result = _persist_browser_screenshot_output(
+                result,
+                browser_screenshot_target,
             )
             result = _activate_skill_result(fn_name, fn_args, result)
             result, transient_blocks, transient_estimate = (
@@ -5666,7 +5768,7 @@ async def run_agent_loop(
                 success=result.success,
                 content=tc_content,
                 error=tc_error,
-                raw_output=result.raw_output,
+                raw_output=_trace_safe_tool_raw_output(result.raw_output),
                 user_visible=tool_user_visible,
                 policy_decision=policy_decision,
                 tool_id=tool_id,
@@ -5727,6 +5829,7 @@ async def run_agent_loop(
             par_budget_errors: dict[str, str] = {}
             par_user_visible: dict[str, bool] = {}
             par_browser_snapshot_targets: dict[str, Path | None] = {}
+            par_browser_screenshot_targets: dict[str, Path | None] = {}
             par_started_at: dict[str, float] = {}
             durable_parallel_calls = False
             for tc in parallel_calls:
@@ -5741,6 +5844,19 @@ async def run_agent_loop(
                     artifact_root_dir,
                 )
                 par_browser_snapshot_targets[tc.id] = browser_snapshot_target
+                (
+                    browser_screenshot_target,
+                    browser_screenshot_path_error,
+                ) = _prepare_browser_screenshot_output(
+                    tc.function.name,
+                    par_fn_args,
+                    workspace_dir,
+                    artifact_root_dir,
+                )
+                par_browser_screenshot_targets[tc.id] = browser_screenshot_target
+                browser_snapshot_path_error = (
+                    browser_snapshot_path_error or browser_screenshot_path_error
+                )
                 browser_intent_error = browser_intent_policy.tool_call_error(
                     tc.function.name,
                     par_fn_args,
@@ -6054,7 +6170,7 @@ async def run_agent_loop(
                         result_success=result.success,
                         result_content=result.content if result.success else None,
                         result_error=result.error if not result.success else None,
-                        raw_output=result.raw_output,
+                        raw_output=_trace_safe_tool_raw_output(result.raw_output),
                         tool_id=tool_id,
                         server_name=server_name,
                     )
@@ -6073,7 +6189,7 @@ async def run_agent_loop(
                                 result_error=(
                                     retry_result.error if not retry_result.success else None
                                 ),
-                                raw_output=retry_result.raw_output,
+                                raw_output=_trace_safe_tool_raw_output(retry_result.raw_output),
                                 tool_id=tool_id,
                                 server_name=server_name,
                             )
@@ -6101,6 +6217,10 @@ async def run_agent_loop(
                 result = _persist_browser_snapshot_output(
                     result,
                     par_browser_snapshot_targets.get(tc_id),
+                )
+                result = _persist_browser_screenshot_output(
+                    result,
+                    par_browser_screenshot_targets.get(tc_id),
                 )
                 result, transient_blocks, transient_estimate = (
                     _validate_transient_followup_result(
@@ -6246,7 +6366,7 @@ async def run_agent_loop(
                     success=result.success,
                     content=par_content,
                     error=par_error,
-                    raw_output=result.raw_output,
+                    raw_output=_trace_safe_tool_raw_output(result.raw_output),
                     user_visible=tool_user_visible,
                     policy_decision=policy_decision,
                     tool_id=tool_id,
