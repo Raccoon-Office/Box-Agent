@@ -198,16 +198,20 @@ ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/merge_html_fragments.js" \
 
 ## Generated Images
 
-Plan generated images after the outline and before writing final slide HTML.
-Use image generation for visuals that should be bitmap assets, such as hero
-illustrations, product mockups, scene images, textures, photo-like backgrounds,
-and people-heavy visuals that should not be built from PowerPoint shapes.
+Plan bitmap acquisition after the outline and before writing final slide HTML.
+Use hosted web image search first for real people, places, products, documentary
+subjects, and photographic atmosphere. Use image generation directly for
+invented or deliberately stylized visuals such as hero illustrations, product
+concepts, abstract scenes, textures, and visual metaphors.
 
-Default to `generate` for covers, dividers, posters, brand campaigns,
-product launches, vision/future-state pages, abstract concept pages, and
-emotionally led closing pages; only fall back when the image service is
-unavailable, the user opts out, or the slide requires a real/source-backed
-asset. Avoid generating filler images just to dress up text-heavy slides, but
+Default to `acquire_via: ai` for explicitly generated covers, dividers, posters,
+brand campaigns, product concepts, vision/future-state pages, abstract concept
+pages, and emotionally led closing pages. Use `acquire_via: web` for real or
+ordinary photographic subjects; it calls `web_search` with `SearchType=image`
+before retaining `generate` as a labelled concept fallback. Localize the selected
+result with `scripts/localize_web_image.py`; web-search reuse rights remain
+unverified until the source page is reviewed. Avoid generating
+filler images just to dress up text-heavy slides, but
 do not let generic caution suppress useful visuals. Every slide must get an
 explicit image decision in `assets/generated/manifest.json`; pick `generate`
 whenever a bitmap visual would make the message faster to understand, more
@@ -218,9 +222,9 @@ HTML/CSS alone.
 
 For each slide, choose exactly one primary visual lane:
 
-- `generate`: bitmap visual asset from `generate_image`
-- `use_existing`: supplied, licensed, screenshot, brand, product, person, or
-  source-backed image
+- `generate`: unresolved bitmap job that will use AI directly or after hosted
+  image search is exhausted or unavailable
+- `use_existing`: supplied or successfully localized web-search image
 - `draw_in_html`: editable chart, diagram, timeline, icon cluster, map-like
   schematic, or shape composition
 - `skip`: no image because text/data/editable composition is stronger
@@ -351,6 +355,8 @@ by every `generate` entry, plus an `image_plan` array. Use this shape:
     {
       "slide": "03",
       "decision": "generate",
+      "acquire_via": "ai",
+      "resolved_via": null,
       "kind": "hero_illustration",
       "reason": "abstract AI workflow concept needs a visual anchor",
       "placement": "right-side hero, ~720x1080 area, title overlays the left third",
@@ -496,8 +502,10 @@ Tune the prompt by image `kind`. Anchor stays the same; subject/composition/qual
 
 Allowed decisions:
 
-- `generate`: call the available `generate_image` tool and save the result.
-- `use_existing`: use a supplied, licensed, or source-backed image.
+- `generate`: call `generate_image` directly for `acquire_via: ai`, or only
+  after `acquire_via: web` has a recorded exhausted/unavailable image search.
+- `use_existing`: use a supplied image or a web-search image localized with its
+  source provenance and explicit license-verification status.
 - `draw_in_html`: build the visual as editable HTML/CSS/SVG/chart elements.
 - `skip`: no image is needed.
 - `blocked`: image generation would be appropriate, but no image-generation

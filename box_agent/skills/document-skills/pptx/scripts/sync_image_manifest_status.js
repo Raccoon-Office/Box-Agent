@@ -47,6 +47,7 @@ function main() {
   const unresolved = [];
   imagePlan.forEach(entry => {
     if (!entry || !["generate", "use_existing"].includes(entry.decision)) return;
+    let entryChanged = false;
     const resolved = resolveOutputPath(entry.output_path, manifestPath);
     if (!resolved) {
       if (entry.decision === "generate") {
@@ -57,8 +58,26 @@ function main() {
     const desiredStatus = entry.decision === "generate" ? "generated" : "ready";
     if (entry.status !== desiredStatus) {
       entry.status = desiredStatus;
-      changed += 1;
+      entryChanged = true;
     }
+    const desiredResolvedVia = entry.decision === "generate"
+      ? "ai"
+      : entry.origin === "sourced"
+        ? "web"
+        : "user";
+    if (entry.resolved_via !== desiredResolvedVia) {
+      entry.resolved_via = desiredResolvedVia;
+      entryChanged = true;
+    }
+    if (
+      entry.decision === "generate"
+      && entry.acquire_via === "web"
+      && entry.fallback_used !== true
+    ) {
+      entry.fallback_used = true;
+      entryChanged = true;
+    }
+    if (entryChanged) changed += 1;
   });
 
   if (unresolved.length) {

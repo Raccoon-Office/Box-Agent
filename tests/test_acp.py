@@ -3820,6 +3820,64 @@ async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_acp_skill_filter_ignores_host_ui_language_instruction(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_names = ("research-synthesis", "pptx", "docx", "pdf", "xlsx")
+    for skill_name in skill_names:
+        skill_dir = skills_dir / skill_name
+        skill_dir.mkdir(parents=True)
+        skill_dir.joinpath("SKILL.md").write_text(
+            "---\n"
+            f"name: {skill_name}\n"
+            "description: Use this language for user-visible response updates.\n"
+            "keywords: [use, user, response]\n"
+            "---\n"
+            f"# {skill_name} FULL RULES\n",
+            encoding="utf-8",
+        )
+    skill_loader = SkillLoader(skills_dir)
+    skill_loader.discover_skills()
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    llm = CaptureMessagesLLM()
+    agent = BoxACPAgent(
+        DummyConn(),
+        config,
+        llm,
+        [],
+        f"system\n\n{SKILL_SLOT_SENTINEL}",
+        skill_loader=skill_loader,
+    )
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "孙宇晨最新的回复是什么"}],
+            field_meta={"ui_language": "zh"},
+        )
+    )
+
+    state = agent._sessions[session.sessionId]
+    assert state.skill_selector.matched_skill_names == ()
+    assert state.preloaded_skill_names == []
+    assert "## Auto-Loaded Skill Instructions" not in llm.calls[0][0][1]
+    user_messages = [content for role, content in llm.calls[0] if role == "user"]
+    assert user_messages == [
+        "[Host UI language: Chinese. Use this language for user-visible "
+        "intermediate summaries, progress updates, and the final response unless the user "
+        "explicitly requests another language.]\n\n"
+        "孙宇晨最新的回复是什么"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_acp_preloads_matched_pptx_skill_for_deliverable(tmp_path):
     skills_dir = tmp_path / "skills"
     pptx_dir = skills_dir / "pptx"

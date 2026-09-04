@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from box_agent.tools.skill_loader import SkillLoader
+
 
 SKILL_DIR = (
     Path(__file__).resolve().parents[1]
@@ -2766,7 +2768,7 @@ console.log(JSON.stringify({ layouts: slides.length, migrations, enumControls, c
     assert json.loads(result.stdout) == {
         "layouts": 33,
         "migrations": 1089,
-        "enumControls": 29,
+        "enumControls": 33,
         "collectionControls": 31,
     }
 
@@ -4651,6 +4653,73 @@ def test_scaffold_splits_overflow_for_typed_collection_layouts(
     assert [slide["source_outline_page"] for slide in slides] == [1, 1]
     assert slides[0]["source_outline_item_range"]["start"] == 1
     assert slides[-1]["source_outline_item_range"]["end"] == item_count
+
+
+def test_scaffold_keeps_single_series_eight_month_trend_on_one_slide(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(outline_path, page_count=1, source_mode="user_provided")
+    categories = [f"{month} 月" for month in range(1, 9)]
+    values = ["120", "145", "168", "205", "248", "292", "326", "351"]
+    outline["slides"][0].update(
+        {
+            "title": "连续八个月收入趋势",
+            "message": "月度经常性收入保持连续增长。",
+            "bullets": [
+                f"{category} {value} 万元"
+                for category, value in zip(categories, values, strict=True)
+            ],
+            "layout": "chart",
+            "visual": "单系列折线图，展示八个月的趋势",
+        }
+    )
+    outline_path.write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "chart-data-v1",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    contract = json.loads(scaffold.stdout)
+    slides = json.loads(deck_path.read_text(encoding="utf-8"))["slides"]
+    assert len(slides) == 1
+    assert "source_outline_item_range" not in slides[0]
+    assert not any(
+        item.get("strategy") == "split"
+        for item in contract.get("layout_normalizations", [])
+    )
+
+    patch_path = tmp_path / "deck.patch.json"
+    patch_path.write_text(
+        json.dumps(
+            {
+                "slides": {
+                    "slide-01": {
+                        "props": {
+                            "categories": categories,
+                            "series": [{"name": "月度收入", "values": values}],
+                        }
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    applied = _run("apply_deck_patch.js", str(deck_path), str(patch_path))
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    slide = json.loads(deck_path.read_text(encoding="utf-8"))["slides"][0]
+    assert slide["props"]["categories"] == categories
+    assert slide["props"]["series"] == [{"name": "月度收入", "values": values}]
 
 
 def test_scaffold_and_patch_support_six_column_nine_row_gantt(
@@ -9642,6 +9711,21 @@ def test_pptx_theme_selection_has_no_hard_html_templates_dependency() -> None:
     assert "DiagramSpec SVG clean and professional" in text
 
 
+def test_pptx_skill_exposes_platform_specific_standalone_image_sync() -> None:
+    skill = SkillLoader(sources=[(SKILL_DIR, "builtin")]).load_skill(
+        SKILL_DIR / "SKILL.md"
+    )
+
+    assert skill is not None
+    sync_script = str(SCRIPTS_DIR / "sync_image_manifest_status.js")
+    assert sync_script in skill.content
+    assert '"$BOX_AGENT_NODE" "<LOADER_EXPANDED_SYNC_SCRIPT>"' in skill.content
+    assert '& "$env:BOX_AGENT_NODE" "<LOADER_EXPANDED_SYNC_SCRIPT>"' in skill.content
+    assert "already runs with `BOX_AGENT_OUTPUT_DIR` as its cwd" in skill.content
+    assert "synchronization invocation must be" in skill.content
+    assert "the only command" in skill.content
+
+
 def test_pptx_solution_briefs_do_not_default_to_deep_research() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     outline = (SKILL_DIR / "references" / "outline.md").read_text(encoding="utf-8")
@@ -11607,6 +11691,149 @@ def test_animated_chart_layout_supports_seven_types_and_editable_matrix(
     assert "add-chart-series" in html
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["issues"] == []
+
+
+def test_chart_design_profiles_resolve_from_data_semantics(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "chart-data-v1",
+        "chart-data-v1",
+        "chart-data-v1",
+        "--out",
+        str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    deck["slides"][0]["props"].update(
+        {
+            "chart_type": "line",
+            "categories": [f"D{index}" for index in range(1, 9)],
+            "series": [{"name": "活跃用户", "values": [str(20 + index) for index in range(8)]}],
+        }
+    )
+    deck["slides"][1]["props"].update(
+        {
+            "chart_type": "donut",
+            "categories": ["自然", "推荐", "活动", "合作"],
+            "series": [{"name": "来源", "values": ["34", "28", "22", "16"]}],
+        }
+    )
+    deck["slides"][2]["props"].update(
+        {
+            "chart_type": "line",
+            "categories": ["Q1", "Q2", "Q3", "Q4"],
+            "series": [{"name": "ARR", "values": ["120", "180", "260", "360"]}],
+            "presentation": "traction",
+        }
+    )
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+
+    rendered = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    output = html_path.read_text(encoding="utf-8")
+    first, second, third = [
+        output.split(f'data-slide="{index:02d}"', 1)[1].split("</section>", 1)[0]
+        for index in range(1, 4)
+    ]
+    assert 'data-chart-style="cool-ordinal"' in first
+    assert 'data-chart-reading-mode="editorial"' in first
+    assert "&quot;label_mode&quot;:&quot;endpoints&quot;" in first
+    assert 'data-chart-style="botanical-categorical"' in second
+    assert 'data-chart-reading-mode="glance"' in second
+    assert 'data-chart-style="ink-focus"' in third
+    assert 'data-chart-reading-mode="glance"' in third
+    assert 'data-chart-palette-light="#173E75,#3769A8,#587DA9,#668AB6"' in first
+    for markup in (first, second, third):
+        light_palette = re.search(r'data-chart-palette-light="([^"]+)"', markup)
+        dark_palette = re.search(r'data-chart-palette-dark="([^"]+)"', markup)
+        assert light_palette is not None
+        assert dark_palette is not None
+        assert all(
+            _contrast_ratio(color, "#F7F4E9") >= 3
+            for color in light_palette.group(1).split(",")
+        )
+        assert all(
+            _contrast_ratio(color, "#151619") >= 3
+            for color in dark_palette.group(1).split(",")
+        )
+
+
+def test_chart_reading_modes_change_echarts_visual_grammar() -> None:
+    if NODE is None:
+        pytest.skip("Node.js is required to test the chart runtime")
+    runtime = SKILL_DIR / "runtime" / "chart-runtime.js"
+    probe = """
+const api = require(process.argv[1]);
+const tokens = {
+  primary: '#173E75', text: '#20201D', muted: '#77766F', border: '#D6D4CB',
+  background: '#F6F2E9', display: 'Arial', body: 'Arial',
+  palette: ['#173E75', '#3769A8', '#587DA9', '#668AB6'],
+};
+const editorial = api.buildOption({
+  type: 'line', categories: ['A', 'B', 'C'],
+  series: [{name: 'S', values: [1, 3, 2]}],
+  reading_mode: 'editorial', style_profile: 'cool-ordinal', label_mode: 'endpoints',
+}, tokens);
+const glance = api.buildOption({
+  type: 'bar', categories: ['A', 'B', 'C'],
+  series: [{name: 'S', values: [1, 3, 2]}],
+  reading_mode: 'glance', style_profile: 'cool-ordinal', show_values: 'on',
+}, tokens);
+console.log(JSON.stringify({
+  editorial: {
+    lineWidth: editorial.series[0].lineStyle.width,
+    lineColor: editorial.series[0].lineStyle.color,
+    symbolSize: editorial.series[0].symbolSize,
+    gridType: editorial.xAxis.type === 'value'
+      ? editorial.xAxis.splitLine.lineStyle.type
+      : editorial.yAxis.splitLine.lineStyle.type,
+  },
+  glance: {
+    barMaxWidth: glance.series[0].barMaxWidth,
+    radius: glance.series[0].itemStyle.borderRadius,
+    labelSize: glance.series[0].label.fontSize,
+    colors: glance.series[0].data.map(item => item.itemStyle.color),
+  },
+}));
+"""
+    result = subprocess.run(
+        [str(NODE), "-e", probe, str(runtime)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["editorial"] == {
+        "lineWidth": 2.25,
+        "lineColor": "#173E75",
+        "symbolSize": 7,
+        "gridType": "solid",
+    }
+    assert payload["glance"] == {
+        "barMaxWidth": 42,
+        "radius": [0, 18, 18, 0],
+        "labelSize": 19,
+        "colors": ["#173E75", "#587DA9", "#668AB6"],
+    }
+
+
+def test_native_pptx_chart_export_uses_embedded_profile_palette() -> None:
+    bundle = (SCRIPTS_DIR / "dom-to-pptx.bundle.js").read_text(encoding="utf-8")
+
+    assert "function chartAttributePalette" in bundle
+    assert "data-chart-palette-dark" in bundle
+    assert "data-chart-palette-light" in bundle
+    assert "chartColors," in bundle
+    assert "varyColors: spec.series.length === 1" in bundle
+    assert "lineSize: spec.reading_mode === 'editorial' ? 1.5 : 2.5" in bundle
+    assert "markerSize: spec.reading_mode === 'editorial' ? 4 : 6" in bundle
 
 
 def test_business_progress_line_chart_uses_editable_traction_presentation(

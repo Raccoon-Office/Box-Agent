@@ -34,8 +34,10 @@ from .shell_inspection import inspect_shell_command
 from .safety import (
     backup_file,
     detect_dangerous_command,
+    detect_invalid_runtime_executable_syntax,
     detect_scope_escape,
     extract_rm_targets,
+    is_safe_scratch_cleanup,
     trusted_runtime_executable_references,
 )
 
@@ -55,6 +57,8 @@ _DEFAULT_TOOLS_CONFIG = ToolsConfig()
 BASH_LIFETIME_TURN = "turn"
 BASH_LIFETIME_RUNTIME = "runtime"
 _BASH_LIFETIMES = frozenset({BASH_LIFETIME_TURN, BASH_LIFETIME_RUNTIME})
+_FOREGROUND_PROCESS_TREE_MEMORY_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
+_FOREGROUND_RESOURCE_POLL_SECONDS = 0.5
 
 
 def _truncate_bash_output(text: str, label: str, limit: int = MAX_BASH_OUTPUT_CHARS) -> tuple[str, int]:
@@ -1034,6 +1038,29 @@ class BashTool(Tool):
                 start_new_session=True,
             )
 
+    @staticmethod
+    def _process_tree_rss_bytes(process: asyncio.subprocess.Process) -> int | None:
+        """Best-effort RSS total for a Unix process group."""
+        if sys.platform.startswith("win"):
+            return None
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "rss=", "-g", str(process.pid)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        total_kib = 0
+        for value in completed.stdout.split():
+            try:
+                total_kib += int(value)
+            except ValueError:
+                continue
+        return total_kib * 1024
+
     def _restore_skill_path_after_login(self, command: str) -> str:
         """Reapply Box-Agent's trusted PATH prefix after login profiles run."""
         if not self._subprocess_env or not self._subprocess_env.get(
@@ -1243,13 +1270,17 @@ Tips:
   - Quote file paths with spaces: cd "My Documents"
   - Chain dependent commands with &&: git add . && git commit -m "msg"
   - Use absolute paths instead of cd when possible
+  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm
+  - Run the injected Python runtime as "$BOX_AGENT_PYTHON"; do not write "$BOX_AGENT_PYTHON:-python3"
+  - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
+  - A timeout, resource stop, or optional QA failure is advisory for artifact workflows: preserve usable output, record the warning, and continue to delivery when safe
   - For background commands, monitor with bash_output and terminate with bash_kill
   - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
 
 Examples:
   - git status
   - npm test
-  - ${{BOX_AGENT_PYTHON:-python3}} -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true; read the dynamic port with bash_output)""",
+  - "$BOX_AGENT_PYTHON" -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true; read the dynamic port with bash_output)""",
         }
         # When the bundled Git-for-Windows bash is active on Win, the shell is
         # POSIX bash with coreutils — use the Unix description so the LLM
@@ -1361,6 +1392,15 @@ Examples:
                     stderr=error,
                     exit_code=1,
                 )
+            runtime_syntax_error = detect_invalid_runtime_executable_syntax(command)
+            if runtime_syntax_error:
+                return BashOutputResult(
+                    success=False,
+                    error=runtime_syntax_error,
+                    stdout="",
+                    stderr=runtime_syntax_error,
+                    exit_code=1,
+                )
             # --- Safety checks ---
             bypass_error = detect_pptx_self_check_bypass(None, command)
             if bypass_error:
@@ -1375,6 +1415,11 @@ Examples:
                 command,
                 workspace_dir=self.workspace_dir,
                 runtime_env=self._subprocess_env,
+                shell_style=(
+                    "powershell"
+                    if self.is_windows and self._bundled_win_bash is None
+                    else "posix"
+                ),
             )
             if image_status_error:
                 return BashOutputResult(
@@ -1423,6 +1468,11 @@ Examples:
                     self._subprocess_env
                 ),
             )
+            if danger_reason and is_safe_scratch_cleanup(
+                command,
+                (self._subprocess_env or {}).get("BOX_AGENT_SCRATCH_DIR"),
+            ):
+                danger_reason = None
             if danger_reason:
                 if (
                     not self.bypass_dangerous_command_approval
@@ -1586,13 +1636,42 @@ Examples:
                 # Foreground execution: Create isolated process
                 process = await self._create_subprocess(command, merge_stderr=False)
 
-                try:
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-                except asyncio.TimeoutError:
+                communicate_task = asyncio.create_task(process.communicate())
+                deadline = time.monotonic() + timeout
+                resource_error: str | None = None
+                while not communicate_task.done():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(communicate_task),
+                            timeout=min(_FOREGROUND_RESOURCE_POLL_SECONDS, remaining),
+                        )
+                    except asyncio.TimeoutError:
+                        rss_bytes = self._process_tree_rss_bytes(process)
+                        if (
+                            rss_bytes is not None
+                            and rss_bytes > _FOREGROUND_PROCESS_TREE_MEMORY_LIMIT_BYTES
+                        ):
+                            resource_error = (
+                                "BASH_RESOURCE_LIMIT: command process tree exceeded "
+                                f"{_FOREGROUND_PROCESS_TREE_MEMORY_LIMIT_BYTES // (1024 ** 2)} MiB RSS; "
+                                "it was stopped to protect the client. Preserve existing artifacts, "
+                                "fix or skip this step, and continue with a warning."
+                            )
+                            break
+                if resource_error is not None or not communicate_task.done():
                     # Kill the whole process group and reap, so the shell and any
                     # children it spawned are torn down (no orphans, no zombie).
                     await self._kill_process_tree(process)
-                    error_msg = f"Command timed out after {timeout} seconds"
+                    if not communicate_task.done():
+                        communicate_task.cancel()
+                    error_msg = resource_error or (
+                        f"Command timed out after {timeout} seconds and its process "
+                        "tree was stopped. Preserve existing artifacts, skip or fix "
+                        "this step, and continue with a warning when possible."
+                    )
                     return BashOutputResult(
                         success=False,
                         error=error_msg,
@@ -1600,6 +1679,7 @@ Examples:
                         stderr=error_msg,
                         exit_code=-1,
                     )
+                stdout, stderr = communicate_task.result()
 
                 # Decode output
                 stdout_text = stdout.decode("utf-8", errors="replace")

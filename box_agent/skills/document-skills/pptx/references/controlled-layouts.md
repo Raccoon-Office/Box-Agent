@@ -213,6 +213,18 @@ the generated SVG. Presentation mode replays chart animation when the chart
 slide becomes current. The editable PPTX exporter maps the same controlled
 spec to a native PptxGenJS/PowerPoint chart instead of copying the ECharts SVG.
 
+Both controlled chart layouts expose two independent design controls.
+`chart_style` is semantic rather than decorative: `cool-ordinal` uses a
+single-hue lightness sequence, `botanical-categorical` separates a small set of
+independent categories, and `ink-focus` combines neutral ink with one dominant
+signal. `reading_mode` controls visual grammar: `glance` favors immediate
+comparison with wider marks and stronger labels, while `editorial` favors
+hairline grids, open markers, endpoint labels, and slower reading. `auto`
+resolves both controls from the chart type, series count, category count, and
+traction presentation. The renderer writes the resolved profile and light/dark
+palettes onto each `data-pptx-chart` root so HTML ECharts and native PowerPoint
+export consume the same colors.
+
 Use `image-feature-v1` when one wide 16:9 image should dominate the page while
 the title, explanation, and caption remain editable below it. Use
 `image-full-bleed-v1` for an explicit full-slide visual, cinematic poster,

@@ -4227,6 +4227,276 @@ def test_web_search_reranks_entity_matches_and_marks_direct_read_candidates():
     ]
 
 
+def test_web_search_emits_normalized_refs_for_global_image_results():
+    from box_agent.core import (
+        _dedupe_web_search_content,
+        _extract_web_search_payload,
+    )
+
+    content = json.dumps(
+        {
+            "ResponseMetadata": {"RequestId": "request-1"},
+            "Result": {
+                "TotalDocCount": 1,
+                "Documents": [
+                    {
+                        "Rank": 0,
+                        "Url": "https://example.com/shandong-university",
+                        "Title": "山东大学",
+                        "Snippet": [
+                            {"Type": "text", "Text": "山东大学校园建筑"},
+                            {
+                                "Type": "image",
+                                "Image": {
+                                    "Width": 1600,
+                                    "Height": 900,
+                                    "ImageUrl": (
+                                        "https://cdn.example.com/campus.jpg"
+                                        "?x-expires=1&x-signature=a%2Bb"
+                                    ),
+                                    "Alt": "山东大学校园",
+                                },
+                            },
+                        ],
+                        "DocumentInfo": {
+                            "Filetype": "image",
+                            "PublishTime": "2026-09-03",
+                        },
+                        "HostInfo": {"Hostname": "example.com"},
+                    }
+                ],
+                "ErrorCode": 0,
+                "ErrorMsg": "",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    normalized, new_count, duplicate_count, _, inspected = (
+        _dedupe_web_search_content(
+            content,
+            set(),
+            {"Query": "山东大学", "SearchType": "image"},
+        )
+    )
+    payload = _extract_web_search_payload("web_search", normalized)
+
+    assert inspected is True
+    assert new_count == 1
+    assert duplicate_count == 0
+    assert payload == {
+        "type": "web_search",
+        "refs": [
+            {
+                "date": "2026-09-03",
+                "images": [
+                    "https://cdn.example.com/campus.jpg?x-expires=1&x-signature=a%2Bb"
+                ],
+                "score": 0,
+                "title": "山东大学",
+                "url": "https://example.com/shandong-university",
+                "domain": "example.com",
+                "passage": "山东大学校园建筑",
+                "type": "web",
+                "reference_tag": "ref_1",
+                "image_details": [
+                    {
+                        "url": (
+                            "https://cdn.example.com/campus.jpg"
+                            "?x-expires=1&x-signature=a%2Bb"
+                        ),
+                        "width": 1600,
+                        "height": 900,
+                        "alt": "山东大学校园",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_web_search_emits_normalized_refs_for_custom_image_results():
+    from box_agent.core import _extract_web_search_payload
+
+    payload = _extract_web_search_payload(
+        "web_search",
+        json.dumps(
+            {
+                "Result": {
+                    "ResultCount": 1,
+                    "WebResults": None,
+                    "SearchContext": {
+                        "OriginQuery": "凯尔特人赛程",
+                        "SearchType": "image",
+                    },
+                    "ImageResults": [
+                        {
+                            "SortId": 1,
+                            "Title": "凯尔特人赛程",
+                            "SiteName": "头条图片",
+                            "Url": "",
+                            "PublishTime": "2026-08-27T18:30:50+08:00",
+                            "Image": {
+                                "Url": "https://cdn.example.com/schedule.jpg?signature=a%2Bb",
+                                "Width": 786,
+                                "Height": 479,
+                                "Shape": "横长方形",
+                                "BlurDes": "清晰",
+                                "Category": "新闻",
+                                "Watermark": "0",
+                                "Features": {
+                                    "Description": "凯尔特人赛程列表",
+                                    "StyleType": "数据图",
+                                },
+                            },
+                            "RankScore": 0.53,
+                        }
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert payload == {
+        "type": "web_search",
+        "refs": [
+            {
+                "date": "2026-08-27T18:30:50+08:00",
+                "images": ["https://cdn.example.com/schedule.jpg?signature=a%2Bb"],
+                "score": 0.53,
+                "title": "凯尔特人赛程",
+                "url": "https://cdn.example.com/schedule.jpg?signature=a%2Bb",
+                "domain": "头条图片",
+                "passage": "",
+                "type": "web",
+                "reference_tag": "ref_1",
+                "image_details": [
+                    {
+                        "url": "https://cdn.example.com/schedule.jpg?signature=a%2Bb",
+                        "width": 786,
+                        "height": 479,
+                        "shape": "横长方形",
+                        "clarity": "清晰",
+                        "category": "新闻",
+                        "watermark": "0",
+                        "description": "凯尔特人赛程列表",
+                        "style_type": "数据图",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_signed_web_image_url_stream_rewriter_restores_only_stripped_matches():
+    from box_agent.core import _SignedWebImageUrlStreamRewriter
+
+    unsigned = (
+        "https://p26-volcsearch-sign.byteimg.com/tos-cn-i-xstd03g9pf/"
+        "image~tplv-obj.jpeg"
+    )
+    signed = f"{unsigned}?lk3s=x&x-expires=9&x-signature=a%2Fb"
+    rewriter = _SignedWebImageUrlStreamRewriter({unsigned: signed})
+
+    assert rewriter.feed(f"推荐：{unsigned[:-8]}") == "推荐："
+    assert rewriter.feed(f"{unsigned[-8:]}\n普通：https://example.com/a.jpg\n") == (
+        f"{signed}\n普通：https://example.com/a.jpg\n"
+    )
+    assert rewriter.flush() == ""
+
+    already_signed = _SignedWebImageUrlStreamRewriter({unsigned: signed})
+    assert already_signed.feed(signed) == signed
+    assert already_signed.flush() == ""
+
+
+@pytest.mark.asyncio
+async def test_agent_restores_stripped_signed_image_url_from_web_search_result():
+    signed = (
+        "https://p26-volcsearch-sign.byteimg.com/tos-cn-i-xstd03g9pf/"
+        "image~tplv-obj.jpeg?lk3s=x&x-expires=9&x-signature=a%2Fb"
+    )
+    unsigned = signed.split("?", 1)[0]
+
+    class SignedImageSearchTool(Tool):
+        @property
+        def name(self):
+            return "web_search"
+
+        @property
+        def description(self):
+            return "Search images"
+
+        @property
+        def parameters(self):
+            return {
+                "type": "object",
+                "properties": {"Query": {"type": "string"}},
+            }
+
+        async def execute(self, Query: str = ""):
+            return ToolResult(
+                success=True,
+                content=json.dumps(
+                    {
+                        "Result": {
+                            "ImageResults": [
+                                {
+                                    "Title": "Train",
+                                    "Url": "https://example.com/source",
+                                    "Image": {
+                                        "Url": signed,
+                                        "Width": 2048,
+                                        "Height": 1365,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ),
+            )
+
+    llm = MockLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="image-search",
+                        type="function",
+                        function=FunctionCall(
+                            name="web_search",
+                            arguments={"Query": "train"},
+                        ),
+                    )
+                ],
+                finish_reason="tool_use",
+            ),
+            LLMResponse(content=f"图片：{unsigned}。", finish_reason="stop"),
+        ]
+    )
+    messages = [Message(role="user", content="search image")]
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=messages,
+            tools={"web_search": SignedImageSearchTool()},
+            max_steps=3,
+        )
+    )
+
+    streamed = "".join(
+        event.content
+        for event in events
+        if isinstance(event, ContentEvent) and event._streaming
+    )
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert streamed == f"图片：{signed}。"
+    assert done.final_content == f"图片：{signed}。"
+    assert messages[-1].content == f"图片：{signed}。"
+
+
 def test_web_search_site_query_reports_provider_empty_state():
     from box_agent.core import _dedupe_web_search_content
 
@@ -5061,6 +5331,62 @@ def test_artifact_detect_data_kind(tmp_path):
     assert arts[0].kind == "data"
     assert "csv" in arts[0].mime
     assert arts[0].rel_path == "output/results.csv"
+
+
+def test_browser_screenshot_is_persisted_inside_artifact_root(tmp_path):
+    output_dir = tmp_path / "output"
+    arguments = {"filename": "qa/slide-01.png"}
+
+    target, error = core._prepare_browser_screenshot_output(
+        "managed_browser_take_screenshot",
+        arguments,
+        str(tmp_path),
+        output_dir,
+    )
+    result = core._persist_browser_screenshot_output(
+        ToolResult(
+            success=True,
+            content="captured",
+            raw_output={
+                "mcp_inline_images": [
+                    {"data": "aW1hZ2U=", "mime_type": "image/png"}
+                ]
+            },
+        ),
+        target,
+    )
+
+    assert error is None
+    assert arguments == {}
+    assert (output_dir / "qa/slide-01.png").read_bytes() == b"image"
+    assert result.success is True
+    assert "Screenshot persisted" in result.content
+
+
+def test_browser_screenshot_persistence_failure_is_advisory(tmp_path):
+    target = tmp_path / "qa" / "slide-01.png"
+
+    result = core._persist_browser_screenshot_output(
+        ToolResult(success=True, content="captured"),
+        target,
+    )
+
+    assert result.success is True
+    assert "visual QA may be skipped" in result.content
+
+
+def test_inline_screenshot_bytes_are_redacted_from_trace_payload():
+    payload = core._trace_safe_tool_raw_output(
+        {
+            "mcp_inline_images": [
+                {"data": "aW1hZ2U=", "mime_type": "image/png"}
+            ]
+        }
+    )
+
+    assert payload == {
+        "mcp_inline_images": [{"mime_type": "image/png", "encoded_chars": 8}]
+    }
 
 
 def test_artifact_detect_ignores_workspace_root(tmp_path):

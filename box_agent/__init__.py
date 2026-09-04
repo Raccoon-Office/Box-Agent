@@ -9,7 +9,7 @@ from .hooks import BaseHook, HookManager, load_hooks
 from .llm import LLMClient
 from .schema import FunctionCall, LLMProvider, LLMResponse, Message, ToolCall
 
-__version__ = "0.9.7"
+__version__ = "0.9.8"
 
 
 def _frozen_runtime_version(default: str) -> str:

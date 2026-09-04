@@ -78,6 +78,7 @@ from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from .model_history import is_model_history_placeholder
 from .session_trace import emit_session_trace
 from .session_log import SessionLog, SessionLogDurabilityError
+from .turn_continuation import TurnContinuationController
 from .loop_guards import (
     EMPTY_ARGS_LIMIT,
     FINAL_SUMMARY_EXCLUDED_TOOLS,
@@ -570,6 +571,92 @@ def _persist_browser_snapshot_output(
         update={"content": f"{content.rstrip()}\n\nSnapshot persisted to {target_path}"}
     )
 
+
+def _prepare_browser_screenshot_output(
+    tool_name: str,
+    arguments: dict[str, Any],
+    workspace_dir: str | None,
+    artifact_root_dir: str | Path | None,
+) -> tuple[Path | None, str | None]:
+    """Request an inline Playwright screenshot for Box-Agent-managed persistence."""
+    if tool_name != "managed_browser_take_screenshot":
+        return None, None
+    filename = arguments.get("filename")
+    if not isinstance(filename, str) or not filename.strip():
+        return None, None
+    supplied_path = Path(filename).expanduser()
+    artifact_root = _artifact_scan_root(workspace_dir, artifact_root_dir)
+    if artifact_root is None:
+        return None, None
+    artifact_root = artifact_root.resolve()
+    resolved_path = (
+        supplied_path.resolve()
+        if supplied_path.is_absolute()
+        else (artifact_root / supplied_path).resolve()
+    )
+    if not resolved_path.is_relative_to(artifact_root):
+        if supplied_path.is_absolute():
+            return None, None
+        return None, (
+            "BROWSER_SCREENSHOT_OUTPUT_PATH_INVALID: filename must stay inside "
+            "the artifact root"
+        )
+    arguments.pop("filename", None)
+    return resolved_path, None
+
+
+def _persist_browser_screenshot_output(
+    result: ToolResult,
+    target_path: Path | None,
+) -> ToolResult:
+    """Persist an inline MCP image; persistence failure remains advisory."""
+    if target_path is None or not result.success:
+        return result
+    raw_output = result.raw_output if isinstance(result.raw_output, dict) else {}
+    images = raw_output.get("mcp_inline_images")
+    image = images[0] if isinstance(images, list) and images else None
+    content = (result.content or "").rstrip()
+    if not isinstance(image, dict) or not isinstance(image.get("data"), str):
+        warning = (
+            "Browser screenshot was not returned inline; visual QA may be skipped: "
+            f"{target_path}"
+        )
+        return result.model_copy(update={"content": f"{content}\n\n{warning}".strip()})
+    try:
+        import base64
+
+        payload = base64.b64decode(image["data"], validate=True)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(payload)
+    except (OSError, ValueError) as exc:
+        warning = (
+            f"Could not persist browser screenshot at {target_path}: {exc}. "
+            "Visual QA may be skipped."
+        )
+        return result.model_copy(update={"content": f"{content}\n\n{warning}".strip()})
+    return result.model_copy(
+        update={"content": f"{content}\n\nScreenshot persisted to {target_path}".strip()}
+    )
+
+
+def _trace_safe_tool_raw_output(raw_output: Any) -> Any:
+    """Keep inline MCP image payloads out of durable JSONL traces."""
+    if not isinstance(raw_output, dict) or "mcp_inline_images" not in raw_output:
+        return raw_output
+    images = raw_output.get("mcp_inline_images")
+    metadata = []
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict):
+                data = image.get("data")
+                metadata.append(
+                    {
+                        "mime_type": image.get("mime_type"),
+                        "encoded_chars": len(data) if isinstance(data, str) else None,
+                    }
+                )
+    return {**raw_output, "mcp_inline_images": metadata}
+
 # Pattern to match <!--PLOT_DATA:...--> markers embedded by code execution.
 # These carry interactive chart payloads already sent to the frontend via SSE;
 # they must NOT be fed back into the model context.
@@ -1053,7 +1140,7 @@ async def _negotiate_tool_permission_chain(
 
 
 def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] | None:
-    """Return a frontend-friendly web_search payload when tool output has refs."""
+    """Return frontend refs from supported structured web_search results."""
     if tool_name != "web_search" or not content:
         return None
 
@@ -1062,10 +1149,16 @@ def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] 
     except json.JSONDecodeError:
         return None
 
-    if not isinstance(payload, dict) or not isinstance(payload.get("refs"), list):
+    if not isinstance(payload, dict):
         return None
 
-    return payload
+    if isinstance(payload.get("refs"), list):
+        return payload
+
+    refs = _normalize_web_search_refs(payload)
+    if not refs:
+        return None
+    return {"type": "web_search", "refs": refs}
 
 
 async def _auto_match_memory_for_latest_prompt(
@@ -2156,6 +2249,9 @@ _WEB_SEARCH_RESULT_KEYS: Final[tuple[str, ...]] = (
     "webResults",
     "WebResults",
     "web_results",
+    "imageResults",
+    "ImageResults",
+    "image_results",
     "items",
     "value",
     "organic_results",
@@ -2346,6 +2442,312 @@ def _candidate_search_items(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+_WEB_SEARCH_IMAGE_URL_KEYS: Final[tuple[str, ...]] = (
+    "image_url",
+    "imageUrl",
+    "ImageUrl",
+    "thumbnail",
+    "thumbnail_url",
+    "thumbnailUrl",
+)
+_WEB_SEARCH_IMAGE_LIST_KEYS: Final[tuple[str, ...]] = (
+    "images",
+    "Images",
+    "image_urls",
+    "imageUrls",
+)
+
+
+def _web_search_http_url(value: Any) -> str:
+    """Return an HTTP(S) URL without rewriting signed image query strings."""
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    if parts.scheme.casefold() not in {"http", "https"} or not parts.netloc:
+        return ""
+    return url
+
+
+def _web_search_image_detail(
+    value: Any,
+    *,
+    allow_plain_url: bool = False,
+) -> dict[str, Any] | None:
+    if isinstance(value, str):
+        url = _web_search_http_url(value)
+        return {"url": url} if url else None
+    if not isinstance(value, dict):
+        return None
+
+    nested = _first_present(value, ("image", "Image"))
+    candidate = nested if isinstance(nested, dict) else value
+    url_keys = (
+        (*_WEB_SEARCH_IMAGE_URL_KEYS, "url", "Url")
+        if isinstance(nested, dict) or allow_plain_url
+        else _WEB_SEARCH_IMAGE_URL_KEYS
+    )
+    url = _web_search_http_url(_first_present(candidate, url_keys))
+    if not url:
+        return None
+
+    detail: dict[str, Any] = {"url": url}
+    for output_key, source_keys in (
+        ("width", ("width", "Width")),
+        ("height", ("height", "Height")),
+    ):
+        raw_value = _first_present(candidate, source_keys)
+        if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+            detail[output_key] = raw_value
+    alt = _first_present(candidate, ("alt", "Alt", "alt_text", "altText"))
+    if alt not in (None, ""):
+        detail["alt"] = str(alt).strip()
+    for output_key, source_keys in (
+        ("shape", ("shape", "Shape")),
+        ("clarity", ("blur_des", "blurDes", "BlurDes")),
+        ("category", ("category", "Category")),
+        ("watermark", ("watermark", "Watermark")),
+    ):
+        raw_value = _first_present(candidate, source_keys)
+        if raw_value not in (None, ""):
+            detail[output_key] = str(raw_value).strip()
+    features = _first_present(candidate, ("features", "Features"))
+    if isinstance(features, dict):
+        for output_key, source_keys in (
+            ("description", ("description", "Description")),
+            ("style_type", ("style_type", "styleType", "StyleType")),
+        ):
+            raw_value = _first_present(features, source_keys)
+            if raw_value not in (None, ""):
+                detail[output_key] = str(raw_value).strip()
+    return detail
+
+
+def _search_item_image_details(item: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[tuple[Any, bool]] = [(item, False)]
+    image_values = _first_present(item, _WEB_SEARCH_IMAGE_LIST_KEYS)
+    if isinstance(image_values, list):
+        candidates.extend((value, True) for value in image_values)
+
+    snippets = _first_present(item, ("snippet", "Snippet"))
+    if isinstance(snippets, list):
+        candidates.extend((value, True) for value in snippets)
+    elif isinstance(snippets, dict):
+        candidates.append((snippets, True))
+
+    details: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for candidate, allow_plain_url in candidates:
+        detail = _web_search_image_detail(
+            candidate,
+            allow_plain_url=allow_plain_url,
+        )
+        if detail is None or detail["url"] in seen_urls:
+            continue
+        seen_urls.add(detail["url"])
+        details.append(detail)
+    return details
+
+
+def _search_item_reference_tag(item: dict[str, Any], index: int) -> str:
+    explicit = _first_present(item, ("reference_tag", "referenceTag"))
+    if explicit not in (None, ""):
+        value = str(explicit).strip()
+        if value.casefold().startswith("ref_"):
+            return value.casefold()
+        if value.isdigit():
+            return f"ref_{value}"
+
+    sort_id = _first_present(item, ("sort_id", "sortId", "SortId"))
+    if isinstance(sort_id, (int, float)) and not isinstance(sort_id, bool):
+        return f"ref_{max(1, round(sort_id))}"
+
+    rank = _first_present(item, ("rank", "Rank"))
+    if isinstance(rank, (int, float)) and not isinstance(rank, bool):
+        return f"ref_{max(1, round(rank) + 1)}"
+    return f"ref_{index + 1}"
+
+
+def _search_item_metadata(item: dict[str, Any], key: str) -> Any:
+    for container_key in ("DocumentInfo", "documentInfo", "HostInfo", "hostInfo"):
+        container = item.get(container_key)
+        if isinstance(container, dict):
+            value = _first_present(container, (key,))
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _normalize_web_search_refs(payload: Any) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for index, item in enumerate(_candidate_search_items(payload)):
+        image_details = _search_item_image_details(item)
+        source_url = _web_search_http_url(_search_item_url(item))
+        if not source_url and image_details:
+            source_url = image_details[0]["url"]
+        if not source_url:
+            continue
+
+        title = _search_item_title(item)
+        if not title and image_details:
+            title = str(image_details[0].get("alt") or "").strip()
+        title = title or source_url
+
+        domain = str(
+            _first_present(
+                item,
+                (
+                    "display_url",
+                    "displayUrl",
+                    "DisplayUrl",
+                    "domain",
+                    "Domain",
+                    "site_name",
+                    "siteName",
+                    "SiteName",
+                ),
+            )
+            or _search_item_metadata(item, "Hostname")
+            or (urlsplit(source_url).hostname or "")
+        ).strip()
+        publish_time = _first_present(
+            item,
+            ("date", "Date", "published_at", "publishedAt", "publishTime", "PublishTime"),
+        )
+        if publish_time in (None, ""):
+            publish_time = _search_item_metadata(item, "PublishTime")
+        score = _first_present(item, ("score", "Score", "rankScore", "RankScore"))
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            score = 0
+
+        ref: dict[str, Any] = {
+            "date": str(publish_time or "").strip(),
+            "images": [detail["url"] for detail in image_details],
+            "score": score,
+            "title": title,
+            "url": source_url,
+            "domain": domain,
+            "passage": _search_item_snippet(item),
+            "type": "web",
+            "reference_tag": _search_item_reference_tag(item, index),
+        }
+        if image_details:
+            ref["image_details"] = image_details
+        refs.append(ref)
+    return refs
+
+
+def _signed_web_image_url_map(messages: list[Message]) -> dict[str, str]:
+    """Map unsigned VolcSearch image paths to exact signed tool-result URLs."""
+    signed_urls: dict[str, str] = {}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for nested in value.values():
+                visit(nested)
+            return
+        if isinstance(value, list):
+            for nested in value:
+                visit(nested)
+            return
+        if not isinstance(value, str) or "?" not in value:
+            return
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            return
+        hostname = (parts.hostname or "").casefold()
+        if (
+            parts.scheme.casefold() != "https"
+            or not hostname.endswith("volcsearch-sign.byteimg.com")
+            or "x-expires=" not in parts.query
+            or "x-signature=" not in parts.query
+        ):
+            return
+        unsigned = value.split("?", 1)[0]
+        signed_urls[unsigned] = value
+
+    for message in messages:
+        if message.role != "tool" or message.name != WEB_SEARCH_TOOL_NAME:
+            continue
+        content = _message_text(message.content).strip()
+        if not content:
+            continue
+        if content.startswith("[OK]"):
+            content = content[4:].strip()
+        try:
+            visit(json.loads(content))
+        except json.JSONDecodeError:
+            continue
+    return signed_urls
+
+
+def _restore_signed_web_image_urls(
+    content: str,
+    signed_urls: dict[str, str],
+) -> str:
+    """Restore a stripped signed image URL only from exact web_search evidence."""
+    restored = content
+    for unsigned, signed in sorted(
+        signed_urls.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        for candidate in (unsigned, unsigned.replace("~", r"\~")):
+            restored = re.sub(
+                rf"{re.escape(candidate)}(?!\?)",
+                lambda _match, replacement=signed: replacement,
+                restored,
+            )
+    return restored
+
+
+class _SignedWebImageUrlStreamRewriter:
+    """Repair signed image URLs without waiting for the full model response."""
+
+    def __init__(self, signed_urls: dict[str, str]):
+        self._signed_urls = dict(signed_urls)
+        self._prefixes = tuple(
+            dict.fromkeys(
+                candidate
+                for unsigned in self._signed_urls
+                for candidate in (unsigned, unsigned.replace("~", r"\~"))
+            )
+        )
+        self._buffer = ""
+
+    def _pending_suffix_length(self) -> int:
+        maximum = 0
+        for candidate in self._prefixes:
+            limit = min(len(candidate), len(self._buffer))
+            for length in range(limit, maximum, -1):
+                if self._buffer.endswith(candidate[:length]):
+                    maximum = length
+                    break
+        return maximum
+
+    def feed(self, delta: str) -> str:
+        if not self._signed_urls:
+            return delta
+        self._buffer += delta
+        pending_length = self._pending_suffix_length()
+        if pending_length:
+            ready = self._buffer[:-pending_length]
+            self._buffer = self._buffer[-pending_length:]
+        else:
+            ready = self._buffer
+            self._buffer = ""
+        return _restore_signed_web_image_urls(ready, self._signed_urls)
+
+    def flush(self) -> str:
+        ready = _restore_signed_web_image_urls(self._buffer, self._signed_urls)
+        self._buffer = ""
+        return ready
+
+
 def _search_result_list_found(payload: Any) -> bool:
     """Return whether a structured result-list field exists, even when empty."""
     if isinstance(payload, list):
@@ -2367,22 +2769,32 @@ def _search_item_title(item: dict[str, Any]) -> str:
 
 
 def _search_item_snippet(item: dict[str, Any]) -> str:
-    return str(
-        _first_present(
-            item,
-            (
-                "snippet",
-                "Snippet",
-                "summary",
-                "Summary",
-                "description",
-                "Description",
-                "content",
-                "Content",
-            ),
-        )
-        or ""
-    ).strip()
+    value = _first_present(
+        item,
+        (
+            "snippet",
+            "Snippet",
+            "summary",
+            "Summary",
+            "description",
+            "Description",
+            "content",
+            "Content",
+        ),
+    )
+    if isinstance(value, list):
+        text_parts: list[str] = []
+        for entry in value:
+            if not isinstance(entry, dict):
+                continue
+            text = _first_present(entry, ("text", "Text"))
+            if text not in (None, ""):
+                text_parts.append(str(text).strip())
+        return "\n".join(part for part in text_parts if part)
+    if isinstance(value, dict):
+        text = _first_present(value, ("text", "Text"))
+        return str(text or "").strip()
+    return str(value or "").strip()
 
 
 def _web_search_match_terms(query: str) -> tuple[str, ...]:
@@ -3111,6 +3523,7 @@ async def run_agent_loop(
     # curl scraping dozens of times. Disabled (None) for the top-level agent to
     # preserve existing behavior.
     no_progress_steps = 0
+    turn_continuation = TurnContinuationController()
 
     plan_write_succeeded = False
     # Suspected-truncation continuation (opt-in via
@@ -3731,6 +4144,9 @@ async def run_agent_loop(
             stream_repeat_pattern: str | None = None
             text_chunk_count = 0
             thinking_chunk_count = 0
+            signed_image_url_rewriter = _SignedWebImageUrlStreamRewriter(
+                _signed_web_image_url_map(messages)
+            )
 
             stream_kwargs = {
                 "messages": provider_request_messages,
@@ -3770,7 +4186,8 @@ async def run_agent_loop(
                     yield ThinkingEvent(content=chunk.delta or "", _streaming=True)
                 elif chunk.type == "text":
                     text_chunk_count += 1
-                    candidate = text_content + (chunk.delta or "")
+                    visible_delta = signed_image_url_rewriter.feed(chunk.delta or "")
+                    candidate = text_content + visible_delta
                     stream_repeat_pattern = (
                         repeated_stream_pattern(candidate)
                         if text_chunk_count >= STREAM_REPEAT_MIN_CHUNKS
@@ -3779,11 +4196,18 @@ async def run_agent_loop(
                     if stream_repeat_pattern is not None:
                         break
                     text_content = candidate
-                    yield ContentEvent(content=chunk.delta or "", _streaming=True)
+                    if visible_delta:
+                        yield ContentEvent(content=visible_delta, _streaming=True)
                 elif chunk.type == "activity" and chunk.activity:
                     yield LLMActivityEvent(step=step + 1, payload=dict(chunk.activity))
                 elif chunk.type == "finish":
                     finish_event = chunk
+
+            if stream_repeat_pattern is None and not cancelled():
+                final_visible_delta = signed_image_url_rewriter.flush()
+                if final_visible_delta:
+                    text_content += final_visible_delta
+                    yield ContentEvent(content=final_visible_delta, _streaming=True)
 
             if stream_repeat_pattern is not None:
                 closer = getattr(llm_stream, "aclose", None)
@@ -4503,6 +4927,37 @@ async def run_agent_loop(
                 )
                 return
 
+            continuation = turn_continuation.evaluate(
+                content=response.content,
+                finish_reason=response.finish_reason,
+                tools_available=bool(tool_list),
+                step=step,
+                max_steps=max_steps,
+                cancelled=cancelled(),
+                session_id=session_id,
+            )
+            if continuation is not None:
+                messages.append(Message(role="user", content=continuation.prompt))
+                yield InjectedMessageEvent(
+                    content=continuation.prompt,
+                    injection_id=None,
+                    user_visible=False,
+                )
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(
+                        step=step + 1,
+                        elapsed_seconds=elapsed,
+                        total_elapsed_seconds=total,
+                    )
+                yield StepEnd(
+                    step=step + 1,
+                    elapsed_seconds=elapsed,
+                    total_elapsed_seconds=total,
+                )
+                continue
+
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -4808,6 +5263,18 @@ async def run_agent_loop(
                 workspace_dir,
                 artifact_root_dir,
             )
+            (
+                browser_screenshot_target,
+                browser_screenshot_path_error,
+            ) = _prepare_browser_screenshot_output(
+                fn_name,
+                fn_args,
+                workspace_dir,
+                artifact_root_dir,
+            )
+            browser_snapshot_path_error = (
+                browser_snapshot_path_error or browser_screenshot_path_error
+            )
             placeholder_argument = _model_history_placeholder_argument(fn_name, fn_args)
             can_auto_repair_placeholder = (
                 placeholder_argument is not None
@@ -5090,7 +5557,7 @@ async def run_agent_loop(
                     result_success=result.success,
                     result_content=result.content if result.success else None,
                     result_error=result.error if not result.success else None,
-                    raw_output=result.raw_output,
+                    raw_output=_trace_safe_tool_raw_output(result.raw_output),
                     tool_id=tool_id,
                     server_name=server_name,
                 )
@@ -5109,7 +5576,7 @@ async def run_agent_loop(
                             result_error=(
                                 retry_result.error if not retry_result.success else None
                             ),
-                            raw_output=retry_result.raw_output,
+                            raw_output=_trace_safe_tool_raw_output(retry_result.raw_output),
                             tool_id=tool_id,
                             server_name=server_name,
                         )
@@ -5137,6 +5604,10 @@ async def run_agent_loop(
             result = _persist_browser_snapshot_output(
                 result,
                 browser_snapshot_target,
+            )
+            result = _persist_browser_screenshot_output(
+                result,
+                browser_screenshot_target,
             )
             result = _activate_skill_result(fn_name, fn_args, result)
             result, transient_blocks, transient_estimate = (
@@ -5297,7 +5768,7 @@ async def run_agent_loop(
                 success=result.success,
                 content=tc_content,
                 error=tc_error,
-                raw_output=result.raw_output,
+                raw_output=_trace_safe_tool_raw_output(result.raw_output),
                 user_visible=tool_user_visible,
                 policy_decision=policy_decision,
                 tool_id=tool_id,
@@ -5358,6 +5829,7 @@ async def run_agent_loop(
             par_budget_errors: dict[str, str] = {}
             par_user_visible: dict[str, bool] = {}
             par_browser_snapshot_targets: dict[str, Path | None] = {}
+            par_browser_screenshot_targets: dict[str, Path | None] = {}
             par_started_at: dict[str, float] = {}
             durable_parallel_calls = False
             for tc in parallel_calls:
@@ -5372,6 +5844,19 @@ async def run_agent_loop(
                     artifact_root_dir,
                 )
                 par_browser_snapshot_targets[tc.id] = browser_snapshot_target
+                (
+                    browser_screenshot_target,
+                    browser_screenshot_path_error,
+                ) = _prepare_browser_screenshot_output(
+                    tc.function.name,
+                    par_fn_args,
+                    workspace_dir,
+                    artifact_root_dir,
+                )
+                par_browser_screenshot_targets[tc.id] = browser_screenshot_target
+                browser_snapshot_path_error = (
+                    browser_snapshot_path_error or browser_screenshot_path_error
+                )
                 browser_intent_error = browser_intent_policy.tool_call_error(
                     tc.function.name,
                     par_fn_args,
@@ -5685,7 +6170,7 @@ async def run_agent_loop(
                         result_success=result.success,
                         result_content=result.content if result.success else None,
                         result_error=result.error if not result.success else None,
-                        raw_output=result.raw_output,
+                        raw_output=_trace_safe_tool_raw_output(result.raw_output),
                         tool_id=tool_id,
                         server_name=server_name,
                     )
@@ -5704,7 +6189,7 @@ async def run_agent_loop(
                                 result_error=(
                                     retry_result.error if not retry_result.success else None
                                 ),
-                                raw_output=retry_result.raw_output,
+                                raw_output=_trace_safe_tool_raw_output(retry_result.raw_output),
                                 tool_id=tool_id,
                                 server_name=server_name,
                             )
@@ -5732,6 +6217,10 @@ async def run_agent_loop(
                 result = _persist_browser_snapshot_output(
                     result,
                     par_browser_snapshot_targets.get(tc_id),
+                )
+                result = _persist_browser_screenshot_output(
+                    result,
+                    par_browser_screenshot_targets.get(tc_id),
                 )
                 result, transient_blocks, transient_estimate = (
                     _validate_transient_followup_result(
@@ -5877,7 +6366,7 @@ async def run_agent_loop(
                     success=result.success,
                     content=par_content,
                     error=par_error,
-                    raw_output=result.raw_output,
+                    raw_output=_trace_safe_tool_raw_output(result.raw_output),
                     user_visible=tool_user_visible,
                     policy_decision=policy_decision,
                     tool_id=tool_id,

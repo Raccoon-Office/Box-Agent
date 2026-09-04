@@ -11,8 +11,10 @@ from box_agent.tools.safety import (
     TRASH_DIR,
     backup_file,
     detect_dangerous_command,
+    detect_invalid_runtime_executable_syntax,
     detect_scope_escape,
     extract_rm_targets,
+    is_safe_scratch_cleanup,
     trusted_runtime_executable_references,
     validate_path_in_workspace,
 )
@@ -29,6 +31,69 @@ class TestDetectDangerousCommand:
         assert detect_dangerous_command("bash -c 'rm file.txt'") is not None
         assert detect_dangerous_command(">audit.log rm file.txt") is not None
         assert detect_dangerous_command("2>/dev/null rm file.txt") is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            '"$BOX_AGENT_PYTHON:-python3" script.py',
+            "$BOX_AGENT_NODE:-node server.js",
+        ],
+    )
+    def test_malformed_runtime_fallback_is_rejected(self, command):
+        error = detect_invalid_runtime_executable_syntax(command)
+
+        assert error is not None
+        assert "BASH_INVALID_RUNTIME_EXECUTABLE" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            '"$BOX_AGENT_PYTHON" script.py',
+            '"${BOX_AGENT_PYTHON:-python3}" script.py',
+            "python3 script.py",
+        ],
+    )
+    def test_valid_runtime_invocations_are_accepted(self, command):
+        assert detect_invalid_runtime_executable_syntax(command) is None
+
+    def test_simple_scratch_descendant_cleanup_is_safe(self, tmp_path):
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+
+        assert is_safe_scratch_cleanup(
+            'rm -rf "$BOX_AGENT_SCRATCH_DIR/preview_shots"', scratch
+        )
+        assert is_safe_scratch_cleanup(f"rmdir {scratch / 'empty-preview'}", scratch)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'rm -rf "$BOX_AGENT_SCRATCH_DIR"',
+            "rm -rf preview_shots",
+            'rm -rf "$BOX_AGENT_SCRATCH_DIR"/*',
+            'rm -rf "$BOX_AGENT_SCRATCH_DIR/preview" && echo done',
+        ],
+    )
+    def test_broad_or_ambiguous_scratch_cleanup_is_not_safe(self, tmp_path, command):
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+
+        assert not is_safe_scratch_cleanup(command, scratch)
+
+    def test_scratch_cleanup_rejects_symlink_path(self, tmp_path):
+        scratch = tmp_path / "scratch"
+        outside = tmp_path / "outside"
+        scratch.mkdir()
+        outside.mkdir()
+        link = scratch / "link"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (NotImplementedError, OSError) as error:
+            pytest.skip(f"symlinks are unavailable in this environment: {error}")
+
+        assert not is_safe_scratch_cleanup(
+            'rm -rf "$BOX_AGENT_SCRATCH_DIR/link/child"', scratch
+        )
 
     def test_rmdir_detected(self):
         assert detect_dangerous_command("rmdir empty_dir") is not None

@@ -2495,6 +2495,8 @@ class BoxACPAgent:
                 "[/HOST_USER_DECISION_RESPONSE]\n\n"
                 f"{user_text}"
             )
+        # Host-only language guidance must not influence semantic skill routing.
+        skill_selection_text = user_text
         ui_language = _meta_string(prompt_meta, "ui_language", "uiLanguage").lower()
         if ui_language in {"en", "ja", "zh"}:
             display_language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[ui_language]
@@ -2760,7 +2762,7 @@ class BoxACPAgent:
                 current_system = state.agent.messages[0].content
                 if SKILL_SLOT_SENTINEL in current_system:
                     state.skill_selector.bind(current_system)
-                new_prompt = state.skill_selector.update(user_text)
+                new_prompt = state.skill_selector.update(skill_selection_text)
                 if new_prompt is not None:
                     self._set_agent_system_prompt(state.agent, new_prompt)
                     log.info(

@@ -5,7 +5,7 @@ def test_source_runtime_keeps_package_version(monkeypatch):
     monkeypatch.delattr("sys.frozen", raising=False)
 
     assert _frozen_runtime_version("1.2.3") == "1.2.3"
-    assert __version__ == "0.9.7"
+    assert __version__ == "0.9.8"
 
 
 def test_frozen_runtime_reads_outer_bundle_version(tmp_path, monkeypatch):

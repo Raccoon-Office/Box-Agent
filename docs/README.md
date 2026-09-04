@@ -28,6 +28,7 @@ contracts.
 | Workflow ownership and third-party Skill recovery | [Workflow Ownership](WORKFLOW_OWNERSHIP.md) | Same document |
 | Flat sub-agent request and derived policy | [Sub-agent Delegation](SUB_AGENT_DELEGATION.md) | [子 Agent 委派](SUB_AGENT_DELEGATION_CN.md) |
 | Persistent memory integration | [Memory Integration](MEMORY_INTEGRATION.md) | Same document |
+| Hosted web image search | [Web Image Search](WEB_SEARCH_IMAGE_SEARCH.md) | [联网文搜图](WEB_SEARCH_IMAGE_SEARCH_CN.md) |
 | Controlled HTML PPTX compiler | [PPTX Architecture](PPTX_CONTROLLED_HTML_ARCHITECTURE.md) | [PPTX 架构](PPTX_CONTROLLED_HTML_ARCHITECTURE_CN.md) |
 | Controlled HTML PPTX development and extension | [PPTX Development Guide](PPTX_CONTROLLED_HTML_DEVELOPMENT.md) | [PPTX 开发与扩展手册](PPTX_CONTROLLED_HTML_DEVELOPMENT_CN.md) |
 

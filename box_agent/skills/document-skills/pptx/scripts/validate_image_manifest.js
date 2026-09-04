@@ -130,6 +130,9 @@ function main() {
   const imagePlan = imagePlanFromManifest(manifest);
   const successfulGenerated = imagePlan.filter(item => isSuccessfulGenerate(item, manifestPath));
   const successfulExisting = imagePlan.filter(item => isSuccessfulExisting(item, manifestPath));
+  const successfulSourced = successfulExisting.filter(
+    item => item && (item.resolved_via === "web" || item.origin === "sourced")
+  );
   const unresolvedGenerated = imagePlan.filter(
     item => item && item.decision === "generate" && !isSuccessfulGenerate(item, manifestPath)
   );
@@ -143,6 +146,77 @@ function main() {
   if (!imagePlan.length) {
     issues.push("manifest.image_plan is missing or empty.");
   }
+
+  imagePlan.forEach(item => {
+    if (!item || item.acquire_via === undefined) return;
+    const acquireVia = item.acquire_via;
+    if (!["ai", "web", "user", "none"].includes(acquireVia)) {
+      issues.push(
+        `slide ${item.slide || "?"}: acquire_via must be ai, web, user, or none.`
+      );
+      return;
+    }
+    if (acquireVia === "none" && item.decision !== "skip") {
+      issues.push(`slide ${item.slide || "?"}: acquire_via none requires decision skip.`);
+    }
+    if (acquireVia === "user" && item.decision !== "use_existing") {
+      issues.push(
+        `slide ${item.slide || "?"}: acquire_via user requires decision use_existing.`
+      );
+    }
+    if (acquireVia === "ai" && item.decision === "generate" && item.resolved_via === "web") {
+      issues.push(`slide ${item.slide || "?"}: acquire_via ai cannot resolve via web.`);
+    }
+    if (acquireVia !== "web") return;
+    const search = item.search;
+    if (!search || typeof search !== "object" || Array.isArray(search)) {
+      issues.push(`slide ${item.slide || "?"}: acquire_via web requires a search object.`);
+      return;
+    }
+    if (search.provider !== "web_search") {
+      issues.push(`slide ${item.slide || "?"}: web acquisition provider must be web_search.`);
+    }
+    if (search.search_type !== "image") {
+      issues.push(`slide ${item.slide || "?"}: web acquisition search_type must be image.`);
+    }
+    if (!Number.isInteger(search.count) || search.count < 1 || search.count > 5) {
+      issues.push(`slide ${item.slide || "?"}: web image search count must be 1..5.`);
+    }
+    if (search.fallback !== "generate") {
+      issues.push(`slide ${item.slide || "?"}: web image search fallback must be generate.`);
+    }
+    if (item.decision === "use_existing") {
+      if (item.resolved_via !== "web" || search.status !== "sourced") {
+        issues.push(
+          `slide ${item.slide || "?"}: sourced web image must resolve via web with search.status sourced.`
+        );
+      }
+      if (
+        !item.source
+        || typeof item.source !== "object"
+        || !String(item.source.provider || "").trim()
+        || !String(item.source.source_page_url || "").trim()
+        || !String(item.source.download_url || "").trim()
+      ) {
+        issues.push(
+          `slide ${item.slide || "?"}: sourced web image requires provider, source page, and download URL provenance.`
+        );
+      } else if (item.source.license_status !== "verified") {
+        warnings.push(
+          `slide ${item.slide || "?"}: web image reuse rights are unverified; review the source page before public distribution.`
+        );
+      }
+    } else if (item.decision === "generate") {
+      if (!["exhausted", "unavailable"].includes(search.status)) {
+        issues.push(
+          `slide ${item.slide || "?"}: web-first generation fallback requires image search to be exhausted or unavailable.`
+        );
+      }
+      if (item.resolved_via && item.resolved_via !== "ai") {
+        issues.push(`slide ${item.slide || "?"}: web-first fallback must resolve via ai.`);
+      }
+    }
+  });
 
   if (opts.mode && manifest.mode !== opts.mode) {
     issues.push(`manifest.mode must be "${opts.mode}", got ${JSON.stringify(manifest.mode)}.`);
@@ -284,6 +358,7 @@ function main() {
     requiredImageCount: imagePlan.filter(item => item && item.required === true).length,
     successfulGeneratedCount: successfulGenerated.length,
     successfulExistingCount: successfulExisting.length,
+    successfulSourcedCount: successfulSourced.length,
     successfulGenerated: successfulGenerated.map(item => ({
       slide: item.slide || null,
       kind: item.kind || null,

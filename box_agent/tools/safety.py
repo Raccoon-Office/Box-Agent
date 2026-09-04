@@ -7,6 +7,7 @@ and user confirmation for destructive operations.
 import os
 import re
 import shutil
+import stat
 import sys
 from collections.abc import Iterable, Mapping
 from datetime import datetime
@@ -55,6 +56,10 @@ _RUNTIME_EXECUTABLE_FALLBACKS: dict[str, tuple[str, ...]] = {
 _SHELL_ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_VARIABLE_NAME_RE = re.compile(
     r"^(?:\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|%([A-Za-z_][A-Za-z0-9_]*)%)$"
+)
+_MALFORMED_RUNTIME_FALLBACK_RE = re.compile(
+    r"(?P<quote>['\"]?)\$(?P<name>BOX_AGENT_(?:PYTHON|PYTHON3|NPM|NPX|NODE))"
+    r":-(?P<fallback>[A-Za-z0-9_.+-]+)(?P=quote)"
 )
 
 # Patterns indicating scope escape (absolute paths, cd to outside workspace)
@@ -189,6 +194,133 @@ def detect_dangerous_command(
         if ">" in redirection.operator and redirection.target.startswith("/etc/"):
             return "write to /etc: modifies system config"
     return None
+
+
+def detect_invalid_runtime_executable_syntax(command: str) -> str | None:
+    """Return guidance for a common malformed shell fallback expression."""
+
+    match = _MALFORMED_RUNTIME_FALLBACK_RE.search(command)
+    if match is None:
+        return None
+    name = match.group("name")
+    fallback = match.group("fallback")
+    return (
+        "BASH_INVALID_RUNTIME_EXECUTABLE: malformed shell parameter expansion "
+        f"'${name}:-{fallback}'. Use \"${name}\" when the injected runtime is "
+        f"available, or \"${{{name}:-{fallback}}}\" for an explicit fallback."
+    )
+
+
+def is_safe_scratch_cleanup(command: str, scratch_root: str | Path | None) -> bool:
+    """Return whether a simple rm/rmdir only targets real scratch descendants."""
+
+    if not scratch_root:
+        return False
+    inspection = inspect_shell_command(command)
+    if (
+        inspection.has_control_operators
+        or inspection.substitutions
+        or inspection.redirections
+        or inspection.ambiguous_regions
+        or len(inspection.invocations) != 1
+    ):
+        return False
+    invocation = inspection.invocations[0]
+    executable = invocation.executable.casefold()
+    if (
+        executable not in {"rm", "rmdir"}
+        or invocation.prefix
+        or invocation.dynamic_executable_sources
+    ):
+        return False
+
+    allowed_options = (
+        {
+            "-f",
+            "-r",
+            "-R",
+            "-d",
+            "-v",
+            "-i",
+            "-I",
+            "--force",
+            "--recursive",
+            "--dir",
+            "--verbose",
+        }
+        if executable == "rm"
+        else {
+            "-p",
+            "-v",
+            "--parents",
+            "--verbose",
+            "--ignore-fail-on-non-empty",
+        }
+    )
+    targets: list[str] = []
+    options_done = False
+    for argument in invocation.arguments:
+        if not options_done and argument == "--":
+            options_done = True
+        elif not options_done and argument.startswith("-"):
+            if argument in allowed_options or (
+                not argument.startswith("--")
+                and set(argument[1:]).issubset(
+                    set("fRrdviI") if executable == "rm" else set("pv")
+                )
+            ):
+                continue
+            return False
+        else:
+            targets.append(argument)
+    if not targets:
+        return False
+
+    try:
+        root = Path(scratch_root).expanduser().resolve(strict=True)
+    except OSError:
+        return False
+    for target in targets:
+        expanded = _expand_scratch_reference(target, root)
+        if expanded is None or not _is_real_scratch_descendant(expanded, root):
+            return False
+    return True
+
+
+def _expand_scratch_reference(target: str, root: Path) -> Path | None:
+    for reference in ("${BOX_AGENT_SCRATCH_DIR}", "$BOX_AGENT_SCRATCH_DIR"):
+        if target == reference:
+            return root
+        prefix = reference + "/"
+        if target.startswith(prefix):
+            suffix = target[len(prefix) :]
+            return None if any(char in suffix for char in "*?[]{}") else root / suffix
+    if any(char in target for char in "*?[]{}"):
+        return None
+    path = Path(target).expanduser()
+    return path if path.is_absolute() else None
+
+
+def _is_real_scratch_descendant(target: Path, root: Path) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(target)))
+    try:
+        relative = absolute.relative_to(root)
+    except ValueError:
+        return False
+    if not relative.parts:
+        return False
+    current = root
+    for part in relative.parts:
+        if part in {"", ".", ".."}:
+            return False
+        current /= part
+        try:
+            stats = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(stats.st_mode):
+            return False
+    return True
 
 
 def _normalized_executable(value: str) -> str:

@@ -14,6 +14,12 @@
     "donut",
     "radar",
   ]);
+  const CHART_STYLES = new Set([
+    "cool-ordinal",
+    "botanical-categorical",
+    "ink-focus",
+  ]);
+  const READING_MODES = new Set(["glance", "editorial"]);
   const instances = new WeakMap();
   const mountedRoots = new Set();
 
@@ -54,6 +60,12 @@
         show_values: "on",
         animation: "on",
         value_suffix: "",
+        style_profile: CHART_STYLES.has(spec.style_profile)
+          ? spec.style_profile
+          : "cool-ordinal",
+        reading_mode: READING_MODES.has(spec.reading_mode)
+          ? spec.reading_mode
+          : "glance",
       };
     }
 
@@ -76,6 +88,12 @@
       value_suffix: String(spec.value_suffix || ""),
       presentation: spec.presentation === "traction" ? "traction" : "standard",
       label_mode: spec.label_mode === "endpoints" ? "endpoints" : "auto",
+      style_profile: CHART_STYLES.has(spec.style_profile)
+        ? spec.style_profile
+        : "cool-ordinal",
+      reading_mode: READING_MODES.has(spec.reading_mode)
+        ? spec.reading_mode
+        : "glance",
     };
   }
 
@@ -110,6 +128,30 @@
     return `#${mixed.join("")}`;
   }
 
+  function relativeLuminance(value) {
+    const channels = normalizeHex(value, "#000000")
+      .slice(1)
+      .match(/.{2}/g)
+      .map(part => parseInt(part, 16) / 255)
+      .map(channel => channel <= 0.04045
+        ? channel / 12.92
+        : ((channel + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  }
+
+  function chartPalette(element, background, fallback) {
+    if (!element || !element.getAttribute) return fallback;
+    const attribute = relativeLuminance(background) < 0.28
+      ? "data-chart-palette-dark"
+      : "data-chart-palette-light";
+    const values = String(element.getAttribute(attribute) || "")
+      .split(",")
+      .map(value => value.trim())
+      .filter(value => /^#[0-9a-f]{6}$/i.test(value))
+      .slice(0, 4);
+    return values.length >= 3 ? values : fallback;
+  }
+
   function themeTokens(element) {
     if (!root || !root.getComputedStyle) {
       return {
@@ -120,6 +162,7 @@
         background: "#FDFAE7",
         display: "Arial",
         body: "Arial",
+        palette: ["#173E75", "#3769A8", "#587DA9", "#668AB6"],
       };
     }
     const style = root.getComputedStyle(element);
@@ -130,6 +173,12 @@
       style.getPropertyValue(`--deck-chart-${index}`),
       fallback
     );
+    const fallbackPalette = [
+      chartColor(1, primary),
+      chartColor(2, mixHex(primary, background, 0.36)),
+      chartColor(3, text),
+      chartColor(4, mixHex(primary, text, 0.46)),
+    ];
     return {
       primary,
       text,
@@ -138,12 +187,7 @@
       border: normalizeHex(style.getPropertyValue("--deck-border"), "#D1D2C8"),
       display: style.getPropertyValue("--deck-display").trim() || "Arial",
       body: style.getPropertyValue("--deck-body").trim() || "Arial",
-      palette: [
-        chartColor(1, primary),
-        chartColor(2, mixHex(primary, background, 0.36)),
-        chartColor(3, text),
-        chartColor(4, mixHex(primary, text, 0.46)),
-      ],
+      palette: chartPalette(element, background, fallbackPalette),
     };
   }
 
@@ -160,32 +204,46 @@
     return spec.series.length > 1;
   }
 
+  function categoryColor(spec, tokens, index) {
+    const palette = tokens.palette;
+    if (!palette.length) return tokens.primary;
+    if (spec.style_profile === "ink-focus") {
+      return index === 0 ? palette[0] : palette[1 + ((index - 1) % (palette.length - 1))];
+    }
+    if (spec.style_profile === "botanical-categorical") {
+      return palette[index % palette.length];
+    }
+    const denominator = Math.max(1, spec.categories.length - 1);
+    return palette[Math.round(index * (palette.length - 1) / denominator)];
+  }
+
   function buildOption(rawSpec, tokens, options = {}) {
     const spec = normalizeSpec(rawSpec);
     const motionAllowed = options.motion !== false && spec.animation !== "off";
     const showValues = valueLabel(spec);
     const showLegend = legendVisible(spec);
     const suffix = spec.value_suffix;
+    const editorial = spec.reading_mode === "editorial";
     const axisLine = { lineStyle: { color: tokens.border, width: 1 } };
     const axisLabel = {
       color: tokens.muted,
       fontFamily: tokens.body,
-      fontSize: 18,
+      fontSize: editorial ? 16 : 19,
       formatter: suffix ? `{value}${suffix}` : "{value}",
     };
     const categoryLabel = {
       color: tokens.text,
       fontFamily: tokens.body,
-      fontSize: 18,
+      fontSize: editorial ? 16 : 19,
       overflow: "truncate",
       width: 230,
     };
     const base = {
       animation: motionAllowed,
-      animationDuration: 860,
+      animationDuration: editorial ? 980 : 720,
       animationDurationUpdate: 420,
       animationEasing: "cubicOut",
-      animationDelay: index => Math.min(index * 55, 360),
+      animationDelay: index => Math.min(index * (editorial ? 70 : 42), 360),
       color: tokens.palette,
       backgroundColor: "transparent",
       textStyle: { fontFamily: tokens.body, color: tokens.text },
@@ -195,9 +253,9 @@
         show: showLegend,
         top: 0,
         right: 8,
-        itemWidth: 18,
-        itemHeight: 8,
-        textStyle: { color: tokens.muted, fontFamily: tokens.body, fontSize: 16 },
+        itemWidth: editorial ? 14 : 20,
+        itemHeight: editorial ? 6 : 9,
+        textStyle: { color: tokens.muted, fontFamily: tokens.body, fontSize: editorial ? 15 : 17 },
       },
     };
 
@@ -219,12 +277,12 @@
           radius: spec.type === "donut" ? ["43%", "69%"] : [0, "70%"],
           center: [showLegend ? "42%" : "50%", "53%"],
           avoidLabelOverlap: true,
-          itemStyle: { borderColor: tokens.background, borderWidth: 3 },
+          itemStyle: { borderColor: tokens.background, borderWidth: editorial ? 2 : 4 },
           label: {
             show: showValues,
             color: tokens.text,
             fontFamily: tokens.body,
-            fontSize: 17,
+            fontSize: editorial ? 15 : 18,
             formatter: suffix ? `{b}  {c}${suffix}` : "{b}  {c}",
           },
           emphasis: { scaleSize: 8 },
@@ -257,9 +315,9 @@
         series: [{
           type: "radar",
           data: spec.series.map(series => ({ name: series.name, value: series.values })),
-          lineStyle: { width: 3 },
+          lineStyle: { width: editorial ? 2 : 4 },
           areaStyle: { opacity: 0.1 },
-          symbolSize: 8,
+          symbolSize: editorial ? 6 : 9,
         }],
       };
     }
@@ -278,7 +336,13 @@
       axisLine: { show: false },
       axisTick: { show: false },
       axisLabel,
-      splitLine: { lineStyle: { color: tokens.border, type: "dashed", opacity: 0.72 } },
+      splitLine: {
+        lineStyle: {
+          color: tokens.border,
+          type: editorial ? "solid" : "dashed",
+          opacity: editorial ? 0.42 : 0.62,
+        },
+      },
     };
     const cartesianSeries = spec.series.map((series, seriesIndex) => {
       const isLine = spec.type === "line" || spec.type === "area";
@@ -286,23 +350,43 @@
       return {
         name: series.name,
         type: isLine ? "line" : "bar",
-        data: series.values,
+        data: !isLine && spec.series.length === 1
+          ? series.values.map((value, index) => ({
+            value,
+            itemStyle: { color: categoryColor(spec, tokens, index) },
+          }))
+          : series.values,
         stack: spec.stacked === "on" ? "total" : undefined,
         smooth: isLine && spec.presentation !== "traction",
         symbol: isLine ? "circle" : undefined,
-        symbolSize: isLine ? 9 : undefined,
+        symbolSize: isLine ? (editorial ? 7 : 10) : undefined,
         showSymbol: isLine,
-        lineStyle: isLine ? { width: spec.presentation === "traction" ? 5 : 4 } : undefined,
+        lineStyle: isLine
+          ? {
+            width: spec.presentation === "traction" ? 5 : editorial ? 2.25 : 4.5,
+            color: tokens.palette[seriesIndex % tokens.palette.length],
+          }
+          : undefined,
         areaStyle: spec.type === "area" ? { opacity: 0.13 } : undefined,
-        barMaxWidth: horizontal ? 34 : 58,
-        itemStyle: isLine ? undefined : { borderRadius: horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0] },
+        barMaxWidth: editorial ? (horizontal ? 28 : 44) : (horizontal ? 42 : 64),
+        itemStyle: isLine
+          ? {
+            color: tokens.background,
+            borderColor: tokens.palette[seriesIndex % tokens.palette.length],
+            borderWidth: editorial ? 2 : 0,
+          }
+          : {
+            borderRadius: horizontal
+              ? [0, editorial ? 6 : 18, editorial ? 6 : 18, 0]
+              : [editorial ? 6 : 18, editorial ? 6 : 18, 0, 0],
+          },
         label: {
           show: showValues,
           position: horizontal ? "right" : "top",
           color: seriesIndex === 0 ? tokens.primary : tokens.text,
           fontFamily: tokens.display,
-          fontSize: 17,
-          fontWeight: 600,
+          fontSize: editorial ? 15 : 19,
+          fontWeight: editorial ? 600 : 700,
           formatter: endpointLabels
             ? params => {
               const lastIndex = spec.categories.length - 1;
