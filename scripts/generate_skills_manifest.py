@@ -49,6 +49,7 @@ BUILTIN_SKILL_NAMES: frozenset[str] = frozenset(
         "roadmap",
         "scheduled-task",
         "xlsx",
+        "zhihu",
     }
 )
 

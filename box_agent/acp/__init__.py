@@ -77,6 +77,7 @@ from box_agent.agent_runtime import (
 )
 from box_agent.agent_run import AgentRunHandle
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
+from box_agent.acp.content_safety import safe_acp_reply_for_user_text
 from box_agent.agent import (
     Agent,
     goal_autopilot_prompt,
@@ -2297,6 +2298,10 @@ class BoxACPAgent:
         state.follow_up_suggestions_task = None
         state.cancelled = False
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
+        safe_reply = safe_acp_reply_for_user_text(user_text)
+        if safe_reply is not None:
+            await self._send(session_id, update_agent_message(text_block(safe_reply)))
+            return PromptResponse(stopReason="end_turn")
         plan_detection_text = _latest_user_request_for_plan_detection(user_text)
         source_binding_text = (
             _user_source_text_for_binding(user_text)

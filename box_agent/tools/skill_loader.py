@@ -34,7 +34,7 @@ SKILL_USAGE_GUIDANCE = (
 )
 
 MANIFEST_FILENAME = "_manifest.json"
-RESERVED_BUILTIN_SKILL_NAMES = frozenset({"roadmap"})
+RESERVED_BUILTIN_SKILL_NAMES = frozenset({"roadmap", "zhihu"})
 _METADATA_PROMPT_BYTES = 12_000
 _METADATA_ENTRY_BYTES = 2_048
 _METADATA_MAX_SKILLS = 32
@@ -97,8 +97,6 @@ def _bounded_metadata_record(record: dict[str, object]) -> tuple[str, bool]:
         else:
             bounded[key], _ = _clip_metadata_text(value, max(16, len(value.encode("utf-8")) // 2))
         truncated = True
-
-
 def _warn(msg: str) -> None:
     """Write diagnostic message to stderr (never stdout)."""
     sys.stderr.write(msg + "\n")

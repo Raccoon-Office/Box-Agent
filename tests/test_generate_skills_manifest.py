@@ -21,15 +21,20 @@ EXPECTED_BUILTIN_SKILLS = {
     "roadmap": "roadmap/SKILL.md",
     "scheduled-task": "scheduled-task/SKILL.md",
     "xlsx": "document-skills/xlsx/SKILL.md",
+    "zhihu": "zhihu/SKILL.md",
 }
 
 
-def test_builtin_manifest_contains_exactly_the_core_skill_allowlist():
+def test_builtin_manifest_contains_exactly_the_core_skill_allowlist(tmp_path, monkeypatch):
     entries = dict(_collect_skills())
 
     assert set(BUILTIN_SKILL_NAMES) == set(EXPECTED_BUILTIN_SKILLS)
     assert entries == EXPECTED_BUILTIN_SKILLS
 
+    cli_home = tmp_path / "zhihu-cli"
+    cli_home.mkdir()
+    monkeypatch.setattr("box_agent.tools.skill_loader.sys.platform", "darwin")
+    monkeypatch.setenv("ZHIHU_CLI_HOME", str(cli_home))
     loader = SkillLoader(SKILLS_DIR)
     loader.discover_skills()
     assert set(loader.list_skills()) == set(EXPECTED_BUILTIN_SKILLS)
@@ -41,7 +46,6 @@ def test_builtin_manifest_contains_exactly_the_core_skill_allowlist():
         ("artifacts-builder", "artifacts-builder/SKILL.md"),
         ("midu-writing", "midu-writing/SKILL.md"),
         ("dev-code-init", "superpowers/dev-code-init/SKILL.md"),
-        ("zhihu", "zhihu/SKILL.md"),
         ("viral-topic", "viral-topic/SKILL.md"),
     ],
 )

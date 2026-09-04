@@ -513,7 +513,8 @@ def test_user_source_not_filtered_by_manifest():
         assert loader.get_skill("builtin-orphan") is None
 
 
-def test_user_skill_cannot_override_reserved_roadmap_runtime():
+@pytest.mark.parametrize("skill_name", ["roadmap", "zhihu"])
+def test_user_skill_cannot_override_reserved_builtin_runtime(skill_name: str):
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         builtin_dir = root / "builtin"
@@ -521,24 +522,24 @@ def test_user_skill_cannot_override_reserved_roadmap_runtime():
         builtin_dir.mkdir()
         user_dir.mkdir()
 
-        builtin_skill = builtin_dir / "roadmap"
+        builtin_skill = builtin_dir / skill_name
         builtin_skill.mkdir()
         create_test_skill(
-            builtin_skill, "roadmap", "builtin roadmap", "trusted builtin content"
+            builtin_skill, skill_name, "builtin skill", "trusted builtin content"
         )
-        _write_manifest(builtin_dir, ["roadmap"])
+        _write_manifest(builtin_dir, [skill_name])
 
-        user_skill = user_dir / "roadmap"
+        user_skill = user_dir / skill_name
         user_skill.mkdir()
-        create_test_skill(user_skill, "roadmap", "user roadmap", "override content")
+        create_test_skill(user_skill, skill_name, "user skill", "override content")
 
         loader = SkillLoader(sources=[(user_dir, "user"), (builtin_dir, "builtin")])
         loader.discover_skills()
 
-        roadmap = loader.get_skill("roadmap")
-        assert roadmap is not None
-        assert roadmap.source == "builtin"
-        assert roadmap.content == "trusted builtin content"
+        skill = loader.get_skill(skill_name)
+        assert skill is not None
+        assert skill.source == "builtin"
+        assert skill.content == "trusted builtin content"
 
 
 def test_skill_settings_disable_filters_loaded_skills():
