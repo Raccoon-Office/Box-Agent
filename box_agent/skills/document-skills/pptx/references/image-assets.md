@@ -44,7 +44,7 @@ Rules:
 2. On the controlled route, `image_plan.decision` remains the compatibility/execution state `generate`, `use_existing`, or `skip`; `acquire_via` is the source decision `ai`, `web`, `user`, or `none`. They must agree with the inspected slot/background strategies. Use `status: "blocked"` for a failed required generation attempt. `draw_in_html` is a legacy/custom-HTML planning label only; never write it into the controlled scaffold manifest.
 3. Prefer a bitmap asset when it makes the slide faster to understand, more memorable, or visually credible. Choose `web` for real people, places, products, evidence, documentary subjects, and ordinary photographic atmosphere; choose `ai` for invented or deliberately stylized scenes, illustration, metaphor, abstract backgrounds, conceptual interfaces, and decorative image treatments. In ordinary `auto`, do not require explicit words such as “插画” when the chosen cover or inner-page media slot already establishes a clear image job.
 4. Do not use `skip` as the default. Use it only when the reason says why typography, data, or editable shapes are stronger than any bitmap.
-5. Use supplied or free-web source-backed images for factual, screenshot, chart, logo, real-location, or person-accuracy content. When no acceptable free image exists, any generated fallback is visibly labelled as a concept and never presented as documentary evidence.
+5. Use supplied or web-search source-backed images for factual, screenshot, chart, logo, real-location, or person-accuracy content. When no acceptable result exists, any generated fallback is visibly labelled as a concept and never presented as documentary evidence.
 6. Do not create generic decorative filler; generated images need a clear narrative job.
 7. A generated visual used in a project/case-study slot is concept art unless the user supplied the real project asset. Set `origin: "generated"` and label its alt/caption explicitly (for example `AI 概念视觉，实际项目图待补充`) so viewers cannot mistake it for documentary evidence.
 8. Bind a user-supplied local image during scaffold with repeated
@@ -54,7 +54,7 @@ Rules:
    `assets/source/`, hashes them, and records `decision: "use_existing"`.
    Reference that portable copied path from `deck.json`; never leave the final
    deck pointing at the user's original machine path.
-9. A `web` row searches the free Openverse/Wikimedia chain before any generation call. Successful CC0/Public Domain results become `use_existing`, `resolved_via: web`, and retain source provenance; no match or provider unavailability keeps the row as `generate` with the search status and fallback reason preserved. Paid providers are a future adapter behind the same search object, not a new manifest mode.
+9. A `web` row calls the registered `web_search` tool with `SearchType=image` before any generation call. A successfully localized result becomes `use_existing`, `resolved_via: web`, and retains its search/source metadata plus `license_status: unverified`; no usable result or tool/provider unavailability keeps the row as `generate` with the terminal search status and fallback reason preserved.
 
 ## 2. Trigger rules
 
@@ -117,19 +117,78 @@ Rules:
 1. Emit all independent `generate_image` calls in the same assistant tool-call batch. The tool is parallel-safe and the executor runs the batch concurrently within its configured semaphore.
 2. Do not delegate image calls to a sub-agent merely to avoid waiting. The parent must receive the actual output paths before it can update the manifest, bind media props, render, and run QA; fire-and-forget would create a race.
 3. A sub-agent is useful only for a genuinely independent task such as image research or prompt planning with deterministic output files. It is not the default image execution path, and a one-image deck gains no latency benefit from it.
-4. After the files exist, run `scripts/sync_image_manifest_status.js assets/generated/manifest.json` once. Do not reread the manifest or manually edit one status at a time.
+4. After the files exist, run the loader-expanded absolute
+   `scripts/sync_image_manifest_status.js` once, using the standalone
+   platform-specific command in `SKILL.md`. The Bash tool already starts in the
+   artifact root: do not prepend `cd`, add redirects/diagnostic suffixes, expand
+   `BOX_AGENT_OUTPUT_DIR` into the manifest argument, or manually edit status
+   fields after a rejection.
 
-## 4.1 Free search before generation
+## 4.1 Hosted web image search before generation
 
-For every `acquire_via: web` row, run `scripts/search_free_image.py` once before
-calling `generate_image`. The default provider registry contains only Openverse
-and Wikimedia. It accepts no-attribution CC0/Public Domain images, checks actual
-download dimensions, writes the localized JPEG under `assets/source/`, and
-records provider, source page, license, query, and dimensions in the same plan
-entry. A successful row becomes `use_existing`; an exhausted or unavailable
-row remains `generate` and may then use its existing prompt as an AI fallback.
-Do not describe an unavailable provider as an empty result, and do not present
-an AI fallback for a named real subject as factual evidence.
+For every `acquire_via: web` row, call the registered `web_search` tool with
+the exact scaffolded query, `SearchType: "image"`, and `Count: 5` before calling
+`generate_image`. Call once per unique query and reuse the returned candidate
+batch for any identical-query rows, because the runtime intentionally rejects
+duplicate searches. Do not invoke the hosted MCP URL from a script: the Agent tool
+call owns authentication, usage logging, budgets, and shared concurrency.
+
+The tool may return normalized `refs[].image_details[]`, Custom
+`Result.ImageResults[].Image.Url`, or Global
+`Result.Documents[].Snippet[].Image.ImageUrl`. Select one candidate whose
+subject, orientation, reported clarity, watermark state, and dimensions fit the
+declared slot. Write only that selection to an artifact-root-local receipt:
+
+```json
+{
+  "slide": 1,
+  "query": "Neymar Barcelona portrait",
+  "reference_tag": "ref_1",
+  "title": "Neymar playing for Barcelona",
+  "source_url": "https://example.com/source-page",
+  "image": {
+    "url": "https://cdn.example.com/image.jpg?signature=...",
+    "width": 1600,
+    "height": 1000,
+    "alt": "Neymar playing football",
+    "shape": "横长方形",
+    "clarity": "清晰",
+    "category": "体育",
+    "watermark": "0",
+    "description": "Football player on the pitch",
+    "style_type": "实拍图"
+  }
+}
+```
+
+Then run:
+
+```bash
+${BOX_AGENT_PYTHON:-python3} scripts/localize_web_image.py \
+  assets/generated/manifest.json import \
+  assets/source/candidates/slide-01.json
+```
+
+The helper requires the receipt query to match the scaffold, preserves the
+signed image URL exactly, rejects reported blur/watermarks, downloads at most
+25 MiB over HTTPS, verifies the actual file and minimum dimensions, normalizes
+it to JPEG under `assets/source/`, and atomically records provenance. A search
+result does not prove a reusable license, so the source is recorded with
+`license_status: unverified` and manifest QA emits a public-distribution
+warning until a human or an authorized upstream source verifies the rights.
+
+If all returned candidates fail, record `exhausted`; if `web_search` is absent,
+authentication fails, or the provider/transport fails, record `unavailable`:
+
+```bash
+${BOX_AGENT_PYTHON:-python3} scripts/localize_web_image.py \
+  assets/generated/manifest.json mark --slide 1 \
+  --status exhausted --reason "no usable result passed localization checks"
+```
+
+Only after one of those terminal states may the row retain `generate` and use
+its existing prompt as an explicitly labelled AI fallback. Do not present an
+AI fallback for a named real subject as factual evidence.
 
 ## 5. Style anchor reuse
 

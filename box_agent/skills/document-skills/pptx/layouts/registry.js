@@ -1386,12 +1386,71 @@ function renderTextColumns(slide, index) {
   );
 }
 
+const CHART_STYLE_PROFILES = Object.freeze({
+  "cool-ordinal": Object.freeze({
+    light: Object.freeze(["#173E75", "#3769A8", "#587DA9", "#668AB6"]),
+    dark: Object.freeze(["#EFF6FF", "#BDD7F0", "#7FA9D3", "#477CB5"]),
+  }),
+  "botanical-categorical": Object.freeze({
+    light: Object.freeze(["#31594B", "#718B68", "#7F9167", "#B36C28"]),
+    dark: Object.freeze(["#E8F0D8", "#B9CEA7", "#82A17B", "#F0C273"]),
+  }),
+  "ink-focus": Object.freeze({
+    light: Object.freeze(["#E75D3C", "#24241F", "#77766F", "#8D8A82"]),
+    dark: Object.freeze(["#FF9277", "#F3F0E7", "#B9B6AC", "#78756D"]),
+  }),
+});
+
+function resolveChartStyleProfile(requested, chartType, seriesCount, presentation) {
+  if (Object.prototype.hasOwnProperty.call(CHART_STYLE_PROFILES, requested)) {
+    return requested;
+  }
+  if (presentation === "traction") return "ink-focus";
+  if (["pie", "donut", "radar"].includes(chartType) || seriesCount > 1) {
+    return "botanical-categorical";
+  }
+  return "cool-ordinal";
+}
+
+function resolveChartReadingMode(requested, chartType, categoryCount, presentation) {
+  if (["glance", "editorial"].includes(requested)) return requested;
+  if (presentation === "traction") return "glance";
+  if (["line", "area", "radar"].includes(chartType) || categoryCount > 6) {
+    return "editorial";
+  }
+  return "glance";
+}
+
+function chartProfileAttributes(spec) {
+  const profile = CHART_STYLE_PROFILES[spec.style_profile];
+  if (!profile) return "";
+  return [
+    `data-chart-style="${escapeHtml(spec.style_profile)}"`,
+    `data-chart-reading-mode="${escapeHtml(spec.reading_mode)}"`,
+    `data-chart-palette-light="${escapeHtml(profile.light.join(","))}"`,
+    `data-chart-palette-dark="${escapeHtml(profile.dark.join(","))}"`,
+  ].join(" ");
+}
+
 function renderBarChart(slide, index) {
   const p = slide.props;
   const values = p.items.map(item => numericValue(item.value));
+  const chartType = p.variant === "columns" ? "column" : "bar";
+  const styleProfile = resolveChartStyleProfile(
+    p.chart_style,
+    chartType,
+    1,
+    "standard"
+  );
+  const readingMode = resolveChartReadingMode(
+    p.reading_mode,
+    chartType,
+    p.items.length,
+    "standard"
+  );
   const chartSpec = {
     version: 1,
-    type: p.variant === "columns" ? "column" : "bar",
+    type: chartType,
     categories: p.items.map(item => item.label),
     series: [{ name: p.series_label || "数值", values }],
     legend: "off",
@@ -1399,6 +1458,8 @@ function renderBarChart(slide, index) {
     animation: "on",
     stacked: "off",
     value_suffix: "",
+    style_profile: styleProfile,
+    reading_mode: readingMode,
   };
   const fallback = p.items.map((item, itemIndex) => [
     `<span class="chart-fallback-item" data-item-index="${itemIndex}">`,
@@ -1417,7 +1478,7 @@ function renderBarChart(slide, index) {
       editableText("p", "subtitle", p.subtitle || "", "header-note"),
       "</header>",
       `<div class="chart-body" data-layout-region="content">`,
-      `<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
+      `<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec)} data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
       '  <div class="echarts-for-pptx" data-chart-canvas role="img" aria-label="可编辑分类数据图表"></div>',
       `  <div class="chart-fallback" aria-hidden="true">${fallback}</div>`,
       "</div>",
@@ -1532,7 +1593,7 @@ function extractTractionHighlights(props, categories, series) {
 function renderChartFrame(chartSpec, fallback, extraClass = "") {
   const className = ["chart-echarts-frame", extraClass].filter(Boolean).join(" ");
   return [
-    `<div class="${className}" data-pptx-chart data-native-chart="true" data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
+    `<div class="${className}" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec)} data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
     '  <div class="echarts-for-pptx" data-chart-canvas role="img" aria-label="可编辑多系列数据图表"></div>',
     `  <div class="chart-fallback" aria-hidden="true">${fallback}</div>`,
     "</div>",
@@ -1544,6 +1605,18 @@ function renderDataChart(slide, index) {
   const categories = p.categories.slice(0, 12);
   const series = normalizedChartSeries(p.series, categories.length);
   const presentation = chartPresentation(p, series);
+  const styleProfile = resolveChartStyleProfile(
+    p.chart_style,
+    p.chart_type || "column",
+    series.length,
+    presentation
+  );
+  const readingMode = resolveChartReadingMode(
+    p.reading_mode,
+    p.chart_type || "column",
+    categories.length,
+    presentation
+  );
   const categoryUnits = chartCategoryUnits(series, categories.length);
   const distinctUnits = new Set(categoryUnits);
   const independentScales = !p.value_suffix
@@ -1568,7 +1641,13 @@ function renderDataChart(slide, index) {
     stacked: p.stacked || "off",
     value_suffix: p.value_suffix || inferredCommonSuffix || "",
     presentation,
-    label_mode: presentation === "traction" && p.show_values === "auto"
+    style_profile: styleProfile,
+    reading_mode: readingMode,
+    label_mode: p.show_values === "auto"
+      && (
+        presentation === "traction"
+        || (readingMode === "editorial" && ["line", "area"].includes(p.chart_type))
+      )
       ? "endpoints"
       : "auto",
   };
@@ -1618,7 +1697,7 @@ function renderDataChart(slide, index) {
     ].join("\n");
   } else {
     chartMarkup = [
-      '<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" ',
+      `<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec)} `,
       `data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
       '  <div class="echarts-for-pptx" data-chart-canvas role="img" aria-label="可编辑多系列数据图表"></div>',
       `  <div class="chart-fallback" aria-hidden="true">${fallbackRows}</div>`,
@@ -1630,6 +1709,8 @@ function renderDataChart(slide, index) {
     `chart-type-${p.chart_type || "column"}`,
     `chart-series-${series.length}`,
     `chart-presentation-${presentation}`,
+    `chart-style-${styleProfile}`,
+    `chart-reading-${readingMode}`,
   ].join(" ");
   const header = [
     '<header class="slide-header" data-layout-region="header">',
@@ -2770,6 +2851,19 @@ const layouts = [
             label: "图表方向",
             options: { horizontal: "水平条形", columns: "垂直柱形" },
           },
+          chart_style: {
+            label: "图表配色",
+            options: {
+              auto: "自动",
+              "cool-ordinal": "冷色序数",
+              "botanical-categorical": "自然分类",
+              "ink-focus": "墨色强调",
+            },
+          },
+          reading_mode: {
+            label: "阅读模式",
+            options: { auto: "自动", glance: "快速判断", editorial: "编辑部细读" },
+          },
         },
         collections: {
           items: {
@@ -2801,6 +2895,8 @@ const layouts = [
         insight: "突出最值得关注的差异或排序结论。",
         source: "",
         variant: "horizontal",
+        chart_style: "auto",
+        reading_mode: "auto",
       },
     },
     roles: ["chart", "bar-chart", "ranking", "distribution", "data-comparison"],
@@ -2826,6 +2922,11 @@ const layouts = [
       insight: textField(140, { required: false, role: "lead" }),
       source: textField(100, { required: false, role: "caption" }),
       variant: enumField(["horizontal", "columns"], "horizontal"),
+      chart_style: enumField(
+        ["auto", "cool-ordinal", "botanical-categorical", "ink-focus"],
+        "auto"
+      ),
+      reading_mode: enumField(["auto", "glance", "editorial"], "auto"),
     },
     defaultProps: {
       subtitle: "",
@@ -2833,6 +2934,8 @@ const layouts = [
       insight: "",
       source: "",
       variant: "horizontal",
+      chart_style: "auto",
+      reading_mode: "auto",
     },
     render: renderBarChart,
   },
@@ -2876,6 +2979,19 @@ const layouts = [
             label: "信息构图",
             options: { auto: "自动", standard: "标准图表", traction: "业务进展" },
           },
+          chart_style: {
+            label: "图表配色",
+            options: {
+              auto: "自动",
+              "cool-ordinal": "冷色序数",
+              "botanical-categorical": "自然分类",
+              "ink-focus": "墨色强调",
+            },
+          },
+          reading_mode: {
+            label: "阅读模式",
+            options: { auto: "自动", glance: "快速判断", editorial: "编辑部细读" },
+          },
         },
         collections: {
           highlights: {
@@ -2909,6 +3025,8 @@ const layouts = [
         stacked: "off",
         value_suffix: "",
         presentation: "auto",
+        chart_style: "auto",
+        reading_mode: "auto",
         highlights: [],
         insight: "用一句话指出趋势、差距或结构变化。",
         source: "",
@@ -2958,6 +3076,11 @@ const layouts = [
       stacked: enumField(["off", "on"], "off"),
       value_suffix: textField(8, { required: false, role: "label" }),
       presentation: enumField(["auto", "standard", "traction"], "auto"),
+      chart_style: enumField(
+        ["auto", "cool-ordinal", "botanical-categorical", "ink-focus"],
+        "auto"
+      ),
+      reading_mode: enumField(["auto", "glance", "editorial"], "auto"),
       highlights: arrayField(0, 3, {
         value: textField(18, { role: "metric" }),
         label: textField(36, { role: "label" }),
@@ -2974,6 +3097,8 @@ const layouts = [
       stacked: "off",
       value_suffix: "",
       presentation: "auto",
+      chart_style: "auto",
+      reading_mode: "auto",
       highlights: [],
       insight: "",
       source: "",

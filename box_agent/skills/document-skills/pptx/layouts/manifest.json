@@ -11469,6 +11469,23 @@
                 "horizontal": "水平条形",
                 "columns": "垂直柱形"
               }
+            },
+            "chart_style": {
+              "label": "图表配色",
+              "options": {
+                "auto": "自动",
+                "cool-ordinal": "冷色序数",
+                "botanical-categorical": "自然分类",
+                "ink-focus": "墨色强调"
+              }
+            },
+            "reading_mode": {
+              "label": "阅读模式",
+              "options": {
+                "auto": "自动",
+                "glance": "快速判断",
+                "editorial": "编辑部细读"
+              }
             }
           },
           "collections": {
@@ -11530,7 +11547,9 @@
           ],
           "insight": "突出最值得关注的差异或排序结论。",
           "source": "",
-          "variant": "horizontal"
+          "variant": "horizontal",
+          "chart_style": "auto",
+          "reading_mode": "auto"
         }
       },
       "roles": [
@@ -11679,6 +11698,29 @@
           "default": "horizontal",
           "required": false,
           "editor": true
+        },
+        "chart_style": {
+          "type": "enum",
+          "values": [
+            "auto",
+            "cool-ordinal",
+            "botanical-categorical",
+            "ink-focus"
+          ],
+          "default": "auto",
+          "required": false,
+          "editor": true
+        },
+        "reading_mode": {
+          "type": "enum",
+          "values": [
+            "auto",
+            "glance",
+            "editorial"
+          ],
+          "default": "auto",
+          "required": false,
+          "editor": true
         }
       },
       "defaultProps": {
@@ -11686,7 +11728,9 @@
         "series_label": "",
         "insight": "",
         "source": "",
-        "variant": "horizontal"
+        "variant": "horizontal",
+        "chart_style": "auto",
+        "reading_mode": "auto"
       },
       "counts": {
         "categories": "items"
@@ -11749,6 +11793,23 @@
                 "standard": "标准图表",
                 "traction": "业务进展"
               }
+            },
+            "chart_style": {
+              "label": "图表配色",
+              "options": {
+                "auto": "自动",
+                "cool-ordinal": "冷色序数",
+                "botanical-categorical": "自然分类",
+                "ink-focus": "墨色强调"
+              }
+            },
+            "reading_mode": {
+              "label": "阅读模式",
+              "options": {
+                "auto": "自动",
+                "glance": "快速判断",
+                "editorial": "编辑部细读"
+              }
             }
           },
           "collections": {
@@ -11808,6 +11869,8 @@
           "stacked": "off",
           "value_suffix": "",
           "presentation": "auto",
+          "chart_style": "auto",
+          "reading_mode": "auto",
           "highlights": [],
           "insight": "用一句话指出趋势、差距或结构变化。",
           "source": ""
@@ -12031,6 +12094,29 @@
           "required": false,
           "editor": true
         },
+        "chart_style": {
+          "type": "enum",
+          "values": [
+            "auto",
+            "cool-ordinal",
+            "botanical-categorical",
+            "ink-focus"
+          ],
+          "default": "auto",
+          "required": false,
+          "editor": true
+        },
+        "reading_mode": {
+          "type": "enum",
+          "values": [
+            "auto",
+            "glance",
+            "editorial"
+          ],
+          "default": "auto",
+          "required": false,
+          "editor": true
+        },
         "highlights": {
           "type": "array",
           "required": true,
@@ -12084,6 +12170,8 @@
         "stacked": "off",
         "value_suffix": "",
         "presentation": "auto",
+        "chart_style": "auto",
+        "reading_mode": "auto",
         "highlights": [],
         "insight": "",
         "source": ""

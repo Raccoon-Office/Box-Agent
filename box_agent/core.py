@@ -78,6 +78,7 @@ from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from .model_history import is_model_history_placeholder
 from .session_trace import emit_session_trace
 from .session_log import SessionLog, SessionLogDurabilityError
+from .turn_continuation import TurnContinuationController
 from .loop_guards import (
     EMPTY_ARGS_LIMIT,
     FINAL_SUMMARY_EXCLUDED_TOOLS,
@@ -3328,6 +3329,7 @@ async def run_agent_loop(
     # curl scraping dozens of times. Disabled (None) for the top-level agent to
     # preserve existing behavior.
     no_progress_steps = 0
+    turn_continuation = TurnContinuationController()
 
     plan_write_succeeded = False
     # Suspected-truncation continuation (opt-in via
@@ -4719,6 +4721,37 @@ async def run_agent_loop(
                     final_content=_EMPTY_FINAL_ANSWER_ERROR,
                 )
                 return
+
+            continuation = turn_continuation.evaluate(
+                content=response.content,
+                finish_reason=response.finish_reason,
+                tools_available=bool(tool_list),
+                step=step,
+                max_steps=max_steps,
+                cancelled=cancelled(),
+                session_id=session_id,
+            )
+            if continuation is not None:
+                messages.append(Message(role="user", content=continuation.prompt))
+                yield InjectedMessageEvent(
+                    content=continuation.prompt,
+                    injection_id=None,
+                    user_visible=False,
+                )
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(
+                        step=step + 1,
+                        elapsed_seconds=elapsed,
+                        total_elapsed_seconds=total,
+                    )
+                yield StepEnd(
+                    step=step + 1,
+                    elapsed_seconds=elapsed,
+                    total_elapsed_seconds=total,
+                )
+                continue
 
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start

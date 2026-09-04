@@ -97,6 +97,18 @@ const REQUIRED_FIELD_ALIASES = Object.freeze({
 const RELAXABLE_DECORATIVE_FIELDS = new Set(["tags"]);
 const EXPLICIT_TAG_CONTENT_RE = /(?:标签|关键词|主线卡|\btags?\b|\bchips?\b)/i;
 
+function contractLayoutRecord(layout) {
+  const record = manifestRecord(layout);
+  return {
+    ...record,
+    editor: {
+      label: record.editor.label,
+      description: record.editor.description,
+      defaultProps: record.editor.defaultProps,
+    },
+  };
+}
+
 function normalizeSourceText(value) {
   return String(value || "")
     .normalize("NFKC")
@@ -1294,7 +1306,7 @@ function buildImagePlanEntry(
   );
   const explicitAiSource = AUTO_AI_IMAGE_SOURCE_RE.test(slideVisualText);
   const explicitWebSource = AUTO_WEB_IMAGE_SOURCE_RE.test(slideVisualText);
-  const searchFreeFirst = generate
+  const searchWebFirst = generate
     && imageMode === "auto"
     && strategies.includes("use_existing")
     && !explicitAiSource
@@ -1346,13 +1358,13 @@ function buildImagePlanEntry(
   } else if (index === 0) {
     decisionReason = "the outline supports a typography-led cover and does not request a concrete bitmap visual";
   }
-  if (searchFreeFirst) {
-    decisionReason += "; try free openly licensed web search first and generate only after that pool is exhausted";
+  if (searchWebFirst) {
+    decisionReason += "; try hosted web_search image retrieval first and generate only after it is exhausted or unavailable";
   }
   const acquireVia = useExisting
     ? "user"
     : generate
-      ? (searchFreeFirst ? "web" : "ai")
+      ? (searchWebFirst ? "web" : "ai")
       : "none";
   const generatedOutputPath = `assets/generated/${slideId}-${targetId}.png`;
   return {
@@ -1373,8 +1385,8 @@ function buildImagePlanEntry(
           { ...context, layoutContract: backgroundLayoutContract },
           slot ? slot.role : "background"
         ),
-        searchFreeFirst
-          ? "Use this only if free image search is exhausted. If the page names a real person, place, product, or event, create an obviously conceptual editorial substitute rather than fabricated documentary evidence."
+        searchWebFirst
+          ? "Use this only if hosted web image search is exhausted or unavailable. If the page names a real person, place, product, or event, create an obviously conceptual editorial substitute rather than fabricated documentary evidence."
           : "",
       ].filter(Boolean).join(" ")
       : "",
@@ -1389,11 +1401,12 @@ function buildImagePlanEntry(
         asset_hash: existingAsset.hash,
       }
       : {}),
-    ...(searchFreeFirst
+    ...(searchWebFirst
       ? {
         search: {
-          tier: "free",
-          providers: ["openverse", "wikimedia"],
+          provider: "web_search",
+          search_type: "image",
+          count: 5,
           query: imageSearchQuery(context),
           output_path: `assets/source/${slideId}-${targetId}.jpg`,
           status: "pending",
@@ -1959,7 +1972,7 @@ function main() {
       design: skeleton.design,
       design_selection: designSelection,
       design_contract: skeleton.design_contract || null,
-      layouts: selectedLayouts.map(manifestRecord),
+      layouts: selectedLayouts.map(contractLayoutRecord),
       layout_plan: effectiveLayoutIds,
       layout_plan_requested: opts.layoutIds,
       layout_normalizations: layoutResolution.normalizations,
@@ -2171,7 +2184,7 @@ function main() {
         layout_normalizations: layoutResolution.normalizations,
       }
       : {}),
-    layouts: selectedLayouts.map(manifestRecord),
+    layouts: selectedLayouts.map(contractLayoutRecord),
     deck_skeleton: skeleton,
     deck_file: deckFile,
     image_manifest: imageManifest,

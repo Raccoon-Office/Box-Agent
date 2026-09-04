@@ -173,14 +173,17 @@ function main() {
       issues.push(`slide ${item.slide || "?"}: acquire_via web requires a search object.`);
       return;
     }
-    if (search.tier !== "free") {
-      issues.push(`slide ${item.slide || "?"}: initial web search tier must be free.`);
+    if (search.provider !== "web_search") {
+      issues.push(`slide ${item.slide || "?"}: web acquisition provider must be web_search.`);
     }
-    if (!Array.isArray(search.providers) || search.providers.length === 0) {
-      issues.push(`slide ${item.slide || "?"}: free web search requires providers.`);
+    if (search.search_type !== "image") {
+      issues.push(`slide ${item.slide || "?"}: web acquisition search_type must be image.`);
+    }
+    if (!Number.isInteger(search.count) || search.count < 1 || search.count > 5) {
+      issues.push(`slide ${item.slide || "?"}: web image search count must be 1..5.`);
     }
     if (search.fallback !== "generate") {
-      issues.push(`slide ${item.slide || "?"}: free web search fallback must be generate.`);
+      issues.push(`slide ${item.slide || "?"}: web image search fallback must be generate.`);
     }
     if (item.decision === "use_existing") {
       if (item.resolved_via !== "web" || search.status !== "sourced") {
@@ -191,18 +194,22 @@ function main() {
       if (
         !item.source
         || typeof item.source !== "object"
-        || item.source.license_tier !== "no-attribution"
         || !String(item.source.provider || "").trim()
         || !String(item.source.source_page_url || "").trim()
+        || !String(item.source.download_url || "").trim()
       ) {
         issues.push(
-          `slide ${item.slide || "?"}: sourced web image requires provider, source page, and no-attribution license provenance.`
+          `slide ${item.slide || "?"}: sourced web image requires provider, source page, and download URL provenance.`
+        );
+      } else if (item.source.license_status !== "verified") {
+        warnings.push(
+          `slide ${item.slide || "?"}: web image reuse rights are unverified; review the source page before public distribution.`
         );
       }
     } else if (item.decision === "generate") {
       if (!["exhausted", "unavailable"].includes(search.status)) {
         issues.push(
-          `slide ${item.slide || "?"}: web-first generation fallback requires free search to be exhausted or unavailable.`
+          `slide ${item.slide || "?"}: web-first generation fallback requires image search to be exhausted or unavailable.`
         );
       }
       if (item.resolved_via && item.resolved_via !== "ai") {

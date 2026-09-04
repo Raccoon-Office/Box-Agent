@@ -8,21 +8,23 @@ import sys
 from pathlib import Path
 
 import pytest
-import requests
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PPTX_SCRIPTS = (
     REPO_ROOT / "box_agent" / "skills" / "document-skills" / "pptx" / "scripts"
 )
-SEARCH_SCRIPT = PPTX_SCRIPTS / "search_free_image.py"
+LOCALIZE_SCRIPT = PPTX_SCRIPTS / "localize_web_image.py"
 INSPECT_SCRIPT = PPTX_SCRIPTS / "inspect_deck_contract.js"
 SYNC_SCRIPT = PPTX_SCRIPTS / "sync_image_manifest_status.js"
 VALIDATE_SCRIPT = PPTX_SCRIPTS / "validate_image_manifest.js"
 
 
-def _load_search_module():
-    spec = importlib.util.spec_from_file_location("pptx_free_image_search", SEARCH_SCRIPT)
+def _load_localize_module():
+    spec = importlib.util.spec_from_file_location(
+        "pptx_web_image_localize",
+        LOCALIZE_SCRIPT,
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -48,8 +50,9 @@ def _write_manifest(tmp_path: Path) -> Path:
                         "placement": "fixed-frame",
                         "output_path": "assets/generated/slide-01-hero.png",
                         "search": {
-                            "tier": "free",
-                            "providers": ["openverse", "wikimedia"],
+                            "provider": "web_search",
+                            "search_type": "image",
+                            "count": 5,
                             "query": "Neymar Barcelona portrait",
                             "output_path": "assets/source/slide-01-hero.jpg",
                             "status": "pending",
@@ -66,26 +69,47 @@ def _write_manifest(tmp_path: Path) -> Path:
     return manifest_path
 
 
-def test_free_search_promotes_sourced_image_and_records_provenance(
+def _write_candidate(tmp_path: Path) -> Path:
+    candidate_path = tmp_path / "assets" / "source" / "candidates" / "slide-01.json"
+    candidate_path.parent.mkdir(parents=True)
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "slide": 1,
+                "query": "Neymar Barcelona portrait",
+                "reference_tag": "ref_1",
+                "title": "Neymar playing for Barcelona",
+                "source_url": "https://example.test/source",
+                "image": {
+                    "url": "https://example.test/original.jpg?signature=a%2Bb",
+                    "width": 1600,
+                    "height": 1000,
+                    "alt": "Neymar playing football",
+                    "shape": "横长方形",
+                    "clarity": "清晰",
+                    "category": "体育",
+                    "watermark": "0",
+                    "description": "Football player on the pitch",
+                    "style_type": "实拍图",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return candidate_path
+
+
+def test_web_search_candidate_is_localized_and_records_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = _load_search_module()
+    module = _load_localize_module()
     manifest_path = _write_manifest(tmp_path)
-    candidate = module.Candidate(
-        provider="openverse",
-        title="Neymar playing for Barcelona",
-        author="Example Author",
-        source_page_url="https://example.test/source",
-        download_url="https://example.test/original.jpg",
-        license_name="CC0",
-        license_url="https://creativecommons.org/publicdomain/zero/1.0/",
-        width=1600,
-        height=1000,
-    )
-    monkeypatch.setitem(module.PROVIDERS, "openverse", lambda _query, _timeout: [candidate])
+    candidate_path = _write_candidate(tmp_path)
 
-    def fake_download(_candidate, target_path, *, placement, timeout):
+    def fake_download(image_url, target_path, *, placement, timeout):
+        assert image_url.endswith("?signature=a%2Bb")
         assert placement == "fixed-frame"
         assert timeout == 30
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,9 +118,9 @@ def test_free_search_promotes_sourced_image_and_records_provenance(
 
     monkeypatch.setattr(module, "_download_and_normalize", fake_download)
 
-    result = module.process_manifest(manifest_path, provider_names=("openverse",))
+    result = module.import_candidate(manifest_path, candidate_path)
 
-    assert result["sourced"] == 1
+    assert result["ok"] is True
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry = payload["image_plan"][0]
     assert entry["decision"] == "use_existing"
@@ -105,8 +129,12 @@ def test_free_search_promotes_sourced_image_and_records_provenance(
     assert entry["origin"] == "sourced"
     assert entry["output_path"] == "assets/source/slide-01-hero.jpg"
     assert entry["search"]["status"] == "sourced"
-    assert entry["source"]["provider"] == "openverse"
-    assert entry["source"]["license_tier"] == "no-attribution"
+    assert entry["source"]["provider"] == "web_search"
+    assert entry["source"]["license_status"] == "unverified"
+    assert entry["source"]["download_url"].endswith("?signature=a%2Bb")
+    assert entry["source"]["width"] == 1600
+    assert entry["source"]["height"] == 1000
+
     node = shutil.which("node")
     if node is not None:
         validated = subprocess.run(
@@ -116,29 +144,30 @@ def test_free_search_promotes_sourced_image_and_records_provenance(
             check=False,
         )
         assert validated.returncode == 0, validated.stdout + validated.stderr
-        assert json.loads(validated.stdout)["successfulSourcedCount"] == 1
+        report = json.loads(validated.stdout)
+        assert report["successfulSourcedCount"] == 1
+        assert any("reuse rights are unverified" in item for item in report["warnings"])
 
 
-def test_free_search_exhaustion_preserves_generation_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_search_module()
+def test_web_search_terminal_status_preserves_generation_fallback(tmp_path: Path) -> None:
+    module = _load_localize_module()
     manifest_path = _write_manifest(tmp_path)
-    monkeypatch.setitem(module.PROVIDERS, "openverse", lambda _query, _timeout: [])
 
-    result = module.process_manifest(manifest_path, provider_names=("openverse",))
+    result = module.mark_search(
+        manifest_path,
+        slide=1,
+        status="exhausted",
+        reason="no usable image passed localization checks",
+    )
 
-    assert result["exhausted"] == 1
+    assert result["status"] == "exhausted"
     entry = json.loads(manifest_path.read_text(encoding="utf-8"))["image_plan"][0]
     assert entry["decision"] == "generate"
     assert entry["status"] == "pending"
     assert entry["resolved_via"] is None
-    assert entry["search"]["status"] == "exhausted"
     assert entry["search"]["fallback"] == "generate"
-    repeated = module.process_manifest(manifest_path, provider_names=("openverse",))
-    assert repeated["exhausted"] == 0
-    assert repeated["skipped"] == 1
+    assert "localization" in entry["search"]["last_error"]
+
     generated_path = tmp_path / "assets" / "generated" / "slide-01-hero.png"
     generated_path.write_bytes(b"generated-fallback")
     node = shutil.which("node")
@@ -153,37 +182,25 @@ def test_free_search_exhaustion_preserves_generation_fallback(
         fallback = json.loads(manifest_path.read_text(encoding="utf-8"))["image_plan"][0]
         assert fallback["resolved_via"] == "ai"
         assert fallback["fallback_used"] is True
-        validated = subprocess.run(
-            [node, str(VALIDATE_SCRIPT), str(manifest_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert validated.returncode == 0, validated.stdout + validated.stderr
 
 
-def test_free_search_unavailability_is_not_reported_as_empty_results(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_search_module()
+def test_web_search_candidate_query_must_match_manifest(tmp_path: Path) -> None:
+    module = _load_localize_module()
     manifest_path = _write_manifest(tmp_path)
+    candidate_path = _write_candidate(tmp_path)
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    candidate["query"] = "different subject"
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
 
-    def unavailable(_query, _timeout):
-        raise requests.ConnectionError("offline")
+    with pytest.raises(ValueError, match="exactly match"):
+        module.import_candidate(manifest_path, candidate_path)
 
-    monkeypatch.setitem(module.PROVIDERS, "openverse", unavailable)
-
-    result = module.process_manifest(manifest_path, provider_names=("openverse",))
-
-    assert result["unavailable"] == 1
     entry = json.loads(manifest_path.read_text(encoding="utf-8"))["image_plan"][0]
-    assert entry["search"]["status"] == "unavailable"
-    assert "offline" in entry["search"]["last_error"]
+    assert entry["search"]["status"] == "pending"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
-def test_scaffold_routes_real_photography_to_free_search_first(tmp_path: Path) -> None:
+def test_scaffold_routes_real_photography_to_web_search_first(tmp_path: Path) -> None:
     deck_path = tmp_path / "deck.json"
     result = subprocess.run(
         [
@@ -209,8 +226,9 @@ def test_scaffold_routes_real_photography_to_free_search_first(tmp_path: Path) -
     )["image_plan"][0]
     assert entry["decision"] == "generate"
     assert entry["acquire_via"] == "web"
-    assert entry["search"]["tier"] == "free"
-    assert entry["search"]["providers"] == ["openverse", "wikimedia"]
+    assert entry["search"]["provider"] == "web_search"
+    assert entry["search"]["search_type"] == "image"
+    assert entry["search"]["count"] == 5
     assert entry["search"]["fallback"] == "generate"
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import box_agent.tools.bash_tool as bash_tool_module
 from box_agent.tools.bash_tool import (
     BASH_LIFETIME_RUNTIME,
     BASH_LIFETIME_TURN,
@@ -30,6 +31,41 @@ from box_agent.tools.pptx_safety import (
 def test_bash_tools_opt_out_of_shared_result_compression():
     assert math.isinf(BashTool.max_result_size_chars)
     assert math.isinf(BashOutputTool.max_result_size_chars)
+
+
+@pytest.mark.parametrize(
+    ("bundled_bash", "expected_shell_style"),
+    [(None, "powershell"), (Path(r"C:\PortableGit\usr\bin\bash.exe"), "posix")],
+)
+@pytest.mark.asyncio
+async def test_windows_bash_tool_reports_actual_shell_style_to_pptx_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    bundled_bash: Path | None,
+    expected_shell_style: str,
+):
+    observed: dict[str, str] = {}
+
+    def fake_guard(command: str, **kwargs):
+        observed["command"] = command
+        observed["shell_style"] = kwargs["shell_style"]
+        return "blocked for test"
+
+    monkeypatch.setattr(bash_tool_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: bundled_bash)
+    monkeypatch.setattr(
+        bash_tool_module,
+        "detect_pptx_image_status_command_bypass",
+        fake_guard,
+    )
+    tool = BashTool(workspace_dir=".")
+
+    result = await tool.execute(command="sync_image_manifest_status.js")
+
+    assert result.success is False
+    assert observed == {
+        "command": "sync_image_manifest_status.js",
+        "shell_style": expected_shell_style,
+    }
 
 
 @pytest.mark.asyncio
@@ -148,6 +184,40 @@ def test_allows_exact_pptx_image_status_command(tmp_path: Path):
     )
 
 
+def test_allows_exact_artifact_relative_pptx_image_status_command(tmp_path: Path):
+    command = (
+        f'"$BOX_AGENT_NODE" {shlex.quote(str(_SYNC_IMAGE_STATUS_SCRIPT))} '
+        "assets/generated/manifest.json"
+    )
+
+    assert (
+        detect_pptx_image_status_command_bypass(
+            command,
+            workspace_dir=str(tmp_path),
+            runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+        )
+        is None
+    )
+
+
+def test_allows_powershell_pptx_image_status_command(tmp_path: Path):
+    windows_script = str(_SYNC_IMAGE_STATUS_SCRIPT).replace("/", "\\")
+    command = (
+        f'& "$env:BOX_AGENT_NODE" {shlex.quote(windows_script)} '
+        + shlex.quote(r"assets\generated\manifest.json")
+    )
+
+    assert (
+        detect_pptx_image_status_command_bypass(
+            command,
+            workspace_dir=str(tmp_path),
+            runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+            shell_style="powershell",
+        )
+        is None
+    )
+
+
 def test_allows_windows_separators_for_exact_pptx_image_status_command(
     tmp_path: Path,
 ):
@@ -199,11 +269,17 @@ async def test_blocks_disguised_pptx_image_status_node_tokens(
     assert result.success is False
     assert result.exit_code == 1
     assert "PPTX image-status synchronization blocked" in result.error
+    assert "reason_code=PPTX_IMAGE_STATUS_NODE_FORM" in result.error
 
 
 @pytest.mark.parametrize(
     "command_suffix",
-    [" && echo bypass", " | cat", "\nnode --version"],
+    [
+        " && echo bypass",
+        " | cat",
+        "\nnode --version",
+        ' 2>&1; echo "EXIT=$?"',
+    ],
 )
 @pytest.mark.asyncio
 async def test_blocks_pptx_image_status_command_chaining(
@@ -222,6 +298,101 @@ async def test_blocks_pptx_image_status_command_chaining(
     assert result.success is False
     assert result.exit_code == 1
     assert "PPTX image-status synchronization blocked" in result.error
+    assert "reason_code=PPTX_IMAGE_STATUS_COMMAND_SHAPE" in result.error
+
+
+def test_rejects_unexpanded_output_dir_in_image_status_manifest(tmp_path: Path):
+    command = (
+        f'"$BOX_AGENT_NODE" {shlex.quote(str(_SYNC_IMAGE_STATUS_SCRIPT))} '
+        '"$BOX_AGENT_OUTPUT_DIR/assets/generated/manifest.json"'
+    )
+
+    error = detect_pptx_image_status_command_bypass(
+        command,
+        workspace_dir=str(tmp_path),
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+    )
+
+    assert error is not None
+    assert "reason_code=PPTX_IMAGE_STATUS_MANIFEST_SCOPE" in error
+    assert str(tmp_path) not in error
+
+
+def test_rejects_powershell_node_variable_without_call_operator(tmp_path: Path):
+    command = (
+        f'"$env:BOX_AGENT_NODE" {shlex.quote(str(_SYNC_IMAGE_STATUS_SCRIPT))} '
+        "assets/generated/manifest.json"
+    )
+
+    error = detect_pptx_image_status_command_bypass(
+        command,
+        workspace_dir=str(tmp_path),
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+        shell_style="powershell",
+    )
+
+    assert error is not None
+    assert "reason_code=PPTX_IMAGE_STATUS_COMMAND_SHAPE" in error
+
+
+def test_reports_image_status_parse_error_without_echoing_command(tmp_path: Path):
+    command = 'node "sync_image_manifest_status.js assets/generated/manifest.json'
+
+    error = detect_pptx_image_status_command_bypass(
+        command,
+        workspace_dir=str(tmp_path),
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+    )
+
+    assert error is not None
+    assert "reason_code=PPTX_IMAGE_STATUS_PARSE_ERROR" in error
+    assert command not in error
+
+
+def test_reports_missing_image_status_runtime_context() -> None:
+    command = _image_status_command(Path("unused"))
+
+    error = detect_pptx_image_status_command_bypass(
+        command,
+        workspace_dir=None,
+        runtime_env=None,
+    )
+
+    assert error is not None
+    assert "reason_code=PPTX_IMAGE_STATUS_RUNTIME_CONTEXT" in error
+
+
+def test_reports_image_status_artifact_root_mismatch(tmp_path: Path):
+    command = _image_status_command(tmp_path)
+    command = f"cd {shlex.quote(str(tmp_path / 'other'))} && {command}"
+
+    error = detect_pptx_image_status_command_bypass(
+        command,
+        workspace_dir=str(tmp_path),
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+    )
+
+    assert error is not None
+    assert "reason_code=PPTX_IMAGE_STATUS_ARTIFACT_ROOT" in error
+    assert str(tmp_path) not in error
+
+
+def test_rejects_unexpanded_output_dir_in_image_status_cd(tmp_path: Path):
+    command = _image_status_command(
+        tmp_path,
+        manifest_path=Path("assets/generated/manifest.json"),
+    )
+    command = f'cd "$BOX_AGENT_OUTPUT_DIR" && {command}'
+
+    error = detect_pptx_image_status_command_bypass(
+        command,
+        workspace_dir=str(tmp_path),
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+    )
+
+    assert error is not None
+    assert "reason_code=PPTX_IMAGE_STATUS_ARTIFACT_ROOT" in error
+    assert str(tmp_path) not in error
 
 
 @pytest.mark.parametrize("wrong_target", ["script", "manifest"])
@@ -256,6 +427,28 @@ async def test_blocks_untrusted_pptx_image_status_paths(
     assert result.success is False
     assert result.exit_code == 1
     assert "PPTX image-status synchronization blocked" in result.error
+    expected_reason = (
+        "PPTX_IMAGE_STATUS_SCRIPT_IDENTITY"
+        if wrong_target == "script"
+        else "PPTX_IMAGE_STATUS_MANIFEST_SCOPE"
+    )
+    assert f"reason_code={expected_reason}" in result.error
+
+
+def test_image_status_rejection_does_not_disclose_local_paths(tmp_path: Path):
+    untrusted_script = tmp_path / "private" / "sync_image_manifest_status.js"
+    command = _image_status_command(tmp_path, script_path=untrusted_script)
+
+    error = detect_pptx_image_status_command_bypass(
+        command,
+        workspace_dir=str(tmp_path),
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+    )
+
+    assert error is not None
+    assert "reason_code=PPTX_IMAGE_STATUS_SCRIPT_IDENTITY" in error
+    assert str(untrusted_script) not in error
+    assert str(_SYNC_IMAGE_STATUS_SCRIPT) not in error
 
 
 @pytest.mark.asyncio

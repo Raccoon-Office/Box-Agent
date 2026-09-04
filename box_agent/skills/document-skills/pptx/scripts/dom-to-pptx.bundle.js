@@ -63892,6 +63892,12 @@
       legend: ['auto', 'on', 'off'].includes(spec.legend) ? spec.legend : 'auto',
       show_values: ['auto', 'on', 'off'].includes(spec.show_values) ? spec.show_values : 'auto',
       stacked: spec.stacked === 'on' ? 'on' : 'off',
+      style_profile: ['cool-ordinal', 'botanical-categorical', 'ink-focus'].includes(spec.style_profile)
+        ? spec.style_profile
+        : 'cool-ordinal',
+      reading_mode: ['glance', 'editorial'].includes(spec.reading_mode)
+        ? spec.reading_mode
+        : 'glance',
     };
   }
 
@@ -63903,6 +63909,24 @@
     } catch (_error) {
       return fallback;
     }
+  }
+
+  function chartAttributePalette(element, background, fallback) {
+    const hex = String(background || '').replace(/^#/, '');
+    const channels = /^[0-9a-f]{6}$/i.test(hex)
+      ? [0, 2, 4].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255)
+      : [1, 1, 1];
+    const luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    const attribute = luminance < 0.28
+      ? 'data-chart-palette-dark'
+      : 'data-chart-palette-light';
+    const colors = String(element.getAttribute(attribute) || '')
+      .split(',')
+      .map((value) => parseColor(value.trim()))
+      .filter((value) => value && value.hex)
+      .map((value) => value.hex)
+      .slice(0, 4);
+    return colors.length >= 3 ? colors : fallback;
   }
 
   function addNativeCharts(root, slide, pptx, layoutConfig) {
@@ -63943,6 +63967,12 @@
       const text = chartCssColor(chartRoot, '--deck-text', '111111');
       const muted = chartCssColor(chartRoot, '--deck-muted', '6B6B6B');
       const border = chartCssColor(chartRoot, '--deck-border', 'D1D2C8');
+      const background = chartCssColor(chartRoot, '--deck-bg', 'FDFAE7');
+      const chartColors = chartAttributePalette(
+        chartRoot,
+        background,
+        [primary, '6B75FF', text, muted]
+      );
       const chartText = [...spec.categories, ...spec.series.map((item) => item.name)].join(' ');
       const displayFont = resolvePptxFontFace(
         window.getComputedStyle(chartRoot).getPropertyValue('--deck-display').trim() || 'Arial',
@@ -63983,14 +64013,15 @@
         catAxisLineColor: border,
         valAxisLineColor: border,
         valGridLine: { color: border, transparency: 35 },
-        chartColors: [primary, '6B75FF', text, muted],
+        chartColors,
         showCatAxisTitle: false,
         showValAxisTitle: false,
         showBorder: false,
+        varyColors: spec.series.length === 1 && ['bar', 'column'].includes(spec.type),
         showLine: ['line', 'area', 'radar'].includes(spec.type),
-        lineSize: 2,
+        lineSize: spec.reading_mode === 'editorial' ? 1.5 : 2.5,
         showMarker: ['line', 'area'].includes(spec.type),
-        markerSize: 5,
+        markerSize: spec.reading_mode === 'editorial' ? 4 : 6,
         holeSize: spec.type === 'donut' ? 58 : undefined,
         barDir: spec.type === 'bar' ? 'bar' : 'col',
         barGrouping: spec.stacked === 'on' ? 'stacked' : 'clustered',

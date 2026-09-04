@@ -1375,6 +1375,11 @@ Examples:
                 command,
                 workspace_dir=self.workspace_dir,
                 runtime_env=self._subprocess_env,
+                shell_style=(
+                    "powershell"
+                    if self.is_windows and self._bundled_win_bash is None
+                    else "posix"
+                ),
             )
             if image_status_error:
                 return BashOutputResult(

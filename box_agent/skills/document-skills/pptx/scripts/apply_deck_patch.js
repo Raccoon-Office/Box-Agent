@@ -231,7 +231,7 @@ function reconcileReadyManifestMedia(deck, deckPath, changes) {
       {
         src: outputPath,
         alt: sourcedFromWeb
-          ? sourceTitle || "免费开放图库来源的演示文稿视觉"
+          ? sourceTitle || "联网搜索来源的演示文稿视觉"
           : entry.decision === "use_existing"
             ? "用户提供的演示文稿视觉"
           : propPath === "background"
