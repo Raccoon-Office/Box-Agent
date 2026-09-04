@@ -1,0 +1,75 @@
+{
+  "schema_version": "box-agent-evaluation-model-catalog/v1",
+  "models": [
+    {
+      "id": "raccoonwork-auto",
+      "name": "RaccoonWork-Auto",
+      "multiplier": "1x",
+      "binding": {
+        "source": "builtin",
+        "model": "sn-sensenova-6-8-flash-lite",
+        "contextWindow": 480000,
+        "maxTokens": 63999,
+        "evaluationMode": "auto",
+        "autoRouting": {
+          "models": [
+            {
+              "model": "sn-sensenova-6-8-flash-lite",
+              "tags": ["general", "chat", "rewrite", "summary", "fast"],
+              "abilityLevel": 1,
+              "contextWindow": 480000,
+              "maxTokens": 63999
+            },
+            {
+              "model": "sn-glm-5-2",
+              "tags": ["code", "debug", "html", "frontend", "data-analysis"],
+              "abilityLevel": 2,
+              "contextWindow": 1000000,
+              "maxTokens": 100000
+            },
+            {
+              "model": "sn-deepseek-v4-pro",
+              "tags": ["general", "office", "presentation", "document", "code", "analysis", "reasoning"],
+              "abilityLevel": 3,
+              "contextWindow": 1000000,
+              "maxTokens": 100000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "sn-sensenova-6-8-flash-lite",
+      "name": "SenseNova-6.8-Flash-Lite",
+      "multiplier": "0.5x",
+      "binding": {
+        "source": "builtin",
+        "model": "sn-sensenova-6-8-flash-lite",
+        "contextWindow": 480000,
+        "maxTokens": 63999
+      }
+    },
+    {
+      "id": "sn-glm-5-2",
+      "name": "GLM-5-2",
+      "multiplier": "0.5x",
+      "binding": {
+        "source": "builtin",
+        "model": "sn-glm-5-2",
+        "contextWindow": 1000000,
+        "maxTokens": 100000
+      }
+    },
+    {
+      "id": "sn-deepseek-v4-pro",
+      "name": "DeepSeek-V4-Pro-0813",
+      "multiplier": "0.5x",
+      "binding": {
+        "source": "builtin",
+        "model": "sn-deepseek-v4-pro",
+        "contextWindow": 1000000,
+        "maxTokens": 100000
+      }
+    }
+  ]
+}

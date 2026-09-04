@@ -83,7 +83,8 @@ test_workspace/outputs/<evaluation>/
         ├── files-before.json
         ├── files-after.json
         ├── artifacts.json
-        └── completeness.json
+        ├── completeness.json
+        └── effect_evaluation.json  # optional agents-eval response
 ```
 
 `latest.json` atomically points to the latest attempt using its ID and a path
@@ -113,6 +114,30 @@ evaluation directory is copied away from the source checkout.
 
 There is deliberately no compatibility layer for older evaluation layouts.
 Delete obsolete output directories and rerun them with this runner.
+
+## Optional synchronous effect evaluation
+
+Set `BOX_AGENT_EFFECT_EVAL_URL` or pass `--effect-eval-url` to call an
+independently running agents-eval service after each newly executed Case has
+already reached its original terminal state:
+
+```bash
+BOX_AGENT_EFFECT_EVAL_URL=http://127.0.0.1:8766 \
+uv run --project test_workspace/acp_eval acp-eval \
+  --repo-root . \
+  --dataset test_workspace/inputs/smoke_test/dataset.jsonl \
+  --run-dir test_workspace/outputs/260826-effect \
+  --effect-eval-timeout-seconds 180
+```
+
+Only the absolute Attempt path, Case ID, Attempt ID, and optional dataset
+`benchmark_case_id` are sent to the local service. No Judge credentials are
+accepted or forwarded by this runner. A service failure is recorded separately
+and never changes the ACP or evidence-completeness outcome.
+
+The optional `--model` and `--model-max-tokens` flags bind the tested model on
+every ACP `session/new`. They select the product model under test; they do not
+configure or expose the independent agents-eval Judge model.
 
 ## Diagnostic interpretation and data sensitivity
 

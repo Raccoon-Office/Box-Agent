@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ case.case_id }} · 效果指标{% endblock %}
+{% block content %}
+{% macro score_table(metrics) -%}
+<div class="table-wrap"><table class="effect-table score-table">
+  <thead><tr><th>指标</th><th>得分</th><th>状态 / 裁判</th><th>置信度</th><th>判断与关键证据</th></tr></thead>
+  <tbody>{% for metric in metrics %}<tr>
+    <td><strong>{{ metric.label }}</strong><small>{{ metric.metric_id }}</small></td>
+    <td class="score-cell">{{ metric.score if metric.score is not none else "—" }} / {{ metric.weight }}</td>
+    <td><span class="status status-{{ metric.status }}">{% if metric.status == "complete" %}已评估{% elif metric.status == "unavailable" %}无法评估{% elif metric.status == "conflict" %}待复核{% elif metric.status == "pending" %}评估中{% else %}{{ metric.status }}{% endif %}</span><small>{{ metric.judge_type }}</small>{% if metric.missing_evidence %}<small>缺少：{{ metric.missing_evidence|join(", ") }}</small>{% endif %}</td>
+    <td>{{ (metric.confidence * 100)|round(0)|int }}%</td>
+    <td><p class="rationale">{{ metric.rationale or "—" }}</p>{% for evidence in metric.evidence %}<details class="evidence"><summary>{{ evidence.evidence_id }} · {{ evidence.locator }}</summary><pre>{{ evidence.excerpt }}</pre></details>{% endfor %}</td>
+  </tr>{% else %}<tr><td colspan="5" class="empty">没有此类指标。</td></tr>{% endfor %}</tbody>
+</table></div>
+{%- endmacro %}
+<nav class="crumb"><a href="/">评测目录</a><span>/</span><a href="/runs/{{ run_name }}">{{ run_name }}</a><span>/</span><a href="/runs/{{ run_name }}/cases/{{ case.case_id }}">{{ case.case_id }}</a></nav>
+<section class="page-heading"><h1>效果指标</h1><p>agents-eval 基于本次 Case 原始采集证据同步生成的独立评估。</p></section>
+{% include "_tabs.html" %}
+
+{% if not effect %}
+<section class="panel effect-empty"><h2>尚未生成效果评估</h2><p class="empty">本次 Attempt 没有 <code>effect_evaluation.json</code>。请配置效果评估服务后执行一个新 Attempt。</p></section>
+{% else %}
+{% if effect.status == "service_error" %}
+<aside class="notice"><strong>效果评估服务调用失败</strong><span>{{ effect.client.error or effect.judge.error or "未知错误" }}</span></aside>
+{% endif %}
+<section class="metrics effect-summary">
+  <div><small>评估状态</small><strong>{{ effect.status }}</strong></div>
+  <div><small>总分</small><strong>{{ effect.summary.total_score if effect.summary.total_score is not none else "—" }} / 100</strong></div>
+  <div><small>过程 / 结果</small><strong>{{ effect.summary.process_score if effect.summary.process_score is not none else "—" }} / {{ effect.summary.result_score if effect.summary.result_score is not none else "—" }}</strong></div>
+  <div><small>评分覆盖</small><strong>{{ ((effect.summary.score_coverage or 0) * 100)|round(1) }}%</strong></div>
+</section>
+<p class="effect-meta">指标来源：{{ effect.source.metric_source or "—" }} · 评估模型：{{ effect.judge.model or "未配置" }} · 生成时间：{{ effect.generated_at or "—" }}</p>
+
+<section class="effect-section">
+  <div class="section-heading"><h2>结果指标</h2><span>{{ result_available }} / {{ result_metrics|length }} 项可评分 · 60 分</span></div>
+  {{ score_table(result_metrics) }}
+</section>
+
+<section class="effect-section">
+  <div class="section-heading"><h2>过程指标</h2><span>{{ process_available }} / {{ process_metrics|length }} 项可评分 · 40 分</span></div>
+  {{ score_table(process_metrics) }}
+</section>
+
+<section class="effect-section">
+  <div class="section-heading"><h2>性能耗时</h2><span>仅展示采集可证明的数据</span></div>
+  <div class="table-wrap"><table class="effect-table"><thead><tr><th>指标</th><th>数值</th><th>状态</th><th>不可用原因</th></tr></thead><tbody>
+    {% for metric in effect.performance %}<tr><td><strong>{{ metric.label }}</strong><small>{{ metric.metric_id }}</small></td><td>{{ metric.value if metric.value is not none else "—" }} {{ metric.unit }}</td><td><span class="status status-{{ metric.status }}">{{ metric.status }}</span></td><td>{{ metric.reason or "—" }}</td></tr>{% else %}<tr><td colspan="4" class="empty">没有性能数据。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<section class="effect-section">
+  <div class="section-heading"><h2>成本</h2><span>金额仅在存在可审计计费数据时展示</span></div>
+  <div class="table-wrap"><table class="effect-table"><thead><tr><th>范围</th><th>指标</th><th>数值</th><th>来源 / 说明</th></tr></thead><tbody>
+    {% for metric in effect.cost %}<tr><td>{{ metric.scope }}</td><td><strong>{{ metric.label }}</strong><small>{{ metric.metric_id }}</small></td><td>{{ metric.value if metric.value is not none else "—" }} {{ metric.unit }}</td><td>{{ metric.source }}{% if metric.reason %}<small>{{ metric.reason }}</small>{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">没有成本数据。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endif %}
+{% endblock %}

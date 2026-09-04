@@ -90,6 +90,107 @@ class EvaluationRepository:
         except (KeyError, TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _task_type(input_data: dict[str, Any]) -> str | None:
+        task_type = input_data.get("task_type")
+        if isinstance(task_type, str) and task_type.strip():
+            return task_type.strip()
+        task_types = input_data.get("task_types")
+        if isinstance(task_types, list):
+            values = [
+                value.strip()
+                for value in task_types
+                if isinstance(value, str) and value.strip()
+            ]
+            if values:
+                return " / ".join(dict.fromkeys(values))
+        return None
+
+    @staticmethod
+    def _effect_summary(attempt: Path) -> dict[str, Any]:
+        def compact_number(value: Any) -> Any:
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+            return value
+
+        effect = EvaluationRepository._json(
+            attempt / "effect_evaluation.json",
+            None,
+        )
+        if not isinstance(effect, dict):
+            return {
+                "status": "missing",
+                "process_score": None,
+                "process_weight": 40,
+                "result_score": None,
+                "result_weight": 60,
+                "cost": None,
+            }
+
+        summary = effect.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+        metrics = effect.get("metrics")
+        if not isinstance(metrics, list):
+            metrics = []
+
+        phase_weights: dict[str, int | float] = {"process": 0, "result": 0}
+        for metric in metrics:
+            if not isinstance(metric, dict):
+                continue
+            phase = metric.get("phase")
+            weight = metric.get("weight")
+            if (
+                phase in phase_weights
+                and isinstance(weight, (int, float))
+                and not isinstance(weight, bool)
+            ):
+                phase_weights[phase] += weight
+
+        raw_cost = effect.get("cost")
+        cost_metrics = raw_cost if isinstance(raw_cost, list) else []
+        cost = next(
+            (
+                metric
+                for metric in cost_metrics
+                if isinstance(metric, dict)
+                and metric.get("metric_id") == "agent_total_tokens"
+                and metric.get("value") is not None
+            ),
+            None,
+        )
+        if cost is None:
+            cost = next(
+                (
+                    metric
+                    for metric in cost_metrics
+                    if isinstance(metric, dict)
+                    and metric.get("scope") == "agent"
+                    and metric.get("value") is not None
+                    and metric.get("status") in {None, "available", "complete"}
+                ),
+                None,
+            )
+
+        metrics_complete = (
+            isinstance(summary.get("total_metrics"), int)
+            and not isinstance(summary.get("total_metrics"), bool)
+            and summary.get("total_metrics") > 0
+            and summary.get("total_metrics") == len(metrics)
+        )
+        return {
+            "status": effect.get("status") or "unknown",
+            "process_score": compact_number(summary.get("process_score")),
+            "process_weight": compact_number(
+                phase_weights["process"] if metrics_complete else 40
+            ),
+            "result_score": compact_number(summary.get("result_score")),
+            "result_weight": compact_number(
+                phase_weights["result"] if metrics_complete else 60
+            ),
+            "cost": dict(cost) if isinstance(cost, dict) else None,
+        }
+
     def _case_summary(self, case_path: Path) -> dict[str, Any]:
         input_data = self._json(case_path / "input.json", {})
         try:
@@ -98,21 +199,25 @@ class EvaluationRepository:
             return {
                 "case_id": case_path.name,
                 "query": input_data.get("query"),
+                "task_type": self._task_type(input_data),
                 "acp_status": "missing",
                 "completeness_status": "incomplete",
                 "duration": None,
                 "stderr_counts": {"error": 0, "timeout": 0, "warning": 0},
+                "effect_summary": self._effect_summary(case_path),
             }
         run = self._json(attempt / "run.json", {})
         return {
             "case_id": case_path.name,
             "query": input_data.get("query"),
+            "task_type": self._task_type(input_data),
             "attempt_id": attempt.name,
             "attempt_path": attempt,
             "acp_status": run.get("acp_status") or "unknown",
             "completeness_status": run.get("completeness_status") or "incomplete",
             "duration": self._duration(run),
             "stderr_counts": run.get("stderr_counts") or {"error": 0, "timeout": 0, "warning": 0},
+            "effect_summary": self._effect_summary(attempt),
             "run": run,
         }
 
@@ -139,6 +244,9 @@ class EvaluationRepository:
                 "input": self._json(case_path / "input.json", {}),
                 "assistant": self._final_answer(attempt),
                 "completeness": self._json(attempt / "completeness.json", {}),
+                "effect_evaluation": self._json(
+                    attempt / "effect_evaluation.json", None
+                ),
                 "case_path": case_path,
             }
         )
