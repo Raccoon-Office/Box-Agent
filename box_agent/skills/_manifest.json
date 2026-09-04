@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "box_agent_version": "1.0.0",
-  "generated_at": "2026-10-27T07:33:44Z",
+  "generated_at": "2026-10-30T05:35:02Z",
   "skills": [
     {
       "name": "browser-use",
@@ -90,6 +90,19 @@
     {
       "name": "scheduled-task",
       "path": "scheduled-task/SKILL.md"
+    },
+    {
+      "name": "zhihu",
+      "path": "zhihu/SKILL.md",
+      "availability": {
+        "platforms": [
+          "darwin",
+          "win32"
+        ],
+        "required_env_paths": [
+          "ZHIHU_CLI_HOME"
+        ]
+      }
     }
   ]
 }

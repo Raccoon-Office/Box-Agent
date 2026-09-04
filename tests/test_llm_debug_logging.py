@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from box_agent.acp.debug_logger import ACPDebugLogger
 from box_agent.core import run_agent_loop
 from box_agent.llm.debug_logging import (
     reset_llm_debug_sink,
@@ -17,6 +18,21 @@ from box_agent.llm.openai_client import OpenAIClient
 from box_agent.logger import AgentLogger
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
+
+
+def test_acp_debug_logger_honors_explicit_log_path(tmp_path, monkeypatch) -> None:
+    log_file = tmp_path / "repo/.logs/box-agent.debug.log"
+    log_file.parent.mkdir(parents=True)
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "profile"))
+    monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(log_file))
+
+    logger = ACPDebugLogger()
+    try:
+        logger.error("test/log_path", message="written")
+    finally:
+        logger.close()
+
+    assert "test/log_path" in log_file.read_text(encoding="utf-8")
 
 
 def test_sanitize_for_logging_redacts_auth_headers() -> None:

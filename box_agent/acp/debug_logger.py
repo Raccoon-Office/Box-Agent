@@ -24,9 +24,8 @@ import os
 import sys
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
-
-from box_agent.user_paths import state_path
 
 # ── Level constants ──────────────────────────────────────────
 
@@ -71,7 +70,7 @@ class ACPDebugLogger:
 
         file_path = os.environ.get("BOX_AGENT_LOG_FILE")
         if file_path:
-            file_path = str(state_path("log/box-agent.log", file_path))
+            file_path = str(Path(file_path).expanduser().resolve())
             try:
                 self._file_handle = open(file_path, "a", encoding="utf-8", buffering=1)  # line-buffered
                 self._file_path = file_path
