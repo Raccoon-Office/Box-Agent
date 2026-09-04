@@ -2554,6 +2554,114 @@ def _normalize_web_search_refs(payload: Any) -> list[dict[str, Any]]:
     return refs
 
 
+def _signed_web_image_url_map(messages: list[Message]) -> dict[str, str]:
+    """Map unsigned VolcSearch image paths to exact signed tool-result URLs."""
+    signed_urls: dict[str, str] = {}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for nested in value.values():
+                visit(nested)
+            return
+        if isinstance(value, list):
+            for nested in value:
+                visit(nested)
+            return
+        if not isinstance(value, str) or "?" not in value:
+            return
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            return
+        hostname = (parts.hostname or "").casefold()
+        if (
+            parts.scheme.casefold() != "https"
+            or not hostname.endswith("volcsearch-sign.byteimg.com")
+            or "x-expires=" not in parts.query
+            or "x-signature=" not in parts.query
+        ):
+            return
+        unsigned = value.split("?", 1)[0]
+        signed_urls[unsigned] = value
+
+    for message in messages:
+        if message.role != "tool" or message.name != WEB_SEARCH_TOOL_NAME:
+            continue
+        content = _message_text(message.content).strip()
+        if not content:
+            continue
+        if content.startswith("[OK]"):
+            content = content[4:].strip()
+        try:
+            visit(json.loads(content))
+        except json.JSONDecodeError:
+            continue
+    return signed_urls
+
+
+def _restore_signed_web_image_urls(
+    content: str,
+    signed_urls: dict[str, str],
+) -> str:
+    """Restore a stripped signed image URL only from exact web_search evidence."""
+    restored = content
+    for unsigned, signed in sorted(
+        signed_urls.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        for candidate in (unsigned, unsigned.replace("~", r"\~")):
+            restored = re.sub(
+                rf"{re.escape(candidate)}(?!\?)",
+                lambda _match, replacement=signed: replacement,
+                restored,
+            )
+    return restored
+
+
+class _SignedWebImageUrlStreamRewriter:
+    """Repair signed image URLs without waiting for the full model response."""
+
+    def __init__(self, signed_urls: dict[str, str]):
+        self._signed_urls = dict(signed_urls)
+        self._prefixes = tuple(
+            dict.fromkeys(
+                candidate
+                for unsigned in self._signed_urls
+                for candidate in (unsigned, unsigned.replace("~", r"\~"))
+            )
+        )
+        self._buffer = ""
+
+    def _pending_suffix_length(self) -> int:
+        maximum = 0
+        for candidate in self._prefixes:
+            limit = min(len(candidate), len(self._buffer))
+            for length in range(limit, maximum, -1):
+                if self._buffer.endswith(candidate[:length]):
+                    maximum = length
+                    break
+        return maximum
+
+    def feed(self, delta: str) -> str:
+        if not self._signed_urls:
+            return delta
+        self._buffer += delta
+        pending_length = self._pending_suffix_length()
+        if pending_length:
+            ready = self._buffer[:-pending_length]
+            self._buffer = self._buffer[-pending_length:]
+        else:
+            ready = self._buffer
+            self._buffer = ""
+        return _restore_signed_web_image_urls(ready, self._signed_urls)
+
+    def flush(self) -> str:
+        ready = _restore_signed_web_image_urls(self._buffer, self._signed_urls)
+        self._buffer = ""
+        return ready
+
+
 def _search_result_list_found(payload: Any) -> bool:
     """Return whether a structured result-list field exists, even when empty."""
     if isinstance(payload, list):
@@ -3950,6 +4058,9 @@ async def run_agent_loop(
             stream_repeat_pattern: str | None = None
             text_chunk_count = 0
             thinking_chunk_count = 0
+            signed_image_url_rewriter = _SignedWebImageUrlStreamRewriter(
+                _signed_web_image_url_map(messages)
+            )
 
             stream_kwargs = {
                 "messages": provider_request_messages,
@@ -3989,7 +4100,8 @@ async def run_agent_loop(
                     yield ThinkingEvent(content=chunk.delta or "", _streaming=True)
                 elif chunk.type == "text":
                     text_chunk_count += 1
-                    candidate = text_content + (chunk.delta or "")
+                    visible_delta = signed_image_url_rewriter.feed(chunk.delta or "")
+                    candidate = text_content + visible_delta
                     stream_repeat_pattern = (
                         repeated_stream_pattern(candidate)
                         if text_chunk_count >= STREAM_REPEAT_MIN_CHUNKS
@@ -3998,11 +4110,18 @@ async def run_agent_loop(
                     if stream_repeat_pattern is not None:
                         break
                     text_content = candidate
-                    yield ContentEvent(content=chunk.delta or "", _streaming=True)
+                    if visible_delta:
+                        yield ContentEvent(content=visible_delta, _streaming=True)
                 elif chunk.type == "activity" and chunk.activity:
                     yield LLMActivityEvent(step=step + 1, payload=dict(chunk.activity))
                 elif chunk.type == "finish":
                     finish_event = chunk
+
+            if stream_repeat_pattern is None and not cancelled():
+                final_visible_delta = signed_image_url_rewriter.flush()
+                if final_visible_delta:
+                    text_content += final_visible_delta
+                    yield ContentEvent(content=final_visible_delta, _streaming=True)
 
             if stream_repeat_pattern is not None:
                 closer = getattr(llm_stream, "aclose", None)

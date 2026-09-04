@@ -4389,6 +4389,114 @@ def test_web_search_emits_normalized_refs_for_custom_image_results():
     }
 
 
+def test_signed_web_image_url_stream_rewriter_restores_only_stripped_matches():
+    from box_agent.core import _SignedWebImageUrlStreamRewriter
+
+    unsigned = (
+        "https://p26-volcsearch-sign.byteimg.com/tos-cn-i-xstd03g9pf/"
+        "image~tplv-obj.jpeg"
+    )
+    signed = f"{unsigned}?lk3s=x&x-expires=9&x-signature=a%2Fb"
+    rewriter = _SignedWebImageUrlStreamRewriter({unsigned: signed})
+
+    assert rewriter.feed(f"推荐：{unsigned[:-8]}") == "推荐："
+    assert rewriter.feed(f"{unsigned[-8:]}\n普通：https://example.com/a.jpg\n") == (
+        f"{signed}\n普通：https://example.com/a.jpg\n"
+    )
+    assert rewriter.flush() == ""
+
+    already_signed = _SignedWebImageUrlStreamRewriter({unsigned: signed})
+    assert already_signed.feed(signed) == signed
+    assert already_signed.flush() == ""
+
+
+@pytest.mark.asyncio
+async def test_agent_restores_stripped_signed_image_url_from_web_search_result():
+    signed = (
+        "https://p26-volcsearch-sign.byteimg.com/tos-cn-i-xstd03g9pf/"
+        "image~tplv-obj.jpeg?lk3s=x&x-expires=9&x-signature=a%2Fb"
+    )
+    unsigned = signed.split("?", 1)[0]
+
+    class SignedImageSearchTool(Tool):
+        @property
+        def name(self):
+            return "web_search"
+
+        @property
+        def description(self):
+            return "Search images"
+
+        @property
+        def parameters(self):
+            return {
+                "type": "object",
+                "properties": {"Query": {"type": "string"}},
+            }
+
+        async def execute(self, Query: str = ""):
+            return ToolResult(
+                success=True,
+                content=json.dumps(
+                    {
+                        "Result": {
+                            "ImageResults": [
+                                {
+                                    "Title": "Train",
+                                    "Url": "https://example.com/source",
+                                    "Image": {
+                                        "Url": signed,
+                                        "Width": 2048,
+                                        "Height": 1365,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ),
+            )
+
+    llm = MockLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="image-search",
+                        type="function",
+                        function=FunctionCall(
+                            name="web_search",
+                            arguments={"Query": "train"},
+                        ),
+                    )
+                ],
+                finish_reason="tool_use",
+            ),
+            LLMResponse(content=f"图片：{unsigned}。", finish_reason="stop"),
+        ]
+    )
+    messages = [Message(role="user", content="search image")]
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=messages,
+            tools={"web_search": SignedImageSearchTool()},
+            max_steps=3,
+        )
+    )
+
+    streamed = "".join(
+        event.content
+        for event in events
+        if isinstance(event, ContentEvent) and event._streaming
+    )
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert streamed == f"图片：{signed}。"
+    assert done.final_content == f"图片：{signed}。"
+    assert messages[-1].content == f"图片：{signed}。"
+
+
 def test_web_search_site_query_reports_provider_empty_state():
     from box_agent.core import _dedupe_web_search_content
 
