@@ -127,7 +127,8 @@ def test_system_prompt_pauses_only_for_blocking_input_or_sensitive_decisions():
     assert "需要用户选择时使用 `request_user_decision`" in prompt
     assert "可推荐偏好，不得使用 `request_user_input`" in prompt
     assert "请求 30 秒倒计时" in prompt
-    assert "敏感决策必须等待用户选择" in prompt
+    assert "已授权操作直接继续，不重复确认" in prompt
+    assert "新增未授权的敏感事项须等待用户选择，不得自动提交" in prompt
 
 
 def test_system_prompt_checks_explicit_requirements_before_completion():
