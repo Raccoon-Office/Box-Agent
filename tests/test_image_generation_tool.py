@@ -1485,3 +1485,60 @@ async def test_generate_image_svg_response_skips_watermark(
     saved = (tmp_path / "assets/generated/logo.svg").read_bytes()
     assert saved == svg_bytes  # vector untouched
     assert result.raw_output["watermark"]["applied"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publish_artifact", [True, False])
+async def test_intermediate_image_stays_available_without_artifact_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publish_artifact: bool
+) -> None:
+    from box_agent.core import _detect_tool_artifacts, _snapshot_workspace_signatures
+
+    patch_async_client(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200, json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]}
+        ),
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    before = _snapshot_workspace_signatures(str(tmp_path))
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), output_dir=str(output),
+        endpoint="https://image.example.test/v1/images/generations",
+    )
+    result = await tool.execute(
+        prompt="slide illustration", output_path="assets/generated/hero.png",
+        watermark=False, publish_artifact=publish_artifact,
+    )
+    assert result.success
+    target = output / "assets/generated/hero.png"
+    assert target.read_bytes() == PNG_BYTES
+    assert json.loads(result.model_context)["absolute_path"] == str(target)
+    assert result.raw_output["type"] == ("artifact" if publish_artifact else "intermediate_asset")
+    # An unrelated deliverable must still be discovered in the same batch.
+    other = output / "deck.html"
+    other.write_text("<html></html>")
+    events = _detect_tool_artifacts(
+        "image-call", "generate_image",
+        result.content + "\n[deck.html]\n[assets/generated/hero.png]",
+        result.raw_output, before, _snapshot_workspace_signatures(str(tmp_path)),
+        str(tmp_path), str(output),
+    )
+    paths = {event.abs_path for event in events}
+    assert str(other) in paths
+    assert (str(target) in paths) == publish_artifact
+
+
+@pytest.mark.asyncio
+async def test_intermediate_image_failure_does_not_publish_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_async_client(monkeypatch, lambda request: httpx.Response(500, text="failed"))
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), endpoint="https://image.example.test/v1/images/generations",
+    )
+    result = await tool.execute(prompt="slide", output_path="hero.png", publish_artifact=False)
+    assert not result.success
+    assert not result.raw_output
+    assert not (tmp_path / "hero.png").exists()

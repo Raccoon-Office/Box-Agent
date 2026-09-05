@@ -44,7 +44,11 @@ const {
   evaluateModelThemeChoice,
   inferTheme,
 } = require("./theme_selection_core.js");
-const { inferDesignContract } = require("./design_contract_core.js");
+const {
+  inferDesignContract,
+  mergeStyleOverrides,
+  withModelPaletteContract,
+} = require("./design_contract_core.js");
 
 const AUTO_COVER_IMAGE_BRIEF_RE = /(?:融资|路演|投资人|\bvc\b|fundrais|investor|pitch\s*deck|发布会|产品发布|品牌提案|高端|premium)/i;
 const AUTO_COVER_VISUAL_STORY_RE = /(?:传奇|故事|人物|传记|纪实|biograph|profile|legend|story|documentary)/i;
@@ -153,7 +157,7 @@ function themeDiscoveryRecord(theme) {
     selection: theme.selection,
     composition: {
       family: manifest.composition.default_family,
-      alternatives: Math.max(0, manifest.composition.allowed_families.length - 1),
+      allowed_families: manifest.composition.allowed_families,
     },
   };
 }
@@ -184,51 +188,47 @@ function selectTheme(opts, context) {
   if (String(opts.themeId || "").trim().toLowerCase() === "auto") {
     if (opts.themeModelChoice) {
       const evaluation = evaluateModelThemeChoice(
-        inference,
+        listThemes(),
         opts.themeModelChoice
       );
-      const deterministicRecommendation = {
-        theme_id: inference.theme_id,
-        source: inference.source,
-        confidence: inference.confidence,
-        score: inference.score,
-        margin: inference.margin,
-      };
       if (evaluation.accepted) {
         return {
-          theme: getTheme(evaluation.candidate.theme_id),
+          theme: evaluation.candidate,
           normalization: null,
           selection: {
-            theme_id: evaluation.candidate.theme_id,
-            source: "model_reranked",
-            confidence: null,
-            score: evaluation.candidate.score,
+            theme_id: evaluation.candidate.id,
+            source: "model_selected",
+            confidence: opts.themeModelConfidence,
+            score: null,
             margin: null,
-            matched_signals: evaluation.candidate.matched_signals,
-            ranking: inference.ranking,
-            shortlist: inference.shortlist,
+            matched_signals: [],
             requested_theme_id: "auto",
-            deterministic_recommendation: deterministicRecommendation,
             model_choice: {
-              theme_id: evaluation.candidate.theme_id,
+              theme_id: evaluation.candidate.id,
               reason: opts.themeModelReason,
+              identity_basis: opts.themeModelIdentity,
+              confidence: opts.themeModelConfidence,
               accepted: true,
             },
           },
         };
       }
       return {
-        theme: getTheme(inference.theme_id),
+        theme: getTheme(DEFAULT_THEME_ID),
         normalization: null,
         selection: {
-          ...inference,
+          theme_id: DEFAULT_THEME_ID,
           source: "model_choice_rejected",
           requested_theme_id: "auto",
-          deterministic_source: inference.source,
-          deterministic_recommendation: deterministicRecommendation,
+          confidence: null,
+          score: null,
+          margin: null,
+          matched_signals: [],
           model_choice: {
             theme_id: opts.themeModelChoice,
             reason: opts.themeModelReason,
+            identity_basis: opts.themeModelIdentity,
+            confidence: opts.themeModelConfidence,
             accepted: false,
             rejection_reason: evaluation.reason,
           },
@@ -295,39 +295,49 @@ function selectTheme(opts, context) {
   };
 }
 
-function themeShortlistPayload(context) {
-  const inference = inferTheme(listThemes(), context, DEFAULT_THEME_ID);
+function themeCatalogPayload(context) {
+  void context;
+  const themes = listThemes();
   return {
-    mode: "theme_shortlist",
+    mode: "theme_catalog",
     default_theme_id: DEFAULT_THEME_ID,
-    deterministic_recommendation: {
-      theme_id: inference.theme_id,
-      source: inference.source,
-      confidence: inference.confidence,
-      score: inference.score,
-      margin: inference.margin,
-      matched_signals: inference.matched_signals,
-    },
-    candidate_count: inference.shortlist.length,
-    candidates: inference.shortlist.map(candidate => {
-      const theme = getTheme(candidate.theme_id);
-      const discovery = themeDiscoveryRecord(theme);
-      return {
-        ...discovery,
-        theme_id: candidate.theme_id,
-        deterministic_rank: candidate.rank,
-        deterministic_score: candidate.score,
-        matched_signals: candidate.matched_signals,
-        hard_conflicts: candidate.hard_conflicts,
-        protected_signals: candidate.protected_signals,
-        eligible_for_model_choice: candidate.eligible_for_model_choice,
-      };
-    }),
+    candidate_count: themes.length,
+    candidates: themes.map(themeDiscoveryRecord),
     model_choice_contract: {
-      choose_from_candidates_only: true,
-      hard_conflicts_are_ineligible: true,
-      protected_deterministic_signals_limit_override: true,
-      submit_with: "--theme auto --theme-model-choice THEME_ID --theme-model-reason REASON",
+      choose_from_registered_catalog_only: true,
+      aesthetic_choice_owned_by_model: true,
+      validator_checks_execution_only: true,
+      submit_with: (
+        "--theme auto --theme-model-choice THEME_ID --theme-model-reason REASON " +
+        "--theme-model-confidence low|medium|high --theme-model-identity BASIS " +
+        "--family FAMILY --palette-background HEX --palette-text HEX --palette-primary HEX " +
+        "--palette-accent HEX [--palette-secondary HEX] " +
+        "[--palette-accent-usage sparse|balanced|dominant] " +
+        "[--style-override collage=off|decorations=off|stagger=off|" +
+        "irregular_grid=off|shadow=off|texture=off|gradient=off|" +
+        "radius=square|rounded]"
+      ),
+      style_override_axes: {
+        collage: ["off"],
+        decorations: ["off"],
+        stagger: ["off"],
+        irregular_grid: ["off"],
+        shadow: ["off"],
+        texture: ["off"],
+        gradient: ["off"],
+        radius: ["square", "rounded"],
+      },
+      semantic_review: {
+        required_for_structured_palette: true,
+        exactly_once: true,
+        reviewer: "one isolated model review after content patch and before finalization",
+        checks: [
+          "identity basis names a concrete visual identity rather than the task type",
+          "theme and composition express the requested mood",
+          "identity colors occupy visible primary and accent roles",
+          "local chart styles do not override the deck palette",
+        ],
+      },
     },
   };
 }
@@ -346,7 +356,6 @@ function compactThemeSelection(selection) {
     ...(selection.model_choice
       ? {
         model_choice: selection.model_choice,
-        deterministic_recommendation: selection.deterministic_recommendation,
       }
       : {}),
   };
@@ -446,6 +455,12 @@ function parseArgs(argv) {
     themeLocked: false,
     themeModelChoice: null,
     themeModelReason: null,
+    themeModelConfidence: null,
+    themeModelIdentity: null,
+    designReviewVerdict: null,
+    designReviewReason: null,
+    modelPalette: null,
+    modelStyleOverrides: null,
     designSeed: null,
     family: null,
     title: "Untitled deck",
@@ -477,6 +492,46 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--theme-model-reason" && value) {
       opts.themeModelReason = value;
+      index += 1;
+    } else if (arg === "--theme-model-confidence" && value) {
+      opts.themeModelConfidence = value;
+      index += 1;
+    } else if (arg === "--theme-model-identity" && value) {
+      opts.themeModelIdentity = value;
+      index += 1;
+    } else if (arg === "--design-review-verdict" && value) {
+      opts.designReviewVerdict = value;
+      index += 1;
+    } else if (arg === "--design-review-reason" && value) {
+      opts.designReviewReason = value;
+      index += 1;
+    } else if (arg === "--palette-background" && value) {
+      opts.modelPalette = { ...(opts.modelPalette || {}), background: value };
+      index += 1;
+    } else if (arg === "--palette-primary" && value) {
+      opts.modelPalette = { ...(opts.modelPalette || {}), primary: value };
+      index += 1;
+    } else if (arg === "--palette-text" && value) {
+      opts.modelPalette = { ...(opts.modelPalette || {}), text: value };
+      index += 1;
+    } else if (arg === "--palette-accent" && value) {
+      opts.modelPalette = { ...(opts.modelPalette || {}), accent: value };
+      index += 1;
+    } else if (arg === "--palette-secondary" && value) {
+      opts.modelPalette = { ...(opts.modelPalette || {}), secondary: value };
+      index += 1;
+    } else if (arg === "--palette-accent-usage" && value) {
+      opts.modelPalette = { ...(opts.modelPalette || {}), accent_usage: value };
+      index += 1;
+    } else if (arg === "--style-override" && value) {
+      const match = /^([a-z_]+)=(off|square|rounded)$/.exec(value);
+      if (!match) {
+        throw new Error("--style-override must use KEY=VALUE");
+      }
+      opts.modelStyleOverrides = {
+        ...(opts.modelStyleOverrides || {}),
+        [match[1]]: match[2],
+      };
       index += 1;
     } else if (arg === "--design-seed" && value) {
       opts.designSeed = value;
@@ -537,18 +592,23 @@ function parseArgs(argv) {
       opts.force = true;
     } else if (arg === "--list-themes") {
       opts.listThemes = true;
-    } else if (arg === "--rank-themes") {
+    } else if (arg === "--design-catalog" || arg === "--rank-themes") {
       opts.rankThemes = true;
     } else if (arg === "--help" || arg === "-h") {
       console.log(
         "Usage: inspect_deck_contract.js [LAYOUT_ID ...] " +
         "[--theme auto|THEME_ID] [--lock-theme] [--theme-model-choice THEME_ID] " +
-        "[--theme-model-reason REASON] [--family FAMILY_ID] [--design-seed SEED] [--title TITLE] [--truth-mode MODE] " +
+        "[--theme-model-reason REASON] [--theme-model-confidence low|medium|high] " +
+        "[--theme-model-identity BASIS] [--palette-background HEX --palette-text HEX --palette-primary HEX " +
+        "--palette-accent HEX [--palette-secondary HEX] [--palette-accent-usage USAGE]] " +
+        "[--style-override KEY=VALUE ...] " +
+        "[--design-review-verdict accepted|revised|unavailable --design-review-reason REASON] " +
+        "[--family FAMILY_ID] [--design-seed SEED] [--title TITLE] [--truth-mode MODE] " +
         "[--image-mode auto|creative_image_mode] [--no-images] " +
         "[--image-asset SLIDE:SLOT=PATH ...] " +
         "[--fact TEXT ...] [--research-fact TEXT ...] [--assumption TEXT ...] " +
         "[--require-field SLIDE:FIELD ...] [--outline outline.json] [--out deck.json] " +
-        "[--report qa/deck_contract.json] [--force] [--list-themes | --rank-themes]"
+        "[--report qa/deck_contract.json] [--force] [--list-themes | --design-catalog]"
       );
       process.exit(0);
     } else if (arg.startsWith("-")) {
@@ -837,6 +897,30 @@ function normalizeOutlineDrivenLayoutIds(
       return "table-data-v1";
     }
     const explicitVisualItemCount = expectedVisualItemCount(slide);
+    const outlineBulletCount = Array.isArray(slide && slide.bullets)
+      ? slide.bullets.filter(item => String(item || "").trim()).length
+      : 0;
+    const statementLength = Array.from(
+      [slide && slide.title, slide && slide.message]
+        .filter(Boolean)
+        .join("：")
+    ).length;
+    if (
+      layoutId === "statement-focus-v1"
+      && layoutPolicy.compositionFamily === "editorial-spread"
+      && (statementLength > 14 || outlineBulletCount >= 3)
+    ) {
+      normalizations.push({
+        slide: index + 1,
+        from: layoutId,
+        to: "cards-grid-v1",
+        reason: (
+          "editorial-spread statement pages require a short thesis and light proof set; " +
+          `received ${statementLength} title/message characters and ${outlineBulletCount} parallel points`
+        ),
+      });
+      return "cards-grid-v1";
+    }
     const timelineMaxItems = visualCollectionLimit("timeline-horizontal-v1", slide);
     const cardsMaxItems = visualCollectionLimit("cards-grid-v1", slide);
     if (
@@ -1595,6 +1679,42 @@ function main() {
     throw new Error("--theme-model-reason must be 240 characters or fewer");
   }
   if (
+    opts.themeModelConfidence
+    && !["low", "medium", "high"].includes(opts.themeModelConfidence)
+  ) {
+    throw new Error("--theme-model-confidence must be low, medium, or high");
+  }
+  if (opts.themeModelIdentity && !opts.themeModelChoice) {
+    throw new Error("--theme-model-identity requires --theme-model-choice");
+  }
+  if (opts.modelPalette && !opts.themeModelChoice) {
+    throw new Error("model palette flags require --theme-model-choice");
+  }
+  if (opts.modelPalette) {
+    const missing = ["background", "text", "primary", "accent"]
+      .filter(key => !opts.modelPalette[key]);
+    if (missing.length) {
+      throw new Error(`model palette requires background, text, primary, and accent; missing ${missing.join(", ")}`);
+    }
+  }
+  if (
+    opts.designReviewVerdict
+    && !["accepted", "revised", "unavailable"].includes(opts.designReviewVerdict)
+  ) {
+    throw new Error(
+      "--design-review-verdict must be accepted, revised, or unavailable"
+    );
+  }
+  if (opts.designReviewVerdict && !String(opts.designReviewReason || "").trim()) {
+    throw new Error("--design-review-verdict requires --design-review-reason");
+  }
+  if (!opts.designReviewVerdict && opts.designReviewReason) {
+    throw new Error("--design-review-reason requires --design-review-verdict");
+  }
+  if (String(opts.designReviewReason || "").length > 240) {
+    throw new Error("--design-review-reason must be 240 characters or fewer");
+  }
+  if (
     opts.rankThemes
     && (
       opts.layoutIds.length
@@ -1611,7 +1731,7 @@ function main() {
     )
   ) {
     throw new Error(
-      "--rank-themes accepts brief inputs only and cannot be combined with layouts, output, explicit themes, or model choice"
+      "--design-catalog accepts brief inputs only and cannot be combined with layouts, output, explicit themes, or model choice"
     );
   }
   if (opts.report && !opts.out) {
@@ -1659,7 +1779,7 @@ function main() {
     outline: outlineBinding ? outlineBinding.content : null,
   };
   if (opts.rankThemes) {
-    console.log(JSON.stringify(themeShortlistPayload(designContext), null, 2));
+    console.log(JSON.stringify(themeCatalogPayload(designContext), null, 2));
     return;
   }
   const assumptions = [...new Set(
@@ -1668,6 +1788,8 @@ function main() {
   const assumptionBinding = validateAssumptionsAgainstRuntime(assumptions);
   const truthAdvisories = [...assumptionBinding.issues];
   const layoutPolicy = {
+    compositionFamily: opts.family || null,
+    userSourceText: runtimeBinding.source_text || "",
     allowIllustrativeQuantitative: (
       opts.truthMode === "illustrative"
       || assumptionBinding.assumption_count > 0
@@ -1725,10 +1847,29 @@ function main() {
     layoutPolicy
   );
   const themeResolution = selectTheme(opts, designContext);
-  const designContract = inferDesignContract(
+  const inferredDesignContract = inferDesignContract(
     designContext,
     outlineBinding ? authoringSlides : []
   );
+  const paletteIssues = [];
+  const paletteDesignContract = opts.modelPalette
+    ? withModelPaletteContract(
+      inferredDesignContract,
+      opts.modelPalette,
+      opts.themeModelIdentity || opts.themeModelReason,
+      paletteIssues,
+    )
+    : inferredDesignContract;
+  const mergedStyleOverrides = mergeStyleOverrides(
+    paletteDesignContract && paletteDesignContract.style_overrides,
+    opts.modelStyleOverrides,
+  );
+  const designContract = mergedStyleOverrides
+    ? {
+      ...(paletteDesignContract || { version: 1 }),
+      style_overrides: mergedStyleOverrides,
+    }
+    : paletteDesignContract;
   const theme = themeResolution.theme;
   if (!theme) {
     throw new Error(
@@ -1736,24 +1877,56 @@ function main() {
       `registered theme_ids: ${listThemes().map(item => item.id).join(", ")}`
     );
   }
-  const themeSelection = themeResolution.selection;
-  const designSelection = opts.family
+  const themeSelection = {
+    ...themeResolution.selection,
+    ...(opts.modelPalette
+      ? {
+        model_palette: paletteIssues.length
+          ? { accepted: false, issues: [...paletteIssues] }
+          : { accepted: true },
+      }
+      : {}),
+    ...(opts.designReviewVerdict
+      ? {
+        design_review: {
+          verdict: opts.designReviewVerdict,
+          reason: opts.designReviewReason,
+          count: 1,
+        },
+      }
+      : {}),
+  };
+  const allowedFamilies = themeManifestRecord(theme).composition.allowed_families;
+  const requestedFamilyAccepted = (
+    !opts.family || allowedFamilies.includes(opts.family)
+  );
+  const inferredDesignSelection = inferCompositionFamily(
+    theme,
+    {
+      title: opts.title,
+      source_text: outlineBinding ? "" : runtimeBinding.source_text,
+      outline: outlineBinding ? outlineBinding.content : null,
+    },
+    effectiveLayoutIds,
+  );
+  const designSelection = opts.family && requestedFamilyAccepted
     ? {
       family: opts.family,
-      source: "explicit_family",
+      source: "model_selected_family",
       score: null,
       matched_signals: [],
       scores: null,
     }
-    : inferCompositionFamily(
-      theme,
-      {
-        title: opts.title,
-        source_text: outlineBinding ? "" : runtimeBinding.source_text,
-        outline: outlineBinding ? outlineBinding.content : null,
-      },
-      effectiveLayoutIds,
-    );
+    : {
+      ...inferredDesignSelection,
+      ...(opts.family
+        ? {
+          source: "model_family_rejected",
+          rejected_family: opts.family,
+          rejection_reason: "family_not_allowed_by_theme",
+        }
+        : {}),
+    };
   const design = createDeckDesign(theme, opts.designSeed, designSelection.family);
   const selectedLayouts = [...new Set(effectiveLayoutIds)].map(layoutId => getLayout(layoutId));
   const requiredFieldNormalizations = [];
@@ -2027,6 +2200,21 @@ function main() {
       required_field_normalizations: requiredFieldNormalizations,
       required_field_relaxations: requiredFieldRelaxations,
       warnings: [
+        ...(opts.designReviewVerdict === "unavailable"
+          ? [
+            "Design review was attempted once but unavailable; retained the " +
+            "model proposal and continued with executable validation",
+          ]
+          : []),
+        ...paletteIssues.map(issue => (
+          `Model palette rejected; theme colors retained: ${issue}`
+        )),
+        ...(opts.family && !requestedFamilyAccepted
+          ? [
+            `Model composition family ${opts.family} is not allowed by theme ` +
+            `${theme.id}; used ${designSelection.family} instead`,
+          ]
+          : []),
         ...requiredFieldRelaxations.map(item => (
           `Slide ${item.slide} ignored decorative --require-field ${item.field} because ` +
           `${item.effective_layout_id} does not expose it and the outline does not ` +
@@ -2072,7 +2260,7 @@ function main() {
       },
       design_policy: {
         path: "design",
-        rule: "Explicit --family wins. Otherwise infer one allowed family from the title, bound outline, and ordered layouts; keep the theme default when signals are weak. Persist design through patch/render/export. A fresh scaffold may choose another allowed family or variant.",
+        rule: "A model-selected registered family is used when the chosen theme allows it. Invalid families fall back once to an allowed family with a warning. Persist design through patch/render/export.",
         user_choice_path: "selected_theme.composition.directions",
         family_selection_path: "selected_theme.composition.families[].selection_signals",
         selection_source: designSelection.source,

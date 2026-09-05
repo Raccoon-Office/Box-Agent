@@ -69,3 +69,20 @@ def test_pptx_qa_reference_uses_localized_labels_and_keeps_artifact_paths():
     assert "`deck.patch.json`" in qa_text
     assert "`qa/` and `research/`" in qa_text
     assert "Simplified-Chinese user impact" not in qa_text
+
+
+def test_pptx_keeps_intermediate_images_private_and_overview_optional():
+    text = " ".join((PPTX_SKILL_ROOT / "SKILL.md").read_text().split())
+    images = " ".join((PPTX_SKILL_ROOT / "references/image-assets.md").read_text().split())
+    assert "`publish_artifact: false`" in text
+    assert "`publish_artifact: false`" in images
+    assert "Do not embed them in progress messages or the final reply" in text
+    assert "Never block delivery on this preview" in text
+    assert "Do not install dependencies just for this optional preview" in text
+    assert "If any slide is missing, omit the overview" in text
+    assert "scripts/make_contact_sheet.js qa/overview-slides" in text
+    assert "--cols 4 --thumb-width 480" in text
+    assert "12 slides form 4 columns by 3 rows" in text
+    assert "screenshot each slide element separately" in text
+    assert "Do not use a full-page scrolling screenshot" in text
+    assert "Embed only the successfully created contact sheet once" in text

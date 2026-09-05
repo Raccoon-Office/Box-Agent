@@ -46,6 +46,9 @@ const TAG_RE = /(?:标签|主线卡|关键词|\btags?\b|\bchips?\b)/i;
 const MEDIA_RE = /(?:照片|人物|海报|主视觉|插画|概念图|界面|截图|样机|hero|photo|portrait|poster|illustration|concept\s*art|interface|screenshot|mockup)/i;
 const FULL_BLEED_IMAGE_RE = /(?:整页生图|整页(?:图片|主视觉|背景图)|全屏(?:图片|主视觉|背景图)|全幅(?:图片|主视觉|背景图)|沉浸式背景图|full[- ]?bleed|full[- ]?slide\s+image|cinematic\s+image)/i;
 const IMAGE_FEATURE_RE = /(?:横向大图|全宽大图|大图叙事|大图展示|视觉特写页|wide\s+image|image\s+feature|large\s+image\s+story|visual\s+feature)/i;
+const QUADRANT_RELATIONSHIP_RE = /(?:优先级矩阵|影响[^\n]{0,24}(?:紧急|投入|难度)|(?:紧急|投入|难度)[^\n]{0,24}影响|[xX横]\s*轴|[yY纵]\s*轴|横轴[^\n]{0,32}纵轴|纵轴[^\n]{0,32}横轴|impact[^\n]{0,24}(?:effort|urgency)|(?:effort|urgency)[^\n]{0,24}impact)/i;
+const ORDERED_SEQUENCE_RE = /(?:先.+(?:再|然后|随后|最后)|(?:第一|第二|第三|第四|第五|第六|第\s*\d+)[步阶段天周]|(?:阶段|步骤|里程碑)\s*[一二三四五六七八九十\d]+|DAY\s*\d+|Q[1-4]|20\d{2}\s*(?:年|[-–—→]))/i;
+const TEMPORAL_TOKEN_RE = /(?:DAY\s*\d+(?:\s*[-–—]\s*\d+)?|20\d{2}(?:\s*年)?|Q[1-4]|第\s*[一二三四五六七八九十\d]+\s*(?:天|周|阶段|步骤))/i;
 
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -73,6 +76,25 @@ function selectionText(slide) {
 function visualSelectionText(slide) {
   const intent = outlineIntentRecord(slide);
   return [intent.layout, intent.visual].filter(Boolean).join("\n");
+}
+
+function semanticContentText(slide) {
+  return [
+    slide && slide.title,
+    slide && slide.message,
+    ...(Array.isArray(slide && slide.bullets) ? slide.bullets : []),
+  ].filter(Boolean).join("\n");
+}
+
+function hasOrderedSequence(slide) {
+  const content = semanticContentText(slide);
+  if (ORDERED_SEQUENCE_RE.test(content)) return true;
+  const entries = [
+    slide && slide.title,
+    slide && slide.message,
+    ...(Array.isArray(slide && slide.bullets) ? slide.bullets : []),
+  ].filter(Boolean);
+  return entries.filter(value => TEMPORAL_TOKEN_RE.test(String(value))).length >= 2;
 }
 
 function semanticRule(kind, preferred, allowed, reason) {
@@ -112,7 +134,7 @@ function outlineHasPlottableChartEvidence(slide, sourceMode = "") {
 function analyzeOutlineLayoutIntent(
   slide,
   sourceMode = "",
-  { allowIllustrativeQuantitative = false } = {}
+  { allowIllustrativeQuantitative = false, userSourceText = "" } = {}
 ) {
   const all = selectionText(slide);
   const visual = visualSelectionText(slide);
@@ -219,6 +241,17 @@ function analyzeOutlineLayoutIntent(
   }
 
   if (QUADRANT_RE.test(all)) {
+    if (
+      !QUADRANT_RELATIONSHIP_RE.test(all)
+      && !QUADRANT_RELATIONSHIP_RE.test(userSourceText)
+    ) {
+      return semanticRule(
+        "parallel-values-not-quadrant",
+        "cards-grid-v1",
+        ["cards-grid-v1"],
+        "four parallel items do not define x/y axes or quadrant relationships; use editable cards"
+      );
+    }
     return semanticRule(
       "quadrant",
       "quadrant-matrix-v1",
@@ -402,6 +435,14 @@ function analyzeOutlineLayoutIntent(
     );
   }
   if (TIMELINE_RE.test(visual) || /(?:timeline|roadmap)/i.test(layout)) {
+    if (!hasOrderedSequence(slide)) {
+      return semanticRule(
+        "parallel-rules-not-timeline",
+        "cards-grid-v1",
+        ["cards-grid-v1"],
+        "parallel rules do not provide at least two ordered time/phase signals; use editable cards"
+      );
+    }
     return semanticRule(
       "timeline",
       "timeline-horizontal-v1",
@@ -468,6 +509,14 @@ function analyzeOutlineLayoutIntent(
       );
   }
   if (/^(?:timeline|roadmap|时间轴|路线图)$/i.test(layout)) {
+    if (!hasOrderedSequence(slide)) {
+      return semanticRule(
+        "parallel-rules-not-timeline",
+        "cards-grid-v1",
+        ["cards-grid-v1"],
+        "parallel rules do not provide at least two ordered time/phase signals; use editable cards"
+      );
+    }
     return semanticRule(
       "timeline",
       "timeline-horizontal-v1",

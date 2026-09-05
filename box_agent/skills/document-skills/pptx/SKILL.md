@@ -8,6 +8,20 @@ related_skills: [html-templates]
 
 # PPTX Skill
 
+## Optional bundled Archify diagrams
+
+For polished architecture, workflow, sequence, data-flow, or lifecycle diagrams,
+PPTX includes an optional Archify runtime in `vendor/archify/`. Before scaffolding
+an Archify image-led page, read `references/archify-diagrams.md` for source JSON,
+validation, canonical image export, and slide embedding. No separate Skill
+installation is needed. Use this supplement when its presentation fits the brief;
+retain `technical-diagram-v1` when node/edge editing inside the deck is required.
+An Archify image-feature page is an explicit exception to the default technical
+diagram layout routing below. Its JSON and interactive HTML remain companion
+sources; the embedded diagram is an image. Statistical charts keep the existing
+editable chart workflow.
+
+
 Use this skill whenever a presentation deck is an input, output, or deliverable.
 
 ### Theme preview intent (before deck authoring)
@@ -39,38 +53,70 @@ already names a registered theme, skip the gallery and continue. A preview
 gallery is disposable discovery output, not durable deck-authoring state, so the new-deck
 hard start below has not begun yet.
 
-For normal authoring, use the hybrid theme route after `outline.json` is valid.
-First run `inspect_deck_contract.js --rank-themes` with the title, bound outline,
-and source facts. This is discovery, not the new-deck scaffold: it returns a
-deterministic shortlist of 5–8 registered themes with scores, matched signals,
-hard conflicts, and composition metadata. Choose exactly one eligible candidate
-by comparing the audience, content job, visual tone, density, and composition;
-do not choose outside the returned candidates. Then scaffold with `--theme auto
---theme-model-choice <CANDIDATE_ID> --theme-model-reason <SHORT_REASON>`. Keep
-the reason under 240 characters and state only a concise, user-visible fit such
-as “创意机构场景与多彩海报语法更匹配”; do not include hidden reasoning.
+For normal authoring, use the model-owned design route after `outline.json` is
+valid. First run `inspect_deck_contract.js --design-catalog` with the title, bound
+outline, and source facts. This discovery call returns the complete registered
+theme catalog and every theme's allowed composition families; it does not rank,
+shortlist, or make an aesthetic recommendation. Choose one registered theme,
+one allowed family, and a structured palette by comparing the audience,
+subject identity, content job, tone, and density. Then scaffold with `--theme
+auto --theme-model-choice <THEME_ID> --theme-model-reason <SHORT_REASON>
+--theme-model-confidence <low|medium|high> --theme-model-identity <BASIS>
+--family <FAMILY> --palette-background <HEX> --palette-text <HEX> --palette-primary <HEX>
+--palette-accent <HEX>` and optionally `--palette-secondary <HEX>` and
+`--palette-accent-usage <sparse|balanced|dominant>`. Translate explicit local
+style constraints into repeatable `--style-override KEY=VALUE` flags instead
+of replacing the theme or family: `collage=off`, `decorations=off`,
+`stagger=off`, `irregular_grid=off`, `shadow=off`, `texture=off`,
+`gradient=off`, or `radius=square|rounded`. User-authored opt-outs are also
+inferred from the exact source request and outrank model flags. After scaffolding and the
+content patch, review the complete final design exactly once with a separate model call. When
+`sub_agent` is available, call it once with `required_tools: ["read_file"]`,
+`files: ["deck.json", "qa/deck_contract.json"]`, and a self-contained task
+containing the deck title, goal, audience, mood, and storyline. Tell the
+reviewer that those two files are authoritative for the final theme/family,
+identity basis, palette, style overrides, every slide layout, and every
+`chart_style`; do not replace them with a parent-authored summary. Ask for
+one compact JSON object with `verdict` (`accepted` or `revised`), `reason`, and
+the complete reviewed design. The reviewer checks semantic fit only: the
+identity basis must name a concrete visual identity rather than a task label,
+the theme/family must express the mood, identity colors must occupy visible
+primary/accent roles rather than only secondary slots, and local chart styles
+must not override the deck palette. A local user opt-out should revise
+`style_overrides`, not replace the whole family, unless the family is
+fundamentally incompatible after those axes are disabled. Apply at most that one revision through
+`apply_deck_redesign.js` and/or one final `apply_deck_patch.js`; do not call
+another reviewer. Then record the reviewed final surface with
+`design_review_receipt.js deck.json record --verdict accepted|revised|unavailable
+--reason <REASON>`. If review is unavailable or unusable, do not retry: retain
+the proposal, record `unavailable`, and continue with a warning. Keep reasons under 240 characters and make the identity basis
+auditable without exposing hidden reasoning.
 
-The CLI remains authoritative. It rejects candidates with explicit hard
-conflicts, candidates outside the shortlist, and large overrides of protected
-subject rules, then preserves the deterministic choice under
-`model_choice_rejected`. A valid rerank is recorded as `model_reranked`, not as
-a user choice. The deterministic layer scores explicit keyword rules,
-industry-fit metadata, mood metadata, light/dark intent, formality, and opt-outs
-such as “不要拼贴” or “不要复古手绘”. Pass `--theme
+The CLI validates execution only: the theme id must be registered, the family
+must be allowed by that theme, colors must be exact hex values, and background
+to text contrast must be at least 4.5:1. Primary, accent, and secondary are
+visual identity colors and are not rejected for low contrast against the
+background. At render time, palette-backed cards, timelines, labels, and charts
+receive a readable local foreground token. Emphasis text is resolved against
+ordinary page/card surfaces; text on a solid primary fill uses a separate
+inverse role. Readable brand-colored text is retained, and muted copy also
+accounts for tinted card surfaces. The existing runtime probe samples
+those local surfaces in the same pass; any remaining component-contrast finding
+is advisory, never a new model review, repair loop, or delivery gate. It does not score aesthetics or
+override a valid model choice with keyword rules. Explicit user-authored colors
+still outrank the model palette. Pass `--theme
 <REGISTERED_THEME_ID> --lock-theme` only when the user explicitly named or
-selected that exact theme; explicit locks skip shortlist/rerank. Do not turn the
+selected that exact theme; explicit locks skip model selection. Do not turn the
 fallback `blue-professional` id into an artificial explicit choice.
 Explicit palette wording is persisted separately in `design_contract.palette`
 and overrides theme color tokens while retaining the selected theme's
 typography, shape, surface grammar, and allowed composition families. Preserve
 explicit colors and their roles in `outline.design_requirements`; never reduce
 “深蓝、米白、少量橙色点缀” to a generic cool or light theme match.
-When a short brief names a subject with a stable, unmistakable visual identity,
-the contract may add a sparse inferred subject palette after selecting the
-registered theme—for example Tesla black/white/red, Forbidden City
-vermilion/parchment/gold, or Minecraft forest/stone/grass green. This palette is
-a soft semantic default only: any user-authored palette wording or exact hex
-colors outrank it.
+When a short brief names a subject with a stable visual identity, the model
+returns that identity basis and exact structured palette through the scaffold
+flags. Do not add entity-specific palette rules to the compiler. Any
+user-authored palette wording or exact hex colors outrank the model palette.
 Explicit geometry, direction, relationship, and item-count requirements are
 also persisted in `design_contract.slides` and are hard constraints. Use
 `pyramid-hierarchy-v1` for an explicit pyramid instead of approximating it with
@@ -111,7 +157,7 @@ the slide plan and ordered layout choices exist, the **first deck-authoring
 command** must scaffold the complete ordered deck, including repeated layouts:
 
 ```bash
-cd "${BOX_AGENT_OUTPUT_DIR:-.}" && ${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js <LAYOUT_ID_FOR_SLIDE_1> <LAYOUT_ID_FOR_SLIDE_2> ... --theme auto --theme-model-choice <CANDIDATE_ID> --theme-model-reason "<SHORT_USER_VISIBLE_FIT>" [--family <ALLOWED_FAMILY_ID>] --image-mode <auto|creative_image_mode> --outline outline.json --title "<DECK_TITLE>" --fact "<VERBATIM_USER_FACT>" --research-fact "<FACT_FROM_COMPLETED_EXTERNAL_RESEARCH>" --assumption "<ONLY_IF_USER_EXPLICITLY_AUTHORIZES_IT>" --require-field <SLIDE_NUMBER>:<MANDATORY_FIELD> --out deck.json
+cd "${BOX_AGENT_OUTPUT_DIR:-.}" && ${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js <LAYOUT_ID_FOR_SLIDE_1> <LAYOUT_ID_FOR_SLIDE_2> ... --theme auto --theme-model-choice <THEME_ID> --theme-model-reason "<SHORT_USER_VISIBLE_FIT>" --theme-model-confidence <low|medium|high> --theme-model-identity "<SUBJECT_IDENTITY_BASIS>" --family <ALLOWED_FAMILY_ID> --palette-background <HEX> --palette-text <HEX> --palette-primary <HEX> --palette-accent <HEX> [--palette-secondary <HEX>] [--palette-accent-usage <sparse|balanced|dominant>] [--style-override KEY=VALUE ...] --image-mode <auto|creative_image_mode> --outline outline.json --title "<DECK_TITLE>" --fact "<VERBATIM_USER_FACT>" --research-fact "<FACT_FROM_COMPLETED_EXTERNAL_RESEARCH>" --assumption "<ONLY_IF_USER_EXPLICITLY_AUTHORIZES_IT>" --require-field <SLIDE_NUMBER>:<MANDATORY_FIELD> --out deck.json
 ```
 
 Keep this scaffold invocation on one physical command line so its ordered
@@ -178,7 +224,7 @@ preserves signed URLs and source metadata, records reuse rights as unverified,
 and converts a sourced row to `use_existing`. If the tool is unavailable, mark
 the row `unavailable`; if no returned candidate passes relevance, watermark,
 download, decode, and size checks, mark it `exhausted`. Only then call
-`generate_image` with `watermark: false` for the remaining `generate` rows.
+`generate_image` with `watermark: false` and `publish_artifact: false` for the remaining `generate` rows.
 Never skip image search for a web row or replace a named real subject with
 fabricated documentary evidence; an AI fallback is an explicitly labelled
 concept. Search inclusion does not establish reuse permission, so surface the
@@ -303,12 +349,12 @@ or split them according to the source material, and never override explicit
 user order or page count.
 
 1. **Pass the content & outline gate first (see §1.1 and `references/outline.md`).** Every new controlled deck writes one `outline.json` and validates it to `qa/outline_check.json` before theme/layout selection. When the user already supplied a complete page list, this is a lightweight traceability mapping, not a new invented storyline. A concise solution brief naming the intended system, integrations, processes, and page count is also enough to plan a proposal without external research. Do not write slide HTML or start image planning until that report is `ok`. Audience, purpose, style, page count, scope, and content direction are finite framing choices, not missing facts: never request them with `request_user_input`. If two or more such choices materially change the deck, call `request_user_decision` once with 2–6 options, put the recommended option first, set its id as `default_option_id`, request `requested_auto_submit_seconds: 30`, and declare `risk_level: "low"`, `reversible: true`, and `preserves_user_intent: true` only when those statements are accurate. Route to `research-synthesis` only when external evidence is necessary (§1.1). End the clarification turn after the tool call; the next user reply continues this deck rather than starting a fresh HTML task. In output mode, write the outline with the exact artifact-relative tool path `outline.json`; never use the absolute session-workspace path. Prefer one initial `write_file(path="outline.json", content=...)` call without chunk fields whenever the complete JSON fits in the current response. Start ordered chunks only after explicit output-length/tool-argument recovery. Within the same active turn, continue only from the immediately preceding `write_file` result. On a later turn or recovered Session, validate the durable target and restart the write if it is absent or invalid.
-2. Inspect the built-in theme catalog before scaffolding when the durable deck files do not already contain a scaffold. For normal authoring, run `scripts/inspect_deck_contract.js --rank-themes --theme auto --outline outline.json --title "<DECK_TITLE>"` with the same source facts that will reach the scaffold, choose one eligible returned candidate, and preserve its short public fit reason. The shortlist is the model's complete authority: never invent an id, choose an ineligible candidate, or treat the deterministic recommendation as mandatory when another eligible candidate better fits the audience and visual job. Submit the choice through the hard-start command's `--theme-model-choice` and `--theme-model-reason`; inspect returned `theme_selection` because the CLI may reject it and safely retain the deterministic recommendation. If `html-templates` is available, its Visual DNA may inform the comparison, but it is not required. Use `--theme <REGISTERED_THEME_ID> --lock-theme` only after the user explicitly names or chooses that exact id; this bypasses model reranking. Use `default_theme_id` only when the matcher reports `fallback_default`; never copy it into the command merely because it is the default (see §3.0).
-3. query layouts by page role/density/media needs, choose the **ordered layout id for every slide (including repeats)**, choose `--image-mode auto` or `creative_image_mode` from the brief, then run the hard-start scaffold command with `--outline outline.json --out deck.json` once. Semantic fidelity beats forced variety: a qualitative page must not use `chart-*` or `kpi-grid-v1` unless its outline evidence contains real quantities, and repeated layouts are allowed. Use `technical-diagram-v1` for professional architecture, system-integration, data-flow, and data-pipeline pages: set `diagram_kind`, author stable node ids plus explicit edges, and let the bundled DiagramSpec + ELK runtime compute the SVG. Keep `architecture-layered-v1` and `system-integration-v1` only for compatibility with existing decks. Use `quadrant-matrix-v1` for a true editable 2×2/四象限 priority matrix; do not approximate it with a table or generic cards. Use `dashboard-overview-v1` for a dashboard concept whose real values have not been supplied; use `kpi-grid-v1` only once quantitative evidence exists. A requested risk heatmap uses `heatmap-matrix-v1`; its editable semantic cells render as intensity levels without being mistaken for a plain table. A requested Gantt plan uses `table-data-v1` with `variant: "gantt"`; it supports a task column plus up to five editable phase columns and up to twelve work packages, and inactive cells use `"—"` rather than an empty string. The scaffold persists each page's title/message/layout/visual as `outline_intent`, normalizes strong visual mismatches (for example heatmap→heatmap matrix, 2×2 matrix→quadrant matrix, generic matrix→table, Gantt→Gantt table, architecture→technical diagram, integration→technical diagram, qualitative dashboard→dashboard overview), and safely converts an otherwise qualitative chart/KPI choice to cards instead of inventing values or requiring a model retry. Later QA checks explicit visual cardinality such as “三段式” or “四象限”. Do not discard or rewrite that intent metadata. Use `table-data-v1`, not `closing-next-steps-v1`, when a next-step page carries parallel fields such as task/action, role/owner, responsibility, member/name, status, or date; the closing layout is only for self-contained calls to action whose label and detail do not imply a responsibility matrix. The scaffold may enforce this distinction from the bound outline and reports any change under `layout_normalizations`; author only against the returned effective layout contract. For `source_mode=user_provided`, exact quantities in that page's message/bullets are evidence even when its external-link `evidence` array is empty; never downgrade a user-mandated editable chart or KPI page merely because the supplied facts do not need URLs. Use `project-case-study-v1` only for an actual source-backed project/case with proof metrics; it is not a generic image-plus-text layout for history, profiles, or other editorial narratives. A requested project case that combines a thumbnail/media region with project metrics remains `project-case-study-v1`; words such as “关键数字指标卡” describe the proof region and must not convert the whole page into `kpi-grid-v1`. Missing private project values may use visible `待补充` placeholders without changing that composition. Translate every explicit recoverable page-content requirement into an exact `--require-field SLIDE:FIELD` from that chosen contract: KPI grids use `items`, while project case studies use `metrics`. Decorative styling is not a recoverable content requirement: for example, a cover asking for a generated hero plus rotated corner labels uses the hero layout and composition styling, not `--require-field 1:tags`. A project page that must contain 2-3 metrics must use a layout whose fields include `metrics` (do not substitute `image-hero-split-v1`, which has no metrics), and a requested KPI page stays on `kpi-grid-v1` rather than being weakened to a generic cards layout. The scaffold stdout returns the complete selected-layout contracts and bound outline pages; do not call `inspect_layout.js` once per selected slide before or after scaffolding. Valid props are under `layouts[].fields` and examples/defaults under `layouts[].editor.defaultProps`. Do not query nonexistent `.props` / `.required_fields`, read the full manifest in chunks, use `execute_code` to inspect it, grep the registry source, or repeatedly inspect the same layout. Use `inspect_deck_contract.js --list-themes` and `query_layouts.js --list` for compact discovery.
+2. Inspect the complete built-in theme catalog before scaffolding when the durable deck files do not already contain a scaffold. For normal authoring, run `scripts/inspect_deck_contract.js --design-catalog --theme auto --outline outline.json --title "<DECK_TITLE>"` with the same source facts that will reach the scaffold. Choose one registered theme, one of its allowed families, and a structured palette; never invent ids or families. Submit that executable proposal to the scaffold. The exactly-one semantic review happens after the content patch in step 6, when local chart styles and the complete final design are visible. If `html-templates` is available, its Visual DNA may inform the comparison, but it is not required. Use `--theme <REGISTERED_THEME_ID> --lock-theme` only after the user explicitly names or chooses that exact id. Use `default_theme_id` only as a compatibility fallback after an invalid model response; never copy it into the command merely because it is the default (see §3.0).
+3. query layouts by page role/density/media needs, choose the **ordered layout id for every slide (including repeats)**, choose `--image-mode auto` or `creative_image_mode` from the brief, then run the hard-start scaffold command with `--outline outline.json --out deck.json` once. Semantic fidelity beats forced variety: a qualitative page must not use `chart-*` or `kpi-grid-v1` unless its outline evidence contains real quantities, and repeated layouts are allowed. A quadrant requires concrete x/y axes or a recognized relationship such as impact × effort; four parallel values without axes normalize to cards. A timeline requires at least two real ordered time/phase signals; parallel rules normalize to cards, while Day 1–5 or multi-year milestones remain timelines. Under `editorial-spread`, a statement page with a long title/message or three parallel proof points normalizes to cards instead of using an unbalanced split statement. Use `technical-diagram-v1` for professional architecture, system-integration, data-flow, and data-pipeline pages: set `diagram_kind`, author stable node ids plus explicit edges, and let the bundled DiagramSpec + ELK runtime compute the SVG. Keep `architecture-layered-v1` and `system-integration-v1` only for compatibility with existing decks. Use `quadrant-matrix-v1` for a true editable 2×2/四象限 priority matrix; do not approximate it with a table or generic cards. Use `dashboard-overview-v1` for a dashboard concept whose real values have not been supplied; use `kpi-grid-v1` only once quantitative evidence exists. A requested risk heatmap uses `heatmap-matrix-v1`; its editable semantic cells render as intensity levels without being mistaken for a plain table. A requested Gantt plan uses `table-data-v1` with `variant: "gantt"`; it supports a task column plus up to five editable phase columns and up to twelve work packages, and inactive cells use `"—"` rather than an empty string. The scaffold persists each page's title/message/layout/visual as `outline_intent`, normalizes strong visual mismatches (for example heatmap→heatmap matrix, 2×2 matrix→quadrant matrix, generic matrix→table, Gantt→Gantt table, architecture→technical diagram, integration→technical diagram, qualitative dashboard→dashboard overview), and safely converts an otherwise qualitative chart/KPI choice to cards instead of inventing values or requiring a model retry. Later QA checks explicit visual cardinality such as “三段式” or “四象限”. Do not discard or rewrite that intent metadata. Use `table-data-v1`, not `closing-next-steps-v1`, when a next-step page carries parallel fields such as task/action, role/owner, responsibility, member/name, status, or date; the closing layout is only for self-contained calls to action whose label and detail do not imply a responsibility matrix. The scaffold may enforce this distinction from the bound outline and reports any change under `layout_normalizations`; author only against the returned effective layout contract. For `source_mode=user_provided`, exact quantities in that page's message/bullets are evidence even when its external-link `evidence` array is empty; never downgrade a user-mandated editable chart or KPI page merely because the supplied facts do not need URLs. Use `project-case-study-v1` only for an actual source-backed project/case with proof metrics; it is not a generic image-plus-text layout for history, profiles, or other editorial narratives. A requested project case that combines a thumbnail/media region with project metrics remains `project-case-study-v1`; words such as “关键数字指标卡” describe the proof region and must not convert the whole page into `kpi-grid-v1`. Missing private project values may use visible `待补充` placeholders without changing that composition. Translate every explicit recoverable page-content requirement into an exact `--require-field SLIDE:FIELD` from that chosen contract: KPI grids use `items`, while project case studies use `metrics`. Decorative styling is not a recoverable content requirement: for example, a cover asking for a generated hero plus rotated corner labels uses the hero layout and composition styling, not `--require-field 1:tags`. A project page that must contain 2-3 metrics must use a layout whose fields include `metrics` (do not substitute `image-hero-split-v1`, which has no metrics), and a requested KPI page stays on `kpi-grid-v1` rather than being weakened to a generic cards layout. The scaffold stdout returns the complete selected-layout contracts and bound outline pages; do not call `inspect_layout.js` once per selected slide before or after scaffolding. Valid props are under `layouts[].fields` and examples/defaults under `layouts[].editor.defaultProps`. Do not query nonexistent `.props` / `.required_fields`, read the full manifest in chunks, use `execute_code` to inspect it, grep the registry source, or repeatedly inspect the same layout. Use `inspect_deck_contract.js --list-themes` and `query_layouts.js --list` for compact discovery.
    Use `image-feature-v1` for a wide image-led content page with editable narrative below it. Use `image-full-bleed-v1` when the brief explicitly asks for an entire-slide image, cinematic poster, campaign visual, or immersive vision page; its generated background, text-safe region, right-side visual-focus region, and dark wash are scaffolded as one recoverable layout contract. Do not approximate either request with `image-hero-split-v1` or a generic background on an unrelated layout.
 4. plan slide-level image decisions in the scaffolded `assets/generated/manifest.json`. Derive one stable deck context/style anchor from the selected theme and repeat it inside every generated-image prompt; do not add a competing top-level manifest schema. For each declared slot choose `generate`, `use_existing`, or `skip` from the narrative job, and preserve the scaffolded `acquire_via`: real people, places, products, evidence, documentary subjects, and ordinary photographic atmosphere use `web`; invented/stylized scenes, illustration, metaphor, abstract backgrounds, conceptual interfaces, and decorative image treatments use `ai`; supplied authority uses `user`; editable text/data/structure uses `none`. In ordinary `auto`, resolve an eligible cover and optional inner-page media slots through that source policy unless the page is explicitly typography-, data-, diagram-, or editable-structure-led. `creative_image_mode` keeps its explicit generation contract. A concrete subject normally uses a fixed-frame hero slot; atmosphere may use the slide-level background. Prefer one dominant media treatment rather than filling both hero and background without a reason.
-5. for every `acquire_via: web` row, call `web_search` with `{"Query":"<exact search.query>","SearchType":"image","Count":5}` before generation. Call once per unique query so the runtime duplicate-query guard does not discard an equivalent request; identical-query rows may consume the same returned batch but should choose distinct candidates unless deliberate reuse is appropriate. Emit independent unique image searches in one tool-call batch when possible. Select one relevant, sufficiently large, clear, non-watermarked candidate; write its compact receipt under `assets/source/candidates/`, then run `localize_web_image.py assets/generated/manifest.json import <receipt.json>`. Try another returned candidate if localization rejects one. If all candidates fail, run the helper's `mark` action with `exhausted`; use `unavailable` only for a missing tool, authentication, transport, or provider failure. After that recorded terminal status, call `generate_image` for only the remaining `generate` items before final validation. Emit independent image-generation calls together in one assistant tool-call batch; the executor runs this parallel-safe tool concurrently. Do not create a sub-agent merely to wait for image search or generation—the parent still needs the returned asset paths before manifest binding and QA. Always pass `watermark: false`. Localize every `use_existing` asset. Once the files exist, run `sync_image_manifest_status.js` once instead of manually editing the manifest. Store artifact-root-relative paths in the declared media prop or `slide.background`, and set media `origin` to `generated` or `asset`; the final `deck.json` never contains an unresolved generation request.
-6. Fill the scaffolded `deck.json` with one controlled batch patch when practical, then run the single `scripts/finalize_controlled_deck.js deck.json --out index.html` command directly. The patch compiler first reconciles ready manifest assets to their exact slide/prop bindings. The finalizer treats deck structure and HTML rendering as hard prerequisites, records image-manifest findings as a delivery advisory, compiles HTML, runs HTML self-check and `probe_deck_runtime.js` at `1440x900`, then records source/truth findings as another non-blocking advisory. Once rendering succeeds, a downstream HTML/runtime QA failure is preserved as a degraded advisory and the existing `index.html` is still delivered; it must not start an automatic repair loop or be described as no output. On a blocking structural failure, patch only the named paths. Source/URL/private-fact findings are reported after generation and never start a repair loop. For public-research decks, do not expose `待补充` merely because a nonessential claim was not researched: omit that claim and use supported copy instead. For required unavailable public facts use `暂无可验证公开数据`; for required user/private facts use `待补充` or `待客户确认`, then continue without asking.
+5. for every `acquire_via: web` row, call `web_search` with `{"Query":"<exact search.query>","SearchType":"image","Count":5}` before generation. Call once per unique query so the runtime duplicate-query guard does not discard an equivalent request; identical-query rows may consume the same returned batch but should choose distinct candidates unless deliberate reuse is appropriate. Emit independent unique image searches in one tool-call batch when possible. Select one relevant, sufficiently large, clear, non-watermarked candidate; write its compact receipt under `assets/source/candidates/`, then run `localize_web_image.py assets/generated/manifest.json import <receipt.json>`. Try another returned candidate if localization rejects one. If all candidates fail, run the helper's `mark` action with `exhausted`; use `unavailable` only for a missing tool, authentication, transport, or provider failure. After that recorded terminal status, call `generate_image` for only the remaining `generate` items before final validation. Emit independent image-generation calls together in one assistant tool-call batch; the executor runs this parallel-safe tool concurrently. Do not create a sub-agent merely to wait for image search or generation—the parent still needs the returned asset paths before manifest binding and QA. Always pass `watermark: false` and `publish_artifact: false`. Localize every `use_existing` asset. Once the files exist, run `sync_image_manifest_status.js` once instead of manually editing the manifest. Store artifact-root-relative paths in the declared media prop or `slide.background`, and set media `origin` to `generated` or `asset`; the final `deck.json` never contains an unresolved generation request.
+6. Fill the scaffolded `deck.json` with one controlled batch patch when practical. Then run the exactly-one semantic model review from §3.0 against the final theme, family, palette, layouts, and local chart styles. Apply at most one review revision, force chart pages back to the deck palette when a local preset conflicts, and record the reviewed final surface with `design_review_receipt.js`. Only then run the single `scripts/finalize_controlled_deck.js deck.json --out index.html` command directly. The patch compiler first reconciles ready manifest assets to their exact slide/prop bindings. The finalizer treats deck structure and HTML rendering as hard prerequisites, validates the review receipt as a non-blocking advisory, records image-manifest findings as a delivery advisory, compiles HTML, runs HTML self-check and `probe_deck_runtime.js` at `1440x900`, then records source/truth findings as another non-blocking advisory. Once rendering succeeds, a missing/stale review or downstream HTML/runtime QA failure is preserved as a degraded advisory and the existing `index.html` is still delivered; it must not start an automatic repair loop or be described as no output. On a blocking structural failure, patch only the named paths. Source/URL/private-fact findings are reported after generation and never start a repair loop. For public-research decks, do not expose `待补充` merely because a nonessential claim was not researched: omit that claim and use supported copy instead. For required unavailable public facts use `暂无可验证公开数据`; for required user/private facts use `待补充` or `待客户确认`, then continue without asking.
 7. `finalize_controlled_deck.js` is the only normal finalization command. Do not hand-edit the compiled HTML, split finalization into separate successful validator/render calls, or add another `output/` prefix. The generated HTML is the default deliverable and includes the controlled editor runtime. A failed core deck schema or render step blocks delivery because no trustworthy HTML can be compiled. Exact outline title/message binding drift is semantic QA: preserve it as a degraded deck-spec warning and still render; do not enter another model repair loop solely for that drift. Image-manifest findings likewise do not suppress HTML; deliver the HTML as degraded and explain a missing explicitly required image under the localized usage-note label from §6. A failed HTML self-check, editor-fit, contrast, or export-geometry report keeps the already-rendered HTML as a degraded draft with the exact QA findings preserved; return that artifact and do not loop. A source/truth advisory with findings does not block or invalidate an existing `index.html`; keep the HTML and summarize only its concrete user impact afterward.
 8. When the manifest contains `layout_contract`, run image layout contract validation after finalization.
 9. export with `scripts/html_to_editable_pptx.js` only when the user explicitly requests PPTX, then run PPTX structural QA.
@@ -513,8 +559,9 @@ Do not switch routes based on convenience.
 | Preview representative themes | `${BOX_AGENT_NODE:-node} scripts/render_theme_gallery.js --out theme-previews/index.html` (`--all` only on request) |
 | Compare every composition family | `${BOX_AGENT_NODE:-node} scripts/render_composition_gallery.js --out composition-previews/index.html` (11 families × 3 variants, matched content) |
 | Validate outline | `${BOX_AGENT_NODE:-node} scripts/validate_outline.js outline.json --report qa/outline_check.json` |
-| Rank theme candidates for model rerank | `${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js --rank-themes --theme auto --outline outline.json --title "Deck title"` |
-| Scaffold ordered deck + image manifest + inspect exact contract | `cd "${BOX_AGENT_OUTPUT_DIR:-.}" && ${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js cover-hero-v1 cards-grid-v1 cards-grid-v1 --theme auto --theme-model-choice creative-mode --theme-model-reason "创意机构场景与多彩海报语法更匹配" --outline outline.json --title "Deck title" --out deck.json` |
+| Read complete design catalog | `${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js --design-catalog --theme auto --outline outline.json --title "Deck title"` |
+| Scaffold ordered deck + image manifest + inspect exact contract | `cd "${BOX_AGENT_OUTPUT_DIR:-.}" && ${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js cover-hero-v1 cards-grid-v1 cards-grid-v1 --theme auto --theme-model-choice creative-mode --theme-model-reason "创意机构场景与多彩海报语法更匹配" --theme-model-confidence high --theme-model-identity "创意机构品牌活动" --family poster-asymmetric --palette-background '#FFF8F0' --palette-text '#111111' --palette-primary '#FF4D8D' --palette-accent '#FFC700' --outline outline.json --title "Deck title" --out deck.json` |
+| Record exactly-one final design review | `${BOX_AGENT_NODE:-node} scripts/design_review_receipt.js deck.json record --verdict accepted --reason "最终主题、配色、版式与图表风格一致"` |
 | Query controlled layouts | `${BOX_AGENT_NODE:-node} scripts/query_layouts.js --role comparison --density medium-high --media-count 0` |
 | Inspect a layout contract | `${BOX_AGENT_NODE:-node} scripts/inspect_layout.js comparison-two-column-v1` |
 | Localize selected web image | `${BOX_AGENT_PYTHON:-python3} scripts/localize_web_image.py assets/generated/manifest.json import assets/source/candidates/slide-01.json` |
@@ -932,6 +979,44 @@ No global, Homebrew, or system-wide installs without explicit approval.
 No `/tmp`, no `>/tmp`, and no writes outside the canonical delivery root
 selected by the runtime. Never add another nested `output/` directory.
 
+### 4.3 Optional whole-deck overview
+
+At final delivery, prefer one contact sheet showing every slide in order, if
+current screenshots and the local renderer are available. This is a user preview,
+not an additional visual QA gate. Never block delivery on this preview.
+Use a four-column thumbnail grid in reading order (left to right, then top to
+bottom): 12 slides form 4 columns by 3 rows. Fewer than four slides use one row;
+an incomplete last row is fine. This is only a quick look at the overall style
+and composition, not a detailed slide review.
+
+Reuse screenshots from the final HTML export when available; identify them as
+HTML previews, not screenshots of the exported PowerPoint. Otherwise use an
+available browser to capture the final HTML slides, or an already usable PPTX
+renderer (`scripts/render_pptx.py <deck.pptx> --out qa/overview-slides --format png`).
+For browser capture, screenshot each slide element separately, preserving its
+aspect ratio and excluding editor toolbars, navigation, and surrounding page
+chrome. Do not use a full-page scrolling screenshot or a single tall strip of
+the entire deck as the overview. Do not change the actual deck layout to make
+the contact sheet.
+Do not install dependencies just for this optional preview. If capture is
+unavailable or fails, skip it without retries or asking the user to fix their
+machine. Missing preview alone does not make the deck incomplete.
+
+Use only current full-slide PNGs in a dedicated directory; check that their
+count and numeric order match the final deck. Never use generated asset images,
+stale screenshots, or a single Quick Look thumbnail as an all-slide overview.
+If any slide is missing, omit the overview. Combine a complete set with:
+
+```bash
+${BOX_AGENT_NODE:-node} scripts/make_contact_sheet.js qa/overview-slides --out qa/deck-overview.png --cols 4 --thumb-width 480
+```
+
+If stitching fails or the dependency is missing, skip the preview. The helper's
+vision-review prompt/status belongs to opt-in visual QA; it does not require a
+reviewer or prevent delivery of this user preview. Embed only the successfully
+created contact sheet once, before the generation-details section. Do not
+embed individual slide screenshots by default.
+
 ## 6. Final Response Format
 
 The normal user-facing response must be concise and use the active user-visible
@@ -939,6 +1024,15 @@ response language. An explicit user language request wins; otherwise follow the
 host `ui_language` instruction when present, then the language of the user's
 task. Never override that contract with a locale-specific default, and do not
 mix headings from one language with body text from another.
+
+Treat generated or acquired slide illustrations, diagrams, backgrounds, and
+individual screenshots as intermediate assets. Do not embed them in progress
+messages or the final reply, or list them as standalone deliverables, unless
+the user explicitly requests the individual images. Keep their local files and
+manifest references for deck rendering and editing. For PPT assets call
+`generate_image` with `publish_artifact: false`; this suppresses standalone
+artifact publication without suppressing generation or insertion. A requested
+individual-image deliverable may use `publish_artifact: true`.
 
 Present information in this priority order:
 
@@ -983,6 +1077,14 @@ the localized usage-note section only when it changes how the user should use th
 
 Translate internal outcomes into user impact:
 
+- Image-generation success means the file exists, not that it is inserted.
+  Finalization binds ready manifest assets to missing/placeholder slots in the
+  same invocation, preserving already chosen media. Use the final image report
+  to describe insertion; an unreferenced image remains missing from the deck.
+  Report affected pages in an editable draft without another review or retry.
+- Local contrast warnings likewise mean a readable-display problem remains:
+  deliver the editable draft, name the affected pages from the existing report,
+  and do not label the color check as clean or start another review round.
 - When the editable HTML is current and core checks pass, say it can be
   previewed and edited normally.
 - When source or private-fact advisories exist, make clear that they do not

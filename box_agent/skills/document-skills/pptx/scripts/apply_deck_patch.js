@@ -20,7 +20,7 @@ const {
 const {
   expectedVisualItemContract,
 } = require("./outline_layout_contract.js");
-const { getVisualCollectionContract } = require("../layouts/registry.js");
+const { EDITOR_PLACEHOLDER_IMAGE, getVisualCollectionContract } = require("../layouts/registry.js");
 
 function usage(exitCode = 2) {
   console.log("Usage: apply_deck_patch.js deck.json deck.patch.json");
@@ -167,9 +167,9 @@ function setNestedProp(target, propPath, value) {
   return true;
 }
 
-function reconcileReadyManifestMedia(deck, deckPath, changes) {
+function reconcileReadyManifestMedia(deck, deckPath, changes, options = {}) {
   const artifactRoot = path.dirname(deckPath);
-  const manifestPath = path.join(
+  const manifestPath = options.manifestPath || path.join(
     artifactRoot,
     "assets",
     "generated",
@@ -187,7 +187,7 @@ function reconcileReadyManifestMedia(deck, deckPath, changes) {
   const imagePlan = isPlainObject(manifest) ? manifest.image_plan : null;
   if (!Array.isArray(imagePlan)) return;
 
-  const slidesById = new Map(deck.slides.map(slide => [slide.id, slide]));
+  const slidesById = new Map(deck.slides.filter(isPlainObject).map(slide => [slide.id, slide]));
   for (const entry of imagePlan) {
     if (!isPlainObject(entry)) continue;
     if (!["generate", "use_existing"].includes(entry.decision)) continue;
@@ -222,6 +222,20 @@ function reconcileReadyManifestMedia(deck, deckPath, changes) {
       ? entry.prop_path.trim()
       : "";
     if (!propPath) continue;
+    const isBackground = propPath === "background" || propPath === "slide.background";
+    const normalizedPropPath = propPath.startsWith("props.")
+      ? propPath.slice("props.".length)
+      : propPath;
+    const propParts = normalizedPropPath.split(".");
+    if (propParts.some(part => !part || ["__proto__", "prototype", "constructor"].includes(part))) continue;
+    if (options.onlyMissing) {
+      const current = isBackground ? slide.background : propParts.reduce(
+        (value, part) => value && value[part], slide.props
+      );
+      const currentSrc = typeof current === "string" ? current : current && current.src;
+      if (typeof currentSrc === "string" && currentSrc.trim()
+          && currentSrc !== EDITOR_PLACEHOLDER_IMAGE) continue;
+    }
     const sourcedFromWeb = entry.resolved_via === "web" || entry.origin === "sourced";
     const origin = entry.decision === "use_existing" ? "asset" : "generated";
     const sourceTitle = isPlainObject(entry.source)
@@ -246,7 +260,7 @@ function reconcileReadyManifestMedia(deck, deckPath, changes) {
       changes,
       `manifest.${slide.id}.${propPath}`
     );
-    if (propPath === "background" || propPath === "slide.background") {
+    if (isBackground) {
       slide.background = media;
       recordChange(
         changes,
@@ -255,9 +269,6 @@ function reconcileReadyManifestMedia(deck, deckPath, changes) {
       continue;
     }
 
-    const normalizedPropPath = propPath.startsWith("props.")
-      ? propPath.slice("props.".length)
-      : propPath;
     const rootProp = normalizedPropPath.split(".", 1)[0];
     const layout = getLayout(slide.layout_id);
     if (!layout || !layout.fields || !layout.fields[rootProp]) continue;
@@ -802,9 +813,13 @@ function main() {
   }, null, 2));
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(error && error.stack ? error.stack : String(error));
-  process.exit(1);
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exit(1);
+  }
 }
+
+module.exports = { reconcileReadyManifestMedia };

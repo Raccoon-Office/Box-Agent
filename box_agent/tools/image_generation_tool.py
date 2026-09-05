@@ -505,6 +505,14 @@ class GenerateImageTool(Tool):
                         "is NOT a reason to disable it."
                     ),
                 },
+                "publish_artifact": {
+                    "type": "boolean",
+                    "description": (
+                        "Publish the image as a standalone user deliverable (default true). "
+                        "Set false for intermediate assets embedded in a larger deliverable, "
+                        "as instructed by the PPTX skill. The saved file remains available."
+                    ),
+                },
                 "watermark_text": {
                     "type": "string",
                     "description": (
@@ -531,6 +539,7 @@ class GenerateImageTool(Tool):
         metadata: dict[str, Any] | None = None,
         watermark: bool = True,
         watermark_text: str | None = None,
+        publish_artifact: bool = True,
     ) -> ToolResult:
         if not self.endpoint:
             return ToolResult(
@@ -627,7 +636,7 @@ class GenerateImageTool(Tool):
             rel_path = self._display_path(target)
             artifact_rel_path = self._artifact_display_path(target)
             info = {
-                "type": "artifact",
+                "type": "artifact" if publish_artifact else "intermediate_asset",
                 "kind": "image",
                 "filename": target.name,
                 "rel_path": rel_path,
@@ -654,8 +663,12 @@ class GenerateImageTool(Tool):
             return ToolResult(
                 success=True,
                 content=(
-                    f"Generated image saved to [{artifact_rel_path}]\n"
-                    f"mime_type: {mime_type}\n"
+                    (
+                        f"Generated image saved to [{artifact_rel_path}]\n"
+                        if publish_artifact
+                        else "Intermediate image saved; use model_context for its path.\n"
+                    )
+                    + f"mime_type: {mime_type}\n"
                     f"bytes: {len(image_bytes)}\n"
                     f"watermark: {'applied' if watermark_status.get('applied') else 'not applied'}"
                     + (

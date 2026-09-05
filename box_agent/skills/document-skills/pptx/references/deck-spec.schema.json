@@ -63,9 +63,25 @@
             "requested": { "type": "array", "items": { "type": "string" } },
             "background": { "$ref": "#/$defs/colorContract" },
             "surface": { "$ref": "#/$defs/colorContract" },
+            "text": { "$ref": "#/$defs/colorContract" },
             "primary": { "$ref": "#/$defs/colorContract" },
             "accent": { "$ref": "#/$defs/colorContract" },
+            "secondary": { "$ref": "#/$defs/colorContract" },
             "accent_usage": { "enum": ["sparse", "balanced", "dominant"] }
+          }
+        },
+        "style_overrides": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "collage": { "const": "off" },
+            "decorations": { "const": "off" },
+            "stagger": { "const": "off" },
+            "irregular_grid": { "const": "off" },
+            "shadow": { "const": "off" },
+            "texture": { "const": "off" },
+            "gradient": { "const": "off" },
+            "radius": { "enum": ["square", "rounded"] }
           }
         },
         "slides": {

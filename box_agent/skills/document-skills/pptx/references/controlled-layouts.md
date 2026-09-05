@@ -64,13 +64,18 @@ Normal generation finalizes with one command:
 ${BOX_AGENT_NODE:-node} scripts/finalize_controlled_deck.js deck.json --out index.html
 ```
 
-The patch compiler first reconciles every existing manifest asset to its exact
-slide id and `prop_path`. The helper validates the core deck schema as a hard prerequisite,
+The patch compiler reconciles every existing manifest asset to its exact
+slide id and `prop_path`. Finalization reuses the same binding function before
+validation/rendering to fill missing or editor-placeholder media when files
+arrive after the content patch. It honors `--manifest`, preserves already chosen
+media, and never adds a model turn or subprocess stage. The helper validates the core deck schema as a hard prerequisite,
 records image-manifest findings as a delivery advisory, renders `index.html`,
 runs HTML self-check and the 1440x900 runtime probe, then records source/truth
-findings as another non-blocking advisory. It stops at the first actionable
-structural, HTML, or runtime failure. Image, source, URL, and private-fact
-findings never prevent a structurally valid HTML artifact from being written;
+findings as another non-blocking advisory. It stops only when a structural or
+render failure prevents a trustworthy HTML artifact from being written. HTML,
+runtime, image, source, URL, and private-fact findings discovered after render
+are preserved as advisories; they never start another model or repair round.
+Those findings never prevent an already rendered, structurally valid HTML artifact from being written;
 unmet required images make that artifact degraded rather than complete. Exact
 outline title/message binding drift is also preserved as degraded semantic QA
 when the core deck schema still passes.
@@ -277,18 +282,56 @@ The controlled compiler owns a versioned theme catalog under `themes/`.
 `layouts/manifest.json` and `scripts/inspect_deck_contract.js` expose
 `default_theme_id` plus every theme's selection signals, palette, typography,
 shape tokens, compatible composition families, and finite visual-style axes.
-Normal authoring uses `--theme auto`; the contract writes an explainable
-`theme_selection` record and may replace a strongly mismatched fallback default.
-Auto-selection applies three ordered signal classes: explicit keyword rules,
-industry matching against `selection.industry_fit`, and mood matching against
-`selection.mood_keywords`. Negative style clauses are removed before positive
-industry/mood scoring, so “不要复古手绘” is not treated as a retro request.
+Normal authoring calls `--design-catalog`, then uses `--theme auto` and asks the active model to choose from
+the complete registered catalog. The model also supplies one allowed
+composition family and a structured exact-hex palette with separate background,
+text, primary, accent, and optional secondary roles. After content authoring,
+exactly one isolated semantic model review sees the final chart styles and may
+accept or revise the identity/theme/family/palette proposal once; an unavailable
+review is recorded and never retried. The compiler validates the final review
+receipt as an advisory and validates executability: registered ids, family
+compatibility, color syntax, and text/background contrast. Identity colors are
+not rejected solely because primary/background contrast is low. It does not rank themes or override
+a valid aesthetic choice with keyword rules. Legacy callers that omit a model
+choice retain compatibility inference, but this is not the normal authoring
+route.
 Use `--theme <THEME_ID> --lock-theme` only for an exact user-selected id.
 The catalog includes at least one
 executable theme for every bundled Visual DNA id, plus explicitly curated
 variants such as `block-frame-mono-blue`. It ships with the `pptx` skill and is
 sufficient for generation on machines that do not have the separate
 `html-templates` skill.
+
+Layout semantics are validated independently of item count. A quadrant needs
+real x/y relationship evidence; four parallel labels fall back to cards. A
+timeline needs at least two ordered time or phase signals; parallel policies
+fall back to cards. Composition compatibility also participates in
+normalization: `editorial-spread` does not keep a split statement when the
+title/message is long or the page carries three parallel proof points. These
+normalizations are advisory authoring corrections and never suppress an
+otherwise renderable artifact.
+
+Composition families publish their actual content-left gutter through
+`--deck-content-left`. Theme guide lines and similar edge decorations derive
+their position from that shared gutter instead of using an independent
+percentage, so a theme cannot draw through layout-owned content. Repeated
+structures also adapt to semantic cardinality where the geometry would
+otherwise create a conspicuous empty column (for example three- and four-step
+timelines). These are deterministic renderer rules, not extra model review
+rounds.
+
+The existing 1440x900 runtime probe checks both the slide background/base-text
+pair and sampled text on local card, timeline, label, and chart surfaces. The
+renderer computes a readable foreground token for each palette-backed surface.
+`primary_text` means emphasis ink on the page, card, and tinted surfaces;
+`inverse` means ink on a solid `primary` fill. They are resolved independently
+for both built-in and overridden palettes. Readable identity-colored emphasis
+is retained; muted copy and alternate-page emphasis account for their actual
+surface palette. Chart/note surfaces keep their own foreground roles.
+The probe evaluates actual statement text rather than an unused container
+color, and includes total failure count/affected pages alongside bounded details.
+Local contrast findings remain advisory and keep the rendered HTML deliverable;
+they do not add a hard threshold, retry loop, or separate finalization stage.
 
 `html-templates` is an optional, richer Visual DNA matcher. When present, its
 `template_id` selects the corresponding executable base theme (for example
@@ -310,7 +353,7 @@ composition instead of inheriting only generic theme-axis styling. DiagramSpec
 pages retain clean professional SVG nodes and edges inside the pixel monitor
 frame.
 
-The technical/product/data shortlist owns three purpose-built themes:
+The technical/product/data catalog includes three purpose-built themes:
 
 - `technical-blueprint` defaults to `technical-schematic` for architecture,
   infrastructure, integration, runtime, and data-pipeline briefs. Its CSS adds

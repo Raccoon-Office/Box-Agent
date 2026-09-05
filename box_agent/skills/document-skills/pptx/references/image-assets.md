@@ -204,6 +204,6 @@ AI fallback for a named real subject as factual evidence.
 
 1. Store generated files under `assets/generated/`.
 1. Reference files with artifact-root-relative paths inside `index.html`/`deck.json`.
-1. Always call `generate_image` with `watermark: false` for PPT assets. The deck supplies its own branding/watermark and the `avoid` field already steers the model away from in-image watermarks, so the tool's default "AI 生成" stamp must be suppressed.
+1. Always call `generate_image` with `watermark: false` and `publish_artifact: false` for PPT assets. Keep intermediate images out of user-facing messages; retain their files and manifest references. Only publish individual images when explicitly requested. The deck supplies its own branding/watermark and the `avoid` field already steers the model away from in-image watermarks, so the tool's default "AI 生成" stamp must be suppressed.
 1. If generation tooling is unavailable, mark required image-plan entries as `blocked`; on a non-creative controlled deck, an optional slot may use `skip` only when its layout contract permits it. `draw_in_html` remains a legacy-route choice, not a controlled fallback.
 1. In `creative_image_mode`, the previous fallback rule is stricter: if the required generated image is unavailable, the image-complete delivery is blocked. Preserve and deliver any structurally valid HTML as a degraded draft; do not claim that it satisfies the requested image-rich result.

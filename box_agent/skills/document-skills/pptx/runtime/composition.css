@@ -587,6 +587,7 @@
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="institutional-grid"] .slide {
+  --deck-content-left: 86px;
   padding: 68px 86px 66px;
 }
 
@@ -804,6 +805,7 @@ body[data-deck-composition="institutional-grid"][data-deck-composition-variant="
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="editorial-spread"] .slide {
+  --deck-content-left: 76px;
   padding: 62px 76px 66px;
 }
 
@@ -947,6 +949,14 @@ body[data-deck-composition="editorial-spread"] .timeline-track {
   grid-template-columns: minmax(0, 1.35fr) repeat(4, minmax(0, 0.91fr));
 }
 
+body[data-deck-composition="editorial-spread"] .timeline-count-3 .timeline-track {
+  grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(0, 1fr));
+}
+
+body[data-deck-composition="editorial-spread"] .timeline-count-4 .timeline-track {
+  grid-template-columns: minmax(0, 1.25fr) repeat(3, minmax(0, 0.95fr));
+}
+
 body[data-deck-composition="editorial-spread"] .timeline-step:first-child {
   padding-right: 54px;
 }
@@ -1034,6 +1044,7 @@ body[data-deck-composition="editorial-spread"][data-deck-composition-variant="ba
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="poster-asymmetric"] .slide {
+  --deck-content-left: 64px;
   padding: 56px 64px 58px;
 }
 
@@ -1274,6 +1285,7 @@ body[data-deck-composition="poster-asymmetric"][data-deck-composition-variant="s
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="playful-collage"] .slide {
+  --deck-content-left: 78px;
   padding: 66px 78px 68px;
 }
 
@@ -1512,6 +1524,7 @@ body[data-deck-composition="playful-collage"][data-deck-composition-variant="cap
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="brutalist-frame"] .slide {
+  --deck-content-left: 70px;
   padding: 62px 70px 64px;
   outline: 4px solid var(--deck-text);
   outline-offset: -24px;
@@ -1776,6 +1789,7 @@ body[data-deck-composition="brutalist-frame"][data-deck-composition-variant="led
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="retro-interface"] .slide {
+  --deck-content-left: 74px;
   padding: 108px 74px 64px;
   border: 4px solid var(--deck-text);
 }
@@ -2063,6 +2077,7 @@ body[data-deck-composition="retro-interface"][data-deck-composition-variant="win
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="literary-minimal"] .slide {
+  --deck-content-left: 112px;
   padding: 78px 112px 76px;
 }
 
@@ -2361,6 +2376,7 @@ body[data-deck-composition="literary-minimal"][data-deck-composition-variant="ma
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="product-showcase"] .slide {
+  --deck-content-left: 88px;
   padding: 78px 88px 68px;
 }
 
@@ -2707,6 +2723,7 @@ body[data-deck-composition="product-showcase"][data-deck-composition-variant="an
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="cinematic-canvas"] .slide {
+  --deck-content-left: 86px;
   padding: 76px 86px 70px;
 }
 
@@ -2983,6 +3000,7 @@ body[data-deck-composition="cinematic-canvas"][data-deck-composition-variant="ch
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="analytical-exhibit"] .slide {
+  --deck-content-left: 88px;
   padding: 70px 88px 66px;
 }
 
@@ -3294,6 +3312,7 @@ body[data-deck-composition="analytical-exhibit"][data-deck-composition-variant="
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="technical-schematic"] .slide {
+  --deck-content-left: 88px;
   padding: 76px 88px 68px;
 }
 
@@ -3927,8 +3946,9 @@ body:not(.deck-editing) .layout-cover.no-hero .cover-visual {
    cards-grid-v1 advertises three to six editable cards. Composition families
    may change the visual rhythm, but they must not make a valid collection
    depend on hidden overflow or unusually short placeholder copy. Four cards
-   use a stable two-by-two frame; five and six use two rows of three. The
-   structural ledger-grid variant remains single-column and is excluded below.
+   use a stable two-by-two frame; five uses an equal-card 3+2 centered frame;
+   and six uses two rows of three. The structural ledger-grid variant remains
+   single-column and is excluded below.
    -------------------------------------------------------------------------- */
 
 body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) :is(.cards-count-4, .cards-count-5, .cards-count-6) .cards-grid,
@@ -3959,6 +3979,30 @@ body[data-deck-composition="brutalist-frame"][data-deck-composition-variant="led
 body[data-deck-composition="retro-interface"] :is(.cards-count-5, .cards-count-6) .cards-grid,
 body[data-deck-composition="literary-minimal"][data-deck-composition-variant="asymmetric-column"] :is(.cards-count-5, .cards-count-6) .cards-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) .layout-cards.cards-count-5:not(.cards-featured) .cards-grid,
+body[data-deck-composition="editorial-spread"] .layout-cards.cards-count-5:not(.cards-featured) .cards-grid,
+body[data-deck-composition="playful-collage"]:not([data-deck-composition-variant="capsule"]) .layout-cards.cards-count-5:not(.cards-featured) .cards-grid,
+body[data-deck-composition="retro-interface"]:not([data-deck-composition-variant="terminal-stack"]) .layout-cards.cards-count-5:not(.cards-featured) .cards-grid,
+body[data-deck-composition="literary-minimal"][data-deck-composition-variant="asymmetric-column"] .layout-cards.cards-count-5:not(.cards-featured) .cards-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) .layout-cards.cards-count-5:not(.cards-featured) .content-card,
+body[data-deck-composition="editorial-spread"] .layout-cards.cards-count-5:not(.cards-featured) .content-card,
+body[data-deck-composition="playful-collage"]:not([data-deck-composition-variant="capsule"]) .layout-cards.cards-count-5:not(.cards-featured) .content-card,
+body[data-deck-composition="retro-interface"]:not([data-deck-composition-variant="terminal-stack"]) .layout-cards.cards-count-5:not(.cards-featured) .content-card,
+body[data-deck-composition="literary-minimal"][data-deck-composition-variant="asymmetric-column"] .layout-cards.cards-count-5:not(.cards-featured) .content-card {
+  grid-column: span 2;
+}
+
+body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) .layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4),
+body[data-deck-composition="editorial-spread"] .layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4),
+body[data-deck-composition="playful-collage"]:not([data-deck-composition-variant="capsule"]) .layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4),
+body[data-deck-composition="retro-interface"]:not([data-deck-composition-variant="terminal-stack"]) .layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4),
+body[data-deck-composition="literary-minimal"][data-deck-composition-variant="asymmetric-column"] .layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4) {
+  grid-column: 2 / span 2;
 }
 
 body[data-deck-composition="institutional-grid"]:not([data-deck-composition-variant="ledger-grid"]) :is(.cards-count-4, .cards-count-5, .cards-count-6) .content-card,
@@ -4054,6 +4098,130 @@ body[data-deck-composition="playful-collage"][data-deck-composition-variant="sta
   padding: 22px 24px;
 }
 
+/* --------------------------------------------------------------------------
+   User-directed style overrides. These semantic axes refine a composition
+   without replacing its theme, family, layout ids, or editable content.
+   -------------------------------------------------------------------------- */
+
+body[data-deck-style-decorations="off"] .composition-ornament,
+body[data-deck-style-collage="off"] .composition-collage-pin {
+  display: none !important;
+}
+
+body[data-deck-style-stagger="off"] :is(
+  .content-card,
+  .kpi-card,
+  .timeline-step,
+  .comparison-column,
+  .text-section
+),
+body[data-deck-style-collage="off"] :is(
+  .content-card,
+  .kpi-card,
+  .timeline-step,
+  .comparison-column,
+  .text-section
+) {
+  margin-top: 0 !important;
+  transform: none !important;
+}
+
+body[data-deck-style-irregular-grid="off"] :is(
+  .cards-count-3 .cards-grid,
+  .kpis-count-3 .kpi-grid
+),
+body[data-deck-style-collage="off"] :is(
+  .cards-count-3 .cards-grid,
+  .kpis-count-3 .kpi-grid
+) {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+
+body[data-deck-style-irregular-grid="off"] :is(
+  .cards-count-4 .cards-grid,
+  .kpis-count-4 .kpi-grid
+),
+body[data-deck-style-collage="off"] :is(
+  .cards-count-4 .cards-grid,
+  .kpis-count-4 .kpi-grid
+) {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+body[data-deck-style-irregular-grid="off"] :is(
+  .cards-count-6 .cards-grid,
+  .kpis-count-6 .kpi-grid
+),
+body[data-deck-style-collage="off"] :is(
+  .cards-count-6 .cards-grid,
+  .kpis-count-6 .kpi-grid
+) {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+
+body[data-deck-style-irregular-grid="off"] .layout-cards.cards-count-5:not(.cards-featured) .cards-grid,
+body[data-deck-style-collage="off"] .layout-cards.cards-count-5:not(.cards-featured) .cards-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+}
+
+body[data-deck-style-irregular-grid="off"] .layout-cards.cards-count-5:not(.cards-featured) .content-card,
+body[data-deck-style-collage="off"] .layout-cards.cards-count-5:not(.cards-featured) .content-card {
+  grid-column: span 2 !important;
+}
+
+body[data-deck-style-irregular-grid="off"] .layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4),
+body[data-deck-style-collage="off"] .layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4) {
+  grid-column: 2 / span 2 !important;
+}
+
+body[data-deck-style-shadow="off"] .slide * {
+  box-shadow: none !important;
+  text-shadow: none !important;
+  filter: none !important;
+}
+
+body[data-deck-style-texture="off"] .slide {
+  background-image: none !important;
+}
+
+body[data-deck-style-gradient="off"] .slide :is(
+  .content-card,
+  .kpi-card,
+  .comparison-column,
+  .text-section,
+  .chart-plot,
+  .data-table-wrap
+) {
+  background-image: none !important;
+}
+
+body[data-deck-style-radius="square"] .slide :is(
+  .content-card,
+  .kpi-card,
+  .comparison-column,
+  .text-section,
+  .chart-plot,
+  .data-table-wrap,
+  .timeline-step,
+  .cover-visual,
+  .image-feature-media,
+  .image-hero-media
+) {
+  border-radius: 0 !important;
+}
+
+body[data-deck-style-radius="rounded"] .slide :is(
+  .content-card,
+  .kpi-card,
+  .comparison-column,
+  .text-section,
+  .chart-plot,
+  .data-table-wrap,
+  .timeline-step
+) {
+  border-radius: max(18px, var(--deck-radius-medium)) !important;
+}
+
 body[data-deck-composition="playful-collage"][data-deck-composition-variant="staggered"] :is(.cards-count-4, .cards-count-5, .cards-count-6) .content-card h3 {
   margin-top: 8px;
   font-size: 28px;
@@ -4100,6 +4268,11 @@ body.deck-editing .layout-cover.no-hero {
 
 /* Layout variants own semantic geometry. Composition may restyle their parts,
    but must not normalize a selected structural variant back to its family grid. */
+body[data-deck-composition] .layout-project-case.project-poster,
+body[data-deck-composition] .layout-project-case.project-poster.media-left {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 body[data-deck-composition] .cards-featured .cards-grid,
 body[data-deck-composition] .kpis-hero .kpi-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -7,6 +7,7 @@ const { spawnSync } = require("child_process");
 const { createHash } = require("crypto");
 
 const { resolveArtifactPath } = require("./deck_spec_core.js");
+const { reconcileReadyManifestMedia } = require("./apply_deck_patch.js");
 
 function usage() {
   console.error(
@@ -368,6 +369,7 @@ function main() {
   const reportDir = path.join(artifactRoot, "qa");
   const reports = {
     contract: path.join(reportDir, "deck_contract.json"),
+    review: path.join(reportDir, "design_review_check.json"),
     spec: path.join(reportDir, "deck_spec.json"),
     truth: path.join(reportDir, "truth_check.json"),
     image: path.join(reportDir, "image_manifest.json"),
@@ -376,8 +378,31 @@ function main() {
   };
   fs.mkdirSync(reportDir, { recursive: true });
 
+  // Assets can finish after the content patch. Bind them in this same compile
+  // invocation, before validation and rendering, without replacing chosen media.
+  const mediaBindings = [];
+  let deck = null;
+  try {
+    deck = readJson(deckPath);
+  } catch (_error) {
+    // The existing deck-spec stage owns invalid/missing document diagnostics.
+  }
+  if (deck && Array.isArray(deck.slides)) {
+    reconcileReadyManifestMedia(deck, deckPath, mediaBindings, {
+      manifestPath,
+      onlyMissing: true,
+    });
+    if (mediaBindings.length) writeJson(deckPath, deck);
+  }
+
   const deckSpecReport = runDeckSpecStage(deckPath, reports.spec);
   refreshDeckContractReport(deckPath, reports.contract, deckSpecReport);
+  const designReviewReport = runAdvisoryStage(
+    "design_review",
+    "design_review_receipt.js",
+    [deckPath, "validate", "--report", reports.review],
+    reports.review,
+  );
   let manifestMode = "auto";
   try {
     const manifest = readJson(manifestPath);
@@ -435,8 +460,11 @@ function main() {
   const degradedStages = [
     deckSpecReport.advisory === true ? "deck_spec" : null,
     imageReport.warnings.length > 0 ? "image_manifest" : null,
+    designReviewReport.warnings.length > 0 ? "design_review" : null,
     htmlReport.advisory === true ? "html_self_check" : null,
-    runtimeReport.advisory === true ? "runtime_probe" : null,
+    runtimeReport.advisory === true
+      || (runtimeReport.editor?.componentContrast?.failures?.length || 0) > 0
+      ? "runtime_probe" : null,
   ].filter(Boolean);
   const degraded = degradedStages.length > 0;
   console.log(
@@ -444,6 +472,7 @@ function main() {
       ok: true,
       deck: deckPath,
       html: outputPath,
+      media_bindings: mediaBindings,
       qa_reports: Object.values(reports),
       warnings: warningCount,
       degraded,

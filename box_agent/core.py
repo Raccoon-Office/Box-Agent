@@ -1387,7 +1387,8 @@ def _detect_regex_artifacts(
 
     Returns the regex-detected artifacts plus the set of absolute paths that
     should be excluded from the later diff layer (those already surfaced here,
-    or carried on a ``type:"artifact"`` ``raw_output``).
+    or carried on an artifact/intermediate-asset ``raw_output``). Intermediate
+    assets are also excluded from regex publication while remaining on disk.
     """
     regex_artifacts = _detect_artifacts(
         tool_call_id,
@@ -1397,11 +1398,15 @@ def _detect_regex_artifacts(
         artifact_root_dir,
     )
     already = {a.abs_path for a in regex_artifacts}
-    if isinstance(raw_output, dict) and raw_output.get("type") == "artifact":
+    if isinstance(raw_output, dict) and raw_output.get("type") in ("artifact", "intermediate_asset"):
+        raw_paths: set[str] = set()
         for key in ("abs_path", "absolute_path"):
             raw_path = raw_output.get(key)
             if isinstance(raw_path, str) and raw_path.strip():
-                already.add(str(Path(raw_path).expanduser().resolve()))
+                raw_paths.add(str(Path(raw_path).expanduser().resolve()))
+        already.update(raw_paths)
+        if raw_output.get("type") == "intermediate_asset":
+            regex_artifacts = [a for a in regex_artifacts if a.abs_path not in raw_paths]
     return regex_artifacts, already
 
 

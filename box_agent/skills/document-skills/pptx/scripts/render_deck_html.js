@@ -13,7 +13,10 @@ const {
   resolveDeckDesign,
   validateAndNormalizeDeck,
 } = require("./deck_spec_core.js");
-const { paletteWithOverrides } = require("./design_contract_core.js");
+const {
+  paletteWithOverrides,
+  readableForeground,
+} = require("./design_contract_core.js");
 
 function parseArgs(argv) {
   if (!argv[0] || argv[0] === "--help" || argv[0] === "-h") {
@@ -53,17 +56,27 @@ function themeVariables(theme, designContract = null) {
     const value = chart[index];
     return typeof value === "string" && value.trim() ? cssValue(value) : fallback;
   };
+  const chartForeground = index => readableForeground(
+    chartColor(index, cssValue(palette.background)),
+    cssValue(palette.text),
+  );
   return [
     ":root {",
     `  --deck-bg: ${cssValue(palette.background)};`,
     `  --deck-surface: ${cssValue(palette.surface)};`,
     `  --deck-surface-strong: ${cssValue(palette.surface_strong)};`,
     `  --deck-primary: ${cssValue(palette.primary)};`,
+    `  --deck-secondary: ${themeColor(palette, "secondary", cssValue(palette.primary))};`,
     `  --deck-primary-text: ${themeColor(palette, "primary_text", cssValue(palette.primary))};`,
     `  --deck-primary-soft: ${cssValue(palette.primary_soft)};`,
     `  --deck-accent-color: ${themeColor(palette, "accent", cssValue(palette.primary))};`,
     `  --deck-text: ${cssValue(palette.text)};`,
     `  --deck-muted: ${cssValue(palette.muted)};`,
+    `  --deck-base-text: ${cssValue(palette.text)};`,
+    `  --deck-base-muted: ${cssValue(palette.muted)};`,
+    `  --deck-primary-soft-text: ${readableForeground(palette.primary_soft, palette.text)};`,
+    `  --deck-surface-text: ${readableForeground(palette.surface, palette.text)};`,
+    `  --deck-surface-strong-text: ${readableForeground(palette.surface_strong, palette.text)};`,
     `  --deck-border: ${cssValue(palette.border)};`,
     `  --deck-inverse: ${cssValue(palette.inverse)};`,
     `  --deck-alt-bg: ${themeColor(palette, "alt_background", cssValue(palette.surface_strong))};`,
@@ -77,6 +90,10 @@ function themeVariables(theme, designContract = null) {
     `  --deck-chart-2: ${chartColor(1, cssValue(palette.surface_strong))};`,
     `  --deck-chart-3: ${chartColor(2, cssValue(palette.text))};`,
     `  --deck-chart-4: ${chartColor(3, cssValue(palette.muted))};`,
+    `  --deck-chart-text-1: ${chartForeground(0)};`,
+    `  --deck-chart-text-2: ${chartForeground(1)};`,
+    `  --deck-chart-text-3: ${chartForeground(2)};`,
+    `  --deck-chart-text-4: ${chartForeground(3)};`,
     `  --deck-display: ${cssValue(typography.display)};`,
     `  --deck-body: ${cssValue(typography.body)};`,
     `  --deck-label: ${cssValue(typography.label || typography.body)};`,
@@ -86,6 +103,19 @@ function themeVariables(theme, designContract = null) {
     `  --deck-border-width: ${Number(shape.border_width)}px;`,
     "}",
   ].join("\n");
+}
+
+function styleOverrideAttributes(designContract) {
+  const overrides = designContract
+    && designContract.style_overrides
+    && typeof designContract.style_overrides === "object"
+    ? designContract.style_overrides
+    : {};
+  return Object.entries(overrides)
+    .map(([key, value]) => (
+      ` data-deck-style-${escapeHtml(key.replace(/_/g, "-"))}="${escapeHtml(value)}"`
+    ))
+    .join("");
 }
 
 const THEME_STYLE_VALUES = Object.freeze({
@@ -237,11 +267,16 @@ function renderDocument(deck, theme) {
     "utf8"
   );
   const design = resolveDeckDesign(deck, theme);
+  const effectivePalette = paletteWithOverrides(theme.palette, deck.design_contract);
+  const renderContext = {
+    palette: effectivePalette,
+    useDeckPalette: Boolean(deck.design_contract && deck.design_contract.palette),
+  };
   const renderedDeck = { ...deck, design };
   const slideHtml = deck.slides.map((slide, index) => {
     const layout = getLayout(slide.layout_id);
     if (!layout) throw new Error(`Unknown layout during render: ${slide.layout_id}`);
-    return layout.render(slide, index, design);
+    return layout.render(slide, index, design, renderContext);
   }).join("\n\n");
   const hasCharts = slideHtml.includes("data-pptx-chart");
   const chartScripts = hasCharts
@@ -286,6 +321,7 @@ function renderDocument(deck, theme) {
     && deck.design_contract.palette.accent_usage
     ? ` data-deck-palette-accent-usage="${escapeHtml(deck.design_contract.palette.accent_usage)}"`
     : "";
+  const styleOverrides = styleOverrideAttributes(deck.design_contract);
   return [
     "<!doctype html>",
     '<html lang="zh-CN">',
@@ -300,7 +336,7 @@ function renderDocument(deck, theme) {
     themeVariables(theme, deck.design_contract),
     "  </style>",
     "</head>",
-    `<body data-deck-schema-version="1" data-deck-theme="${escapeHtml(visualDnaId)}" data-deck-theme-id="${escapeHtml(theme.id)}" data-deck-composition="${escapeHtml(design.family)}" data-deck-composition-variant="${escapeHtml(design.variant)}" data-deck-design-seed="${escapeHtml(design.seed)}"${paletteAccentUsage}${themeStyleAttributes(theme)}>`,
+    `<body data-deck-schema-version="1" data-deck-theme="${escapeHtml(visualDnaId)}" data-deck-theme-id="${escapeHtml(theme.id)}" data-deck-composition="${escapeHtml(design.family)}" data-deck-composition-variant="${escapeHtml(design.variant)}" data-deck-design-seed="${escapeHtml(design.seed)}"${paletteAccentUsage}${styleOverrides}${themeStyleAttributes(theme)}>`,
     '  <main id="deck-root">',
     slideHtml,
     "  </main>",

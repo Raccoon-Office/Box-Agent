@@ -749,6 +749,36 @@ def test_all_themes_receive_contrast_safe_role_surface_rhythm() -> None:
         role_surface = _mix_hex(palette["primary"], palette["surface"], 0.1)
         assert _contrast_ratio(palette["text"], role_surface) >= 4.5, theme["id"]
 
+
+def test_theme_guide_lines_follow_composition_content_gutter() -> None:
+    deck_css = (SKILL_DIR / "runtime" / "deck.css").read_text(encoding="utf-8")
+    composition_css = (SKILL_DIR / "runtime" / "composition.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--deck-content-left: 92px" in deck_css
+    assert "--deck-guide-gap: 28px" in deck_css
+    assert deck_css.count(
+        "calc(var(--deck-content-left) - var(--deck-guide-gap))"
+    ) >= 2
+    assert "transparent 0 6.8%" not in deck_css
+    assert "transparent 0 7.5%" not in deck_css
+    assert composition_css.count("--deck-content-left:") >= 11
+    assert (
+        'body[data-deck-composition="editorial-spread"] .timeline-count-3 .timeline-track'
+        in composition_css
+    )
+    assert (
+        '.layout-cards.cards-count-5:not(.cards-featured) .cards-grid'
+        in composition_css
+    )
+    assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in composition_css
+    assert (
+        '.layout-cards.cards-count-5:not(.cards-featured) .content-card:nth-child(4)'
+        in composition_css
+    )
+    assert "grid-column: 2 / span 2;" in composition_css
+
     deck_css = (SKILL_DIR / "runtime" / "deck.css").read_text()
     assert ".slide.layout-kpis .kpi-card:first-child," in deck_css
     assert ".slide.layout-comparison .comparison-right," in deck_css
@@ -1604,11 +1634,11 @@ def test_auto_theme_prompts_cover_every_registered_theme(tmp_path: Path) -> None
     assert missed == []
 
 
-def test_theme_rank_preflight_returns_bounded_model_shortlist() -> None:
+def test_theme_catalog_preflight_returns_every_registered_theme() -> None:
     prompt = "创意机构年度品牌活动复盘，现代大胆，不要复古或像素风。"
     ranked = _run(
         "inspect_deck_contract.js",
-        "--rank-themes",
+        "--design-catalog",
         "--title",
         "品牌活动复盘",
         "--fact",
@@ -1617,24 +1647,22 @@ def test_theme_rank_preflight_returns_bounded_model_shortlist() -> None:
 
     assert ranked.returncode == 0, ranked.stdout + ranked.stderr
     payload = json.loads(ranked.stdout)
-    assert payload["mode"] == "theme_shortlist"
-    assert 5 <= payload["candidate_count"] <= 8
+    manifest = json.loads(
+        (SKILL_DIR / "layouts" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert payload["mode"] == "theme_catalog"
+    assert payload["candidate_count"] == len(manifest["themes"])
     assert payload["candidate_count"] == len(payload["candidates"])
     assert len({item["id"] for item in payload["candidates"]}) == len(
         payload["candidates"]
     )
     assert "creative-mode" in {item["id"] for item in payload["candidates"]}
-    assert all(
-        isinstance(item["eligible_for_model_choice"], bool)
-        and "deterministic_score" in item
-        and "matched_signals" in item
-        and "hard_conflicts" in item
-        for item in payload["candidates"]
-    )
-    assert payload["model_choice_contract"]["choose_from_candidates_only"] is True
+    assert all(item["composition"]["allowed_families"] for item in payload["candidates"])
+    assert payload["model_choice_contract"]["choose_from_registered_catalog_only"] is True
+    assert payload["model_choice_contract"]["aesthetic_choice_owned_by_model"] is True
 
 
-def test_model_theme_choice_reranks_only_within_deterministic_shortlist(
+def test_model_theme_choice_selects_registered_theme_without_aesthetic_veto(
     tmp_path: Path,
 ) -> None:
     prompt = "创意机构年度品牌活动复盘，现代大胆，不要复古或像素风。"
@@ -1663,16 +1691,19 @@ def test_model_theme_choice_reranks_only_within_deterministic_shortlist(
     )
     selection = report["theme_selection"]
     assert selection["theme_id"] == "creative-mode"
-    assert selection["source"] == "model_reranked"
+    assert selection["source"] == "model_selected"
     assert selection["model_choice"] == {
         "theme_id": "creative-mode",
         "reason": "创意机构场景与多彩海报语法更匹配。",
+        "identity_basis": None,
+        "confidence": None,
         "accepted": True,
     }
-    assert selection["deterministic_recommendation"]["theme_id"] != "creative-mode"
 
 
-def test_model_theme_choice_outside_shortlist_is_rejected(tmp_path: Path) -> None:
+def test_registered_model_theme_choice_is_not_rejected_for_semantic_mismatch(
+    tmp_path: Path,
+) -> None:
     prompt = "创意机构年度品牌活动复盘，现代大胆，不要复古或像素风。"
     deck_path = tmp_path / "rejected" / "deck.json"
     scaffold = _run(
@@ -1697,15 +1728,180 @@ def test_model_theme_choice_outside_shortlist_is_rejected(tmp_path: Path) -> Non
         (deck_path.parent / "qa" / "deck_contract.json").read_text()
     )
     selection = report["theme_selection"]
-    assert selection["theme_id"] != "8-bit-orbit"
-    assert selection["source"] == "model_choice_rejected"
-    assert selection["model_choice"]["accepted"] is False
-    assert selection["model_choice"]["rejection_reason"] == (
-        "outside_deterministic_shortlist"
+    assert selection["theme_id"] == "8-bit-orbit"
+    assert selection["source"] == "model_selected"
+    assert selection["model_choice"]["accepted"] is True
+
+
+def test_unregistered_model_theme_choice_falls_back_without_aesthetic_retry(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "invented-sports-theme",
+        "--theme-model-reason",
+        "模型返回了未注册主题。",
+        "--out",
+        str(deck_path),
     )
 
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    selection = report["theme_selection"]
+    assert selection["theme_id"] == "blue-professional"
+    assert selection["source"] == "model_choice_rejected"
+    assert selection["model_choice"]["rejection_reason"] == "unregistered_theme_id"
 
-def test_model_theme_choice_cannot_override_protected_subject_rule(
+
+def test_low_contrast_identity_palette_is_kept_while_invalid_family_falls_back(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "bold-poster",
+        "--theme-model-reason",
+        "体育人物海报。",
+        "--family",
+        "technical-schematic",
+        "--palette-background",
+        "#FFFFFF",
+        "--palette-text",
+        "#111111",
+        "--palette-primary",
+        "#FFDF00",
+        "--palette-accent",
+        "#0B5D36",
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    assert deck["theme_id"] == "bold-poster"
+    assert deck["design"]["family"] in {
+        "poster-asymmetric",
+        "cinematic-canvas",
+        "product-showcase",
+        "editorial-spread",
+    }
+    assert report["theme_selection"]["model_palette"]["accepted"] is True
+    assert deck["design_contract"]["palette"]["primary"]["value"] == "#FFDF00"
+    assert deck["design_contract"]["palette"]["accent"]["value"] == "#0B5D36"
+    assert not any("Model palette rejected" in item for item in report["warnings"])
+    assert any("not allowed by theme" in item for item in report["warnings"])
+
+
+def test_low_text_contrast_still_rejects_model_palette(tmp_path: Path) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "bold-poster",
+        "--theme-model-reason",
+        "体育人物海报。",
+        "--palette-background",
+        "#FFFFFF",
+        "--palette-text",
+        "#FFF59D",
+        "--palette-primary",
+        "#009C3B",
+        "--palette-accent",
+        "#002776",
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    assert report["theme_selection"]["model_palette"]["accepted"] is False
+    assert any("background and text contrast" in item for item in report["warnings"])
+
+
+def test_missing_final_design_review_is_advisory(tmp_path: Path) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-editorial-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "bold-poster",
+        "--theme-model-reason",
+        "体育人物海报。",
+        "--palette-background",
+        "#FFF8E7",
+        "--palette-text",
+        "#1A1A1A",
+        "--palette-primary",
+        "#0B5D36",
+        "--palette-accent",
+        "#FFDF00",
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report_path = tmp_path / "qa" / "design_review_check.json"
+    checked = _run(
+        "design_review_receipt.js",
+        str(deck_path),
+        "validate",
+        "--report",
+        str(report_path),
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["count"] == 0
+    assert "receipt is missing" in report["warnings"][0]
+
+    recorded = _run(
+        "design_review_receipt.js",
+        str(deck_path),
+        "record",
+        "--verdict",
+        "accepted",
+        "--reason",
+        "最终设计语义一致。",
+    )
+    assert recorded.returncode == 0, recorded.stdout + recorded.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    deck["slides"][0]["props"]["chart_style"] = "cool-ordinal"
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+    stale_report_path = tmp_path / "qa" / "design_review_stale.json"
+    stale = _run(
+        "design_review_receipt.js",
+        str(deck_path),
+        "validate",
+        "--report",
+        str(stale_report_path),
+    )
+    assert stale.returncode == 0, stale.stdout + stale.stderr
+    stale_report = json.loads(stale_report_path.read_text(encoding="utf-8"))
+    assert any("changed after semantic review" in item for item in stale_report["warnings"])
+
+
+def test_registered_model_theme_choice_is_not_overridden_by_subject_rule(
     tmp_path: Path,
 ) -> None:
     deck_path = tmp_path / "protected" / "deck.json"
@@ -1731,11 +1927,149 @@ def test_model_theme_choice_cannot_override_protected_subject_rule(
         (deck_path.parent / "qa" / "deck_contract.json").read_text()
     )
     selection = report["theme_selection"]
-    assert selection["theme_id"] == "factory-floor"
-    assert selection["source"] == "model_choice_rejected"
-    assert selection["model_choice"]["rejection_reason"] == (
-        "protected_deterministic_signal"
+    assert selection["theme_id"] == "data-intelligence"
+    assert selection["source"] == "model_selected"
+    assert selection["model_choice"]["accepted"] is True
+
+
+def test_sports_biography_kpi_page_does_not_override_global_poster_theme(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=3,
+        source_mode="user_provided",
     )
+    outline.update(
+        {
+            "title": "内马尔高光时刻",
+            "deck_goal": "回顾内马尔职业生涯高光时刻与传奇纪录",
+            "audience": "足球爱好者与大众球迷",
+            "purpose": "人物传奇回顾演讲",
+            "design_requirements": {"mood": "热血、传奇、桑巴激情"},
+            "storyline": "桑托斯少年、巴萨巅峰、世界杯与奥运国家队高光",
+        }
+    )
+    outline["slides"] = [
+        {
+            "page": 1,
+            "title": "内马尔高光时刻",
+            "message": "从桑托斯少年到巴西国家队传奇",
+            "bullets": ["足球天才的热血旅程", "世界杯与奥运高光"],
+            "layout": "cover-hero-v1",
+            "visual": "football hero portrait",
+            "evidence": [],
+        },
+        {
+            "page": 2,
+            "title": "桑托斯：天才少年横空出世",
+            "message": "17岁完成职业首秀",
+            "bullets": ["解放者杯冠军", "南美足球先生"],
+            "layout": "timeline-horizontal-v1",
+            "visual": "career timeline",
+            "evidence": [],
+        },
+        {
+            "page": 3,
+            "title": "巴黎岁月：世界纪录",
+            "message": "用一页数字呈现转会和进球纪录",
+            "bullets": ["2.22亿欧元转会费", "巴黎生涯进球纪录"],
+            "layout": "kpi-grid-v1",
+            "visual": "kpi grid",
+            "evidence": [],
+        },
+    ]
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cover-hero-v1",
+        "timeline-horizontal-v1",
+        "kpi-grid-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "bold-poster",
+        "--theme-model-reason",
+        "体育人物传奇与热血海报表达更匹配。",
+        "--theme-model-confidence",
+        "high",
+        "--theme-model-identity",
+        "巴西国家队与桑巴足球",
+        "--family",
+        "poster-asymmetric",
+        "--palette-background",
+        "#FFF8E7",
+        "--palette-text",
+        "#1A1A1A",
+        "--palette-primary",
+        "#0B5D36",
+        "--palette-accent",
+        "#FFDF00",
+        "--palette-secondary",
+        "#1F5AA6",
+        "--palette-accent-usage",
+        "balanced",
+        "--outline",
+        str(outline_path),
+        "--title",
+        "内马尔高光时刻",
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    selection = report["theme_selection"]
+    assert selection["theme_id"] == "bold-poster"
+    assert selection["model_choice"]["accepted"] is True
+    assert selection["model_choice"]["identity_basis"] == "巴西国家队与桑巴足球"
+    assert selection["model_choice"]["confidence"] == "high"
+    palette = json.loads(deck_path.read_text(encoding="utf-8"))["design_contract"]["palette"]
+    assert palette["background"]["value"] == "#FFF8E7"
+    assert palette["text"]["value"] == "#1A1A1A"
+    assert palette["primary"]["value"] == "#0B5D36"
+    assert palette["accent"]["value"] == "#FFDF00"
+    assert palette["secondary"]["value"] == "#1F5AA6"
+    html_path = tmp_path / "index.html"
+    rendered = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    html = html_path.read_text(encoding="utf-8")
+    assert "--deck-bg: #FFF8E7" in html
+    assert "--deck-primary: #0B5D36" in html
+    assert "--deck-accent-color: #FFDF00" in html
+    assert "--deck-chart-3: #1F5AA6" in html
+    receipt = _run(
+        "design_review_receipt.js",
+        str(deck_path),
+        "record",
+        "--verdict",
+        "revised",
+        "--reason",
+        "复核将身份修正为巴西国家队，并补充黄绿蓝配色。",
+    )
+    assert receipt.returncode == 0, receipt.stdout + receipt.stderr
+    checked = _run(
+        "design_review_receipt.js",
+        str(deck_path),
+        "validate",
+        "--report",
+        str(tmp_path / "qa" / "design_review_check.json"),
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    review = json.loads(
+        (tmp_path / "qa" / "design_review_check.json").read_text(encoding="utf-8")
+    )
+    assert review["verdict"] == "revised"
+    assert review["count"] == 1
+    assert review["warnings"] == []
 
 
 def test_model_theme_choice_cannot_impersonate_explicit_user_lock(
@@ -1954,37 +2288,25 @@ def test_pixel_brief_auto_selects_8_bit_orbit_theme(tmp_path: Path) -> None:
             "介绍多云 AI 平台的技术架构和数据流",
             "technical-blueprint",
             "technical-schematic",
-            {
-                "keyword rule: architecture and infrastructure",
-                "industry match: technical systems",
-            },
+            {"keyword rule: architecture and infrastructure"},
         ),
         (
             "做一个 SaaS 产品介绍，面向客户，突出三个核心功能",
             "product-console",
             "product-showcase",
-            {
-                "keyword rule: SaaS and product interface",
-                "industry match: software product",
-            },
+            {"keyword rule: SaaS and product interface"},
         ),
         (
             "做一份 Q2 经营数据复盘，包含核心 KPI、趋势和下一步动作",
             "data-intelligence",
             "analytical-exhibit",
-            {
-                "keyword rule: KPI and business intelligence",
-                "industry match: analytics and operations",
-            },
+            {"keyword rule: KPI and business intelligence"},
         ),
         (
             "说明 CRM、订单、客服和数据平台如何完成系统集成与数据流转",
             "technical-blueprint",
             "technical-schematic",
-            {
-                "keyword rule: architecture and infrastructure",
-                "industry match: technical systems",
-            },
+            {"keyword rule: architecture and infrastructure"},
         ),
         (
             "介绍 AI 文档助手，讲清核心功能、使用流程和产品价值",
@@ -2194,31 +2516,46 @@ def test_natural_briefs_use_keyword_industry_and_mood_theme_selection(
 
 
 @pytest.mark.parametrize(
-    ("prompt", "expected_background", "expected_primary", "expected_accent"),
+    (
+        "prompt",
+        "theme_id",
+        "identity_basis",
+        "expected_background",
+        "expected_primary",
+        "expected_accent",
+    ),
     [
         (
             "做一个介绍《我的世界》创造与冒险的PPT",
+            "8-bit-orbit",
+            "Minecraft forest, stone, and grass green",
             "#101A11",
             "#EEF5E9",
             "#65B741",
         ),
         (
             "做一个介绍故宫与紫禁城文化遗产的PPT",
+            "biennale-yellow",
+            "Forbidden City vermilion, parchment, and gold",
             "#F4E8D1",
             "#7A1D16",
             "#C9A227",
         ),
         (
             "做一个介绍特斯拉电动汽车与未来出行的PPT",
+            "neo-grid-bold",
+            "Tesla black, white, and red",
             "#FFFFFF",
             "#111111",
             "#E82127",
         ),
     ],
 )
-def test_named_subjects_infer_semantic_palette_without_overriding_theme_geometry(
+def test_model_structured_subject_palette_overrides_theme_colors(
     tmp_path: Path,
     prompt: str,
+    theme_id: str,
+    identity_basis: str,
     expected_background: str,
     expected_primary: str,
     expected_accent: str,
@@ -2230,6 +2567,24 @@ def test_named_subjects_infer_semantic_palette_without_overriding_theme_geometry
         "cards-grid-v1",
         "--theme",
         "auto",
+        "--theme-model-choice",
+        theme_id,
+        "--theme-model-reason",
+        "主体视觉身份与该主题匹配。",
+        "--theme-model-confidence",
+        "high",
+        "--theme-model-identity",
+        identity_basis,
+        "--palette-background",
+        expected_background,
+        "--palette-text",
+        expected_primary,
+        "--palette-primary",
+        expected_primary,
+        "--palette-accent",
+        expected_accent,
+        "--palette-accent-usage",
+        "sparse",
         "--title",
         prompt,
         "--fact",
@@ -2257,6 +2612,20 @@ def test_explicit_palette_outranks_named_subject_palette(tmp_path: Path) -> None
         "cards-grid-v1",
         "--theme",
         "auto",
+        "--theme-model-choice",
+        "neo-grid-bold",
+        "--theme-model-reason",
+        "电动汽车发布使用高对比网格。",
+        "--theme-model-identity",
+        "特斯拉品牌",
+        "--palette-background",
+        "#FFFFFF",
+        "--palette-text",
+        "#111111",
+        "--palette-primary",
+        "#111111",
+        "--palette-accent",
+        "#E82127",
         "--title",
         prompt,
         "--fact",
@@ -2294,6 +2663,113 @@ def test_explicit_cream_background_and_black_text_stay_distinct(
     assert palette["background"]["value"] == "#F4EFE4"
     assert "#111111" in palette["requested"]
     assert "primary" not in palette
+
+
+def test_user_collage_opt_out_refines_family_without_replacing_it(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    env = os.environ.copy()
+    env["BOX_AGENT_SOURCE_TEXT_B64"] = base64.b64encode(
+        "做一份友好圆润的新员工培训，保留胶囊色块，但不要拼贴。".encode()
+    ).decode()
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cards-grid-v1",
+        "timeline-horizontal-v1",
+        "--theme",
+        "capsule",
+        "--family",
+        "playful-collage",
+        "--style-override",
+        "shadow=off",
+        "--out",
+        str(deck_path),
+        env=env,
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["theme_id"] == "capsule"
+    assert deck["design"]["family"] == "playful-collage"
+    assert [slide["layout_id"] for slide in deck["slides"]] == [
+        "cards-grid-v1",
+        "timeline-horizontal-v1",
+    ]
+    assert deck["design_contract"]["style_overrides"] == {
+        "collage": "off",
+        "shadow": "off",
+    }
+
+    html_path = tmp_path / "index.html"
+    rendered = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    html = html_path.read_text(encoding="utf-8")
+    assert 'data-deck-composition="playful-collage"' in html
+    assert 'data-deck-style-collage="off"' in html
+    assert 'data-deck-style-shadow="off"' in html
+    assert 'body[data-deck-style-collage="off"] .composition-collage-pin' in html
+
+
+def test_controlled_redesign_merges_style_overrides_without_changing_layouts(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cards-grid-v1",
+        "--theme",
+        "capsule",
+        "--family",
+        "playful-collage",
+        "--out",
+        str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    before = json.loads(deck_path.read_text(encoding="utf-8"))
+    redesign_path = tmp_path / "deck.redesign.json"
+    redesign_path.write_text(
+        json.dumps(
+            {
+                "style_overrides": {
+                    "collage": "off",
+                    "decorations": "off",
+                    "stagger": "off",
+                    "irregular_grid": "off",
+                    "shadow": "off",
+                    "texture": "off",
+                    "gradient": "off",
+                    "radius": "rounded",
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    redesigned = _run(
+        "apply_deck_redesign.js",
+        str(deck_path),
+        str(redesign_path),
+    )
+
+    assert redesigned.returncode == 0, redesigned.stdout + redesigned.stderr
+    after = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert after["theme_id"] == before["theme_id"]
+    assert after["design"] == before["design"]
+    assert [slide["layout_id"] for slide in after["slides"]] == [
+        slide["layout_id"] for slide in before["slides"]
+    ]
+    assert after["design_contract"]["style_overrides"] == {
+        "collage": "off",
+        "decorations": "off",
+        "stagger": "off",
+        "irregular_grid": "off",
+        "shadow": "off",
+        "texture": "off",
+        "gradient": "off",
+        "radius": "rounded",
+    }
 
 
 def test_software_product_does_not_match_soft_style_by_substring(
@@ -2375,7 +2851,7 @@ def test_lock_theme_preserves_explicit_user_choice_for_onboarding(
     assert report["theme_selection"]["source"] == "explicit_locked"
 
 
-def test_theme_family_allowlist_preserves_compatible_choice_and_rejects_mismatch(
+def test_theme_family_allowlist_preserves_compatible_choice_and_falls_back_on_mismatch(
     tmp_path: Path,
 ) -> None:
     deck_path = tmp_path / "compatible" / "deck.json"
@@ -2415,9 +2891,14 @@ def test_theme_family_allowlist_preserves_compatible_choice_and_rejects_mismatch
         "--design-seed",
         "mismatch_seed",
     )
-    assert rejected.returncode == 1
-    assert "not allowed for theme retro-windows" in rejected.stderr
-    assert "retro-interface, product-showcase, cinematic-canvas" in rejected.stderr
+    assert rejected.returncode == 0, rejected.stdout + rejected.stderr
+    payload = json.loads(rejected.stdout)
+    assert payload["authoring_rules"]["design_policy"]["selection_source"] == (
+        "model_family_rejected"
+    )
+    assert payload["authoring_rules"]["design_policy"]["selected_family"] != (
+        "technical-schematic"
+    )
 
 
 def test_scaffold_infers_product_family_and_cover_image_from_outline(
@@ -2620,7 +3101,7 @@ def test_explicit_family_overrides_outline_inference(tmp_path: Path) -> None:
         (deck_path.parent / "qa" / "deck_contract.json").read_text()
     )
     assert deck["design"]["family"] == "analytical-exhibit"
-    assert report["design_selection"]["source"] == "explicit_family"
+    assert report["design_selection"]["source"] == "model_selected_family"
 
 
 def test_single_theme_record_can_define_composition_policy_without_legacy_mapping() -> None:
@@ -2838,7 +3319,7 @@ def test_compact_theme_and_layout_list_aliases_are_supported() -> None:
         "chart-data-v1",
         "table-data-v1",
     }
-    assert len(themes.stdout) + len(layouts.stdout) < 40_000
+    assert len(themes.stdout) + len(layouts.stdout) < 45_000
 
 
 def test_removed_playful_theme_is_rejected_by_validation(tmp_path: Path) -> None:
@@ -4355,7 +4836,7 @@ def test_scaffold_persists_visual_intent_and_normalizes_strong_layout_mismatches
         "cover-editorial-v1",
         "cards-grid-v1",
         "table-data-v1",
-        "quadrant-matrix-v1",
+        "cards-grid-v1",
     ]
     assert [item["slide"] for item in payload["layout_normalizations"]] == [1, 3, 4]
     assert len(deck["slides"][3]["props"]["items"]) == 4
@@ -4929,6 +5410,15 @@ def test_controlled_redesign_preserves_outline_intent_and_previous_layout_draft(
             {
                 "theme_id": "soft-editorial",
                 "design": {"family": "editorial-spread"},
+                "palette": {
+                    "background": "#FFF8E7",
+                    "text": "#1A1A1A",
+                    "primary": "#0B5D36",
+                    "accent": "#FFDF00",
+                    "secondary": "#1F5AA6",
+                    "accent_usage": "balanced",
+                    "identity_basis": "巴西国家队与桑巴足球",
+                },
                 "slides": {
                     "slide-01": {
                         "layout_id": "timeline-horizontal-v1",
@@ -4961,6 +5451,9 @@ def test_controlled_redesign_preserves_outline_intent_and_previous_layout_draft(
     after = json.loads(deck_path.read_text(encoding="utf-8"))
     assert after["theme_id"] == "soft-editorial"
     assert after["design"]["family"] == "editorial-spread"
+    assert after["design_contract"]["palette"]["source"] == "explicit"
+    assert after["design_contract"]["palette"]["primary"]["value"] == "#0B5D36"
+    assert after["design_contract"]["palette"]["secondary"]["value"] == "#1F5AA6"
     slide = after["slides"][0]
     assert slide["layout_id"] == "timeline-horizontal-v1"
     assert slide["outline_intent"] == before["slides"][0]["outline_intent"]
@@ -4973,6 +5466,7 @@ def test_controlled_redesign_preserves_outline_intent_and_previous_layout_draft(
         (tmp_path / "assets" / "generated" / "manifest.json").read_text()
     )
     assert manifest["deck"]["theme_id"] == "soft-editorial"
+    assert manifest["deck"]["design_contract"] == after["design_contract"]
     validation = _run("validate_deck_spec.js", str(deck_path))
     assert validation.returncode == 0, validation.stdout + validation.stderr
 
@@ -5849,6 +6343,108 @@ def test_scaffold_keeps_five_step_timeline(
         (tmp_path / "qa" / "deck_contract.json").read_text(encoding="utf-8")
     )
     assert report["layout_normalizations"] == []
+
+
+def test_onboarding_semantic_guards_normalize_parallel_layouts(
+    tmp_path: Path,
+) -> None:
+    outline_path = tmp_path / "outline.json"
+    outline = _write_outline(
+        outline_path,
+        page_count=4,
+        source_mode="user_provided",
+    )
+    outline.update(
+        {
+            "deck_goal": "为新员工介绍公司文化、制度与第一周安排",
+            "audience": "新员工",
+            "design_requirements": {"style": "浅色友好员工手册"},
+        }
+    )
+    outline["slides"] = [
+        {
+            "page": 1,
+            "title": "我们的文化",
+            "message": "四个并列文化关键词",
+            "bullets": ["客户第一", "快速迭代", "坦诚协作", "结果导向"],
+            "layout": "quadrant-matrix-v1",
+            "visual": "四象限文化关键词",
+            "evidence": [],
+        },
+        {
+            "page": 2,
+            "title": "客户第一",
+            "message": "所有工作从客户价值出发",
+            "bullets": ["理解场景", "每周迭代", "对客户坦诚"],
+            "layout": "statement-focus-v1",
+            "visual": "文化详解页",
+            "evidence": [],
+        },
+        {
+            "page": 3,
+            "title": "考勤与办公时间",
+            "message": "弹性但守约",
+            "bullets": [
+                "核心协作时间 10:00–16:00",
+                "请假提前申请",
+                "远程办公按规则报备",
+            ],
+            "layout": "timeline-horizontal-v1",
+            "visual": "一天时间线+规则卡",
+            "evidence": [],
+        },
+        {
+            "page": 4,
+            "title": "入职第一周清单",
+            "message": "五天完成上手",
+            "bullets": [
+                "Day 1 领设备、开账号",
+                "Day 2–3 熟悉产品与团队",
+                "Day 4 完成安全培训",
+                "Day 5 复盘并设定目标",
+            ],
+            "layout": "timeline-horizontal-v1",
+            "visual": "横向时间线",
+            "evidence": [],
+        },
+    ]
+    outline_path.write_text(
+        json.dumps(outline, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    deck_path = tmp_path / "deck.json"
+
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "quadrant-matrix-v1",
+        "statement-focus-v1",
+        "timeline-horizontal-v1",
+        "timeline-horizontal-v1",
+        "--theme",
+        "people-handbook",
+        "--family",
+        "editorial-spread",
+        "--no-images",
+        "--outline",
+        str(outline_path),
+        "--out",
+        str(deck_path),
+    )
+
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    report = json.loads(
+        (deck_path.parent / "qa" / "deck_contract.json").read_text()
+    )
+    assert report["layout_plan"] == [
+        "cards-grid-v1",
+        "cards-grid-v1",
+        "cards-grid-v1",
+        "timeline-horizontal-v1",
+    ]
+    reasons = "\n".join(item["reason"] for item in report["layout_normalizations"])
+    assert "do not define x/y axes" in reasons
+    assert "editorial-spread statement pages require a short thesis" in reasons
+    assert "do not provide at least two ordered time/phase signals" in reasons
 
 
 def test_patch_rejects_bound_visual_count_above_layout_capacity(
@@ -10792,6 +11388,103 @@ def test_truth_validator_keeps_invalid_deck_structure_blocking(
     assert any(issue.startswith("deck-spec:") for issue in report["issues"])
 
 
+@pytest.mark.parametrize("custom_manifest", [False, True])
+def test_finalizer_binds_images_generated_after_content_patch(
+    tmp_path: Path, custom_manifest: bool,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js", "cover-editorial-v1", "project-case-study-v1",
+        "--theme", "block-frame", "--out", str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    patch_path = tmp_path / "deck.patch.json"
+    patch_path.write_text('{"slides":{}}', encoding="utf-8")
+    patched = _run("apply_deck_patch.js", str(deck_path), str(patch_path))
+    assert patched.returncode == 0, patched.stdout + patched.stderr
+
+    manifest_path = tmp_path / "assets" / "generated" / "manifest.json"
+    entries = []
+    for number, prop in [(1, "background"), (2, "image")]:
+        asset = f"assets/generated/slide-{number:02d}-{prop}.png"
+        (tmp_path / asset).write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        entries.append({
+            "slide": number, "slide_id": f"slide-{number:02d}",
+            "prop_path": prop, "required": True, "decision": "generate",
+            "acquire_via": "ai", "status": "pending", "output_path": asset,
+        })
+    # Binding must use slide_id/prop_path, independent of manifest row order.
+    manifest_path.write_text(json.dumps({
+        "schema_version": 1, "mode": "auto", "image_plan": entries[::-1],
+    }), encoding="utf-8")
+    synced = _run("sync_image_manifest_status.js", str(manifest_path))
+    assert synced.returncode == 0, synced.stdout + synced.stderr
+    options = []
+    if custom_manifest:
+        alternate = tmp_path / "alternate-images.json"
+        manifest_path.rename(alternate)
+        options = ["--manifest", str(alternate)]
+    html_path = tmp_path / "index.html"
+    result = _run("finalize_controlled_deck.js", str(deck_path), "--out", str(html_path), *options)
+    assert result.returncode == 0, result.stdout + result.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    assert deck["slides"][0]["background"]["src"] == entries[0]["output_path"]
+    assert "background" not in deck["slides"][0]["props"]
+    assert deck["slides"][1]["props"]["image"]["src"] == entries[1]["output_path"]
+    assert deck["slides"][1]["props"]["image"]["origin"] == "generated"
+    report = json.loads((tmp_path / "qa" / "image_manifest.json").read_text())
+    assert not any("not referenced" in w for w in report["warnings"])
+    html_report = json.loads((tmp_path / "qa" / "html_self_check.json").read_text())
+    assert html_report["projectCaseStyles"][0]["imageLoaded"] is True
+    assert html_report["projectCaseStyles"][0]["imagePlaceholder"] is False
+    assert len(json.loads(result.stdout.splitlines()[-1])["media_bindings"]) == 2
+    saved_deck = deck_path.read_bytes()
+    repeated = _run("finalize_controlled_deck.js", str(deck_path), "--out", str(html_path), *options)
+    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+    assert json.loads(repeated.stdout.splitlines()[-1])["media_bindings"] == []
+    assert deck_path.read_bytes() == saved_deck
+
+
+@pytest.mark.parametrize("asset_state", ["selected", "failed", "missing", "malformed"])
+def test_finalizer_preserves_chosen_media_and_delivers_with_unavailable_assets(
+    tmp_path: Path, asset_state: str,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run("inspect_deck_contract.js", "project-case-study-v1", "--out", str(deck_path))
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text())
+    manifest_path = tmp_path / "assets" / "generated" / "manifest.json"
+    asset = "assets/generated/project.png"
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    if asset_state != "missing":
+        (tmp_path / asset).write_bytes(png)
+    if asset_state == "selected":
+        (tmp_path / "chosen.png").write_bytes(png)
+        deck["slides"][0]["props"]["image"] = {
+            "src": "chosen.png", "alt": "My chosen visual", "fit": "contain",
+            "position": "left", "origin": "asset",
+        }
+    deck_path.write_text(json.dumps(deck), encoding="utf-8")
+    before = deck_path.read_bytes()
+    manifest_path.write_text(json.dumps({
+        "mode": "auto", "image_plan": [{
+            "slide": 1, "slide_id": "slide-01", "prop_path": "image",
+            "required": True, "decision": "generate", "acquire_via": "ai",
+            "status": "failed" if asset_state == "failed" else "generated",
+            "output_path": asset,
+        }],
+    }) if asset_state != "malformed" else "{", encoding="utf-8")
+    result = _run("finalize_controlled_deck.js", str(deck_path), "--out", str(tmp_path / "index.html"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "index.html").is_file()
+    assert deck_path.read_bytes() == before
+    assert json.loads(result.stdout.splitlines()[-1])["media_bindings"] == []
+
+
 def test_controlled_finalizer_runs_compact_complete_chain(tmp_path: Path) -> None:
     deck = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     deck["truth_contract"] = {
@@ -10933,8 +11626,9 @@ def test_controlled_finalizer_delivers_degraded_html_for_image_manifest_failure(
     assert image_report["warnings"]
 
 
+@pytest.mark.parametrize("local_warning_only", [False, True])
 def test_controlled_finalizer_delivers_degraded_html_for_runtime_probe_failure(
-    tmp_path: Path,
+    tmp_path: Path, local_warning_only: bool,
 ) -> None:
     deck = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     deck_path = tmp_path / "deck.json"
@@ -10974,6 +11668,13 @@ childProcess.spawnSync = function(command, args, options) {
     const reportIndex = args.indexOf("--report");
     const reportPath = args[reportIndex + 1];
     fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+    if (process.env.PPTX_TEST_LOCAL_WARNING === "1") {
+      fs.writeFileSync(reportPath, JSON.stringify({
+        ok: true, issues: [], warnings: ["Slide 1 local text contrast is 1.25:1"],
+        editor: {componentContrast: {failures: [{slide: 1, ratio: 1.25}]}},
+      }));
+      return {status: 0, stdout: "", stderr: ""};
+    }
     fs.writeFileSync(reportPath, JSON.stringify({
       ok: false,
       issues: [
@@ -10991,6 +11692,7 @@ childProcess.spawnSync = function(command, args, options) {
     )
     env = os.environ.copy()
     env["NODE_OPTIONS"] = f"--require={preload_path}"
+    env["PPTX_TEST_LOCAL_WARNING"] = "1" if local_warning_only else "0"
     html_path = tmp_path / "index.html"
 
     result = _run(
@@ -11003,7 +11705,9 @@ childProcess.spawnSync = function(command, args, options) {
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert html_path.is_file()
-    assert "FINALIZE_ADVISORY stage=runtime_probe warnings=2" in result.stdout
+    marker = ("FINALIZE_PASS stage=runtime_probe warnings=1" if local_warning_only
+              else "FINALIZE_ADVISORY stage=runtime_probe warnings=2")
+    assert marker in result.stdout
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["ok"] is True
     assert payload["degraded"] is True
@@ -11016,6 +11720,10 @@ childProcess.spawnSync = function(command, args, options) {
         (tmp_path / "qa" / "runtime_probe.json").read_text(encoding="utf-8")
     )
     assert runtime_report["ok"] is True
+    if local_warning_only:
+        assert runtime_report["issues"] == []
+        assert runtime_report["warnings"] == ["Slide 1 local text contrast is 1.25:1"]
+        return
     assert runtime_report["advisory"] is True
     assert runtime_report["degraded_reason"] == "runtime_probe"
     assert runtime_report["issues"] == []
@@ -11336,7 +12044,7 @@ def test_toolbar_groups_fit_embedded_editor_viewport(
     }
 
 
-def test_palette_self_heals_before_probe_and_gate_catches_html_corruption(
+def test_text_contrast_self_heals_while_identity_primary_is_preserved(
     tmp_path: Path,
 ) -> None:
     deck = json.loads(EXAMPLE.read_text(encoding="utf-8"))
@@ -11371,7 +12079,7 @@ def test_palette_self_heals_before_probe_and_gate_catches_html_corruption(
     repaired_runtime = json.loads(repaired_probe.stdout)
     assert repaired_runtime["editor"]["palette"]["distinctCoreColors"] > 1
     assert repaired_runtime["editor"]["palette"]["textOnBackgroundContrast"] >= 4.5
-    assert repaired_runtime["editor"]["palette"]["primary"] == "#1E2BFA"
+    assert repaired_runtime["editor"]["palette"]["primary"] == "#F4EFE4"
 
     html = html_path.read_text(encoding="utf-8")
     html = re.sub(
@@ -11394,6 +12102,129 @@ def test_palette_self_heals_before_probe_and_gate_catches_html_corruption(
     assert runtime["editor"]["palette"]["textOnBackgroundContrast"] == 1
     assert "Core deck colors collapse to one value" in runtime["issues"]
     assert "Deck text/background contrast is too low: 1.00" in runtime["issues"]
+
+
+@pytest.mark.parametrize("colors", [
+    {"background": "#F7F3E8", "text": "#151515", "primary": "#2147C7", "accent": "#E6462E"},
+    {"background": "#EAF6FF", "text": "#17324D", "primary": "#4C9FE6", "accent": "#FF8A65"},
+    {"background": "#FFF8DB", "text": "#173D24", "primary": "#F9D400", "accent": "#15803D"},
+    {"background": "#101820", "text": "#F4F6F8", "primary": "#67D9EF", "accent": "#FFBC66"},
+], ids=["deep-blue-on-light", "pastel-on-light", "yellow-green", "light-on-dark"])
+def test_palette_text_roles_preserve_brand_ink_and_separate_solid_fill_foreground(colors: dict) -> None:
+    result = subprocess.run([
+        NODE, "-e", """
+const fs = require('fs');
+const {paletteWithOverrides} = require(process.argv[1]);
+const themes = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).themes;
+const colors = JSON.parse(process.argv[3]);
+const contract = {palette:Object.fromEntries(Object.entries(colors).map(([k,value])=>[k,{value}]))};
+console.log(JSON.stringify(themes.map(theme=>({id:theme.id,palette:paletteWithOverrides(theme.palette,contract)}))));
+""", str(SCRIPTS_DIR / "design_contract_core.js"),
+        str(SKILL_DIR / "layouts" / "manifest.json"), json.dumps(colors),
+    ], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    for item in json.loads(result.stdout):
+        palette = item["palette"]
+        assert palette["primary"] == colors["primary"], item["id"]
+        assert palette["accent"] == colors["accent"], item["id"]
+        assert _contrast_ratio(palette["inverse"], palette["primary"]) >= 4.5, item["id"]
+        for key in ("background", "surface", "surface_strong", "primary_soft"):
+            assert _contrast_ratio(palette["primary_text"], palette[key]) >= 4.5, item["id"]
+        if colors["primary"] == "#2147C7":
+            assert palette["primary_text"] == colors["primary"], item["id"]
+            assert palette["inverse"] == "#FFFFFF", item["id"]
+
+
+@pytest.mark.parametrize(("theme", "family"), [
+    ("commerce-pulse", "product-showcase"),
+    ("people-handbook", "editorial-spread"),
+    ("block-frame", "brutalist-frame"),
+    ("blue-professional", "institutional-grid"),
+    ("data-intelligence", "analytical-exhibit"),
+])
+@pytest.mark.parametrize(("background", "text_color", "primary", "accent"), [
+    ("#F7F3E8", "#151515", "#2147C7", "#E6462E"),
+    ("#EAF6FF", "#17324D", "#4C9FE6", "#FF8A65"),
+    ("#FFF8DB", "#173D24", "#F9D400", "#15803D"),
+    ("#101820", "#F4F6F8", "#67D9EF", "#FFBC66"),
+], ids=["deep-blue-on-light", "pastel-on-light", "yellow-green", "light-on-dark"])
+def test_rendered_palette_keeps_emphasis_and_colored_surface_text_readable(
+    tmp_path: Path, theme: str, family: str, background: str,
+    text_color: str, primary: str, accent: str,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js", "kpi-grid-v1", "cards-grid-v1",
+        "timeline-horizontal-v1", "statement-focus-v1",
+        "--theme", theme, "--family", family, "--design-seed", "palette-role-regression",
+        "--out", str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text())
+    deck["design_contract"] = {"version": 1, "palette": {
+        "source": "inferred", "requested": ["palette-role-regression"],
+        **{key: {"value": value, "source": "inferred", "requested": "palette-role-regression"}
+           for key, value in {"background": background, "text": text_color,
+                              "primary": primary, "accent": accent}.items()},
+    }}
+    deck["slides"][0]["props"]["variant"] = "cards"
+    deck["slides"][1]["props"]["variant"] = "balanced"
+    deck["slides"][2]["props"]["variant"] = "horizontal"
+    deck["slides"][3]["props"]["emphasis"] = "poster"
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    render = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+    assert render.returncode == 0, render.stdout + render.stderr
+    probe = _run("probe_deck_runtime.js", str(html_path))
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    report = json.loads(probe.stdout)
+    assert report["editor"]["primary"] == primary
+    assert report["editor"]["componentContrast"]["sampled"] > 30
+    assert report["editor"]["componentContrast"]["failures"] == []
+
+
+def test_runtime_probe_reports_local_component_contrast_as_advisory(
+    tmp_path: Path,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "cards-grid-v1",
+        "--out",
+        str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    html_path = tmp_path / "index.html"
+    rendered = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    html = html_path.read_text(encoding="utf-8").replace(
+        "</head>",
+        "<style>.content-card,.content-card *{background:#111!important;color:#111!important}</style></head>",
+    )
+    html_path.write_text(html, encoding="utf-8")
+    report_path = tmp_path / "runtime.json"
+
+    probe = _run(
+        "probe_deck_runtime.js",
+        str(html_path),
+        "--report",
+        str(report_path),
+    )
+    if probe.returncode != 0 and (
+        "Cannot find module 'playwright'" in probe.stderr
+        or "Executable doesn't exist" in probe.stderr
+    ):
+        pytest.skip("Managed Playwright browser is unavailable")
+
+    assert probe.returncode == 0, probe.stderr or probe.stdout
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["issues"] == []
+    assert any("local text contrast" in warning for warning in report["warnings"])
+    assert report["editor"]["componentContrast"]["minimum"] == 1
+    assert report["editor"]["componentContrast"]["failureCount"] > 8
+    assert report["editor"]["componentContrast"]["affectedSlides"] == [1]
+    assert len(report["editor"]["componentContrast"]["failures"]) == 8
 
 
 def test_project_case_layout_renders_metrics_and_two_compositions(tmp_path: Path) -> None:
@@ -11447,6 +12278,60 @@ def test_project_case_layout_renders_metrics_and_two_compositions(tmp_path: Path
     assert "layout-project-case project-poster media-right" in html
     assert 'data-prop-path="metrics.0.value"' in html
     assert "项目视觉 · 双击替换" in html
+
+
+@pytest.mark.parametrize(("family", "theme"), [
+    ("institutional-grid", "blue-professional"),
+    ("editorial-spread", "biennale-yellow"),
+    ("poster-asymmetric", "studio"),
+    ("playful-collage", "daisy-days"),
+    ("brutalist-frame", "block-frame"),
+    ("retro-interface", "8-bit-orbit"),
+    ("literary-minimal", "soft-editorial"),
+    ("product-showcase", "product-console"),
+    ("cinematic-canvas", "studio"),
+    ("analytical-exhibit", "data-intelligence"),
+    ("technical-schematic", "technical-blueprint"),
+])
+def test_project_poster_keeps_full_width_and_readable_copy_across_families(
+    tmp_path: Path, family: str, theme: str,
+) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js", "project-case-study-v1", "project-case-study-v1",
+        "--theme", theme, "--family", family, "--design-seed", "project-poster-regression",
+        "--out", str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text())
+    for slide, side in zip(deck["slides"], ["right", "left"]):
+        slide["props"].update({
+            "composition": "poster", "media_side": side,
+            "eyebrow": "01 / BRAND / 示例项目", "title": "01 / BRAND — PULSE LAB",
+            "positioning": "把企业级 AI 服务做成一个有速度感、也有人味的品牌系统。定位：可信且有温度。",
+            "caption": "CONCEPT PLACEHOLDER — REPLACE WITH REAL WORK",
+            "metrics": [
+                {"value": "42", "label": "品牌触点 / 示例"},
+                {"value": "6 WKS", "label": "上线周期 / 示例"},
+                {"value": "03", "label": "动态规则 / 示例"},
+            ],
+        })
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    render = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+    assert render.returncode == 0, render.stdout + render.stderr
+    report_path = tmp_path / "html-check.json"
+    checked = _run("html_self_check.js", str(html_path), "--dom-to-pptx", "--report", str(report_path))
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    report = json.loads(report_path.read_text())
+    assert report["issues"] == []
+    assert len(report["projectCaseStyles"]) == 2
+    for style in report["projectCaseStyles"]:
+        assert style["poster"] is True
+        assert len(style["gridTemplateColumns"].split()) == 1, style
+        assert style["mediaWidth"] > 1400, style
+        assert style["headingWidth"] > 500, style
+        assert style["copyScrollHeight"] <= style["copyHeight"] + 1, style
 
 
 def test_extended_layouts_render_editable_data_and_semantic_variants(
@@ -11761,6 +12646,65 @@ def test_chart_design_profiles_resolve_from_data_semantics(
             _contrast_ratio(color, "#151619") >= 3
             for color in dark_palette.group(1).split(",")
         )
+
+
+def test_deck_palette_overrides_local_cool_ordinal_chart_colors(tmp_path: Path) -> None:
+    deck_path = tmp_path / "deck.json"
+    scaffold = _run(
+        "inspect_deck_contract.js",
+        "chart-bar-v1",
+        "--theme",
+        "auto",
+        "--theme-model-choice",
+        "bold-poster",
+        "--theme-model-reason",
+        "体育人物海报。",
+        "--theme-model-identity",
+        "巴西国家队与桑巴足球",
+        "--palette-background",
+        "#FFF8E7",
+        "--palette-text",
+        "#1A1A1A",
+        "--palette-primary",
+        "#009739",
+        "--palette-accent",
+        "#FFC400",
+        "--palette-secondary",
+        "#1F5AA6",
+        "--out",
+        str(deck_path),
+    )
+    assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
+    deck = json.loads(deck_path.read_text(encoding="utf-8"))
+    deck["slides"][0]["props"].update(
+        {
+            "eyebrow": "国家队纪录",
+            "title": "队史射手榜",
+            "subtitle": "巴西国家队进球",
+            "series_label": "进球",
+            "insight": "黄绿身份色应覆盖局部冷色预设",
+            "source": "FIFA",
+            "chart_style": "cool-ordinal",
+            "items": [
+                {"label": "内马尔", "value": "80", "note": "第一"},
+                {"label": "贝利", "value": "77", "note": "第二"},
+                {"label": "罗纳尔多", "value": "62", "note": "第三"},
+            ],
+        }
+    )
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+
+    rendered = _run("render_deck_html.js", str(deck_path), "--out", str(html_path))
+
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    html = html_path.read_text(encoding="utf-8")
+    assert 'data-chart-style="cool-ordinal"' in html
+    assert 'data-chart-palette-source="deck"' in html
+    assert (
+        'data-chart-palette-light="#009739,#FFC400,#1F5AA6,#D8000F"'
+        in html
+    )
 
 
 def test_chart_reading_modes_change_echarts_visual_grammar() -> None:
@@ -12525,7 +13469,7 @@ def test_every_composition_variant_preserves_card_capacity_contract(
                     column_count = len(style["gridTemplateColumns"].split())
                     expected_columns = 1
                     if variant != "ledger-grid":
-                        expected_columns = {4: 2, 5: 3, 6: 3}[item_count]
+                        expected_columns = {4: 2, 5: 6, 6: 3}[item_count]
                     if column_count != expected_columns:
                         failures.append(
                             f"{family}/{variant}/{item_count}: expected "
@@ -13711,7 +14655,7 @@ def test_modern_editorial_brief_outranks_one_kpi_slide_for_deck_theme(
     assert json.loads(deck_path.read_text(encoding="utf-8"))["theme_id"] == "soft-editorial"
 
 
-def test_editorial_layout_intent_survives_when_model_omits_top_level_tone(
+def test_page_layout_tokens_do_not_override_semantic_portfolio_theme(
     tmp_path: Path,
 ) -> None:
     outline_path = tmp_path / "outline.json"
@@ -13753,7 +14697,7 @@ def test_editorial_layout_intent_survives_when_model_omits_top_level_tone(
     )
 
     assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
-    assert json.loads(deck_path.read_text(encoding="utf-8"))["theme_id"] == "soft-editorial"
+    assert json.loads(deck_path.read_text(encoding="utf-8"))["theme_id"] == "block-frame"
 
 
 def test_readability_css_keeps_folios_visible_and_four_kpis_balanced() -> None:

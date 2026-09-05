@@ -171,6 +171,8 @@ async function readEditorState(page, viewport) {
     function rgb(value) {
       const match = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(value || "");
       if (match) return match.slice(1, 4).map(Number);
+      const srgb = /color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/.exec(value || "");
+      if (srgb) return srgb.slice(1, 4).map(channel => Number(channel) * 255);
       const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(value || "").trim());
       if (!hex) return null;
       const normalized = hex[1].length === 3
@@ -193,6 +195,22 @@ async function readEditorState(page, viewport) {
       const right = luminance(rgb(background));
       if (left == null || right == null) return null;
       return (Math.max(left, right) + 0.05) / (Math.min(left, right) + 0.05);
+    }
+    function isVisibleColor(value) {
+      if (String(value || "").trim() === "transparent") return false;
+      const rgba = /rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([\d.]+)\s*\)/.exec(value || "");
+      if (rgba) return Number(rgba[1]) > 0.05;
+      return Boolean(rgb(value));
+    }
+    function effectiveBackground(element, slide) {
+      let current = element;
+      while (current) {
+        const background = getComputedStyle(current).backgroundColor;
+        if (isVisibleColor(background)) return background;
+        if (current === slide) break;
+        current = current.parentElement;
+      }
+      return getComputedStyle(slide).backgroundColor;
     }
 
     const firstSlide = document.querySelector("#deck-root > .slide");
@@ -267,7 +285,9 @@ async function readEditorState(page, viewport) {
     });
     const firstRect = firstSlide && firstSlide.getBoundingClientRect();
     const toolbarRect = toolbar && toolbar.getBoundingClientRect();
-    const statementStyle = statement && getComputedStyle(statement);
+    const statementText = statement && (statement.querySelector("h1") || statement);
+    const statementStyle = statementText && getComputedStyle(statementText);
+    const statementBackground = statement && effectiveBackground(statementText, statement);
     const rootStyle = getComputedStyle(document.documentElement);
     const coreColors = {
       background: rootStyle.getPropertyValue("--deck-bg").trim(),
@@ -279,6 +299,32 @@ async function readEditorState(page, viewport) {
       .map(value => rgb(value))
       .filter(Boolean)
       .map(value => value.join(","));
+    const contrastSamples = [];
+    document.querySelectorAll("#deck-root > .slide").forEach((slide, slideIndex) => {
+      slide.querySelectorAll(
+        "h1,h2,h3,p,li,td,th,strong,.card-index,.timeline-marker,.timeline-number,.kpi-value,.eyebrow"
+      ).forEach(element => {
+        const rect = element.getBoundingClientRect();
+        const content = String(element.textContent || "").trim();
+        if (!content || rect.width < 1 || rect.height < 1) return;
+        const foreground = getComputedStyle(element).color;
+        const background = effectiveBackground(element, slide);
+        const ratio = contrast(foreground, background);
+        if (ratio == null) return;
+        contrastSamples.push({
+          slide: slideIndex + 1,
+          element: element.tagName.toLowerCase(),
+          className: String(element.className || "").slice(0, 120),
+          foreground,
+          background,
+          ratio,
+          text: content.replace(/\s+/g, " ").slice(0, 80),
+        });
+      });
+    });
+    const componentContrastFailures = contrastSamples
+      .filter(sample => sample.ratio < 4.5)
+      .sort((left, right) => left.ratio - right.ratio);
     return {
       viewport: { width, height },
       bodyOverflowX: getComputedStyle(document.body).overflowX,
@@ -290,6 +336,15 @@ async function readEditorState(page, viewport) {
         ...coreColors,
         distinctCoreColors: new Set(normalizedCoreColors).size,
         textOnBackgroundContrast: contrast(coreColors.text, coreColors.background),
+      },
+      componentContrast: {
+        sampled: contrastSamples.length,
+        minimum: contrastSamples.length
+          ? Math.min(...contrastSamples.map(sample => sample.ratio))
+          : null,
+        failureCount: componentContrastFailures.length,
+        affectedSlides: [...new Set(componentContrastFailures.map(sample => sample.slide))].sort((a, b) => a - b),
+        failures: componentContrastFailures.slice(0, 8),
       },
       firstSlide: firstRect ? {
         left: firstRect.left,
@@ -310,9 +365,9 @@ async function readEditorState(page, viewport) {
         hasOverflow: toolbar.scrollWidth > toolbar.clientWidth + 1,
       } : null,
       statement: statementStyle ? {
-        background: statementStyle.backgroundColor,
+        background: statementBackground,
         color: statementStyle.color,
-        contrast: contrast(statementStyle.color, statementStyle.backgroundColor),
+        contrast: contrast(statementStyle.color, statementBackground),
       } : null,
       diagram: diagram ? {
         state: diagram.getAttribute("data-diagram-render-state"),
@@ -424,6 +479,7 @@ async function main() {
     await exportPage.close();
 
     const issues = [];
+    const warnings = [];
     if (!editor.firstSlide) issues.push("No slide found in editor mode");
     if (editor.firstSlide && (
       editor.firstSlide.left < -1 || editor.firstSlide.right > opts.viewport.width + 1
@@ -459,6 +515,14 @@ async function main() {
         `Deck text/background contrast is too low: ${editor.palette.textOnBackgroundContrast.toFixed(2)}`
       );
     }
+    (editor.componentContrast && editor.componentContrast.failures || [])
+      .forEach(failure => {
+        warnings.push(
+          `Slide ${failure.slide} local text contrast is ${failure.ratio.toFixed(2)}:1 ` +
+          `for ${failure.element}${failure.className ? `.${failure.className.split(/\s+/)[0]}` : ""} ` +
+          `(${failure.foreground} on ${failure.background}): ${failure.text}`
+        );
+      });
     if (editor.diagram && (
       editor.diagram.state !== "ready" ||
       editor.diagram.svgRoots !== 1 ||
@@ -488,7 +552,7 @@ async function main() {
       issues.push("Export mode unexpectedly scales the slide canvas");
     }
 
-    const report = { ok: issues.length === 0, issues, editor, export: exported };
+    const report = { ok: issues.length === 0, issues, warnings, editor, export: exported };
     const output = `${JSON.stringify(report, null, 2)}\n`;
     if (opts.report) {
       fs.mkdirSync(path.dirname(opts.report), { recursive: true });

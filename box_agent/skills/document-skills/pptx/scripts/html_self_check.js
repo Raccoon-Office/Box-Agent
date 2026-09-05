@@ -650,9 +650,28 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         })
       );
 
+      const projectCaseStyles = slideEls.flatMap((slide, slideIndex) => {
+        const copy = slide.querySelector(".project-case-copy");
+        if (!copy) return [];
+        const heading = copy.querySelector(".project-case-heading");
+        const media = slide.querySelector(".project-case-media");
+        const image = media && media.querySelector("img");
+        return [{
+          slide: slideIndex + 1,
+          poster: slide.classList.contains("project-poster"),
+          gridTemplateColumns: getComputedStyle(slide).gridTemplateColumns,
+          mediaWidth: media ? media.getBoundingClientRect().width : 0,
+          headingWidth: heading ? heading.getBoundingClientRect().width : 0,
+          copyHeight: copy.clientHeight,
+          copyScrollHeight: copy.scrollHeight,
+          imageLoaded: Boolean(image && image.complete && image.naturalWidth > 0),
+          imagePlaceholder: Boolean(image && image.classList.contains("editor-placeholder-image")),
+        }];
+      });
       return {
         ok: issues.length === 0,
         slideCount: slideEls.length,
+        projectCaseStyles,
         diagramCount: diagramSpecs.length,
         diagramSpecs,
         cardGridStyles,

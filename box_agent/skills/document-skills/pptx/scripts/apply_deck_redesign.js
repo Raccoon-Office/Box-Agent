@@ -16,6 +16,10 @@ const {
 } = require("./deck_spec_core.js");
 const { outlineIntentRecord } = require("./outline_layout_contract.js");
 const { validateOutlineBinding } = require("./validate_deck_spec.js");
+const {
+  mergeStyleOverrides,
+  withModelPaletteContract,
+} = require("./design_contract_core.js");
 
 function usage(exitCode = 2) {
   console.log("Usage: apply_deck_redesign.js deck.json deck.redesign.json");
@@ -114,6 +118,56 @@ function applyDesign(deck, designPatch, changes, resetFamily = false) {
   deck.design = nextDesign;
 }
 
+function applyPalette(deck, palettePatch, changes) {
+  if (palettePatch === undefined) return;
+  if (!isPlainObject(palettePatch)) {
+    throw new Error("palette redesign must be an object");
+  }
+  const allowed = [
+    "background",
+    "text",
+    "primary",
+    "accent",
+    "secondary",
+    "accent_usage",
+    "identity_basis",
+  ];
+  const unknown = Object.keys(palettePatch).filter(key => !allowed.includes(key));
+  if (unknown.length) {
+    throw new Error(`Unknown palette redesign field(s): ${unknown.join(", ")}`);
+  }
+  const issues = [];
+  const next = withModelPaletteContract(
+    deck.design_contract || null,
+    palettePatch,
+    palettePatch.identity_basis || "user-requested palette redesign",
+    issues,
+    "explicit",
+  );
+  if (issues.length) {
+    throw new Error(`Palette redesign is invalid:\n${issues.join("\n")}`);
+  }
+  deck.design_contract = next;
+  changes.push("design_contract.palette: updated during controlled redesign");
+}
+
+function applyStyleOverrides(deck, stylePatch, changes) {
+  if (stylePatch === undefined) return;
+  if (!isPlainObject(stylePatch)) {
+    throw new Error("style_overrides redesign must be an object");
+  }
+  const existing = deck.design_contract || { version: 1 };
+  const merged = mergeStyleOverrides(
+    existing.style_overrides,
+    stylePatch,
+    { explicit: true },
+  );
+  deck.design_contract = { ...existing };
+  if (merged) deck.design_contract.style_overrides = merged;
+  else delete deck.design_contract.style_overrides;
+  changes.push("design_contract.style_overrides: updated during controlled redesign");
+}
+
 function applySlideRedesign(deck, slidePatches, changes) {
   if (slidePatches === undefined) return [];
   if (!isPlainObject(slidePatches)) {
@@ -201,6 +255,7 @@ function updateContractReport(deckPath, deck, redesignPath, redesignedSlides) {
     slides: redesignedSlides,
     theme_id: deck.theme_id,
     design: clone(deck.design),
+    design_contract: clone(deck.design_contract || null),
     layout_plan: [...contract.layout_plan],
   });
   contract.redesign_history = history.slice(-10);
@@ -208,6 +263,7 @@ function updateContractReport(deckPath, deck, redesignPath, redesignedSlides) {
     contract_version: contract.contract_version,
     theme_id: deck.theme_id,
     design: deck.design,
+    design_contract: deck.design_contract || null,
     layout_plan: contract.layout_plan,
     outline_binding: contract.outline_binding || null,
     truth_contract: deck.truth_contract || null,
@@ -245,7 +301,13 @@ function main() {
   const deckPath = resolveArtifactPath(argv[0]);
   const { resolved: redesignPath, value: redesign } = readRedesign(argv[1]);
   const unknownTopLevel = Object.keys(redesign)
-    .filter(key => !["theme_id", "design", "slides"].includes(key));
+    .filter(key => ![
+      "theme_id",
+      "design",
+      "palette",
+      "style_overrides",
+      "slides",
+    ].includes(key));
   if (unknownTopLevel.length) {
     throw new Error(`Unknown deck redesign field(s): ${unknownTopLevel.join(", ")}`);
   }
@@ -259,6 +321,8 @@ function main() {
     changes,
     themeChanged,
   );
+  applyPalette(deck, redesign.palette, changes);
+  applyStyleOverrides(deck, redesign.style_overrides, changes);
   const redesignedSlides = applySlideRedesign(deck, redesign.slides, changes);
 
   const validation = validateAndNormalizeDeck(deck);

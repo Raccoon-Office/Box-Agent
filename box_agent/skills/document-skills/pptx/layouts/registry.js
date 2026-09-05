@@ -1421,18 +1421,27 @@ function resolveChartReadingMode(requested, chartType, categoryCount, presentati
   return "glance";
 }
 
-function chartProfileAttributes(spec) {
+function chartProfileAttributes(spec, renderContext = null) {
   const profile = CHART_STYLE_PROFILES[spec.style_profile];
   if (!profile) return "";
+  const deckChart = renderContext
+    && renderContext.useDeckPalette
+    && renderContext.palette
+    && Array.isArray(renderContext.palette.chart)
+    ? renderContext.palette.chart.filter(Boolean).slice(0, 4)
+    : [];
+  const light = deckChart.length ? deckChart : profile.light;
+  const dark = deckChart.length ? deckChart : profile.dark;
   return [
     `data-chart-style="${escapeHtml(spec.style_profile)}"`,
     `data-chart-reading-mode="${escapeHtml(spec.reading_mode)}"`,
-    `data-chart-palette-light="${escapeHtml(profile.light.join(","))}"`,
-    `data-chart-palette-dark="${escapeHtml(profile.dark.join(","))}"`,
+    `data-chart-palette-light="${escapeHtml(light.join(","))}"`,
+    `data-chart-palette-dark="${escapeHtml(dark.join(","))}"`,
+    ...(deckChart.length ? ['data-chart-palette-source="deck"'] : []),
   ].join(" ");
 }
 
-function renderBarChart(slide, index) {
+function renderBarChart(slide, index, _design = null, renderContext = null) {
   const p = slide.props;
   const values = p.items.map(item => numericValue(item.value));
   const chartType = p.variant === "columns" ? "column" : "bar";
@@ -1478,7 +1487,7 @@ function renderBarChart(slide, index) {
       editableText("p", "subtitle", p.subtitle || "", "header-note"),
       "</header>",
       `<div class="chart-body" data-layout-region="content">`,
-      `<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec)} data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
+      `<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec, renderContext)} data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
       '  <div class="echarts-for-pptx" data-chart-canvas role="img" aria-label="可编辑分类数据图表"></div>',
       `  <div class="chart-fallback" aria-hidden="true">${fallback}</div>`,
       "</div>",
@@ -1590,17 +1599,17 @@ function extractTractionHighlights(props, categories, series) {
   }).filter(item => item.value && item.label);
 }
 
-function renderChartFrame(chartSpec, fallback, extraClass = "") {
+function renderChartFrame(chartSpec, fallback, extraClass = "", renderContext = null) {
   const className = ["chart-echarts-frame", extraClass].filter(Boolean).join(" ");
   return [
-    `<div class="${className}" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec)} data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
+    `<div class="${className}" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec, renderContext)} data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
     '  <div class="echarts-for-pptx" data-chart-canvas role="img" aria-label="可编辑多系列数据图表"></div>',
     `  <div class="chart-fallback" aria-hidden="true">${fallback}</div>`,
     "</div>",
   ].join("\n");
 }
 
-function renderDataChart(slide, index) {
+function renderDataChart(slide, index, _design = null, renderContext = null) {
   const p = slide.props;
   const categories = p.categories.slice(0, 12);
   const series = normalizedChartSeries(p.series, categories.length);
@@ -1685,7 +1694,7 @@ function renderDataChart(slide, index) {
         ...series.map(item => `<strong>${escapeHtml(item.values[categoryIndex])}</strong>`),
         "</span>",
       ].join("\n");
-      return renderChartFrame(panelSpec, fallback, "chart-small-multiple");
+      return renderChartFrame(panelSpec, fallback, "chart-small-multiple", renderContext);
     }).join("\n");
     chartMarkup = [
       `<div class="chart-plot chart-small-multiples-wrap" data-chart-scale="independent">`,
@@ -1697,7 +1706,7 @@ function renderDataChart(slide, index) {
     ].join("\n");
   } else {
     chartMarkup = [
-      `<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec)} `,
+      `<div class="chart-plot chart-echarts-frame" data-pptx-chart data-native-chart="true" ${chartProfileAttributes(chartSpec, renderContext)} `,
       `data-chart-spec="${escapeHtml(JSON.stringify(chartSpec))}">`,
       '  <div class="echarts-for-pptx" data-chart-canvas role="img" aria-label="可编辑多系列数据图表"></div>',
       `  <div class="chart-fallback" aria-hidden="true">${fallbackRows}</div>`,
@@ -4089,11 +4098,16 @@ const layouts = [
 
 layouts.forEach(layout => {
   const renderLayout = layout.render;
-  layout.render = function renderCompositionAwareLayout(slide, index, design = null) {
+  layout.render = function renderCompositionAwareLayout(
+    slide,
+    index,
+    design = null,
+    renderContext = null,
+  ) {
     const previousDesign = activeCompositionDesign;
     activeCompositionDesign = normalizedCompositionDesign(design);
     try {
-      return renderLayout(slide, index);
+      return renderLayout(slide, index, design, renderContext);
     } finally {
       activeCompositionDesign = previousDesign;
     }

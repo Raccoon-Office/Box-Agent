@@ -2,10 +2,7 @@
 
 const { familyForTheme } = require("./composition_core.js");
 
-const THEME_SHORTLIST_LIMIT = 8;
-const THEME_SHORTLIST_PRIMARY_COUNT = 5;
-const HARD_CONFLICT_WEIGHT = -10;
-const PROTECTED_SIGNAL_WEIGHT = 18;
+const KEYWORD_INDUSTRY_DEDUP_WEIGHT = 18;
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -42,7 +39,11 @@ function selectionIntentText(value) {
     ["deck_goal", "audience", "storyline", "tone", "design_requirements", "title"].forEach(key => add(outline[key]));
     (Array.isArray(outline.slides) ? outline.slides : []).forEach(slide => {
       if (!isPlainObject(slide)) return;
-      ["title", "message", "visual", "layout", "layout_id"].forEach(key => add(slide[key]));
+      // Global theme answers what the deck should feel like. Page-level
+      // structure answers how one slide should present its information. Keep
+      // layout/visual implementation tokens out of theme inference so values
+      // such as `kpi-grid-v1` cannot turn a sports biography into a dashboard.
+      ["title", "message", "bullets"].forEach(key => add(slide[key]));
     });
   } else {
     add(value.source_text);
@@ -267,7 +268,7 @@ const THEME_KEYWORD_RULES = Object.freeze([
   Object.freeze({
     theme_id: "block-frame",
     signal: "user intent rule: personal and creative portfolio",
-    pattern: /(?:个人作品集|设计作品集|求职作品集|摄影作品集|创意作品集|个人品牌介绍|personal\s+portfolio|design\s+portfolio|career\s+portfolio|creative\s+portfolio|personal\s+brand)/i,
+    pattern: /(?:个人作品集|设计作品集|求职作品集|摄影作品集|创意作品集|个人品牌介绍|(?:工作室|\bstudio\b)[^。；;\n]{0,32}(?:年度)?作品集|personal\s+portfolio|design\s+portfolio|career\s+portfolio|creative\s+portfolio|studio\s+portfolio|personal\s+brand)/i,
     weight: 18,
   }),
   Object.freeze({
@@ -476,87 +477,15 @@ function applyTaxonomyMatches(rules, dimension, text, profile, add) {
   });
 }
 
-function buildThemeShortlist(
-  ranked,
-  themes,
-  matchesByTheme,
-  selectedThemeId,
-  limit = THEME_SHORTLIST_LIMIT
-) {
-  const themeById = new Map(themes.map(theme => [theme.id, theme]));
-  const rankedById = new Map(ranked.map((item, index) => [
-    item.theme_id,
-    { ...item, rank: index + 1 },
-  ]));
-  const selected = [];
-  const selectedIds = new Set();
-  const selectedFamilies = new Set();
-  const add = themeId => {
-    if (!themeId || selectedIds.has(themeId) || selected.length >= limit) return;
-    const rankedItem = rankedById.get(themeId);
-    const theme = themeById.get(themeId);
-    if (!rankedItem || !theme) return;
-    selectedIds.add(themeId);
-    selectedFamilies.add(familyForTheme(theme));
-    selected.push(rankedItem);
-  };
-
-  ranked.slice(0, THEME_SHORTLIST_PRIMARY_COUNT).forEach(item => add(item.theme_id));
-  add(selectedThemeId);
-  ranked.forEach(item => {
-    const theme = themeById.get(item.theme_id);
-    if (theme && !selectedFamilies.has(familyForTheme(theme))) add(item.theme_id);
-  });
-  ranked.forEach(item => add(item.theme_id));
-
-  return selected.map(item => {
-    const theme = themeById.get(item.theme_id);
-    const matchedSignals = matchesByTheme.get(item.theme_id) || [];
-    const hardConflicts = matchedSignals.filter(match => match.weight <= HARD_CONFLICT_WEIGHT);
-    const protectedSignals = matchedSignals.filter(match => match.weight >= PROTECTED_SIGNAL_WEIGHT);
-    return {
-      theme_id: item.theme_id,
-      score: item.score,
-      rank: item.rank,
-      family: familyForTheme(theme),
-      matched_signals: matchedSignals,
-      hard_conflicts: hardConflicts,
-      protected_signals: protectedSignals,
-      eligible_for_model_choice: hardConflicts.length === 0,
-    };
-  });
-}
-
-function evaluateModelThemeChoice(inference, requestedThemeId) {
+function evaluateModelThemeChoice(themes, requestedThemeId) {
   const normalizedId = String(requestedThemeId || "").trim();
   if (!normalizedId) {
     return { accepted: false, reason: "missing_theme_id", candidate: null };
   }
-  const shortlist = Array.isArray(inference && inference.shortlist)
-    ? inference.shortlist
-    : [];
-  const candidate = shortlist.find(item => item.theme_id === normalizedId) || null;
+  const candidate = (Array.isArray(themes) ? themes : [])
+    .find(item => item && item.id === normalizedId) || null;
   if (!candidate) {
-    return { accepted: false, reason: "outside_deterministic_shortlist", candidate: null };
-  }
-  if (candidate.eligible_for_model_choice === false) {
-    return { accepted: false, reason: "candidate_has_hard_conflict", candidate };
-  }
-
-  const deterministicTop = shortlist.find(item => item.rank === 1) || shortlist[0] || null;
-  const protectedTop = deterministicTop
-    && Array.isArray(deterministicTop.protected_signals)
-    && deterministicTop.protected_signals.length > 0;
-  if (
-    protectedTop
-    && deterministicTop.theme_id !== candidate.theme_id
-    && deterministicTop.score - candidate.score > 4
-  ) {
-    return {
-      accepted: false,
-      reason: "protected_deterministic_signal",
-      candidate,
-    };
+    return { accepted: false, reason: "unregistered_theme_id", candidate: null };
   }
   return { accepted: true, reason: "accepted", candidate };
 }
@@ -581,23 +510,33 @@ function inferTheme(themes, content, defaultThemeId = "blue-professional") {
 
     if (profile.fallback) add("fallback theme", -1);
 
+    let strongKeywordRuleMatched = false;
     THEME_KEYWORD_RULES.forEach(rule => {
       if (theme.id === rule.theme_id && rule.pattern.test(intentPositiveText)) {
         add(rule.signal, rule.weight);
+        if (rule.weight >= KEYWORD_INDUSTRY_DEDUP_WEIGHT) {
+          strongKeywordRuleMatched = true;
+        }
       }
     });
 
-    const industryHits = directMetadataHits(intentPositiveText, profile.industry_terms);
-    if (industryHits.length) {
-      add(`industry metadata: ${industryHits.slice(0, 2).join(", ")}`, Math.min(6, industryHits.length * 3));
+    // A keyword rule and industry taxonomy commonly describe the same phrase.
+    // Do not count that phrase twice for one theme; otherwise a single `KPI`
+    // token receives both the keyword and analytics-industry weights and can
+    // become an incorrectly protected global decision.
+    if (!strongKeywordRuleMatched) {
+      const industryHits = directMetadataHits(intentPositiveText, profile.industry_terms);
+      if (industryHits.length) {
+        add(`industry metadata: ${industryHits.slice(0, 2).join(", ")}`, Math.min(6, industryHits.length * 3));
+      }
+      applyTaxonomyMatches(
+        INDUSTRY_MATCH_RULES,
+        "industry",
+        intentPositiveText,
+        profile,
+        add
+      );
     }
-    applyTaxonomyMatches(
-      INDUSTRY_MATCH_RULES,
-      "industry",
-      intentPositiveText,
-      profile,
-      add
-    );
 
     const moodHits = directMetadataHits(intentPositiveText, profile.mood_terms);
     if (moodHits.length) {
@@ -823,12 +762,6 @@ function inferTheme(themes, content, defaultThemeId = "blue-professional") {
       ? "medium"
       : "low";
   const themeId = confidence === "low" ? defaultThemeId : top.theme_id;
-  const shortlist = buildThemeShortlist(
-    ranked,
-    candidates,
-    matchesByTheme,
-    themeId
-  );
   return {
     theme_id: themeId,
     source: confidence === "low" ? "fallback_default" : "content_inference",
@@ -837,7 +770,6 @@ function inferTheme(themes, content, defaultThemeId = "blue-professional") {
     margin,
     matched_signals: matchesByTheme.get(themeId) || [],
     ranking: ranked.slice(0, 5).map(({ theme_id, score }) => ({ theme_id, score })),
-    shortlist,
   };
 }
 
