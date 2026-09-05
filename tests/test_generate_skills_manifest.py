@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from box_agent.tools.skill_loader import SkillLoader
@@ -24,12 +26,16 @@ EXPECTED_BUILTIN_SKILLS = {
 }
 
 
-def test_builtin_manifest_contains_exactly_the_core_skill_allowlist():
+def test_builtin_manifest_contains_exactly_the_core_skill_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     entries = dict(_collect_skills())
 
     assert set(BUILTIN_SKILL_NAMES) == set(EXPECTED_BUILTIN_SKILLS)
     assert entries == EXPECTED_BUILTIN_SKILLS
 
+    monkeypatch.setenv("AEGIS_CLI_HOME", str(tmp_path))
     loader = SkillLoader(SKILLS_DIR)
     loader.discover_skills()
     assert set(loader.list_skills()) == set(EXPECTED_BUILTIN_SKILLS)

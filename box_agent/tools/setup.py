@@ -612,17 +612,19 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     runtime_env = build_skill_execution_env(runtime_context)
     skill_scratch_dir = None
     if artifact_root is not None:
+        # Intermediate Skill files belong in session scratch, not OS temp.
+        skill_scratch_dir = prepare_skill_scratch_dir(
+            workspace_dir,
+            scratch_root_dir=skill_scratch_root_dir,
+        )
+        runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
+    if artifact_root is not None:
         # Make the canonical delivery root available to subprocess-backed
         # skills even when a generated command unnecessarily changes cwd.
         # File tools and generate_image already resolve relative paths from
         # this directory; exposing the same root keeps shell authoring on the
         # identical boundary.
         runtime_env["BOX_AGENT_OUTPUT_DIR"] = str(artifact_root)
-        skill_scratch_dir = prepare_skill_scratch_dir(
-            workspace_dir,
-            scratch_root_dir=skill_scratch_root_dir,
-        )
-        runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
     if config.tools.enable_bash:
         sandbox_venv_path = None
         if sandbox_mode and not getattr(sys, "frozen", False):
@@ -728,9 +730,10 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:
         sandbox_runtime_env = runtime_context.env()
-        if artifact_root is not None and skill_scratch_dir is not None:
-            sandbox_runtime_env["BOX_AGENT_OUTPUT_DIR"] = str(artifact_root)
+        if skill_scratch_dir is not None:
             sandbox_runtime_env["BOX_AGENT_SCRATCH_DIR"] = str(skill_scratch_dir.path)
+        if artifact_root is not None:
+            sandbox_runtime_env["BOX_AGENT_OUTPUT_DIR"] = str(artifact_root)
         sandbox_tool = JupyterSandboxTool(
             workspace_dir=str(workspace_dir),
             runtime_env=sandbox_runtime_env,

@@ -107,6 +107,7 @@ from .permission_gateway import (
     MAX_TOOL_PERMISSION_RETRIES,
     _approve_tool_permission,
     _negotiate_tool_permission_chain,
+    _permission_denial_final_content,
     _permission_event_kwargs,
     _policy_decision_payload,
 )
@@ -2986,6 +2987,23 @@ async def _run_agent_loop_impl(
                     decision="requested",
                 )
 
+            permission_denial_final_content = _permission_denial_final_content(
+                result,
+                policy_decision,
+            )
+            if permission_denial_final_content is not None:
+                yield ContentEvent(content=permission_denial_final_content)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_done(
+                        stop_reason=StopReason.END_TURN,
+                        final_content=permission_denial_final_content,
+                    )
+                yield DoneEvent(
+                    stop_reason=StopReason.END_TURN,
+                    final_content=permission_denial_final_content,
+                )
+                return
+
             result = _persist_browser_snapshot_output(
                 result,
                 browser_snapshot_target,
@@ -3118,6 +3136,7 @@ async def _run_agent_loop_impl(
             # snapshots are impossible under concurrency, so the diff layer uses
             # one pre/post pair for the whole batch (see after the result loop).
             par_pre_files: dict[Path, tuple[int, int]] = {}
+            parallel_permission_denial_final_content: str | None = None
             if artifact_detection_enabled and workspace_dir:
                 par_pre_files = _snapshot_workspace_signatures(
                     workspace_dir,
@@ -3390,6 +3409,11 @@ async def _run_agent_loop_impl(
                         decision="requested",
                     )
 
+                if parallel_permission_denial_final_content is None:
+                    parallel_permission_denial_final_content = (
+                        _permission_denial_final_content(result, policy_decision)
+                    )
+
                 result = _persist_browser_snapshot_output(
                     result,
                     par_browser_snapshot_targets.get(tc_id),
@@ -3509,6 +3533,19 @@ async def _run_agent_loop_impl(
                 if hook_mgr.hooks:
                     await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+                return
+
+            if parallel_permission_denial_final_content is not None:
+                yield ContentEvent(content=parallel_permission_denial_final_content)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_done(
+                        stop_reason=StopReason.END_TURN,
+                        final_content=parallel_permission_denial_final_content,
+                    )
+                yield DoneEvent(
+                    stop_reason=StopReason.END_TURN,
+                    final_content=parallel_permission_denial_final_content,
+                )
                 return
 
         # Reply to same-response duplicates without executing them. The source

@@ -4,7 +4,7 @@ Skill Loader - Load Claude Skills from multiple sources.
 Supports:
 - Builtin skills shipped with the package (read-only)
 - User skills at ~/.box-agent/skills/ (writable from officev3)
-- User skills override builtin ones on name conflict, except reserved runtime skills
+- User skills override builtin ones on name conflict, except reserved or host-managed runtime skills
 - mtime-based auto reload (no explicit trigger needed)
 - Manifest-based whitelist for builtin sources: any SKILL.md left on disk
   (e.g. by a downstream host that updated box-agent without deleting old
@@ -124,6 +124,7 @@ class Skill:
     required_skills: Optional[List[str]] = None
     related_skills: Optional[List[str]] = None
     capabilities: Optional[List[str]] = None
+    host_managed: bool = False
     broken: bool = False
     broken_reason: Optional[str] = None
 
@@ -461,6 +462,9 @@ class SkillLoader:
                 required_skills=required_skills,
                 related_skills=related_skills,
                 capabilities=capabilities,
+                host_managed=bool(frontmatter.get("host_managed", False))
+                if source == "builtin"
+                else False,
             )
 
         except Exception as e:
@@ -549,13 +553,20 @@ class SkillLoader:
                     orphan_count += 1
                     continue
 
+                existing_skill = self.loaded_skills.get(skill.name)
                 if (
                     entry.source == "user"
-                    and skill.name in RESERVED_BUILTIN_SKILL_NAMES
+                    and (
+                        skill.name in RESERVED_BUILTIN_SKILL_NAMES
+                        or (
+                            existing_skill is not None
+                            and existing_skill.source == "builtin"
+                            and existing_skill.host_managed
+                        )
+                    )
                 ):
-                    # These skills own host-negotiated runtime contracts.  A
-                    # user prompt skill may extend the workflow under another
-                    # name, but must not replace the packaged implementation.
+                    # These skills own runtime contracts that a stale user copy
+                    # must not replace. Extensions can use a different name.
                     reserved_override_count += 1
                     continue
 

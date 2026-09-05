@@ -172,6 +172,46 @@ def test_get_skill():
         assert loader.get_skill("nonexistent") is None
 
 
+def test_host_managed_builtin_skill_cannot_be_overridden_by_user_copy(tmp_path):
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    builtin_skill_dir = builtin_dir / "managed-example"
+    user_skill_dir = user_dir / "managed-example"
+    builtin_skill_dir.mkdir(parents=True)
+    user_skill_dir.mkdir(parents=True)
+
+    (builtin_skill_dir / "SKILL.md").write_text(
+        """---
+name: managed-example
+description: Managed integration
+host_managed: true
+---
+
+Use the trusted host workflow.
+""",
+        encoding="utf-8",
+    )
+    (user_skill_dir / "SKILL.md").write_text(
+        """---
+name: managed-example
+description: Stale user copy
+---
+
+Use a raw command.
+""",
+        encoding="utf-8",
+    )
+
+    loader = SkillLoader(sources=[(user_dir, "user"), (builtin_dir, "builtin")])
+    loader.discover_skills()
+
+    skill = loader.get_skill("managed-example")
+    assert skill is not None
+    assert skill.source == "builtin"
+    assert skill.host_managed is True
+    assert "trusted host workflow" in skill.content
+
+
 
 def test_get_skills_metadata_prompt():
     """Test generating metadata-only prompt (Progressive Disclosure Level 1)"""

@@ -55,6 +55,23 @@ def _approve_tool_permission(tool: Tool, permission_request: dict[str, Any]) -> 
         )
 
 
+def _reject_tool_permission(tool: Tool | None, permission_request: dict[str, Any]) -> None:
+    """Let a tool revoke one-shot state when the host rejects a permission."""
+    if tool is None:
+        return
+    rejecter = getattr(tool, "reject_permission_request", None)
+    if not callable(rejecter):
+        return
+    try:
+        rejecter(permission_request)
+    except Exception as exc:
+        _log.warning(
+            "tool/permission_rejection_hook_failed tool=%s error=%s",
+            getattr(tool, "name", type(tool).__name__),
+            exc,
+        )
+
+
 def _policy_decision_payload(
     *,
     tool_name: str,
@@ -97,6 +114,7 @@ async def _negotiate_tool_permission_chain(
     retry_count = 0
     seen_requests: set[str] = set()
 
+    # Approved requests retry the same tool invocation with the original arguments.
     while not result.success and result.permission_request:
         permission_request = result.permission_request
         request_key = json.dumps(
@@ -144,6 +162,7 @@ async def _negotiate_tool_permission_chain(
         try:
             granted = await permission_negotiator.negotiate(permission_request)
         except Exception as exc:
+            _reject_tool_permission(tool, permission_request)
             policy_decision = _policy_decision_payload(
                 tool_name=tool_name,
                 permission_request=permission_request,
@@ -159,6 +178,7 @@ async def _negotiate_tool_permission_chain(
             break
 
         if not granted:
+            _reject_tool_permission(tool, permission_request)
             policy_decision = _policy_decision_payload(
                 tool_name=tool_name,
                 permission_request=permission_request,
@@ -201,3 +221,20 @@ async def _negotiate_tool_permission_chain(
             on_retry(result)
 
     return result, policy_decision
+
+
+def _permission_denial_final_content(
+    result: ToolResult,
+    policy_decision: dict[str, Any] | None,
+) -> str | None:
+    """Return a tool-declared final response after an in-band denial."""
+    permission_request = result.permission_request
+    if (
+        not permission_request
+        or not permission_request.get("abort_on_denial")
+        or not policy_decision
+        or policy_decision.get("decision") != "denied"
+    ):
+        return None
+    message = str(permission_request.get("denial_message") or "").strip()
+    return message[:2000] or "所需授权未完成，请重新发起本次操作。"

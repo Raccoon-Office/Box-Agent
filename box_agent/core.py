@@ -142,8 +142,10 @@ from .kernel.permission_gateway import (
     MAX_TOOL_PERMISSION_RETRIES,
     _approve_tool_permission,
     _negotiate_tool_permission_chain,
+    _permission_denial_final_content,
     _permission_event_kwargs,
     _policy_decision_payload,
+    _reject_tool_permission,
 )
 from .kernel.state import ToolBudgetState
 from .kernel.stream_controller import (
