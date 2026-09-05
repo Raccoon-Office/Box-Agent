@@ -54,7 +54,7 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "auth",
         ("invalid api key", "invalid_api_key", "incorrect api key", "authentication",
          "unauthorized", "401"),
-        "API 密钥无效或未通过鉴权。请运行 `box-agent setup` 检查 api_key 与 api_base 配置。",
+        "API 密钥无效或未通过鉴权。请确认服务配置。",
     ),
     (
         "permission",
