@@ -369,6 +369,9 @@ class _FollowUpSuggestionsExtractingLLM:
 
     async def generate(self, *args: Any, **kwargs: Any):
         response = await self._wrapped.generate(*args, **kwargs)
+        # Auxiliary verdicts must not replace the visible reply's suggestions.
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return response
         extractor = FollowUpSuggestionsStreamExtractor()
         self._extractor = extractor
         visible = "".join(extractor.push(response.content) + extractor.finish())

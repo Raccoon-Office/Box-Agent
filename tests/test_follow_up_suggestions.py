@@ -52,6 +52,8 @@ class _DedicatedFollowUpLLM:
         self.release_suggestions = asyncio.Event()
 
     async def generate(self, messages, tools=None, **_):
+        if _.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         self.generate_calls.append(_)
         await self.release_suggestions.wait()
         return LLMResponse(
@@ -62,6 +64,16 @@ class _DedicatedFollowUpLLM:
     async def generate_stream(self, messages, tools=None, **_):
         yield StreamEvent(type="text", delta="React 当前 npm 稳定最新版是 19.2.7。")
         yield StreamEvent(type="finish", finish_reason="stop")
+
+
+class _JudgedFollowUpLLM(_FollowUpLLM):
+    def __init__(self):
+        self.generate_calls = []
+
+    async def generate(self, messages, tools=None, **kwargs):
+        self.generate_calls.append(kwargs.get("call_kind"))
+        assert kwargs.get("call_kind") == "turn_continuation_judge"
+        return LLMResponse(content='{"continue":false}', finish_reason="stop")
 
 
 class _DecisionThenStopLLM:
@@ -156,8 +168,12 @@ def test_prompt_requires_a_structured_follow_up_block_only_after_completion() ->
 
 
 @pytest.mark.asyncio
-async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(tmp_path) -> None:
+@pytest.mark.parametrize("judge_enabled", [False, True])
+async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
+    tmp_path, judge_enabled,
+) -> None:
     conn = _RecordingConn()
+    llm = _JudgedFollowUpLLM() if judge_enabled else _FollowUpLLM()
     agent = BoxACPAgent(
         conn,
         Config(
@@ -165,7 +181,7 @@ async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(t
             agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
             tools=ToolsConfig(),
         ),
-        _FollowUpLLM(),
+        llm,
         [],
         "system",
     )
@@ -179,6 +195,9 @@ async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(t
     )
 
     assert response.stopReason == "end_turn"
+    if judge_enabled:
+        assert llm.generate_calls == ["turn_continuation_judge"]
+        assert agent._sessions[session.sessionId].follow_up_suggestions_task is None
     visible_text = "".join(
         update.update.content.text
         for update in conn.updates

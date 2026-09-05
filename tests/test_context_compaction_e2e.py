@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from box_agent.agent import Agent
@@ -15,9 +17,13 @@ class CompactionE2ELLM:
     def __init__(self) -> None:
         self.summary_messages: list[Message] = []
         self.normal_messages: list[Message] = []
+        self.judge_messages: list[Message] = []
 
     async def generate(self, messages, tools=None, **_kwargs):
         assert tools is None
+        if _kwargs.get("call_kind") == "turn_continuation_judge":
+            self.judge_messages = list(messages)
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         self.summary_messages = list(messages)
         return LLMResponse(
             content=(
@@ -72,6 +78,7 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
         for sent, original in zip(llm.summary_messages[:-1], original_prefix)
     )
     assert llm.summary_messages[-1].role == "user"
+    assert json.loads(llm.judge_messages[-1].content)["user_request"] == "latest user request"
 
     compacted_summary = llm.normal_messages[1]
     assert compacted_summary.role == "user"

@@ -3345,6 +3345,10 @@ async def run_agent_loop(
             stable across turns.
     """
     cancelled = is_cancelled or (lambda: False)
+    # Capture before memory, repair and continuation messages can change history.
+    continuation_user_request = (
+        current_turn_text if current_turn_text is not None else _latest_user_text(messages)
+    )
     effective_tool_limits = tool_limits or ToolLimitsConfig()
     web_search_batch_size = effective_tool_limits.web_search.batch_size
     web_search_concurrency = effective_tool_limits.web_search.concurrency
@@ -3707,6 +3711,8 @@ async def run_agent_loop(
                     injected_text = str(injected_item)
                 if not injected_text:
                     continue
+                if injection_source == "user":
+                    continuation_user_request = injected_text
                 formatted_injection = (
                     format_runtime_context_update(injected_text)
                     if injection_source == "runtime"
@@ -4927,7 +4933,9 @@ async def run_agent_loop(
                 )
                 return
 
-            continuation = turn_continuation.evaluate(
+            continuation = await turn_continuation.evaluate(
+                llm=llm,
+                user_request=continuation_user_request,
                 content=response.content,
                 finish_reason=response.finish_reason,
                 tools_available=bool(tool_list),
@@ -4935,7 +4943,29 @@ async def run_agent_loop(
                 max_steps=max_steps,
                 cancelled=cancelled(),
                 session_id=session_id,
+                turn_id=turn_id,
+                title=title,
+                should_interrupt=lambda: cancelled() or (
+                    inject_queue is not None and not inject_queue.empty()
+                ),
             )
+            # Re-enter the existing cancellation/queue handlers before accepting
+            # a verdict made while the user was cancelling or changing the task.
+            if cancelled() or (inject_queue is not None and not inject_queue.empty()):
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(
+                        step=step + 1,
+                        elapsed_seconds=elapsed,
+                        total_elapsed_seconds=total,
+                    )
+                yield StepEnd(
+                    step=step + 1,
+                    elapsed_seconds=elapsed,
+                    total_elapsed_seconds=total,
+                )
+                continue
             if continuation is not None:
                 messages.append(Message(role="user", content=continuation.prompt))
                 yield InjectedMessageEvent(
