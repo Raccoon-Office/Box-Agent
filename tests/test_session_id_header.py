@@ -237,7 +237,7 @@ def test_agent_headers_emit_internal_call_kind():
 @pytest.mark.asyncio
 async def test_anthropic_generate_emits_agent_headers():
     client = AnthropicClient(
-        api_key=_API_KEY, api_base="https://api.anthropic.com", model="m",
+        api_key=_API_KEY, api_base="https://xiaohuanxiong.com", model="m",
         retry_config=RetryConfig(enabled=False),
     )
     cap = _install_anthropic_fake(client)
@@ -253,6 +253,8 @@ async def test_anthropic_generate_emits_agent_headers():
 
     assert cap.last_params is not None
     assert cap.last_params.get("extra_headers") == {
+        "x-client-name": "raccoon",
+        "x-client-platform": "unknown",
         _HEADER: "sess-77",
         _TURN_HEADER: "sess-77-turn-1",
         _TITLE_HEADER: "Quarterly review",
@@ -263,7 +265,7 @@ async def test_anthropic_generate_emits_agent_headers():
 @pytest.mark.asyncio
 async def test_anthropic_generate_omits_header_when_empty():
     client = AnthropicClient(
-        api_key=_API_KEY, api_base="https://api.anthropic.com", model="m",
+        api_key=_API_KEY, api_base="https://xiaohuanxiong.com", model="m",
         retry_config=RetryConfig(enabled=False),
     )
     cap = _install_anthropic_fake(client)
@@ -278,7 +280,7 @@ async def test_anthropic_generate_omits_header_when_empty():
 async def test_anthropic_stream_emits_agent_headers():
     client = AnthropicClient(
         api_key=_API_KEY,
-        api_base="https://api.anthropic.com",
+        api_base="https://xiaohuanxiong.com",
         model="m",
         retry_config=RetryConfig(enabled=False),
     )
@@ -295,6 +297,8 @@ async def test_anthropic_stream_emits_agent_headers():
 
     assert cap.last_params is not None
     assert cap.last_params.get("extra_headers") == {
+        "x-client-name": "raccoon",
+        "x-client-platform": "unknown",
         _HEADER: "sess-stream",
         _TURN_HEADER: "sess-stream-turn-1",
         _TITLE_HEADER: "Quarterly review",
@@ -308,7 +312,7 @@ async def test_anthropic_stream_emits_agent_headers():
 @pytest.mark.asyncio
 async def test_openai_generate_emits_agent_headers():
     client = OpenAIClient(
-        api_key=_API_KEY, api_base="https://api.example.com/v1", model="m",
+        api_key=_API_KEY, api_base="https://xiaohuanxiong.com/v1", model="m",
         retry_config=RetryConfig(enabled=False),
     )
     cap = _install_openai_fake(client)
@@ -324,6 +328,8 @@ async def test_openai_generate_emits_agent_headers():
 
     assert cap.last_params is not None
     assert cap.last_params.get("extra_headers") == {
+        "x-client-name": "raccoon",
+        "x-client-platform": "unknown",
         _HEADER: "sess-88",
         _TURN_HEADER: "sess-88-turn-1",
         _TITLE_HEADER: "Quarterly review",
@@ -334,7 +340,7 @@ async def test_openai_generate_emits_agent_headers():
 @pytest.mark.asyncio
 async def test_openai_generate_omits_header_when_empty():
     client = OpenAIClient(
-        api_key=_API_KEY, api_base="https://api.example.com/v1", model="m",
+        api_key=_API_KEY, api_base="https://xiaohuanxiong.com/v1", model="m",
         retry_config=RetryConfig(enabled=False),
     )
     cap = _install_openai_fake(client)
@@ -349,7 +355,7 @@ async def test_openai_generate_omits_header_when_empty():
 async def test_openai_stream_emits_agent_headers():
     client = OpenAIClient(
         api_key=_API_KEY,
-        api_base="https://api.example.com/v1",
+        api_base="https://xiaohuanxiong.com/v1",
         model="m",
         retry_config=RetryConfig(enabled=False),
     )
@@ -366,6 +372,8 @@ async def test_openai_stream_emits_agent_headers():
 
     assert cap.last_params is not None
     assert cap.last_params.get("extra_headers") == {
+        "x-client-name": "raccoon",
+        "x-client-platform": "unknown",
         _HEADER: "sess-stream",
         _TURN_HEADER: "sess-stream-turn-1",
         _TITLE_HEADER: "Quarterly review",
@@ -400,7 +408,7 @@ async def test_session_bound_llm_adds_client_headers_only_for_raccoon_backend():
 
     assert hosted_capture.last_params is not None
     assert hosted_capture.last_params["extra_headers"] | {} == {
-        "x-client-name": "raccoon-ai",
+        "x-client-name": "raccoon",
         "x-client-platform": "desktop-macos-arm64",
         "x-client-version": "v0.21.1",
         "x-client-os-version": "15.6",
@@ -433,11 +441,16 @@ async def test_session_bound_llm_adds_client_headers_only_for_raccoon_backend():
 
 
 @pytest.mark.asyncio
-async def test_openai_sdk_sends_utf8_title_without_header_encoding_failure():
+@pytest.mark.parametrize("url,hosted", [
+    ("https://xiaohuanxiong.com/v1", True),
+    ("https://personal.example/v1", False),
+])
+async def test_openai_sdk_sends_product_headers_only_to_raccoon(url, hosted):
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["title"] = dict(request.headers.raw)[b"X-RACCOON-Title"]
+        captured["title"] = dict(request.headers.raw).get(b"X-RACCOON-Title")
+        captured["headers"] = request.headers
         return httpx.Response(
             200,
             json={
@@ -463,7 +476,7 @@ async def test_openai_sdk_sends_utf8_title_without_header_encoding_failure():
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = OpenAIClient(
         api_key=_API_KEY,
-        api_base="https://api.example.com/v1",
+        api_base=url,
         model="m",
         retry_config=RetryConfig(enabled=False),
     )
@@ -483,17 +496,51 @@ async def test_openai_sdk_sends_utf8_title_without_header_encoding_failure():
     finally:
         await client.client.close()
 
-    assert captured["title"] == "季度复盘".encode("utf-8")
+    assert captured["headers"]["authorization"] == f"Bearer {_API_KEY}"
+    if hosted:
+        assert captured["title"] == "季度复盘".encode("utf-8")
+        assert captured["headers"]["x-client-name"] == "raccoon"
+    else:
+        assert not any(
+            key.startswith(("x-raccoon-", "x-client-"))
+            for key in captured["headers"]
+        )
 
 
 # ── Wrapper threads agent metadata through ───────────────────────────────────
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client_type,install,stream", [
+    (OpenAIClient, _install_openai_fake, False),
+    (OpenAIClient, _install_openai_stream_fake, True),
+    (AnthropicClient, _install_anthropic_fake, False),
+    (AnthropicClient, _install_anthropic_stream_fake, True),
+])
+@pytest.mark.parametrize("url", [
+    "https://api.openai.com/v1", "http://localhost:8000/v1",
+    "http://10.158.136.99/v1", "https://xiaohuanxiong.com.evil.example/v1",
+])
+async def test_external_llm_requests_omit_all_product_headers(client_type, install, stream, url):
+    client = client_type(api_key=_API_KEY, api_base=url, model="m",
+                         retry_config=RetryConfig(enabled=False))
+    capture = install(client)
+    session = SessionBoundLLM(client)
+    session.set_request_context(
+        session_id="session", turn_id="turn", title="private title", call_kind="agent_step",
+        client_info=ClientInfo(version="v1.2.3", device_id="private-device"),
+    )
+    run = _capture_stream if stream else _capture_generate
+    await run(session, messages=[Message(role="user", content="hi")])
+    assert capture.last_params is not None
+    assert "extra_headers" not in capture.last_params
+
+
+@pytest.mark.asyncio
 async def test_wrapper_threads_agent_headers_to_client():
     wrapper = LLMClient(
         api_key=_API_KEY, provider=LLMProvider.ANTHROPIC,
-        api_base="https://api.anthropic.com", model="m",
+        api_base="https://xiaohuanxiong.com", model="m",
         retry_config=RetryConfig(enabled=False),
     )
     cap = _install_anthropic_fake(wrapper._client)
@@ -508,6 +555,8 @@ async def test_wrapper_threads_agent_headers_to_client():
 
     assert cap.last_params is not None
     assert cap.last_params.get("extra_headers") == {
+        "x-client-name": "raccoon",
+        "x-client-platform": "unknown",
         _HEADER: "sess-wrap",
         _TURN_HEADER: "sess-wrap-turn-1",
         _TITLE_HEADER: "Quarterly review",

@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..auth import refresh_hosted_auth_token_if_needed, request_auth_headers
-from ..client_info import current_client_headers
+from ..client_info import current_client_headers, should_attach_client_headers
 from ..retry import RetryConfig
 from ..schema import LLMResponse, Message, StreamEvent
 
@@ -108,6 +108,8 @@ class LLMClientBase(ABC):
         call_kind: str = "",
     ) -> dict[str, str | bytes]:
         """Return correlation plus host client headers for one request."""
+        if not should_attach_client_headers(self.api_base):
+            return {}
         headers = self._agent_headers(session_id, turn_id, title, call_kind)
         headers.update(current_client_headers(self.api_base))
         return headers

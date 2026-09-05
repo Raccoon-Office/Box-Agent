@@ -2,19 +2,32 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Iterator
+from urllib.parse import urlparse
 
-from .auth import should_attach_auth_header
 
 _MAX_HEADER_VALUE_LENGTH = 256
 _CURRENT_CLIENT_INFO: ContextVar[ClientInfo | None] = ContextVar(
     "box_agent_client_info",
     default=None,
 )
+
+
+def should_attach_client_headers(url: str) -> bool:
+    """Limit product metadata to the Raccoon domain and its subdomains."""
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and (
+        hostname == "xiaohuanxiong.com" or hostname.endswith(".xiaohuanxiong.com")
+    )
 
 
 def _clean_header_value(value: Any) -> str:
@@ -69,17 +82,26 @@ class ClientInfo:
         ) else None
 
     def headers_for_url(self, url: str) -> dict[str, str]:
-        if not should_attach_auth_header(url):
+        if not should_attach_client_headers(url):
             return {}
+        version = _clean_header_value(self.version)
+        if re.fullmatch(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
+            version = "v" + version.removeprefix("v")
+        else:
+            version = ""
         values = (
-            ("x-client-name", self.name),
-            ("x-client-platform", self.platform),
-            ("x-client-version", self.version),
+            ("x-client-name", "raccoon"),
+            ("x-client-platform", _clean_header_value(self.platform) or "unknown"),
+            ("x-client-version", version),
             ("x-client-os-version", self.os_version),
             ("x-client-channel", self.channel),
             ("x-client-device-id", self.device_id),
         )
-        return {header: value for header, value in values if value}
+        return {
+            header: cleaned
+            for header, value in values
+            if (cleaned := _clean_header_value(value))
+        }
 
 
 @contextmanager
@@ -93,4 +115,4 @@ def scoped_client_info(client_info: ClientInfo | None) -> Iterator[None]:
 
 def current_client_headers(url: str) -> dict[str, str]:
     client_info = _CURRENT_CLIENT_INFO.get()
-    return client_info.headers_for_url(url) if client_info is not None else {}
+    return (client_info or ClientInfo()).headers_for_url(url)

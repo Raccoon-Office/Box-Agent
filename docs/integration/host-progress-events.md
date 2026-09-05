@@ -35,7 +35,8 @@ Hosts should pass the business conversation id and optional display title on
 }
 ```
 
-Box-Agent forwards these values on every model request as
+Box-Agent forwards these values on model requests to `xiaohuanxiong.com`
+and its subdomains as
 `X-RACCOON-Session-ID`, `X-RACCOON-Turn-ID`, and `X-RACCOON-Title`. It also
 uses `X-RACCOON-Call-Kind` to classify the request: `agent_step` for the main
 Agent loop, `title_generate` for title generation, `context_summary` for
@@ -48,6 +49,25 @@ the gateway treats an omitted value as `agent_step`. A prompt
 may override the cached title with `_meta.title`, `_meta.session_title`, or
 `_meta.sessionTitle`. If no title is provided, the title defaults to
 `Box-Agent`. Empty session or turn ids are omitted.
+
+Both streaming and non-streaming OpenAI-compatible and Anthropic requests use
+this domain restriction. Third-party hosts, personal servers, localhost, and IP
+addresses (including `10.158.136.99`) receive neither `X-RACCOON-*` correlation
+headers nor `x-client-*` metadata. Standard SDK headers and provider authentication
+remain in place; the existing hosted-login authentication rules are unchanged.
+
+Hosts may supply `_meta.client_info` during ACP initialize, session creation,
+or a lightweight LLM prompt. Supported fields are `name`, `platform`, `version`, `os_version`
+(or `osVersion`), `channel`, and `device_id` (or `deviceId`). On allowed model
+requests, `x-client-name` is fixed to `raccoon` and a missing or unsafe platform
+falls back to `unknown`. The host's product version is emitted as
+`x-client-version: vMAJOR.MINOR.PATCH`; an absent or invalid version is omitted.
+Box-Agent does not substitute its own package version for the host product version.
+Hosts remain responsible for supplying the protocol's platform enumeration.
+Non-empty safe OS version, channel, and device ID values are forwarded as
+`x-client-os-version`, `x-client-channel`, and `x-client-device-id`.
+Box-Agent does not collect hardware identifiers or guess host metadata from its
+runtime machine. This contract covers model requests, not every host business API.
 
 The stream payload includes both the host-facing ids and the ACP-local session id:
 

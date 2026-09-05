@@ -427,7 +427,7 @@ async def test_openai_client_uses_configured_api_key_without_auth_json(tmp_path:
     (tmp_path / "auth.json").write_text('{"access_token": "token-two"}\n', encoding="utf-8")
     await client._make_api_request([{"role": "user", "content": "hi"}])
 
-    assert captured == [None, None]
+    assert captured == [{"x-client-name": "raccoon", "x-client-platform": "unknown"}] * 2
 
 
 @pytest.mark.asyncio
@@ -454,7 +454,11 @@ async def test_openai_client_omits_empty_model(tmp_path: Path) -> None:
     await client._make_api_request([{"role": "user", "content": "hi"}])
 
     assert "model" not in captured[0]
-    assert captured[0]["extra_headers"] == {"Authorization": "Bearer token-one"}
+    assert captured[0]["extra_headers"] == {
+        "Authorization": "Bearer token-one",
+        "x-client-name": "raccoon",
+        "x-client-platform": "unknown",
+    }
 
 
 @pytest.mark.asyncio
@@ -480,7 +484,11 @@ async def test_openai_client_reads_auth_json_for_officev3_placeholder(tmp_path: 
     (tmp_path / "auth.json").write_text('{"access_token": "token-one"}\n', encoding="utf-8")
     await client._make_api_request([{"role": "user", "content": "hi"}])
 
-    assert captured == [{"Authorization": "Bearer token-one"}]
+    assert captured == [{
+        "Authorization": "Bearer token-one",
+        "x-client-name": "raccoon",
+        "x-client-platform": "unknown",
+    }]
 
 
 @pytest.mark.asyncio
@@ -506,7 +514,7 @@ async def test_anthropic_client_uses_configured_api_key_without_auth_json(tmp_pa
     (tmp_path / "auth.json").write_text('{"access_token": "token-two"}\n', encoding="utf-8")
     await client._make_api_request(None, [{"role": "user", "content": "hi"}])
 
-    assert captured == [None, None]
+    assert captured == [{"x-client-name": "raccoon", "x-client-platform": "unknown"}] * 2
 
 
 @pytest.mark.asyncio
