@@ -3374,9 +3374,19 @@ async def test_acp_uses_host_artifact_root_dir_for_output_mode(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("artifact_mode", ["output", "project"])
+@pytest.mark.parametrize(
+    "layout_keys",
+    [
+        ("selected_root_dir", "session_workspace_dir", "artifact_root_dir"),
+        ("selectedRootDir", "sessionWorkspaceDir", "artifactRootDir"),
+    ],
+)
 async def test_acp_workspace_layout_prompt_distinguishes_root_roles(
     tmp_path,
     monkeypatch,
+    artifact_mode,
+    layout_keys,
 ):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     selected_root = tmp_path / "workbench"
@@ -3394,11 +3404,11 @@ async def test_acp_workspace_layout_prompt_distinguishes_root_roles(
         SimpleNamespace(
             cwd=str(task_root),
             field_meta={
-                "artifact_mode": "output",
+                "artifact_mode": artifact_mode,
                 "workspace_layout": {
-                    "selected_root_dir": str(selected_root),
-                    "session_workspace_dir": str(task_root),
-                    "artifact_root_dir": str(artifact_root),
+                    layout_keys[0]: str(selected_root),
+                    layout_keys[1]: str(task_root),
+                    layout_keys[2]: str(artifact_root),
                 },
             },
         )
@@ -3409,9 +3419,16 @@ async def test_acp_workspace_layout_prompt_distinguishes_root_roles(
     assert f"工作区（selected workspace root）：`{selected_root}`" in prompt
     assert f"当前任务目录（current task root）：`{task_root}`" in prompt
     assert f"交付物目录（artifact root）：`{artifact_root}`" in prompt
-    assert "说“当前任务”或“当前目录”时指 current task root" in prompt
-    assert "不得称为工作区或当前任务目录" in prompt
-    assert Path(state.agent.tools["bash"].workspace_dir) == artifact_root.resolve()
+    assert "用户说“工作区”“当前文件夹”或“当前目录”时，默认指 selected workspace root" in prompt
+    assert "只有明确说“当前任务目录”时才指 current task root" in prompt
+    assert "必须先使用目标目录的绝对路径实际查询其内容" in prompt
+    assert "只有查询成功且确认无内容时，才可判断该目标目录为空" in prompt
+    assert "不得用当前任务目录、交付物目录或工具默认目录的空结果推断工作区为空" in prompt
+    assert "查询失败、权限不足或结果被过滤、截断时，不得据此判空" in prompt
+    if artifact_mode == "output":
+        assert "不得称为工作区或当前任务目录" in prompt
+    expected_cwd = artifact_root if artifact_mode == "output" else task_root
+    assert Path(state.agent.tools["bash"].workspace_dir) == expected_cwd.resolve()
 
 
 def test_acp_artifact_raw_output_gets_session_metadata():

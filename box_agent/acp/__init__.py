@@ -876,13 +876,19 @@ def _workspace_layout_prompt(
         f"- 当前任务目录（current task root）：`{task_root}`",
         f"- 交付物目录（artifact root）：`{resolved_artifact_root}`",
         (
-            "- 目录语义：用户说“工作区”时指 selected workspace root；"
-            "说“当前任务”或“当前目录”时指 current task root；"
+            "- 目录语义：用户说“工作区”“当前文件夹”或“当前目录”时，默认指 "
+            "selected workspace root；只有明确说“当前任务目录”时才指 current task root；"
             "只有明确说“输出目录”或“交付物目录”时才指 artifact root。"
         ),
         (
             "- 查看工作区或当前任务内容时，使用上面对应根目录的绝对路径，"
             "不要根据工具的相对路径根猜测目录身份。"
+        ),
+        (
+            "- 判空规则：必须先使用目标目录的绝对路径实际查询其内容，"
+            "只有查询成功且确认无内容时，才可判断该目标目录为空。"
+            "不得用当前任务目录、交付物目录或工具默认目录的空结果推断工作区为空；"
+            "查询失败、权限不足或结果被过滤、截断时，不得据此判空。"
         ),
     ]
     if artifact_mode != "project":
