@@ -35,6 +35,17 @@ CapabilitySnapshotProvider = Callable[[], Mapping[str, Any]]
 SkillHubSearcher = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
+SKILL_SOURCE_DISCOVERY_PROMPT = """For Skill find/install requests without a specified source,
+do not assume marketplace-only intent. The marketplace may be searched first; after no
+matches or an unavailable search, continue broader discovery using available web search
+for GitHub or other public sources and verify the repository and SKILL.md. No separate
+request for broad discovery is needed. Restrict discovery to the marketplace only when
+the user explicitly limits the source to it. Inspect a user-supplied source first.
+Ask for a link or identifier only after other reasonable sources yield no match, or an
+unresolvable ambiguity or real blocker remains. Never invent a marketplace skill_id for
+an external source. External installation must follow applicable permission rules and
+must not bypass a denied installation authorization."""
+
 HARD_CAPABILITY_GAP_PROMPT = """## Skill marketplace capability-gap fallback
 When the user requests an executable outcome that the currently installed Skills and
 available tools cannot faithfully deliver, first use `tool_search` if deferred MCP
@@ -48,6 +59,8 @@ marketplace, call `search_skillhub` with `request_kind=explicit_marketplace_requ
 this direct marketplace request does not require `tool_search` first. A repository URL
 or a request for general web discovery is not an explicit marketplace request. Never use
 `get_skill` to install anything: it only loads Skills that are already installed.
+For an unspecified-source Skill find/install request, the marketplace search leg may use
+`explicit_marketplace_request`; this does not mean the user limited the source to the market.
 
 Skill marketplace search is read-only and never installs a Skill. Search with 2-5 short,
 independent, non-sensitive capability keywords: include the user's language plus an
@@ -62,13 +75,13 @@ the host resumes the task. If installation is unavailable, direct the user to th
 Skill marketplace card. If installation is denied or fails, respect that result and do not bypass
 it with package managers, shell commands, browser automation, or an unrelated installer.
 If every marketplace query succeeds with no matches, explicitly say the Skill marketplace
-returned no matching Skill, then provide the safest useful best-effort answer. If marketplace
-search is unavailable, say it could not be performed, then provide the same bounded fallback.
+returned no matching Skill; this is not a reason to stop source discovery. If marketplace
+search is unavailable, say it could not be performed and continue applicable source discovery.
 In legal, medical, financial,
 compliance, engineering-signoff, or other high-risk domains, best effort is informational
 only and must not fabricate a professional verdict, approval, guarantee, or validated
 deliverable.
-"""
+""" + "\n" + SKILL_SOURCE_DISCOVERY_PROMPT
 
 
 def _bounded_text(value: object, *, limit: int) -> str:
@@ -175,6 +188,8 @@ class SkillHubSearchTool(Tool):
             "Search the Skill marketplace once either after a hard capability gap has been "
             "confirmed or because the user explicitly asked to find or install a marketplace "
             "Skill. "
+            "It may also be the marketplace search leg of an unspecified-source Skill "
+            "find/install request; no matches must lead to external source discovery. "
             "Capability-gap searches require relevant deferred MCP discovery first; direct "
             "marketplace requests do not. Do not use for a user-supplied repository URL, general "
             "web discovery, missing input, ambiguity, auth, permission, platform, transient "
@@ -200,7 +215,9 @@ class SkillHubSearchTool(Tool):
                         "Use capability_gap after local discovery proves an executable "
                         "capability is missing. Use explicit_marketplace_request when the user "
                         "directly asks to find or install a Skill from the Skill marketplace, "
-                        "not when they supply a repository URL or request general web discovery."
+                        "or for the marketplace search leg of an unspecified-source Skill request; "
+                        "this does not imply marketplace-only intent. Do "
+                        "not use it when they supply a repository URL or request general web discovery."
                     ),
                 },
                 "missing_capability": {
@@ -400,9 +417,8 @@ class SkillHubSearchTool(Tool):
                 "matching Skill. This result is scoped only to the Skill marketplace; it "
                 "does not establish that a supplied "
                 "repository or another external source has no matching Skill. Do not end the "
-                "turn solely because of this result. Inspect any user-supplied source, or "
-                "continue broader discovery with relevant available external search tools when "
-                f"the user requested it. The missing capability is: {missing_capability}. "
+                "turn solely because of this result. "
+                f"{SKILL_SOURCE_DISCOVERY_PROMPT}\nThe missing capability is: {missing_capability}. "
                 "For high-risk work, provide informational guidance only and no professional "
                 "verdict."
             )
@@ -413,7 +429,8 @@ class SkillHubSearchTool(Tool):
             self._candidates_by_id = {}
             content = (
                 "The Skill marketplace could not be searched right now. Do not say that no "
-                "matching Skill exists. Continue with the safest best-effort response and state that the "
+                "matching Skill exists. "
+                f"{SKILL_SOURCE_DISCOVERY_PROMPT}\nState that the "
                 f"missing capability is: {missing_capability}. For high-risk work, provide "
                 "informational guidance only and no professional verdict."
             )

@@ -92,6 +92,15 @@ def test_system_prompt_routes_direct_sources_before_marketplace_search():
     assert "存在其他安全可用来源时不得据此结束任务" in prompt
 
 
+def test_system_prompt_continues_unspecified_skill_source_discovery():
+    prompt = _prompt()
+
+    assert "未指定来源时，不等于仅从 Skill 市场安装" in prompt
+    assert "未命中或不可用时继续搜索 GitHub 等公开来源并核对仓库与 SKILL.md" in prompt
+    assert "只有用户明确限定仅从市场安装时才不扩展来源" in prompt
+    assert "不得绕过用户已拒绝的安装授权" in prompt
+
+
 def test_system_prompt_forbids_reusing_model_history_placeholders():
     prompt = _prompt()
 

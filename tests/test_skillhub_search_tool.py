@@ -7,6 +7,7 @@ import pytest
 from box_agent.schema import FunctionCall, Message, ToolCall
 from box_agent.tools.skillhub_search_tool import (
     HARD_CAPABILITY_GAP_PROMPT,
+    SKILL_SOURCE_DISCOVERY_PROMPT,
     SkillHubSearchTool,
     capability_snapshot,
 )
@@ -145,6 +146,7 @@ async def test_skillhub_search_preserves_empty_and_unavailable_states(
     assert result.raw_output["status"] == expected_status
     assert expected_text in result.content
     assert result.raw_output["items"] == []
+    assert SKILL_SOURCE_DISCOVERY_PROMPT in result.model_context
 
     if expected_status == "empty":
         assert "scoped only to the Skill marketplace" in result.model_context
@@ -184,6 +186,33 @@ def test_marketplace_prompt_uses_product_name_and_scopes_direct_sources() -> Non
     assert "repository URL" in normalized_prompt
     assert "not an explicit marketplace request" in normalized_prompt
     assert "SkillHub" not in normalized_prompt
+
+
+@pytest.mark.parametrize(
+    "guidance",
+    [
+        "do not assume marketplace-only intent",
+        "verify the repository and SKILL.md",
+        "No separate request for broad discovery is needed",
+        "only when the user explicitly limits the source to it",
+        "Inspect a user-supplied source first",
+        "must not bypass a denied installation authorization",
+        "Never invent a marketplace skill_id for an external source",
+    ],
+)
+def test_marketplace_prompt_preserves_source_and_authorization_boundaries(guidance) -> None:
+    assert guidance in " ".join(HARD_CAPABILITY_GAP_PROMPT.split())
+
+
+def test_marketplace_search_schema_does_not_imply_marketplace_only_intent() -> None:
+    async def searcher(_payload):
+        return {"status": "empty", "items": []}
+
+    tool = SkillHubSearchTool(searcher)
+    assert "unspecified-source" in tool.description
+    assert "does not imply marketplace-only intent" in (
+        tool.parameters["properties"]["request_kind"]["description"]
+    )
 
 
 @pytest.mark.asyncio
