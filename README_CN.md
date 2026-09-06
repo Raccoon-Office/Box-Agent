@@ -347,8 +347,9 @@ uv run box-agent-build-runtime
 # 一次性准备：
 #   arch -x86_64 /bin/bash -c 'curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin-x64" sh'
 #   UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv sync
-# 打包：
-UV_PROJECT_ENVIRONMENT=.venv-x64 BOX_AGENT_RUNTIME_TARGET=darwin-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime
+# 已有 .venv-x64 时直接使用其 Python，不依赖 x64 uv 的安装路径。
+# 独立输出目录避免与 ARM 构建的中间产物相互覆盖；可加 --version X.Y.Z。
+.venv-x64/bin/python -m box_agent.build_runtime_cli --target darwin-x64 --output dist/runtime-darwin-x64
 ```
 
 运行时通过 JSON-RPC over stdio 通信。stdout = 纯协议数据，stderr = 诊断信息。

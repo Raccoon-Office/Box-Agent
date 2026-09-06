@@ -396,14 +396,15 @@ uv run box-agent-build-runtime
 # One-time setup:
 #   arch -x86_64 /bin/bash -c 'curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin-x64" sh'
 #   UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv sync
-# Build:
-UV_PROJECT_ENVIRONMENT=.venv-x64 BOX_AGENT_RUNTIME_TARGET=darwin-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime
+# Reuse the existing x64 Python without depending on the x64 uv install path.
+# Isolate intermediate outputs from ARM builds; add --version X.Y.Z if needed.
+.venv-x64/bin/python -m box_agent.build_runtime_cli --target darwin-x64 --output dist/runtime-darwin-x64
 ```
 
 The runtime communicates via JSON-RPC over stdio. stdout = protocol only, stderr = diagnostics.
-macOS runtime archives include Box-Agent's pinned Node.js runtime for skills
-under `box-agent-runtime/runtimes/node/`; npm cache/prefix state remains in
-`~/.box-agent/runtimes/node/sandbox/`.
+macOS runtime archives contain ACP and its internal dependencies. Stable tool
+Python/Node runtimes are host-managed and must match the target architecture;
+they are not bundled into this ACP-only archive.
 
 ## Testing
 

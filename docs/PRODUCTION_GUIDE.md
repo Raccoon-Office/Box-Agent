@@ -184,13 +184,16 @@ uv run box-agent-build-runtime
 Build macOS Intel/x64 from an Apple Silicon Mac:
 
 ```bash
-UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime --arch x64
+.venv-x64/bin/python -m box_agent.build_runtime_cli --target darwin-x64 --output dist/runtime-darwin-x64
 ```
 
-The long form is also supported:
+This requires an existing x86_64 Python environment with the project and
+PyInstaller dependencies installed. Check the actual process architecture and
+dependency consistency before building:
 
 ```bash
-UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime --target darwin-x64
+.venv-x64/bin/python -c 'import platform; print(platform.machine())'
+uv pip check --python .venv-x64/bin/python
 ```
 
 Optional environment defaults:
@@ -207,11 +210,12 @@ The older direct script entry remains available for compatibility:
 uv run python scripts/build_runtime.py --target darwin-arm64
 ```
 
-macOS runtime artifacts additionally bundle a pinned Node.js runtime under
-`box-agent-runtime/runtimes/node/`. The Node manifest uses relative paths so the
-runtime directory remains relocatable after extraction. Runtime npm state
-(`npm_config_cache`, `npm_config_prefix`, and `NODE_PATH`) is still kept under
-the user's `~/.box-agent/runtimes/node/sandbox/` directory.
+macOS runtime artifacts are ACP-only (`external_python_sandbox: true`,
+`bundled_stable_runtimes: []`). The embedded Python belongs to ACP itself;
+stable tool Python/Node are provisioned by the host for the matching target.
+Keep Intel and ARM build output directories separate, and install the resulting
+archive into an architecture-specific host build workspace rather than replacing
+the runtime of an active development client.
 
 ### 3.3 Container Deployment Recommendations
 
