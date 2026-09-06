@@ -1426,6 +1426,39 @@ async def test_default_llm_port_accepts_legacy_streaming_only_implementation() -
     await host.close()
 
 
+@pytest.mark.asyncio
+async def test_default_composition_accepts_dynamic_llm_proxy():
+    import box_agent.core as core
+
+    class Proxy:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+    events = [event async for event in core.run_agent_loop(
+        llm=Proxy(_LLM()), summary_llm=Proxy(_LLM()),
+        messages=[Message(role="user", content="respond")], tools={}, max_steps=1,
+    )]
+    assert events[-1].final_content == "done"
+
+
+@pytest.mark.asyncio
+async def test_default_composition_rejects_proxy_with_missing_llm_method():
+    import box_agent.core as core
+    from box_agent.plugins.host import PluginValidationError
+
+    class MissingMethodProxy:
+        def __getattr__(self, name):
+            raise AttributeError(name)
+
+    with pytest.raises(PluginValidationError):
+        await anext(core.run_agent_loop(
+            llm=MissingMethodProxy(), messages=[], tools={}, max_steps=1,
+        ))
+
+
 def test_capability_schema_rejects_unhashable_port_type_before_factory() -> None:
     from box_agent.plugins.host import PluginHost, PluginValidationError
     from box_agent.plugins.registries import (
@@ -1872,6 +1905,50 @@ async def test_session_disposal_preserves_cancellation_and_keeps_cache_retryable
     assert calls == 2
     assert "session-a" not in host._session_instances
     assert host._live_records == []
+
+
+@pytest.mark.asyncio
+async def test_session_activation_waits_for_interrupted_cleanup_to_finish():
+    from box_agent.plugins.descriptors import PluginScope
+    from box_agent.plugins.host import PluginScopeError
+
+    class SessionPort:
+        pass
+
+    created = []
+    attempts = 0
+
+    def create():
+        instance = object()
+        created.append(instance)
+        return instance
+
+    async def dispose(instance):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise asyncio.CancelledError
+
+    host = _plugin_host((
+        _plugin_descriptor("session.resource", SessionPort, create,
+                           scope=PluginScope.SESSION, disposer=dispose),
+    ), required=(SessionPort,))
+    first = await host.activate(session_key="first")
+    await first.dispose()
+    with pytest.raises(asyncio.CancelledError):
+        await host.dispose_session("first")
+
+    with pytest.raises(PluginScopeError, match="cleanup"):
+        await host.activate(session_key="first")
+    assert len(created) == 1
+
+    other = await host.activate(session_key="other")
+    await other.dispose()
+    await host.dispose_session("first")
+    fresh = await host.activate(session_key="first")
+    assert fresh.registry[SessionPort] is not created[0]
+    await fresh.dispose()
+    await host.close()
 
 
 @pytest.mark.asyncio

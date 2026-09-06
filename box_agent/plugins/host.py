@@ -53,6 +53,27 @@ def _is_hashable(value: object) -> bool:
     return True
 
 
+def _supports_dynamic_protocol(instance: object, port_type: type) -> bool:
+    """Retain duck-typed proxies after Python 3.12 made Protocol checks static."""
+
+    members = getattr(port_type, "__protocol_attrs__", ())
+    if not members or not callable(getattr(type(instance), "__getattr__", None)):
+        return False
+    for name in members:
+        try:
+            # Python resolves special methods on the type, not via __getattr__.
+            value = (
+                inspect.getattr_static(type(instance), name)
+                if name.startswith("__") and name.endswith("__")
+                else getattr(instance, name)
+            )
+        except AttributeError:
+            return False
+        if callable(getattr(port_type, name, None)) and not callable(value):
+            return False
+    return True
+
+
 class PluginError(RuntimeError):
     """Base error for plugin-host lifecycle failures."""
 
@@ -126,6 +147,7 @@ class PluginHost:
         self._schema = schema
         self._process_instances: dict[str, _InstanceRecord] = {}
         self._session_instances: dict[Hashable, dict[str, _InstanceRecord]] = {}
+        self._closing_sessions: set[Hashable] = set()
         self._live_records: list[_InstanceRecord] = []
         self._closed = False
         self._lock = asyncio.Lock()
@@ -380,6 +402,10 @@ class PluginHost:
             async with self._lock:
                 if self._closed:
                     raise PluginError("plugin host is closed")
+                if session_key in self._closing_sessions:
+                    raise PluginScopeError(
+                        "session cleanup is incomplete; retry dispose_session first"
+                    )
             if self._schema is None:  # Guarded by resolve_dependencies().
                 raise PluginValidationError("malformed capability schema")
             builder = TypedRegistry(self._schema)
@@ -474,7 +500,10 @@ class PluginHost:
                 and getattr(port_type, "_is_runtime_protocol", False)
             ):
                 continue
-            if not isinstance(instance, port_type):
+            if not (
+                isinstance(instance, port_type)
+                or _supports_dynamic_protocol(instance, port_type)
+            ):
                 raise PluginValidationError(
                     f"plugin {descriptor.plugin_id!r} factory result does not "
                     f"satisfy runtime Port {port_type.__qualname__}"
@@ -552,6 +581,8 @@ class PluginHost:
                 owned_records = tuple(
                     self._session_instances.get(session_key, {}).values()
                 )
+                if owned_records:
+                    self._closing_sessions.add(session_key)
             cleanup_errors, cancellation = await self._dispose_records(
                 reversed(owned_records)
             )
@@ -566,6 +597,8 @@ class PluginHost:
                             del session_cache[record.descriptor.plugin_id]
                     if not session_cache:
                         del self._session_instances[session_key]
+                if session_key not in self._session_instances:
+                    self._closing_sessions.discard(session_key)
                 self._remove_live_records(
                     record for record in owned_records if record.disposed
                 )
@@ -654,6 +687,7 @@ class PluginHost:
                 empty_sessions.append(session_key)
         for session_key in empty_sessions:
             del self._session_instances[session_key]
+            self._closing_sessions.discard(session_key)
 
     def _remove_live_records(self, records: Iterable[_InstanceRecord]) -> None:
         record_ids = {id(record) for record in records}

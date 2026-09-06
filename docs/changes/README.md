@@ -72,6 +72,22 @@ Release, provider API, and ACP compatibility have their own sources under
 
 ## Pending material changes
 
+### 2026-09-06 — kernel lifecycle follow-up
+
+- Agent and kernel event streams close their owned tool iterators explicitly.
+  Event and parallel tools receive their configured cancellation grace period;
+  late results remain observed. Foreground Bash cancellation reaps the process
+  tree and communication task, including when cancellation repeats during cleanup.
+- Direct adapter calls and permission retries preserve `SessionLogDurabilityError`
+  instead of converting it into an ordinary tool failure and continuing execution.
+- Runtime Port validation preserves dynamic method proxies on Python 3.12+ without
+  accepting missing members or forwarding unsupported special methods.
+- A session whose disposal was interrupted cannot activate again until
+  `dispose_session` completes. Other sessions and cleanup retries remain usable.
+- Proof anchors: kernel compatibility, Bash process cancellation, permission
+  negotiation, and plugin host regression tests. These source checks do not
+  establish installed runtime or OfficeV3 behavior.
+
 ### 2026-09-03 — stable kernel and static plugin composition
 
 - Change: [PR #107](https://github.com/Raccoon-Office/Box-Agent/pull/107),
