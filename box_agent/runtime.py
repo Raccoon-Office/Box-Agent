@@ -11,11 +11,9 @@ from collections.abc import AsyncIterator
 from functools import wraps
 from typing import Any
 
-from .core import (
-    _negotiate_tool_permission_chain,
-    run_agent_loop as _run_agent_loop,
-)
+from .core import run_agent_loop as _run_agent_loop
 from .events import AgentEvent
+from .kernel.permission_gateway import _negotiate_tool_permission_chain
 from .tools.base import Tool, ToolResult
 from .tools.model_tool_context import scoped_model_tool_context
 

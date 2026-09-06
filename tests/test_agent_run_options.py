@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import asyncio
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
 
 import box_agent.agent as agent_module
-from box_agent.agent import Agent
+from box_agent.agent import Agent, AgentRunOptions
 from box_agent.config import ToolLimitsConfig
 from box_agent.context_resources import ResourceClass, ResourceDescriptor
-from box_agent.events import DoneEvent, StopReason
+from box_agent.events import ContentEvent, DoneEvent, StopReason
+from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.skill_preload import ACTIVE_SKILLS_HEADING, strip_active_skills
 
 
@@ -76,6 +79,16 @@ async def test_agent_run_events_forwards_host_run_options(
         workspace_dir=str(tmp_path),
     )
     host_llm = object()
+    summary_llm = object()
+    cancelled = lambda: False
+    host_logger = object()
+    permission_negotiator = object()
+    hooks = [object()]
+    memory_manager = object()
+    memory_extractor = object()
+    inject_queue: asyncio.Queue[object] = asyncio.Queue()
+    plan_approval = {"state": "approved"}
+    fingerprint_context = {"source": "host"}
     artifact_root = tmp_path / "host-output"
     def fingerprint_sink(_payload: dict) -> None:
         pass
@@ -83,15 +96,30 @@ async def test_agent_run_events_forwards_host_run_options(
     options = replace(
         agent.default_run_options(),
         llm=host_llm,
+        summary_llm=summary_llm,
+        is_cancelled=cancelled,
+        logger=host_logger,
+        permission_negotiator=permission_negotiator,
+        hooks=hooks,
+        memory_manager=memory_manager,
+        memory_extractor=memory_extractor,
         session_id="host-session",
         memory_turn_id="turn-1",
+        inject_queue=inject_queue,
         turn_id="turn-1",
         title="Quarterly review",
+        force_plan_start=True,
+        require_plan_approval=True,
+        plan_approval=plan_approval,
+        plan_start_text="write a plan",
+        pause_after_plan_write=True,
         max_tool_calls=9,
         max_delegated_tool_calls=12,
         web_search_total_limit=36,
         no_progress_limit=2,
+        artifact_detection_enabled=False,
         artifact_root_dir=artifact_root,
+        cache_fingerprint_context=fingerprint_context,
         cache_fingerprint_sink=fingerprint_sink,
         current_turn_text="host current turn",
     )
@@ -99,20 +127,149 @@ async def test_agent_run_events_forwards_host_run_options(
     events = [event async for event in agent.run_events(options=options)]
 
     assert len(events) == 1
-    assert captured["llm"] is host_llm
-    assert captured["session_id"] == "host-session"
-    assert captured["memory_turn_id"] == "turn-1"
-    assert captured["turn_id"] == "turn-1"
-    assert captured["title"] == "Quarterly review"
-    assert captured["max_tool_calls"] == 9
-    assert captured["max_delegated_tool_calls"] == 12
-    assert captured["web_search_total_limit"] == 36
-    assert captured["no_progress_limit"] == 2
-    assert captured["artifact_root_dir"] == artifact_root
-    assert captured["cache_fingerprint_sink"] is fingerprint_sink
+    identity_fields = {
+        "llm",
+        "summary_llm",
+        "is_cancelled",
+        "logger",
+        "permission_negotiator",
+        "hooks",
+        "memory_manager",
+        "memory_extractor",
+        "inject_queue",
+        "plan_approval",
+        "artifact_root_dir",
+        "cache_fingerprint_context",
+        "cache_fingerprint_sink",
+    }
+    for option_field in fields(AgentRunOptions):
+        actual = captured[option_field.name]
+        expected = getattr(options, option_field.name)
+        if option_field.name in identity_fields:
+            assert actual is expected, option_field.name
+        else:
+            assert actual == expected, option_field.name
     assert "workflow_policy" not in captured
-    assert captured["current_turn_text"] == "host current turn"
+    assert {"_services", "services", "registry", "plugin_host"}.isdisjoint(captured)
     assert captured["context_resource_ledger"] is agent.context_resource_ledger
+
+
+@pytest.mark.asyncio
+async def test_agent_run_consumes_run_events_and_returns_done_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(
+        llm_client=DummyLLM(),
+        system_prompt="system",
+        tools=[],
+        workspace_dir=str(tmp_path),
+    )
+    seen: dict[str, object] = {}
+    rendered: list[object] = []
+
+    async def fake_run_events(cancel_event=None, *, options=None, **kwargs):
+        seen["cancel_event"] = cancel_event
+        seen["options"] = options
+        seen["kwargs"] = kwargs
+        yield ContentEvent(content="streamed")
+        yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="final")
+
+    monkeypatch.setattr(agent, "run_events", fake_run_events)
+    monkeypatch.setattr(agent, "_render_event", rendered.append)
+
+    result = await agent.run(current_turn_text="current request")
+
+    assert result == "final"
+    assert agent.last_stop_reason == StopReason.END_TURN.value
+    assert [type(event).__name__ for event in rendered] == [
+        "ContentEvent",
+        "DoneEvent",
+    ]
+    assert seen["options"].current_turn_text == "current request"
+
+
+class _OrderedEventsLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, **_kwargs):
+        raise AssertionError("this fixture must not need context summarization")
+
+    async def generate_stream(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="echo-1",
+                        type="function",
+                        function=FunctionCall(
+                            name="echo",
+                            arguments={"text": "evidence"},
+                        ),
+                    )
+                ],
+            )
+            return
+        yield StreamEvent(type="text", delta="final")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+
+class _OrderedEventsEchoTool(Tool):
+    @property
+    def name(self) -> str:
+        return "echo"
+
+    @property
+    def description(self) -> str:
+        return "Echo deterministic evidence."
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        }
+
+    async def execute(self, text: str) -> ToolResult:
+        return ToolResult(success=True, content=text)
+
+
+@pytest.mark.asyncio
+async def test_agent_public_event_order_for_deterministic_tool_turn(
+    tmp_path: Path,
+) -> None:
+    agent = Agent(
+        llm_client=_OrderedEventsLLM(),
+        system_prompt="system",
+        tools=[_OrderedEventsEchoTool()],
+        max_steps=3,
+        workspace_dir=str(tmp_path),
+    )
+    agent.add_user_message("use echo")
+    options = replace(agent.default_run_options(), logger=None)
+
+    event_types = [
+        type(event).__name__
+        async for event in agent.run_events(options=options)
+    ]
+
+    assert event_types == [
+        "StepStart",
+        "LLMOutputEvent",
+        "ToolCallStart",
+        "ToolCallResult",
+        "StepEnd",
+        "StepStart",
+        "ContentEvent",
+        "LLMOutputEvent",
+        "StepEnd",
+        "DoneEvent",
+    ]
 
 
 def test_agent_public_runtime_configuration_and_history_reset(tmp_path: Path) -> None:

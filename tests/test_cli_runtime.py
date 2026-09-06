@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 from pathlib import Path
 
 import box_agent.cli as cli
+import box_agent.composition as composition_module
+import box_agent.runtime as runtime_module
+from box_agent.agent import Agent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.events import DoneEvent, StopReason
+from box_agent.kernel.ports import KernelServices
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.skill_loader import Skill, SkillLoader
@@ -15,12 +21,131 @@ from box_agent.tools.runtime import build_skill_runtime_context, build_skill_run
 from box_agent.tools.setup import add_workspace_tools
 from box_agent.tools.skill_tool import GetSkillTool
 from box_agent.workspace_registry import WorkspaceRegistry
+from tests.architecture_imports import forbidden_adapter_layer_imports
 
 
 def _make_executable(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(0o755)
+
+
+def test_cli_uses_public_agent_api_without_kernel_or_plugin_imports() -> None:
+    source_path = Path(cli.__file__)
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    assert forbidden_adapter_layer_imports(
+        source_path,
+        inspected_module="box_agent.cli",
+    ) == []
+    assert cli.Agent is Agent
+    agent_run_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "agent"
+        and node.func.attr == "run"
+    ]
+    assert agent_run_calls
+
+
+def test_cli_public_path_reaches_plugin_composition_and_agent_loop_kernel(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("api_key: test\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=1,
+            workspace_dir=str(workspace),
+            enable_memory=False,
+            enable_memory_extraction=False,
+            memory_maintainer_enabled=False,
+            memory_promotion_proposal_enabled=False,
+        ),
+        tools=ToolsConfig(
+            enable_file_tools=False,
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_mcp=False,
+            enable_skills=False,
+            allow_full_access=True,
+        ),
+    )
+    bridge_calls: list[dict[str, object]] = []
+    host_calls: list[dict[str, object]] = []
+    kernel_calls: list[dict[str, object]] = []
+    real_core_entrypoint = runtime_module._run_agent_loop
+    real_create_host = composition_module.create_default_plugin_host
+
+    def tracked_core_entrypoint(**kwargs):
+        bridge_calls.append(kwargs)
+        return real_core_entrypoint(**kwargs)
+
+    def tracked_create_host(**capabilities):
+        host_calls.append(capabilities)
+        return real_create_host(**capabilities)
+
+    class SentinelKernel:
+        def __init__(self, *, _services, _runtime_defaults, **run_arguments):
+            assert isinstance(_services, KernelServices)
+            kernel_calls.append(
+                {
+                    "services": _services,
+                    "run_arguments": run_arguments,
+                }
+            )
+
+        async def run(self):
+            yield DoneEvent(
+                stop_reason=StopReason.END_TURN,
+                final_content="kernel sentinel",
+            )
+
+    async def fake_initialize_base_tools(*_args, **_kwargs):
+        return [], None, None, None
+
+    monkeypatch.setattr(
+        cli.Config,
+        "get_default_config_path",
+        staticmethod(lambda: config_path),
+    )
+    monkeypatch.setattr(cli.Config, "from_yaml", staticmethod(lambda _path: config))
+    monkeypatch.setattr(cli, "LLMClient", _CaptureStreamLLM)
+    monkeypatch.setattr(cli, "initialize_base_tools", fake_initialize_base_tools)
+    monkeypatch.setattr(cli, "add_workspace_tools", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_module, "_run_agent_loop", tracked_core_entrypoint)
+    monkeypatch.setattr(
+        composition_module,
+        "create_default_plugin_host",
+        tracked_create_host,
+    )
+    monkeypatch.setattr(composition_module, "AgentLoopKernel", SentinelKernel)
+
+    exit_code = asyncio.run(
+        cli.run_agent(
+            workspace,
+            task="exercise the public CLI path",
+            sandbox_mode=False,
+            verify_api=False,
+            goal_autopilot_enabled=False,
+        )
+    )
+
+    assert exit_code == 0
+    assert [len(bridge_calls), len(host_calls), len(kernel_calls)] == [1, 1, 1]
+    assert host_calls[0]["llm"] is bridge_calls[0]["llm"]
+    services = kernel_calls[0]["services"]
+    assert services.llm is host_calls[0]["llm"]
+    assert services.tool_catalog is host_calls[0]["tool_catalog"]
+    assert kernel_calls[0]["run_arguments"]["messages"] is bridge_calls[0]["messages"]
 
 
 def _write_skill(

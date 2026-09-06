@@ -5,15 +5,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.architecture_imports import forbidden_adapter_layer_imports
+
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "box_agent"
 CORE_BRIDGE = Path("runtime.py")
 APPLICATION_ADAPTER_MODULES = ("box_agent.acp", "box_agent.cli", "acp", "cli")
-STABLE_KERNEL_MODULES = (
-    Path("core.py"),
-    Path("loop_guards.py"),
-    Path("runtime.py"),
-)
 PRESENTATION_WORKFLOW_TOKENS = (
     "controlled_presentation",
     "presentation_research_mode",
@@ -24,6 +21,17 @@ PRESENTATION_WORKFLOW_TOKENS = (
     "演示文稿",
     "幻灯片",
 )
+
+
+def _stable_kernel_paths() -> tuple[Path, ...]:
+    """Return legacy stable modules plus every Python file in ``kernel``."""
+    legacy_paths = (
+        PACKAGE_ROOT / "core.py",
+        PACKAGE_ROOT / "loop_guards.py",
+        PACKAGE_ROOT / "runtime.py",
+    )
+    kernel_root = PACKAGE_ROOT / "kernel"
+    return tuple(legacy_paths) + tuple(sorted(kernel_root.rglob("*.py")))
 
 
 def _direct_core_imports(path: Path) -> list[int]:
@@ -83,6 +91,34 @@ def _application_adapter_imports(path: Path) -> list[str]:
     return violations
 
 
+def _outer_composition_imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            modules = [module]
+            if module == "box_agent":
+                modules.extend(f"box_agent.{alias.name}" for alias in node.names)
+            elif node.level > 0 and not module:
+                modules.extend(alias.name for alias in node.names)
+        else:
+            continue
+        for module in modules:
+            if (
+                module == "box_agent.plugins"
+                or module.startswith("box_agent.plugins.")
+                or module == "plugins"
+                or module.startswith("plugins.")
+                or module == "box_agent.composition"
+                or module == "composition"
+            ):
+                violations.append(f"{module}:{node.lineno}")
+    return violations
+
+
 def test_only_runtime_bridge_imports_core_implementation() -> None:
     violations: list[str] = []
     for path in PACKAGE_ROOT.rglob("*.py"):
@@ -134,8 +170,8 @@ def test_core_has_no_workflow_state_machine_dependency() -> None:
 
 def test_stable_kernel_contains_no_concrete_presentation_workflow() -> None:
     violations: list[str] = []
-    for relative_path in STABLE_KERNEL_MODULES:
-        path = PACKAGE_ROOT / relative_path
+    for path in _stable_kernel_paths():
+        relative_path = path.relative_to(PACKAGE_ROOT)
         source = path.read_text(encoding="utf-8").lower()
         for token in PRESENTATION_WORKFLOW_TOKENS:
             if token in source:
@@ -145,6 +181,92 @@ def test_stable_kernel_contains_no_concrete_presentation_workflow() -> None:
         "Presentation routing and state must stay outside the stable kernel: "
         f"{violations}"
     )
+
+
+def test_stable_kernel_has_no_application_adapter_or_core_dependency() -> None:
+    adapter_violations: list[str] = []
+    core_violations: list[str] = []
+    for path in _stable_kernel_paths():
+        relative_path = path.relative_to(PACKAGE_ROOT)
+        for violation in _application_adapter_imports(path):
+            adapter_violations.append(f"{relative_path}:{violation}")
+        if "kernel" in relative_path.parts:
+            for lineno in _direct_core_imports(path):
+                core_violations.append(f"{relative_path}:{lineno}")
+
+    assert adapter_violations == [], (
+        "Stable kernel files must not import application adapters: "
+        f"{adapter_violations}"
+    )
+    assert core_violations == [], (
+        "Kernel package files must not import box_agent.core: "
+        f"{core_violations}"
+    )
+
+
+def test_kernel_has_no_outer_composition_dependency_at_any_scope() -> None:
+    violations = [
+        f"{path.relative_to(PACKAGE_ROOT)}:{violation}"
+        for path in sorted((PACKAGE_ROOT / "kernel").rglob("*.py"))
+        for violation in _outer_composition_imports(path)
+    ]
+
+    assert violations == [], (
+        "Outer composition and plugins depend on kernel-owned ports; kernel "
+        "modules must not import either layer, including inside functions: "
+        f"{violations}"
+    )
+
+
+def test_outer_composition_detector_rejects_package_member_imports(
+    tmp_path: Path,
+) -> None:
+    sample = tmp_path / "forbidden_outer_imports.py"
+    sample.write_text(
+        "from box_agent import plugins\n"
+        "from box_agent import composition\n"
+        "from . import plugins\n"
+        "from . import composition\n",
+        encoding="utf-8",
+    )
+
+    assert _outer_composition_imports(sample) == [
+        "box_agent.plugins:1",
+        "box_agent.composition:2",
+        "plugins:3",
+        "composition:4",
+    ]
+
+
+def test_adapter_import_detector_handles_absolute_and_relative_forms(
+    tmp_path: Path,
+) -> None:
+    sample = tmp_path / "adapter.py"
+    sample.write_text(
+        "import box_agent.kernel.loop\n"
+        "from box_agent.core import run_agent_loop\n"
+        "from box_agent import plugins\n"
+        "from .kernel import AgentLoopKernel\n"
+        "from ..kernel import ports\n"
+        "from . import composition\n"
+        "from .. import core\n"
+        "from .action_hints import normalize\n"
+        "from ..events import DoneEvent\n",
+        encoding="utf-8",
+    )
+
+    assert forbidden_adapter_layer_imports(
+        sample,
+        inspected_module="box_agent.acp.adapter",
+    ) == [
+        "box_agent.kernel.loop:1",
+        "box_agent.core:2",
+        "box_agent.plugins:3",
+        ".kernel:4",
+        "..kernel:5",
+        ".composition:6",
+        "..core:7",
+    ]
 
 
 def test_generic_tools_contain_no_presentation_workflow_lifecycle() -> None:

@@ -70,6 +70,9 @@ def test_resolve_provider_stale_seconds_precedence(monkeypatch):
     monkeypatch.delenv("BOX_AGENT_PROVIDER_STALE_SECONDS", raising=False)
     # default
     assert core._resolve_provider_stale_seconds() == core.LLM_PROVIDER_STALE_SECONDS
+    # The compatibility wrapper reads its fallback from core at call time.
+    monkeypatch.setattr(core, "LLM_PROVIDER_STALE_SECONDS", 321.0)
+    assert core._resolve_provider_stale_seconds() == 321.0
     # configured value used when no env
     assert core._resolve_provider_stale_seconds(350) == 350.0
     # non-positive / bad configured value falls back to default

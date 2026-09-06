@@ -136,6 +136,65 @@ class SafetyNegotiator:
         return self._grant
 
 
+class TwoGateTool(Tool):
+    """Tool that requires two distinct one-shot approvals before succeeding."""
+
+    def __init__(self) -> None:
+        self.requests = [
+            {
+                "type": "permission_request",
+                "scope": "filesystem",
+                "requested_scope": "user_home",
+                "reason": "first gate",
+                "path": "C:/outside/first.txt",
+                "temporary_supported": True,
+                "persistent_supported": True,
+                "persistent_label": "Allow directory",
+                "command": "",
+                "risk": "",
+            },
+            {
+                "type": "permission_request",
+                "scope": "safety",
+                "requested_scope": "dangerous_command",
+                "reason": "second gate",
+                "path": "",
+                "temporary_supported": True,
+                "persistent_supported": False,
+                "persistent_label": "",
+                "command": "Remove-Item outside.txt",
+                "risk": "destructive",
+            },
+        ]
+        self.approved_requests: list[dict] = []
+        self.call_count = 0
+
+    @property
+    def name(self) -> str:
+        return "two_gates"
+
+    @property
+    def description(self) -> str:
+        return "Requires two permission gates"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    def approve_permission_request(self, permission_request: dict) -> None:
+        self.approved_requests.append(permission_request)
+
+    async def execute(self) -> ToolResult:
+        self.call_count += 1
+        if len(self.approved_requests) < len(self.requests):
+            return ToolResult(
+                success=False,
+                error="Approval required",
+                permission_request=self.requests[len(self.approved_requests)],
+            )
+        return ToolResult(success=True, content="approved through both gates")
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "workspace"
@@ -307,6 +366,42 @@ class TestDirectToolInvocationWithPermissions:
         assert tool._call_count == 1
         assert policy_decision is not None
         assert policy_decision["decision"] == "denied"
+
+    @pytest.mark.asyncio
+    async def test_runtime_retries_distinct_permission_requests_in_order(
+        self,
+    ) -> None:
+        tool = TwoGateTool()
+        negotiator = SafetyNegotiator(grant=True)
+
+        result, policy_decision = await invoke_tool_with_permissions(
+            tool,
+            {},
+            permission_negotiator=negotiator,
+        )
+
+        assert result == ToolResult(
+            success=True,
+            content="approved through both gates",
+        )
+        assert tool.call_count == 3
+        assert negotiator.requests == tool.requests
+        assert tool.approved_requests == tool.requests
+        assert policy_decision == {
+            "type": "policy_decision",
+            "tool_name": "two_gates",
+            "decision": "approved",
+            "retry_count": 2,
+            "scope": "safety",
+            "requested_scope": "dangerous_command",
+            "reason": "second gate",
+            "path": "",
+            "temporary_supported": True,
+            "persistent_supported": False,
+            "persistent_label": "",
+            "command": "Remove-Item outside.txt",
+            "risk": "destructive",
+        }
 
 
 class TestNegotiationInCore:

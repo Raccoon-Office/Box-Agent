@@ -1,5 +1,6 @@
 """Integration tests for the Box ACP adapter."""
 
+import ast
 import asyncio
 import base64
 import json
@@ -15,6 +16,9 @@ from types import SimpleNamespace
 import pytest
 from acp import text_block, update_agent_message
 
+import box_agent.acp as acp_module
+import box_agent.composition as composition_module
+import box_agent.runtime as runtime_module
 from box_agent.acp import (
     BoxACPAgent,
     _inject_item_id,
@@ -41,6 +45,7 @@ from box_agent.config import (
 )
 from box_agent.memory import MemoryManager
 from box_agent.llm import SessionBoundLLM
+from box_agent.kernel.ports import KernelServices
 from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
 from box_agent.session_log import SessionLogWorkspaceMismatch
@@ -55,6 +60,7 @@ from box_agent.tools.setup import (
     build_sandbox_info_prompt,
 )
 from box_agent.workspace_registry import WorkspaceRegistry
+from tests.architecture_imports import forbidden_adapter_layer_imports
 
 
 class DummyConn:
@@ -63,6 +69,101 @@ class DummyConn:
 
     async def sessionUpdate(self, payload):
         self.updates.append(payload)
+
+
+def test_acp_uses_agent_event_api_and_shared_permission_runtime() -> None:
+    source_path = Path(acp_module.__file__)
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    assert forbidden_adapter_layer_imports(
+        source_path,
+        inspected_module="box_agent.acp",
+    ) == []
+    assert acp_module.invoke_tool_with_permissions is (
+        runtime_module.invoke_tool_with_permissions
+    )
+    run_events_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run_events"
+        and any(keyword.arg == "options" for keyword in node.keywords)
+    ]
+    assert len(run_events_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_acp_public_path_reaches_plugin_composition_and_agent_loop_kernel(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_file_tools=False,
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_mcp=False,
+            enable_skills=False,
+        ),
+    )
+    bridge_calls: list[dict[str, object]] = []
+    host_calls: list[dict[str, object]] = []
+    kernel_calls: list[dict[str, object]] = []
+    real_core_entrypoint = runtime_module._run_agent_loop
+    real_create_host = composition_module.create_default_plugin_host
+
+    def tracked_core_entrypoint(**kwargs):
+        bridge_calls.append(kwargs)
+        return real_core_entrypoint(**kwargs)
+
+    def tracked_create_host(**capabilities):
+        host_calls.append(capabilities)
+        return real_create_host(**capabilities)
+
+    class SentinelKernel:
+        def __init__(self, *, _services, _runtime_defaults, **run_arguments):
+            assert isinstance(_services, KernelServices)
+            kernel_calls.append(
+                {
+                    "services": _services,
+                    "run_arguments": run_arguments,
+                }
+            )
+
+        async def run(self):
+            yield DoneEvent(
+                stop_reason=StopReason.END_TURN,
+                final_content="kernel sentinel",
+            )
+
+    monkeypatch.setattr(runtime_module, "_run_agent_loop", tracked_core_entrypoint)
+    monkeypatch.setattr(
+        composition_module,
+        "create_default_plugin_host",
+        tracked_create_host,
+    )
+    monkeypatch.setattr(composition_module, "AgentLoopKernel", SentinelKernel)
+
+    adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    session = await adapter.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await adapter.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    assert [len(bridge_calls), len(host_calls), len(kernel_calls)] == [1, 1, 1]
+    assert host_calls[0]["llm"] is bridge_calls[0]["llm"]
+    services = kernel_calls[0]["services"]
+    assert services.llm is host_calls[0]["llm"]
+    assert services.tool_catalog is host_calls[0]["tool_catalog"]
+    assert kernel_calls[0]["run_arguments"]["messages"] is bridge_calls[0]["messages"]
 
 
 def test_acp_context_summary_routes_auto_by_tags_and_locks_manual_model(tmp_path):

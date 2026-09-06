@@ -56,6 +56,7 @@ decision, read those entries together.
 | Image inspection | `inspect_images`, `vision_review`, canonical image blocks, structured image attachments, transient follow-up | Image inspection is instruction-driven and read-only; `proxy` returns utility-model text, while `native` uses a bounded one-request main-model overlay that never enters durable history. | PR #62 replaced `vision_review`; PR #76 is being rebased as an additive native strategy. | [PR #62](#2026-08-21--instruction-driven-image-inspection-pr-62), [PR #76](#2026-08-23--request-only-native-image-inspection-pr-76) |
 | Shell safety inspection | `shell_inspection.py`, `safety.py`, `bash_tool.py`, dangerous commands, DWS | Policy checks inspect shell structure and executable invocations while treating embedded-language bodies as data; bounded parsing fails closed for policy-relevant ambiguity. | Pending PR #63; must be reviewed as a security-boundary change. | [PR #63](#2026-08-21--structure-aware-shell-policy-inspection-pr-63) |
 | Context compression | `box_agent/core.py`, tool-call arguments, history summarization | Normal unsummarized history retains exact tool-call arguments; whole-history summarization remains a separate boundary. | Current at this baseline. | [PR #35](#2026-08-17--preserve-tool-call-arguments-in-normal-history-pr-35) |
+| Agent kernel and plugin composition | `box_agent/kernel/`, `box_agent/plugins/`, `composition.py`, `KernelServices`, `AgentLoopKernel`, `PluginHost` | ACP/CLI public entry points keep their signatures while the shared loop consumes an immutable Port bundle resolved by an explicit startup-static plugin host. | Pending implementation; reorganizes ownership without adding discovery, hot reload, or a protocol migration. | [2026-09-03 kernel/plugin boundary](#2026-09-03--stable-kernel-and-static-plugin-composition) |
 | MCP deferred loading | `mcp_tool_catalog.py`, `mcp_tool_search.py`, `tool_search` | Ordinary MCP schemas are hidden by default until session-scoped activation; `alwaysLoad` remains eager. | Current; later research hardening may also apply to research paths. | [PR #31](#2026-08-17--deferred-mcp-catalog-and-session-exposure-pr-31), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
 | Sub-agent delegation | `sub_agent_tool.py`, `sub_agent_capabilities.py`, `required_tools`, `write_scope`, `files` | The public request is flat; runtime-derived policy limits implicit tools to trusted local readers, keeps process/external/unknown MCP capabilities fail-closed, and scopes path writes. | Supersedes the caller-authored nested constraint contract while retaining its runtime enforcement goals. | [2026-08-19 flattened contract](#2026-08-19--flattened-sub-agent-contract-with-derived-policy) |
 | Session and workflow ownership | `session_log.py`, explicit Skills, `WAITING_FOR_USER`, legacy workflow files | Session Log is the sole durable Agent-session source. Skills/plugins own domain progress and recovery instructions; legacy checkpoint and owner files are ignored but not deleted. | PR #100 supersedes the proposed runtime owner/checkpoint lifecycle while retaining generic Tool safety boundaries. | [PR #100](#2026-09-02--session-log-only-recovery-pr-100), [earlier owner design](#2026-08-20--workflow-owner-precedence-for-third-party-skills) |
@@ -70,6 +71,44 @@ Release, provider API, and ACP compatibility have their own sources under
 [long-lived release and compatibility history](#long-lived-release-and-compatibility-history).
 
 ## Pending material changes
+
+### 2026-09-03 — stable kernel and static plugin composition
+
+- Change: [PR #107](https://github.com/Raccoon-Office/Box-Agent/pull/107),
+  with local integration against `main` at `a8d6ad4`; no merge or
+  packaged-runtime reference exists yet.
+- Durable architecture: ACP and CLI continue through `Agent.run_events()` and
+  `Agent.run()`. The shared execution path is `Agent` → `runtime/core`
+  compatibility facade → outer composition and `PluginHost` → immutable
+  `KernelServices` → `AgentLoopKernel`. Kernel modules own loop invariants and
+  Port contracts; plugin modules own descriptors, typed registries, dependency
+  resolution, scope caches, activation, rollback, and disposal.
+- Compatibility: the public Agent, Core, runtime, ACP, and CLI signatures and
+  defaults remain unchanged. Streaming `LLMPort` stays distinct from the
+  conditional `SummaryLLMPort`, preserving legacy streaming-only callers until
+  summarization is actually required. Disabled optional capabilities produce
+  no binding. There is no configuration or persistent-data migration.
+- Lifecycle boundary: plugin registration is explicit and startup-static; no
+  package scanning or hot reload is introduced. Factories and disposers run
+  outside the host state lock, callback re-entry fails fast, runtime-checkable
+  Ports are validated before publication, and cancellation leaves interrupted
+  cleanup retryable.
+- Review fixes: closing a run during an ordinary serial tool waits for that
+  tool's cleanup before returning. Cleanup diagnostics preserve the primary
+  exception and cancellation on Python 3.10. Any runtime Port validation
+  exception disposes the newly created instance before activation fails.
+- Target consistency: the extracted kernel retains main's model-guided turn
+  continuation, signed web-image URL repair, image-reference normalization,
+  intermediate-asset filtering, and managed screenshot persistence.
+- Proof anchors: `tests/test_kernel_compatibility.py`,
+  `tests/test_plugin_host.py`, `tests/test_tool_engine.py`,
+  `tests/test_tool_result_pipeline.py`, `tests/test_architecture_boundaries.py`,
+  and the CLI/ACP public-path sentinels. Focused source tests and a source-level
+  model connectivity probe do not prove a packaged runtime.
+- Runtime boundary: no runtime package was built or installed, no ACP host was
+  restarted, and no fresh packaged live task was verified.
+- Rollback: revert the eventual implementation commit to restore the monolithic
+  Core organization. No configuration or data rollback is required.
 
 ### 2026-09-02 — Session Log-only recovery (PR #100)
 
