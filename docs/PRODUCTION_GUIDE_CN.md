@@ -103,8 +103,10 @@ uv sync --group dev
 uv run box-agent-build-runtime
 
 # Apple Silicon 上构建 macOS Intel/x64 runtime：
-# 先准备 x86_64 uv 与 .venv-x64，再运行：
-UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime --target darwin-x64
+# 已有 x86_64 .venv-x64（含项目依赖与 PyInstaller）时：
+.venv-x64/bin/python -c 'import platform; print(platform.machine())'
+uv pip check --python .venv-x64/bin/python
+.venv-x64/bin/python -m box_agent.build_runtime_cli --target darwin-x64 --output dist/runtime-darwin-x64
 ```
 
 构建 runtime 并立即安装到 officev3 `build-resources` 可以合并为一条命令：
