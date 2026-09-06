@@ -11389,8 +11389,9 @@ def test_truth_validator_keeps_invalid_deck_structure_blocking(
 
 
 @pytest.mark.parametrize("custom_manifest", [False, True])
+@pytest.mark.parametrize("browser_check", [False, True])
 def test_finalizer_binds_images_generated_after_content_patch(
-    tmp_path: Path, custom_manifest: bool,
+    tmp_path: Path, custom_manifest: bool, browser_check: bool,
 ) -> None:
     deck_path = tmp_path / "deck.json"
     scaffold = _run(
@@ -11437,14 +11438,24 @@ def test_finalizer_binds_images_generated_after_content_patch(
     report = json.loads((tmp_path / "qa" / "image_manifest.json").read_text())
     assert not any("not referenced" in w for w in report["warnings"])
     html_report = json.loads((tmp_path / "qa" / "html_self_check.json").read_text())
-    assert html_report["projectCaseStyles"][0]["imageLoaded"] is True
-    assert html_report["projectCaseStyles"][0]["imagePlaceholder"] is False
     assert len(json.loads(result.stdout.splitlines()[-1])["media_bindings"]) == 2
     saved_deck = deck_path.read_bytes()
     repeated = _run("finalize_controlled_deck.js", str(deck_path), "--out", str(html_path), *options)
     assert repeated.returncode == 0, repeated.stdout + repeated.stderr
     assert json.loads(repeated.stdout.splitlines()[-1])["media_bindings"] == []
     assert deck_path.read_bytes() == saved_deck
+
+    if browser_check:
+        # Finalization can succeed with an advisory report when the managed
+        # browser is absent. Probe directly so _run skips only browser cases.
+        report_path = tmp_path / "qa" / "browser_image_check.json"
+        checked = _run(
+            "html_self_check.js", str(html_path), "--dom-to-pptx",
+            "--allow-local-images", "--report", str(report_path),
+        )
+        assert checked.returncode == 0, checked.stdout + checked.stderr
+        assert html_report["projectCaseStyles"][0]["imageLoaded"] is True
+        assert html_report["projectCaseStyles"][0]["imagePlaceholder"] is False
 
 
 @pytest.mark.parametrize("asset_state", ["selected", "failed", "missing", "malformed"])
