@@ -8,6 +8,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any, Final
 
+from ..session_log import SessionLogDurabilityError
 from ..tools.base import Tool, ToolResult
 
 
@@ -186,6 +187,8 @@ async def _negotiate_tool_permission_chain(
             _approve_tool_permission(tool, permission_request)
             try:
                 result = await tool.invoke(arguments)
+            except SessionLogDurabilityError:
+                raise
             except Exception as exc:
                 detail = f"{type(exc).__name__}: {exc!s}"
                 trace = traceback.format_exc()

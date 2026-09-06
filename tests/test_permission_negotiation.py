@@ -16,6 +16,7 @@ from box_agent.events import (
     ToolCallResult,
 )
 from box_agent.schema import FunctionCall, LLMResponse, Message, ToolCall
+from box_agent.session_log import SessionLogDurabilityError
 from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.permissions import (
@@ -54,6 +55,54 @@ class MockLLM:
 
 async def collect(gen) -> list:
     return [ev async for ev in gen]
+
+
+@pytest.mark.parametrize("entrypoint", ("serial", "parallel", "adapter"))
+@pytest.mark.parametrize("needs_approval", (False, True))
+async def test_durability_failure_stops_execution_even_after_approval(
+    entrypoint, needs_approval,
+):
+    failure = SessionLogDurabilityError("durable write failed")
+
+    class FailingTool(Tool):
+        name = "durable_write"
+        description = "Write durable state."
+        parameters = {"type": "object", "properties": {}}
+        parallel_safe = entrypoint == "parallel"
+        calls = 0
+
+        async def execute(self):
+            self.calls += 1
+            if needs_approval and self.calls == 1:
+                return ToolResult(
+                    success=False, error="approval required",
+                    permission_request={"scope": "filesystem", "requested_scope": "workspace"},
+                )
+            raise failure
+
+    class Approver:
+        async def negotiate(self, request):
+            return True
+
+    tool = FailingTool()
+    llm = MockLLM([
+        LLMResponse(content="", tool_calls=[ToolCall(
+            id="durable-1", type="function",
+            function=FunctionCall(name=tool.name, arguments={}),
+        )], finish_reason="tool_use"),
+        LLMResponse(content="must not continue", finish_reason="stop"),
+    ])
+    with pytest.raises(SessionLogDurabilityError) as caught:
+        if entrypoint == "adapter":
+            await invoke_tool_with_permissions(tool, {}, permission_negotiator=Approver())
+        else:
+            await collect(run_agent_loop(
+                llm=llm, messages=_msgs(), tools={tool.name: tool},
+                max_steps=3, permission_negotiator=Approver(),
+            ))
+    assert caught.value is failure
+    assert tool.calls == (2 if needs_approval else 1)
+    assert llm._idx == (0 if entrypoint == "adapter" else 1)
 
 
 def _msgs():

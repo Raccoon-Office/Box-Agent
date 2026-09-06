@@ -14,6 +14,7 @@ from typing import Any
 from .core import run_agent_loop as _run_agent_loop
 from .events import AgentEvent
 from .kernel.permission_gateway import _negotiate_tool_permission_chain
+from .session_log import SessionLogDurabilityError
 from .tools.base import Tool, ToolResult
 from .tools.model_tool_context import scoped_model_tool_context
 
@@ -46,6 +47,8 @@ async def invoke_tool_with_permissions(
 
     try:
         result = await tool.invoke(arguments)
+    except SessionLogDurabilityError:
+        raise
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc!s}"
         return (
