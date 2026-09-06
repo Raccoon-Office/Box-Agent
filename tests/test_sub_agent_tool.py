@@ -516,6 +516,10 @@ def test_sub_agent_does_not_inherit_parent_managed_skill_bodies():
 
 
 async def test_agent_run_wires_parent_permission_negotiator_into_sub_agent(tmp_path):
+    class Negotiator:
+        async def negotiate(self, _request):
+            return True
+
     llm = _make_llm()
     tool = SubAgentTool(llm=llm, parent_tools={})
     agent = Agent(
@@ -525,7 +529,7 @@ async def test_agent_run_wires_parent_permission_negotiator_into_sub_agent(tmp_p
         workspace_dir=str(tmp_path),
         deferred_mcp_loading_enabled=False,
     )
-    negotiator = AsyncMock()
+    negotiator = Negotiator()
     agent.set_permission_negotiator(negotiator)
     agent.messages.append(Message(role="user", content="finish"))
 
