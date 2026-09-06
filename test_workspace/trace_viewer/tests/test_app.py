@@ -1,8 +1,64 @@
+from fastapi.testclient import TestClient
+
+from trace_viewer.app import create_app
+
+
+class FakeEvaluationRunner:
+    def __init__(self, attachment_count: int = 0):
+        self.calls = []
+        self.options = {
+            "datasets": [
+                {
+                    "id": "qs-smoke",
+                    "name": "Smoke 数据集",
+                    "item_count": 3,
+                    "attachment_count": attachment_count,
+                    "task_types": ["text"],
+                    "task_type_stats": [
+                        {
+                            "name": "text",
+                            "item_count": 3,
+                            "attachment_count": attachment_count,
+                        }
+                    ],
+                }
+            ],
+            "models": [
+                {
+                    "id": "sn-deepseek-v4-pro",
+                    "name": "sn-deepseek-v4-pro",
+                    "max_tokens": 100000,
+                    "binding": {
+                        "source": "builtin",
+                        "model": "sn-deepseek-v4-pro",
+                        "maxTokens": 100000,
+                    },
+                }
+            ],
+        }
+
+    def list_options(self):
+        return self.options
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "return_code": 0,
+            "run_name": "260827-1200-auto-smoke",
+            "output": "",
+        }
+
+
 def test_three_level_navigation(client):
     home = client.get("/")
     assert home.status_code == 200
     assert "eval-one" in home.text
     assert "2 个任务" in home.text
+    assert 'id="open-evaluation-dialog"' in home.text
+    assert 'id="evaluation-dialog"' in home.text
+    assert 'id="evaluation-task-type"' in home.text
+    assert 'id="evaluation-count"' in home.text
+    assert "执行评估" in home.text
 
     run = client.get("/runs/eval-one")
     assert run.status_code == 200
@@ -85,6 +141,127 @@ def test_case_search(client):
     assert "Q1" not in response.text
 
 
+def test_run_and_case_pages_show_effect_metric_summaries(client):
+    run = client.get("/runs/eval-one")
+
+    assert run.status_code == 200
+    for heading in ("任务类型", "结果指标", "过程指标", "成本"):
+        assert heading in run.text
+    assert "text" in run.text
+    assert "55 / 60" in run.text
+    assert "32 / 40" in run.text
+    assert "120 tokens" in run.text
+    assert "Agent 总 Token" in run.text
+    assert run.text.count("未评估") >= 2
+    assert "未采集" in run.text
+
+    case = client.get("/runs/eval-one/cases/Q1")
+
+    assert case.status_code == 200
+    assert "55 / 60" in case.text
+    assert "32 / 40" in case.text
+    assert "120 tokens" in case.text
+
+
+def test_evaluation_options_are_loaded_from_the_runner(repo_root):
+    runner = FakeEvaluationRunner()
+    client = TestClient(create_app(repo_root, evaluation_runner=runner))
+
+    response = client.get("/api/evaluation-options")
+
+    assert response.status_code == 200
+    assert response.json()["datasets"][0]["id"] == "qs-smoke"
+    assert response.json()["models"][0]["id"] == "sn-deepseek-v4-pro"
+
+
+def test_evaluation_launch_runs_in_background_and_exposes_status(repo_root):
+    runner = FakeEvaluationRunner()
+    client = TestClient(create_app(repo_root, evaluation_runner=runner))
+
+    launch = client.post(
+        "/api/evaluation-runs",
+        json={
+            "dataset_id": "qs-smoke",
+            "model_id": "sn-deepseek-v4-pro",
+            "task_type": "text",
+            "execution_count": 2,
+            "approved_data_disclosure": False,
+        },
+    )
+
+    assert launch.status_code == 202
+    launch_id = launch.json()["launch_id"]
+    status = client.get(f"/api/evaluation-runs/{launch_id}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
+    assert status.json()["run_name"] == "260827-1200-auto-smoke"
+    assert runner.calls == [
+        {
+            "dataset_id": "qs-smoke",
+            "model": "sn-deepseek-v4-pro",
+            "model_max_tokens": 100000,
+            "launch_id": launch_id,
+            "model_binding": {
+                "source": "builtin",
+                "model": "sn-deepseek-v4-pro",
+                "maxTokens": 100000,
+            },
+            "task_type": "text",
+            "execution_count": 2,
+        }
+    ]
+
+
+def test_attachment_dataset_requires_explicit_disclosure(repo_root):
+    runner = FakeEvaluationRunner(attachment_count=1)
+    client = TestClient(create_app(repo_root, evaluation_runner=runner))
+
+    response = client.post(
+        "/api/evaluation-runs",
+        json={
+            "dataset_id": "qs-smoke",
+            "model_id": "sn-deepseek-v4-pro",
+            "task_type": "text",
+            "execution_count": 3,
+            "approved_data_disclosure": False,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "明确确认数据披露" in response.json()["detail"]
+    assert runner.calls == []
+
+
+def test_evaluation_launch_rejects_task_type_and_count_outside_dataset(repo_root):
+    runner = FakeEvaluationRunner()
+    client = TestClient(create_app(repo_root, evaluation_runner=runner))
+
+    missing_type = client.post(
+        "/api/evaluation-runs",
+        json={
+            "dataset_id": "qs-smoke",
+            "model_id": "sn-deepseek-v4-pro",
+            "task_type": "PPT生成",
+            "execution_count": 1,
+        },
+    )
+    too_many = client.post(
+        "/api/evaluation-runs",
+        json={
+            "dataset_id": "qs-smoke",
+            "model_id": "sn-deepseek-v4-pro",
+            "task_type": "text",
+            "execution_count": 4,
+        },
+    )
+
+    assert missing_type.status_code == 422
+    assert "不包含该任务类型" in missing_type.json()["detail"]
+    assert too_many.status_code == 422
+    assert "1 到 3" in too_many.json()["detail"]
+    assert runner.calls == []
+
+
 def test_incomplete_case_remains_visible(client):
     response = client.get("/runs/eval-one")
     assert "incomplete" in response.text
@@ -104,11 +281,39 @@ def test_all_case_evidence_pages(client):
         "acp": "initialize",
         "process": "process.started",
         "files": "files-before.json",
+        "effect": "结果指标",
     }
     for suffix, text in expected.items():
         response = client.get(f"{base}/{suffix}")
         assert response.status_code == 200
         assert text in response.text
+
+
+def test_effect_page_shows_scores_evidence_performance_cost_and_unavailable(client):
+    response = client.get("/runs/eval-one/cases/Q1/effect")
+
+    assert response.status_code == 200
+    assert 'class="active" href="/runs/eval-one/cases/Q1/effect"' in response.text
+    assert "任务完成度" in response.text
+    assert "结果指标" in response.text
+    assert "过程指标" in response.text
+    assert "5 / 5" in response.text
+    assert "ev-final-answer · assistant.txt" in response.text
+    assert "answer Q1" in response.text
+    assert "任务总耗时" in response.text and "2000 ms" in response.text
+    assert "Agent 总 Token" in response.text and "120 tokens" in response.text
+    assert "计划质量" in response.text
+    assert "无法评估" in response.text
+    assert "未配置效果评估模型 API" in response.text
+    assert "当前无法评估的指标" not in response.text
+    assert "deepseek-v4-flash" in response.text
+
+
+def test_effect_page_has_empty_state_for_old_attempt(client):
+    response = client.get("/runs/eval-one/cases/Q2/effect")
+
+    assert response.status_code == 200
+    assert "尚未生成效果评估" in response.text
 
 
 def test_diagnosis_page_has_an_empty_state_without_a_markdown_file(client):

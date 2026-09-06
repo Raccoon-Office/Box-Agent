@@ -6,4 +6,5 @@
   <a class="{{ 'active' if active == 'process' else '' }}" href="/runs/{{ run_name }}/cases/{{ case.case_id }}/process">进程与 stderr</a>
   <a class="{{ 'active' if active == 'diagnosis' else '' }}" href="/runs/{{ run_name }}/cases/{{ case.case_id }}/diagnosis">诊断结果</a>
   <a class="{{ 'active' if active == 'files' else '' }}" href="/runs/{{ run_name }}/cases/{{ case.case_id }}/files">文件</a>
+  <a class="{{ 'active' if active == 'effect' else '' }}" href="/runs/{{ run_name }}/cases/{{ case.case_id }}/effect">效果指标</a>
 </nav>

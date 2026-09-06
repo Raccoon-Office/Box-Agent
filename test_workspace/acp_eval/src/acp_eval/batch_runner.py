@@ -620,6 +620,11 @@ def run_batch(
     case_ids: Sequence[str],
     *,
     retry_terminal: bool = False,
+    effect_eval_url: str | None = None,
+    effect_eval_timeout_seconds: float = 180.0,
+    model: str | None = None,
+    model_max_tokens: int | None = None,
+    model_binding: Mapping[str, Any] | None = None,
 ) -> int:
     """Run selected cases, atomically index attempts, and return a process code."""
 
@@ -627,6 +632,21 @@ def run_batch(
         raise ValueError("timeout_seconds must be finite and greater than zero")
     if parallelism < 1:
         raise ValueError("parallelism must be at least one")
+    if not math.isfinite(effect_eval_timeout_seconds) or effect_eval_timeout_seconds <= 0:
+        raise ValueError(
+            "effect_eval_timeout_seconds must be finite and greater than zero"
+        )
+    if model_max_tokens is not None and model_max_tokens < 1:
+        raise ValueError("model_max_tokens must be at least one")
+    if model_binding is not None:
+        if model is not None:
+            raise ValueError("model_binding cannot be combined with model")
+        if (
+            model_binding.get("source") != "builtin"
+            or not isinstance(model_binding.get("model"), str)
+            or not str(model_binding.get("model")).strip()
+        ):
+            raise ValueError("model_binding must contain a builtin model")
     dataset = Path(dataset).resolve()
     output_dir = Path(output_dir).resolve()
     repo_root = Path(repo_root).resolve()
@@ -695,6 +715,11 @@ def run_batch(
         dataset_root=dataset.parent,
         timeout_seconds=timeout_seconds,
         python_executable=python_executable,
+        effect_eval_url=effect_eval_url,
+        effect_eval_timeout_seconds=effect_eval_timeout_seconds,
+        model=model,
+        model_max_tokens=model_max_tokens,
+        model_binding=dict(model_binding) if model_binding is not None else None,
     )
     if pending:
         with ThreadPoolExecutor(max_workers=min(parallelism, len(pending))) as executor:

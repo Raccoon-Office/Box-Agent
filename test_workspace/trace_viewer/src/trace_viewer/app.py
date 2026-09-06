@@ -1,14 +1,20 @@
 """FastAPI application factory."""
 
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
+from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
 from markupsafe import Markup
+from pydantic import BaseModel, Field
 
+from trace_viewer.evaluation import EvaluationLaunchError, EvaluationRunner
 from trace_viewer.presentation import annotate_timing, json_text, present_record
 from trace_viewer.repository import EvaluationRepository, NotFoundError
 from trace_viewer.timeline import RECORDS_PER_PAGE, page_records, source_records, unified_timeline
@@ -17,9 +23,23 @@ from trace_viewer.timeline import RECORDS_PER_PAGE, page_records, source_records
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 
-def create_app(repo_root: Path) -> FastAPI:
+class EvaluationLaunchRequest(BaseModel):
+    dataset_id: str = Field(min_length=1, max_length=200)
+    model_id: str = Field(min_length=1, max_length=300)
+    task_type: str | None = Field(default=None, min_length=1, max_length=100)
+    execution_count: int = Field(ge=1, le=10_000)
+    approved_data_disclosure: bool = False
+
+
+def create_app(
+    repo_root: Path,
+    evaluation_runner: EvaluationRunner | None = None,
+) -> FastAPI:
     app = FastAPI(title="ACP 离线评测查看器", docs_url=None, redoc_url=None)
     repository = EvaluationRepository(repo_root)
+    runner = evaluation_runner or EvaluationRunner(repo_root)
+    launches: dict[str, dict[str, Any]] = {}
+    launches_lock = Lock()
     markdown = MarkdownIt("commonmark", {"html": True}).enable(["table", "strikethrough"])
     templates = Jinja2Templates(directory=PROJECT_DIR / "templates")
     app.mount("/static", StaticFiles(directory=PROJECT_DIR / "static"), name="static")
@@ -27,6 +47,152 @@ def create_app(repo_root: Path) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
         return templates.TemplateResponse(request, "index.html", {"runs": repository.list_runs()})
+
+    @app.get("/api/evaluation-options")
+    def evaluation_options() -> dict[str, Any]:
+        try:
+            return runner.list_options()
+        except EvaluationLaunchError as error:
+            raise HTTPException(503, str(error)) from error
+
+    def execute_launch(
+        launch_id: str,
+        dataset_id: str,
+        model: dict[str, Any],
+        task_type: str | None,
+        execution_count: int,
+    ) -> None:
+        with launches_lock:
+            launches[launch_id]["status"] = "running"
+        try:
+            result = runner.run(
+                dataset_id=dataset_id,
+                model=str(model["id"]),
+                model_max_tokens=model.get("max_tokens"),
+                launch_id=launch_id,
+                model_binding=model.get("binding"),
+                task_type=task_type,
+                execution_count=execution_count,
+            )
+        except Exception as error:  # noqa: BLE001 - preserve launch failure for UI polling
+            detail = str(error) if isinstance(error, EvaluationLaunchError) else f"{type(error).__name__}: {error}"
+            with launches_lock:
+                launches[launch_id].update(
+                    {
+                        "status": "failed",
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "error": detail[:2000],
+                    }
+                )
+            return
+        with launches_lock:
+            launches[launch_id].update(
+                {
+                    "status": (
+                        "completed"
+                        if result.get("return_code") == 0
+                        else "completed_with_failures"
+                    ),
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "run_name": result.get("run_name"),
+                    "return_code": result.get("return_code"),
+                    "error": None,
+                }
+            )
+
+    @app.post("/api/evaluation-runs", status_code=202)
+    def launch_evaluation(
+        request: EvaluationLaunchRequest,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        try:
+            options = runner.list_options()
+        except EvaluationLaunchError as error:
+            raise HTTPException(503, str(error)) from error
+        dataset = next(
+            (
+                item
+                for item in options.get("datasets", [])
+                if item.get("id") == request.dataset_id
+            ),
+            None,
+        )
+        model = next(
+            (
+                item
+                for item in options.get("models", [])
+                if item.get("id") == request.model_id
+            ),
+            None,
+        )
+        if dataset is None:
+            raise HTTPException(422, "所选数据集不存在或已下线")
+        if model is None:
+            raise HTTPException(422, "所选模型不存在或已下线")
+        selected_stats = None
+        if request.task_type is not None:
+            selected_stats = next(
+                (
+                    item
+                    for item in dataset.get("task_type_stats", [])
+                    if item.get("name") == request.task_type
+                ),
+                None,
+            )
+            if selected_stats is None:
+                raise HTTPException(422, "所选数据集不包含该任务类型")
+        available_count = (
+            selected_stats.get("item_count", 0)
+            if selected_stats is not None
+            else dataset.get("item_count", 0)
+        )
+        if request.execution_count > available_count:
+            raise HTTPException(
+                422,
+                f"执行条数必须在 1 到 {available_count} 之间",
+            )
+        attachment_count = (
+            selected_stats.get("attachment_count", 0)
+            if selected_stats is not None
+            else dataset.get("attachment_count", 0)
+        )
+        if attachment_count and not request.approved_data_disclosure:
+            raise HTTPException(422, "包含附件的数据集需要明确确认数据披露")
+
+        launch_id = f"launch-{uuid4().hex[:12]}"
+        document = {
+            "launch_id": launch_id,
+            "status": "queued",
+            "dataset_id": request.dataset_id,
+            "dataset_name": dataset.get("name"),
+            "model": model.get("id"),
+            "task_type": request.task_type,
+            "execution_count": request.execution_count,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "run_name": None,
+            "return_code": None,
+            "error": None,
+        }
+        with launches_lock:
+            launches[launch_id] = document
+        background_tasks.add_task(
+            execute_launch,
+            launch_id,
+            request.dataset_id,
+            model,
+            request.task_type,
+            request.execution_count,
+        )
+        return dict(document)
+
+    @app.get("/api/evaluation-runs/{launch_id}")
+    def evaluation_launch_status(launch_id: str) -> dict[str, Any]:
+        with launches_lock:
+            document = launches.get(launch_id)
+            if document is None:
+                raise HTTPException(404, "评测启动记录不存在")
+            return dict(document)
 
     @app.get("/runs/{run_name}", response_class=HTMLResponse)
     def run_page(request: Request, run_name: str, q: str = ""):
@@ -157,6 +323,48 @@ def create_app(repo_root: Path) -> FastAPI:
             raise HTTPException(404, "任务不存在") from error
         files = [path.relative_to(case["attempt_path"]).as_posix() for path in sorted(case["attempt_path"].rglob("*")) if path.is_file()]
         return templates.TemplateResponse(request, "files.html", {"run_name": run_name, "case": case, "active": "files", "files": files})
+
+    @app.get(
+        "/runs/{run_name}/cases/{case_id}/effect",
+        response_class=HTMLResponse,
+    )
+    def effect_page(request: Request, run_name: str, case_id: str):
+        try:
+            case = repository.get_case(run_name, case_id)
+        except NotFoundError as error:
+            raise HTTPException(404, "任务不存在") from error
+        effect = case.get("effect_evaluation")
+        metrics = effect.get("metrics", []) if isinstance(effect, dict) else []
+        if not isinstance(metrics, list):
+            metrics = []
+        process_metrics = [
+            metric
+            for metric in metrics
+            if isinstance(metric, dict) and metric.get("phase") == "process"
+        ]
+        result_metrics = [
+            metric
+            for metric in metrics
+            if isinstance(metric, dict) and metric.get("phase") == "result"
+        ]
+        return templates.TemplateResponse(
+            request,
+            "effect.html",
+            {
+                "run_name": run_name,
+                "case": case,
+                "active": "effect",
+                "effect": effect,
+                "process_metrics": process_metrics,
+                "result_metrics": result_metrics,
+                "process_available": sum(
+                    metric.get("status") == "complete" for metric in process_metrics
+                ),
+                "result_available": sum(
+                    metric.get("status") == "complete" for metric in result_metrics
+                ),
+            },
+        )
 
     @app.get("/runs/{run_name}/cases/{case_id}/download/{relative_path:path}")
     def download(run_name: str, case_id: str, relative_path: str):

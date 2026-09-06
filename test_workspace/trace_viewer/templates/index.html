@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block title %}评测目录 · ACP 离线评测{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/evaluation.css?v=2">{% endblock %}
 {% block content %}
-<section class="page-heading"><p class="eyebrow">test_workspace/outputs</p><h1>选择评测目录</h1></section>
+<section class="page-heading home-heading">
+  <div><p class="eyebrow">test_workspace/outputs</p><h1>选择评测目录</h1></div>
+  <button class="primary-button" id="open-evaluation-dialog" type="button">执行评估</button>
+</section>
 <div class="rows">
 {% for run in runs %}
   <a class="row-link" href="/runs/{{ run.name }}">
@@ -11,4 +15,50 @@
   </a>
 {% else %}<p class="empty">没有可用的 v1 评测目录。</p>{% endfor %}
 </div>
+
+<dialog class="evaluation-dialog" id="evaluation-dialog" aria-labelledby="evaluation-dialog-title">
+  <form id="evaluation-form">
+    <header class="dialog-heading">
+      <div><p class="eyebrow">新任务</p><h2 id="evaluation-dialog-title">执行自动评估</h2></div>
+      <button class="icon-button" id="close-evaluation-dialog" type="button" aria-label="关闭">×</button>
+    </header>
+    <p class="dialog-description">数据集从 RaccoonOps 获取，任务仍通过 test_workspace 原有 ACP 入口执行。</p>
+    <label class="form-field">
+      <span>任务类型</span>
+      <select id="evaluation-task-type" name="task_type" disabled>
+        <option value="">正在读取任务类型…</option>
+      </select>
+      <small>选择任务类型后，仅展示包含该类型任务的数据集。</small>
+    </label>
+    <label class="form-field">
+      <span>数据集</span>
+      <select id="evaluation-dataset" name="dataset_id" required disabled>
+        <option value="">正在读取数据集…</option>
+      </select>
+      <small id="dataset-hint">请选择本次需要执行的任务集合。</small>
+    </label>
+    <label class="form-field">
+      <span>执行条数</span>
+      <input id="evaluation-count" name="execution_count" type="number" min="1" step="1" required disabled>
+      <small id="count-hint">条数上限随任务类型和数据集变化。</small>
+    </label>
+    <label class="form-field">
+      <span>被测模型</span>
+      <select id="evaluation-model" name="model_id" required disabled>
+        <option value="">正在读取模型配置…</option>
+      </select>
+      <small>模型由 test_workspace 评测目录配置；Auto 会按每条任务解析实际模型绑定。</small>
+    </label>
+    <label class="disclosure-confirmation" id="disclosure-confirmation" hidden>
+      <input id="approved-data-disclosure" name="approved_data_disclosure" type="checkbox">
+      <span>我确认允许执行环境按现有配置，将所选数据集附件提供给上方选择的模型。</span>
+    </label>
+    <p class="launch-status" id="evaluation-status" role="status" aria-live="polite"></p>
+    <footer class="dialog-actions">
+      <button class="secondary-button" id="cancel-evaluation" type="button">取消</button>
+      <button class="primary-button" id="submit-evaluation" type="submit" disabled>开始评估</button>
+    </footer>
+  </form>
+</dialog>
+<script src="/static/evaluation.js?v=2" defer></script>
 {% endblock %}
