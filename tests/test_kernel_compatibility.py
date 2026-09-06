@@ -529,24 +529,29 @@ async def test_early_aclose_synchronously_restores_logger_debug_sink(
         event_loop.set_exception_handler(previous_handler)
 
 
-@pytest.mark.parametrize("entrypoint_name", ("core", "kernel"))
+@pytest.mark.parametrize("entrypoint_name", ("core", "kernel", "agent"))
+@pytest.mark.parametrize("tool_kind", ("ordinary", "event", "parallel"))
 @pytest.mark.asyncio
-async def test_closing_run_during_serial_tool_waits_for_tool_cleanup(
+async def test_closing_run_waits_for_tool_cleanup(
     entrypoint_name: str,
+    tool_kind: str,
     monkeypatch,
     tmp_path,
 ) -> None:
     import box_agent.core as core
     import box_agent.kernel.loop as loop
+    from box_agent.agent import Agent
+    from box_agent.tools.base import EventEmittingTool
     from box_agent.composition import compose_default_kernel_services
     from box_agent.tool_result_storage import ToolResultStorage
 
     cleaned_up = asyncio.Event()
 
-    class BlockingTool(Tool):
+    class BlockingTool(EventEmittingTool if tool_kind == "event" else Tool):
         name = "blocking"
         description = "Wait until cancelled."
         parameters = {"type": "object", "properties": {}}
+        parallel_safe = tool_kind == "parallel"
 
         async def execute(self, **_kwargs):
             try:
@@ -570,6 +575,7 @@ async def test_closing_run_during_serial_tool_waits_for_tool_cleanup(
             )
 
     monkeypatch.setattr(core, "TOOL_ACTIVITY_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(core, "TOOL_EVENT_POLL_INTERVAL_SECONDS", 0.001)
     run_arguments = dict(
         llm=ToolLLM(),
         messages=[Message(role="user", content="run the tool")],
@@ -583,6 +589,7 @@ async def test_closing_run_during_serial_tool_waits_for_tool_cleanup(
             _services=services,
             _runtime_defaults=loop._LoopRuntimeDefaults(
                 tool_activity_interval_seconds=0.001,
+                tool_event_poll_interval_seconds=0.001,
             ),
             **{
                 key: value
@@ -590,6 +597,15 @@ async def test_closing_run_during_serial_tool_waits_for_tool_cleanup(
                 if key not in SERVICE_OWNED_RUN_ARGUMENTS
             },
         ).run()
+    elif entrypoint_name == "agent":
+        agent = Agent(
+            run_arguments["llm"], "Run the tool.", list(run_arguments["tools"].values()),
+            max_steps=1, workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False,
+        )
+        agent.logger.log_dir = tmp_path
+        agent.tool_result_storage = run_arguments["tool_result_storage"]
+        agent.messages.append(Message(role="user", content="run the tool"))
+        events = agent.run_events()
     else:
         events = core.run_agent_loop(**run_arguments)
 

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import traceback
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
@@ -150,8 +151,9 @@ class ToolEngine:
 
         tool = self._tools[request.tool_name]
         if isinstance(tool, EventEmittingTool):
-            async for record in self._invoke_serial_event_tool(request):
-                yield record
+            async with aclosing(self._invoke_serial_event_tool(request)) as records:
+                async for record in records:
+                    yield record
             return
 
         exec_task: asyncio.Task[ToolResult] | None = None
@@ -260,8 +262,7 @@ class ToolEngine:
                 result = await exec_task
         finally:
             if not exec_task.done() and not late_task_detached:
-                exec_task.add_done_callback(self._consume_late_task)
-                exec_task.cancel()
+                await self._cancel_tasks((exec_task,))
 
         yield ToolInvocationCompleted(
             call_id=request.call_id,
@@ -278,6 +279,7 @@ class ToolEngine:
         parallel_semaphore = asyncio.Semaphore(max(1, self._max_parallel_tools))
         web_search_semaphore = asyncio.Semaphore(self._web_search_concurrency)
         state = ToolExecutionState(last_activity_at=perf_counter())
+        cleanup_wait_completed = False
 
         async def run_one(
             index: int,
@@ -380,6 +382,7 @@ class ToolEngine:
                     tasks,
                     timeout=self._cancel_grace_seconds,
                 )
+                cleanup_wait_completed = True
                 for task in pending_tasks:
                     task.add_done_callback(self._consume_late_task)
                     task.cancel()
@@ -452,12 +455,28 @@ class ToolEngine:
                 cancelled=state.cancellation_observed,
             )
         finally:
-            for task in tasks:
-                if task.done():
-                    self._consume_late_task(task)
-                else:
-                    task.add_done_callback(self._consume_late_task)
-                    task.cancel()
+            await self._cancel_tasks(tasks, wait=not cleanup_wait_completed)
+
+    async def _cancel_tasks(
+        self, tasks: Sequence[asyncio.Task], *, wait: bool = True,
+    ) -> None:
+        """Wait once for owned task cleanup, then observe any detached results."""
+        pending = []
+        for task in tasks:
+            if task.done():
+                self._consume_late_task(task)
+            else:
+                task.cancel()
+                pending.append(task)
+        if pending and wait:
+            done, pending = await asyncio.wait(
+                pending, timeout=self._cancel_grace_seconds,
+            )
+            for task in done:
+                self._consume_late_task(task)
+        for task in pending:
+            task.add_done_callback(self._consume_late_task)
+            task.cancel()
 
     @staticmethod
     def _cancelled_result(

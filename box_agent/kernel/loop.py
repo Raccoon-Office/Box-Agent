@@ -3277,22 +3277,23 @@ async def _run_agent_loop_impl(
                 )
 
             batch_completion: ToolBatchCompleted | None = None
-            async for engine_record in tool_engine.invoke_parallel(
-                parallel_requests
-            ):
-                if isinstance(engine_record, ToolEngineProgress):
-                    yield engine_record.event
-                elif isinstance(engine_record, ToolEngineActivity):
-                    yield LLMActivityEvent(
-                        step=step + 1,
-                        payload={
-                            "protocol": "agent_activity_v1",
-                            "phase": "tool_running",
-                            "tool_name": engine_record.tool_name,
-                        },
-                    )
-                elif isinstance(engine_record, ToolBatchCompleted):
-                    batch_completion = engine_record
+            async with aclosing(
+                tool_engine.invoke_parallel(parallel_requests)
+            ) as engine_events:
+                async for engine_record in engine_events:
+                    if isinstance(engine_record, ToolEngineProgress):
+                        yield engine_record.event
+                    elif isinstance(engine_record, ToolEngineActivity):
+                        yield LLMActivityEvent(
+                            step=step + 1,
+                            payload={
+                                "protocol": "agent_activity_v1",
+                                "phase": "tool_running",
+                                "tool_name": engine_record.tool_name,
+                            },
+                        )
+                    elif isinstance(engine_record, ToolBatchCompleted):
+                        batch_completion = engine_record
 
             if batch_completion is None:
                 gathered = [

@@ -1072,6 +1072,32 @@ class BashTool(Tool):
             f"export PATH; {command}"
         )
 
+    async def _cleanup_foreground_process(
+        self,
+        process: asyncio.subprocess.Process,
+        communicate_task: asyncio.Task,
+    ) -> None:
+        """Reap a foreground process even if its caller is cancelled again."""
+
+        async def cleanup() -> None:
+            try:
+                await self._kill_process_tree(process)
+            finally:
+                if not communicate_task.done():
+                    communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
+
+        cleanup_task = asyncio.create_task(cleanup())
+        cancellation = None
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError as error:
+                cancellation = error
+        cleanup_task.result()
+        if cancellation is not None:
+            raise cancellation
+
     @staticmethod
     async def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
         """Kill a foreground process tree/group and reap the shell.
@@ -1637,104 +1663,110 @@ Examples:
                 process = await self._create_subprocess(command, merge_stderr=False)
 
                 communicate_task = asyncio.create_task(process.communicate())
-                deadline = time.monotonic() + timeout
-                resource_error: str | None = None
-                while not communicate_task.done():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(communicate_task),
-                            timeout=min(_FOREGROUND_RESOURCE_POLL_SECONDS, remaining),
-                        )
-                    except asyncio.TimeoutError:
-                        rss_bytes = self._process_tree_rss_bytes(process)
-                        if (
-                            rss_bytes is not None
-                            and rss_bytes > _FOREGROUND_PROCESS_TREE_MEMORY_LIMIT_BYTES
-                        ):
-                            resource_error = (
-                                "BASH_RESOURCE_LIMIT: command process tree exceeded "
-                                f"{_FOREGROUND_PROCESS_TREE_MEMORY_LIMIT_BYTES // (1024 ** 2)} MiB RSS; "
-                                "it was stopped to protect the client. Preserve existing artifacts, "
-                                "fix or skip this step, and continue with a warning."
-                            )
+                try:
+                    deadline = time.monotonic() + timeout
+                    resource_error: str | None = None
+                    while not communicate_task.done():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
                             break
-                if resource_error is not None or not communicate_task.done():
-                    # Kill the whole process group and reap, so the shell and any
-                    # children it spawned are torn down (no orphans, no zombie).
-                    await self._kill_process_tree(process)
-                    if not communicate_task.done():
-                        communicate_task.cancel()
-                    error_msg = resource_error or (
-                        f"Command timed out after {timeout} seconds and its process "
-                        "tree was stopped. Preserve existing artifacts, skip or fix "
-                        "this step, and continue with a warning when possible."
-                    )
-                    return BashOutputResult(
-                        success=False,
-                        error=error_msg,
-                        stdout="",
-                        stderr=error_msg,
-                        exit_code=-1,
-                    )
-                stdout, stderr = communicate_task.result()
-
-                # Decode output
-                stdout_text = stdout.decode("utf-8", errors="replace")
-                stderr_text = stderr.decode("utf-8", errors="replace")
-
-                original_stdout_chars = len(stdout_text)
-                original_stderr_chars = len(stderr_text)
-                complete_content = _format_bash_result_content(
-                    stdout_text,
-                    stderr_text,
-                    exit_code=process.returncode or 0,
-                )
-                stdout_text, stderr_text, dropped = _truncate_bash_streams(
-                    stdout_text, stderr_text
-                )
-                raw_output: dict | None = None
-                if dropped:
-                    raw_output = {
-                        "dropped_chars": dropped,
-                        "original_stdout_chars": original_stdout_chars,
-                        "original_stderr_chars": original_stderr_chars,
-                        "streams_combined": True,
-                        "max_output_chars": MAX_BASH_OUTPUT_CHARS,
-                    }
-                    log.warning(
-                        "bash/output_truncated command=%r dropped=%d stdout_chars=%d stderr_chars=%d",
-                        command[:120], dropped, original_stdout_chars, original_stderr_chars,
-                    )
-
-                # Create result (content auto-formatted by model_validator)
-                is_success = process.returncode == 0
-                error_msg = None
-                if not is_success:
-                    error_msg = f"Command failed with exit code {process.returncode}"
-                    if dropped:
-                        # Failed tool messages use ``error`` (not ``content``)
-                        # in model history. Keep a smaller bounded diagnostic
-                        # there so the model can still diagnose the failure
-                        # without duplicating the full 50K visible result.
-                        diagnostic, _ = _truncate_bash_output(
-                            stdout_text, "error context", limit=8_000
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(communicate_task),
+                                timeout=min(_FOREGROUND_RESOURCE_POLL_SECONDS, remaining),
+                            )
+                        except asyncio.TimeoutError:
+                            rss_bytes = self._process_tree_rss_bytes(process)
+                            if (
+                                rss_bytes is not None
+                                and rss_bytes > _FOREGROUND_PROCESS_TREE_MEMORY_LIMIT_BYTES
+                            ):
+                                resource_error = (
+                                    "BASH_RESOURCE_LIMIT: command process tree exceeded "
+                                    f"{_FOREGROUND_PROCESS_TREE_MEMORY_LIMIT_BYTES // (1024 ** 2)} MiB RSS; "
+                                    "it was stopped to protect the client. Preserve existing artifacts, "
+                                    "fix or skip this step, and continue with a warning."
+                                )
+                                break
+                    if resource_error is not None or not communicate_task.done():
+                        # Kill the whole process group and reap, so the shell and any
+                        # children it spawned are torn down (no orphans, no zombie).
+                        await self._kill_process_tree(process)
+                        if not communicate_task.done():
+                            communicate_task.cancel()
+                        await asyncio.gather(communicate_task, return_exceptions=True)
+                        error_msg = resource_error or (
+                            f"Command timed out after {timeout} seconds and its process "
+                            "tree was stopped. Preserve existing artifacts, skip or fix "
+                            "this step, and continue with a warning when possible."
                         )
-                        error_msg += f"\n{diagnostic.strip()}"
-                    elif stderr_text:
-                        error_msg += f"\n{stderr_text.strip()}"
+                        return BashOutputResult(
+                            success=False,
+                            error=error_msg,
+                            stdout="",
+                            stderr=error_msg,
+                            exit_code=-1,
+                        )
+                    stdout, stderr = communicate_task.result()
 
-                return BashOutputResult(
-                    success=is_success,
-                    error=error_msg,
-                    stdout=stdout_text,
-                    stderr=stderr_text,
-                    exit_code=process.returncode or 0,
-                    raw_output=raw_output,
-                    persistence_content=complete_content if dropped else None,
-                )
+                    # Decode output
+                    stdout_text = stdout.decode("utf-8", errors="replace")
+                    stderr_text = stderr.decode("utf-8", errors="replace")
+
+                    original_stdout_chars = len(stdout_text)
+                    original_stderr_chars = len(stderr_text)
+                    complete_content = _format_bash_result_content(
+                        stdout_text,
+                        stderr_text,
+                        exit_code=process.returncode or 0,
+                    )
+                    stdout_text, stderr_text, dropped = _truncate_bash_streams(
+                        stdout_text, stderr_text
+                    )
+                    raw_output: dict | None = None
+                    if dropped:
+                        raw_output = {
+                            "dropped_chars": dropped,
+                            "original_stdout_chars": original_stdout_chars,
+                            "original_stderr_chars": original_stderr_chars,
+                            "streams_combined": True,
+                            "max_output_chars": MAX_BASH_OUTPUT_CHARS,
+                        }
+                        log.warning(
+                            "bash/output_truncated command=%r dropped=%d stdout_chars=%d stderr_chars=%d",
+                            command[:120], dropped, original_stdout_chars, original_stderr_chars,
+                        )
+
+                    # Create result (content auto-formatted by model_validator)
+                    is_success = process.returncode == 0
+                    error_msg = None
+                    if not is_success:
+                        error_msg = f"Command failed with exit code {process.returncode}"
+                        if dropped:
+                            # Failed tool messages use ``error`` (not ``content``)
+                            # in model history. Keep a smaller bounded diagnostic
+                            # there so the model can still diagnose the failure
+                            # without duplicating the full 50K visible result.
+                            diagnostic, _ = _truncate_bash_output(
+                                stdout_text, "error context", limit=8_000
+                            )
+                            error_msg += f"\n{diagnostic.strip()}"
+                        elif stderr_text:
+                            error_msg += f"\n{stderr_text.strip()}"
+
+                    return BashOutputResult(
+                        success=is_success,
+                        error=error_msg,
+                        stdout=stdout_text,
+                        stderr=stderr_text,
+                        exit_code=process.returncode or 0,
+                        raw_output=raw_output,
+                        persistence_content=complete_content if dropped else None,
+                    )
+
+                finally:
+                    if process.returncode is None or not communicate_task.done():
+                        await self._cleanup_foreground_process(process, communicate_task)
 
         except Exception as e:
             return BashOutputResult(

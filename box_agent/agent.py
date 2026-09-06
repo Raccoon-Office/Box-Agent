@@ -1211,26 +1211,31 @@ class Agent:
                             )
                 yield event
         finally:
-            if (
-                self.session_log is not None
-                and session_turn is not None
-                and session_turn_open
-                and not self.session_log.failed
-            ):
-                self._persist_unlogged_messages(
-                    turn=session_turn,
-                    step=session_step,
-                )
-                if session_step_open:
-                    self.session_log.append(
-                        "step/end",
-                        {"turn": session_turn, "step": session_step},
+            try:
+                close = getattr(events, "aclose", None)
+                if callable(close):
+                    await close()
+            finally:
+                if (
+                    self.session_log is not None
+                    and session_turn is not None
+                    and session_turn_open
+                    and not self.session_log.failed
+                ):
+                    self._persist_unlogged_messages(
+                        turn=session_turn,
+                        step=session_step,
                     )
-                self.session_log.append(
-                    "turn/end",
-                    {"turn": session_turn, "reason": {"kind": "interrupted"}},
-                )
-                self.session_log.flush()
+                    if session_step_open:
+                        self.session_log.append(
+                            "step/end",
+                            {"turn": session_turn, "step": session_step},
+                        )
+                    self.session_log.append(
+                        "turn/end",
+                        {"turn": session_turn, "reason": {"kind": "interrupted"}},
+                    )
+                    self.session_log.flush()
 
     # ── Backward-compatible run() ───────────────────────────
 

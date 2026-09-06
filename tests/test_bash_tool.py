@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import shlex
+import sys
 import unittest.mock
 from pathlib import Path
 
@@ -26,6 +27,97 @@ from box_agent.tools.pptx_safety import (
     _SYNC_IMAGE_STATUS_SCRIPT,
     detect_pptx_image_status_command_bypass,
 )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group integration")
+@pytest.mark.asyncio
+async def test_cancelled_foreground_command_reaps_process_before_returning(tmp_path, monkeypatch):
+    started = tmp_path / "started"
+    script = tmp_path / "waiting.py"
+    script.write_text(
+        "from pathlib import Path\nimport time\n"
+        f"Path({str(started)!r}).write_text('started')\ntime.sleep(30)\n"
+    )
+    tool = BashTool(workspace_dir=str(tmp_path), allow_full_access=False, non_interactive=True)
+    processes = []
+
+    async def create_process(command, *, merge_stderr=False):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(script), stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, start_new_session=True,
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(tool, "_create_subprocess", create_process)
+    task = asyncio.create_task(tool.invoke({"command": "python waiting.py"}))
+
+    async def wait_started():
+        while not started.exists():
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(wait_started(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert processes[0].returncode is not None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for process in processes:
+            if process.returncode is None:
+                await tool._kill_process_tree(process)
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_waits_for_foreground_cleanup(tmp_path, monkeypatch):
+    started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    communicated = asyncio.Event()
+
+    class Process:
+        returncode = None
+
+        async def communicate(self):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                communicated.set()
+
+    process = Process()
+    tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True)
+
+    async def create_process(*args, **kwargs):
+        return process
+
+    async def kill_process(target):
+        assert target is process
+        cleanup_started.set()
+        await finish_cleanup.wait()
+        target.returncode = -9
+
+    monkeypatch.setattr(tool, "_create_subprocess", create_process)
+    monkeypatch.setattr(tool, "_kill_process_tree", kill_process)
+    task = asyncio.create_task(tool.invoke({"command": "echo cleanup"}))
+    try:
+        await started.wait()
+        task.cancel()
+        await cleanup_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert process.returncode == -9
+        assert communicated.is_set()
+    finally:
+        finish_cleanup.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def test_bash_tools_opt_out_of_shared_result_compression():
