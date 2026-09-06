@@ -589,13 +589,9 @@ ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_self_check.js" deck.html -
 ```
 
 If the command exits non-zero, inspect `qa/html_self_check.json` before deciding
-what failed. Summarize concrete failing slides/selectors and fix `deck.html`.
-If the deck still has a small number of accepted issues after the bounded repair
-rule in `SKILL.md`, use the official export flag instead:
-
-```bash
-${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_to_editable_pptx.js" deck.html output.pptx --out slides --allow-self-check-issues
-```
+what failed. Summarize concrete failing slides/selectors and follow the bounded
+repair rule in `SKILL.md`. The report remains QA evidence but does not control
+whether the editable exporter runs.
 
 Then export:
 
@@ -603,9 +599,9 @@ Then export:
 ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_to_editable_pptx.js" deck.html output.pptx --out slides
 ```
 
-The export script runs self-check again, writes `qa/html_self_check.json`,
-creates `slides/slide-*.png` preview images for visual QA, temporarily inlines
-local `<img>` paths in the browser DOM for export, captures a per-slide
+The export script does not run self-check or write `qa/html_self_check.json`.
+It creates `slides/slide-*.png` preview images for visual QA, temporarily
+inlines local `<img>` paths in the browser DOM for export, captures a per-slide
 background-decoration bitmap (see below), loads
 `scripts/dom-to-pptx.bundle.js`, and writes `output.pptx`. It does not rewrite
 `deck.html`.

@@ -251,6 +251,51 @@ def test_background_capture_exports_below_authored_full_slide_image(
         assert top_center[0] > 180 and top_center[1] < 80 and top_center[2] < 90
 
 
+def test_editable_export_does_not_run_html_self_check(tmp_path: Path) -> None:
+    case_dir = tmp_path / "export-with-advisory-layout-overflow"
+    case_dir.mkdir()
+    html_path = case_dir / "deck.html"
+    html_path.write_text(
+        """<!doctype html><html><head><meta charset="utf-8"><style>
+        html,body{margin:0;padding:0}
+        .slide{width:1920px;height:1080px;position:relative;overflow:hidden;background:#fff}
+        .layout{position:absolute;left:100px;top:100px;width:400px;height:1100px}
+        .card{width:400px;height:100px;background:#16a34a;color:#fff}
+        </style></head><body><section class="slide">
+        <div class="layout"><div class="card">Content remains inside the slide</div></div>
+        </section></body></html>""",
+        encoding="utf-8",
+    )
+    report_path = case_dir / "qa" / "html_self_check.json"
+
+    checked = _run_node(
+        SELF_CHECK_SCRIPT_PATH,
+        str(html_path),
+        "--dom-to-pptx",
+        "--report",
+        str(report_path),
+    )
+    assert checked.returncode == 1
+    assert "visible content extends outside the slide bounds" in checked.stdout
+
+    pptx_path = case_dir / "deck.pptx"
+    report_path.unlink()
+    exported = _run_node(
+        EXPORT_SCRIPT_PATH,
+        str(html_path),
+        str(pptx_path),
+        "--out",
+        str(case_dir / "slides"),
+        "--bg-capture",
+        "never",
+    )
+
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    assert pptx_path.exists()
+    assert not report_path.exists()
+    assert "htmlSelfCheck" not in _last_json_object(exported.stdout)
+
+
 def test_html_self_check_rejects_invalid_technical_diagram_contract(
     tmp_path: Path,
 ) -> None:
@@ -411,7 +456,6 @@ def test_marked_diagram_exports_as_vector_and_stays_out_of_background(
 
     assert summary["diagramCount"] == 1
     assert summary["diagramVectorExport"] is True
-    assert summary["htmlSelfCheck"].endswith("qa/html_self_check.json")
     with zipfile.ZipFile(pptx_path) as archive:
         background_targets, vector_targets = _slide_picture_targets(archive)
         assert len(vector_targets) == 1

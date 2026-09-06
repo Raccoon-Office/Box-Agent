@@ -40,7 +40,7 @@ Editable export can reflow text, shift layers, or lose CSS effects, so source
 previews alone are not enough.
 
 0. HTML self-check for HTML-first decks:
-   - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js index.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` for controlled decks before export (use `deck.html` only on the legacy/custom route), or rely on `scripts/html_to_editable_pptx.js` which writes the same check internally.
+   - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js index.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` for controlled decks before export (use `deck.html` only on the legacy/custom route). The editable exporter does not run this check or write this report internally.
    - Always use the stricter `--dom-to-pptx` compatibility profile for new HTML-first decks.
    - Confirm every `.slide` reports exactly `1920x1080` unless the user explicitly requested a nonstandard output size.
    - Confirm `qa/html_self_check.json` exists, is non-empty, and has `"ok": true`. If it is missing, report HTML self-check as `BLOCKED`.
