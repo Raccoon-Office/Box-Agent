@@ -74,13 +74,15 @@ branch history, also check
 Release, provider API, and ACP compatibility have their own sources under
 [long-lived release and compatibility history](#long-lived-release-and-compatibility-history).
 
-## Pending material changes
+## Pending and recently merged material changes
 
 ### 2026-09-10 — managed session assembly and plugin lifecycle
 
-- **Change:** `refactor(session): manage capability assembly through scoped plugins`
-  on `codex/kernel-plugin-refactor`. This extends [PR #114](https://github.com/Raccoon-Office/Box-Agent/pull/114),
-  merged as `7c85e82`; see [Agent Session](../AGENT_SESSION.md).
+- **Change:** [PR #120](https://github.com/Raccoon-Office/Box-Agent/pull/120),
+  `refactor(session): manage capability assembly through scoped plugins`, merged as
+  `3f70b0a2bad78414c0f2016dc510128df8591e21`. This extends
+  [PR #114](https://github.com/Raccoon-Office/Box-Agent/pull/114), merged as
+  `7c85e82`; see [Agent Session](../AGENT_SESSION.md).
 - **Durable effect:** `AgentSession.open` prepares models, memory, tools/Skills/MCP,
   prompts and hooks through shared session initializers. ACP shares an application
   PluginRuntime; CLI owns a private runtime by default. Each run receives fresh
