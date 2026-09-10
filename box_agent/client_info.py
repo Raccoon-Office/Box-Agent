@@ -90,7 +90,7 @@ class ClientInfo:
         else:
             version = ""
         values = (
-            ("x-client-name", "raccoon"),
+            ("x-client-name", _clean_header_value(self.name) or "raccoon"),
             ("x-client-platform", _clean_header_value(self.platform) or "unknown"),
             ("x-client-version", version),
             ("x-client-os-version", self.os_version),
