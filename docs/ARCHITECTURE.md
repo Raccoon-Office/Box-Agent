@@ -181,6 +181,13 @@ the new runtime has no recovered conversation history. Missing logs can be creat
 in leftover directories, while existing logs and active writer locks are protected.
 Failed construction or resume preparation releases the session writer immediately.
 
+When a model profile revision is missing, session binding resolves the newest
+valid local revision of the same profile ID, provided its provider/endpoint is
+unambiguous. Existing revisions remain pinned; the selected model is preserved.
+Resolution logs only profile/revision identifiers and does not rewrite the
+registry or persisted binding. Profiles with no valid revision or conflicting
+provider routes still require a model configuration update.
+
 A Session owns one normalized cwd for its entire lifetime. Opening the same
 Session with another workspace fails before the log is repaired or mutated.
 Syntactically equivalent paths are accepted; a symlink alias is a distinct

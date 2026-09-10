@@ -3,11 +3,14 @@
 OfficeV3 stores immutable profile revisions in a local, owner-readable registry.
 ACP bindings carry only the non-secret profile identity; provider credentials are
 resolved here and never copied into session metadata or traces.
+Missing revisions may resolve within the same profile when the available route
+is unambiguous; existing revisions remain pinned.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,6 +23,7 @@ from box_agent.user_paths import state_path
 
 
 REGISTRY_VERSION = 1
+_log = logging.getLogger(__name__)
 
 
 class ModelProfileUnavailable(ValueError):
@@ -51,8 +55,9 @@ def load_model_profile_revision(
     profile_revision: str,
     *,
     registry_path: Path | None = None,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
-    """Load one immutable model profile without exposing other revisions."""
+    """Load a revision, optionally recovering a missing revision within its profile."""
 
     revision = _required_text(profile_revision, field="revision")
     path = registry_path or default_model_profile_registry_path()
@@ -67,10 +72,40 @@ def load_model_profile_revision(
     profiles = payload.get("profiles")
     if not isinstance(profiles, Mapping):
         raise ModelProfileUnavailable("model profile registry is invalid")
+    if revision not in profiles and profile_id is not None:
+        # Compatibility: old conversations may outlive their local revision.
+        # Only use valid records for the same profile, with one unambiguous route.
+        expected_id = _required_text(profile_id, field="profileId")
+        candidates: list[tuple[str, int, dict[str, Any]]] = []
+        for order, (key, candidate) in enumerate(profiles.items()):
+            if not isinstance(candidate, Mapping) or candidate.get("profileId") != expected_id:
+                continue
+            try:
+                validated = _validate_model_profile(key, candidate)
+            except (TypeError, ValueError):
+                continue
+            created_at = candidate.get("createdAt")
+            # OfficeV3 writes createdAt in UTC ISO format; registry order breaks ties.
+            candidates.append((created_at if isinstance(created_at, str) else "", order, validated))
+        routes = {(p["provider"], p["apiBase"]) for _, _, p in candidates}
+        if len(routes) > 1:
+            raise ModelProfileUnavailable(
+                f"model profile revision recovery is ambiguous for profile id: {expected_id}"
+            )
+        if candidates:
+            profile = max(candidates, key=lambda item: item[:2])[2]
+            _log.info(
+                "model_profile/revision_recovered profile_id=%s requested_revision=%s resolved_revision=%s",
+                expected_id, revision, profile["profileRevision"],
+            )
+            return profile
     profile = profiles.get(revision)
     if not isinstance(profile, Mapping):
         raise ModelProfileUnavailable(f"model profile revision is unavailable: {revision}")
+    return _validate_model_profile(revision, profile)
 
+
+def _validate_model_profile(revision: str, profile: Mapping[str, Any]) -> dict[str, Any]:
     provider = _required_text(profile.get("provider"), field="provider").lower()
     if provider not in {LLMProvider.OPENAI.value, LLMProvider.ANTHROPIC.value}:
         raise ModelProfileUnavailable(f"model profile provider is unsupported: {provider}")
@@ -105,8 +140,10 @@ def client_for_model_profile(
 ) -> LLMClient:
     """Construct an isolated client for a v2 Session profile binding."""
 
-    profile = load_model_profile_revision(str(binding.get("profileRevision") or ""))
     expected_profile_id = _required_text(binding.get("profileId"), field="profileId")
+    profile = load_model_profile_revision(
+        str(binding.get("profileRevision") or ""), profile_id=expected_profile_id
+    )
     if profile["profileId"] != expected_profile_id:
         raise ModelProfileUnavailable("model profile id does not match its revision")
 
