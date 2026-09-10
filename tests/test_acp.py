@@ -300,6 +300,7 @@ async def test_acp_workspace_config_methods_share_profiles(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("box_agent.tools.setup.resolve_rg_executable", lambda _: "rg")
     workspace = tmp_path / "project"
     workspace.mkdir()
     WorkspaceRegistry().set(workspace, "code")
@@ -326,6 +327,8 @@ async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, m
     assert scratch_dir.is_dir()
     assert scratch_dir.is_relative_to(workspace / ".box-agent" / "scratch")
     assert not (workspace / ".box-agent-scratch").exists()
+    assert "rg" in state.agent.tools
+    assert "search_files" not in state.agent.tools
     assert "Software Engineering Mode (code_agent)" in state.agent.system_prompt
     assert "Project Workspace Mode" in state.agent.system_prompt
 

@@ -45,7 +45,7 @@ Provider 返回的 usage 仍会包含本次图片输入。因此对应 assistant
 以下结果不会再做二次压缩：
 
 - 已实际采用工具 `model_context` 的结果会按 `tool_use_id` 冻结；
-- `read_file`、`query_jsonl`、`search_files` 通过 Infinity 明确退出，它们分别依赖行/字符分页、cursor/结构化摘要、结果数/字符分页；
+- `read_file`、`query_jsonl`、`search_files`、`rg` 通过 Infinity 明确退出，依赖各自的行、cursor、结果数或字符边界；
 - `bash`、`bash_output` 也通过 Infinity 退出，因为工具内部已经执行一次 50,000 字符的 40% head + 60% tail 截断。
 
 读取类工具不会被单结果即时检查外置，避免每个普通分页结果都落盘后又诱导模型重新读取。Infinity 只退出这条即时检查；当多个并行结果的合计内容超过请求总预算时，聚合检查仍可外置其中最大的页面。工具也可通过 `ToolResult.persistence_content` 请求统一落盘完整内容。

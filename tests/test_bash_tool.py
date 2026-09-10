@@ -1040,6 +1040,30 @@ def test_description_uses_injected_python_and_reserved_scratch_directory():
     assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="rg guidance is POSIX-specific")
+def test_description_allows_rg_only_when_session_prompt_directs_it():
+    description = BashTool().description
+
+    assert "Do NOT use grep/rg/find/ls" not in description
+    assert "Use search_files unless the current session prompt explicitly directs rg" in description
+    assert "When explicitly directed, bounded rg and rg --files searches are allowed" in description
+    assert "`general`" not in description
+    assert "`code_agent`" not in description
+
+
+def test_powershell_description_allows_rg_only_when_session_prompt_directs_it():
+    tool = BashTool()
+    tool.is_windows = True
+    tool._bundled_win_bash = None
+
+    description = tool.description
+
+    assert "Use search_files unless the current session prompt explicitly directs rg" in description
+    assert "When explicitly directed, bounded rg and rg --files searches are allowed" in description
+    assert "`general`" not in description
+    assert "`code_agent`" not in description
+
+
 @pytest.mark.asyncio
 async def test_malformed_runtime_fallback_fails_without_approval():
     tool = BashTool(runtime_env={"BOX_AGENT_PYTHON": "/runtime/python"})

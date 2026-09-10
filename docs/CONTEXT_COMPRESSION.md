@@ -72,7 +72,7 @@ The minimum shared model-facing result limit is 20,000 characters and scales wit
 The following results are not processed a second time:
 
 - a tool result whose `model_context` projection was actually selected is frozen by `tool_use_id`;
-- `read_file`, `query_jsonl`, and `search_files` declare infinity and rely on line/character pagination, cursor/structured summarization, and result-count/character pagination respectively;
+- `read_file`, `query_jsonl`, `search_files`, and `rg` declare infinity and rely on their own line, cursor, result-count, or character bounds;
 - `bash` and `bash_output` also declare infinity because they already apply one 50,000-character 40% head + 60% tail truncation inside the tool.
 
 Read-like tools are not externalized by the single-result check because persisting every normal page only to make the model read it again would create a loop. Infinity opts out of that immediate check, but a large parallel batch can still externalize its largest pages to satisfy the aggregate request budget. A tool can also request persistence of complete recoverable text through `ToolResult.persistence_content`.

@@ -42,6 +42,18 @@ MAX_SEARCH_OUTPUT_CHARS = 50_000
 SEARCH_OUTPUT_HINT_RESERVE_CHARS = 1_000
 DEFAULT_SEARCH_TIMEOUT_SECONDS = 60.0
 SEARCH_HEARTBEAT_SECONDS = 10.0
+_SEARCH_IGNORED_DIRECTORY_NAMES = frozenset(
+    {
+        "__pycache__",
+        "build",
+        "coverage",
+        "dist",
+        "env",
+        "node_modules",
+        "target",
+        "venv",
+    }
+)
 _BINARY_EXTENSIONS = {
     ".7z", ".avi", ".bin", ".bmp", ".class", ".dll", ".dmg", ".doc",
     ".docx", ".exe", ".gif", ".gz", ".ico", ".jar", ".jpeg", ".jpg",
@@ -167,8 +179,9 @@ class SearchFilesTool(EventEmittingTool):
     @property
     def description(self) -> str:
         return (
-            "Search file contents or find files by name. Use this instead of grep/rg/find/ls "
-            "in bash. target='content' performs a regular-expression text search; "
+            "Search file contents or find files by name. This is the default file-search tool; "
+            "use it unless the current session prompt explicitly directs another search method. "
+            "target='content' performs a regular-expression text search; "
             "target='files' finds files by glob pattern and is the correct way to inspect "
             "a directory. Results are bounded by count and total characters and support "
             "offset/limit pagination."
@@ -292,7 +305,8 @@ class SearchFilesTool(EventEmittingTool):
             directories[:] = sorted(
                 directory
                 for directory in directories
-                if directory not in {".git", ".hg", ".svn", "node_modules", "__pycache__"}
+                if not directory.startswith(".")
+                and directory.casefold() not in _SEARCH_IGNORED_DIRECTORY_NAMES
             )
             root_path = Path(current_root)
             for filename in sorted(filenames):

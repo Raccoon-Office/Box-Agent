@@ -196,6 +196,11 @@ class MyTool(Tool):
 参数 Schema；别名不会转换其他 Agent 的参数格式。`read_file`、`write_file`、
 `search_files`、`execute_code`、`memory_search` 等已经同名的等价工具无需额外别名。
 
+代码模式会在 `BOX_AGENT_RG` 或 `PATH` 中的 ripgrep 可用时额外注册 canonical
+`rg` 工具。使用 `mode="files"` 按 glob 发现文件，使用 `mode="content"` 做有界
+内容搜索。普通模式继续使用 `search_files`；ripgrep 不可用时，代码模式也回退到
+`search_files`。
+
 #### 示例
 
 ```python

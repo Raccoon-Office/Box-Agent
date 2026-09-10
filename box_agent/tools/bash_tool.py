@@ -1260,7 +1260,8 @@ class BashTool(Tool):
             "Windows": f"""Execute PowerShell commands in foreground or background.
 
 Do NOT use Get-Content/type to read files; use read_file instead.
-Do NOT use Select-String/Get-ChildItem/dir to search or list files; use search_files instead.
+For file searches, follow the current session prompt. Use search_files unless the current session prompt explicitly directs rg. When explicitly directed, bounded rg and rg --files searches are allowed when available; otherwise use search_files.
+Do NOT use Select-String/Get-ChildItem/dir to search or list files.
 Reserve bash for git, builds, tests, package managers, processes, scripts, and system commands.
 
 Parameters:
@@ -1283,7 +1284,8 @@ Examples:
             "Unix": f"""Execute bash commands in foreground or background.
 
 Do NOT use cat/head/tail to read files; use read_file instead.
-Do NOT use grep/rg/find/ls to search or list files; use search_files instead.
+For file searches, follow the current session prompt. Use search_files unless the current session prompt explicitly directs rg. When explicitly directed, bounded rg and rg --files searches are allowed when available; otherwise use search_files.
+Do NOT use grep/find/ls to search or list files.
 Reserve bash for git, builds, tests, package managers, processes, scripts, and system commands.
 
 Parameters:

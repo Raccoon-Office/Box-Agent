@@ -2101,6 +2101,7 @@ async def run_agent(
         ),
         use_output_dir=not code_workspace,
         env_context=cli_env_context,
+        session_mode="code_agent" if code_workspace else "general",
     )
 
     if not allow_full_access:

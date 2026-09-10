@@ -1869,6 +1869,7 @@ class BoxACPAgent:
                     else None
                 ),
                 env_context=env_context,
+                session_mode=session_mode,
                 process_owner_id=session_id,
                 bypass_dangerous_command_approval=permission_mode == "full_access",
             )

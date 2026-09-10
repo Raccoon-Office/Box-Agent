@@ -143,7 +143,18 @@ def test_code_agent_prompt_includes_software_engineering_contract(tmp_path):
 
     assert "Software Engineering Mode (code_agent)" not in general_prompt
     assert "Software Engineering Mode (code_agent)" in code_prompt
-    assert "优先用 `rg` 定位" in code_prompt
+    assert "文件搜索默认使用 `search_files`" in general_prompt
+    assert "只有当前会话的专属提示明确要求其他方式时" in general_prompt
+    assert "`rg --files`" not in general_prompt
+    assert "本会话的代码搜索优先使用独立的 `rg` 工具" in code_prompt
+    assert "`mode='files'`" in code_prompt
+    assert "`mode='content'`" in code_prompt
+    assert "不要为常规文件发现或内容检索拼接 Bash 命令" in code_prompt
+    assert "`rg --files`" not in code_prompt
+    assert "`rg -n`" not in code_prompt
+    assert "`--hidden`" in code_prompt
+    assert "`--no-ignore`" in code_prompt
+    assert "回退到 `search_files`" in code_prompt
     assert "代码工作区就是交付位置" in code_prompt
     assert "不要默认创建或使用 `output/`" in code_prompt
     assert "`git diff`/`git status` 失败不能当作已确认" in code_prompt

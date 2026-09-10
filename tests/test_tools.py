@@ -48,6 +48,15 @@ def test_bounded_read_tools_opt_out_of_shared_result_compression(tmp_path):
     assert all(math.isinf(tool.max_result_size_chars) for tool in tools)
 
 
+def test_search_files_description_defers_to_explicit_session_search_policy(tmp_path):
+    description = SearchFilesTool(workspace_dir=str(tmp_path)).description
+
+    assert "default file-search tool" in description
+    assert "unless the current session prompt explicitly directs another search method" in description
+    assert "`general`" not in description
+    assert "`code_agent`" not in description
+
+
 @pytest.mark.asyncio
 async def test_read_tool():
     """Test read file tool."""
@@ -405,6 +414,66 @@ async def test_search_files_lists_and_searches_without_bash(tmp_path):
     assert content_result.success is True
     assert "src/app.py:2:>needle here" in content_result.content
     assert "README.md" not in content_result.content
+
+
+@pytest.mark.asyncio
+async def test_search_files_skips_common_generated_and_hidden_directories(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle\n", encoding="utf-8")
+    ignored_directories = (
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "ENV",
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        "build",
+        "dist",
+        "target",
+        "coverage",
+        ".next",
+        ".generated",
+    )
+    for directory in ignored_directories:
+        generated = tmp_path / directory
+        generated.mkdir()
+        (generated / "noise.py").write_text("needle\n", encoding="utf-8")
+
+    result = await SearchFilesTool(workspace_dir=str(tmp_path)).execute(
+        pattern="needle",
+        target="content",
+        path=".",
+        file_glob="*.py",
+    )
+
+    assert result.success is True
+    assert "src/app.py:1:>needle" in result.content
+    assert "noise.py" not in result.content
+    assert result.raw_output["scanned_files"] == 1
+
+
+@pytest.mark.asyncio
+async def test_search_files_can_search_an_explicitly_selected_ignored_directory(tmp_path):
+    virtual_environment = tmp_path / ".venv"
+    virtual_environment.mkdir()
+    (virtual_environment / "installed.py").write_text("needle\n", encoding="utf-8")
+
+    result = await SearchFilesTool(workspace_dir=str(tmp_path)).execute(
+        pattern="needle",
+        target="content",
+        path=".venv",
+        file_glob="*.py",
+    )
+
+    assert result.success is True
+    assert "installed.py:1:>needle" in result.content
+    assert result.raw_output["scanned_files"] == 1
 
 
 @pytest.mark.asyncio
@@ -922,8 +991,73 @@ def test_workspace_tools_register_search_files(tmp_path):
 
     tool_names = {tool.name for tool in tools}
     assert "search_files" in tool_names
+    assert "rg" not in tool_names
     assert "query_jsonl" in tool_names
     assert "report_execution_result" in tool_names
+
+
+def test_workspace_tools_register_rg_only_for_code_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr("box_agent.tools.setup.resolve_rg_executable", lambda _: "rg")
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        use_output_dir=False,
+        session_mode="code_agent",
+    )
+
+    tool_names = {tool.name for tool in tools}
+    assert "rg" in tool_names
+    assert "search_files" not in tool_names
+
+
+def test_workspace_tools_fall_back_to_search_files_when_rg_is_unavailable(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("box_agent.tools.setup.resolve_rg_executable", lambda _: None)
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        use_output_dir=False,
+        session_mode="code_agent",
+    )
+
+    tool_names = {tool.name for tool in tools}
+    assert "search_files" in tool_names
+    assert "rg" not in tool_names
 
 
 def test_add_workspace_tools_applies_configured_bash_timeouts(tmp_path):

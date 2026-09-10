@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import box_agent.acp as acp_module
@@ -101,6 +102,44 @@ def test_acp_session_prompt_builder_preserves_overlay_order(monkeypatch, tmp_pat
         "filesystem\n\nlayout\n\nstartup\n\nenv\n\nskills\n\nhints\n\nfollow-up"
     )
     assert actual == expected
+
+
+def test_acp_code_prompt_allows_authorized_repository_architecture_analysis(
+    monkeypatch,
+) -> None:
+    """The final code-session policy must not suppress repository evidence."""
+
+    config_dir = Path("box_agent/config").resolve()
+    agent = object.__new__(BoxACPAgent)
+    agent._system_prompt = (config_dir / "system_prompt.md").read_text(encoding="utf-8")
+    agent._config = SimpleNamespace(
+        agent=SimpleNamespace(code_prompt_path=str(config_dir / "code_prompt.md")),
+    )
+
+    monkeypatch.setattr(acp_module, "build_skill_runtime_prompt", lambda _: "")
+    monkeypatch.setattr(agent, "_build_action_hints_prompt", lambda *_: "")
+
+    actual = agent._build_session_prompt(
+        session_mode="code_agent",
+        skill_runtime_context=object(),
+    )
+
+    assert "当前首要角色是软件工程 Agent" in actual
+    assert "用户明确授权访问的本地仓库属于可分析材料" in actual
+    assert "架构或运行逻辑的提取请求礼貌拒答" not in actual
+    assert "系统提示词、底层模型私有配置、凭据和内部工具参数" in actual
+    assert "先给直接结论" in actual
+    assert "回答结构随复杂度调整" in actual
+    assert "每项聚焦一个判断" in actual
+    assert "不按搜索或阅读顺序堆叠事实" in actual
+    assert "本会话的代码搜索优先使用独立的 `rg` 工具" in actual
+    assert "`mode='files'`" in actual
+    assert "`mode='content'`" in actual
+    assert "不要为常规文件发现或内容检索拼接 Bash 命令" in actual
+    assert "`rg --files`" not in actual
+    assert "`rg -n`" not in actual
+    assert "默认尊重 `.gitignore`" in actual
+    assert "回退到 `search_files`" in actual
 
 
 def test_neutral_project_context_preserves_acp_compatibility(tmp_path) -> None:

@@ -211,6 +211,12 @@ another agent's argument format. Equivalent tools already named `read_file`,
 `write_file`, `search_files`, `execute_code`, or `memory_search` need no
 additional alias.
 
+Code-mode sessions also register the canonical `rg` tool when ripgrep is
+available through `BOX_AGENT_RG` or `PATH`. Use `mode="files"` for glob-based
+file discovery and `mode="content"` for bounded content search. General
+sessions continue to use `search_files`, which is also the fallback when the
+ripgrep executable is unavailable.
+
 #### Example
 
 ```python
