@@ -135,12 +135,30 @@ Other MCP servers must be enabled explicitly in `~/.box-agent/config/mcp.json`.
     "playwright": {
       "description": "Playwright - Browser automation (Chromium)",
       "command": "npx",
-      "args": ["-y", "@playwright/mcp@latest"],
+      "args": ["-y", "@playwright/mcp@latest", "--isolated"],
       "disabled": false
     }
   }
 }
 ```
+
+**One browser context per agent session (and per sub-agent run)**
+
+When the `playwright` entry is a stdio command that includes `--isolated` (and does not set `--shared-browser-context`, `--user-data-dir`, `--port`, `--host` or `--allowed-hosts`), Box-Agent does not talk to it over stdio. Instead it:
+
+1. spawns the same command once with `--port <free port> --host 127.0.0.1 --allowed-hosts 127.0.0.1:<port>` appended (loopback only);
+2. opens one short-lived MCP client to list the tools, then closes it (no browser is launched for discovery);
+3. opens one MCP client **per agent session** on first use, and a further client **per `sub_agent` run** (`{parentSessionId}:{sub_agent_id}`). `@playwright/mcp` gives every HTTP client its own `BrowserContext` on a shared Chromium process, so concurrent ACP sessions and parallel sub-agents get independent tabs, cookies and storage and never block each other. In headed mode every active context shows its own window. A sub-agent's context is closed when that child returns.
+
+Tuning lives under `tools.mcp` in `config.yaml`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `playwright_per_session_context` | `true` | Set to `false` to return to one shared stdio session (turns then serialize with `BROWSER_RUNTIME_BUSY`). |
+| `playwright_max_session_clients` | `8` | Concurrent browser contexts, including sub-agent children. Idle sessions are evicted LRU; when every context is busy the tool returns `BROWSER_SESSION_LIMIT`. |
+| `playwright_session_idle_timeout` | `1800` | Seconds before an unused session context is closed. `0` disables the reaper. |
+
+`mcp_config(action="inspect_browser")` reports `per_session_context=true|false (<reason>)`, and the ACP `_mcp/status` extension method returns a `browser` object (`mode`, `activeClients`, `pid`, `url`). Persistent-profile setups (no `--isolated`) keep today's single shared session; the loader logs the reason on stderr.
 
 ## 3. Extended Abilities
 

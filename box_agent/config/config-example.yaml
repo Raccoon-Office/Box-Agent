@@ -154,6 +154,13 @@ tools:
     connect_timeout: 60.0 # Connection timeout in seconds (default: 60)
     execute_timeout: 120.0 # Tool execution timeout in seconds (default: 120)
     sse_read_timeout: 180.0 # SSE read timeout in seconds (default: 180)
+    # Managed browser isolation: run the playwright MCP server in HTTP mode and
+    # give every agent session (and each sub_agent run) its own MCP client /
+    # BrowserContext. Requires the playwright entry in mcp.json to be a stdio
+    # command with --isolated.
+    playwright_per_session_context: true
+    playwright_max_session_clients: 8 # Concurrent contexts, including sub_agent children
+    playwright_session_idle_timeout: 1800.0 # Seconds before an idle context is closed
 
 # ===== Image Generation Service =====
 # The built-in generate_image tool reads this block the same way LLM requests

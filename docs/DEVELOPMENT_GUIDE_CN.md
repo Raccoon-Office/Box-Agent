@@ -126,12 +126,30 @@ box-agent goal complete --evidence "uv run pytest tests/ -q passed"
     "playwright": {
       "description": "Playwright - Browser automation (Chromium)",
       "command": "npx",
-      "args": ["-y", "@playwright/mcp@latest"],
+      "args": ["-y", "@playwright/mcp@latest", "--isolated"],
       "disabled": false
     }
   }
 }
 ```
+
+**每个 agent session（以及每个 sub_agent 运行）一个独立浏览器上下文**
+
+当 `playwright` 入口是带 `--isolated` 的 stdio 命令（且没有 `--shared-browser-context`、`--user-data-dir`、`--port`、`--host`、`--allowed-hosts`）时，Box-Agent 不再通过 stdio 与它通信，而是：
+
+1. 用同一条命令只拉起一个进程，追加 `--port <空闲端口> --host 127.0.0.1 --allowed-hosts 127.0.0.1:<端口>`（仅回环地址）；
+2. 用一个短命 MCP 客户端列出工具后立刻关闭（发现阶段不会启动浏览器）；
+3. **每个 agent session 首次调用时**各自建立一个 MCP 客户端，**每个 `sub_agent` 运行**再派生 `{父session}:{sub_agent_id}` 客户端。`@playwright/mcp` 会给每个 HTTP 客户端一个独立的 `BrowserContext`（共享一个 Chromium 进程），因此并发的 ACP 会话和同一会话内并行的子 Agent 拥有各自的标签页、Cookie 和存储，互不阻塞；有头模式下每个活跃上下文对应一个独立窗口。子 Agent 返回时关闭其上下文。
+
+可在 `config.yaml` 的 `tools.mcp` 下调节：
+
+| 配置项 | 默认值 | 含义 |
+| --- | --- | --- |
+| `playwright_per_session_context` | `true` | 设为 `false` 回到单个共享 stdio 会话（不同 turn 串行，出现 `BROWSER_RUNTIME_BUSY`）。 |
+| `playwright_max_session_clients` | `8` | 同时存在的浏览器上下文数（含 sub_agent 子上下文）。空闲会话按 LRU 回收；全部忙时工具返回 `BROWSER_SESSION_LIMIT`。 |
+| `playwright_session_idle_timeout` | `1800` | 会话上下文闲置多少秒后关闭，`0` 关闭回收。 |
+
+`mcp_config(action="inspect_browser")` 会输出 `per_session_context=true|false (<原因>)`；ACP 扩展方法 `_mcp/status` 返回 `browser` 对象（`mode`、`activeClients`、`pid`、`url`）。持久 profile（不带 `--isolated`）的配置沿用今天的单一共享会话，加载器会在 stderr 打出原因。
 
 ## 3. 扩展能力
 

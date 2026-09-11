@@ -291,6 +291,14 @@ class MCPConfig(BaseModel):
     execute_timeout: float = 120.0  # Tool execution timeout (seconds)
     sse_read_timeout: float = 180.0  # SSE read timeout (seconds)
 
+    # Managed browser (Playwright MCP) isolation. When enabled and the
+    # ``playwright`` entry in mcp.json is a stdio command with ``--isolated``,
+    # box-agent spawns the server in HTTP mode and opens one MCP client per
+    # agent session (and per sub_agent run), so each gets its own BrowserContext.
+    playwright_per_session_context: bool = True
+    playwright_max_session_clients: int = Field(default=8, ge=1, le=64)
+    playwright_session_idle_timeout: float = Field(default=1800.0, ge=0.0)
+
 
 class ToolsConfig(BaseModel):
     """Tools configuration"""

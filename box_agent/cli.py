@@ -67,6 +67,7 @@ from box_agent.llm.model_routing import resolve_model_client
 from box_agent.schema import LLMProvider, Message
 from box_agent.session_trace import SessionTraceWriter, traced_session_turn
 from box_agent.tools.base import Tool
+from box_agent.tools.browser_runtime_scope import set_browser_session_key
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from box_agent.tools.mcp_loader import (
     cleanup_mcp_connections,
@@ -1850,6 +1851,9 @@ async def run_agent(
         session_id: Optional logical session ID, supplied by keyword
     """
     session_start = datetime.now()
+    # One CLI process is one agent session → one managed BrowserContext.
+    # (ACP binds the key per session in ``_prompt``; CLI is a single session.)
+    set_browser_session_key("cli")
 
     # 1. Load configuration from package directory
     config_path = Config.get_default_config_path()
