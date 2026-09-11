@@ -646,6 +646,7 @@ async def _run_agent_loop_impl(
     context_resource_ledger: ContextResourceLedger | None = None,
     context_resource_dedup_enabled: bool = True,
     session_turn: int | None = None,
+    run_control: Any | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -1014,6 +1015,12 @@ async def _run_agent_loop_impl(
             await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
         return DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
 
+    async def run_checkpoint() -> bool:
+        """Honor cooperative pause/resume at a run-safe boundary."""
+        if run_control is not None and not await run_control.checkpoint():
+            return False
+        return not cancelled()
+
     async def compact_context(history_token_limit, *, force=False, estimate_tools=None):
         """Apply one compaction through the same durable surface/event path."""
         nonlocal summary_failure_cooldown_steps
@@ -1142,7 +1149,7 @@ async def _run_agent_loop_impl(
 
         # ── Cancellation check (top of step) ────────────────
         # No cleanup needed here — messages are consistent at step boundaries.
-        if cancelled():
+        if not await run_checkpoint():
             yield await cancellation_done_event()
             return
 
@@ -2442,7 +2449,7 @@ async def _run_agent_loop_impl(
             return
 
         # ── Cancellation check (before tools) ──────────────
-        if cancelled():
+        if not await run_checkpoint():
             _cleanup_incomplete_messages(messages)
             if hook_mgr.hooks:
                 await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")

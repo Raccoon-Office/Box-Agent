@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from .agent import Agent
 from .agent_runtime import AgentFactory, build_agent
+from .agent_run import AgentRunHandle
+from .api import RunRequest
+from .run_control import PermissionBroker, RunControl
 
 
 class AgentService:
@@ -37,6 +41,57 @@ class AgentService:
         from .plugins.defaults import skill_loader_from_catalog
 
         return skill_loader_from_catalog({tool.name: tool for tool in tools})
+
+    async def start(
+        self,
+        request: RunRequest,
+        *,
+        session: Any,
+        options: Any | None = None,
+    ) -> AgentRunHandle:
+        """Start one protocol-neutral run over an existing AgentSession.
+
+        The first migration keeps AgentSession as the execution owner. The
+        returned handle supplies the stable control, event, and result boundary
+        that later adapters can use without importing Kernel internals.
+        """
+
+        if not isinstance(request, RunRequest):
+            raise TypeError("request must be a RunRequest")
+        control = RunControl()
+        if request.user_message is not None:
+            session.agent.add_user_message(request.user_message)
+        if options is None:
+            options = session.build_run_options(
+                session_id=request.session_id,
+                turn_id=request.run_id,
+                current_turn_text=request.user_message,
+            )
+        if hasattr(options, "run_control"):
+            options = replace(options, run_control=control)
+
+        permission_broker = (
+            getattr(options, "permission_negotiator", None)
+            if options is not None
+            else None
+        )
+
+        handle = AgentRunHandle.for_run(
+            state=session,
+            run_id=request.run_id,
+            events_factory=lambda: session.run_events(options=options),
+            control=control,
+            permission_broker=(
+                permission_broker
+                if isinstance(permission_broker, PermissionBroker)
+                else None
+            ),
+        )
+        if isinstance(permission_broker, PermissionBroker):
+            permission_broker.set_event_sink(handle.publish)
+        session._run_handle = handle
+        handle._start()
+        return handle
 
 
 __all__ = ["AgentService"]

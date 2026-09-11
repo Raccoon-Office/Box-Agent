@@ -152,6 +152,24 @@ binds cancellation, injection and summary/extraction references before explicit
 overrides. Managed sessions populate the internal `kernel_services` field;
 adapters should not supply it themselves.
 
+New protocol-neutral runs are available through `AgentService.start(RunRequest,
+session=...)`. The returned `AgentRunHandle` starts the compatible session run,
+exposes ordered `EventEnvelope` values from `events()`, accepts `cancel`,
+`pause`, `resume`, `inject_message`, and `permission_response` commands through
+`send()`, and returns one aggregated `RunResult` from `result()`. `pause` takes
+effect at the next kernel checkpoint; a `PermissionBroker` correlates
+`PermissionRequestEvent.request_id` with `permission_response`. `AgentSession.run_events()` remains the compatibility
+stream for existing adapters during migration.
+
+For a continuation over messages that an adapter has already staged, set
+`RunRequest.user_message` to `None`; the service reuses the current Session
+history without appending another user message.
+
+The Python SDK exposes the same boundary through `AgentClient(session)`. Use
+`await client.run(request)` for a non-rendering run, or
+`await client.start(request)` when the caller needs the handle's event stream
+and control methods. The SDK does not own Session construction or cleanup.
+
 ## Adapter boundaries
 
 ACP retains request parsing, workspace/model binding, permission reverse RPC,

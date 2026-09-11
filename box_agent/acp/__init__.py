@@ -76,6 +76,7 @@ from box_agent.agent_runtime import (
     build_permission_engine,
 )
 from box_agent.agent_run import AgentRunHandle
+from box_agent.api import RunRequest
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
 from box_agent.agent import (
     Agent,
@@ -4351,7 +4352,16 @@ class BoxACPAgent:
             ),
             current_turn_text=plan_start_text,
         )
-        events = state.run_events(options=run_options)
+        protocol_handle = await AgentService().start(
+            RunRequest(
+                run_id=turn_id or state.current_turn_id or f"acp-run-{uuid4().hex}",
+                session_id=session_id,
+            ),
+            session=state,
+            options=run_options,
+        )
+        run_handle = protocol_handle
+        events = protocol_handle.events()
         if observer.trace_writer is not None:
             events = scoped_session_trace(
                 events,
@@ -4359,7 +4369,8 @@ class BoxACPAgent:
                 turn_id=turn_id,
             )
         async with aclosing(events):
-            async for event in events:
+            async for envelope in events:
+                event = envelope.payload
                 try:
                     await _sync_explicit_skill_deliveries()
                     match event:
