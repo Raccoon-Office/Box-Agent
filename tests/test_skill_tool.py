@@ -1,9 +1,7 @@
 """
 Test Skill Tool
 
-Tests for skill tools after Progressive Disclosure optimization:
-- Only GetSkillTool remains (ListSkillsTool and UseSkillTool removed)
-- Tests verify the single-tool approach
+Tests for local directory discovery and on-demand reference reading.
 """
 
 import tempfile
@@ -63,7 +61,7 @@ async def test_get_skill_tool(skill_loader):
 
 
 @pytest.mark.asyncio
-async def test_get_skill_tool_returns_short_context_when_skill_is_preloaded(skill_loader):
+async def test_get_skill_tool_does_not_trust_legacy_preload_hash_as_visible_body(skill_loader):
     skill = skill_loader.get_skill("test-skill-0")
     assert skill is not None
     skill_prompt = skill.to_prompt()
@@ -77,9 +75,9 @@ async def test_get_skill_tool_returns_short_context_when_skill_is_preloaded(skil
     result = await tool.execute(skill_name=skill.name)
 
     assert result.success
-    assert "already preloaded" in result.content
+    assert "Test skill 0 content" in result.content
     assert result.model_context == result.content
-    assert "Test skill 0 content" not in result.content
+    assert "already preloaded" not in result.content
 
 
 @pytest.mark.asyncio
@@ -92,7 +90,7 @@ async def test_get_skill_tool_returns_full_content_when_preloaded_skill_changed(
     result = await tool.execute(skill_name="test-skill-0")
 
     assert result.success
-    assert result.model_context is None
+    assert result.model_context == result.content
     assert "Test skill 0 content" in result.content
 
 
@@ -127,8 +125,8 @@ async def test_get_skill_tool_honors_profile_block_until_user_explicitly_allows_
         },
     )
     preloaded_result = await preloaded.execute(skill_name="test-skill-0")
-    assert preloaded_result.success
-    assert "already preloaded" in preloaded_result.content
+    assert not preloaded_result.success
+    assert "execution profile" in preloaded_result.error
 
 
 @pytest.mark.asyncio
@@ -139,11 +137,11 @@ async def test_get_skill_tool_nonexistent(skill_loader):
     result = await tool.execute(skill_name="nonexistent-skill")
 
     assert not result.success
-    assert "不存在" in result.error or "not exist" in result.error.lower()
+    assert "不存在" in result.error or "not found" in result.error.lower()
 
 
-def test_create_skill_tools_returns_single_tool(skill_loader):
-    """Test that create_skill_tools only returns GetSkillTool after optimization"""
+def test_create_skill_tools_returns_local_discovery_and_reader(skill_loader):
+    """Both lightweight discovery and reading are offered without an execution tool."""
     with tempfile.TemporaryDirectory() as tmpdir:
         skill_dir = Path(tmpdir) / "test-skill"
         skill_dir.mkdir()
@@ -153,14 +151,14 @@ def test_create_skill_tools_returns_single_tool(skill_loader):
 
         tools, loader = create_skill_tools(tmpdir)
 
-        # Should only have one tool now (GetSkillTool)
-        assert len(tools) == 1
+        # Discovery and reading share the same source catalog.
+        assert {tool.name for tool in tools} == {"get_skill", "list_skills"}
         assert isinstance(tools[0], GetSkillTool)
         assert loader is not None
 
 
-def test_tool_count_optimization():
-    """Verify Progressive Disclosure optimization: 3 tools -> 1 tool"""
+def test_skill_tools_keep_get_skill_compatibility():
+    """The existing read name remains alongside local discovery."""
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create a simple test skill
         skill_dir = Path(tmpdir) / "simple-skill"
@@ -171,11 +169,9 @@ def test_tool_count_optimization():
 
         tools, _ = create_skill_tools(tmpdir)
 
-        # After optimization, should only have 1 tool (GetSkillTool)
-        # Before optimization, we had 3 tools (ListSkillsTool, GetSkillTool, UseSkillTool)
-        assert len(tools) == 1
+        assert {tool.name for tool in tools} == {"get_skill", "list_skills"}
 
         # Verify it's GetSkillTool
         tool = tools[0]
         assert tool.name == "get_skill"
-        assert "get complete content" in tool.description.lower() or "获取" in tool.description
+    assert "next_offset" in tool.description and "required_skills" in tool.description

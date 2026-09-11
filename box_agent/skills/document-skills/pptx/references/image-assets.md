@@ -119,10 +119,12 @@ Rules:
 3. A sub-agent is useful only for a genuinely independent task such as image research or prompt planning with deterministic output files. It is not the default image execution path, and a one-image deck gains no latency benefit from it.
 4. After the files exist, run the loader-expanded absolute
    `scripts/sync_image_manifest_status.js` once, using the standalone
-   platform-specific command in `SKILL.md`. The Bash tool already starts in the
-   artifact root: do not prepend `cd`, add redirects/diagnostic suffixes, expand
-   `BOX_AGENT_OUTPUT_DIR` into the manifest argument, or manually edit status
-   fields after a rejection.
+   platform-specific command in `SKILL.md`: POSIX uses `cd ... &&`; PowerShell
+   uses `Set-Location -LiteralPath '...' -ErrorAction Stop;` with literal
+   single-quoted paths and doubled embedded apostrophes. Box-Agent's Bash tool
+   has no `workspaceDir` argument. Do not add redirects/diagnostic suffixes,
+   use a legacy output variable in the manifest argument, or manually edit
+   status fields after a rejection.
 
 ## 4.1 Hosted web image search before generation
 
@@ -137,7 +139,7 @@ The tool may return normalized `refs[].image_details[]`, Custom
 `Result.ImageResults[].Image.Url`, or Global
 `Result.Documents[].Snippet[].Image.ImageUrl`. Select one candidate whose
 subject, orientation, reported clarity, watermark state, and dimensions fit the
-declared slot. Write only that selection to an artifact-root-local receipt:
+declared slot. Write only that selection to a presentation-directory-local receipt:
 
 ```json
 {
@@ -203,7 +205,7 @@ AI fallback for a named real subject as factual evidence.
 ## 6. Output placement
 
 1. Store generated files under `assets/generated/`.
-1. Reference files with artifact-root-relative paths inside `index.html`/`deck.json`.
+1. Reference files with presentation-directory-relative paths inside `index.html`/`deck.json`.
 1. Always call `generate_image` with `watermark: false` and `publish_artifact: false` for PPT assets. Keep intermediate images out of user-facing messages; retain their files and manifest references. Only publish individual images when explicitly requested. The deck supplies its own branding/watermark and the `avoid` field already steers the model away from in-image watermarks, so the tool's default "AI 生成" stamp must be suppressed.
 1. If generation tooling is unavailable, mark required image-plan entries as `blocked`; on a non-creative controlled deck, an optional slot may use `skip` only when its layout contract permits it. `draw_in_html` remains a legacy-route choice, not a controlled fallback.
 1. In `creative_image_mode`, the previous fallback rule is stricter: if the required generated image is unavailable, the image-complete delivery is blocked. Preserve and deliver any structurally valid HTML as a degraded draft; do not claim that it satisfies the requested image-rich result.

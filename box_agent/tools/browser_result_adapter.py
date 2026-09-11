@@ -11,7 +11,7 @@ from .base import ToolResult
 
 _BROWSER_SNAPSHOT_OUTPUT_PATH_ERROR = (
     "BROWSER_SNAPSHOT_OUTPUT_PATH_INVALID: relative snapshot filenames must stay "
-    "inside the current task artifact root. Use a path such as "
+    "inside the session cwd. Use a path such as "
     "research/page-snapshot.md, or omit filename when no persisted snapshot is needed."
 )
 
@@ -20,14 +20,13 @@ def _prepare_browser_snapshot_output(
     tool_name: str,
     arguments: dict[str, Any],
     workspace_dir: str | None,
-    artifact_root_dir: str | Path | None,
 ) -> tuple[Path | None, str | None]:
     """Turn a Playwright snapshot filename into Box-Agent-managed persistence.
 
     Standalone Playwright MCP servers run in their own process and therefore do
     not share Box-Agent's workspace cwd.  They also intentionally restrict file
-    writes to their own temp roots.  For a filename inside the current artifact
-    root, request an inline snapshot from Playwright and persist that returned
+    writes to their own temp roots. For a filename inside the session cwd,
+    request an inline snapshot from Playwright and persist that returned
     Markdown in Box-Agent after the tool succeeds.
     """
     if tool_name != "managed_browser_snapshot":
@@ -36,16 +35,16 @@ def _prepare_browser_snapshot_output(
     if not isinstance(filename, str) or not filename.strip():
         return None, None
     supplied_path = Path(filename).expanduser()
-    artifact_root = _artifact_scan_root(workspace_dir, artifact_root_dir)
-    if artifact_root is None:
+    cwd_root = _artifact_scan_root(workspace_dir)
+    if cwd_root is None:
         return None, None
-    artifact_root = artifact_root.resolve()
+    cwd_root = cwd_root.resolve()
     resolved_path = (
         supplied_path.resolve()
         if supplied_path.is_absolute()
-        else (artifact_root / supplied_path).resolve()
+        else (cwd_root / supplied_path).resolve()
     )
-    if not resolved_path.is_relative_to(artifact_root):
+    if not resolved_path.is_relative_to(cwd_root):
         if supplied_path.is_absolute():
             return None, None
         return None, _BROWSER_SNAPSHOT_OUTPUT_PATH_ERROR
@@ -90,7 +89,6 @@ def _prepare_browser_screenshot_output(
     tool_name: str,
     arguments: dict[str, Any],
     workspace_dir: str | None,
-    artifact_root_dir: str | Path | None,
 ) -> tuple[Path | None, str | None]:
     """Request an inline Playwright screenshot for Box-Agent-managed persistence."""
     if tool_name != "managed_browser_take_screenshot":
@@ -99,21 +97,21 @@ def _prepare_browser_screenshot_output(
     if not isinstance(filename, str) or not filename.strip():
         return None, None
     supplied_path = Path(filename).expanduser()
-    artifact_root = _artifact_scan_root(workspace_dir, artifact_root_dir)
-    if artifact_root is None:
+    cwd_root = _artifact_scan_root(workspace_dir)
+    if cwd_root is None:
         return None, None
-    artifact_root = artifact_root.resolve()
+    cwd_root = cwd_root.resolve()
     resolved_path = (
         supplied_path.resolve()
         if supplied_path.is_absolute()
-        else (artifact_root / supplied_path).resolve()
+        else (cwd_root / supplied_path).resolve()
     )
-    if not resolved_path.is_relative_to(artifact_root):
+    if not resolved_path.is_relative_to(cwd_root):
         if supplied_path.is_absolute():
             return None, None
         return None, (
             "BROWSER_SCREENSHOT_OUTPUT_PATH_INVALID: filename must stay inside "
-            "the artifact root"
+            "the session cwd"
         )
     arguments.pop("filename", None)
     return resolved_path, None

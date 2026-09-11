@@ -28,8 +28,10 @@ body-level variables cannot change one surface without its matching foreground.
 
 ## Adding or adjusting a theme
 
-Run the repository commands below from the repository root. Review artifacts go
-under `output/`, not inside the Skill source directory.
+Run the repository commands below from the repository root. Keep review artifacts
+under the conversation-selected `<PRESENTATION_DIR>/qa/`, outside the Skill source
+directory. Substitute the absolute directory using the Skill's literal path
+quoting rules; do not add an automatic `output/` layer.
 
 1. Add or edit its existing theme JSON contract. Keep palette, typography,
    shape, style and composition declarations together. No new CSS selector is
@@ -50,7 +52,7 @@ composition-family atlas demonstrates those traditional shells explicitly.
 
 ```bash
 node box_agent/skills/document-skills/pptx/scripts/build_layout_manifest.js
-node box_agent/skills/document-skills/pptx/scripts/render_theme_matrix.js --out output/pptx-theme-review --themes NEW_THEME_ID --check --screenshots
+node box_agent/skills/document-skills/pptx/scripts/render_theme_matrix.js --out '<PRESENTATION_DIR>/qa/pptx-theme-review' --themes NEW_THEME_ID --check --screenshots
 ```
 
 ## Adding or adjusting a layout
@@ -80,7 +82,7 @@ node box_agent/skills/document-skills/pptx/scripts/render_theme_matrix.js --out 
 ## Checks and visual review
 
 ```bash
-node box_agent/skills/document-skills/pptx/scripts/render_theme_matrix.js --out output/pptx-full-theme-review --check --screenshots
+node box_agent/skills/document-skills/pptx/scripts/render_theme_matrix.js --out '<PRESENTATION_DIR>/qa/pptx-full-theme-review' --check --screenshots
 ```
 
 Without filters this discovers every current theme and layout dynamically.

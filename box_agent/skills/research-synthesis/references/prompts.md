@@ -2,6 +2,8 @@
 
 These templates work for both native subagents and local sequential rounds.
 Replace bracketed fields before dispatching or executing.
+Use the absolute task directory selected in `SKILL.md` for `[output_dir]`;
+it may be a child of the unchanged session cwd.
 
 ## Wide Facet
 
@@ -24,7 +26,7 @@ Search requirements:
   ranked variant returned no results; use an exact known first-party URL or mark
   the gap unresolved.
 
-Output path: [workspace]/research/[topic]_wide[NN].md
+Output path: [output_dir]/research/[topic]_wide[NN].md
 Output format:
 - Facet
 - Key findings with footnote citations
@@ -61,14 +63,14 @@ Source rules:
   a URL-bound search-result summary may be medium-confidence evidence when its
   exact returned excerpt is preserved with `evidence_basis=search_summary`.
 - For every candidate claim, add or update one row in
-  [workspace]/research/[topic]_evidence.json using the output-contract schema.
+  [output_dir]/research/[topic]_evidence.json using the output-contract schema.
 - Mark a row `verified` only when the excerpt names the entity and directly
   supports the claim. Mark cross-entity matches, unsupported snippets, and
   unresolved user/source conflicts `conflicting` or `unverified`.
 - For `first_party`, the page hostname must match a declared
   `official_domains` entry for that entity.
 
-Output path: [workspace]/research/[topic]_dim[NN].md
+Output path: [output_dir]/research/[topic]_dim[NN].md
 Output format:
 Entity: [exact target entity]
 Claim: [claim with inline citation]
@@ -98,8 +100,8 @@ Requirements:
 - Update the corresponding evidence-ledger rows. Preserve both the user claim
   and source-backed claim when they conflict; do not collapse them.
 
-Output path: [workspace]/research/[topic]_validation[NN].md
-Main-agent merge target: [workspace]/research/[topic]_cross_verification.md
+Output path: [output_dir]/research/[topic]_validation[NN].md
+Main-agent merge target: [output_dir]/research/[topic]_cross_verification.md
 ```
 
 ## Final Handoff
@@ -108,13 +110,13 @@ Main-agent merge target: [workspace]/research/[topic]_cross_verification.md
 Research is complete. Do not launch additional research agents.
 
 Use these artifacts:
-- Insight file: [workspace]/research/[topic]_insight.md
-- Cross-verification file: [workspace]/research/[topic]_cross_verification.md
-- Evidence ledger: [workspace]/research/[topic]_evidence.json
-- Delivery handoff report: [workspace]/research/qa/[topic]_research_check.json
-- Dimension files: [workspace]/research/[topic]_dim01.md through [topic]_dimNN.md
-- File analysis: [workspace]/research/[topic]_file_analysis.md, if present
-- Wide exploration files: [workspace]/research/[topic]_wideNN.md, if present
+- Insight file: [output_dir]/research/[topic]_insight.md
+- Cross-verification file: [output_dir]/research/[topic]_cross_verification.md
+- Evidence ledger: [output_dir]/research/[topic]_evidence.json
+- Delivery handoff report: [output_dir]/research/qa/[topic]_research_check.json
+- Dimension files: [output_dir]/research/[topic]_dim01.md through [topic]_dimNN.md
+- File analysis: [output_dir]/research/[topic]_file_analysis.md, if present
+- Wide exploration files: [output_dir]/research/[topic]_wideNN.md, if present
 
 Preserve Markdown footnotes exactly. Do not renumber, strip, or replace them.
 For factual downstream copy, use only

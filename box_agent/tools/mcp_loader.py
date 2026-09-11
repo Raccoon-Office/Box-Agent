@@ -66,6 +66,12 @@ from .browser_tool_names import (
     public_browser_tool_text,
 )
 from .mcp_tool_catalog import get_mcp_tool_catalog
+from .mcp_sources import (
+    McpConfigSource,
+    ResolvedMcpServer,
+    configured_mcp_sources,
+    resolve_mcp_sources,
+)
 from .model_tool_context import current_model_tool_context
 
 
@@ -78,9 +84,15 @@ def _warn(msg: str) -> None:
     sys.stderr.write(msg + "\n")
 
 
-def _public_mcp_tool_name(server_name: str, remote_name: str) -> str:
+def _public_mcp_tool_name(
+    server_name: str,
+    remote_name: str,
+    connector_id: str | None = None,
+) -> str:
     """Return a stable provider-safe name while preserving the MCP name separately."""
     mapped_name = public_browser_tool_name(server_name, remote_name)
+    if connector_id and mapped_name == remote_name:
+        mapped_name = f"mcp__{server_name}__{remote_name}"
     if (
         len(mapped_name) <= _MODEL_TOOL_NAME_MAX_LENGTH
         and not _INVALID_MODEL_TOOL_NAME_CHARACTER.search(mapped_name)
@@ -93,6 +105,11 @@ def _public_mcp_tool_name(server_name: str, remote_name: str) -> str:
     safe_stem = _INVALID_MODEL_TOOL_NAME_CHARACTER.sub("_", mapped_name)
     safe_stem = safe_stem[: _MODEL_TOOL_NAME_MAX_LENGTH - len(digest) - 2]
     return f"{safe_stem}__{digest}"
+
+
+def _mcp_tool_always_load(server_name: str, tool: Any, server_default: bool) -> bool:
+    """Use the owning server's deferred-loading policy."""
+    return server_default
 
 
 def _replace_server_catalog(connection: "MCPServerConnection") -> None:
@@ -327,6 +344,8 @@ class MCPTool(Tool):
         fixed_arguments: dict[str, Any] | None = None,
         execute_timeout: float | None = None,
         always_load: bool = False,
+        connector_id: str | None = None,
+        connector_name: str | None = None,
         concurrency_limiter: asyncio.Semaphore | None = None,
     ):
         self._name = name
@@ -338,6 +357,8 @@ class MCPTool(Tool):
         self._session = session
         self._execute_timeout = execute_timeout
         self._always_load = always_load
+        self._connector_id = connector_id
+        self._connector_name = connector_name
         self._concurrency_limiter = concurrency_limiter
         self._mcp_generation = 0
 
@@ -357,6 +378,14 @@ class MCPTool(Tool):
     @property
     def mcp_tool_id(self) -> str:
         return f"mcp:{self._server_name}/{self._name}"
+
+    @property
+    def mcp_connector_id(self) -> str | None:
+        return self._connector_id
+
+    @property
+    def mcp_connector_name(self) -> str | None:
+        return self._connector_name
 
     @property
     def mcp_generation(self) -> int:
@@ -522,6 +551,8 @@ class MCPServerConnection:
         execute_timeout: float | None = None,
         sse_read_timeout: float | None = None,
         always_load: bool = False,
+        connector_id: str | None = None,
+        connector_name: str | None = None,
     ):
         self.name = name
         self.connection_type = connection_type
@@ -538,6 +569,8 @@ class MCPServerConnection:
         self.execute_timeout = execute_timeout
         self.sse_read_timeout = sse_read_timeout
         self.always_load = always_load
+        self.connector_id = connector_id
+        self.connector_name = connector_name
         self._web_search_concurrency_limiter: asyncio.Semaphore | None = None
         # Connection state
         self.last_error: str | None = None
@@ -648,7 +681,11 @@ class MCPServerConnection:
             execute_timeout = self._get_execute_timeout()
             for tool in tools_list.tools:
                 parameters = tool.inputSchema if hasattr(tool, "inputSchema") else {}
-                public_name = _public_mcp_tool_name(self.name, tool.name)
+                public_name = _public_mcp_tool_name(
+                    self.name,
+                    tool.name,
+                    self.connector_id,
+                )
                 fixed_arguments = browser_tool_fixed_arguments(self.name, parameters)
                 parameters = public_browser_tool_parameters(parameters, fixed_arguments)
                 mcp_tool = MCPTool(
@@ -663,7 +700,9 @@ class MCPServerConnection:
                     server_name=self.name,
                     fixed_arguments=fixed_arguments,
                     execute_timeout=execute_timeout,
-                    always_load=self.always_load,
+                    always_load=_mcp_tool_always_load(self.name, tool, self.always_load),
+                    connector_id=self.connector_id,
+                    connector_name=self.connector_name,
                     concurrency_limiter=self._concurrency_limiter_for_tool(tool.name),
                 )
                 self.tools.append(mcp_tool)
@@ -910,12 +949,18 @@ class MCPServerConnection:
 # Global connections registry
 _mcp_connections: list[MCPServerConnection] = []
 _mcp_reconnect_locks: dict[str, asyncio.Lock] = {}
+_mcp_source_reconcile_lock = asyncio.Lock()
 
 
 @dataclass
 class McpServerStatus:
     name: str
     state: str  # connecting | connected | failed | disabled
+    owner: str = "user"
+    config_id: str = ""
+    connector_id: str | None = None
+    connector_name: str | None = None
+    source_path: str = ""
     transport: str = ""
     tool_count: int = 0
     tools: list = field(default_factory=list)
@@ -926,6 +971,11 @@ class McpServerStatus:
 _mcp_status: dict[str, McpServerStatus] = {}
 _mcp_loading: bool = False
 _mcp_config_path: str | None = None
+_mcp_sources: tuple[McpConfigSource, ...] = ()
+_mcp_server_definitions: dict[str, ResolvedMcpServer] = {}
+_mcp_source_overrides: dict[str, dict[str, dict]] = {}
+_mcp_runtime_credentials: dict[str, dict[str, str]] = {}
+_mcp_runtime_credential_versions: dict[str, int] = {}
 # Auth inputs from the last load_mcp_tools_async() call — reused by
 # reconnect_mcp_server() so a single-server hot reconnect gets the same
 # DynamicBearer / Authorization headers the cold-start path would build.
@@ -948,6 +998,10 @@ def is_mcp_loading() -> bool:
 
 def get_mcp_config_path() -> str | None:
     return _mcp_config_path
+
+
+def get_mcp_config_paths() -> dict[str, str]:
+    return {source.owner: str(source.path) for source in _mcp_sources}
 
 
 def get_mcp_tools_for_server(name: str) -> list:
@@ -986,14 +1040,23 @@ def _record_status(
     tools: list | None = None,
     error: str | None = None,
     auth_status: int | None = None,
+    definition: ResolvedMcpServer | None = None,
 ) -> None:
     if auth_status is None and error:
         if "HTTP 401" in error or "Authentication failed" in error:
             auth_status = 401
         elif "HTTP 403" in error or "Authorization failed" in error:
             auth_status = 403
+    definition = definition or _mcp_server_definitions.get(name)
     _mcp_status[name] = McpServerStatus(
-        name=name, state=state, transport=transport,
+        name=name,
+        state=state,
+        owner=definition.owner if definition else "user",
+        config_id=definition.config_id if definition else f"custom-mcp:{name}",
+        connector_id=definition.connector_id if definition else None,
+        connector_name=definition.connector_name if definition else None,
+        source_path=definition.source_path if definition else (_mcp_config_path or ""),
+        transport=transport,
         tool_count=tool_count, tools=tools or [], error=error,
         auth_status=auth_status,
     )
@@ -1003,6 +1066,11 @@ def get_mcp_status() -> list[dict]:
     return [
         {
             "name": s.name,
+            "owner": s.owner,
+            "configId": s.config_id,
+            "connectorId": s.connector_id,
+            "connectorName": s.connector_name,
+            "sourcePath": s.source_path,
             "state": s.state,
             "transport": s.transport,
             "toolCount": s.tool_count,
@@ -1023,6 +1091,159 @@ def _determine_connection_type(server_config: dict) -> ConnectionType:
     if server_config.get("url"):
         return "streamable_http"
     return "stdio"
+
+
+def set_mcp_runtime_credential(credential_ref: str, headers: dict[str, str]) -> list[str]:
+    """Store connector credentials in memory and return affected server names.
+
+    Credential material is deliberately excluded from MCP config files and status
+    payloads. The desktop host must restore it after every Box-Agent restart.
+    """
+
+    normalized_ref = credential_ref.strip()
+    if not normalized_ref:
+        raise ValueError("credentialRef is required")
+    normalized_headers = {
+        str(name): str(value)
+        for name, value in headers.items()
+        if str(name).strip() and str(value).strip()
+    }
+    if not normalized_headers:
+        raise ValueError("credential headers are required")
+    _mcp_runtime_credentials[normalized_ref] = normalized_headers
+    _mcp_runtime_credential_versions[normalized_ref] = (
+        _mcp_runtime_credential_versions.get(normalized_ref, 0) + 1
+    )
+    return [
+        name
+        for name, definition in _mcp_server_definitions.items()
+        if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
+    ]
+
+
+def get_mcp_connector_server_names() -> dict[str, frozenset[str]]:
+    """Return every configured MCP server name expected for each connector."""
+    names_by_connector: dict[str, set[str]] = {}
+    for definition in _mcp_server_definitions.values():
+        if definition.owner != "connector" or not definition.connector_id:
+            continue
+        names_by_connector.setdefault(definition.connector_id, set()).add(definition.name)
+    return {
+        connector_id: frozenset(server_names)
+        for connector_id, server_names in names_by_connector.items()
+    }
+
+
+def clear_mcp_runtime_credential(credential_ref: str) -> list[str]:
+    normalized_ref = credential_ref.strip()
+    _mcp_runtime_credentials.pop(normalized_ref, None)
+    _mcp_runtime_credential_versions[normalized_ref] = (
+        _mcp_runtime_credential_versions.get(normalized_ref, 0) + 1
+    )
+    return [
+        name
+        for name, definition in _mcp_server_definitions.items()
+        if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
+    ]
+
+
+def _materialize_server_config(definition: ResolvedMcpServer) -> dict:
+    server_config = dict(definition.config)
+    credential_ref = server_config.pop("credentialRef", None)
+    if credential_ref is not None and definition.owner != "connector":
+        raise ValueError("credentialRef requires a connector-owned source")
+    server_config.pop("_connectorId", None)
+    server_config.pop("_connectorName", None)
+    if isinstance(credential_ref, str):
+        credential_headers = _mcp_runtime_credentials.get(credential_ref)
+        if credential_headers:
+            server_config["headers"] = {
+                **dict(server_config.get("headers") or {}),
+                **credential_headers,
+            }
+    return server_config
+
+
+def _waiting_for_credential(definition: ResolvedMcpServer) -> bool:
+    credential_ref = definition.config.get("credentialRef")
+    return isinstance(credential_ref, str) and not _mcp_runtime_credentials.get(credential_ref)
+
+
+def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
+    server_config = _materialize_server_config(definition)
+    conn_type = _determine_connection_type(server_config)
+    url = server_config.get("url")
+    configured_headers = server_config.get("headers", {})
+    auth = _dynamic_bearer_auth_for_url(
+        url=url,
+        headers=configured_headers,
+        auth_file=_mcp_auth_file,
+        auth_token=_mcp_auth_token,
+    )
+    connection_headers = (
+        configured_headers
+        if auth is not None
+        else request_auth_headers(
+            auth_file=_mcp_auth_file,
+            explicit_token=_mcp_auth_token,
+            existing=configured_headers,
+            url=url,
+        )
+    )
+    return MCPServerConnection(
+        name=definition.name,
+        connection_type=conn_type,
+        command=server_config.get("command"),
+        args=server_config.get("args", []),
+        env=server_config.get("env", {}),
+        url=url,
+        headers=connection_headers,
+        auth=auth,
+        connect_timeout=server_config.get("connect_timeout"),
+        execute_timeout=server_config.get("execute_timeout"),
+        sse_read_timeout=server_config.get("sse_read_timeout"),
+        always_load=bool(server_config.get("alwaysLoad", False)),
+        connector_id=definition.connector_id,
+        connector_name=definition.connector_name,
+    )
+
+
+def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer]:
+    global _mcp_sources
+    _mcp_sources = configured_mcp_sources(config_path)
+    if "connector" in _mcp_source_overrides and not any(
+        source.owner == "connector" for source in _mcp_sources
+    ):
+        connector_source = McpConfigSource("connector", Path("<runtime:connector>"))
+        sources = list(_mcp_sources)
+        user_index = next(
+            (index for index, source in enumerate(sources) if source.owner == "user"),
+            len(sources),
+        )
+        sources.insert(user_index, connector_source)
+        _mcp_sources = tuple(sources)
+    raw_reserved_names = os.environ.get("BOX_AGENT_RESERVED_MCP_SERVER_NAMES", "")
+    reserved_names: set[str] = set()
+    if raw_reserved_names:
+        try:
+            parsed_reserved_names = json.loads(raw_reserved_names)
+            if isinstance(parsed_reserved_names, list):
+                reserved_names = {
+                    name.strip()
+                    for name in parsed_reserved_names
+                    if isinstance(name, str) and name.strip()
+                }
+        except json.JSONDecodeError:
+            _warn("Ignoring invalid BOX_AGENT_RESERVED_MCP_SERVER_NAMES JSON")
+    resolved = resolve_mcp_sources(
+        _mcp_sources,
+        _mcp_runtime_credential_versions,
+        reserved_names,
+        _mcp_source_overrides,
+    )
+    for conflict in resolved.conflicts:
+        _warn(f"Skipping conflicting MCP server: {conflict}")
+    return resolved.servers
 
 
 def _resolve_mcp_config_path(config_path: str) -> Path | None:
@@ -1093,6 +1314,7 @@ async def load_mcp_tools_async(
         List of Tool objects representing MCP tools
     """
     global _mcp_connections, _mcp_status, _mcp_loading, _mcp_config_path
+    global _mcp_server_definitions
     global _mcp_auth_file, _mcp_auth_token, _mcp_auth_fingerprint
     _mcp_loading = True
     catalog = get_mcp_tool_catalog()
@@ -1104,19 +1326,22 @@ async def load_mcp_tools_async(
     _mcp_auth_fingerprint = _current_mcp_auth_fingerprint()
     try:
         config_file = _resolve_mcp_config_path(config_path)
-        if config_file is not None:
-            _mcp_config_path = str(config_file)
-
-        if config_file is None:
+        if config_file is None and not any(
+            os.environ.get(name, "").strip()
+            for name in (
+                "BOX_AGENT_USER_MCP_CONFIG_PATH",
+                "BOX_AGENT_SYSTEM_MCP_CONFIG_PATH",
+                "BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH",
+            )
+        ):
             _warn(f"MCP config not found: {config_path}")
             return []
 
-        with open(config_file, encoding="utf-8") as f:
-            config = json.load(f)
+        effective_path = str(config_file or Path(config_path).expanduser())
+        _mcp_config_path = effective_path
+        _mcp_server_definitions = _resolve_registered_sources(effective_path)
 
-        mcp_servers = config.get("mcpServers", {})
-
-        if not mcp_servers:
+        if not _mcp_server_definitions:
             import sys as _sys
             _sys.stderr.write("No MCP servers configured\n")
             return []
@@ -1124,10 +1349,18 @@ async def load_mcp_tools_async(
         connections: list[MCPServerConnection] = []
 
         # Build connection objects for each enabled server
-        for server_name, server_config in mcp_servers.items():
+        for server_name, definition in _mcp_server_definitions.items():
+            server_config = _materialize_server_config(definition)
             if server_config.get("disabled", False):
                 _warn(f"Skipping disabled server: {server_name}")
-                _record_status(server_name, "disabled")
+                _record_status(server_name, "disabled", definition=definition)
+                continue
+
+            if _waiting_for_credential(definition):
+                _record_status(
+                    server_name, "connecting",
+                    error="Waiting for host credential", definition=definition,
+                )
                 continue
 
             conn_type = _determine_connection_type(server_config)
@@ -1142,41 +1375,7 @@ async def load_mcp_tools_async(
                 _warn(f"No url specified for {conn_type.upper()} server: {server_name}")
                 continue
 
-            configured_headers = server_config.get("headers", {})
-            auth = _dynamic_bearer_auth_for_url(
-                url=url,
-                headers=configured_headers,
-                auth_file=auth_file,
-                auth_token=auth_token,
-            )
-            connection_headers = (
-                configured_headers
-                if auth is not None
-                else request_auth_headers(
-                    auth_file=auth_file,
-                    explicit_token=auth_token,
-                    existing=configured_headers,
-                    url=url,
-                )
-            )
-
-            connections.append(
-                MCPServerConnection(
-                    name=server_name,
-                    connection_type=conn_type,
-                    command=command,
-                    args=server_config.get("args", []),
-                    env=server_config.get("env", {}),
-                    url=url,
-                    headers=connection_headers,
-                    auth=auth,
-                    # Per-server timeout overrides from mcp.json
-                    connect_timeout=server_config.get("connect_timeout"),
-                    execute_timeout=server_config.get("execute_timeout"),
-                    sse_read_timeout=server_config.get("sse_read_timeout"),
-                    always_load=bool(server_config.get("alwaysLoad", False)),
-                )
-            )
+            connections.append(_build_connection(definition))
 
         # Connect to all servers in parallel — one slow/broken server no
         # longer blocks the others. Each connection has its own timeout.
@@ -1237,19 +1436,206 @@ async def load_mcp_tools_async(
 
 async def cleanup_mcp_connections():
     """Clean up all MCP connections."""
-    global _mcp_connections
+    global _mcp_connections, _mcp_server_definitions, _mcp_sources
     for connection in _mcp_connections:
         await connection.disconnect()
     _mcp_connections.clear()
     _mcp_reconnect_locks.clear()
+    _mcp_server_definitions = {}
+    _mcp_sources = ()
+    _mcp_source_overrides.clear()
+    _mcp_status.clear()
     get_mcp_tool_catalog().clear()
 
 
 async def reconnect_mcp_server(name: str) -> dict:
     """Serialize hot reconnects for one server name."""
+    global _mcp_server_definitions
     lock = _mcp_reconnect_locks.setdefault(name, asyncio.Lock())
     async with lock:
+        if _mcp_config_path:
+            try:
+                # Reading another server's new credential version does not mean
+                # its existing connection has used it. Update this server only.
+                current = _resolve_registered_sources(_mcp_config_path)
+                if name in current:
+                    _mcp_server_definitions[name] = current[name]
+                else:
+                    _mcp_server_definitions.pop(name, None)
+            except Exception as error:
+                return {"success": False, "error": str(error)}
         return await _reconnect_mcp_server_locked(name)
+
+
+async def _mcp_startup_ready() -> bool:
+    """Keep source updates behind the cold-discovery publication boundary."""
+    catalog = get_mcp_tool_catalog()
+    if _mcp_loading or catalog.initial_loading:
+        return await catalog.wait_until_ready(
+            timeout=max(5.0, get_mcp_timeout_config().connect_timeout)
+        )
+    return True
+
+
+async def reconcile_mcp_sources(source: str | None = None) -> dict:
+    """Apply source-file changes without restarting unrelated MCP servers."""
+
+    async with _mcp_source_reconcile_lock:
+        if not await _mcp_startup_ready():
+            return {"success": False, "error": "MCP startup is still loading; retry the source update after readiness."}
+        return await _reconcile_mcp_sources_locked(source)
+
+
+async def replace_mcp_source(
+    source: str, config: dict, connector_ids: list[str] | None = None,
+) -> dict:
+    """Replace a host-managed MCP source in memory and reconcile its connections."""
+
+    if source != "connector":
+        return {"success": False, "error": f"Unsupported runtime MCP source: {source}"}
+    if not isinstance(config, dict):
+        return {"success": False, "error": "config must be an object"}
+    raw_servers = config.get("mcpServers", {})
+    if not isinstance(raw_servers, dict):
+        return {"success": False, "error": "mcpServers must be an object"}
+    servers: dict[str, dict] = {}
+    for name, server_config in raw_servers.items():
+        if not isinstance(name, str) or not name.strip() or not isinstance(server_config, dict):
+            return {"success": False, "error": "Invalid MCP server entry"}
+        servers[name] = dict(server_config)
+
+    if connector_ids is not None and (
+        not isinstance(connector_ids, list) or not connector_ids
+        or any(not isinstance(item, str) or not item.strip() for item in connector_ids)
+    ):
+        return {"success": False, "error": "connectorIds must be a non-empty list for the connector source"}
+
+    async with _mcp_source_reconcile_lock:
+        if not await _mcp_startup_ready():
+            return {"success": False, "error": "MCP startup is still loading; retry the source update after readiness."}
+        previous = _mcp_source_overrides.get(source)
+        if connector_ids is not None:
+            targets = {item.strip().lower() for item in connector_ids}
+            connector_ids = sorted(targets)
+            # A connector update is a scoped replacement, including removals.
+            # Never publish another connector's half-restored configuration.
+            existing = previous
+            if existing is None:
+                existing = {
+                    name: definition.config
+                    for name, definition in _mcp_server_definitions.items()
+                    if definition.owner == source
+                }
+            retained = {
+                name: value for name, value in existing.items()
+                if str(value.get("_connectorId", "")).strip().lower() not in targets
+            }
+            incoming = {
+                name: value for name, value in servers.items()
+                if str(value.get("_connectorId", "")).strip().lower() in targets
+            }
+            conflicts = sorted(retained.keys() & incoming.keys())
+            if conflicts:
+                return {"success": False, "error": (
+                    "MCP server names belong to connectors outside connectorIds: "
+                    + ", ".join(conflicts)
+                )}
+            servers = {**retained, **incoming}
+        _mcp_source_overrides[source] = servers
+        if connector_ids is not None:
+            result = await _reconcile_mcp_sources_locked(source, connector_ids)
+        else:
+            result = await _reconcile_mcp_sources_locked(source)
+        if result.get("error") and not result.get("results"):
+            if previous is None:
+                _mcp_source_overrides.pop(source, None)
+            else:
+                _mcp_source_overrides[source] = previous
+        return result
+
+
+async def _reconcile_mcp_sources_locked(
+    source: str | None = None, connector_ids: list[str] | None = None,
+) -> dict:
+    global _mcp_server_definitions
+    if source is not None and source not in {"system", "connector", "user"}:
+        return {"success": False, "error": f"Unknown MCP source: {source}"}
+    if not _mcp_config_path:
+        return {"success": False, "error": "MCP source paths are not initialized"}
+
+    previous = dict(_mcp_server_definitions)
+    try:
+        current = _resolve_registered_sources(_mcp_config_path)
+    except Exception as error:
+        return {"success": False, "error": str(error)}
+
+    async def retire(name: str, before: ResolvedMcpServer | None,
+                     after: ResolvedMcpServer | None) -> dict | None:
+        # An in-flight reconnect must finish publishing before revocation can
+        # close it. Return only after that same server's critical section ends.
+        lock = _mcp_reconnect_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            if after is None:
+                result = await disconnect_mcp_server(name)
+                if before is not None:
+                    _record_status(name, "disabled", definition=before)
+                _mcp_server_definitions.pop(name, None)
+                return {"name": name, "action": "removed", **result}
+            _mcp_server_definitions[name] = after
+            if before is None or not before.config.get("disabled", False) or any(
+                connection.name == name for connection in _mcp_connections
+            ):
+                result = await disconnect_mcp_server(name)
+                _record_status(name, "disabled", definition=after)
+                return {"name": name, "action": "disabled", **result}
+            _record_status(name, "disabled", definition=after)
+            return None
+
+    async def reconnect(name: str, action: str) -> dict:
+        result = await reconnect_mcp_server(name)
+        return {"name": name, "action": action, **result}
+
+    def in_scope(definition: ResolvedMcpServer | None) -> bool:
+        return definition is not None and (
+            source is None or definition.owner == source
+        ) and (
+            connector_ids is None or definition.connector_id in connector_ids
+        )
+
+    operations = []
+    all_names = sorted(set(previous) | set(current))
+    for name in all_names:
+        before = previous.get(name)
+        after = current.get(name)
+        before_in_scope, after_in_scope = in_scope(before), in_scope(after)
+        if not before_in_scope and not after_in_scope:
+            continue
+        if not after_in_scope:
+            # Revoke the old owner without applying a newly revealed source
+            # outside this update. Its own reconciliation may activate it later.
+            operations.append(retire(name, before, None))
+            continue
+        if after.config.get("disabled", False):
+            operations.append(retire(name, before, after))
+            continue
+        if before is not None and before.fingerprint == after.fingerprint:
+            status = _mcp_status.get(name)
+            # An unchanged configuration is not proof of a successful connection.
+            # Retry failures, but leave healthy or still-loading servers alone.
+            if status is None or status.state != "failed":
+                continue
+        operations.append(reconnect(name, "added" if before is None else "modified"))
+
+    # Reconnects and revocations share per-server locks, while unrelated names
+    # start independently even if one removal waits for a slow connection.
+    results = [result for result in await asyncio.gather(*operations) if result is not None]
+
+    return {
+        "success": all(result.get("success", False) for result in results),
+        "source": source,
+        "results": results,
+        "configPaths": get_mcp_config_paths(),
+    }
 
 
 async def reconnect_auth_failed_mcp_servers_if_token_changed() -> list[dict]:
@@ -1283,25 +1669,17 @@ async def reconnect_auth_failed_mcp_servers_if_token_changed() -> list[dict]:
 
 
 async def _reconnect_mcp_server_locked(name: str) -> dict:
-    """Re-read mcp.json and reconnect a single named MCP server in-place."""
+    """Reconnect one server from the resolved multi-source registry."""
     global _mcp_connections
 
-    if not _mcp_config_path:
-        return {"success": False, "error": "mcp.json path unknown; box-agent not yet initialized"}
-
-    try:
-        with open(_mcp_config_path, encoding="utf-8") as f:
-            config = json.load(f)
-    except Exception as e:
-        return {"success": False, "error": f"Cannot read {_mcp_config_path}: {e}", "configPath": _mcp_config_path}
-
-    server_config = config.get("mcpServers", {}).get(name)
-    if not server_config:
-        return {"success": False, "error": f"Server '{name}' not found in mcp.json", "configPath": _mcp_config_path}
+    definition = _mcp_server_definitions.get(name)
+    if definition is None:
+        return {"success": False, "error": f"Server '{name}' not found in MCP sources"}
+    server_config = _materialize_server_config(definition)
 
     if server_config.get("disabled"):
-        _record_status(name, "disabled")
-        return {"success": False, "error": "Server is disabled", "configPath": _mcp_config_path}
+        _record_status(name, "disabled", definition=definition)
+        return {"success": False, "error": "Server is disabled", "configPath": definition.source_path}
 
     catalog = get_mcp_tool_catalog()
     catalog.mark_server_loading(name)
@@ -1317,47 +1695,19 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
             _mcp_connections = [c for c in _mcp_connections if c.name != name]
             catalog.remove_server(name)
 
-        conn_type = _determine_connection_type(server_config)
         url = server_config.get("url")
         command = server_config.get("command")
         transport_label = url or command or ""
-
-        # Mirror cold-start auth logic in load_mcp_tools_async(): compute a dynamic
-        # bearer if applicable, otherwise fold static Authorization headers in via
-        # request_auth_headers(). Without this a hot reconnect drops the token and
-        # hosted MCP endpoints (e.g. mcp.xiaohuanxiong.com) return 401 forever.
-        configured_headers = server_config.get("headers", {})
-        auth = _dynamic_bearer_auth_for_url(
-            url=url,
-            headers=configured_headers,
-            auth_file=_mcp_auth_file,
-            auth_token=_mcp_auth_token,
-        )
-        connection_headers = (
-            configured_headers
-            if auth is not None
-            else request_auth_headers(
-                auth_file=_mcp_auth_file,
-                explicit_token=_mcp_auth_token,
-                existing=configured_headers,
-                url=url,
+        if _waiting_for_credential(definition):
+            _record_status(
+                name, "connecting", transport=transport_label,
+                error="Waiting for host credential", definition=definition,
             )
-        )
-
-        conn = MCPServerConnection(
-            name=name,
-            connection_type=conn_type,
-            command=command,
-            args=server_config.get("args", []),
-            env=server_config.get("env", {}),
-            url=url,
-            headers=connection_headers,
-            auth=auth,
-            connect_timeout=server_config.get("connect_timeout"),
-            execute_timeout=server_config.get("execute_timeout"),
-            sse_read_timeout=server_config.get("sse_read_timeout"),
-            always_load=bool(server_config.get("alwaysLoad", False)),
-        )
+            return {
+                "success": False, "waitingForCredential": True,
+                "error": "Waiting for host credential", "configPath": definition.source_path,
+            }
+        conn = _build_connection(definition)
 
         _record_status(name, "connecting", transport=transport_label)
         try:
@@ -1370,7 +1720,7 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
                 error=str(e),
                 auth_status=_mcp_auth_status(e),
             )
-            return {"success": False, "error": str(e), "configPath": _mcp_config_path}
+            return {"success": False, "error": str(e), "configPath": definition.source_path}
 
         if success:
             _mcp_connections.append(conn)
@@ -1381,7 +1731,7 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
                 tool_count=len(conn.tools),
                 tools=[t.name for t in conn.tools],
             )
-            return {"success": True, "toolCount": len(conn.tools), "tools": [t.name for t in conn.tools], "configPath": _mcp_config_path}
+            return {"success": True, "toolCount": len(conn.tools), "tools": [t.name for t in conn.tools], "configPath": definition.source_path}
 
         _record_status(
             name,
@@ -1390,6 +1740,6 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
             error=conn.last_error,
             auth_status=conn.last_auth_status,
         )
-        return {"success": False, "error": conn.last_error or "connect() returned False", "configPath": _mcp_config_path}
+        return {"success": False, "error": conn.last_error or "connect() returned False", "configPath": definition.source_path}
     finally:
         catalog.mark_server_ready(name)

@@ -74,6 +74,10 @@ uv run python test_workspace/run_acp_eval.py \
 ```bash
 uv run --project test_workspace/trace_viewer trace-viewer \
   --repo-root "$PWD" \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8000
 ```
+
+Viewer 默认仅允许本机启动评测。远程查看可显式绑定网络地址；远程启动必须额外设置
+`--allow-remote-evaluations` 并由部署方限定可信访问。启动前对实际附件重新核对披露确认，
+不能仅使用较早的选项统计。Markdown 保留完整内容并将原始 HTML 作为文本显示，避免诊断或模型输出变成执行控件。

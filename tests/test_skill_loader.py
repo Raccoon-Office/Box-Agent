@@ -11,6 +11,41 @@ import pytest
 from box_agent.tools.skill_loader import Skill, SkillLoader
 
 
+def test_search_skills_enumerates_without_selector_cap_or_dependency_expansion(tmp_path):
+    loader = SkillLoader(tmp_path, skill_settings_path=tmp_path / "settings.json")
+    loader.loaded_skills = {
+        f"entry-{i:02d}": Skill(name=f"entry-{i:02d}", description="shared topic", content="")
+        for i in range(55)
+    }
+    loader.loaded_skills["entry-00"].related_skills = ["unrelated"]
+    loader.loaded_skills["unrelated"] = Skill(name="unrelated", description="other", content="")
+
+    assert len(loader.search_skills("")) == 56
+    matches = loader.search_skills("shared")
+    assert [skill.name for skill in matches] == [f"entry-{i:02d}" for i in range(55)]
+
+
+def test_selector_refreshes_same_name_description_after_disk_reload(tmp_path):
+    from box_agent.tools.skill_loader import SkillSelector
+
+    directory = tmp_path / "demo"
+    directory.mkdir()
+    create_test_skill(directory, "demo", "old description", "body")
+    loader = SkillLoader(tmp_path, skill_settings_path=tmp_path / "settings.json")
+    loader.discover_skills()
+    selector = SkillSelector(loader)
+    selector.bind("base " + selector.SLOT)
+    assert "old description" in selector.update("demo")
+
+    create_test_skill(directory, "demo", "new longer description", "body")
+    update = selector.update("demo")
+
+    assert loader.get_skill("demo").description == "new longer description"
+    assert update is not None
+    assert "new longer description" in update
+    assert "old description" not in update
+
+
 def create_test_skill(skill_dir: Path, name: str, description: str, content: str):
     """Create a test skill"""
     skill_file = skill_dir / "SKILL.md"
@@ -113,7 +148,7 @@ Use the selected tools.
     skill = loader.get_skill("tool-routing")
     assert skill.allowed_tools == ["read_file", "write_file"]
     prompt = loader.get_skills_metadata_prompt()
-    assert "allowed tools: read_file, write_file" in prompt
+    assert '"allowed_tools": ["read_file", "write_file"]' in prompt
 
 
 def test_load_invalid_skill():

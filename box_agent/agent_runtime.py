@@ -80,6 +80,7 @@ def build_agent(
     workspace_dir: str,
     token_limit: int,
     hooks: list[Any] | None | object = _UNSET,
+    plugins: tuple[Any, ...] | object = _UNSET,
     thinking_enabled: bool = False,
     memory_promotion_enabled: bool = False,
     memory_promotion_hit_threshold: int = 5,
@@ -92,9 +93,12 @@ def build_agent(
     max_truncated_tool_call_retries: int = 3,
     truncated_tool_call_boost_cap: int = 32768,
     context_resource_dedup_enabled: bool = True,
+    allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
     deferred_mcp_loading_enabled: bool = True,
     session_log: Any = _UNSET,
     enable_builtin_tools: bool | object = _UNSET,
+    skill_runtime: Any = _UNSET,
+    session_id: str | None = None,
     agent_factory: AgentFactory = Agent,
 ) -> Agent:
     """Construct an Agent while keeping adapter-specific state outside it.
@@ -125,14 +129,21 @@ def build_agent(
         "max_truncated_tool_call_retries": max_truncated_tool_call_retries,
         "truncated_tool_call_boost_cap": truncated_tool_call_boost_cap,
         "context_resource_dedup_enabled": context_resource_dedup_enabled,
+        "allowed_connector_ids_provider": allowed_connector_ids_provider,
         "deferred_mcp_loading_enabled": deferred_mcp_loading_enabled,
     }
+    if plugins is not _UNSET:
+        kwargs["plugins"] = plugins
     if hooks is not _UNSET:
         kwargs["hooks"] = hooks
     if session_log is not _UNSET:
         kwargs["session_log"] = session_log
     if enable_builtin_tools is not _UNSET:
         kwargs["enable_builtin_tools"] = enable_builtin_tools
+    if skill_runtime is not _UNSET:
+        kwargs["skill_runtime"] = skill_runtime
+    if session_id is not None:
+        kwargs["session_id"] = session_id
     return agent_factory(**kwargs)
 
 

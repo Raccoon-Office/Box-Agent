@@ -43,6 +43,7 @@ class ToolInvocationRequest:
     immediate_result: ToolResult | None = None
     invocation_context: ToolInvocationContext | None = None
     approved_permission_request: dict[str, Any] | None = None
+    on_invoke: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +148,7 @@ class ToolEngine:
         if event_queue is not None:
             context = ToolInvocationContext(
                 event_queue=event_queue,
+                skill_reader=context.skill_reader if context is not None else None,
                 parent_tool_call_id=(
                     context.parent_tool_call_id
                     if context is not None
@@ -159,6 +161,9 @@ class ToolEngine:
             # There must be no scheduling/await boundary between grant and
             # invocation, or cancellation could leave it for a later call.
             _approve_tool_permission(tool, request.approved_permission_request)
+        # 在真正进入调用前登记，排队期间取消或即时拒绝不算执行。
+        if request.on_invoke is not None:
+            request.on_invoke()
         return await invoke_tool_once(tool, request.arguments, context=context)
 
     async def invoke_serial(

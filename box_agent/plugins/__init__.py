@@ -7,9 +7,10 @@ from .defaults import (
     default_plugin_descriptors,
     kernel_services_from_registry,
 )
-from .descriptors import PluginDescriptor, PluginScope
+from .descriptors import PluginDescriptor, PluginFactoryContext, PluginScope
 from .host import (
     PluginActivation,
+    PluginContribution,
     PluginCleanupError,
     PluginDependencyCycleError,
     PluginError,
@@ -17,6 +18,7 @@ from .host import (
     PluginScopeError,
     PluginValidationError,
 )
+from .hooks import HookOwner, HookProviderPort, HookSpec
 from .registries import (
     ActivatedRegistry,
     CapabilityBinding,
@@ -34,10 +36,15 @@ __all__ = [
     "CapabilitySchema",
     "DuplicateCapabilityError",
     "PluginActivation",
+    "PluginContribution",
+    "HookOwner",
+    "HookProviderPort",
+    "HookSpec",
     "PluginCleanupError",
     "PluginDependencyCycleError",
     "PluginDescriptor",
     "PluginError",
+    "PluginFactoryContext",
     "PluginHost",
     "PluginScope",
     "PluginScopeError",

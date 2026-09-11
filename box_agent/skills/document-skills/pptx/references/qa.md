@@ -6,7 +6,7 @@ or creating/editing a `.pptx` export.
 ## Required Checks
 
 Keep every temporary report, helper script, extracted text file, and rendered
-image inside the current canonical delivery root selected by the runtime. Do
+image inside `<PRESENTATION_DIR>` selected in the conversation. Do
 not add another `output/` prefix, and do not write to `/tmp`, `/var/tmp`, or an
 unrelated absolute temp path.
 

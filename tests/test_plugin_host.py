@@ -11,7 +11,7 @@ import pytest
 
 from box_agent.events import ContentEvent
 from box_agent.schema import LLMResponse, Message, StreamEvent
-from box_agent.tools.base import Tool
+from box_agent.tools.base import Tool, ToolResult
 
 
 SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
@@ -26,6 +26,7 @@ SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
         "session_log",
         "tool_exposure_manager",
         "tool_result_storage",
+        "skill_engine",
     }
 )
 
@@ -150,6 +151,23 @@ class _ToolCatalog(dict[str, Tool]):
     pass
 
 
+class _SkillEngine:
+    read_facts = ()
+    selected_names = ()
+    restoring_names = ()
+    restore_diagnostics = {}
+    legacy_system_suffix = ""
+
+    def resolve_reference(self, name):
+        return name
+
+    def record_delivery(self, snapshot, metadata, *, reason):
+        pass
+
+    def record_observation(self, snapshot, metadata):
+        pass
+
+
 class _ExposureOutcome:
     def __init__(self, tools: list[Tool]) -> None:
         self.tools = tools
@@ -218,6 +236,9 @@ def test_current_capability_shapes_satisfy_kernel_ports() -> None:
         MemoryPromotionPort,
         PermissionGatewayPort,
         SessionStorePort,
+        PreparedContextPort,
+        ContextEnginePort,
+        SkillEnginePort,
         SummaryLLMPort,
         ToolCatalogPort,
         ToolExposureResultPort,
@@ -239,6 +260,25 @@ def test_current_capability_shapes_satisfy_kernel_ports() -> None:
     assert isinstance(_ExposureOutcome([]), ToolExposureResultPort)
     assert isinstance(_ToolResultStore(), ToolResultStorePort)
     assert isinstance(_BudgetOutcome(), ToolResultBudgetOutcomePort)
+    assert isinstance(_SkillEngine(), SkillEnginePort)
+    from box_agent.context_input import DefaultContextEngine, PreparedContext
+
+    assert isinstance(DefaultContextEngine(), ContextEnginePort)
+    assert isinstance(PreparedContext([], []), PreparedContextPort)
+
+
+def test_context_port_owns_projection_and_skill_port_exposes_source_facts() -> None:
+    from typing import get_type_hints
+    from box_agent.kernel.ports import ContextEnginePort, PreparedContextPort, SkillEnginePort
+    from box_agent.tools.engine.contracts import PreparedTools
+    from box_agent.skill_runtime import SkillRuntime
+
+    assert get_type_hints(ContextEnginePort.prepare_request, localns={"PreparedTools": PreparedTools})["return"] is PreparedContextPort
+    assert "prepare_context" not in vars(SkillEnginePort)
+    assert "messages" not in inspect.signature(SkillRuntime).parameters
+    assert "resolve_reference" in vars(SkillEnginePort)
+    assert "record_delivery" in vars(SkillEnginePort)
+    inspect.signature(SkillRuntime.read).bind(None, "shared", budget_chars=100)
 
 
 def test_production_defaults_match_port_call_shapes() -> None:
@@ -416,7 +456,9 @@ def test_default_capability_schema_covers_kernel_services_in_field_order() -> No
 
     bindings = DEFAULT_CAPABILITY_SCHEMA.bindings
 
-    from box_agent.kernel.ports import ToolEnginePort
+    from box_agent.kernel.ports import ToolEnginePort, HookDispatchPort
+    from box_agent.plugins.hooks import HookProviderPort
+    from box_agent.kernel.ports import ContextEnginePort, SkillEnginePort, CompactEnginePort
 
     ports_by_field = {
         "llm": LLMPort,
@@ -431,10 +473,14 @@ def test_default_capability_schema_covers_kernel_services_in_field_order() -> No
         "tool_exposure": ToolExposurePort,
         "tool_result_store": ToolResultStorePort,
         "tool_engine": ToolEnginePort,
+        "hook_dispatch": HookDispatchPort,
+        "skill_engine": SkillEnginePort,
+        "context_engine": ContextEnginePort,
+        "compact_engine": CompactEnginePort,
     }
-    assert tuple(binding.port_type for binding in bindings) == tuple(
-        ports_by_field[field.name] for field in fields(KernelServices)
-    )
+    # Provider 是多实现贡献，调用身份是值对象，二者不按服务字段一一映射。
+    assert {binding.port_type for binding in bindings} == set(ports_by_field.values()) | {HookProviderPort}
+    assert {item.name for item in fields(KernelServices)} == set(ports_by_field) | {"hook_context"}
     policies = {binding.port_type: binding.policy for binding in bindings}
     assert policies[LLMPort] is CapabilityPolicy.REQUIRED_SINGLE
     assert policies[HookBusPort] is CapabilityPolicy.REQUIRED_SINGLE
@@ -442,7 +488,8 @@ def test_default_capability_schema_covers_kernel_services_in_field_order() -> No
     assert sum(
         policy is CapabilityPolicy.REQUIRED_SINGLE for policy in policies.values()
     ) == 3
-    assert all(policy is not CapabilityPolicy.MULTI for policy in policies.values())
+    assert policies[HookDispatchPort] is CapabilityPolicy.OPTIONAL_SINGLE
+    assert policies[HookProviderPort] is CapabilityPolicy.MULTI
 
 
 def test_default_descriptors_are_deterministic_and_preserve_exact_instances() -> None:
@@ -496,7 +543,17 @@ def test_default_descriptors_are_deterministic_and_preserve_exact_instances() ->
     assert by_port[MemoryLookupPort] is memory
     assert by_port[MemoryPromotionPort] is memory
     assert by_port[ToolCatalogPort] is tools
-    assert len(first) == 6
+    from box_agent.context_input import DefaultContextEngine
+    from box_agent.kernel.ports import ContextEnginePort
+
+    assert isinstance(by_port[ContextEnginePort], DefaultContextEngine)
+    context_descriptor = next(item for item in first if item.capabilities == (ContextEnginePort,))
+    assert inspect.signature(context_descriptor.factory).parameters == {}
+    from box_agent.kernel.compact_engine import DefaultCompactEngine
+    from box_agent.kernel.ports import CompactEnginePort
+
+    assert isinstance(by_port[CompactEnginePort], DefaultCompactEngine)
+    assert len(first) == 8
 
 
 @pytest.mark.asyncio
@@ -748,11 +805,13 @@ async def test_outer_cleanup_never_aggregates_cancellation_with_ordinary_failure
     from box_agent.plugins.host import PluginHost
 
     close_error = RuntimeError("host close failed")
+    cancellation = asyncio.CancelledError("activation cleanup cancelled")
+    cancellation.__notes__ = ["保留插件释放时的取消诊断"]
 
     class CancellationThenFailureHost(PluginHost):
         async def _dispose_activation(self, activation):
             await super()._dispose_activation(activation)
-            raise asyncio.CancelledError
+            raise cancellation
 
         async def close(self) -> None:
             await super().close()
@@ -777,12 +836,15 @@ async def test_outer_cleanup_never_aggregates_cancellation_with_ordinary_failure
     with pytest.raises(asyncio.CancelledError) as caught:
         await events.aclose()
 
+    assert caught.value is cancellation
     assert caught.value.__cause__ is close_error
+    assert caught.value.__notes__ == ["保留插件释放时的取消诊断"]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_cleanup", [False, True])
 async def test_outer_composition_closes_host_when_iteration_is_cancelled(
-    monkeypatch,
+    monkeypatch, cancel_during_cleanup,
 ) -> None:
     import asyncio
 
@@ -796,6 +858,9 @@ async def test_outer_composition_closes_host_when_iteration_is_cancelled(
 
     lifecycle: list[str] = []
     kernel_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    host_closed = asyncio.Event()
     hosts: list[PluginHost] = []
 
     class RecordingHost(PluginHost):
@@ -805,11 +870,15 @@ async def test_outer_composition_closes_host_when_iteration_is_cancelled(
 
         async def _dispose_activation(self, activation):
             lifecycle.append("dispose")
+            if cancel_during_cleanup:
+                cleanup_started.set()
+                await release_cleanup.wait()
             await super()._dispose_activation(activation)
 
         async def close(self) -> None:
             lifecycle.append("close")
             await super().close()
+            host_closed.set()
 
     def build_host(**capabilities: Any) -> PluginHost:
         source = create_default_plugin_host(**capabilities)
@@ -842,9 +911,20 @@ async def test_outer_composition_closes_host_when_iteration_is_cancelled(
     await kernel_started.wait()
     pending.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await pending
+    try:
+        if cancel_during_cleanup:
+            await asyncio.wait_for(cleanup_started.wait(), 1)
+            pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        if cancel_during_cleanup:
+            # 再次取消外层等待时，插件清理仍持有资源，宿主尚未被提前释放。
+            assert not host_closed.is_set()
+            assert hosts[0]._live_records
+    finally:
+        release_cleanup.set()
 
+    await asyncio.wait_for(host_closed.wait(), 1)
     assert lifecycle == ["activate", "dispose", "close"]
     assert hosts[0]._live_records == []
 

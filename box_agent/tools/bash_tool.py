@@ -910,6 +910,10 @@ class BashTool(Tool):
                     if key.lower() in {"npm_config_prefix", "npm_config_cache"}:
                         self._subprocess_env.pop(key, None)
             self._subprocess_env.update(runtime_env)
+        if self._subprocess_env is None and "BOX_AGENT_OUTPUT_DIR" in os.environ:
+            self._subprocess_env = os.environ.copy()
+        if self._subprocess_env is not None:
+            self._subprocess_env.pop("BOX_AGENT_OUTPUT_DIR", None)
 
     def update_runtime_env(self, values: dict[str, str | None]) -> None:
         """Update environment values inherited by future subprocesses.
@@ -921,6 +925,10 @@ class BashTool(Tool):
         if self._subprocess_env is None:
             self._subprocess_env = os.environ.copy()
         for key, value in values.items():
+            if key == "BOX_AGENT_OUTPUT_DIR":
+                log.warning("BOX_AGENT_OUTPUT_DIR is deprecated and ignored")
+                self._subprocess_env.pop(key, None)
+                continue
             if value is None:
                 self._subprocess_env.pop(key, None)
             elif isinstance(value, str):

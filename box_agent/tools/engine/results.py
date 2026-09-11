@@ -55,6 +55,7 @@ class ToolResultPipelineInput:
     started_at: float | None = None
     parallel: bool = False
     commit_result: Callable[[Message, ToolCallResult, int], None] | None = None
+    hook_text_modified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,12 +118,15 @@ def process_tool_result(
         visible_error=visible_error,
         resource_receipt=resource_decision.receipt,
     )
+    if pipeline_input.hook_text_modified:
+        # 已处理的可见文本进入历史，避免原 model_context 或资源回执覆盖修改。
+        model_content = visible_content if result.success else f"Error: {visible_error or visible_content}"
     repeated = _repeatable_framework_error(
         tool_name=pipeline_input.tool_name,
         result=result,
         visible_error=visible_error,
     )
-    if repeated is not None and pipeline_input.framework_error_counts is not None:
+    if repeated is not None and pipeline_input.framework_error_counts is not None and not pipeline_input.hook_text_modified:
         signature, label = repeated
         count = pipeline_input.framework_error_counts.get(signature, 0) + 1
         pipeline_input.framework_error_counts[signature] = count

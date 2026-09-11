@@ -19,7 +19,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from ..artifacts import ensure_output_dir
 from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
 
@@ -160,7 +159,7 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
     def _box_agent_require_writable(path):
         if not _box_agent_path_is_writable(path):
             raise PermissionError(
-                "EXECUTE_CODE_WRITE_OUTSIDE_ARTIFACT_ROOT: writes are limited to "
+                "EXECUTE_CODE_WRITE_OUTSIDE_WORKSPACE: writes are limited to "
                 f"{{getattr(_box_guard_sys, '_box_agent_write_roots', ())}}; "
                 f"rejected {{path!r}}"
             )
@@ -276,6 +275,7 @@ class SandboxEnvironment:
     ):
         self.base_dir = base_dir or SANDBOX_BASE_DIR
         self.runtime_env = dict(runtime_env or {})
+        self.runtime_env.pop("BOX_AGENT_OUTPUT_DIR", None)
         self.venv_dir = self.base_dir / "venv"
         # Windows venv lays out python under Scripts/, Unix under bin/.
         if sys.platform == "win32":
@@ -489,6 +489,7 @@ class SandboxEnvironment:
         if not self._bundled_override:
             return None
         env = os.environ.copy()
+        env.pop("BOX_AGENT_OUTPUT_DIR", None)
         env.update({key: value for key, value in self.runtime_env.items() if isinstance(value, str)})
         extra = str(RUNTIME_PACKAGES_DIR)
         existing = env.get("PYTHONPATH", "")
@@ -1375,8 +1376,6 @@ class JupyterSandboxTool(Tool):
         self,
         workspace_dir: str | None = None,
         runtime_env: Mapping[str, str] | None = None,
-        use_output_dir: bool = True,
-        output_dir: str | None = None,
         process_owner_id: str | None = None,
     ):
         """Initialize sandbox tool.
@@ -1384,15 +1383,12 @@ class JupyterSandboxTool(Tool):
         Args:
             workspace_dir: Base workspace directory for sandbox sessions.
             runtime_env: Host runtime environment exported by env_context.
-            use_output_dir: Chdir kernels into {workspace}/output when True.
-            output_dir: Optional explicit artifact output directory.
             process_owner_id: Trusted host session identity used to namespace
                 persistent kernels. Model-provided session IDs never cross it.
         """
         self.workspace_dir = workspace_dir
         self.runtime_env = dict(runtime_env or {})
-        self.use_output_dir = use_output_dir
-        self.output_dir = output_dir
+        self.runtime_env.pop("BOX_AGENT_OUTPUT_DIR", None)
         self.process_owner_id = (process_owner_id or "").strip()
         self._session_id: Optional[str] = None
 
@@ -1503,8 +1499,8 @@ class JupyterSandboxTool(Tool):
 
 This tool runs Python code in a **real Jupyter kernel** with its own isolated environment:
 - Variables, functions, classes, imports all persist between calls
-- Reads may use allowed input paths, but durable writes are confined to the active
-  project/artifact root; runtime-managed temporary/internal roots remain available
+- Reads may use allowed input paths, but durable writes are confined to the session cwd;
+  runtime-managed temporary/internal roots remain available
 - Pre-installed packages: pandas, numpy, matplotlib, seaborn, scikit-learn, requests,
   openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx,
   beautifulsoup4, lxml, pillow, pyyaml, python-dateutil, chardet
@@ -1554,7 +1550,7 @@ Output formats:
                         "ordered write_file chunks using chunk_index/final unless "
                         "Python processing is actually required. "
                         "Reads may use allowed input paths, but durable writes "
-                        "are confined to the active project/artifact root. "
+                        "are confined to the session cwd. "
                         "Variables and functions from previous calls in the same "
                         "session are available. Use %pip install <pkg> to install "
                         "packages."
@@ -1871,24 +1867,13 @@ Output formats:
     def _get_workspace(self, session_id: str) -> Path:
         """Get the directory the kernel chdirs into for a session.
 
-        In default artifact mode this returns ``{workspace_dir}/output/`` so
-        generated files land in the canonical artifact location. In project
-        workspace mode, callers disable ``use_output_dir`` and the kernel uses
-        the workspace/project root directly.
+        Generated files land relative to the unchanged session workspace.
         """
-        if self.use_output_dir and self.output_dir:
-            root = Path(self.output_dir).expanduser().resolve()
-            root.mkdir(parents=True, exist_ok=True)
-            return root
         if self.workspace_dir:
             root = Path(self.workspace_dir).expanduser().resolve()
-            if self.use_output_dir:
-                return ensure_output_dir(root)
             root.mkdir(parents=True, exist_ok=True)
             return root
         session_root = SANDBOX_BASE_DIR / "sessions" / session_id
-        if self.use_output_dir:
-            return ensure_output_dir(session_root)
         session_root.mkdir(parents=True, exist_ok=True)
         return session_root
 

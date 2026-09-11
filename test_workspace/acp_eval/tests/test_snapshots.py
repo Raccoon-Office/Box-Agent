@@ -146,3 +146,34 @@ def test_artifact_inventory_does_not_follow_external_output_symlink(
     inventory = build_artifact_inventory(tmp_path / "protocol.jsonl", workspace)
 
     assert inventory["final_files"] == []
+
+
+def test_artifact_inventory_lists_cwd_rooted_event_files_without_inputs(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    artifact = workspace / "deck" / "slides.pptx"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"pptx")
+    (workspace / "input.md").write_text("source", encoding="utf-8")
+    protocol = tmp_path / "protocol.jsonl"
+    protocol.write_text(
+        json.dumps(
+            {
+                "rawOutput": {
+                    "type": "artifact",
+                    "kind": "presentation",
+                    "filename": artifact.name,
+                    "rel_path": "deck/slides.pptx",
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    inventory = build_artifact_inventory(protocol, workspace)
+
+    assert [item["path"] for item in inventory["final_files"]] == [
+        "deck/slides.pptx"
+    ]

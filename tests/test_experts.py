@@ -244,20 +244,27 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_acp_expert_session_can_select_disabled_skill(tmp_path) -> None:
+@pytest.mark.parametrize("globally_disabled", [True, False])
+async def test_acp_expert_explicit_selection_only_overrides_profile_block(
+    tmp_path, globally_disabled,
+) -> None:
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
-    _write_skill(skills_dir, "disabled-skill", "Disabled expert-only capability")
+    skill_name = "research-synthesis"
+    _write_skill(skills_dir, skill_name, "Research method")
 
     settings_path = tmp_path / "skill-settings.json"
     settings_path.write_text(
-        '{"disabledSkillNames":["disabled-skill"]}',
+        ('{"disabledSkillNames":["research-synthesis"]}'
+         if globally_disabled else '{"disabledSkillNames":[]}'),
         encoding="utf-8",
     )
 
     skill_loader = SkillLoader(skills_dir, skill_settings_path=settings_path)
     skill_loader.discover_skills()
-    assert skill_loader.get_skill("disabled-skill") is None
+    assert (skill_loader.get_skill(skill_name) is None) is globally_disabled
 
     config = Config(
         llm=LLMConfig(api_key="test-key"),
@@ -268,7 +275,7 @@ async def test_acp_expert_session_can_select_disabled_skill(tmp_path) -> None:
         DummyConn(),
         config,
         DoneLLM(),
-        [GetSkillTool(skill_loader)],
+        [GetSkillTool(skill_loader), ListSkillsTool(skill_loader)],
         f"base system\n{SKILL_SLOT_SENTINEL}",
         skill_loader=skill_loader,
     )
@@ -277,20 +284,31 @@ async def test_acp_expert_session_can_select_disabled_skill(tmp_path) -> None:
         SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
+                "execution_profile": "fast",
                 "expert": {
-                    "id": "expert-with-disabled-skill",
-                    "name": "禁用技能专家",
-                    "defaultSkills": ["disabled-skill"],
+                    "id": "research-expert",
+                    "name": "研究专家",
+                    "defaultSkills": [skill_name],
                 },
             },
         )
     )
 
     state = agent._sessions[session.sessionId]
-    assert "disabled-skill" in state.agent.system_prompt
-    result = await state.agent.tools["get_skill"].execute("disabled-skill")
-    assert result.success is True
-    assert "disabled-skill content" in result.content
+    get_skill = state.agent.tools["get_skill"]
+    catalog = state.agent.tools["list_skills"]
+    assert not (await get_skill.execute(skill_name)).success
+    assert not (await catalog.execute(query=skill_name)).raw_output["skills"][0]["available"]
+    if globally_disabled:
+        assert skill_name not in state.skill_selector.matched_skill_names
+
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId,
+        prompt=[{"text": "Use the selected research method"}],
+        field_meta={"selected_skill_names": [skill_name]}))
+    assert (await get_skill.execute(skill_name)).success is not globally_disabled
+    assert (await catalog.execute(query=skill_name)).raw_output["skills"][0]["available"] is not globally_disabled
+    assert (skill_name in state.agent.skill_runtime.turn_deliveries) is not globally_disabled
+    assert f"{skill_name} content" not in state.agent.system_prompt
 
 
 @pytest.mark.asyncio

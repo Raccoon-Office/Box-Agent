@@ -120,14 +120,13 @@ function normalizeLayoutId(layoutId) {
   return hinted ? hinted.id : requested;
 }
 
-function artifactRoot() {
-  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
-  return configured ? path.resolve(configured) : process.cwd();
+function presentationDirectory() {
+  return process.cwd();
 }
 
 function resolveArtifactPath(filePath) {
   if (path.isAbsolute(filePath)) return path.resolve(filePath);
-  return path.resolve(artifactRoot(), filePath);
+  return path.resolve(presentationDirectory(), filePath);
 }
 
 function isPlainObject(value) {
@@ -435,7 +434,7 @@ function validateMedia(value, contract, fieldPath, issues) {
       issues.push(`${fieldPath}.src: remote or executable URLs are not allowed; localize the asset first`);
     }
     if (!isDataImage && (path.isAbsolute(src) || segments.includes(".."))) {
-      issues.push(`${fieldPath}.src: use an artifact-root-relative path without '..' segments`);
+      issues.push(`${fieldPath}.src: use a presentation-directory-relative path without '..' segments`);
     }
   }
   if (value.alt !== undefined && typeof value.alt !== "string") {

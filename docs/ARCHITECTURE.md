@@ -9,25 +9,33 @@ belong outside `box_agent/core.py` and `box_agent/kernel/`.
 ```mermaid
 flowchart TB
     H["Host adapters<br/>ACP / CLI / custom UI"]
-    SS["AgentSession<br/>Config + live session state"]
+    OPEN["AgentSession.open<br/>Config + normalized host inputs"]
+    PREP["Session plugins / session_assembly<br/>prepare configured capabilities once"]
+    SS["AgentSession.run_events<br/>reuse Agent + session state"]
     A["Stable public API<br/>Agent / AgentRunOptions / AgentEvent"]
     R["Runtime bridge<br/>box_agent.runtime"]
     C["Compatibility facade<br/>box_agent.core"]
     O["Outer composition<br/>box_agent.composition"]
-    P["Static PluginHost<br/>descriptors / typed registries"]
+    P["Reusable PluginRuntime / PluginHost<br/>ACP application-owned; CLI private by default"]
+    RUN["RunContext / PluginSession.open_run<br/>activate fresh Run scope"]
     S["Immutable KernelServices<br/>kernel-owned Ports"]
     L["AgentLoopKernel<br/>kernel.loop"]
     E["Kernel services<br/>context / stream / tool messages"]
     T["Tool capability<br/>tools/engine: prepare / execute / results"]
 
-    H --> SS --> A --> R --> C --> O --> P --> S --> L --> E
+    H -->|creation| OPEN --> PREP --> SS
+    H -->|later turns| SS
+    SS --> RUN --> S --> A --> R --> C --> O --> L --> E
+    P -.->|same Host| PREP
+    P -.->|same Host| RUN
     L -->|ToolEnginePort| T
     T -->|commit callback| E
 ```
 
 The host call path is therefore **ACP/CLI → AgentSession → Agent → runtime → core
-compatibility facade → outer composition/PluginHost → immutable
-KernelServices → AgentLoopKernel**. Dependencies point toward kernel-owned
+compatibility facade → outer composition → AgentLoopKernel**. The session's
+PluginRuntime prepares capabilities once and supplies fresh immutable
+KernelServices for each run. Dependencies point toward kernel-owned
 contracts. `box_agent/kernel/` never imports PluginHost, composition, ACP, CLI,
 officev3, or another product adapter. Plugins depend on `kernel.ports`; the
 kernel receives already resolved services and never queries a registry.
@@ -41,7 +49,7 @@ and the boundary between session state and host orchestration.
 | Layer | Main code | Responsibility |
 | --- | --- | --- |
 | Product / integration | `box_agent/acp/`, `box_agent/cli.py`, host code | Protocol translation, host metadata, ACP protocol rendering, CLI entrypoint wiring, and host-selected Skills |
-| Shared session | `agent_session.py`, `agent_run.py` | Session configuration, live Agent state, run-option binding, and the event-stream entrypoint |
+| Shared session | `agent_session.py`, `agent_run.py`, `session_context.py`, `session_assembly.py` | Config-driven capability preparation, live Agent state, run-option binding, event streams and resource ownership |
 | Capability | `box_agent/tools/` except `base.py`, `box_agent/skills/`, provider implementations in `box_agent/llm/`, `memory.py` | Tools, self-contained Skills, providers, storage, and domain validators |
 | Stable public API | `agent.py`, `runtime.py`, `core.py`, `events.py`, `schema.py` | Backward-compatible calls and event/schema contracts |
 | Outer composition | `composition.py`, `plugins/` | Explicit descriptors, validation, dependency resolution, scoped activation, immutable service assembly, and disposal |
@@ -74,10 +82,12 @@ such as `SubAgentTool`, may import `run_agent_loop` from
 `box_agent.runtime`. Production code outside that bridge must not import
 `box_agent.core`.
 
-Existing call forms and defaults remain compatible.
+Existing Agent APIs and defaults remain compatible. `AgentRunOptions` and the
+lower loop bridge add an optional internal `kernel_services` binding. Managed
+sessions populate it; ACP/CLI callers do not pass a PluginHost, Registry or
+service bundle. Direct legacy calls retain their per-run default Host.
 `runtime.invoke_tool_with_permissions()` additionally accepts optional
-`invocation_context` and `is_cancelled`; its tuple return is unchanged. In particular, callers do
-not pass a PluginHost, Registry, or `KernelServices`. ACP consumes
+`invocation_context` and `is_cancelled`; its tuple return is unchanged. ACP consumes
 `AgentSession.run_events(options=...)`, which delegates to
 `Agent.run_events(options=...)`, and renders those events into protocol updates.
 CLI consumes the same session event stream through `render_agent_events` in
@@ -129,7 +139,7 @@ as follows:
 
 ## Static plugins, registries, and replacement
 
-Plugin composition is startup-static and follows one lifecycle:
+Plugin catalogs are static and follow the existing lifecycle:
 
 ```text
 discover -> validate -> resolve dependencies -> activate -> dispose
@@ -156,13 +166,23 @@ one activation and are disposed when it ends. The default compatibility path
 uses a fresh host for a legacy run and captures the caller's existing objects
 without transferring their ownership.
 
+Managed sessions instead reuse one PluginRuntime/Host. `AgentSession.open`
+activates session initializer plugins for model, memory, tools/Skills/MCP,
+prompt and hooks, using existing Config gates. Each `run_events` activates fresh
+run services from the final options. Config-dependent resources are session
+scoped; process factories never receive a session Config. Async preparation is
+outside Host lifecycle reservations. Borrowed host capabilities keep their
+original ownership. See [Agent Session](AGENT_SESSION.md) for cleanup, context
+factories, and the retained synchronous `create` API.
+
 To replace a capability, a composition owner prepares an explicit descriptor
 set, removes/replaces the descriptor for that exact kernel Port, and supplies
 the replacement descriptor before `validate`/`activate`. The activated
 Registry is then converted to `KernelServices` and passed to
 `AgentLoopKernel`; replacement never occurs inside a running kernel. This is
-an internal composition seam, not a new parameter or configuration key on
-Agent, CLI, ACP, runtime, or Core.
+an internal composition seam; there is no new public CLI/ACP plugin
+configuration key. Managed service forwarding uses the optional internal
+binding described above.
 
 This version intentionally has no Python entry-point scanning, directory
 scanning, hot loading/unloading, public plugin configuration, or
@@ -178,6 +198,25 @@ plans, todos, active Skills, compaction records, and turn boundaries.
 Active Skills are restored from the current SkillLoader content. A historical
 content hash mismatch does not block recovery. In-memory hashes reflect the
 current content, and restoration does not rewrite historical logs.
+Unavailable Skills are skipped while available Skills are restored. If no
+SkillLoader is available, the session resumes without restoring active Skills.
+Malformed optional Skill/Todo state is ignored; valid conversation history remains.
+
+ACP enables recovery for incompatible versions/events or invalid message records
+only after verifying the session ID and workspace. The original bytes are saved
+as `session.recovery-*.jsonl` before the runtime log is replaced. Historical tools
+are not replayed. An empty replacement can accept the matching host continuation
+on the next prompt, including after another restart. Without that host snapshot,
+the new runtime has no recovered conversation history. Missing logs can be created
+in leftover directories, while existing logs and active writer locks are protected.
+Failed construction or resume preparation releases the session writer immediately.
+
+When a model profile revision is missing, session binding resolves the newest
+valid local revision of the same profile ID, provided its provider/endpoint is
+unambiguous. Existing revisions remain pinned; the selected model is preserved.
+Resolution logs only profile/revision identifiers and does not rewrite the
+registry or persisted binding. Profiles with no valid revision or conflicting
+provider routes still require a model configuration update.
 
 A Session owns one normalized cwd for its entire lifetime. Opening the same
 Session with another workspace fails before the log is repaired or mutated.

@@ -663,3 +663,34 @@ def test_explicit_text_only_current_model_routes_to_other_vision_candidate(
 
     tool = next(tool for tool in tools if tool.name == "inspect_images")
     assert tool.llm.model == "vision-model"
+
+
+@pytest.mark.parametrize('status,category,retryable', [
+    (422, 'invalid_request', False), (401, 'auth', False),
+    (429, 'rate_limit', True), (503, 'server_error', True),
+])
+async def test_proxy_provider_error_is_actionable_without_raw_payload(tmp_path, status, category, retryable):
+    import httpx
+    import openai
+
+    secret = 'PRIVATE_KEY_DO_NOT_EXPOSE'
+    payload = 'PRIVATE_BASE64_DO_NOT_EXPOSE'
+    body = {'error': {'message': f'reasoning_effort invalid {secret} {payload}', 'code': secret}}
+    response = httpx.Response(status, request=httpx.Request('POST', 'https://example.invalid/v1'),
+                              headers={'x-request-id': 'req-safe-123'})
+
+    class FailingProvider:
+        async def generate(self, **kwargs):
+            raise openai.APIStatusError(f'Error {status}: {body}', response=response, body=body)
+
+    (tmp_path / 'slide.png').write_bytes(_ONE_PIXEL_PNG)
+    result = await _tool(tmp_path, FailingProvider()).execute(image_paths=['slide.png'], instruction='Inspect', strategy='proxy')
+    assert not result.success
+    assert result.raw_output['code'] == 'IMAGE_REQUEST_FAILED'
+    details = result.raw_output['provider_error']
+    assert details['category'] == category
+    assert details['httpStatus'] == status
+    assert details['retryable'] is retryable
+    assert details['requestId'] == 'req-safe-123'
+    assert secret not in str(result) and payload not in str(result)
+    assert category in result.error and str(status) in result.error

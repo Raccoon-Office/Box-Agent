@@ -1,0 +1,76 @@
+{
+  "write_file": [
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "path",
+        "description"
+      ],
+      "before": "Prefer a path relative to the active project/artifact root (<PROFILE>/workspace). Absolute paths are used exactly as supplied.",
+      "after": "Prefer a path relative to the active file root (<PROFILE>/workspace). Absolute paths are used exactly as supplied."
+    }
+  ],
+  "generate_image": [
+    {
+      "path": [
+        "description"
+      ],
+      "before": "Standard Box-Agent image tool shared by CLI and ACP. Generate or edit a bitmap image with the Box-Agent-configured image service, save it inside the active project/artifact root, and return a local path for use in HTML/PPTX assets. For explicit native image, illustration, poster, cover, or bitmap infographic requests, prefer this tool over HTML/CSS, SVG, PIL, or screenshot generation unless the user asks for one of those editable/rendered formats. Use text-to-image when the user asks for a new image. Use image-to-image with reference_images when the user asks to modify, redraw, restyle, or preserve a supplied image/logo/sketch. Use for PPT image_plan items marked `generate`. If the user forbids fallback and this tool fails, report the request as blocked. If the service is not configured, report the blocked image generation instead of pretending an asset exists. Configuration: image_generation.endpoint in config.yaml; optional image_generation.api_key for a dedicated bearer token. Environment overrides are also supported.",
+      "after": "Standard Box-Agent image tool shared by CLI and ACP. Generate or edit a bitmap image with the Box-Agent-configured image service, save it inside the session cwd, and return a local path for use in HTML/PPTX assets. For explicit native image, illustration, poster, cover, or bitmap infographic requests, prefer this tool over HTML/CSS, SVG, PIL, or screenshot generation unless the user asks for one of those editable/rendered formats. Use text-to-image when the user asks for a new image. Use image-to-image with reference_images when the user asks to modify, redraw, restyle, or preserve a supplied image/logo/sketch. Use for PPT image_plan items marked `generate`. If the user forbids fallback and this tool fails, report the request as blocked. If the service is not configured, report the blocked image generation instead of pretending an asset exists. Configuration: image_generation.endpoint in config.yaml; optional image_generation.api_key for a dedicated bearer token. Environment overrides are also supported."
+    },
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "output_path",
+        "description"
+      ],
+      "before": "Project/artifact-root-relative image path, for example assets/generated/slide-03-hero.png. In output mode the tool already targets the current output root; do not prefix the path with output/.",
+      "after": "Session-cwd-relative image path, for example assets/generated/slide-03-hero.png. Use the task directory selected in conversation when one exists."
+    }
+  ],
+  "inspect_images": [
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "image_paths",
+        "description"
+      ],
+      "before": "Local PNG/JPEG paths. Relative paths resolve from the active project/artifact root.",
+      "after": "Local PNG/JPEG paths. Relative paths resolve from the active session cwd."
+    }
+  ],
+  "execute_code": [
+    {
+      "path": [
+        "description"
+      ],
+      "before": "Execute Python code in a persistent Jupyter kernel sandbox.\n\nThis tool runs Python code in a **real Jupyter kernel** with its own isolated environment:\n- Variables, functions, classes, imports all persist between calls\n- Reads may use allowed input paths, but durable writes are confined to the active\n  project/artifact root; runtime-managed temporary/internal roots remain available\n- Pre-installed packages: pandas, numpy, matplotlib, seaborn, scikit-learn, requests,\n  openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx,\n  beautifulsoup4, lxml, pillow, pyyaml, python-dateutil, chardet\n- Do NOT %pip install any pre-installed package — it just wastes time and can hit the timeout\n- Only %pip install when you hit an actual ModuleNotFoundError for a non-listed package\n- Ideal for data analysis: load once, analyze many times\n\nExample workflow:\n  1. execute_code(code=\"import pandas as pd\\ndf = pd.read_csv('data.csv')\")\n  2. execute_code(code=\"print(df.describe())\")\n  3. execute_code(code=\"from bs4 import BeautifulSoup  # already installed\")\n  4. execute_code(code=\"%pip install some_uncommon_pkg\")  # only if truly missing\n\n**Full Python state persists in the same session!**\n\nBest practices:\n- Break complex analysis into steps\n- Keep each code argument under 8,000 characters\n- Do not inline large generated static artifact bodies (HTML/CSS/JS, shared\n  styles, JSON manifests, templates, base64, or file bodies) in execute_code.\n  Use ordered write_file chunks with chunk_index/final unless Python processing\n  is actually required.\n- Use print() to see intermediate results\n- Never use the bash tool's `pip install` for sandbox packages — bash runs against the\n  host Python and the sandbox kernel will not see those packages\n\nOutput formats:\n- Text output (print statements, repr)\n- Images (matplotlib plots)\n- Errors (simplified tracebacks)\n",
+      "after": "Execute Python code in a persistent Jupyter kernel sandbox.\n\nThis tool runs Python code in a **real Jupyter kernel** with its own isolated environment:\n- Variables, functions, classes, imports all persist between calls\n- Reads may use allowed input paths, but durable writes are confined to the session cwd;\n  runtime-managed temporary/internal roots remain available\n- Pre-installed packages: pandas, numpy, matplotlib, seaborn, scikit-learn, requests,\n  openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx,\n  beautifulsoup4, lxml, pillow, pyyaml, python-dateutil, chardet\n- Do NOT %pip install any pre-installed package — it just wastes time and can hit the timeout\n- Only %pip install when you hit an actual ModuleNotFoundError for a non-listed package\n- Ideal for data analysis: load once, analyze many times\n\nExample workflow:\n  1. execute_code(code=\"import pandas as pd\\ndf = pd.read_csv('data.csv')\")\n  2. execute_code(code=\"print(df.describe())\")\n  3. execute_code(code=\"from bs4 import BeautifulSoup  # already installed\")\n  4. execute_code(code=\"%pip install some_uncommon_pkg\")  # only if truly missing\n\n**Full Python state persists in the same session!**\n\nBest practices:\n- Break complex analysis into steps\n- Keep each code argument under 8,000 characters\n- Do not inline large generated static artifact bodies (HTML/CSS/JS, shared\n  styles, JSON manifests, templates, base64, or file bodies) in execute_code.\n  Use ordered write_file chunks with chunk_index/final unless Python processing\n  is actually required.\n- Use print() to see intermediate results\n- Never use the bash tool's `pip install` for sandbox packages — bash runs against the\n  host Python and the sandbox kernel will not see those packages\n\nOutput formats:\n- Text output (print statements, repr)\n- Images (matplotlib plots)\n- Errors (simplified tracebacks)\n"
+    },
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "code",
+        "description"
+      ],
+      "before": "Python code to execute. Keep this under 8,000 characters. For large generated static content such as HTML/CSS/JS, shared styles, JSON manifests, templates, base64, or file bodies, do not inline the body in execute_code; use ordered write_file chunks using chunk_index/final unless Python processing is actually required. Reads may use allowed input paths, but durable writes are confined to the active project/artifact root. Variables and functions from previous calls in the same session are available. Use %pip install <pkg> to install packages.",
+      "after": "Python code to execute. Keep this under 8,000 characters. For large generated static content such as HTML/CSS/JS, shared styles, JSON manifests, templates, base64, or file bodies, do not inline the body in execute_code; use ordered write_file chunks using chunk_index/final unless Python processing is actually required. Reads may use allowed input paths, but durable writes are confined to the session cwd. Variables and functions from previous calls in the same session are available. Use %pip install <pkg> to install packages."
+    }
+  ],
+  "sub_agent": [
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "write_scope",
+        "description"
+      ],
+      "before": "Exact artifact-root-relative output paths or directories for write_file, append_file, or edit_file. Required for those tools; parallel children must use disjoint scopes.",
+      "after": "Exact session-cwd-relative output paths or directories for write_file, append_file, or edit_file. Required for those tools; parallel children must use disjoint scopes."
+    }
+  ]
+}

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+from box_agent.tools.skill_loader import SkillLoader
 
 
 VALIDATOR = (
@@ -611,24 +614,89 @@ def test_research_instructions_preserve_depth_without_rephrased_query_loops() ->
     assert "Do not route between browser modes through a" in skill
     assert "five distinct evidence intents" in routes
     assert "reworded versions of an already-run entity/fact query do not add depth" in routes
-    assert "`research/{topic}_evidence.json`" in skill
+    assert "`{output_dir}/research/{topic}_evidence.json`" in skill
     assert "URL-bound search-result summary may be medium-confidence evidence" in prompts
     assert "evidence_basis=search_summary" in skill
     assert "user_input_alignment" in output_contract
     assert "verified_evidence" in output_contract
 
 
-def test_research_instructions_use_artifact_relative_validator_paths() -> None:
+def test_research_instructions_use_conversation_selected_absolute_directory() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-    assert '--research-dir "research"' in skill
-    assert '--report "research/qa/{topic}_research_check.json"' in skill
-    assert "artifact-root-relative `research/...`" in skill
+    assert '--research-dir "{output_dir}/research"' in skill
+    assert '--report "{output_dir}/research/qa/{topic}_research_check.json"' in skill
+    assert "Resolve one absolute `{output_dir}` from the current conversation" in skill
     assert "Reserved research artifact templates override" in skill
     assert "ai-quality-scheduling_dim01.md" in skill
     assert "never write\n  `ai-quality-scheduling-dim01.md`" in skill
-    assert "displayed session" in skill
-    assert "workspace is the filesystem safety boundary" in skill
-    assert "Never derive an absolute research path from it" in skill
-    assert "do not use `$(pwd)/output/research`" in skill
+    assert "session cwd or workspace" in skill
+    assert "Do not infer an output root from environment variables" in skill
+    assert "model-created task directory" in skill
     assert '--research-dir "{workspace}/research"' not in skill
+
+
+def test_loaded_research_references_and_handoff_use_the_selected_task_directory(
+    tmp_path: Path,
+) -> None:
+    skill = SkillLoader(SKILL_ROOT).load_skill(SKILL_ROOT / "SKILL.md")
+    assert skill is not None and not skill.broken
+    prompt = skill.to_prompt()
+    references = {
+        Path(path).name: Path(path).read_text(encoding="utf-8")
+        for path in re.findall(r"\]\(`([^`]+)`\)", prompt)
+    }
+    assert {"routes.md", "prompts.md", "output_contract.md"} <= references.keys()
+    output_dir = tmp_path / "chosen-deck"
+
+    def render_path(template: str) -> Path:
+        for key, value in {
+            "output_dir": str(output_dir), "topic": "topic", "NN": "01"
+        }.items():
+            template = template.replace("{" + key + "}", value)
+            template = template.replace("[" + key + "]", value)
+        path = Path(template)
+        assert path.is_absolute(), template
+        return path
+
+    contract_dir = re.search(
+        r"```text\n([^\n]+)\n```", references["output_contract.md"]
+    )
+    assert contract_dir is not None
+    research = render_path(contract_dir.group(1))
+    assert research == output_dir / "research"
+    route_dir = re.search(r"Create `([^`]+)`", references["routes.md"])
+    assert route_dir is not None
+    assert render_path(route_dir.group(1)) == research
+    _write_focused_research(research)
+
+    templates = references["prompts.md"]
+    dimension = re.search(r"Output path: ([^\n]+_dim\[NN\]\.md)", templates)
+    assert dimension is not None
+    assert render_path(dimension.group(1)).is_file()
+    evidence = re.search(r"- Evidence ledger: ([^\n]+)", templates)
+    handoff = re.search(r"- Delivery handoff report: ([^\n]+)", templates)
+    assert evidence is not None and handoff is not None
+    assert render_path(evidence.group(1)).is_file()
+
+    research_arg = re.search(r'--research-dir "([^"]+)"', prompt)
+    report_arg = re.search(r'--report "([^"]+)"', prompt)
+    assert research_arg is not None and report_arg is not None
+    assert render_path(research_arg.group(1)) == research
+    report = render_path(report_arg.group(1))
+    assert render_path(handoff.group(1)) == report
+    result = subprocess.run(
+        [
+            sys.executable, str(VALIDATOR), "--research-dir", str(research),
+            "--topic", "topic", "--route", "B", "--min-dimensions", "3",
+            "--report", str(report),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(report.read_text(encoding="utf-8"))["delivery_allowed"] is True
+    assert not (tmp_path / "research").exists()

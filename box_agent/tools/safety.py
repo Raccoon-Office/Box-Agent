@@ -52,6 +52,7 @@ _RUNTIME_EXECUTABLE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "BOX_AGENT_NPX": ("npx",),
     "BOX_AGENT_PYTHON": ("python3",),
     "BOX_AGENT_PYTHON3": ("python3",),
+    "BOX_AGENT_SOFFICE": ("soffice", "libreoffice"),
     "BOX_AGENT_SANDBOX_PYTHON": ("python3",),
     "BOX_AGENT_BUNDLED_PYTHON": ("python3",),
 }

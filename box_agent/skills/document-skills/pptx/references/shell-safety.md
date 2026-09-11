@@ -18,8 +18,8 @@
 
 ## 3. Workspace boundary
 
-1. Keep all intermediate files under the canonical delivery root selected by
-   the runtime; do not add another nested `output/` directory.
+1. Keep all intermediate files under `<PRESENTATION_DIR>` selected in the
+   conversation; do not add an automatic nested `output/` directory.
 1. Do not write to `/tmp`, `/var/tmp`, or absolute temp paths.
 1. Avoid `absolute/paths` in redirected outputs.
 

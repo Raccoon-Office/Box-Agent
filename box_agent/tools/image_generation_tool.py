@@ -420,7 +420,7 @@ class GenerateImageTool(Tool):
         return (
             "Standard Box-Agent image tool shared by CLI and ACP. Generate or edit a bitmap image "
             "with the Box-Agent-configured image service, save it inside "
-            "the active project/artifact root, and return a local path for use in HTML/PPTX assets. "
+            "the session cwd, and return a local path for use in HTML/PPTX assets. "
             "For explicit native image, illustration, poster, cover, or bitmap infographic requests, "
             "prefer this tool over HTML/CSS, SVG, PIL, or screenshot generation unless the user asks "
             "for one of those editable/rendered formats. Use text-to-image when the user "
@@ -444,9 +444,9 @@ class GenerateImageTool(Tool):
                 "output_path": {
                     "type": "string",
                     "description": (
-                        "Project/artifact-root-relative image path, for example "
-                        "assets/generated/slide-03-hero.png. In output mode the tool already "
-                        "targets the current output root; do not prefix the path with output/."
+                        "Session-cwd-relative image path, for example "
+                        "assets/generated/slide-03-hero.png. Use the task directory "
+                        "selected in conversation when one exists."
                     ),
                 },
                 "size": {
@@ -686,10 +686,10 @@ class GenerateImageTool(Tool):
     def _resolve_output_path(self, output_path: str) -> Path:
         path = Path(output_path).expanduser()
         if not path.is_absolute():
-            # Accept either the canonical artifact-relative form
+            # Accept either the configured output-relative form
             # (assets/generated/x.png) or the workspace-relative form returned
             # by older runtimes (output/assets/generated/x.png) without nesting
-            # the artifact root twice.
+            # the configured output directory twice.
             try:
                 output_from_workspace = self.output_dir.relative_to(self.workspace_dir)
             except ValueError:

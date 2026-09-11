@@ -114,7 +114,7 @@ def _event_path_exists(workspace: Path, rel_path: Any) -> bool:
 
 
 def build_artifact_inventory(protocol_path: Path, workspace: Path) -> dict[str, Any]:
-    """Reconcile ACP artifact envelopes with regular files in ``output``."""
+    """Reconcile legacy output files or cwd-rooted ACP artifact event files."""
 
     artifact_events = []
     for envelope in _read_artifact_envelopes(protocol_path):
@@ -133,6 +133,22 @@ def build_artifact_inventory(protocol_path: Path, workspace: Path) -> dict[str, 
             if record.kind != "file":
                 continue
             final_files.append(asdict(replace(record, path=f"output/{record.path}")))
+    else:
+        workspace_root = workspace.resolve()
+        final_by_path: dict[str, dict[str, Any]] = {}
+        for event in artifact_events:
+            rel_path = event.get("rel_path")
+            if not event["exists"] or not isinstance(rel_path, str):
+                continue
+            try:
+                candidate = (workspace / rel_path).resolve()
+                candidate.relative_to(workspace_root)
+                record = _file_record(workspace_root, candidate)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if record is not None and record.kind == "file":
+                final_by_path[record.path] = asdict(record)
+        final_files.extend(final_by_path[path] for path in sorted(final_by_path))
 
     return {
         "schema_version": SCHEMA_VERSION,

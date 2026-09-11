@@ -18,10 +18,10 @@ uses the same in-band ``session/request_permission`` reverse RPC as
 filesystem and memory escalation, then retries the tool only if the
 host explicitly approves.
 
-**Sandbox**: Enabled by default for ACP sessions.  Each session gets
-a stable ``sandbox_workspace`` path (``{workspace}/sandbox/``) that
-the client can use to retrieve generated files.  The sandbox Jupyter
-kernel persists across prompts within the same session.
+**Sandbox**: Enabled by default for ACP sessions. ``session/new.params.cwd``
+is the stable session working directory and is not replaced by a generated
+output root. The sandbox Jupyter kernel persists across prompts within the
+same session.
 """
 
 from __future__ import annotations
@@ -30,9 +30,10 @@ import asyncio
 import json as _json
 import logging
 import platform
+import re
 import signal
 import sys
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -63,6 +64,10 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
 from box_agent.agent_session import AgentSession
+from box_agent.session_context import HostBindings, SessionOptions
+from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
+from box_agent.session_assembly import create_application_runtime
+from box_agent.agent_service import AgentService
 from box_agent.agent_runtime import (
     build_agent,
     build_llm_client,
@@ -72,7 +77,6 @@ from box_agent.agent_runtime import (
 )
 from box_agent.agent_run import AgentRunHandle
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
-from box_agent.artifacts import ensure_output_dir
 from box_agent.agent import (
     Agent,
     goal_autopilot_prompt,
@@ -151,7 +155,7 @@ from box_agent.goal_runtime import (
     GoalAutopilotController,
 )
 from box_agent.mcp_runtime import MCPRuntimeController
-from box_agent.skill_runtime import prepare_auto_loaded_skills
+from box_agent.skill_runtime import SkillRuntime
 from box_agent.turn_runtime import sync_skill_cache_fingerprint_context
 from box_agent.client_info import ClientInfo, scoped_client_info
 from box_agent.llm import LLMClient, SessionBoundLLM
@@ -209,6 +213,7 @@ from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.retry import StreamInterrupted
 from box_agent.schema import LLMProvider, Message
 from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
+from box_agent.tools.mcp_loader import get_mcp_connector_server_names, get_mcp_status
 from box_agent.tools.runtime import (
     SkillRuntimeContext,
     build_skill_runtime_context,
@@ -216,12 +221,7 @@ from box_agent.tools.runtime import (
 )
 from box_agent.tools.skill_preload import (
     SkillPreloadAttribution,
-    # Retained for downstream monkeypatch/import compatibility; active turns
-    # use ``prepare_auto_loaded_skills`` below.
-    build_auto_loaded_skills_prompt,
-    host_runtime_preload_skill_names,
     strip_auto_loaded_skills,
-    turn_preload_skill_names,
     web_search_total_limit_for_active_skills,
 )
 from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryError
@@ -256,7 +256,6 @@ except Exception:  # pragma: no cover - defensive
 
 def _artifact_envelope(
     art: ArtifactEvent,
-    output_dir: str | None,
     session_id: str | None = None,
     task_id: str | None = None,
     turn_id: str | None = None,
@@ -280,8 +279,6 @@ def _artifact_envelope(
         "produced_at": art.produced_at,
         "tool_call_id": art.tool_call_id,
     }
-    if output_dir:
-        payload["output_dir"] = output_dir
     if art.layout_id:
         payload["layout_id"] = art.layout_id
     if art.edit_mode:
@@ -829,107 +826,59 @@ def _update_pending_plan_approval_from_raw(
         state.pending_plan_approval = None
 
 
-def _normalize_artifact_mode(meta: Any) -> str:
-    if isinstance(meta, dict):
-        value = meta.get("artifact_mode") or meta.get("artifactMode")
-        if isinstance(value, str) and value.strip().lower() == "project":
-            return "project"
-    return "output"
-
-
-def _artifact_root_from_meta(meta: Any, workspace: Path) -> Path | None:
+def _deprecated_artifact_fields(meta: Any) -> list[str]:
+    """Return legacy host fields that are accepted but ignored."""
     if not isinstance(meta, dict):
-        return None
-    layout = meta.get("workspace_layout") or meta.get("workspaceLayout")
-    if not isinstance(layout, dict):
-        return None
-    raw = layout.get("artifact_root_dir") or layout.get("artifactRootDir")
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    root = Path(raw.strip()).expanduser()
-    if not root.is_absolute():
-        root = workspace / root
-    return root.resolve()
-
-
-def _workspace_layout_path(
-    layout: Any,
-    workspace: Path,
-    *keys: str,
-) -> Path | None:
-    if not isinstance(layout, dict):
-        return None
-    raw = None
-    for key in keys:
-        value = layout.get(key)
-        if isinstance(value, str) and value.strip():
-            raw = value.strip()
-            break
-    if raw is None:
-        return None
-    try:
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = workspace / path
-        return path.resolve()
-    except (OSError, RuntimeError):
-        return None
-
-
-def _workspace_layout_prompt(
-    *,
-    workspace: Path,
-    artifact_root: Path,
-    layout: Any,
-    artifact_mode: str,
-) -> str:
-    """Describe host, task, and artifact roots without conflating their roles."""
-    selected_root = _workspace_layout_path(
-        layout,
-        workspace,
-        "selected_root_dir",
-        "selectedRootDir",
-    ) or workspace
-    task_root = _workspace_layout_path(
-        layout,
-        workspace,
-        "session_workspace_dir",
-        "sessionWorkspaceDir",
-    ) or workspace
-    resolved_artifact_root = _workspace_layout_path(
-        layout,
-        workspace,
+        return []
+    fields: list[str] = []
+    for key in (
+        "artifact_mode",
+        "artifactMode",
+        "artifact_root",
+        "artifactRoot",
         "artifact_root_dir",
         "artifactRootDir",
-    ) or artifact_root
+        "session_workspace_dir",
+        "sessionWorkspaceDir",
+    ):
+        if key in meta:
+            fields.append(key)
+    layout = meta.get("workspace_layout") or meta.get("workspaceLayout")
+    if isinstance(layout, dict):
+        for key in (
+            "artifact_root",
+            "artifactRoot",
+            "artifact_root_dir",
+            "artifactRootDir",
+            "session_workspace_dir",
+            "sessionWorkspaceDir",
+        ):
+            if key in layout:
+                fields.append(f"workspace_layout.{key}")
+    return fields
 
-    lines = [
-        "## Workspace Layout",
-        f"- 工作区（selected workspace root）：`{selected_root}`",
-        f"- 当前任务目录（current task root）：`{task_root}`",
-        f"- 交付物目录（artifact root）：`{resolved_artifact_root}`",
-        (
-            "- 目录语义：用户说“工作区”“当前文件夹”或“当前目录”时，默认指 "
-            "selected workspace root；只有明确说“当前任务目录”时才指 current task root；"
-            "只有明确说“输出目录”或“交付物目录”时才指 artifact root。"
-        ),
-        (
-            "- 查看工作区或当前任务内容时，使用上面对应根目录的绝对路径，"
-            "不要根据工具的相对路径根猜测目录身份。"
-        ),
-        (
-            "- 判空规则：必须先使用目标目录的绝对路径实际查询其内容，"
-            "只有查询成功且确认无内容时，才可判断该目标目录为空。"
-            "不得用当前任务目录、交付物目录或工具默认目录的空结果推断工作区为空；"
-            "查询失败、权限不足或结果被过滤、截断时，不得据此判空。"
-        ),
-    ]
-    if artifact_mode != "project":
-        lines.append(
-            "- Output 模式下，`pwd`、bash cwd 和文件工具相对路径默认位于 "
-            "artifact root；这只是工具执行/交付边界，不得称为工作区或当前任务目录。"
-        )
-    return "\n".join(lines)
+
+def _normalize_workspace_layout(layout):
+    if not isinstance(layout, dict):
+        return None
+    normalized = {}
+    for canonical, alias in (
+        ("selected_root_dir", "selectedRootDir"),
+        ("session_workspace_dir", "sessionWorkspaceDir"),
+        ("artifact_root_dir", "artifactRootDir"),
+    ):
+        for key in (canonical, alias):
+            value = layout.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized[canonical] = value.strip()
+                break
+    return normalized
+
+
+def _workspace_layout_prompt(**kwargs):
+    from box_agent.session_assembly import _workspace_layout_prompt as build
+    kwargs["layout"] = _normalize_workspace_layout(kwargs.get("layout"))
+    return build(**kwargs)
 
 
 def _goal_payload(agent: Agent) -> dict[str, Any] | None:
@@ -962,15 +911,12 @@ def _tool_result_raw_output(
     policy_decision: dict[str, Any] | None,
     *,
     session_id: str | None = None,
-    output_dir: str | None = None,
     task_id: str | None = None,
     turn_id: str | None = None,
 ) -> Any:
     if isinstance(raw_output, dict):
         payload = dict(raw_output)
         if payload.get("type") == "artifact":
-            if output_dir:
-                payload.setdefault("output_dir", output_dir)
             if session_id:
                 payload.setdefault("session_id", session_id)
                 payload.setdefault("sessionId", session_id)
@@ -1000,6 +946,11 @@ class SessionState(AgentSession):
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
     seen_injection_ids: set[str] = field(default_factory=set)
+    connector_skill_grants: set[str] = field(default_factory=set)
+    selected_connector_ids: set[str] = field(default_factory=set)
+    connector_statuses: tuple[tuple[str, str, str], ...] | None = None
+    connector_status_unavailable: bool = False
+    utility_session: bool = False
     expert_context: ExpertSessionContext | None = None
     upstream_session_id: str = ""
     current_task_id: str = ""
@@ -1008,9 +959,199 @@ class SessionState(AgentSession):
     follow_up_suggestions_enabled: bool = False
     follow_up_suggestions_task: asyncio.Task[None] | None = None
 
+    async def aclose(self) -> None:
+        task = self.follow_up_suggestions_task
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self.follow_up_suggestions_task = None
+        await super().aclose()
+
 
 _CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS = 4_096
 _TITLE_MAX_OUTPUT_TOKENS = 8_000
+_CONNECTOR_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_CONNECTOR_STATUS_VALUES = frozenset({"connected", "disconnected"})
+_MAX_CONNECTOR_STATUSES = 256
+
+
+def _connector_ids_from_meta(meta: Any) -> set[str] | None:
+    """Read the host's per-conversation connector selection without guessing IDs."""
+    if not isinstance(meta, dict):
+        return None
+    marker = meta.get("selected_connector_ids", meta.get("selectedConnectorIds"))
+    if marker is None:
+        return None
+    if not isinstance(marker, list):
+        raise ValueError("selected_connector_ids must be an array")
+    selected: set[str] = set()
+    for raw in marker:
+        if not isinstance(raw, str):
+            raise ValueError("selected_connector_ids must contain strings")
+        connector_id = raw.strip().lower()
+        if not _CONNECTOR_ID_PATTERN.fullmatch(connector_id):
+            raise ValueError("selected_connector_ids contains an invalid connector id")
+        selected.add(connector_id)
+    return selected
+
+
+def _connector_statuses_from_meta(
+    meta: Any,
+) -> tuple[tuple[str, str, str], ...] | None:
+    """Read the host's complete connector catalog snapshot for one turn."""
+    if not isinstance(meta, dict):
+        return None
+    marker = meta.get("connector_statuses", meta.get("connectorStatuses"))
+    if marker is None:
+        return None
+    if not isinstance(marker, list):
+        raise ValueError("connector_statuses must be an array")
+    if len(marker) > _MAX_CONNECTOR_STATUSES:
+        raise ValueError("connector_statuses contains too many entries")
+
+    statuses: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for raw in marker:
+        if not isinstance(raw, dict):
+            raise ValueError("connector_statuses entries must be objects")
+        raw_id = raw.get("id")
+        raw_name = raw.get("name")
+        raw_status = raw.get("status")
+        if not isinstance(raw_id, str):
+            raise ValueError("connector_statuses id must be a string")
+        connector_id = raw_id.strip().lower()
+        if not _CONNECTOR_ID_PATTERN.fullmatch(connector_id):
+            raise ValueError("connector_statuses contains an invalid connector id")
+        if connector_id in seen:
+            raise ValueError("connector_statuses contains a duplicate connector id")
+        if (
+            not isinstance(raw_name, str)
+            or not raw_name.strip()
+            or len(raw_name.strip()) > 128
+            or any(character in raw_name for character in "\r\n")
+        ):
+            raise ValueError("connector_statuses contains an invalid connector name")
+        if not isinstance(raw_status, str) or raw_status not in _CONNECTOR_STATUS_VALUES:
+            raise ValueError("connector_statuses contains an invalid status")
+        seen.add(connector_id)
+        statuses.append((connector_id, raw_name.strip(), raw_status))
+    return tuple(statuses)
+
+
+def _connector_status_unavailable_from_meta(meta: Any) -> bool | None:
+    """Read the host signal that the connector snapshot could not be refreshed."""
+    if not isinstance(meta, dict):
+        return None
+    marker = meta.get(
+        "connector_status_unavailable", meta.get("connectorStatusUnavailable")
+    )
+    if marker is None:
+        return None
+    if not isinstance(marker, bool):
+        raise ValueError("connector_status_unavailable must be a boolean")
+    return marker
+
+
+def _connector_server_statuses() -> dict[str, list[tuple[str, str, str]]]:
+    """Return the current connector runtime state keyed by canonical connector ID."""
+    statuses_by_connector: dict[str, list[tuple[str, str, str]]] = {}
+    expected_by_connector = get_mcp_connector_server_names()
+    for status in get_mcp_status():
+        if status.get("owner") != "connector":
+            continue
+        connector_id = status.get("connectorId")
+        if isinstance(connector_id, str) and connector_id:
+            server_name = str(status.get("name") or connector_id)
+            if server_name not in expected_by_connector.get(connector_id, ()):
+                continue
+            connector_name = status.get("connectorName")
+            statuses_by_connector.setdefault(connector_id, []).append(
+                (
+                    str(status.get("name") or connector_id),
+                    connector_name.strip()
+                    if isinstance(connector_name, str) and connector_name.strip()
+                    else connector_id,
+                    str(status.get("state") or "disconnected"),
+                )
+            )
+    return statuses_by_connector
+
+
+def _connected_connector_ids(selected_connector_ids: set[str]) -> frozenset[str]:
+    statuses_by_connector = _connector_server_statuses()
+    expected_by_connector = get_mcp_connector_server_names()
+    return frozenset(
+        connector_id
+        for connector_id in selected_connector_ids
+        if (expected := expected_by_connector.get(connector_id))
+        and (statuses := statuses_by_connector.get(connector_id))
+        and expected == {server_name for server_name, _, _ in statuses}
+        and all(state == "connected" for _, _, state in statuses)
+    )
+
+
+def _connector_skill_is_available(skill: Any, selected_connector_ids: set[str]) -> bool:
+    """Gate new connector-Skill recognition without removing already loaded guidance."""
+    if getattr(skill, "source", None) != "connector":
+        return True
+    return getattr(skill, "owner_id", None) in _connected_connector_ids(
+        selected_connector_ids
+    )
+
+
+def _connector_skill_is_granted(skill: Any, connector_skill_grants: set[str]) -> bool:
+    """Allow connector Skills only after this conversation's internal selector grants them."""
+    return getattr(skill, "source", None) != "connector" or getattr(
+        skill, "name", None
+    ) in connector_skill_grants
+
+
+def _connector_status_context(
+    selected_connector_ids: set[str],
+    connector_statuses: tuple[tuple[str, str, str], ...] | None = None,
+    connector_status_unavailable: bool = False,
+) -> str:
+    """Render connector-level state; individual MCP server health stays internal."""
+    if connector_status_unavailable:
+        return (
+            "<connector-status>\n"
+            "status: unavailable\n"
+            "连接器状态读取失败，请勿沿用之前轮次的连接状态。\n"
+            "</connector-status>"
+        )
+    if connector_statuses is not None:
+        lines = ["<connector-status>"]
+        lines.extend(
+            f"{connector_id} {connector_name}: {status}"
+            for connector_id, connector_name, status in connector_statuses
+        )
+        lines.append("</connector-status>")
+        return "\n".join(lines)
+
+    statuses_by_connector = _connector_server_statuses()
+    expected_by_connector = get_mcp_connector_server_names()
+
+    lines = ["<connector-status>"]
+    for connector_id in sorted(selected_connector_ids):
+        statuses = statuses_by_connector.get(connector_id, [])
+        if not statuses:
+            lines.append(f"{connector_id}: disconnected")
+            continue
+        connector_name = sorted(statuses)[0][1]
+        expected = expected_by_connector.get(connector_id, frozenset())
+        overall_state = (
+            "connected"
+            if expected
+            and expected == {server_name for server_name, _, _ in statuses}
+            and all(state == "connected" for _, _, state in statuses)
+            else "disconnected"
+        )
+        lines.append(f"{connector_id} {connector_name}: {overall_state}")
+    if len(lines) == 1:
+        lines.append("none: selected")
+    lines.append("</connector-status>")
+    return "\n".join(lines)
 
 
 def _bind_user_source_text(state: SessionState, user_request: str) -> None:
@@ -1042,6 +1183,7 @@ class BoxACPAgent:
         lite_llm: LLMClient | None = None,
     ):
         self._conn = conn
+        self._plugin_runtime = create_application_runtime()
         self._config = config
         self._llm = llm
         self._lite_llm = lite_llm or llm
@@ -1059,6 +1201,7 @@ class BoxACPAgent:
             session_registries=lambda: (
                 (state.agent.tools, state.mcp_fallback_tools)
                 for state in self._sessions.values()
+                if not state.utility_session
             ),
         )
         self._mcp_task = mcp_task  # background MCP discovery; awaited on first prompt
@@ -1067,12 +1210,40 @@ class BoxACPAgent:
         # prompts while the first one is still awaiting the background load.
         # Distinct from `_mcp_loaded` — see `_ensure_mcp_loaded` for why.
         self._mcp_finalize_scheduled = False
+        self._mcp_finalize_task = None
         # Background skill discovery: awaited before the first turn's
         # SkillSelector runs. See `_ensure_skills_loaded`. When None,
         # discovery ran inline in initialize_base_tools (CLI path only —
         # ACP always defers).
         self._skill_task = skill_task
         self._skills_loaded = skill_task is None
+
+    async def aclose(self) -> None:
+        """Release sessions and application plugins, retaining interrupted owners."""
+        errors = []
+        for handle, state in list(self._sessions.items()):
+            try:
+                await state.aclose()
+            except BaseException as error:
+                errors.append(error)
+            if state._closed:
+                if state.agent.session_log is not None:
+                    state.agent.session_log.close()
+                del self._sessions[handle]
+        if self._mcp_finalize_task is not None:
+            self._mcp_finalize_task.cancel()
+            await asyncio.gather(self._mcp_finalize_task, return_exceptions=True)
+            self._mcp_finalize_task = None
+        try:
+            await self._plugin_runtime.aclose()
+        except BaseException as error:
+            errors.append(error)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            from box_agent.session_assembly import combine_cleanup_errors
+
+            raise combine_cleanup_errors(errors)
 
     def _llm_for_binding(self, binding: dict[str, Any] | None) -> LLMClient:
         if binding is None:
@@ -1221,73 +1392,6 @@ class BoxACPAgent:
             preloaded_skills=",".join(fingerprint.get("preloaded_skill_names") or []),
         )
 
-    def _host_runtime_preload_skill_names(
-        self,
-        matched_skill_names: tuple[str, ...],
-        env_context: EnvContext | None,
-        user_text: str | None,
-    ) -> list[str]:
-        return host_runtime_preload_skill_names(
-            matched_skill_names,
-            env_context,
-            user_text,
-        )
-
-    def _turn_preload_skill_names(
-        self,
-        matched_skill_names: tuple[str, ...],
-        env_context: EnvContext | None,
-        user_text: str | None,
-        *,
-        selected_skill_names: tuple[str, ...] = (),
-    ) -> list[str]:
-        return turn_preload_skill_names(
-            matched_skill_names,
-            env_context,
-            user_text,
-            selected_skill_names=selected_skill_names,
-        )
-
-    def _apply_auto_loaded_skills(
-        self,
-        state: SessionState,
-        session_id: str,
-        skill_names: list[str],
-    ) -> None:
-        skill_loader = state.skill_loader or self._skill_loader
-        if not skill_loader:
-            self._sync_cache_fingerprint_context(state)
-            return
-        include_disabled = state.expert_context is not None
-        result, unloaded_skill_names = prepare_auto_loaded_skills(
-            skill_loader,
-            state.agent.system_prompt,
-            skill_names,
-            include_disabled=include_disabled,
-            preloaded_skill_names=state.preloaded_skill_names,
-            preloaded_skill_hashes=state.preloaded_skill_hashes,
-            preloaded_skill_attributions=state.preloaded_skill_attributions,
-            prompt_builder=build_auto_loaded_skills_prompt,
-        )
-        for skill_name in result.missing_names:
-            log.warn("skills/preload_missing", session_id=session_id, skill=skill_name)
-        self._sync_cache_fingerprint_context(state)
-        if result.changed:
-            self._set_agent_system_prompt(state.agent, result.system_prompt)
-        if unloaded_skill_names:
-            log.info(
-                "skills/auto_unloaded",
-                session_id=session_id,
-                skills=",".join(sorted(unloaded_skill_names)),
-            )
-        if result.loaded_names and result.changed:
-            log.info(
-                "skills/preloaded",
-                session_id=session_id,
-                skills=",".join(state.preloaded_skill_names),
-                prompt_chars=len(result.system_prompt),
-            )
-
     async def _ensure_mcp_loaded(self) -> None:
         """Finalize startup MCP discovery on the first prompt.
 
@@ -1309,7 +1413,7 @@ class BoxACPAgent:
             # prompts that also arrive before the load returns.
             if not self._mcp_finalize_scheduled:
                 self._mcp_finalize_scheduled = True
-                asyncio.create_task(self._finalize_mcp_load(), name="mcp-finalize")
+                self._mcp_finalize_task = asyncio.create_task(self._finalize_mcp_load(), name="mcp-finalize")
             return
         mcp_tools = await await_mcp_tools(self._mcp_task)
         if not self._config.tools.mcp.deferred_loading_enabled:
@@ -1431,7 +1535,7 @@ class BoxACPAgent:
             return None
         try:
             self._skill_loader.maybe_reload()
-            return self._skill_loader.list_skills_metadata()
+            return self._skill_loader.list_skills_metadata(include_connector=False)
         except Exception as exc:
             log.warn("skills/meta_error", message=f"Failed to build skills metadata: {exc}")
             return None
@@ -1465,6 +1569,7 @@ class BoxACPAgent:
         workspace = Path(params.cwd or self._config.agent.workspace_dir).expanduser()
         if not workspace.is_absolute():
             workspace = workspace.resolve()
+        workspace.mkdir(parents=True, exist_ok=True)
 
         # Extract session_mode from _meta (ACP extension point)
         # Pydantic aliases _meta to field_meta
@@ -1478,7 +1583,6 @@ class BoxACPAgent:
         upstream_title = _DEFAULT_AGENT_TITLE
         force_plan_start = False
         require_plan_approval = False
-        artifact_mode = "output"
         initial_goal_request: dict[str, Any] | None = None
         follow_up_suggestions_enabled = False
         skillhub_search_enabled = False
@@ -1504,7 +1608,17 @@ class BoxACPAgent:
                 "require_plan_approval",
                 "requirePlanApproval",
             )
-            artifact_mode = _normalize_artifact_mode(meta)
+            deprecated_artifact_fields = _deprecated_artifact_fields(meta)
+            if deprecated_artifact_fields:
+                log.warn(
+                    "session/deprecated_artifact_paths",
+                    session_id=session_id,
+                    fields=deprecated_artifact_fields,
+                    message=(
+                        "Deprecated artifact path fields are ignored; the session cwd is "
+                        "the only runtime and artifact-scan root"
+                    ),
+                )
             initial_goal_request = _goal_request_from_meta(meta)
             follow_up_suggestions_enabled = _meta_bool(
                 meta,
@@ -1549,6 +1663,12 @@ class BoxACPAgent:
                 _meta_string(meta, "title", "session_title", "sessionTitle")
                 or _DEFAULT_AGENT_TITLE
             )
+        selected_connector_ids = _connector_ids_from_meta(meta) or set()
+        connector_statuses = _connector_statuses_from_meta(meta)
+        connector_status_unavailable = (
+            _connector_status_unavailable_from_meta(meta) is True
+            and connector_statuses is None
+        )
 
         try:
             workspace_profile = WorkspaceRegistry().get(workspace)
@@ -1558,11 +1678,6 @@ class BoxACPAgent:
         if workspace_profile is not None and workspace_profile.task_type == "code":
             if session_mode is None:
                 session_mode = "code_agent"
-            if session_mode == "code_agent" and not (
-                isinstance(meta, dict)
-                and ("artifact_mode" in meta or "artifactMode" in meta)
-            ):
-                artifact_mode = "project"
 
         llm_binding = _normalize_llm_binding(meta)
         session_llm = SessionBoundLLM(self._llm_for_binding(llm_binding))
@@ -1589,24 +1704,12 @@ class BoxACPAgent:
             required_input_tokens=session_token_limit,
         )
 
-        # Project tools keep the repository root as cwd, but still receive a
-        # lazy artifact boundary for deliverable-producing Skills. The boundary
-        # is not created until a Skill writes an artifact, so ordinary code
-        # sessions do not gain an implicit output/ directory.
-        output_dir: str | None = None
-        artifact_root_dir = _artifact_root_from_meta(meta, workspace)
-        output_path = artifact_root_dir or (workspace / "output").resolve()
-        if artifact_mode != "project":
-            output_path = artifact_root_dir or ensure_output_dir(workspace)
-            output_path.mkdir(parents=True, exist_ok=True)
-        output_dir = str(output_path)
-
         log.info(
             "session/new",
             session_id=session_id,
             message=(
                 f"Creating session, workspace={workspace}, session_mode={session_mode}, "
-                f"artifact_mode={artifact_mode}, deep_think={deep_think}, "
+                f"deep_think={deep_think}, "
                 f"execution_profile={execution_profile}, "
                 f"force_plan_start={force_plan_start}, "
                 f"require_plan_approval={require_plan_approval}, "
@@ -1615,7 +1718,6 @@ class BoxACPAgent:
                 f"context_window={session_context_window}, "
                 f"max_output_tokens={session_max_output_tokens}, "
                 f"context_token_limit={session_token_limit}, "
-                f"artifact_root={output_dir}, "
                 f"expert={expert_context.to_metadata() if expert_context else None}"
             ),
         )
@@ -1662,22 +1764,6 @@ class BoxACPAgent:
             and (self._has_officev3_policy() or permission_mode == "default")
         ):
             try:
-                base_policy = (
-                    CapabilityPolicy.from_config(self._config)
-                    if self._has_officev3_policy()
-                    else CapabilityPolicy()
-                )
-                if permission_mode == "default":
-                    # Explicit session-default mode must fail closed even when
-                    # the host omits its filesystem context. Host-provided
-                    # values below may narrow or extend this session baseline.
-                    base_policy = base_policy.with_filesystem_overrides(
-                        session_workspace_root=str(workspace),
-                        allowed_directories=[],
-                        filesystem_scope="session_workspace",
-                        replace_allowed_directories=True,
-                    )
-
                 # officev3_permissions_override is DEPRECATED — kept for parsing only.
                 # In-band permission/request negotiation handles escalation now.
                 permission_overrides = meta.get("officev3_permissions_override") if isinstance(meta, dict) else None
@@ -1708,11 +1794,10 @@ class BoxACPAgent:
                         extra_dirs = None
                     if not isinstance(fs_scope, str):
                         fs_scope = None
-                    base_policy = base_policy.with_filesystem_overrides(
+                    fs_meta = dict(
                         session_workspace_root=swr,
                         allowed_directories=extra_dirs,
                         filesystem_scope=fs_scope,
-                        replace_allowed_directories=permission_mode == "default",
                     )
                     log.info(
                         "session/permissions",
@@ -1723,7 +1808,11 @@ class BoxACPAgent:
                         ),
                     )
 
-                effective_policy = base_policy
+                from box_agent.session_assembly import build_session_permission_policy
+                effective_policy = build_session_permission_policy(
+                    self._config, workspace, permission_mode,
+                    fs_meta if isinstance(fs_meta, dict) else None,
+                )
 
                 perm_engine = build_permission_engine(
                     effective_policy,
@@ -1761,123 +1850,14 @@ class BoxACPAgent:
                 ),
             )
 
-        skill_runtime_context = build_skill_runtime_context(
-            sandbox_mode=session_sandbox_mode,
-            env_context=env_context,
-        )
+        # RPC tools are host bindings; session tools and prompt are prepared by plugins.
+        tools: list = []
         session_skill_loader = self._skill_loader
-        if expert_context is not None and self._skill_loader is not None:
-            session_skill_loader = self._skill_loader.with_expert_skill_sources(
+        if expert_context is not None and session_skill_loader is not None:
+            session_skill_loader = session_skill_loader.with_expert_skill_sources(
                 expert_context.skill_names()
             )
-
-        # Build per-session system prompt with conditional mode injection
-        system_prompt = self._build_session_prompt(
-            session_mode,
-            workspace=workspace,
-            policy=effective_policy,
-            env_context=env_context,
-            skill_runtime_context=skill_runtime_context,
-            expert_context=expert_context,
-            artifact_mode=artifact_mode,
-            artifact_root=output_path,
-            workspace_layout=(
-                meta.get("workspace_layout") or meta.get("workspaceLayout")
-                if isinstance(meta, dict)
-                else None
-            ),
-            follow_up_suggestions_enabled=follow_up_suggestions_enabled,
-        )
-
-        # Inject memory context (skipped for lightweight utility sessions)
-        memory_block: str | None = None
-        if self._memory and not utility:
-            recalled = await asyncio.to_thread(self._memory.recall)
-            if recalled:
-                memory_block = recalled
-                system_prompt = append_prompt_segment(system_prompt, memory_block)
-                log.info("session/memory", session_id=session_id, message="Memory context injected")
-
-        preloaded_skill_hashes: dict[str, str] = {}
-        skill_scratch_dir = None
-        explicitly_allowed_skill_names: set[str] = set()
-        blocked_skill_names = (
-            FAST_OPTIONAL_SKILLS if execution_profile == "fast" else frozenset()
-        )
-        if utility:
-            # Pure text transform: no base tools, no workspace/sandbox tools.
-            tools: list = []
-            log.info("session/new", session_id=session_id,
-                     message="Utility session: tools disabled (no memory recall/extraction)")
-        else:
-            tools = list(self._base_tools)
-            if session_skill_loader:
-                from box_agent.tools.skill_tool import GetSkillTool
-
-                tools = [
-                    GetSkillTool(
-                        session_skill_loader,
-                        include_disabled=expert_context is not None,
-                        preloaded_skill_hashes=preloaded_skill_hashes,
-                        blocked_skill_names=blocked_skill_names,
-                        explicitly_allowed_skill_names=(
-                            explicitly_allowed_skill_names
-                        ),
-                    )
-                    if isinstance(tool, GetSkillTool)
-                    or (
-                        expert_context is not None
-                        and getattr(tool, "name", "") == "get_skill"
-                    )
-                    else tool
-                    for tool in tools
-                ]
-            if perm_engine is None:
-                message = (
-                    f"Using explicit session permission mode: {permission_mode}"
-                    if permission_mode in elevated_permission_modes
-                    else "No officev3 policy — using legacy allow_full_access mode"
-                )
-                log.info(
-                    "session/permissions",
-                    session_id=session_id,
-                    message=message,
-                )
-            # Enable sandbox mode and restrict to workspace for ACP sessions
-            skill_scratch_dir = add_workspace_tools(
-                tools,
-                self._config,
-                workspace,
-                sandbox_mode=session_sandbox_mode,
-                allow_full_access=session_allow_full_access,
-                non_interactive=True,  # ACP cannot do interactive terminal prompts
-                output=lambda msg: sys.stderr.write(msg + "\n"),
-                llm=session_llm,
-                permission_engine=perm_engine,
-                skill_runtime_context=skill_runtime_context,
-                skill_loader=session_skill_loader,
-                capability_state_provider=self._sub_agent_capability_state,
-                use_output_dir=artifact_mode != "project",
-                artifact_root_dir=output_dir,
-                create_artifact_root=artifact_mode != "project",
-                skill_scratch_root_dir=(
-                    workspace
-                    / ".box-agent"
-                    / "scratch"
-                    / session_id
-                    if artifact_mode == "project"
-                    else None
-                ),
-                env_context=env_context,
-                session_mode=session_mode,
-                process_owner_id=session_id,
-                bypass_dangerous_command_approval=permission_mode == "full_access",
-            )
-            system_prompt = (
-                f"{system_prompt.rstrip()}\n\n"
-                f"{build_image_generation_prompt(self._config)}"
-            )
-
+        connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None
         if skillhub_search_enabled and not utility:
 
@@ -1902,9 +1882,8 @@ class BoxACPAgent:
                         skill_loader=session_skill_loader,
                     )
                 )
-            system_prompt = (
-                f"{system_prompt.rstrip()}\n\n{HARD_CAPABILITY_GAP_PROMPT.strip()}"
-            )
+
+        recovery_prompt: str | None = None
         session_log: SessionLog | None = None
         session_log_restored = False
         if upstream_session_id:
@@ -1918,6 +1897,8 @@ class BoxACPAgent:
                 existing_log = existing_state.agent.session_log
                 if existing_log is not None:
                     existing_log.assert_workspace(workspace)
+                await existing_state.aclose()
+                if existing_log is not None:
                     existing_log.close()
                 del self._sessions[existing_handle]
             session_root = state_path('sessions')
@@ -1926,6 +1907,7 @@ class BoxACPAgent:
                     session_root,
                     session_id=upstream_session_id,
                     cwd=workspace,
+                    recover=True,
                 )
             except FileNotFoundError:
                 session_log = SessionLog.create(
@@ -1934,86 +1916,116 @@ class BoxACPAgent:
                     cwd=workspace,
                 )
             else:
-                session_log.prepare_resume()
-                session_log_restored = True
+                try:
+                    # Validate Skill sources before resume repair appends records.
+                    projection = session_log.replay()
+                    restore_loader = (session_skill_loader if session_skill_loader is not None
+                                      else AgentService.resolve_skill_loader(self._base_tools))
+                    SkillRuntime(restore_loader, allow_partial_restore=True).restore_records(projection.skills)
+                    session_log_restored = bool(projection.messages)
+                    session_log.prepare_resume()
+                except BaseException:
+                    session_log.close()
+                    raise
+                if session_log.recovery_source is not None:
+                    recovery_prompt = (
+                        "\n\nThe previous session runtime log could not be fully restored. "
+                        "Use supplied conversation history for context, but verify existing "
+                        "artifacts and outcomes before repeating earlier actions with side effects."
+                    )
+                    log.info(
+                        "session/recovered", session_id=session_id,
+                        source=str(session_log.recovery_source),
+                    )
+
+        diagnostic_events = []
+        trace_writer = None
+
+        def emit_diagnostic(event, data):
+            if trace_writer is None:
+                diagnostic_events.append((event, data))
+            else:
+                trace_writer.write(event, data=data)
 
         # Resolve the module-level factory at session creation time, matching
         # the historical direct ``Agent(...)`` call and its test hook.
-        state = SessionState.create(
-            config=self._config,
-            agent_factory=Agent,
-            llm_client=session_llm,
-            system_prompt=system_prompt,
-            tools=tools,
-            workspace_dir=str(workspace),
-            token_limit=session_token_limit,
-            session_log=session_log,
-            utility=utility,
-            session_llm=session_llm,
-            summary_llm=summary_llm,
-            output_dir=output_dir, session_mode=session_mode,
-            skill_scratch_dir=skill_scratch_dir,
-            llm_binding=llm_binding,
-            artifact_mode=artifact_mode,
-            permission_engine=perm_engine, grant_store=grant_store,
-            memory_block=memory_block,
-            thinking_enabled=deep_think,
-            execution_profile=execution_profile,
-            explicitly_allowed_skill_names=explicitly_allowed_skill_names,
-            env_context=env_context,
-            skill_runtime_context=skill_runtime_context,
-            skill_loader=session_skill_loader,
-            expert_context=expert_context,
-            upstream_session_id=upstream_session_id,
-            current_task_id=initial_task_id,
-            upstream_title=upstream_title,
-            force_plan_start=force_plan_start,
-            require_plan_approval=require_plan_approval,
-            preloaded_skill_hashes=preloaded_skill_hashes,
-            follow_up_suggestions_enabled=follow_up_suggestions_enabled,
-            continuation_applied=session_log_restored,
-            mcp_fallback_tools=dict(self._base_mcp_fallback_tools),
-        )
+        try:
+            state = await SessionState.open(
+                config=self._config,
+                runtime=self._plugin_runtime,
+                options=SessionOptions(
+                    profile="acp", workspace_dir=workspace, token_limit=session_token_limit,
+                    utility=utility, sandbox_mode=session_sandbox_mode,
+                    session_mode=session_mode, allow_full_access=session_allow_full_access,
+                    permission_mode=permission_mode, effective_policy=effective_policy,
+                    process_owner_id=session_id,
+                    workspace_layout=_normalize_workspace_layout(meta.get("workspace_layout") or meta.get("workspaceLayout") if isinstance(meta, dict) else None),
+                    follow_up_suggestions_enabled=follow_up_suggestions_enabled,
+                ),
+                host=HostBindings(
+                    llm_client=session_llm, summary_llm=summary_llm,
+                    base_tools=self._base_tools, system_prompt=self._system_prompt,
+                    memory_manager=self._memory, hooks=self._hooks,
+                    skill_loader=session_skill_loader, mcp_task=self._mcp_task,
+                    skill_task=self._skill_task, session_log=session_log,
+                    workspace_tools_factory=add_workspace_tools,
+                    capability_state_provider=self._sub_agent_capability_state,
+                    skill_access_filter=lambda skill: _connector_skill_is_granted(
+                        skill, connector_skill_grants
+                    ),
+                    skill_catalog_filter=lambda skill: _connector_skill_is_available(
+                        skill, selected_connector_ids
+                    ),
+                    extra_tools=tools,
+                    prompt_suffix="\n\n".join(part for part in (
+                        HARD_CAPABILITY_GAP_PROMPT if skillhub_search_tool else None,
+                        recovery_prompt,
+                    ) if part) or None,
+                    output=lambda msg: sys.stderr.write(msg + "\n"),
+                    diagnostics=emit_diagnostic,
+                ),
+                agent_factory=Agent,
+                allowed_connector_ids_provider=lambda: _connected_connector_ids(
+                    selected_connector_ids
+                ),
+                connector_skill_grants=connector_skill_grants,
+                selected_connector_ids=selected_connector_ids,
+                connector_statuses=connector_statuses,
+                connector_status_unavailable=connector_status_unavailable,
+                utility_session=utility,
+                session_llm=session_llm,
+                summary_llm=summary_llm,
+                session_mode=session_mode,
+                llm_binding=llm_binding,
+                permission_engine=perm_engine, grant_store=grant_store,
+                thinking_enabled=deep_think,
+                execution_profile=execution_profile,
+                env_context=env_context,
+                expert_context=expert_context,
+                upstream_session_id=upstream_session_id,
+                current_task_id=initial_task_id,
+                upstream_title=upstream_title,
+                force_plan_start=force_plan_start,
+                require_plan_approval=require_plan_approval,
+                follow_up_suggestions_enabled=follow_up_suggestions_enabled,
+                continuation_applied=session_log_restored,
+                mcp_fallback_tools=dict(self._base_mcp_fallback_tools),
+            )
+        except BaseException:
+            if session_log is not None:
+                session_log.close()
+            raise
         agent = state.agent
+        session_skill_loader = state.skill_loader
+        tools = list(agent.tools.values())
+        for tool in tools:
+            if isinstance(tool, SkillHubInstallTool):
+                tool._skill_loader = session_skill_loader
 
         if skillhub_search_tool is not None:
             skillhub_search_tool.set_snapshot_provider(
                 lambda: capability_snapshot(agent, session_skill_loader)
             )
-
-        if agent.restored_skills:
-            try:
-                if session_skill_loader is None:
-                    raise ValueError(
-                        "persisted active Skills cannot be restored without a SkillLoader"
-                    )
-                restored_skill_prompts: list[tuple[str, str, str, int]] = []
-                for item in agent.restored_skills:
-                    name = item.get("name")
-                    prompt_hash = item.get("sha256")
-                    load_order = item.get("loadOrder")
-                    if (
-                        not isinstance(name, str)
-                        or not isinstance(prompt_hash, str)
-                        or not isinstance(load_order, int)
-                    ):
-                        raise ValueError("persisted active Skill metadata is invalid")
-                    skill = session_skill_loader.get_skill(
-                        name,
-                        include_disabled=expert_context is not None,
-                    )
-                    if skill is None:
-                        raise ValueError(
-                            f"persisted active Skill {name!r} is unavailable"
-                        )
-                    restored_skill_prompts.append(
-                        (name, skill.to_prompt(), prompt_hash, load_order)
-                    )
-                agent.restore_active_skill_instructions(restored_skill_prompts)
-            except Exception:
-                if session_log is not None:
-                    session_log.close()
-                raise
 
         if initial_goal_request is not None:
             goal_result = self._apply_goal_action(agent, initial_goal_request)
@@ -2031,24 +2043,10 @@ class BoxACPAgent:
                     status=goal_payload.get("status"),
                 )
 
-        # Per-session MemoryExtractor to avoid cross-session state leaks
-        session_extractor = None
-        if self._memory and state.config.agent.enable_memory_extraction and not utility:
-            from box_agent.memory import MemoryExtractor
-            session_extractor = build_memory_extractor(
-                llm=session_llm,
-                memory_manager=self._memory,
-                session_id=upstream_session_id,
-                cooldown=state.config.agent.memory_extraction_cooldown,
-                step_interval=state.config.agent.memory_extraction_step_interval,
-                extractor_factory=MemoryExtractor,
-            )
-
         trace_writer = SessionTraceWriter(
             session_id=upstream_session_id or session_id,
             acp_session_id=session_id,
         )
-        state.memory_extractor = session_extractor
         state.trace_writer = trace_writer
         self._sessions[session_id] = state
         trace_writer.write(
@@ -2056,7 +2054,6 @@ class BoxACPAgent:
             data={
                 "workspace": str(workspace),
                 "session_mode": session_mode,
-                "artifact_mode": artifact_mode,
                 "execution_profile": execution_profile,
                 "title": upstream_title,
                 "utility": utility,
@@ -2066,25 +2063,9 @@ class BoxACPAgent:
             },
         )
 
-        # Skill selector: per-turn keyword-based filter on the skill catalog.
-        # Agent.__init__ appends session/runtime/workspace context first; then
-        # the skill slot is moved to the tail to keep catalog churn localized.
-        if session_skill_loader:
-            from box_agent.tools.skill_loader import SkillSelector, move_skill_slot_to_end
-
-            relocated_prompt = move_skill_slot_to_end(agent.messages[0].content)
-            if relocated_prompt != agent.messages[0].content:
-                self._set_agent_system_prompt(agent, relocated_prompt)
-            selector = SkillSelector(
-                session_skill_loader,
-                include_disabled=expert_context is not None,
-            )
-            selector.bind(agent.messages[0].content)
-            if expert_context:
-                expert_skill_prompt = selector.update(expert_context.skill_query())
-                if expert_skill_prompt is not None:
-                    self._set_agent_system_prompt(agent, expert_skill_prompt)
-            self._sessions[session_id].skill_selector = selector
+        for event, data in diagnostic_events:
+            trace_writer.write(event, data=data)
+        diagnostic_events.clear()
 
         tool_names = [t.name for t in tools]
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
@@ -2104,7 +2085,7 @@ class BoxACPAgent:
                 SKILLHUB_INSTALL_CAPABILITY_VERSION
             ]
         skills = (
-            session_skill_loader.list_skills_metadata()
+            session_skill_loader.list_skills_metadata(include_connector=False)
             if session_skill_loader is not None
             else self._skills_meta()
         )
@@ -2112,186 +2093,27 @@ class BoxACPAgent:
             response_meta["skills"] = skills
         if expert_context is not None:
             response_meta["expert_context"] = expert_context.to_metadata()
-        if artifact_mode == "project":
-            response_meta["artifact_mode"] = artifact_mode
         if agent.goal is not None:
             response_meta["goal"] = _goal_payload(agent)
         if response_meta:
             kwargs["field_meta"] = response_meta
         return NewSessionResponse(**kwargs)
 
-    def _filesystem_access_prompt(self, workspace: Path, policy: CapabilityPolicy | None) -> str:
-        """Build per-session filesystem guidance for the model.
+    def _filesystem_access_prompt(self, workspace, policy):
+        from box_agent.session_assembly import _filesystem_access_prompt
+        return _filesystem_access_prompt(workspace, policy)
 
-        Tools still enforce permissions. This prompt only prevents the model
-        from assuming workspace-only access when officev3 has granted extra
-        roots such as ~/Documents.
-        """
-        if policy is None:
-            return (
-                "## File Access Context\n"
-                f"- Current workspace: `{workspace}`\n"
-                "- File tools and bash may access paths allowed by the active runtime policy.\n"
-                "- If a file is outside the allowed scope, the tool will return a permission error; "
-                "try the tool instead of assuming denial."
-            )
+    def _build_action_hints_prompt(self, env_context=None):
+        from box_agent.session_assembly import _build_action_hints_prompt
+        return _build_action_hints_prompt(self._config, self._memory, env_context)
 
-        allowed_roots = [workspace]
-        if policy.session_workspace_root:
-            allowed_roots.append(Path(policy.session_workspace_root).expanduser())
-        for directory in policy.allowed_directories:
-            allowed_roots.append(Path(directory).expanduser())
-
-        seen: set[str] = set()
-        root_lines: list[str] = []
-        for root in allowed_roots:
-            root_s = str(root)
-            if root_s not in seen:
-                seen.add(root_s)
-                root_lines.append(f"- `{root_s}`")
-
-        if policy.filesystem_scope == "user_home":
-            scope_line = "- Active filesystem scope: `user_home`; paths under the user home directory are allowed."
-        elif policy.filesystem_scope in ("session_workspace", "custom"):
-            scope_line = (
-                f"- Active filesystem scope: `{policy.filesystem_scope}`; the workspace, "
-                "session workspace root, and configured allowed directories are allowed."
-            )
-        else:
-            scope_line = f"- Active filesystem scope: `{policy.filesystem_scope}`; unknown scopes fail closed in tools."
-
-        return (
-            "## File Access Context\n"
-            f"{scope_line}\n"
-            "- Allowed filesystem roots for this session include:\n"
-            + "\n".join(root_lines)
-            + "\n- These are currently pre-authorized roots, not the complete set of paths that may be requested."
-            + "\n- When the task requires it, you may try a specific, narrow path outside these roots; "
-            "the runtime will request permission when appropriate."
-            + "\n- A permission denial applies only to the requested path. "
-            "Do not generalize it to other specific candidate paths."
-            + "\n- Prefer absolute paths when the user names a location such as ~/Documents."
-            + "\n- Do not claim you can only access the workspace based only on the listed "
-            "roots or a denial for another path."
+    def _build_session_prompt(self, session_mode, **kwargs):
+        from box_agent.session_assembly import build_acp_session_prompt
+        if "workspace_layout" in kwargs:
+            kwargs["workspace_layout"] = _normalize_workspace_layout(kwargs["workspace_layout"])
+        return build_acp_session_prompt(
+            self._config, self._system_prompt, self._memory, session_mode, **kwargs,
         )
-
-    def _build_action_hints_prompt(self, env_context: EnvContext | None = None) -> str:
-        """Detect onboarding / browser-tools scenarios and build the hint contract."""
-        memory_scarce = is_memory_scarce(self._memory.read_core() if self._memory else None)
-
-        try:
-            _user_mcp = state_path('config/mcp.json')
-            mcp_path = _user_mcp if _user_mcp.exists() else Config.find_config_file(self._config.tools.mcp_config_path)
-        except Exception:
-            mcp_path = None
-        playwright_unavailable = is_playwright_unavailable(
-            mcp_path,
-            mcp_globally_enabled=self._config.tools.enable_mcp,
-        ) or is_playwright_unavailable_from_env_context(env_context)
-
-        return build_action_hints_prompt(
-            memory_scarce=memory_scarce,
-            playwright_unavailable=playwright_unavailable,
-        )
-
-    def _build_session_prompt(
-        self,
-        session_mode: str | None,
-        workspace: Path | None = None,
-        policy: CapabilityPolicy | None = None,
-        env_context: EnvContext | None = None,
-        skill_runtime_context: SkillRuntimeContext | None = None,
-        expert_context: ExpertSessionContext | None = None,
-        artifact_mode: str = "output",
-        artifact_root: Path | None = None,
-        workspace_layout: Any = None,
-        follow_up_suggestions_enabled: bool = False,
-    ) -> str:
-        """Build system prompt with conditional mode-specific injection."""
-        _MODE_PROMPT_MAP = {
-            "data_analysis": "analysis_prompt_path",
-            "code_agent": "code_prompt_path",
-        }
-
-        use_output_dir = artifact_mode != "project"
-        base_prompt = compose_prompt_segments(
-            self._system_prompt,
-            replacements={
-                "{SANDBOX_INFO}": build_sandbox_info_prompt(
-                    use_output_dir=use_output_dir
-                ),
-                "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(
-                    use_output_dir=use_output_dir
-                ),
-            },
-            segments=(
-                PROJECT_WORKSPACE_MODE_PROMPT
-                if artifact_mode == "project"
-                else None,
-            ),
-        )
-        if workspace is not None:
-            base_prompt = append_prompt_segment(
-                base_prompt,
-                self._filesystem_access_prompt(workspace, policy),
-            )
-            layout_prompt = _workspace_layout_prompt(
-                workspace=workspace,
-                artifact_root=artifact_root or (workspace / "output").resolve(),
-                layout=workspace_layout,
-                artifact_mode=artifact_mode,
-            )
-            base_prompt = append_prompt_segment(base_prompt, layout_prompt)
-
-        if session_mode == "code_agent" and workspace is not None:
-            base_prompt = append_prompt_segment(
-                base_prompt,
-                build_project_startup_context_prompt(workspace),
-            )
-
-        env_prompt = build_env_context_prompt(env_context)
-        if env_prompt:
-            base_prompt = append_prompt_segment(base_prompt, env_prompt)
-
-        runtime_context = skill_runtime_context or build_skill_runtime_context(
-            sandbox_mode=True,
-            env_context=env_context,
-        )
-        base_prompt = append_prompt_segment(
-            base_prompt,
-            build_skill_runtime_prompt(runtime_context),
-        )
-
-        hints_prompt = self._build_action_hints_prompt(env_context)
-        if hints_prompt:
-            base_prompt = append_prompt_segment(base_prompt, hints_prompt)
-
-        if follow_up_suggestions_enabled:
-            base_prompt = append_prompt_segment(
-                base_prompt,
-                build_follow_up_suggestions_prompt(),
-            )
-
-        attr = _MODE_PROMPT_MAP.get(session_mode or "")
-        if attr:
-            prompt_filename = getattr(self._config.agent, attr, None)
-            if prompt_filename:
-                mode_path = Config.find_config_file(prompt_filename)
-                if mode_path and mode_path.exists():
-                    mode_prompt = mode_path.read_text(encoding="utf-8").strip()
-                    base_prompt = append_prompt_segment(
-                        base_prompt,
-                        mode_prompt,
-                        skip_empty=False,
-                    )
-                else:
-                    log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
-
-        if expert_context:
-            expert_prompt = expert_context.render_prompt()
-            if expert_prompt:
-                base_prompt = append_prompt_segment(base_prompt, expert_prompt)
-        return base_prompt
 
     def _has_officev3_policy(self) -> bool:
         """Check if officev3 capability policy is configured (not just defaults)."""
@@ -2483,6 +2305,23 @@ class BoxACPAgent:
         )
         _bind_user_source_text(state, source_binding_text)
         prompt_meta = getattr(params, "field_meta", None) or {}
+        if not state.utility_session:
+            selected_connector_ids = _connector_ids_from_meta(prompt_meta)
+            if selected_connector_ids is not None:
+                state.selected_connector_ids.clear()
+                state.selected_connector_ids.update(selected_connector_ids)
+            connector_statuses = _connector_statuses_from_meta(prompt_meta)
+            if connector_statuses is not None:
+                state.connector_statuses = connector_statuses
+                state.connector_status_unavailable = False
+            else:
+                connector_status_unavailable = _connector_status_unavailable_from_meta(
+                    prompt_meta
+                )
+                if connector_status_unavailable is not None:
+                    state.connector_status_unavailable = connector_status_unavailable
+                    if connector_status_unavailable:
+                        state.connector_statuses = None
         user_decision_response = _user_decision_response_from_meta(prompt_meta)
         if user_decision_response is not None:
             user_text = (
@@ -2502,6 +2341,13 @@ class BoxACPAgent:
                 "explicitly requests another language.]\n\n"
                 f"{user_text}"
             )
+        if not state.utility_session:
+            connector_status = _connector_status_context(
+                state.selected_connector_ids,
+                state.connector_statuses,
+                state.connector_status_unavailable,
+            )
+            user_text = f"{user_text.rstrip()}\n\n{connector_status}"
         requested_llm_binding = _normalize_llm_binding(prompt_meta)
         if requested_llm_binding is not None and requested_llm_binding != state.llm_binding:
             if state.turn_active:
@@ -2594,7 +2440,6 @@ class BoxACPAgent:
             begin_task(
                 state.agent.workspace_dir,
                 task_context,
-                artifact_root_dir=state.output_dir,
             )
         except Exception as exc:
             state.task_registry_error = str(exc)
@@ -2779,10 +2624,22 @@ class BoxACPAgent:
             if state.skill_selector is not None
             else ()
         )
+        if state.skill_loader is not None:
+            for skill_name in matched_skill_names:
+                skill = state.skill_loader.get_skill(skill_name)
+                if skill is not None and _connector_skill_is_available(
+                    skill, state.selected_connector_ids
+                ):
+                    state.connector_skill_grants.add(skill.name)
         explicit_skill = resolve_explicit_skill_invocation(
             state.skill_loader,
             plan_detection_text,
         )
+        if (
+            explicit_skill is not None
+            and getattr(explicit_skill, "source", None) == "connector"
+        ):
+            explicit_skill = None
         requested_host_skills = (
             _meta_string_list(prompt_meta, "selected_skill_names", limit=8)
             or _meta_string_list(prompt_meta, "selectedSkillNames", limit=8)
@@ -2791,7 +2648,8 @@ class BoxACPAgent:
             name
             for name in requested_host_skills
             if state.skill_loader is not None
-            and state.skill_loader.get_skill(name) is not None
+            and (skill := state.skill_loader.get_skill(name)) is not None
+            and getattr(skill, "source", None) != "connector"
         )
         explicitly_selected_skill_names = tuple(
             dict.fromkeys(
@@ -2819,20 +2677,14 @@ class BoxACPAgent:
                 skills=",".join(host_selected_skill_names),
             )
 
-        if state.skill_selector is not None:
-            preload_names = self._turn_preload_skill_names(
-                state.skill_selector.matched_skill_names,
-                state.env_context,
-                plan_detection_text,
-                selected_skill_names=explicitly_selected_skill_names,
-            )
-            state.explicitly_allowed_skill_names.update(preload_names)
-            if preload_names:
-                self._apply_auto_loaded_skills(state, session_id, preload_names)
-            elif state.preloaded_skill_names:
-                self._apply_auto_loaded_skills(state, session_id, [])
-            else:
-                self._sync_cache_fingerprint_context(state)
+        if state.agent.skill_runtime is not None:
+            state.agent.skill_runtime.select(explicitly_selected_skill_names)
+        # Compatibility views describe only successful delivery in this turn;
+        # selection and directory matches do not own a second loading state.
+        state.preloaded_skill_names.clear()
+        state.preloaded_skill_hashes.clear()
+        state.preloaded_skill_attributions.clear()
+        self._sync_cache_fingerprint_context(state)
 
         if image_attachment_context:
             user_text = f"{user_text}\n\n{image_attachment_context}"
@@ -3019,7 +2871,6 @@ class BoxACPAgent:
                 state.agent.workspace_dir,
                 task_context,
                 execution_status=execution_status,
-                artifact_root_dir=state.output_dir,
             )
         except Exception as exc:
             state.task_registry_error = str(exc)
@@ -3361,11 +3212,93 @@ class BoxACPAgent:
             except WorkspaceRegistryError as exc:
                 return {"error": str(exc)}
         if method == "mcp/status":
-            from box_agent.tools.mcp_loader import get_mcp_status, is_mcp_loading, get_mcp_config_path
+            from box_agent.tools.mcp_loader import (
+                get_mcp_config_path,
+                get_mcp_config_paths,
+                get_mcp_status,
+                is_mcp_loading,
+            )
             servers = get_mcp_status()
             loading = is_mcp_loading()
             log.info("mcp/status", count=len(servers), loading=loading)
-            return {"servers": servers, "loading": loading, "configPath": get_mcp_config_path()}
+            return {
+                "servers": servers,
+                "loading": loading,
+                "configPath": get_mcp_config_path(),
+                "configPaths": get_mcp_config_paths(),
+            }
+        if method == "mcp/credential/set":
+            credential_ref = params.get("credentialRef", "")
+            headers = params.get("headers", {})
+            if not isinstance(credential_ref, str) or not isinstance(headers, dict):
+                return {"success": False, "error": "credentialRef and headers are required"}
+            from box_agent.tools.mcp_loader import set_mcp_runtime_credential
+            try:
+                affected = set_mcp_runtime_credential(credential_ref, headers)
+            except ValueError as error:
+                return {"success": False, "error": str(error)}
+            log.info("mcp/credential/set", affected_servers=len(affected))
+            return {"success": True, "affectedServers": affected}
+        if method == "mcp/credential/clear":
+            credential_ref = params.get("credentialRef", "")
+            if not isinstance(credential_ref, str) or not credential_ref.strip():
+                return {"success": False, "error": "credentialRef is required"}
+            from box_agent.tools.mcp_loader import clear_mcp_runtime_credential
+            affected = clear_mcp_runtime_credential(credential_ref)
+            log.info("mcp/credential/clear", affected_servers=len(affected))
+            return {"success": True, "affectedServers": affected}
+        if method in {"mcp/reconcile", "mcp/source/replace"}:
+            source = params.get("source")
+            if source is not None and not isinstance(source, str):
+                return {"success": False, "error": "source must be a string"}
+            from box_agent.tools.mcp_loader import (
+                get_all_mcp_tools,
+                get_mcp_tools_for_server,
+                reconcile_mcp_sources,
+                replace_mcp_source,
+            )
+            if method == "mcp/source/replace":
+                config = params.get("config")
+                if not isinstance(source, str) or not isinstance(config, dict):
+                    return {"success": False, "error": "source and config are required"}
+                connector_ids = params.get("connectorIds")
+                if connector_ids is not None:
+                    result = await replace_mcp_source(source, config, connector_ids)
+                else:
+                    result = await replace_mcp_source(source, config)
+            else:
+                result = await reconcile_mcp_sources(source)
+            if not self._config.tools.mcp.deferred_loading_enabled:
+                self._sync_mcp_registries(get_all_mcp_tools())
+            injected = 0
+            for item in result.get("results", []):
+                name = item.get("name", "")
+                if not name:
+                    continue
+                tools = get_mcp_tools_for_server(name)
+                action = item.get("action")
+                if action in {"removed", "disabled"}:
+                    state = "disconnected"
+                elif item.get("success"):
+                    state = "connected"
+                else:
+                    state = "failed"
+                injected += self._inject_mcp_runtime_update(
+                    name=name,
+                    state=state,
+                    tool_count=len(tools),
+                    always_load_count=sum(
+                        bool(getattr(tool, "mcp_always_load", False)) for tool in tools
+                    ),
+                )
+            log.info(
+                method,
+                source=source,
+                success=result.get("success"),
+                changed=len(result.get("results", [])),
+                context_injected_sessions=injected,
+            )
+            return result
         if method == "mcp/reconnect":
             name = params.get("name", "")
             if not name:
@@ -3442,7 +3375,7 @@ class BoxACPAgent:
         injected = 0
         update_id = uuid4().hex
         for session_id, session in self._sessions.items():
-            if not session.turn_active:
+            if session.utility_session or not session.turn_active:
                 continue
             if state == "ready":
                 visibility = (
@@ -3977,10 +3910,6 @@ class BoxACPAgent:
 
         skill_name_by_tool_call_id: dict[str, str] = {}
         used_skill_names: list[str] = []
-        for preloaded_skill_name in run_handle.preloaded_skill_names:
-            preloaded_skill_name = preloaded_skill_name.strip()
-            if preloaded_skill_name and preloaded_skill_name not in used_skill_names:
-                used_skill_names.append(preloaded_skill_name)
         skill_invocations: list[dict[str, Any]] = []
         recorded_skill_invocation_ids: set[str] = set()
         used_tool_counts: dict[str, int] = {}
@@ -3992,7 +3921,6 @@ class BoxACPAgent:
         artifact_observer = ArtifactObserver(
             workspace_dir=state.agent.workspace_dir,
             task_context=task_context,
-            artifact_root_dir=state.output_dir,
             register_revision=register_artifact_revision,
         )
         usage_tool_call_id = f"turn-usage-{uuid4().hex[:8]}"
@@ -4012,6 +3940,7 @@ class BoxACPAgent:
             *,
             usage_role: str = "primary",
             dependency_of: str | None = None,
+            metadata: dict[str, Any] | None = None,
         ) -> dict[str, Any] | None:
             invocation_key = "\x1f".join(
                 (
@@ -4034,10 +3963,17 @@ class BoxACPAgent:
             if usage_role == "dependency" and dependency_of:
                 invocation["dependencyOf"] = dependency_of
 
-            if state.skill_loader is not None:
+            if metadata:
+                for field, key in (("skillSource", "source"),
+                                   ("skillVersion", "skill_version"),
+                                   ("instructionDigest", "instruction_digest")):
+                    value = metadata.get(key)
+                    if isinstance(value, str) and value:
+                        invocation[field] = value
+            elif state.skill_loader is not None:
                 skill = state.skill_loader.get_skill(
                     skill_name,
-                    include_disabled=state.expert_context is not None,
+                    include_disabled=False,
                 )
                 # A broken SKILL.md returns a diagnostic from get_skill but does
                 # not activate usable instructions, so it is not a billable fact.
@@ -4077,21 +4013,45 @@ class BoxACPAgent:
             skill_invocations.append(invocation)
             return invocation
 
-        for preloaded_skill_name in used_skill_names:
-            attribution = run_handle.preloaded_skill_attributions.get(preloaded_skill_name)
-            _record_skill_invocation(
-                preloaded_skill_name,
-                "preloaded",
-                usage_role=attribution.usage_role if attribution else "primary",
-                dependency_of=attribution.dependency_of if attribution else None,
-            )
+        def _skill_usage_attribution(skill_name: str, metadata: dict[str, Any]) -> tuple[str, str | None]:
+            if skill_name in explicitly_selected_skill_names:
+                return "primary", None
+            if metadata.get("usage_role") == "dependency" and metadata.get("dependency_of"):
+                return "dependency", metadata["dependency_of"]
+            runtime = agent.skill_runtime
+            deliveries = runtime.turn_deliveries if runtime is not None else {}
+            parents = {
+                dependency: parent
+                for parent, delivery in deliveries.items()
+                for dependency in delivery.get("required_skills", ())
+                if dependency not in explicitly_selected_skill_names
+            }
+            parent = parents.get(skill_name)
+            if parent is None:
+                return "primary", None
+            visited = {skill_name}
+            while parent in parents and parent not in visited:
+                visited.add(parent)
+                parent = parents[parent]
+            return "dependency", parent
 
-        def _record_skill_usage(skill_name: str | None) -> dict[str, Any] | None:
+        def _record_skill_usage(skill_name: str | None, raw_output: Any = None) -> dict[str, Any] | None:
             if not skill_name:
+                return None
+            metadata = raw_output.get("skill_reference", {}) if isinstance(raw_output, dict) else {}
+            runtime = agent.skill_runtime
+            if not metadata and runtime is not None:
+                metadata = runtime.turn_deliveries.get(skill_name, {})
+            # Real Skill reads must carry a successful reference, not merely
+            # ToolResult.success on a diagnostic. Legacy custom Skill tools
+            # without a loader retain their existing event contract.
+            if not metadata and getattr(agent.tools.get("get_skill"), "skill_loader", None) is not None:
                 return None
             if skill_name not in used_skill_names:
                 used_skill_names.append(skill_name)
-            _record_skill_invocation(skill_name, "get_skill")
+            role, dependency = _skill_usage_attribution(skill_name, metadata)
+            _record_skill_invocation(skill_name, "get_skill", usage_role=role,
+                                     dependency_of=dependency, metadata=metadata)
             return {
                 "type": "skills_usage",
                 "skills": list(used_skill_names),
@@ -4214,16 +4174,32 @@ class BoxACPAgent:
                 update_tool_call(tool_call_id, raw_output=payload),
             )
 
-        for explicitly_selected_skill_name in explicitly_selected_skill_names:
-            await _send_skill_usage(
-                f"explicit-skill-{uuid4().hex[:8]}",
-                {
-                    "type": "skills_usage",
-                    "skills": list(used_skill_names),
-                    "current": explicitly_selected_skill_name,
-                    "activationSource": "explicit",
-                },
-            )
+        delivered_explicit_names: set[str] = set()
+
+        async def _sync_explicit_skill_deliveries() -> None:
+            runtime = agent.skill_runtime
+            if runtime is None:
+                return
+            for name in explicitly_selected_skill_names:
+                metadata = runtime.turn_deliveries.get(name)
+                if name in delivered_explicit_names or not metadata or metadata.get("reason") != "explicit":
+                    continue
+                delivered_explicit_names.add(name)
+                if name not in used_skill_names:
+                    used_skill_names.append(name)
+                role, dependency = _skill_usage_attribution(name, metadata)
+                _record_skill_invocation(name, "preloaded", usage_role=role,
+                                         dependency_of=dependency, metadata=metadata)
+                state.preloaded_skill_names.append(name)
+                state.preloaded_skill_hashes[name] = metadata["revision"]
+                state.preloaded_skill_attributions[name] = SkillPreloadAttribution(
+                    skill_name=name, usage_role=role, dependency_of=dependency,
+                )
+                await _send_skill_usage(f"explicit-skill-{uuid4().hex[:8]}", {
+                    "type": "skills_usage", "skills": list(used_skill_names),
+                    "current": name, "activationSource": "explicit",
+                })
+            self._sync_cache_fingerprint_context(state)
 
         async def _generate_follow_up_suggestions(
             latest_user_request: str,
@@ -4362,21 +4338,13 @@ class BoxACPAgent:
                     if run_handle.skill_selector is not None
                     else ()
                 ),
-                # Explicit user requirements are active policy inputs even
-                # before the model calls get_skill on demand.
-                tuple(
-                    dict.fromkeys(
-                        (
-                            *run_handle.preloaded_skill_names,
-                            *sorted(run_handle.explicitly_allowed_skill_names),
-                        )
-                    )
-                ),
+                # Explicit user policy is independent of whether its reference
+                # fits in the next request. Ordinary reads do not raise quotas.
+                tuple(sorted(run_handle.explicitly_allowed_skill_names)),
                 tool_limits=run_handle.config.tool_limits,
                 execution_profile=state.execution_profile,
             ),
-            artifact_detection_enabled=state.output_dir is not None,
-            artifact_root_dir=state.output_dir,
+            artifact_detection_enabled=True,
             cache_fingerprint_sink=lambda fingerprint: self._log_cache_fingerprint(
                 session_id,
                 fingerprint,
@@ -4393,6 +4361,7 @@ class BoxACPAgent:
         async with aclosing(events):
             async for event in events:
                 try:
+                    await _sync_explicit_skill_deliveries()
                     match event:
                         case ThinkingEvent() if event._streaming:
                             # Stream thinking deltas in real-time
@@ -4584,7 +4553,7 @@ class BoxACPAgent:
                                 )
                             _update_pending_plan_approval_from_raw(state, raw_output)
                             skill_usage_payload = (
-                                _record_skill_usage(skill_name_by_tool_call_id.get(tid))
+                                _record_skill_usage(skill_name_by_tool_call_id.get(tid), raw_output)
                                 if tname == "get_skill" and ok
                                 else None
                             )
@@ -4603,7 +4572,6 @@ class BoxACPAgent:
                                 result_text,
                                 policy_decision,
                                 session_id=state.upstream_session_id,
-                                output_dir=state.output_dir,
                                 task_id=task_context.task_id,
                                 turn_id=task_context.turn_id,
                             )
@@ -4644,7 +4612,6 @@ class BoxACPAgent:
                                 )
                             artifact_meta = _artifact_envelope(
                                 art,
-                                state.output_dir,
                                 session_id=state.upstream_session_id,
                                 task_id=task_context.task_id,
                                 turn_id=task_context.turn_id,
@@ -4762,7 +4729,7 @@ class BoxACPAgent:
                                 and inner.success
                             ):
                                 skill_usage_payload = _record_skill_usage(
-                                    skill_name_by_tool_call_id.get(inner.tool_call_id)
+                                    skill_name_by_tool_call_id.get(inner.tool_call_id), inner.raw_output,
                                 )
                                 if skill_usage_payload:
                                     await _send_skill_usage(tid, skill_usage_payload)
@@ -4817,7 +4784,6 @@ class BoxACPAgent:
                                         )
                                     progress["artifact"] = _artifact_envelope(
                                         art,
-                                        state.output_dir,
                                         session_id=state.upstream_session_id,
                                         task_id=task_context.task_id,
                                         turn_id=task_context.turn_id,
@@ -5421,6 +5387,9 @@ async def run_acp_server(config: Config | None = None) -> None:
         sys.stderr.flush()
 
     shutdown_event = asyncio.Event()
+    server_adapter: BoxACPAgent | None = None
+    llm = lite_llm = None
+    mcp_task = skill_task = memory_bootstrap_task = None
     loop = asyncio.get_running_loop()
     installed_signal_handlers: list[signal.Signals] = []
     for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
@@ -5535,8 +5504,8 @@ async def run_acp_server(config: Config | None = None) -> None:
         else:
             system_prompt = "You are a helpful AI assistant."
 
-        # SANDBOX_INFO is injected per session because officev3 can mark an ACP
-        # session as an existing project workspace instead of output-artifact mode.
+        # SANDBOX_INFO is injected per session so every session gets the same
+        # cwd-rooted file and sandbox contract.
 
         # NOTE: actual skill list is injected per-turn via SkillSelector
         # (keyword-filtered against the cumulative user query). Here we keep a
@@ -5582,7 +5551,16 @@ async def run_acp_server(config: Config | None = None) -> None:
         _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
 
         sys.stdout = sys.stderr
-        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader, mcp_task=mcp_task, skill_task=skill_task, lite_llm=lite_llm), writer, reader)
+        def create_adapter(conn):
+            nonlocal server_adapter
+            server_adapter = BoxACPAgent(
+                conn, config, llm, base_tools, system_prompt,
+                memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader,
+                mcp_task=mcp_task, skill_task=skill_task, lite_llm=lite_llm,
+            )
+            return server_adapter
+
+        AgentSideConnection(create_adapter, writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         _stderr_print("✅ ACP protocol ready; MCP loading continues in background")
@@ -5593,15 +5571,44 @@ async def run_acp_server(config: Config | None = None) -> None:
         log.exception("server/error", exc, message="ACP server failed to start")
         raise
     finally:
-        terminated_bash_ids = await BackgroundShellManager.terminate_all()
-        if terminated_bash_ids:
-            log.info(
-                "bash/runtime_cleanup",
-                count=len(terminated_bash_ids),
-                bash_ids=terminated_bash_ids,
-            )
-        for shutdown_signal in installed_signal_handlers:
-            loop.remove_signal_handler(shutdown_signal)
+        from box_agent.session_assembly import close_owned_clients
+        from box_agent.tools.mcp_loader import cleanup_mcp_connections
+        from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
+        async def stop_background_task(task):
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        async def stop_background_shells():
+            terminated_bash_ids = await BackgroundShellManager.terminate_all()
+            if terminated_bash_ids:
+                log.info(
+                    "bash/runtime_cleanup", count=len(terminated_bash_ids),
+                    bash_ids=terminated_bash_ids,
+                )
+
+        from box_agent.session_assembly import attach_cleanup_error
+
+        primary_error = sys.exc_info()[1]
+        try:
+            # ExitStack runs all releases even when an earlier resource fails.
+            async with AsyncExitStack() as shutdown:
+                for shutdown_signal in installed_signal_handlers:
+                    shutdown.callback(loop.remove_signal_handler, shutdown_signal)
+                shutdown.push_async_callback(stop_background_shells)
+                shutdown.push_async_callback(close_owned_clients, (llm, lite_llm))
+                shutdown.push_async_callback(cleanup_mcp_connections)
+                shutdown.push_async_callback(JupyterSandboxTool.shutdown_all)
+                for task in (mcp_task, skill_task, memory_bootstrap_task):
+                    if task is not None:
+                        shutdown.push_async_callback(stop_background_task, task)
+                if server_adapter is not None:
+                    shutdown.push_async_callback(server_adapter.aclose)
+        except BaseException as cleanup_error:
+            if primary_error is None:
+                raise
+            attach_cleanup_error(primary_error, cleanup_error)
 
 
 def main() -> None:

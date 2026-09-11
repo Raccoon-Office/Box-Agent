@@ -174,20 +174,20 @@ def _download_and_normalize(
         temp_path.unlink(missing_ok=True)
 
 
-def _artifact_root(manifest_path: Path) -> Path:
+def _presentation_directory(manifest_path: Path) -> Path:
     resolved = manifest_path.resolve()
     if len(resolved.parents) < 3:
-        raise ValueError("manifest path cannot resolve an artifact root")
+        raise ValueError("manifest path cannot resolve a presentation directory")
     return resolved.parents[2]
 
 
-def _resolve_artifact_path(artifact_root: Path, relative_path: str) -> Path:
+def _resolve_presentation_path(presentation_dir: Path, relative_path: str) -> Path:
     path_value = Path(str(relative_path or ""))
     if not relative_path or path_value.is_absolute() or ".." in path_value.parts:
-        raise ValueError("path must be artifact-root-relative")
-    resolved = (artifact_root / path_value).resolve()
-    if resolved != artifact_root and artifact_root not in resolved.parents:
-        raise ValueError("path escapes the artifact root")
+        raise ValueError("path must be presentation-directory-relative")
+    resolved = (presentation_dir / path_value).resolve()
+    if resolved != presentation_dir and presentation_dir not in resolved.parents:
+        raise ValueError("path escapes the presentation directory")
     return resolved
 
 
@@ -211,7 +211,7 @@ def _read_manifest(manifest_path: Path) -> tuple[dict, list[dict], Path]:
     image_plan = manifest.get("image_plan") if isinstance(manifest, dict) else None
     if not isinstance(image_plan, list):
         raise ValueError("manifest.image_plan must be an array")
-    return manifest, image_plan, _artifact_root(resolved)
+    return manifest, image_plan, _presentation_directory(resolved)
 
 
 def _web_entry(image_plan: list[dict], slide: int) -> dict:
@@ -242,10 +242,10 @@ def import_candidate(
     timeout: int = REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
     manifest_path = manifest_path.resolve()
-    manifest, image_plan, artifact_root = _read_manifest(manifest_path)
+    manifest, image_plan, presentation_dir = _read_manifest(manifest_path)
     candidate_resolved = candidate_path.resolve()
-    if artifact_root not in candidate_resolved.parents:
-        raise ValueError("candidate file must be inside the presentation artifact root")
+    if presentation_dir not in candidate_resolved.parents:
+        raise ValueError("candidate file must be inside the presentation directory")
     candidate = _load_candidate(candidate_resolved)
     entry = _web_entry(image_plan, candidate.slide)
     search = entry["search"]
@@ -255,8 +255,8 @@ def import_candidate(
         raise ValueError("candidate.query must exactly match the scaffolded search query")
 
     _reject_reported_quality(candidate)
-    target_path = _resolve_artifact_path(
-        artifact_root,
+    target_path = _resolve_presentation_path(
+        presentation_dir,
         str(search.get("output_path") or ""),
     )
     width, height = _download_and_normalize(
@@ -320,7 +320,7 @@ def mark_search(
     if status not in TERMINAL_SEARCH_STATUSES:
         raise ValueError("status must be exhausted or unavailable")
     manifest_path = manifest_path.resolve()
-    manifest, image_plan, _artifact_root_path = _read_manifest(manifest_path)
+    manifest, image_plan, _presentation_dir = _read_manifest(manifest_path)
     entry = _web_entry(image_plan, slide)
     search = entry["search"]
     search["status"] = status

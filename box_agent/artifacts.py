@@ -1,4 +1,4 @@
-"""Artifact naming, output-directory, and metadata helpers.
+"""Artifact naming and metadata helpers.
 
 These helpers are shared by the runtime and host/tool integrations.  Keeping
 them outside the agent loop lets integrations use the artifact contract
@@ -18,15 +18,11 @@ from .events import ArtifactEvent
 from .roadmap_artifacts import roadmap_metadata_for_html_artifact
 
 __all__ = [
-    "OUTPUT_SUBDIR",
     "artifact_scan_root",
     "avoid_collision",
-    "ensure_output_dir",
     "make_artifact",
     "safe_output_name",
 ]
-
-OUTPUT_SUBDIR: Final[str] = "output"
 
 _MIME_KIND_PREFIX = (
     ("image/", "image"),
@@ -139,23 +135,13 @@ def _classify_kind(filename: str, mime: str | None) -> str:
     return _EXT_KIND.get(Path(filename).suffix.lower(), "file")
 
 
-def ensure_output_dir(workspace_dir: str | Path) -> Path:
-    """Return ``{workspace}/output/``, creating it if needed."""
-    output_dir = Path(workspace_dir).expanduser().resolve() / OUTPUT_SUBDIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
-
-
 def artifact_scan_root(
     workspace_dir: str | Path | None,
-    artifact_root_dir: str | Path | None = None,
 ) -> Path | None:
-    """Resolve the root used for artifact discovery without creating it."""
-    if artifact_root_dir:
-        return Path(artifact_root_dir).expanduser().resolve()
+    """Resolve the session cwd used for artifact discovery without creating it."""
     if not workspace_dir:
         return None
-    return Path(workspace_dir).expanduser().resolve() / OUTPUT_SUBDIR
+    return Path(workspace_dir).expanduser().resolve()
 
 
 def safe_output_name(name: str, *, default_ext: str = "") -> str:

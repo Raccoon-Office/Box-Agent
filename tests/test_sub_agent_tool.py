@@ -502,7 +502,7 @@ def test_agent_wires_system_prompt_into_sub_agent(tmp_path):
     assert "Current Workspace" in tool._parent_system_prompt
 
 
-def test_sub_agent_does_not_inherit_parent_managed_skill_bodies():
+def test_sub_agent_does_not_split_arbitrary_parent_text_at_skill_headings():
     tool = SubAgentTool(llm=AsyncMock(), parent_tools={})
     parent_prompt = (
         "Stable parent safety constraint.\n\n"
@@ -512,7 +512,7 @@ def test_sub_agent_does_not_inherit_parent_managed_skill_bodies():
 
     tool.set_parent_system_prompt(parent_prompt)
 
-    assert tool._parent_system_prompt == "Stable parent safety constraint."
+    assert tool._parent_system_prompt == parent_prompt
 
 
 async def test_agent_run_wires_parent_permission_negotiator_into_sub_agent(tmp_path):
@@ -1025,7 +1025,7 @@ async def test_event_context_missing_task_returns_structured_failure():
     llm.generate_stream.assert_not_called()
 
 
-async def test_selected_skills_are_loaded_into_new_prompt_only(tmp_path):
+async def test_selected_skills_are_delivered_as_child_user_references(tmp_path):
     skill_dir = tmp_path / "review-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
@@ -1065,8 +1065,235 @@ Follow the REVIEW-SKILL-CONTENT rubric.
     )
 
     assert result.success is True
-    assert "REVIEW-SKILL-CONTENT" in captured_messages[0].content
+    assert "REVIEW-SKILL-CONTENT" not in captured_messages[0].content
+    assert "REVIEW-SKILL-CONTENT" in captured_messages[1].content
+    assert "delegated Skill reference" in captured_messages[1].content
     assert result.raw_output["resolved_skills"] == ["review-skill"]
+
+
+@pytest.mark.parametrize("token_limit", [1024, 50_000])
+async def test_tool_free_child_receives_required_skill_closure_only_as_references(tmp_path, token_limit):
+    for name, requirement in (("method", "required_skills: [base]\n"), ("base", ""), ("unselected", "")):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} reference\n{requirement}---\n"
+            f"PRIVATE-{name.upper()}-BODY\n",
+            encoding="utf-8",
+        )
+    loader = SkillLoader(tmp_path)
+    loader.discover_skills()
+    requests = []
+
+    async def capture(*, messages, tools, **kwargs):
+        requests.append(([message.model_copy(deep=True) for message in messages], tools))
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = AsyncMock()
+    llm.generate_stream = capture
+    tool = SubAgentTool(llm=llm, parent_tools={}, workspace_dir=str(tmp_path), token_limit=token_limit)
+    tool.set_skill_provider(lambda: loader)
+    result = await tool.execute(task="Apply the delegated rubric", required_tools=[], skills=["method"])
+
+    assert result.success
+    assert result.raw_output["resolved_skills"] == ["base", "method"]
+    assert result.raw_output["resolved_tools"] == []
+    messages, tools = requests[0]
+    assert not tools
+    assert "PRIVATE-" not in messages[0].content
+    assert "PRIVATE-BASE-BODY" in messages[1].content
+    assert "PRIVATE-METHOD-BODY" in messages[1].content
+    assert "PRIVATE-UNSELECTED-BODY" not in str(messages)
+
+
+async def test_child_skill_tools_only_expose_delegated_closure_in_real_requests(tmp_path):
+    from box_agent.schema import FunctionCall, ToolCall
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    for name, dependency in (("method", "required_skills: [base]\n"), ("base", ""), ("outside", "")):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n{dependency}---\nSECRET-{name}\n",
+            encoding="utf-8",
+        )
+    loader = SkillLoader(tmp_path)
+    loader.discover_skills()
+    parent_get = GetSkillTool(loader)
+    parent_list = ListSkillsTool(loader)
+    requests = []
+    calls = [("list_skills", {}), ("get_skill", {"skill_name": "outside"}),
+             ("get_skill", {"skill_name": "base"})]
+
+    async def capture(*, messages, tools, **kwargs):
+        requests.append([message.model_copy(deep=True) for message in messages])
+        index = len(requests) - 1
+        if index < len(calls):
+            name, arguments = calls[index]
+            yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                ToolCall(id=f"child-skill-{index}", type="function",
+                         function=FunctionCall(name=name, arguments=arguments))
+            ])
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = AsyncMock()
+    llm.generate_stream = capture
+    tool = SubAgentTool(llm=llm, parent_tools={"get_skill": parent_get, "list_skills": parent_list},
+                        workspace_dir=str(tmp_path))
+    tool.set_skill_provider(lambda: loader)
+    result = await tool.execute(task="Use the assigned method", skills=["method"],
+                                required_tools=["get_skill", "list_skills"])
+
+    assert result.success
+    assert result.raw_output["resolved_tools"] == ["get_skill", "list_skills"]
+    tool_messages = {message.tool_call_id: message for message in requests[-1] if message.role == "tool"}
+    assert '"total": 2' in tool_messages["child-skill-0"].content
+    assert '"outside"' not in tool_messages["child-skill-0"].content
+    assert "assigned scope" in tool_messages["child-skill-1"].content
+    assert "SECRET-base" in tool_messages["child-skill-2"].content
+    assert "SECRET-outside" not in str(requests)
+    assert parent_get.allowed_skill_names is None
+    assert parent_list.allowed_skill_names is None
+
+
+@pytest.mark.parametrize("blocked", ["method", "base"])
+async def test_child_delegation_cannot_read_parent_profile_blocked_skill(tmp_path, blocked):
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    for name, dependency in (("method", "required_skills: [base]\n"), ("base", "")):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n{dependency}---\nBODY-{name}\n",
+            encoding="utf-8",
+        )
+    loader = SkillLoader(tmp_path)
+    loader.discover_skills()
+    llm = AsyncMock()
+    parent_get = GetSkillTool(loader, blocked_skill_names={blocked})
+    tool = SubAgentTool(llm=llm, parent_tools={"get_skill": parent_get}, workspace_dir=str(tmp_path))
+    tool.set_skill_provider(lambda: loader)
+
+    result = await tool.execute(task="Use this method", required_tools=[], skills=["method"])
+
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_PROFILE_BLOCKED"
+    assert result.raw_output["skill"] == blocked
+    llm.generate_stream.assert_not_called()
+
+
+async def test_child_skill_tool_clones_preserve_profile_and_narrow_parent_scope(tmp_path, monkeypatch):
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    directory = tmp_path / "selected"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text("---\nname: selected\ndescription: selected\n---\nBODY\n")
+    loader = SkillLoader(tmp_path)
+    loader.discover_skills()
+    explicit = {"selected", "outside"}
+    parent_get = GetSkillTool(loader, allowed_skill_names=frozenset({"selected", "outside"}),
+                             blocked_skill_names={"selected", "outside"},
+                             explicitly_allowed_skill_names=explicit)
+    parent_list = ListSkillsTool(loader, blocked_skill_names={"selected", "outside"},
+                                explicitly_allowed_skill_names=explicit)
+    tool = SubAgentTool(llm=_make_llm(), parent_tools={"get_skill": parent_get, "list_skills": parent_list})
+    tool.set_skill_provider(lambda: loader)
+    captured = {}
+
+    async def run_child(**kwargs):
+        captured.update(kwargs["child_tools"])
+        return ToolResult(success=True, content="done")
+
+    monkeypatch.setattr(tool, "_run_general_loop", run_child)
+    result = await tool.execute(task="Use the selected method", skills=["selected"],
+                                required_tools=["get_skill", "list_skills"])
+
+    assert result.success
+    for name, parent in (("get_skill", parent_get), ("list_skills", parent_list)):
+        child = captured[name]
+        assert child is not parent
+        assert child.skill_loader is loader
+        assert child.allowed_skill_names == frozenset({"selected"})
+        assert child.blocked_skill_names == frozenset({"selected", "outside"})
+        assert child.explicitly_allowed_skill_names == {"selected"}
+        child.explicitly_allowed_skill_names.clear()
+    assert explicit == {"selected", "outside"}
+
+
+@pytest.mark.parametrize("reader", [None, "list_skills", "get_skill", "read_file", "batch_read_file"])
+async def test_oversized_child_skill_bundle_requires_granted_read_capability(tmp_path, reader):
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    directory = tmp_path / "large"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text(
+        "---\nname: large\ndescription: large method\n---\n" + "LONG-METHOD-RULE\n" * 5000,
+        encoding="utf-8",
+    )
+    loader = SkillLoader(tmp_path)
+    loader.discover_skills()
+    (tmp_path / "input.txt").write_text("Small task input\n")
+    requests = []
+
+    async def capture(*, messages, tools, **kwargs):
+        requests.append([message.model_copy(deep=True) for message in messages])
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = AsyncMock()
+    llm.generate.return_value = LLMResponse(content="done", finish_reason="stop")
+    llm.generate_stream = capture
+    parent_tools = {"get_skill": GetSkillTool(loader), "list_skills": ListSkillsTool(loader),
+                    "read_file": ReadTool(workspace_dir=str(tmp_path))}
+    tool = SubAgentTool(llm=llm, parent_tools=parent_tools, token_limit=3000, workspace_dir=str(tmp_path))
+    tool.set_skill_provider(lambda: loader)
+    result = await tool.execute(task="Apply this method", skills=["large"],
+                                required_tools=["read_file" if reader == "batch_read_file" else reader] if reader else [],
+                                files=["input.txt"] if reader == "batch_read_file" else None)
+
+    if reader in {"get_skill", "read_file"}:
+        assert result.success
+        assert result.raw_output["resolved_tools"] == [reader]
+        assert "LONG-METHOD-RULE" not in str(requests)
+        assert "Read the assigned Skills before applying their steps" in requests[0][1].content
+        assert "large" in requests[0][1].content
+        if reader == "read_file":
+            assert str(directory / "SKILL.md") in requests[0][1].content
+    else:
+        assert not result.success
+        assert result.raw_output["code"] == "SKILL_REFERENCE_BUDGET_EXCEEDED"
+        assert result.raw_output["model_calls"] == 0
+        assert not requests
+        llm.generate.assert_not_called()
+
+
+async def test_batch_skill_budget_counts_prefetched_file_bodies_before_model(tmp_path):
+    directory = tmp_path / "method"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text("---\nname: method\ndescription: method\n---\nUse the rubric\n")
+    (tmp_path / "input.txt").write_text("Batch file input line\n" * 1000)
+    loader = SkillLoader(tmp_path)
+    loader.discover_skills()
+    llm = AsyncMock()
+    llm.generate.return_value = LLMResponse(content="done", finish_reason="stop")
+    tool = SubAgentTool(llm=llm, parent_tools={"read_file": ReadTool(workspace_dir=str(tmp_path))},
+                        workspace_dir=str(tmp_path), token_limit=3000)
+    tool.set_skill_provider(lambda: loader)
+
+    result = await tool.execute(task="Apply the method to input", skills=["method"],
+                                required_tools=["read_file"], files=["input.txt"])
+
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_REFERENCE_BUDGET_EXCEEDED"
+    assert result.raw_output["model_calls"] == 0
+    assert result.raw_output["tool_calls"] == 1
+    llm.generate.assert_not_called()
 
 
 async def test_capability_state_provider_drives_not_ready_error():

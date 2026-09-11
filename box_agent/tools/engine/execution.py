@@ -37,7 +37,8 @@ async def invoke_tool_once(
     context: ToolInvocationContext | None = None,
 ) -> ToolResult:
     """Invoke the validated tool interface once, preserving legacy overrides."""
-    if isinstance(tool, EventEmittingTool) and context is not None:
+    if context is not None and (isinstance(tool, EventEmittingTool)
+                               or getattr(tool, "uses_invocation_context", False)):
         return await tool.invoke(arguments, context=context)
     return await tool.invoke(arguments)
 

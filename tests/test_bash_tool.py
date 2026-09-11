@@ -1,9 +1,12 @@
 """Test cases for Bash Tool."""
 
 import asyncio
+import json
 import math
 import os
 import shlex
+import shutil
+import subprocess
 import sys
 import unittest.mock
 from pathlib import Path
@@ -310,6 +313,149 @@ def test_allows_powershell_pptx_image_status_command(tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("node_token", ['"node"', "'node'", '"node.exe"', "'node.exe'"])
+@pytest.mark.parametrize("use_call_operator", [True, False])
+def test_powershell_image_status_quoted_node_requires_call_operator(
+    tmp_path: Path, node_token: str, use_call_operator: bool,
+):
+    call = "& " if use_call_operator else ""
+    command = (
+        f"{call}{node_token} '{_SYNC_IMAGE_STATUS_SCRIPT}' "
+        "'assets/generated/manifest.json'"
+    )
+    error = detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None, shell_style="powershell",
+    )
+
+    if use_call_operator:
+        assert error is None
+    else:
+        assert error is not None
+        assert "PPTX_IMAGE_STATUS_COMMAND_SHAPE" in error
+
+
+@pytest.mark.parametrize("node_token", ["'$env:BOX_AGENT_NODE'", "'python'", "'C:/runtime/node.exe'"])
+def test_powershell_image_status_rejects_untrusted_quoted_executable(
+    tmp_path: Path, node_token: str,
+):
+    command = (
+        f"& {node_token} '{_SYNC_IMAGE_STATUS_SCRIPT}' "
+        "'assets/generated/manifest.json'"
+    )
+    assert detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None, shell_style="powershell",
+    ) is not None
+
+
+def _powershell_image_status_command(presentation_dir: Path, script_path: Path) -> str:
+    def literal(value: Path | str) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    return (
+        f"Set-Location -LiteralPath {literal(presentation_dir)} -ErrorAction Stop; "
+        f'& "$env:BOX_AGENT_NODE" {literal(script_path)} '
+        "'assets/generated/manifest.json'"
+    )
+
+
+@pytest.mark.parametrize("directory", ["deck-task", "deck [draft] $5%; O'Brien `v1"])
+def test_allows_powershell_image_status_in_literal_task_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str,
+):
+    script = tmp_path / "runtime O'Brien $5 `v1" / "sync_image_manifest_status.js"
+    monkeypatch.setattr("box_agent.tools.pptx_safety._SYNC_IMAGE_STATUS_SCRIPT", script)
+    error = detect_pptx_image_status_command_bypass(
+        _powershell_image_status_command(tmp_path / directory, script),
+        workspace_dir=str(tmp_path),
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path / "ignored")},
+        shell_style="powershell",
+    )
+
+    assert error is None
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "-ErrorAction Continue;",
+        ";",
+        "-ErrorAction Stop; Write-Output bypass;",
+        "-ErrorAction Stop &&",
+    ],
+)
+def test_rejects_powershell_image_status_directory_switch_without_stop(
+    tmp_path: Path, replacement: str,
+):
+    command = _powershell_image_status_command(tmp_path / "deck-task", _SYNC_IMAGE_STATUS_SCRIPT)
+    command = command.replace("-ErrorAction Stop;", replacement)
+    error = detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None, shell_style="powershell",
+    )
+
+    assert error is not None
+    assert "PPTX_IMAGE_STATUS_COMMAND_SHAPE" in error
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value + "; Write-Output bypass",
+        lambda value: value + " 2>&1",
+        lambda value: value.replace("-LiteralPath", "-Path"),
+        lambda value: value.replace("'deck-task'", '"$(Write-Output deck-task)"'),
+        lambda value: value.replace("'deck-task'", '"deck`-task"'),
+        lambda value: value.replace("'deck-task'", "'deck-task’; Write-Output bypass; '"),
+        lambda value: value.replace("'assets/generated/manifest.json'", "'../assets/generated/manifest.json'"),
+    ],
+)
+def test_rejects_powershell_image_status_unsafe_directory_command(
+    tmp_path: Path, mutation,
+):
+    command = _powershell_image_status_command(Path("deck-task"), _SYNC_IMAGE_STATUS_SCRIPT)
+    error = detect_pptx_image_status_command_bypass(
+        mutation(command), workspace_dir=str(tmp_path), runtime_env=None, shell_style="powershell",
+    )
+
+    assert error is not None
+
+
+@pytest.mark.parametrize("directory_exists", [False, True])
+def test_powershell_image_status_runs_only_after_successful_directory_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory_exists: bool,
+):
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if shell is None:
+        pytest.skip("PowerShell is required for the directory-switch runtime probe")
+    task_dir = tmp_path / "deck [draft] $5%; O'Brien `v1"
+    if directory_exists:
+        task_dir.mkdir()
+    marker = tmp_path / "called-from.txt"
+    script = tmp_path / "sync_image_manifest_status.js"
+    # Python acts as the invoked executable so this test needs no Node install.
+    script.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(str(Path.cwd()))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("box_agent.tools.pptx_safety._SYNC_IMAGE_STATUS_SCRIPT", script)
+    command = _powershell_image_status_command(task_dir, script)
+    assert detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None, shell_style="powershell",
+    ) is None
+    result = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=tmp_path, env={**os.environ, "BOX_AGENT_NODE": sys.executable},
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+
+    if directory_exists:
+        assert result.returncode == 0, result.stderr
+        assert Path(marker.read_text()) == task_dir
+    else:
+        assert result.returncode != 0
+        assert not marker.exists()
+
+
 def test_allows_windows_separators_for_exact_pptx_image_status_command(
     tmp_path: Path,
 ):
@@ -454,19 +600,153 @@ def test_reports_missing_image_status_runtime_context() -> None:
     assert "reason_code=PPTX_IMAGE_STATUS_RUNTIME_CONTEXT" in error
 
 
-def test_reports_image_status_artifact_root_mismatch(tmp_path: Path):
-    command = _image_status_command(tmp_path)
-    command = f"cd {shlex.quote(str(tmp_path / 'other'))} && {command}"
+def test_allows_explicit_presentation_directory_and_ignores_legacy_env(tmp_path: Path):
+    presentation_dir = tmp_path / "deck-task"
+    command = _image_status_command(
+        presentation_dir,
+        manifest_path=Path("assets/generated/manifest.json"),
+    )
+    command = f"cd {shlex.quote(str(presentation_dir))} && {command}"
 
     error = detect_pptx_image_status_command_bypass(
         command,
         workspace_dir=str(tmp_path),
-        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path)},
+        runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path / "ignored")},
     )
 
-    assert error is not None
-    assert "reason_code=PPTX_IMAGE_STATUS_ARTIFACT_ROOT" in error
-    assert str(tmp_path) not in error
+    assert error is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell quoting integration")
+@pytest.mark.parametrize("shell_name", ["sh", "bash", "zsh"])
+@pytest.mark.parametrize(
+    ("directory_word", "directory_name"),
+    [
+        ("growth50%", "growth50%"),
+        ('"growth50%"', "growth50%"),
+        ("'deck $5 `v1'", "deck $5 `v1"),
+        (r"deck\ \$5\ \`v1", "deck $5 `v1"),
+        (r'"deck \$5 \`v1"', "deck $5 `v1"),
+        ("'deck O'\"'\"'Brien'", "deck O'Brien"),
+        (
+            "'deck $5; $(touch NEVER) [draft] O'\"'\"'Brien'",
+            "deck $5; $(touch NEVER) [draft] O'Brien",
+        ),
+        (r'deck\ \"quote\"', 'deck "quote"'),
+    ],
+)
+def test_posix_image_status_literal_paths_match_shell_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell_name: str,
+    directory_word: str,
+    directory_name: str,
+):
+    shell = shutil.which(shell_name)
+    if shell is None:
+        pytest.skip(f"{shell_name} is required for the shell-argument probe")
+    task_dir = tmp_path / directory_name
+    task_dir.mkdir()
+    script = tmp_path / "runtime O'Brien $5 `v1" / "sync_image_manifest_status.js"
+    script.parent.mkdir()
+    marker = tmp_path / "called.json"
+    # Python acts as Node so the test inspects the shell's cwd and argv without
+    # depending on Node or executing the real manifest synchronizer.
+    script.write_text(
+        "import json, sys\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(json.dumps([str(Path.cwd()), sys.argv[1:]]))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("box_agent.tools.pptx_safety._SYNC_IMAGE_STATUS_SCRIPT", script)
+    command = (
+        f"cd {shlex.quote(str(tmp_path))}/{directory_word} && "
+        f'"$BOX_AGENT_NODE" {shlex.quote(str(script))} '
+        "assets/generated/manifest.json"
+    )
+
+    assert detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None,
+    ) is None
+    result = subprocess.run(
+        [shell, "-c", command],
+        cwd=tmp_path,
+        env={**os.environ, "BOX_AGENT_NODE": sys.executable},
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(marker.read_text()) == [
+        str(task_dir), ["assets/generated/manifest.json"],
+    ]
+    assert not (tmp_path / "NEVER").exists()
+    assert not (task_dir / "NEVER").exists()
+
+
+@pytest.mark.parametrize(
+    "directory_word",
+    [
+        "$TASK_DIR", '"$TASK_DIR"', "${TASK_DIR}", '"${TASK_DIR}"',
+        "${TASK_DIR:-deck}", "$(printf deck)", '"$(printf deck)"',
+        "`printf deck`", '"`printf deck`"',
+        "deck*", "deck?", "deck[12]", "deck{1,2}", "~",
+        "deck;echo bypass", "deck>redirected", "'deck' || true",
+    ],
+)
+def test_posix_image_status_rejects_nonliteral_directory_words(
+    tmp_path: Path, directory_word: str,
+):
+    command = (
+        f"cd {directory_word} && node {shlex.quote(str(_SYNC_IMAGE_STATUS_SCRIPT))} "
+        "assets/generated/manifest.json"
+    )
+
+    assert detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None,
+    ) is not None
+
+
+@pytest.mark.parametrize(
+    "node_word",
+    [
+        "'$BOX_AGENT_NODE'", r"\$BOX_AGENT_NODE", r'"\$BOX_AGENT_NODE"',
+        "$CUSTOM_NODE", '"$(printf node)"', "`printf node`",
+    ],
+)
+def test_posix_image_status_rejects_untrusted_executable_expansion(
+    tmp_path: Path, node_word: str,
+):
+    command = _image_status_command(tmp_path, node_token=node_word)
+
+    assert detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None,
+    ) is not None
+
+
+@pytest.mark.parametrize("field", ["script", "manifest"])
+@pytest.mark.parametrize("unsafe_word", ['"$FILE"', '"$(printf file)"', "`printf file`"])
+def test_posix_image_status_rejects_expansion_in_file_arguments(
+    tmp_path: Path, field: str, unsafe_word: str,
+):
+    # Keep the synchronizer name visible even when replacing its argument.
+    script = (
+        unsafe_word + "/sync_image_manifest_status.js"
+        if field == "script"
+        else shlex.quote(str(_SYNC_IMAGE_STATUS_SCRIPT))
+    )
+    manifest = unsafe_word if field == "manifest" else "assets/generated/manifest.json"
+
+    assert detect_pptx_image_status_command_bypass(
+        f"node {script} {manifest}", workspace_dir=str(tmp_path), runtime_env=None,
+    ) is not None
+
+
+@pytest.mark.parametrize("suffix", [">redirected", "2>redirected", ";echo bypass", "|cat"])
+def test_posix_image_status_rejects_attached_shell_operators(tmp_path: Path, suffix: str):
+    command = _image_status_command(tmp_path) + suffix
+
+    assert detect_pptx_image_status_command_bypass(
+        command, workspace_dir=str(tmp_path), runtime_env=None,
+    ) is not None
 
 
 def test_rejects_unexpanded_output_dir_in_image_status_cd(tmp_path: Path):
@@ -483,7 +763,7 @@ def test_rejects_unexpanded_output_dir_in_image_status_cd(tmp_path: Path):
     )
 
     assert error is not None
-    assert "reason_code=PPTX_IMAGE_STATUS_ARTIFACT_ROOT" in error
+    assert "reason_code=PPTX_IMAGE_STATUS_PRESENTATION_DIR" in error
     assert str(tmp_path) not in error
 
 
@@ -1028,6 +1308,18 @@ def test_empty_runtime_env_does_not_inject_python_vars():
     if tool._subprocess_env is not None:
         assert "BOX_AGENT_PYTHON" not in tool._subprocess_env
         assert "BOX_AGENT_PYTHON3" not in tool._subprocess_env
+
+
+def test_legacy_output_env_is_removed_from_bash_subprocesses(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOX_AGENT_OUTPUT_DIR", str(tmp_path / "ignored"))
+
+    inherited = BashTool()
+    supplied = BashTool(runtime_env={"BOX_AGENT_OUTPUT_DIR": str(tmp_path / "also-ignored")})
+
+    assert inherited._subprocess_env is not None
+    assert "BOX_AGENT_OUTPUT_DIR" not in inherited._subprocess_env
+    assert supplied._subprocess_env is not None
+    assert "BOX_AGENT_OUTPUT_DIR" not in supplied._subprocess_env
 
 
 def test_description_uses_injected_python_and_reserved_scratch_directory():

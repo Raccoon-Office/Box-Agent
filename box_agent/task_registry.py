@@ -15,7 +15,7 @@ from .events import ArtifactEvent
 from .task_context import TaskContext
 
 
-REGISTRY_SCHEMA_VERSION = 2
+REGISTRY_SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -59,7 +59,6 @@ def _write_record(path: Path, payload: dict[str, Any]) -> None:
 
 def _initial_record(
     context: TaskContext,
-    artifact_root_dir: str | Path | None,
 ) -> dict[str, Any]:
     now = _now()
     return {
@@ -67,11 +66,6 @@ def _initial_record(
         "session_id": context.session_id,
         "task_id": context.task_id,
         "current_turn_id": context.turn_id,
-        "artifact_root_dir": (
-            str(Path(artifact_root_dir).expanduser().resolve())
-            if artifact_root_dir is not None
-            else None
-        ),
         "execution_status": "running",
         "created_at": now,
         "updated_at": now,
@@ -82,12 +76,10 @@ def _initial_record(
 def begin_task(
     workspace_dir: str | Path,
     context: TaskContext,
-    *,
-    artifact_root_dir: str | Path | None,
 ) -> Path:
     """Create or resume the canonical record for one logical task."""
     path = _registry_path(workspace_dir, context.task_id)
-    payload = _read_record(path) or _initial_record(context, artifact_root_dir)
+    payload = _read_record(path) or _initial_record(context)
     payload.update(
         {
             "schema_version": REGISTRY_SCHEMA_VERSION,
@@ -99,10 +91,7 @@ def begin_task(
         }
     )
     payload.pop("delivery_status", None)
-    if artifact_root_dir is not None:
-        payload["artifact_root_dir"] = str(
-            Path(artifact_root_dir).expanduser().resolve()
-        )
+    payload.pop("artifact_root_dir", None)
     payload.setdefault("artifacts", [])
     _write_record(path, payload)
     return path
@@ -113,11 +102,10 @@ def finish_task(
     context: TaskContext,
     *,
     execution_status: str,
-    artifact_root_dir: str | Path | None,
 ) -> Path:
     """Persist the terminal execution state without inferring delivery policy."""
     path = _registry_path(workspace_dir, context.task_id)
-    payload = _read_record(path) or _initial_record(context, artifact_root_dir)
+    payload = _read_record(path) or _initial_record(context)
     payload.update(
         {
             "schema_version": REGISTRY_SCHEMA_VERSION,
@@ -129,6 +117,7 @@ def finish_task(
         }
     )
     payload.pop("delivery_status", None)
+    payload.pop("artifact_root_dir", None)
     _write_record(path, payload)
     return path
 
@@ -156,16 +145,13 @@ def register_artifact_revision(
     workspace_dir: str | Path,
     context: TaskContext,
     artifact: ArtifactEvent,
-    *,
-    artifact_root_dir: str | Path | None,
 ) -> ArtifactLineage:
     """Register one emitted file and return stable artifact/revision ids."""
     registry_path = begin_task(
         workspace_dir,
         context,
-        artifact_root_dir=artifact_root_dir,
     )
-    payload = _read_record(registry_path) or _initial_record(context, artifact_root_dir)
+    payload = _read_record(registry_path) or _initial_record(context)
     rel_path = artifact.rel_path or artifact.filename
     artifact_key = f"{context.task_id}\0{rel_path}"
     artifact_id = f"artifact_{hashlib.sha256(artifact_key.encode()).hexdigest()[:24]}"

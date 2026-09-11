@@ -16,18 +16,21 @@ _BYPASS_ERROR = (
 )
 _IMAGE_STATUS_ERROR_MESSAGES = {
     "PPTX_IMAGE_STATUS_COMMAND_SHAPE": (
-        "Run the synchronizer as the only shell command; do not add cd, pipes, "
-        "redirects, command chaining, or diagnostic suffixes."
+        "Run the synchronizer as the only shell command, optionally preceded by "
+        "POSIX 'cd PRESENTATION_DIR &&' or PowerShell "
+        "'Set-Location -LiteralPath PRESENTATION_DIR -ErrorAction Stop;'; "
+        "do not add pipes, redirects, "
+        "other command chaining, or diagnostic suffixes."
     ),
     "PPTX_IMAGE_STATUS_PARSE_ERROR": (
         "Use the exact standalone command form documented by the PPTX skill."
     ),
     "PPTX_IMAGE_STATUS_RUNTIME_CONTEXT": (
-        "Start the synchronization from the active presentation artifact context."
+        "Start synchronization from an explicit presentation directory or the "
+        "tool workspace directory."
     ),
-    "PPTX_IMAGE_STATUS_ARTIFACT_ROOT": (
-        "Use the active presentation artifact root without shell-variable path "
-        "expansion."
+    "PPTX_IMAGE_STATUS_PRESENTATION_DIR": (
+        "Use a literal presentation directory without shell-variable expansion."
     ),
     "PPTX_IMAGE_STATUS_NODE_FORM": (
         "Use the platform-specific trusted Node form documented by the PPTX skill."
@@ -37,7 +40,8 @@ _IMAGE_STATUS_ERROR_MESSAGES = {
         "renaming it."
     ),
     "PPTX_IMAGE_STATUS_MANIFEST_SCOPE": (
-        "Use the literal artifact-relative manifest path documented by the PPTX skill."
+        "Use the literal presentation-directory-relative manifest path documented "
+        "by the PPTX skill."
     ),
 }
 
@@ -67,6 +71,80 @@ _TRUSTED_POWERSHELL_NODE_TOKENS = frozenset(
         "${env:BOX_AGENT_NODE}",
     }
 )
+# Preserve quoting until after validating shell expansion. shlex.split() alone
+# loses the distinction between '$name', "$name", and an escaped dollar sign.
+_POSIX_PATH_WORD = r"(?:'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|[^\s'\"\\;&|<>])+"
+_POSIX_IMAGE_STATUS_COMMAND = re.compile(
+    rf"(?:cd\s+(?P<root>{_POSIX_PATH_WORD})\s*&&\s*)?"
+    rf"(?P<node>{_POSIX_PATH_WORD})\s+"
+    rf"(?P<script>{_POSIX_PATH_WORD})\s+"
+    rf"(?P<manifest>{_POSIX_PATH_WORD})",
+)
+# This is a deliberately small PowerShell grammar, not POSIX shlex: backslashes
+# are literal and doubled single quotes represent one apostrophe. Expandable
+# strings are allowed only for the trusted Node environment variable.
+_POWERSHELL_QUOTED_LITERAL = r"'(?:[^']|'')*'|\"[^\"$`]*\""
+_POWERSHELL_PATH_TOKEN = rf"(?:{_POWERSHELL_QUOTED_LITERAL}|[A-Za-z0-9_./:\\\\-]+)"
+_POWERSHELL_NODE_VARIABLE = r"\$(?:env:BOX_AGENT_NODE|\{env:BOX_AGENT_NODE\})"
+_POWERSHELL_IMAGE_STATUS_COMMAND = re.compile(
+    rf"(?:Set-Location\s+-LiteralPath\s+(?P<root>{_POWERSHELL_QUOTED_LITERAL})"
+    rf"\s+-ErrorAction\s+Stop\s*;\s*)?"
+    rf"(?P<call>&\s+)?(?P<node>node(?:\.exe)?|'node(?:\.exe)?'|"
+    rf'"node(?:\.exe)?"|{_POWERSHELL_NODE_VARIABLE}|'
+    rf'"{_POWERSHELL_NODE_VARIABLE}")\s+'
+    rf"(?P<script>{_POWERSHELL_PATH_TOKEN})\s+"
+    rf"(?P<manifest>{_POWERSHELL_PATH_TOKEN})",
+)
+
+
+def _posix_literal_value(token: str) -> str | None:
+    """Decode one shell word only when every character is literal.
+
+    Quoted fragments may be concatenated (as in shlex.quote's apostrophe
+    escaping). Double-quoted backslashes follow POSIX shell rules, including
+    escaped dollars/backticks, which shlex does not fully decode.
+    """
+    value: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(token):
+        char = token[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                value.append(char)
+        elif char == "\\":
+            index += 1
+            if index == len(token):
+                return None
+            escaped = token[index]
+            if quote == '"' and escaped not in '$`"\\':
+                value.append("\\")
+            value.append(escaped)
+        elif quote == '"':
+            if char == '"':
+                quote = None
+            elif char in "$`":
+                return None
+            else:
+                value.append(char)
+        elif char in "'\"":
+            quote = char
+        elif char in "$`*?[]{}~#()":
+            # Reject substitutions, globs, brace/tilde expansion, and comments.
+            # These characters are fine inside literal quotes or when escaped.
+            return None
+        else:
+            value.append(char)
+        index += 1
+    return "".join(value) if quote is None else None
+
+
+def _powershell_literal_value(token: str) -> str:
+    if token.startswith("'"):
+        return token[1:-1].replace("''", "'")
+    return token[1:-1] if token.startswith('"') else token
 
 
 def _image_status_command_error(reason_code: str) -> str:
@@ -164,46 +242,95 @@ def detect_pptx_image_status_command_bypass(
     runtime_env: Mapping[str, str] | None,
     shell_style: Literal["posix", "powershell"] = "posix",
 ) -> str | None:
-    """Fail closed for shell calls to the image-status manifest synchronizer."""
+    """Fail closed for shell calls to the image-status manifest synchronizer.
+
+    ``runtime_env`` remains in the compatibility signature but output-root
+    variables in it are deliberately ignored.
+    """
     if "sync_image_manifest_status.js" not in command:
         return None
-    if "\n" in command or "\r" in command:
+    if any(char in command for char in "\x00\n\r"):
         return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return _image_status_command_error("PPTX_IMAGE_STATUS_PARSE_ERROR")
-
-    uses_powershell_call_operator = bool(tokens and tokens[0] == "&")
-    if uses_powershell_call_operator:
-        if shell_style != "powershell" or len(tokens) != 4:
-            return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
-        tokens = tokens[1:]
-
     supplied_root_token: str | None = None
-    if tokens and tokens[0] == "cd":
-        if (
-            shell_style != "posix"
-            or len(tokens) != 6
-            or tokens[2] != "&&"
-        ):
+    uses_powershell_call_operator = False
+    if shell_style == "powershell":
+        # PowerShell treats typographic quotes as string delimiters too. Reject
+        # them rather than pretending they are literal path characters.
+        if any(char in command for char in "\x00\u2018\u2019\u201c\u201d"):
             return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
-        supplied_root_token = tokens[1]
-        tokens = tokens[3:]
-    elif len(tokens) != 3:
-        return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
+        match = _POWERSHELL_IMAGE_STATUS_COMMAND.fullmatch(command.strip())
+        if match is None:
+            return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
+        if match["root"] is not None:
+            supplied_root_token = _powershell_literal_value(match["root"])
+        uses_powershell_call_operator = match["call"] is not None
+        if match["node"].startswith(("'", '"')) and not uses_powershell_call_operator:
+            return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
+        tokens = [
+            _powershell_literal_value(match[name])
+            for name in ("node", "script", "manifest")
+        ]
+    else:
+        try:
+            shlex.split(command)
+        except ValueError:
+            return _image_status_command_error("PPTX_IMAGE_STATUS_PARSE_ERROR")
+        match = _POSIX_IMAGE_STATUS_COMMAND.fullmatch(command.strip())
+        if match is None:
+            return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
+        if match["root"] is not None:
+            supplied_root_token = _posix_literal_value(match["root"])
+            if not supplied_root_token:
+                return _image_status_command_error("PPTX_IMAGE_STATUS_PRESENTATION_DIR")
+        node_word = match["node"]
+        # Only the executable position may expand a trusted runtime variable.
+        # Single-quoted/escaped variables are literal executable names instead.
+        node_variable = (
+            node_word[1:-1]
+            if node_word.startswith('"') and node_word.endswith('"')
+            else node_word
+        )
+        if node_variable in _TRUSTED_NODE_TOKENS and node_variable.startswith("$"):
+            node_token = node_variable
+        else:
+            node_token = _posix_literal_value(node_word)
+            if node_token not in {"node", "node.exe"}:
+                return _image_status_command_error("PPTX_IMAGE_STATUS_NODE_FORM")
+        if node_token is None:
+            return _image_status_command_error("PPTX_IMAGE_STATUS_NODE_FORM")
+        script_token = _posix_literal_value(match["script"])
+        if script_token is None:
+            return _image_status_command_error("PPTX_IMAGE_STATUS_SCRIPT_IDENTITY")
+        manifest_token = _posix_literal_value(match["manifest"])
+        if manifest_token is None:
+            return _image_status_command_error("PPTX_IMAGE_STATUS_MANIFEST_SCOPE")
+        tokens = [node_token, script_token, manifest_token]
 
-    artifact_root_raw = (
-        runtime_env.get("BOX_AGENT_OUTPUT_DIR") if runtime_env is not None else None
-    ) or workspace_dir
-    if not artifact_root_raw:
-        return _image_status_command_error("PPTX_IMAGE_STATUS_RUNTIME_CONTEXT")
-    artifact_root = Path(artifact_root_raw).expanduser().resolve(strict=False)
-
+    del runtime_env
+    workspace_root = (
+        Path(workspace_dir).expanduser().resolve(strict=False)
+        if workspace_dir
+        else None
+    )
     if supplied_root_token is not None:
-        supplied_root = Path(supplied_root_token.replace("\\", "/")).expanduser()
-        if supplied_root.resolve(strict=False) != artifact_root:
-            return _image_status_command_error("PPTX_IMAGE_STATUS_ARTIFACT_ROOT")
+        if not supplied_root_token:
+            return _image_status_command_error(
+                "PPTX_IMAGE_STATUS_PRESENTATION_DIR"
+            )
+        supplied_root = Path(
+            supplied_root_token.replace("\\", "/")
+        ).expanduser()
+        if not supplied_root.is_absolute():
+            if workspace_root is None:
+                return _image_status_command_error(
+                    "PPTX_IMAGE_STATUS_RUNTIME_CONTEXT"
+                )
+            supplied_root = workspace_root / supplied_root
+        presentation_dir = supplied_root.resolve(strict=False)
+    elif workspace_root is not None:
+        presentation_dir = workspace_root
+    else:
+        return _image_status_command_error("PPTX_IMAGE_STATUS_RUNTIME_CONTEXT")
 
     node_token, script_token, manifest_token = tokens
     trusted_node_tokens = (
@@ -230,8 +357,8 @@ def detect_pptx_image_status_command_bypass(
 
     manifest_path = Path(manifest_token.replace("\\", "/")).expanduser()
     if not manifest_path.is_absolute():
-        manifest_path = artifact_root / manifest_path
-    expected_manifest = artifact_root / "assets" / "generated" / "manifest.json"
+        manifest_path = presentation_dir / manifest_path
+    expected_manifest = presentation_dir / "assets" / "generated" / "manifest.json"
     if manifest_path.resolve(strict=False) != expected_manifest.resolve(strict=False):
         return _image_status_command_error("PPTX_IMAGE_STATUS_MANIFEST_SCOPE")
     return None

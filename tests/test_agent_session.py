@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
-from box_agent.events import DoneEvent, StepStart, StopReason
+from box_agent.events import ArtifactEvent, DoneEvent, StepStart, StopReason
 from box_agent.schema import FunctionCall, StreamEvent, ToolCall
 
 
@@ -79,6 +79,46 @@ async def test_session_config_controls_actual_loop_step_limit(
 
 
 @pytest.mark.asyncio
+async def test_session_artifacts_stay_relative_to_session_cwd(tmp_path):
+    from box_agent.agent_session import AgentSession
+    from box_agent.tools.file_tools import WriteTool
+
+    class WriteArtifactLLM(ToolThenAnswerLLM):
+        async def generate_stream(self, **kwargs):
+            async for event in super().generate_stream(**kwargs):
+                if event.tool_calls:
+                    event.tool_calls = [ToolCall(
+                        id="write-1", type="function",
+                        function=FunctionCall(
+                            name="write_file",
+                            arguments={"path": "report/summary.md", "content": "Verified result."},
+                        ),
+                    )]
+                yield event
+
+    workspace = tmp_path / "session-cwd"
+    legacy_root = tmp_path / "legacy-output"
+    session = AgentSession.create(
+        config=session_config(tmp_path / "config-workspace"),
+        llm_client=WriteArtifactLLM(), system_prompt="system",
+        tools=[WriteTool(workspace_dir=str(workspace))],
+        workspace_dir=workspace,
+    )
+    session.agent.add_user_message("Write the verified result to report/summary.md.")
+    events = [event async for event in session.run_events(
+        options=session.build_run_options(logger=None, artifact_root_dir=legacy_root),
+    )]
+
+    assert (workspace / "report" / "summary.md").read_text() == "Verified result."
+    assert [event.rel_path for event in events if isinstance(event, ArtifactEvent)] == [
+        "report/summary.md",
+    ]
+    assert session.agent.workspace_dir == workspace
+    assert not legacy_root.exists()
+    assert not (workspace / "output").exists()
+
+
+@pytest.mark.asyncio
 async def test_session_cancellation_reaches_loop_without_acp(tmp_path):
     from box_agent.agent_session import AgentSession
 
@@ -121,18 +161,27 @@ def test_sessions_isolate_injection_and_skill_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_creates_configured_session_and_runs_through_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("selected", [False, True])
+async def test_acp_creates_configured_session_and_runs_through_it(tmp_path, monkeypatch, selected):
     import box_agent.acp as acp_module
     from box_agent.agent_session import AgentSession
     from tests.test_acp import DoneLLM, DummyConn
+    from box_agent.tools.skill_loader import SkillLoader
 
     config = session_config(tmp_path)
+    config.tools.enable_skills = True
     config.tool_limits.web_search.deep_research_total_calls = 7
-    adapter = acp_module.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    method = tmp_path / "skills" / "research-synthesis" / "SKILL.md"
+    method.parent.mkdir(parents=True)
+    method.write_text("---\nname: research-synthesis\ndescription: Evidence analysis\n---\nMETHOD_BODY\n")
+    loader = SkillLoader(method.parent.parent)
+    loader.discover_skills()
+    adapter = acp_module.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", skill_loader=loader)
     response = await adapter.newSession(SimpleNamespace(
         cwd=None, field_meta={"session_mode": "general"},
     ))
     session = adapter._sessions[response.sessionId]
+    # Historical compatibility views cannot select methods or raise quotas.
     session.preloaded_skill_names.append("research-synthesis")
     seen = []
     original = AgentSession.run_events
@@ -148,12 +197,13 @@ async def test_acp_creates_configured_session_and_runs_through_it(tmp_path, monk
     adapter._config.tool_limits.web_search.deep_research_total_calls = 1
     result = await adapter.prompt(SimpleNamespace(
         sessionId=response.sessionId, prompt=[{"text": "hello"}],
+        field_meta={"selected_skill_names": ["research-synthesis"]} if selected else {},
     ))
 
     assert isinstance(session, AgentSession)
     assert session.config is config
     assert result.stopReason == "end_turn"
-    assert seen == [(config, 7)]
+    assert seen == [(config, 7 if selected else None)]
 
 
 @pytest.mark.asyncio

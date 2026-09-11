@@ -17,14 +17,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Final
 
-from .artifacts import (
-    OUTPUT_SUBDIR,
-    artifact_scan_root as _artifact_scan_root,
-    avoid_collision,
-    ensure_output_dir,
-    make_artifact as _make_artifact,
-    safe_output_name,
-)
+from .artifacts import avoid_collision, make_artifact as _make_artifact, safe_output_name
 from .cache_fingerprint import build_cache_fingerprint
 from .config import AgentConfig, ToolLimitsConfig
 from .composition import run_agent_loop_with_default_services
@@ -235,6 +228,7 @@ from .kernel.tool_result_pipeline import (
     process_tool_result,
 )
 from .logger import AgentLogger
+from .kernel.ports import KernelServices
 from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from .loop_guards import (
     EMPTY_ARGS_LIMIT,
@@ -316,6 +310,7 @@ async def run_agent_loop(
     workspace_dir: str | None = None,
     permission_negotiator: Any | None = None,
     hooks: list | None = None,
+    plugins: tuple[Any, ...] = (),
     memory_manager: Any | None = None,
     memory_extractor: Any | None = None,
     memory_turn_id: str = "",
@@ -346,6 +341,8 @@ async def run_agent_loop(
     cache_fingerprint_context: dict[str, Any] | None = None,
     cache_fingerprint_sink: Callable[[dict[str, Any]], None] | None = None,
     active_skill_activator: ActiveSkillActivator | None = None,
+    skill_engine: Any = None,
+    context_engine: Any = None,
     current_turn_text: str | None = None,
     context_resource_ledger: ContextResourceLedger | None = None,
     context_resource_dedup_enabled: bool = True,
@@ -353,6 +350,7 @@ async def run_agent_loop(
     tool_result_storage: ToolResultStorage | None = None,
     session_log: SessionLog | None = None,
     session_turn: int | None = None,
+    kernel_services: KernelServices | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Delegate one run while honoring monkeypatched core timing defaults."""
     run_arguments = dict(locals())

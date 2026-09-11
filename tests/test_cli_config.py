@@ -12,6 +12,7 @@ import yaml
 import box_agent.cli as cli
 from box_agent.config import ToolLimitsConfig
 from box_agent.workspace_registry import WorkspaceRegistry
+from box_agent.session_log import SessionLog
 
 
 def _write_config(path: Path, api_key: str = "sk-test-key") -> None:
@@ -690,3 +691,28 @@ def test_cmd_goal_persists_workspace_goal(tmp_path: Path, monkeypatch, capsys) -
     assert stored is not None
     assert stored.status == "complete"
     assert stored.evidence == ["uv run pytest tests/ -q passed"]
+
+
+def test_cmd_goal_can_persist_goal_in_session_log(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    assert cli.cmd_goal(
+        workspace,
+        action="set",
+        text=["Ship", "session", "goal"],
+        session_id="cli-goal-session",
+        json_output=True,
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["goal"]["objective"] == "Ship session goal"
+    assert result["resumed"] is False
+
+    restored = SessionLog.open(
+        tmp_path / "home" / ".box-agent" / "sessions",
+        session_id="cli-goal-session",
+        cwd=workspace,
+    )
+    assert restored.replay().goal["objective"] == "Ship session goal"
+    restored.close()

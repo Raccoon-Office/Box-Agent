@@ -231,6 +231,18 @@ class LLMClient:
 
         logger.info("Initialized LLM client with provider: %s, api_base: %s", provider, api_base)
 
+    async def aclose(self) -> None:
+        """Close the SDK transport when its owning runtime releases it.
+
+        Model views created by ``for_model`` share this transport; borrowers
+        must leave closing to the owner of the original client.
+        """
+        closer = getattr(self._client, "aclose", None)
+        if closer is None:
+            closer = getattr(getattr(self._client, "client", None), "close", None)
+        if closer is not None:
+            await closer()
+
     def for_model(self, model: str, *, max_output_tokens: int | None = None) -> "LLMClient":
         """Return a client with the same endpoint/auth settings for ``model``.
 

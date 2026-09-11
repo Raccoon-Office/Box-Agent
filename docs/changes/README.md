@@ -49,18 +49,21 @@ decision, read those entries together.
 
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
+| Session/output directories | `params.cwd`, `artifact_mode`, `artifact_root_dir`, `BOX_AGENT_OUTPUT_DIR`, artifact scan, PPT, research | Session cwd is stable; legacy path selectors warn and are ignored; General-mode task folders are model-created file organization only. | Supersedes fixed per-session output-root behavior. | [2026-09-09 cwd-owned task organization](#2026-09-09--cwd-owned-task-organization-and-legacy-output-root-deprecation) |
 | Tool name aliases | `Tool.aliases`, `build_tool_name_index`, OpenClaw, Hermes | Compatibility names are execution-only, use canonical Box-Agent argument schemas, and fail closed on conflicts. | Built-in mappings complete the generic alias mechanism in `fad2436`. | [2026-08-20 built-in aliases](#2026-08-20--built-in-tool-name-compatibility-aliases) |
 | Filesystem path resolution | `SearchFilesTool`, `path_candidates.py`, `PATH_NOT_FOUND`, ACP file-access prompt | Missing paths may return bounded structural candidates, but the model must retry a specific path and the permission engine remains final authority. | Hardens the broad-Home-search block without adding aliases or automatic authorization. | [2026-08-20 path candidates](#2026-08-20--bounded-structural-candidates-for-missing-filesystem-paths) |
 | File writes | `box_agent/tools/file_tools.py`, `write_file` | Ordered chunks commit atomically, with bounded transactions, replay protection, and whole-body safety checks. | PR #37 hardens PR #34; both remain relevant. | [PR #37](#2026-08-17--transactional-write-safety-follow-up-pr-37), [PR #34](#2026-08-17--unified-transactional-write_file-protocol-pr-34) |
-| Tool Engine and local discovery | `tools/engine/`, `ToolEnginePort`, `local_tool_exposure.py`, `tool_messages.py`, `create_scheduled_task` | One execution/result chain, kernel-owned final replies and stable local/MCP discovery; the schedule tool stays unchanged. | Reorganizes the kernel tool helpers and extends PR #31; preserves original Skill and Session Log contracts. | [2026-09-09 Tool Engine](#2026-09-09--tool-engine-ownership-and-local-discovery) |
+| Tool Engine and local discovery | `tools/engine/`, `ToolEnginePort`, `local_tool_exposure.py`, `tool_messages.py`, `create_scheduled_task` | One execution/result chain, kernel-owned final replies and stable local/MCP discovery; the schedule tool stays unchanged. | Reorganizes the kernel tool helpers and extends PR #31; subsequent Skill behavior is recorded separately below. | [2026-09-09 Tool Engine](#2026-09-09--tool-engine-ownership-and-local-discovery) |
+| Skill discovery and ordinary references | `skill_runtime.py`, `skill_context.py`, `context_input.py`, `get_skill`, `list_skills`, `skill/change`, `skillReferences` | Skill 管来源快照与会话事实；Context 管普通资料、真实覆盖和预算，接收 Tool 已准备的完整工具集合；Kernel 保留真实历史。 | 替代原固定全文预加载及 system 激活；经现有 factory 装配 Context，借用最终 Skill/Store，保持旧日志、Tool 权限与调度工具合同。Tool 默认装配仍为独立后续。 | [2026-09-09 Skill Engine](#2026-09-09--skill-engine-ordinary-references-and-session-facts) |
 | Tool invocation | `box_agent/tools/base.py`, `schema_validation.py`, `Tool.invoke` | Tool schemas and arguments fail closed before `execute()` is called. | Current at this baseline. | [PR #33](#2026-08-17--validate-tool-arguments-before-execution-pr-33) |
 | Image inspection | `inspect_images`, `vision_review`, canonical image blocks, structured image attachments, transient follow-up | Image inspection is instruction-driven and read-only; `proxy` returns utility-model text, while `native` uses a bounded one-request main-model overlay that never enters durable history. | PR #62 replaced `vision_review`; PR #76 is being rebased as an additive native strategy. | [PR #62](#2026-08-21--instruction-driven-image-inspection-pr-62), [PR #76](#2026-08-23--request-only-native-image-inspection-pr-76) |
 | Shell safety inspection | `shell_inspection.py`, `safety.py`, `bash_tool.py`, dangerous commands, DWS | Policy checks inspect shell structure and executable invocations while treating embedded-language bodies as data; bounded parsing fails closed for policy-relevant ambiguity. | Pending PR #63; must be reviewed as a security-boundary change. | [PR #63](#2026-08-21--structure-aware-shell-policy-inspection-pr-63) |
 | Context compression | `box_agent/core.py`, tool-call arguments, history summarization | Normal unsummarized history retains exact tool-call arguments; whole-history summarization remains a separate boundary. | Current at this baseline. | [PR #35](#2026-08-17--preserve-tool-call-arguments-in-normal-history-pr-35) |
 | Agent kernel and plugin composition | `box_agent/kernel/`, `box_agent/plugins/`, `composition.py`, `KernelServices`, `AgentLoopKernel`, `PluginHost` | ACP/CLI public entry points keep their signatures while the shared loop consumes an immutable Port bundle resolved by an explicit startup-static plugin host. | Pending implementation; reorganizes ownership without adding discovery, hot reload, or a protocol migration. | [2026-09-03 kernel/plugin boundary](#2026-09-03--stable-kernel-and-static-plugin-composition) |
+| Hook dispatch and static providers | `hook_bus.py`, `kernel/hook_types.py`, `plugins/hooks.py`, HookDispatchPort, HookProviderPort | One frozen bus per Run dispatches lifecycle observers, tool-argument decisions and visible-result decisions; cleanup finishes before plugin disposal. | Extends static plugin composition and the Tool Engine execution seam while preserving legacy hooks, context ownership and Session Log contracts. | [2026-09-10 HookBus](#2026-09-10--run-scoped-hookbus-and-static-hook-providers), [kernel/plugin boundary](#2026-09-03--stable-kernel-and-static-plugin-composition), [Tool Engine](#2026-09-09--tool-engine-ownership-and-local-discovery) |
 | MCP deferred loading | `mcp_tool_catalog.py`, `mcp_tool_search.py`, `tool_search` | Ordinary MCP schemas are hidden by default until session-scoped activation; `alwaysLoad` remains eager. | Current; later research hardening may also apply to research paths. | [PR #31](#2026-08-17--deferred-mcp-catalog-and-session-exposure-pr-31), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
 | Sub-agent delegation | `sub_agent_tool.py`, `sub_agent_capabilities.py`, `required_tools`, `write_scope`, `files` | The public request is flat; runtime-derived policy limits implicit tools to trusted local readers, keeps process/external/unknown MCP capabilities fail-closed, and scopes path writes. | Supersedes the caller-authored nested constraint contract while retaining its runtime enforcement goals. | [2026-08-19 flattened contract](#2026-08-19--flattened-sub-agent-contract-with-derived-policy) |
-| Shared live session ownership | `agent_session.py`, `agent_run.py`, `cli.py`, `acp/` | AgentSession owns live state and a retained Config reference; both adapters consume its event stream. Legacy Agent APIs and Session Log persistence remain unchanged. | Extends the shared runtime extraction; does not replace Session Log or introduce general configuration hot reload. | [2026-09-09 AgentSession](#2026-09-09--shared-agent-session-state-and-configuration) |
+| Shared live session ownership | `agent_session.py`, `session_assembly.py`, `session_context.py`, `plugins/runtime.py`, `cli.py`, `acp/` | Managed sessions prepare capabilities once, reuse a PluginRuntime and bind fresh run services. Owned resources close after active runs; borrowed host resources retain their owner. | Extends PR #114 with scoped preparation and cleanup; legacy creation, Config identity and Session Log persistence remain compatible. | [2026-09-10 managed lifecycle](#2026-09-10--managed-session-assembly-and-plugin-lifecycle), [2026-09-09 AgentSession](#2026-09-09--shared-agent-session-state-and-configuration) |
 | Session and workflow ownership | `session_log.py`, explicit Skills, `WAITING_FOR_USER`, legacy workflow files | Session Log is the sole durable Agent-session source. Skills/plugins own domain progress and recovery instructions; legacy checkpoint and owner files are ignored but not deleted. | PR #100 supersedes the proposed runtime owner/checkpoint lifecycle while retaining generic Tool safety boundaries. | [PR #100](#2026-09-02--session-log-only-recovery-pr-100), [earlier owner design](#2026-08-20--workflow-owner-precedence-for-third-party-skills) |
 | Native CLI session traces | `box_agent/cli.py`, `box_agent/session_trace.py`, `SessionTraceWriter`, `BOX_AGENT_SESSION_TRACE_ENABLED` | CLI creates best-effort v1 traces by default, with one file per invocation and one scope per user turn; Session Log remains the only durable recovery source. Existing opt-out, redaction and retention apply. | Adds native CLI production of traces; read together with the existing viewer and Session Log contracts, not as a replacement for them. | [2026-09-08 native CLI tracing](#2026-09-08--native-cli-session-tracing) |
 | Agent Trace diagnostics | `box_agent/trace_viewer/`, `box-agent trace-viewer`, `box-agent-session-trace/v1` | The packaged viewer is a read-only v1 trace consumer; static access stays browser-local and the optional directory service is loopback-only, authority-validated, explicit-path, and size-bounded. Flat ledgers stay top-level; comparison roots add exactly one `source / trace` level with input-first, filename-assisted grouping. | The 2026-09-04 comparison extension preserves the original writer, Core, provider, ACP, and flat-ledger contracts. | [2026-09-04 multi-source comparison](#2026-09-04--input-matched-multi-source-agent-trace-comparison), [2026-08-20 trace viewer](#2026-08-20--local-agent-trace-diagnostics) |
@@ -74,6 +77,99 @@ Release, provider API, and ACP compatibility have their own sources under
 [long-lived release and compatibility history](#long-lived-release-and-compatibility-history).
 
 ## Pending material changes
+
+### 2026-09-10 — managed session assembly and plugin lifecycle
+
+- **Change:** `refactor(session): manage capability assembly through scoped plugins`
+  on `codex/kernel-plugin-refactor`. This extends [PR #114](https://github.com/Raccoon-Office/Box-Agent/pull/114),
+  merged as `7c85e82`; see [Agent Session](../AGENT_SESSION.md).
+- **Durable effect:** `AgentSession.open` prepares models, memory, tools/Skills/MCP,
+  prompts and hooks through shared session initializers. ACP shares an application
+  PluginRuntime; CLI owns a private runtime by default. Each run receives fresh
+  context and services. Closing a session settles the active stream first;
+  initialization failure rolls back owned resources, and interrupted cleanup
+  remains retryable. Borrowed capabilities retain their existing owner.
+- **Compatibility:** synchronous `create`, direct Agent APIs and no-argument
+  plugin factories remain supported. `AgentRunOptions` and the loop bridge add
+  an optional internal `kernel_services` binding. Context factories receive
+  declared dependencies and scope context; a longer-lived plugin cannot depend
+  on a shorter-lived one. No config key, dynamic discovery, hot reload or Session
+  Log migration is added. Existing prompt ordering and lazy discovery remain.
+- **Target consistency:** read together with the Tool Engine change below and
+  upstream reasoning/utility-session fixes. Managed sessions retain run-scoped
+  tool execution, reasoning policy propagation and utility tool suppression.
+  Shared preparation preserves the stable cwd contract from PR #118, including
+  ordinary task subdirectories and ignored legacy artifact roots. Session Log
+  degradation hints and unavailable-Skill recovery remain effective after their
+  assembly moves out of the adapters.
+  Interrupted rollback of a failed Run activation retains its session owner,
+  including runtime Port validation failures. Session close retries those Run
+  resources before releasing Session dependencies and prevents a new activation
+  from bypassing unfinished cleanup.
+- **Proof anchors:** `tests/test_session_plugins.py`, `test_session_adapter_assembly.py`,
+  `test_plugin_runtime_lifecycle.py`, `test_plugin_host_context.py`,
+  `test_managed_kernel_services.py`, and existing ACP/CLI/kernel/provider suites.
+  Exact execution and generated-graph results belong in the submitting PR.
+- **Runtime and rollback:** source and Python-package checks do not establish
+  installed host behavior. Packaged consumers require rebuild/install/probe,
+  host restart and a fresh live task. Revert session assembly, lifecycle and
+  adapter wiring together; existing Session Logs require no migration.
+
+
+### 2026-09-10 — run-scoped HookBus and static hook providers
+
+- **Change:** [PR #121](https://github.com/Raccoon-Office/Box-Agent/pull/121)
+  integrates HookBus with the managed Session lifecycle. [HookBus](../HOOKBUS.md) describes the public
+  Python integration, handler decisions and lifecycle.
+- **Ownership:** composition creates one HookBus per Run, registers legacy
+  callbacks and `HookProviderPort` contributions with their owner identity,
+  then freezes the registry. Handlers run in priority and registration order.
+  Agent and AgentSession carry explicit plugin descriptors; factories bind
+  resolved host configuration. The bus does not assemble model context or
+  introduce durable session state.
+- **Tool arguments and results:** a before-tool decision may replace the
+  complete argument object or deny execution. Tool Engine revalidates final
+  arguments, paths and execution constraints before permission negotiation;
+  permission retries do not run the before-hook again. Result handlers may
+  replace or suppress visible text in model history and host events without
+  changing the actual success flag, raw output, separately persisted content,
+  or artifact references. Calls rejected before invocation skip new result
+  handlers and report `executed=false` through the completion observer.
+- **Compatibility:** existing `hooks` arguments, hook classes, loaders and
+  callback argument semantics remain available. Legacy callbacks retain their
+  ordinary-error and timeout behavior. New observers warn and continue on
+  ordinary failure; invalid, failed or timed-out interceptors deny execution
+  or suppress text. Cancellation and `SessionLogDurabilityError` propagate.
+  The default path adds no custom provider, configuration schema, protocol
+  field or Session Log migration.
+- **Lifecycle:** matcher and handler share a per-hook budget, bounded by the
+  chain and Run deadlines. Closing stops new dispatch, drains in-flight
+  calls and releases registrations before plugin disposal. Repeated
+  cancellation retains the cleanup task and its resources. Cancellation is
+  cooperative: handlers that block synchronously or ignore cancellation can
+  delay cleanup. Managed runs wait for the Bus and their RUN-only extension
+  providers before allowing Session resources to close. Cleanup tasks carry
+  exception objects as results to preserve cancellation causes on Python 3.10.
+- **Proof anchors:** `tests/test_hook_bus.py` and `tests/test_hook_plugins.py`
+  cover ordering, decisions, deadlines, cancellation, run isolation and
+  visible tool results. Plugin-host, kernel compatibility, Tool Engine,
+  permissions, session and ACP regressions cover integration boundaries.
+  Exact-Head execution results belong in the submitting PR's Proof section.
+- **Runtime and rollback:** packaged consumers need a rebuild, install, host
+  restart and fresh task verification. Revert the HookBus integration and its
+  structured tool-dispatch path together; preserve existing Session Logs and
+  the legacy hooks API. Changes to kernel contracts and tool permission
+  boundaries require core-maintainer review.
+### 2026-09-09 — Skill Engine ordinary references and session facts
+
+- **实现范围：** [Skill Engine 实现说明](../design/skill-engine.md)记录本 PR 的源码边界；不声明已合并、发布或更新安装运行时。原 [Tool 阶段文档](../design/tool-refactor/design.md)保留历史含义，不再作为当前 Skill 正文位置的依据。
+- **行为变化：** 取消固定名称/关键词驱动的自动全文及 system 激活；新增完整本地目录分页工具 `list_skills`，真实 `get_skill` / `skill_view` 返回 tool 正文。目录名称和简介仍由 `SkillLoader.get_skills_metadata_prompt` 生成，经 CLI/ACP 现有 system 模板插入；Context 负责读取正文与宿主资料的投影。显式选择使用当前 user 请求副本，原始输入不改写。多选整组正文放不下时，只有本次真实可调用且允许整组名称的分页 reader 才能改走提示；否则在 provider 前阻断，短资料无 reader 仍可直接交付。资料按下一完整请求、同批共享额度及 UTF-8 成本核算预算。宿主资料按追加后实际 Message 的转义与包装增量核算预算；连显式选择分页提示都放不下时，Context 返回预算型阻断，Kernel 最多压缩并重组一次，仍无法容纳才在 provider 前以 Error/Done 结束。安全输入额度已在上游预留输出，Context 不重复扣除；完整输入检查覆盖 schema、额外消息和 transient 声明成本。压缩恢复不重放工具或通知，只有请求记录 flush 成功后才登记宿主资料交付，失败保留待恢复资料。
+- **职责与装配：** `SkillRuntime` 只拥有来源解析、不可变快照和选择/读取事实，不保存消息、可见性或预算。Context 的 `SkillReferenceContext` 负责正文覆盖、分页和普通资料投影；`DefaultContextEngine` 经现有 plugin factory 按 run 创建，替换与来源核对后借用最终 Skill/Store。`prepare_request` 接收 Tool Engine 已准备的同一个完整 `PreparedTools`，核算 schema 开销但不改 definitions、曝光或可调用目标绑定；schema 展示不代表授权，每次 Tool 执行仍检查权限。集中装配让各模块共用最终依赖，代价是装配层需要明确连接并测试替换关系；具体处理仍留在各自模块。
+- **使用与入口边界：** 通用规则要求采用方法后遵循适用流程、必需参考和验证；阻塞时采用获准恢复或报告未完成，不把必需项改称可选。规则同时进入目录提示与 `get_skill` 描述，正文仍是普通资料、不授予权限。Agent/ACP/默认装配只从真实 Get/List 推断来源。直接调用者的无来源历史恢复在模型及本次日志写入前阻断，并保留构造后 tuple API 提供正文的兼容入口。ACP 在 `prepare_resume` 前通过共享 SkillRuntime 的 partial restore 策略恢复当前可用子集，独立会话 Loader 缺失时使用真实工具 Loader；无来源时仍可继续会话，不改写原 Skill 记录。
+- **会话与兼容：** Agent 持有会话 Skill 服务；Context 从已验证 tool 历史回报读取事实，当前覆盖逐请求核实，Kernel 保留真实历史。原生 Session Log 按 hash 保存宿主资料快照；第三方 Store 无快照文件接口时使用有界 `inlineContent` 与 `sha256`。两者均关联既有 `request/context`，由 Kernel flush 后才请求 provider，不扩展 Store 必需方法或新增事件。旧 `skill/change` 的名称/hash/顺序字段不改含义。沿用 `main` 的 `8702f84` 升级恢复策略：采用当前有效 Skill，版本/来源差异通过普通资料诊断说明，旧日志不改、新正文不冒用旧 hash；直接调用者遇来源缺失、禁用、损坏或 required 失败仍阻断；ACP 保留 main 的可继续恢复策略，跳过不可用及损坏的可选记录，legacy 缺失字段不作为历史正文或可见范围的证明。只有可验证的旧 system 后缀在请求投影中移除。计费用 `preloaded` / `get_skill` 旧枚举有意保留，不表示恢复自动全文策略。
+- **能力边界：** child 明确委派的 required 闭包仍可代读，但正文进入普通资料、Get/List 受分配范围和父 profile 限制，不增加 `required_tools`。外层插件装配拒绝 Skill reader 与最终内置工具目录使用不同 Loader；Kernel 只接收 Port。原 Skill 文件和 Tool 权限不改；Tool 默认引擎创建/注册/释放是独立后续，`create_scheduled_task` 不变。
+- **验证入口：** `tests/test_skill_catalog_tool.py`、`test_skill_usage_guidance.py`、`test_skill_entry_boundaries.py`、`test_context_input.py`、`test_skill_budget_recovery.py`、`test_skill_context.py`、`test_skill_context_regressions.py`、`test_skill_reference_persistence.py`、`test_agent_run_options.py`、`test_agent_session_persistence.py`、`test_sub_agent_capabilities.py`、`test_sub_agent_tool.py`、`test_skill_plugin_composition.py`、`test_plugin_host.py` 和 `test_acp.py`。跨版本投影默认从固定 `3e83bb3` Git 对象提取原读取器与 schema，不依赖邻接 checkout；也可指定 `BOX_AGENT_LEGACY_WORKTREE`。仅旧对象不可用且未指定路径时跳过，指定路径会核对固定 HEAD。执行结果、跳过项和真实任务结果须按最终提交另行报告，不从此条目推断通过。
+- **回退边界：** 以完整代码版本和兼容的 Session Log 为边界，不手工改写旧日志或删除快照；旧读者接受新增字段不代表其模型请求行为与本实现相同。不在本 PR 引入新市场、自动安装、通用权限系统或任务调度框架。
 
 ### 2026-09-09 — Tool Engine ownership and local discovery
 
@@ -130,6 +226,49 @@ Release, provider API, and ACP compatibility have their own sources under
   host restart, and fresh live-task verification before packaged behavior is
   established. Revert the session extraction and adapter wiring together;
   existing Session Logs need no migration.
+
+### 2026-09-09 — cwd-owned task organization and legacy output-root deprecation
+
+- **Implementation:** `fix/stable-session-cwd` is rebased onto `7c85e82`,
+  retaining PR #113's Tool Engine/result adapters and PR #114's shared live
+  AgentSession. The accompanying Draft PR records the final tested Head.
+- **Change:** General sessions keep `session/new.params.cwd` unchanged and no
+  longer create a fixed per-conversation or `output/` directory. A model may
+  create a semantic child directory when an independent task would otherwise
+  clutter the selected workspace; this remains ordinary file organization.
+- **Compatibility:** `artifact_mode`, `artifact_root`, `artifact_root_dir`, and
+  `session_workspace_dir` spellings are accepted for the current compatibility
+  series, warned once per ACP session, and ignored. Remove them from the next
+  major schema. The legacy output-directory environment variable is stripped
+  from Skill subprocesses and has no replacement. With the output-mode selector
+  removed, `append_file` uses the Tool catalog's default discoverable exposure.
+- **Artifact boundary:** pre/post discovery scans the original cwd recursively,
+  excluding VCS, dependencies, virtual environments, caches, and Box-Agent
+  internals. File-count and elapsed-time caps disable only the incomplete diff;
+  explicit structured/text tool paths remain available.
+- **Isolation and scan failures:** each workspace tool set has its own reserved
+  Skill scratch subdirectory, so finishing one session cannot delete another
+  session's temporary files. An incomplete pre- or post-scan disables the entire
+  changed-file diff, including filesystem access failures; it never represents
+  an empty workspace.
+- **PPT/research:** both workflows consume the absolute directory selected in
+  conversation. A research-backed deck shares that same directory and never
+  changes session cwd.
+- **PowerShell PPT images:** the image-status synchronizer accepts a narrowly
+  scoped `Set-Location -LiteralPath ... -ErrorAction Stop;` prefix for a task
+  subdirectory. The Skill uses this command instead of an unsupported Bash-tool
+  `workspaceDir` parameter, and a failed directory switch stops synchronization.
+- **Host action:** pass the user-selected workspace as `params.cwd`; stop
+  allocating a conversation directory or sending legacy path selectors.
+- **Runtime gap:** source tests and distribution builds are separate from a
+  standalone runtime rebuild, host installation/restart, and fresh live-task
+  verification. Those packaged-host steps remain required before rollout.
+- **Rollback:** revert the runtime change together with the corresponding host
+  cwd/path configuration. Preserve existing session cwd values and generated
+  task files; do not automatically move, merge, or delete user directories.
+- **Proof anchors:** ACP/tool/core/task-registry tests, PPT and research Skill
+  contracts, Roadmap cwd-boundary tests, and the generated builtin Skill
+  manifest.
 
 ### 2026-09-08 — native CLI session tracing
 

@@ -83,7 +83,6 @@ def _model_history_recovery_target(
     tool_name: str,
     arguments: dict[str, Any],
     workspace_dir: str | None,
-    artifact_root_dir: str | Path | None,
 ) -> Path | None:
     """Resolve the file target used to bind placeholder recovery to one artifact."""
     if tool_name not in _MODEL_HISTORY_FILE_MUTATION_TOOLS:
@@ -94,7 +93,7 @@ def _model_history_recovery_target(
     candidate = Path(raw_path).expanduser()
     if candidate.is_absolute():
         return candidate.resolve(strict=False)
-    root = _artifact_scan_root(workspace_dir, artifact_root_dir)
+    root = _artifact_scan_root(workspace_dir)
     if root is None:
         root = Path(workspace_dir).expanduser() if workspace_dir else Path.cwd()
     root = root.resolve(strict=False)
@@ -118,7 +117,6 @@ def _model_history_placeholder_recovery_error(
     tool_name: str,
     arguments: dict[str, Any],
     workspace_dir: str | None,
-    artifact_root_dir: str | Path | None,
 ) -> str | None:
     """Block stale downstream work until the rejected mutation is really completed."""
     if recovery is None:
@@ -131,7 +129,6 @@ def _model_history_placeholder_recovery_error(
             tool_name,
             arguments,
             workspace_dir,
-            artifact_root_dir,
         ) == recovery.target:
             return None
     if (
@@ -146,7 +143,6 @@ def _model_history_placeholder_recovery_error(
                     "write_file",
                     {"path": raw_path},
                     workspace_dir,
-                    artifact_root_dir,
                 )
                 if staged_target == recovery.target:
                     return None

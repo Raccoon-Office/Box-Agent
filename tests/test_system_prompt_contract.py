@@ -35,10 +35,21 @@ def test_system_prompt_forbids_plaintext_user_credentials():
 def test_system_prompt_resolves_paths_without_broad_home_searches():
     prompt = _prompt()
 
-    assert "相对路径由工具从当前 active project/artifact root 解析" in prompt
-    assert "不要假定始终相对 workspace" in prompt
-    assert "不递归搜索整个用户主目录" in prompt
-    assert "候选均失败后再询问" in prompt
+    assert "相对路径从 cwd 解析" in prompt
+    assert "任务子目录只管文件，不改 cwd" in prompt
+    assert "不搜主目录" in prompt
+    assert "失败再问" in prompt
+
+
+def test_system_prompt_lets_the_model_choose_a_task_directory():
+    prompt = _prompt()
+
+    assert "新建交付物前，先用 `search_files` 查看 cwd" in prompt
+    assert "默认用 cwd" in prompt
+    assert "只有较多无关文件时才建语义化任务目录" in prompt
+    assert "产物、素材、中间文件、QA 均放其中" in prompt
+    assert "cwd 空、文件少或均属本任务时直接使用 cwd" in prompt
+    assert "PPT 与深度研究共用该目录" in prompt
 
 
 def test_system_prompt_distinguishes_missing_attachments_from_explicit_paths():

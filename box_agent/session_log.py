@@ -7,13 +7,18 @@ import hashlib
 import json
 import logging
 import os
+import re
+import tempfile
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
+from uuid import uuid4
 
 from .schema import Message
+from .session_projection import SessionProjection
 
 
 _log = logging.getLogger(__name__)
@@ -36,6 +41,7 @@ KNOWN_EVENT_TYPES = frozenset(
         "request/header",
         "request/context",
         "session/end-seed",
+        "surface/reset",
         "goal/change",
         "plan/write",
         "todo/write",
@@ -65,14 +71,11 @@ class SessionLogWorkspaceMismatch(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class SessionProjection:
-    """Values reconstructed from one committed Session Log prefix."""
+class SessionOpenResult:
+    """Result of opening or creating one logical Session."""
 
-    messages: list[Message]
-    goal: dict[str, Any] | None
-    plan: dict[str, Any] | None
-    todos: list[dict[str, Any]]
-    skills: list[dict[str, Any]]
+    log: "SessionLog"
+    resumed: bool
 
 
 def _encode_record(record: dict[str, Any]) -> bytes:
@@ -90,6 +93,15 @@ def _encode_record(record: dict[str, Any]) -> bytes:
 def _session_dir(root: Path, session_id: str) -> Path:
     key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
     return root / key
+
+
+def default_session_root() -> Path:
+    """Return the shared on-disk root for logical Agent Sessions."""
+    # Keep session storage inside the configured Box-Agent profile when one is
+    # active (BOX_AGENT_HOME), while preserving the historical default path.
+    from .user_paths import state_path
+
+    return state_path("sessions")
 
 
 def _normalize_cwd(cwd: str | Path) -> str:
@@ -181,6 +193,10 @@ class SessionLog:
         self._lock_handle = lock_handle
         self._closed = False
         self._failed = False
+        self.recovery_source: Path | None = None
+        recovery_name = header.get("recoverySource")
+        if isinstance(recovery_name, str) and Path(recovery_name).name == recovery_name:
+            self.recovery_source = path.parent / recovery_name
 
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
@@ -204,6 +220,43 @@ class SessionLog:
             )
 
     @classmethod
+    def open_or_create(
+        cls,
+        root: str | Path,
+        *,
+        session_id: str,
+        cwd: str | Path,
+        origin: str | None = None,
+        prepare_resume: bool = True,
+    ) -> SessionOpenResult:
+        """Open an existing Session or create it, with one recovery policy."""
+
+        try:
+            log = cls.open(root, session_id=session_id, cwd=cwd)
+        except FileNotFoundError:
+            directory = _session_dir(Path(root), session_id)
+            if directory.exists():
+                # A directory without a canonical session file is not a new
+                # session; surface the corruption instead of overwriting it.
+                raise SessionLogCorrupted(
+                    f"session directory exists without {directory / 'session.jsonl'}"
+                )
+            log = cls.create(
+                root,
+                session_id=session_id,
+                cwd=cwd,
+                origin=origin,
+            )
+            return SessionOpenResult(log=log, resumed=False)
+        if prepare_resume:
+            try:
+                log.prepare_resume()
+            except BaseException:
+                log.close()
+                raise
+        return SessionOpenResult(log=log, resumed=True)
+
+    @classmethod
     def create(
         cls,
         root: str | Path,
@@ -218,7 +271,7 @@ class SessionLog:
             raise ValueError("session_id must not be empty")
         root_path = Path(root)
         directory = _session_dir(root_path, session_id)
-        directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = directory / "session.jsonl"
         lock_handle = _acquire_writer_lock(directory / ".writer.lock")
         header: dict[str, Any] = {
@@ -255,14 +308,18 @@ class SessionLog:
         *,
         session_id: str,
         cwd: str | Path,
+        recover: bool = False,
     ) -> "SessionLog":
+        """Open a session, optionally preserving incompatible logs for host recovery."""
         directory = _session_dir(Path(root), session_id)
         path = directory / "session.jsonl"
         lock_handle = _acquire_writer_lock(directory / ".writer.lock")
         try:
             handle = path.open("r+b")
+            workspace_verified = False
             try:
                 raw = handle.read()
+                original_raw = raw
                 header_end = raw.find(b"\n")
                 if header_end < 0:
                     raise SessionLogCorrupted(
@@ -276,8 +333,6 @@ class SessionLog:
                     ) from exc
                 if not isinstance(header, dict) or header.get("type") != "session":
                     raise SessionLogCorrupted("session log header is invalid")
-                if header.get("version") != SESSION_LOG_VERSION:
-                    raise ValueError("session log version is unsupported")
                 if header.get("id") != session_id:
                     raise ValueError("session log id does not match requested session")
                 stored_cwd = header.get("cwd")
@@ -289,11 +344,12 @@ class SessionLog:
                         "session cwd does not match the immutable workspace "
                         f"(stored={stored_cwd!r}, requested={requested_cwd!r})"
                     )
+                workspace_verified = True
+                if header.get("version") != SESSION_LOG_VERSION:
+                    raise SessionLogCorrupted("session log version is unsupported")
+                committed_end = None
                 if raw and not raw.endswith(b"\n"):
                     committed_end = raw.rfind(b"\n") + 1
-                    handle.truncate(committed_end)
-                    handle.flush()
-                    os.fsync(handle.fileno())
                     raw = raw[:committed_end]
                 raw_lines = raw.splitlines()
                 records: list[Any] = [header]
@@ -330,14 +386,70 @@ class SessionLog:
                         raise SessionLogCorrupted(
                             f"session log record {seq + 1} has invalid event data"
                         )
+                session = cls(path, header, events, handle, lock_handle)
+                if recover:
+                    session.replay()
+                if committed_end is not None:
+                    handle.truncate(committed_end)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 handle.seek(0, os.SEEK_END)
-            except BaseException:
+            except BaseException as exc:
                 handle.close()
+                if recover and workspace_verified and isinstance(exc, SessionLogCorrupted):
+                    return cls._recover_log(
+                        path, original_raw, session_id, cwd, lock_handle
+                    )
                 raise
         except BaseException:
             _release_writer_lock(lock_handle)
             raise
-        return cls(path, header, events, handle, lock_handle)
+        return session
+
+    @classmethod
+    def _recover_log(
+        cls,
+        path: Path,
+        raw: bytes,
+        session_id: str,
+        cwd: str | Path,
+        lock_handle: BinaryIO,
+    ) -> "SessionLog":
+        """Keep the original bytes before replacing an incompatible runtime log.
+
+        The caller holds the writer lock and has verified the session/workspace.
+        No historical tools are replayed; the host may supply semantic history.
+        """
+        suffix = uuid4().hex
+        archive = path.with_name(f"session.recovery-{suffix}.jsonl")
+        temporary = path.with_name(f".session-{suffix}.tmp")
+        header = {
+            "type": "session",
+            "version": SESSION_LOG_VERSION,
+            "id": session_id,
+            "createdAt": int(time.time() * 1000),
+            "cwd": _normalize_cwd(cwd),
+            "recoverySource": archive.name,
+        }
+        with archive.open("xb") as backup:
+            backup.write(raw)
+            backup.flush()
+            os.fsync(backup.fileno())
+        try:
+            with temporary.open("xb") as replacement:
+                replacement.write(_encode_record(header))
+                replacement.flush()
+                os.fsync(replacement.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        handle = path.open("r+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            return cls(path, header, [], handle, lock_handle)
+        except BaseException:
+            handle.close()
+            raise
 
     def append(
         self,
@@ -382,6 +494,104 @@ class SessionLog:
         except OSError as exc:
             self._failed = True
             raise SessionLogDurabilityError("session log flush failed") from exc
+
+    def _skill_reference_path(self, ref: Mapping[str, Any]) -> Path:
+        """Accept only a content-addressed file in this session's namespace."""
+
+        digest = ref.get("sha256") if isinstance(ref, Mapping) else None
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise SessionLogCorrupted("invalid Skill reference hash")
+        expected = f"skill-references/{digest}.txt"
+        if ref.get("contentRef") != expected:
+            raise SessionLogCorrupted("invalid Skill reference path")
+        path = self.path.parent / expected
+        if path.parent.is_symlink() or path.is_symlink():
+            raise SessionLogCorrupted("Skill reference paths must not be symbolic links")
+        if path.resolve().parent != (self.path.parent.resolve() / "skill-references"):
+            raise SessionLogCorrupted("Skill reference escapes the session directory")
+        return path
+
+    def read_skill_reference(self, ref: Mapping[str, Any]) -> str:
+        """Read an exact UTF-8 snapshot, validating its path and byte hash."""
+
+        path = self._skill_reference_path(ref)
+        try:
+            if not path.is_file():
+                raise SessionLogCorrupted(
+                    "cannot read missing or non-regular Skill reference snapshot"
+                )
+            content = path.read_bytes()
+        except OSError as exc:
+            raise SessionLogCorrupted("cannot read Skill reference snapshot") from exc
+        if hashlib.sha256(content).hexdigest() != ref["sha256"]:
+            raise SessionLogCorrupted("Skill reference content hash mismatch")
+        try:
+            return content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SessionLogCorrupted("Skill reference is not valid UTF-8") from exc
+
+    def store_skill_reference(self, content: str) -> dict[str, str]:
+        """Durably publish an immutable snapshot without appending an event.
+
+        After this succeeds, callers append the returned reference plus its
+        request/range metadata to ``request/context`` and flush that event
+        before calling the provider. Neither a trace nor the original Skill
+        file is needed to reconstruct that request's reference text.
+        """
+
+        if self._closed:
+            raise RuntimeError("session log is closed")
+        if self._failed:
+            raise SessionLogDurabilityError("session log is unusable after an I/O failure")
+        encoded = content.encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        ref = {"contentRef": f"skill-references/{digest}.txt", "sha256": digest}
+        path = self._skill_reference_path(ref)
+        temporary: Path | None = None
+        try:
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            if path.exists():
+                # Never overwrite a corrupt snapshot or change an existing
+                # inode. Re-sync a valid file before acknowledging reuse.
+                self.read_skill_reference(ref)
+                with path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+            else:
+                fd, name = tempfile.mkstemp(prefix=".skill-reference-", dir=path.parent)
+                temporary = Path(name)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    # Linking publishes an already-fsynced inode atomically
+                    # without replacing any snapshot that appeared meanwhile.
+                    os.link(temporary, path)
+                except FileExistsError:
+                    self.read_skill_reference(ref)
+                    with path.open("rb") as handle:
+                        os.fsync(handle.fileno())
+                temporary.unlink()
+                temporary = None
+            if os.name != "nt":
+                # Persist both the snapshot name and the newly-created
+                # namespace. Windows does not support opening directory fds.
+                for directory in (path.parent, self.path.parent):
+                    directory_fd = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+        except OSError as exc:
+            self._failed = True
+            raise SessionLogDurabilityError("Skill reference persistence failed") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return ref
 
     def append_unlogged_messages(
         self,
@@ -473,6 +683,9 @@ class SessionLog:
     def _surface_nodes(self) -> list[tuple[int, Message]]:
         surface: list[tuple[int, Message]] = []
         for event in self._events:
+            if event["type"] == "surface/reset":
+                surface.clear()
+                continue
             if event["type"] not in {
                 "user/message",
                 "assistant/message",
@@ -569,6 +782,13 @@ class SessionLog:
             )
         return appended
 
+    def reset_surface(self, *, reason: str) -> dict[str, Any]:
+        """Persist a logical conversation reset without deleting audit history."""
+
+        event = self.append("surface/reset", {"reason": reason})
+        self.flush()
+        return event
+
     def replay(self) -> SessionProjection:
         surface: list[tuple[int, Message]] = []
         goal: dict[str, Any] | None = None
@@ -578,6 +798,9 @@ class SessionLog:
         for event in self._events:
             event_type = event.get("type")
             data = event["data"]
+            if event_type == "surface/reset":
+                surface.clear()
+                continue
             if event_type == "goal/change":
                 value = data.get("goal")
                 goal = deepcopy(value) if isinstance(value, dict) else None
@@ -588,19 +811,11 @@ class SessionLog:
                 continue
             if event_type == "todo/write":
                 value = data.get("todos")
-                if not isinstance(value, list):
-                    raise SessionLogCorrupted(
-                        f"todo/write event {event['seq']} has invalid todos"
-                    )
-                todos = deepcopy(value)
+                todos = deepcopy(value) if isinstance(value, list) else []
                 continue
             if event_type == "skill/change":
                 value = data.get("skills")
-                if not isinstance(value, list):
-                    raise SessionLogCorrupted(
-                        f"skill/change event {event['seq']} has invalid skills"
-                    )
-                skills = deepcopy(value)
+                skills = deepcopy(value) if isinstance(value, list) else []
                 continue
             if event_type not in {
                 "user/message",

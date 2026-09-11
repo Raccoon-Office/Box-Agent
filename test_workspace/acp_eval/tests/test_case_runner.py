@@ -4,6 +4,7 @@ import json
 import hashlib
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -181,11 +182,81 @@ def test_absent_case_metadata_keeps_acp_defaults(tmp_path: Path) -> None:
     prompt = next(message["params"] for message in sent
                   if message.get("method") == "session/prompt")
     assert set(session["_meta"]) == {
-        "title", "session_id", "permission_mode", "filesystem_policy", "workspace_layout"
+        "title", "session_id", "permission_mode", "filesystem_policy"
     }
+    assert session["cwd"] == str((attempt / "workspace").resolve())
     assert session["_meta"]["filesystem_policy"]["allowed_directories"] == []
     assert prompt["_meta"] == {"title": "acp", "turnId": "eval-acp-normal-turn-1"}
     assert "clientCapabilities" not in sent[0]["params"]
+
+
+def test_effect_evaluation_runs_after_original_attempt_is_terminal(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = make_config(tmp_path, "normal")
+    config = CaseConfig(
+        repo_root=config.repo_root,
+        evaluation_dir=config.evaluation_dir,
+        dataset_root=config.dataset_root,
+        timeout_seconds=config.timeout_seconds,
+        python_executable=config.python_executable,
+        effect_eval_url="http://127.0.0.1:8766",
+    )
+    record = {
+        "id": "normal",
+        "query": "execute normal",
+        "input_files": ["input_files/normal/payload.txt"],
+    }
+    observed: dict[str, object] = {}
+
+    def fake_evaluate(attempt: Path, received_record, received_config) -> None:
+        observed["manifest"] = read_json(attempt / "manifest.json")["status"]
+        observed["completeness"] = read_json(attempt / "completeness.json")["status"]
+        observed["record"] = received_record
+        observed["url"] = received_config.service_url
+
+    monkeypatch.setattr(case_runner_module, "evaluate_attempt", fake_evaluate)
+    result = run_case(record, config)
+
+    assert observed == {
+        "manifest": "finished",
+        "completeness": "complete",
+        "record": record,
+        "url": "http://127.0.0.1:8766",
+    }
+    assert result.acp_status == "completed"
+    assert result.completeness_status == "complete"
+
+
+def test_effect_evaluation_failure_cannot_change_case_result(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = make_config(tmp_path, "normal")
+    config = CaseConfig(
+        repo_root=config.repo_root,
+        evaluation_dir=config.evaluation_dir,
+        dataset_root=config.dataset_root,
+        timeout_seconds=config.timeout_seconds,
+        python_executable=config.python_executable,
+        effect_eval_url="http://127.0.0.1:8766",
+    )
+    monkeypatch.setattr(
+        case_runner_module,
+        "evaluate_attempt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("write failed")),
+    )
+
+    result = run_case(
+        {
+            "id": "normal",
+            "query": "execute normal",
+            "input_files": ["input_files/normal/payload.txt"],
+        },
+        config,
+    )
+
+    assert result.acp_status == "completed"
+    assert result.completeness_status == "complete"
 
 
 def test_normal_case_writes_self_contained_complete_attempt(tmp_path: Path) -> None:
@@ -274,6 +345,91 @@ def test_normal_case_writes_self_contained_complete_attempt(tmp_path: Path) -> N
     assert final_response["result"]["_meta"]["usage"]["sessionId"] == (
         "eval-acp-normal"
     )
+
+
+def test_selected_model_is_bound_on_the_acp_session(tmp_path: Path) -> None:
+    config = replace(
+        make_config(tmp_path, "normal"),
+        model="sn-deepseek-v4-pro",
+        model_max_tokens=100000,
+    )
+    record = {
+        "id": "normal",
+        "query": "execute normal",
+        "input_files": ["input_files/normal/payload.txt"],
+    }
+
+    result = run_case(record, config)
+
+    attempt = next(
+        (config.evaluation_dir / "cases/normal/attempts").glob("attempt-*")
+    )
+    sent = [
+        entry["message"]
+        for entry in read_jsonl(attempt / "protocol.jsonl")
+        if entry["direction"] == "sent"
+    ]
+    session_new = next(
+        message for message in sent if message.get("method") == "session/new"
+    )
+    assert session_new["params"]["_meta"]["llm_binding"] == {
+        "source": "builtin",
+        "model": "sn-deepseek-v4-pro",
+        "maxTokens": 100000,
+    }
+    assert session_new["params"]["_meta"]["enableBuiltinModelRouting"] is True
+    assert result.acp_status == "completed"
+
+
+def test_auto_model_binding_is_resolved_per_task_before_acp_session(tmp_path: Path) -> None:
+    candidates = [
+        {
+            "model": "sn-sensenova-6-8-flash-lite",
+            "tags": ["general", "fast"],
+            "abilityLevel": 1,
+            "maxTokens": 63999,
+        },
+        {
+            "model": "sn-deepseek-v4-pro",
+            "tags": ["presentation", "analysis"],
+            "abilityLevel": 3,
+            "maxTokens": 100000,
+        },
+    ]
+    config = replace(
+        make_config(tmp_path, "normal"),
+        model_binding={
+            "source": "builtin",
+            "model": "sn-sensenova-6-8-flash-lite",
+            "evaluationMode": "auto",
+            "autoRouting": {"models": candidates},
+        },
+    )
+    record = {
+        "id": "normal",
+        "query": "请生成一份项目汇报 PPT",
+        "input_files": ["input_files/normal/payload.txt"],
+    }
+
+    result = run_case(record, config)
+
+    attempt = next(
+        (config.evaluation_dir / "cases/normal/attempts").glob("attempt-*")
+    )
+    sent = [
+        entry["message"]
+        for entry in read_jsonl(attempt / "protocol.jsonl")
+        if entry["direction"] == "sent"
+    ]
+    session_new = next(
+        message for message in sent if message.get("method") == "session/new"
+    )
+    binding = session_new["params"]["_meta"]["llm_binding"]
+    assert binding["model"] == "sn-deepseek-v4-pro"
+    assert binding["maxTokens"] == 100000
+    assert binding["autoRouting"] == {"models": candidates}
+    assert "evaluationMode" not in binding
+    assert result.acp_status == "completed"
 
 
 def test_malformed_frame_remains_in_raw_and_marks_attempt_corrupt(tmp_path: Path) -> None:
@@ -829,3 +985,27 @@ def test_subprocess_start_failure_writes_terminal_event_and_incomplete_manifest(
     assert read_json(attempt / "manifest.json")["status"] == "incomplete"
     assert read_json(attempt / "completeness.json")["status"] == "incomplete"
     assert result.acp_status == "error"
+
+
+def test_model_metadata_and_staged_attachments_reach_the_same_acp_session(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path, "normal"), model="sn-model", model_max_tokens=4096)
+    record = {
+        "id": "normal", "query": "inspect the attached input", "input_files": ["input_files/normal/payload.txt"],
+        "session_meta": {"deep_think": True},
+        "prompt_meta": {"selected_skill_names": ["analysis"]},
+    }
+    result = run_case(record, config)
+    assert result.acp_status == "completed"
+    attempt = next((config.evaluation_dir / "cases" / "normal" / "attempts").iterdir())
+    sent = read_jsonl(attempt / "acp-stdin.raw")
+    session = next(message["params"] for message in sent if message.get("method") == "session/new")
+    prompt = next(message["params"] for message in sent if message.get("method") == "session/prompt")
+    assert session["_meta"]["llm_binding"] == {"source": "builtin", "model": "sn-model", "maxTokens": 4096}
+    assert session["_meta"]["deep_think"] is True
+    assert session["_meta"]["permission_mode"] == "default"
+    assert "workspace_layout" not in session["_meta"]
+    assert prompt["_meta"]["selected_skill_names"] == ["analysis"]
+    attachment = next(block for block in prompt["prompt"] if block["type"] == "resource_link")
+    staged = attempt / "workspace" / "payload.txt"
+    assert attachment["uri"] == staged.resolve().as_uri()
+    assert staged.read_bytes() == b"input body\n"

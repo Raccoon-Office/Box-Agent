@@ -40,19 +40,18 @@ def test_run_observer_is_noop_when_trace_is_disabled() -> None:
 def test_artifact_observer_keeps_registration_failure_structured() -> None:
     calls = []
 
-    def register(workspace, task_context, artifact, *, artifact_root_dir):
-        calls.append((workspace, task_context, artifact, artifact_root_dir))
+    def register(workspace, task_context, artifact):
+        calls.append((workspace, task_context, artifact))
         raise RuntimeError("registry unavailable")
 
     observer = ArtifactObserver(
         workspace_dir="workspace",
         task_context="task",
-        artifact_root_dir="output",
         register_revision=register,
     )
     result = observer.observe("artifact")
 
-    assert calls == [("workspace", "task", "artifact", "output")]
+    assert calls == [("workspace", "task", "artifact")]
     assert result.lineage is None
     assert isinstance(result.error, RuntimeError)
 

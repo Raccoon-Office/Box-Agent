@@ -1129,6 +1129,6 @@ async def test_acp_run_turn_uses_agent_facade_with_deep_think(tmp_path, monkeypa
     assert options.cache_fingerprint_context is state.agent.cache_fingerprint_context
     assert options.memory_extractor is state.memory_extractor
     assert options.inject_queue is state.inject_queue
-    assert options.artifact_root_dir == state.output_dir
+    assert options.artifact_root_dir is None
     assert options.artifact_detection_enabled is True
     assert callable(options.cache_fingerprint_sink)

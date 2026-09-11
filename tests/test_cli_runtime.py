@@ -7,6 +7,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 import box_agent.cli as cli
 import box_agent.composition as composition_module
 import box_agent.runtime as runtime_module
@@ -23,6 +25,14 @@ from box_agent.tools.setup import add_workspace_tools
 from box_agent.tools.skill_tool import GetSkillTool
 from box_agent.workspace_registry import WorkspaceRegistry
 from tests.architecture_imports import forbidden_adapter_layer_imports
+from box_agent.session_log import SessionLog
+
+
+@pytest.fixture(autouse=True)
+def isolated_cli_session_home(tmp_path, monkeypatch):
+    """Persistent CLI test sessions must never use the developer's profile."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
 
 
 def _make_executable(path: Path) -> None:
@@ -150,11 +160,15 @@ def test_cli_public_path_reaches_plugin_composition_and_agent_loop_kernel(
     )
 
     assert exit_code == 0
-    assert [len(bridge_calls), len(host_calls), len(kernel_calls)] == [1, 1, 1]
-    assert host_calls[0]["llm"] is bridge_calls[0]["llm"]
+    assert [len(bridge_calls), len(host_calls), len(kernel_calls)] == [1, 0, 1]
     services = kernel_calls[0]["services"]
-    assert services.llm is host_calls[0]["llm"]
-    assert services.tool_catalog is host_calls[0]["tool_catalog"]
+    provided = bridge_calls[0]["kernel_services"]
+    assert services.llm is provided.llm
+    assert services.tool_catalog is provided.tool_catalog
+    assert services.hook_dispatch is services.hook_bus
+    assert services.hook_context is services.hook_bus.context
+    assert services.llm is bridge_calls[0]["llm"]
+    assert services.tool_catalog is bridge_calls[0]["tools"]
     assert kernel_calls[0]["run_arguments"]["messages"] is bridge_calls[0]["messages"]
 
 
@@ -226,6 +240,88 @@ class _CaptureStreamLLM:
         self.system_prompts.append(messages[0].content)
         yield StreamEvent(type="text", delta="done.")
         yield StreamEvent(type="finish", finish_reason="stop")
+
+
+def test_cli_resumes_messages_from_session_log(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("api_key: test\n", encoding="utf-8")
+    system_prompt_path = tmp_path / "system_prompt.md"
+    system_prompt_path.write_text("base system", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=2,
+            workspace_dir=str(workspace),
+            enable_memory=False,
+            enable_memory_extraction=False,
+            memory_maintainer_enabled=False,
+            memory_promotion_proposal_enabled=False,
+            system_prompt_path=str(system_prompt_path),
+        ),
+        tools=ToolsConfig(
+            enable_file_tools=False,
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_mcp=False,
+            enable_skills=False,
+            allow_full_access=True,
+        ),
+    )
+
+    async def fake_initialize_base_tools(*args, **kwargs):
+        return [], None, None, None
+
+    monkeypatch.setattr(
+        cli.Config,
+        "get_default_config_path",
+        staticmethod(lambda: config_path),
+    )
+    monkeypatch.setattr(cli.Config, "from_yaml", staticmethod(lambda _path: config))
+    monkeypatch.setattr(
+        cli.Config,
+        "find_config_file",
+        staticmethod(
+            lambda name: Path(name) if name == str(system_prompt_path) else None
+        ),
+    )
+    monkeypatch.setattr(cli, "LLMClient", _CaptureStreamLLM)
+    monkeypatch.setattr(cli, "initialize_base_tools", fake_initialize_base_tools)
+    monkeypatch.setattr(cli, "add_workspace_tools", lambda *args, **kwargs: None)
+    _CaptureStreamLLM.instances.clear()
+
+    for prompt in ("first request", "second request"):
+        assert (
+            asyncio.run(
+                cli.run_agent(
+                    workspace,
+                    task=prompt,
+                    session_id="cli-resume",
+                    sandbox_mode=False,
+                    verify_api=False,
+                    goal_autopilot_enabled=False,
+                )
+            )
+            == 0
+        )
+
+    restored = SessionLog.open(
+        tmp_path / "home" / ".box-agent" / "sessions",
+        session_id="cli-resume",
+        cwd=workspace,
+    )
+    assert [
+        (message.role, message.content) for message in restored.replay().messages
+    ] == [
+        ("user", "first request"),
+        ("assistant", "done."),
+        ("user", "second request"),
+        ("assistant", "done."),
+    ]
+    restored.close()
 
 
 class _PreloadedSkillThenGetSkillLLM(_CaptureStreamLLM):
@@ -397,7 +493,7 @@ def test_cli_ctrl_d_exits_without_empty_error(
     assert "❌ Error:" not in output
 
 
-def test_interactive_cli_preloads_explicit_skill_without_completion_gate(
+def test_interactive_cli_delivers_explicit_skill_as_ordinary_reference(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -441,18 +537,32 @@ def test_interactive_cli_preloads_explicit_skill_without_completion_gate(
         ),
     )
     run_options: list[dict[str, object]] = []
+    real_run = cli.Agent.run_events
+    real_session_turn = cli._run_session_turn
+
+    async def checked_session_turn(session, **overrides):
+        assert session.explicitly_allowed_skill_names == {"report-skill"}
+        for name in ("get_skill", "list_skills"):
+            assert session.agent.tools[name].explicitly_allowed_skill_names is session.explicitly_allowed_skill_names
+        return await real_session_turn(session, **overrides)
 
     async def fake_initialize_base_tools(*args, **kwargs):
-        return [GetSkillTool(skill_loader)], skill_loader, None, None
+        from box_agent.tools.skill_catalog_tool import ListSkillsTool
+        return [GetSkillTool(skill_loader, blocked_skill_names={"report-skill"}),
+                ListSkillsTool(skill_loader, blocked_skill_names={"report-skill"})], skill_loader, None, None
 
     async def fake_run(self, *args, **kwargs):
+        catalog = await self.tools["list_skills"].execute(query="report-skill")
+        assert catalog.raw_output["skills"][0]["available"]
+        assert "report-skill" in self.tools["get_skill"].explicitly_allowed_skill_names
         run_options.append(
             {
                 "kwargs": kwargs,
                 "system_prompt": self.messages[0].content,
             }
         )
-        yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="done")
+        async for event in real_run(self, *args, **kwargs):
+            yield event
 
     monkeypatch.setattr(
         cli.Config,
@@ -472,7 +582,9 @@ def test_interactive_cli_preloads_explicit_skill_without_completion_gate(
     monkeypatch.setattr(cli, "add_workspace_tools", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "PromptSession", _ExplicitSkillPromptSession)
     monkeypatch.setattr(cli.Agent, "run_events", fake_run)
+    monkeypatch.setattr(cli, "_run_session_turn", checked_session_turn)
     _ExplicitSkillPromptSession.prompt_count = 0
+    _CaptureStreamLLM.instances.clear()
 
     exit_code = asyncio.run(
         cli.run_agent(
@@ -486,7 +598,12 @@ def test_interactive_cli_preloads_explicit_skill_without_completion_gate(
     assert exit_code == 0
     assert len(run_options) == 1
     assert "completion_gate" not in run_options[0]["kwargs"]
-    assert "Generate the requested report." in run_options[0]["system_prompt"]
+    assert "Generate the requested report." not in run_options[0]["system_prompt"]
+    snapshot = _CaptureStreamLLM.instances[0].message_snapshots[0]
+    assert any(role == "user" and "Generate the requested report." in str(content)
+               for role, content in snapshot)
+    assert all("Generate the requested report." not in str(content)
+               for role, content in snapshot if role in ("system", "developer"))
 
 
 def test_cli_workspace_tools_receive_self_managed_node_runtime(
@@ -629,7 +746,7 @@ def test_cli_uses_saved_code_workspace_mode(tmp_path: Path, monkeypatch) -> None
     )
 
     assert exit_code == 0
-    assert workspace_tool_options["use_output_dir"] is False
+    assert "use_output_dir" not in workspace_tool_options
     assert workspace_tool_options["session_mode"] == "code_agent"
     system_prompt = _CaptureStreamLLM.instances[0].system_prompts[0]
     assert "Project Workspace Mode" in system_prompt
@@ -638,7 +755,7 @@ def test_cli_uses_saved_code_workspace_mode(tmp_path: Path, monkeypatch) -> None
     assert "Do not create or use an `output/` folder" in system_prompt
 
 
-def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkeypatch) -> None:
+def test_cli_task_reads_pptx_on_demand_without_automatic_fulltext(tmp_path: Path, monkeypatch) -> None:
     skills_dir = tmp_path / "skills"
     prompt = "做一份 12 页新员工入职培训 PPT，1920×1080 可编辑"
     for index in range(16):
@@ -726,19 +843,15 @@ def test_cli_task_preloads_pptx_even_when_filter_drops_it(tmp_path: Path, monkey
 
     assert exit_code == 0
     first_system_prompt = _CaptureStreamLLM.instances[0].system_prompts[0]
-    assert "## Auto-Loaded Skill Instructions" in first_system_prompt
-    assert "# Skill: pptx" in first_system_prompt
-    assert "# PPTX FULL RULES" in first_system_prompt
-    assert "# Skill: html-templates" in first_system_prompt
-    assert "# HTML TEMPLATE RULES" in first_system_prompt
+    assert "## Auto-Loaded Skill Instructions" not in first_system_prompt
+    assert "# PPTX FULL RULES" not in first_system_prompt
+    assert "# HTML TEMPLATE RULES" not in first_system_prompt
     snapshots = _CaptureStreamLLM.instances[0].message_snapshots
     assert len(snapshots) == 2
     tool_messages = [content for role, content in snapshots[1] if role == "tool"]
-    assert tool_messages == [
-        "Skill 'pptx' is already preloaded in this session. "
-        "Follow its system instructions directly."
-    ]
-    assert "# PPTX FULL RULES" not in tool_messages[0]
+    assert len(tool_messages) == 1
+    assert "# PPTX FULL RULES" in tool_messages[0]
+    assert "# HTML TEMPLATE RULES" not in tool_messages[0]
 
 
 def test_cli_task_returns_failure_for_done_error(
@@ -1000,3 +1113,90 @@ def test_cli_source_image_optout_reaches_real_pptx_scaffold(tmp_path, monkeypatc
     )
     assert manifests[0]["generation_forbidden"] is True
     assert all(item["decision"] == "skip" for item in manifests[0]["image_plan"])
+
+
+def _configure_persistent_cli_test(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("api_key: test\n")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(workspace), enable_memory=False, max_steps=1),
+        tools=ToolsConfig(enable_mcp=False, enable_skills=False),
+    )
+    async def base(*args, **kwargs):
+        return [], None, None, None
+    monkeypatch.setattr(cli.Config, "get_default_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr(cli.Config, "from_yaml", staticmethod(lambda _path: config))
+    monkeypatch.setattr(cli, "LLMClient", _CaptureStreamLLM)
+    monkeypatch.setattr(cli, "initialize_base_tools", base)
+    monkeypatch.setattr(cli, "add_workspace_tools", lambda *args, **kwargs: None)
+    return workspace
+
+
+@pytest.mark.parametrize("all_legacy_arguments", [False, True])
+def test_legacy_cli_positional_arguments_keep_api_verification_disabled(
+    tmp_path, monkeypatch, all_legacy_arguments,
+):
+    workspace = _configure_persistent_cli_test(tmp_path, monkeypatch)
+    probes = []
+
+    async def record_probe(client):
+        probes.append(client)
+
+    monkeypatch.setattr(cli, "_probe_llm_api", record_probe)
+    arguments = [workspace, "task", None, False, False]
+    options = {"session_id": "positional-contract"}
+    if all_legacy_arguments:
+        arguments.extend([False, False, False, False])
+    else:
+        options["goal_autopilot_enabled"] = False
+    assert asyncio.run(cli.run_agent(*arguments, **options)) == 0
+    assert probes == []
+    restored = SessionLog.open(
+        cli.default_session_root(), session_id="positional-contract", cwd=workspace,
+    )
+    try:
+        assert restored.replay().messages[-1].content == "done."
+    finally:
+        restored.close()
+
+
+def test_cli_failed_skill_restore_preserves_log_and_releases_writer_lock(tmp_path, monkeypatch):
+    from box_agent.skill_dependencies import SkillDependencyError
+
+    workspace = _configure_persistent_cli_test(tmp_path, monkeypatch)
+    root = cli.default_session_root()
+    log = SessionLog.create(root, session_id="missing-skill", cwd=workspace)
+    log.append("skill/change", {"skills": [{"name": "missing", "sha256": "old", "loadOrder": 1}]})
+    log.flush()
+    path = log.path
+    log.close()
+    before = path.read_bytes()
+    with pytest.raises(SkillDependencyError, match="No Skill source"):
+        asyncio.run(cli.run_agent(workspace, task="continue", session_id="missing-skill",
+                                  verify_api=False, sandbox_mode=False, goal_autopilot_enabled=False))
+    reopened = SessionLog.open(root, session_id="missing-skill", cwd=workspace)
+    reopened.close()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("persisted_goal", [None, "canonical goal"])
+def test_resumed_cli_uses_log_goal_and_leaves_workspace_goal_unchanged(tmp_path, monkeypatch, persisted_goal):
+    workspace = _configure_persistent_cli_test(tmp_path, monkeypatch)
+    assert cli.cmd_goal(workspace, "set", ["workspace goal"]) == 0
+    root = cli.default_session_root()
+    if persisted_goal is not None:
+        assert cli.cmd_goal(workspace, "set", [persisted_goal], session_id="goal-session") == 0
+    else:
+        SessionLog.create(root, session_id="goal-session", cwd=workspace).close()
+    for prompt in ("first", "second"):
+        assert asyncio.run(cli.run_agent(workspace, task=prompt, session_id="goal-session",
+                                         verify_api=False, sandbox_mode=False, goal_autopilot_enabled=False)) == 0
+    reopened = SessionLog.open(root, session_id="goal-session", cwd=workspace)
+    try:
+        goal = reopened.replay().goal
+        assert (goal["objective"] if goal else None) == persisted_goal
+        assert cli._load_goal_state(workspace).objective == "workspace goal"
+    finally:
+        reopened.close()

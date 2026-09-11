@@ -22,6 +22,19 @@ def test_client_metadata_is_not_sent_outside_raccoon_domain(url):
     assert ClientInfo(device_id="device-1").headers_for_url(url) == {}
 
 
+@pytest.mark.parametrize("name,expected", [
+    ("raccoon-ai", "raccoon-ai"),
+    (" custom-client ", "custom-client"),
+    ("", "raccoon"),
+    ("   ", "raccoon"),
+    ("小浣熊", "raccoon"),
+    ("client\r\nx-injected: true", "raccoon"),
+])
+def test_client_name_uses_host_value_or_defaults_when_missing_or_unsafe(name, expected):
+    headers = ClientInfo(name=name).headers_for_url("https://xiaohuanxiong.com/v1")
+    assert headers["x-client-name"] == expected
+
+
 @pytest.mark.parametrize("version,expected", [
     ("1.2.3", "v1.2.3"), ("v1.2.3", "v1.2.3"),
     ("git-abc123", None), ("", None), ("v01.2.3", None),
@@ -86,7 +99,7 @@ def test_client_headers_are_limited_to_raccoon_owned_backends() -> None:
     )
 
     assert client_info.headers_for_url("https://xiaohuanxiong.com/api/web/llm/v2") == {
-        "x-client-name": "raccoon",
+        "x-client-name": "raccoon-ai",
         "x-client-platform": "desktop-windows-x64",
         "x-client-version": "v0.21.1",
     }
@@ -99,7 +112,7 @@ def test_scoped_client_info_does_not_leak_after_request_scope() -> None:
 
     with scoped_client_info(client_info):
         assert current_client_headers("https://xiaohuanxiong.com/api/web/llm/v2") == {
-            "x-client-name": "raccoon",
+            "x-client-name": "raccoon-ai",
             "x-client-platform": "unknown",
             "x-client-device-id": "scoped-device",
         }
@@ -162,7 +175,7 @@ async def test_acp_session_inherits_client_info_from_initialize(tmp_path) -> Non
     )
 
     assert llm.headers == {
-        "x-client-name": "raccoon",
+        "x-client-name": "raccoon-ai",
         "x-client-platform": "desktop-linux-arm64",
         "x-client-version": "v0.21.1",
     }

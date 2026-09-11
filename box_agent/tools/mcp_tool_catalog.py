@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from threading import RLock
 
@@ -65,6 +65,9 @@ class MCPToolEntry:
     tool: Tool
     generation: int
     always_load: bool
+    connector_id: str | None = None
+    connector_name: str | None = None
+    remote_name: str | None = None
     name_conflict: bool = False
 
 
@@ -127,6 +130,12 @@ class MCPToolCatalog:
             ready_event.set()
 
     @property
+    def initial_loading(self) -> bool:
+        """Distinguish cold discovery from independent server refreshes."""
+        with self._lock:
+            return self._loading
+
+    @property
     def loading(self) -> bool:
         with self._lock:
             return self._has_pending_discovery()
@@ -169,6 +178,9 @@ class MCPToolCatalog:
                     tool=tool,
                     generation=generation,
                     always_load=bool(getattr(tool, "mcp_always_load", False)),
+                    connector_id=getattr(tool, "mcp_connector_id", None),
+                    connector_name=getattr(tool, "mcp_connector_name", None),
+                    remote_name=getattr(tool, "remote_name", raw_name),
                 )
             self._rebuild_conflicts()
             return generation
@@ -207,14 +219,61 @@ class MCPToolCatalog:
             return None
         return matches[0]
 
+    def resolve_connector_id(
+        self,
+        reference: str,
+        *,
+        entry_filter: Callable[[MCPToolEntry], bool] | None = None,
+    ) -> str | None:
+        """Resolve a connector ID or unique display-name fragment."""
+        normalized_reference = _normalize(reference)
+        if not normalized_reference:
+            return None
+        identities: dict[str, set[str]] = {}
+        for entry in self.snapshot():
+            if not entry.connector_id or not self._visible(entry, entry_filter):
+                continue
+            identities.setdefault(entry.connector_id, set()).add(entry.connector_name or "")
+
+        exact_ids = {
+            connector_id
+            for connector_id in identities
+            if _normalize(connector_id) == normalized_reference
+        }
+        if len(exact_ids) == 1:
+            return next(iter(exact_ids))
+
+        matching_ids = {
+            connector_id
+            for connector_id, names in identities.items()
+            if any(
+                normalized_reference
+                in _normalize(f"{connector_id} {connector_name}")
+                for connector_name in names
+            )
+        }
+        return next(iter(matching_ids)) if len(matching_ids) == 1 else None
+
+    @staticmethod
+    def _visible(
+        entry: MCPToolEntry,
+        entry_filter: Callable[[MCPToolEntry], bool] | None,
+    ) -> bool:
+        return entry_filter is None or entry_filter(entry)
+
     def search(
         self,
         query: str,
         *,
         server_name: str | None = None,
         top_k: int = 5,
+        entry_filter: Callable[[MCPToolEntry], bool] | None = None,
     ) -> list[MCPToolEntry]:
-        ranked = self._ranked_search(query, server_name=server_name)
+        ranked = self._ranked_search(
+            query,
+            server_name=server_name,
+            entry_filter=entry_filter,
+        )
         return [entry for *_, entry in ranked[: max(1, top_k)]]
 
     def search_many(
@@ -224,6 +283,7 @@ class MCPToolCatalog:
         server_name: str | None = None,
         top_k: int = 5,
         entries: Iterable[MCPToolEntry] | None = None,
+        entry_filter: Callable[[MCPToolEntry], bool] | None = None,
     ) -> list[MCPToolEntry]:
         """Merge independent keyword searches using each tool's best rank."""
         search_entries = tuple(entries) if entries is not None else None
@@ -242,7 +302,12 @@ class MCPToolCatalog:
         ] = {}
         for query_index, query in enumerate(normalized_queries):
             for exact_priority, neg_relevance, neg_matched, tool_id, entry in (
-                self._ranked_search(query, server_name=server_name, entries=search_entries)
+                self._ranked_search(
+                    query,
+                    server_name=server_name,
+                    entries=search_entries,
+                    entry_filter=entry_filter,
+                )
             ):
                 candidate = (
                     exact_priority,
@@ -264,12 +329,14 @@ class MCPToolCatalog:
         tool_names: Iterable[str],
         *,
         server_name: str | None = None,
+        entry_filter: Callable[[MCPToolEntry], bool] | None = None,
     ) -> tuple[list[MCPToolEntry], list[str]]:
-        """Resolve exact catalog IDs, qualified names, or model names."""
+        """Resolve exact catalog IDs, model names, or original MCP names."""
         entries = [
             entry
             for entry in self.snapshot()
             if server_name is None or entry.server_name == server_name
+            if self._visible(entry, entry_filter)
         ]
         resolved: list[MCPToolEntry] = []
         resolved_ids: set[str] = set()
@@ -290,6 +357,20 @@ class MCPToolCatalog:
                 }
             ]
             if not matches:
+                remote_matches = [
+                    entry
+                    for entry in entries
+                    if entry.remote_name
+                    and normalized_name
+                    in {
+                        _normalize(entry.remote_name),
+                        _normalize(f"{entry.server_name}/{entry.remote_name}"),
+                        _normalize(f"{entry.server_name}:{entry.remote_name}"),
+                    }
+                ]
+                if len(remote_matches) == 1:
+                    matches = remote_matches
+            if not matches:
                 missing.append(requested_name)
                 continue
             for entry in matches:
@@ -305,6 +386,7 @@ class MCPToolCatalog:
         *,
         server_name: str | None = None,
         entries: Iterable[MCPToolEntry] | None = None,
+        entry_filter: Callable[[MCPToolEntry], bool] | None = None,
     ) -> list[tuple[int, float, int, str, MCPToolEntry]]:
         normalized_query = _normalize(query)
         query_terms = tuple(dict.fromkeys(_tokenize(query)))
@@ -314,43 +396,63 @@ class MCPToolCatalog:
         for entry in self.snapshot() if entries is None else entries:
             if server_name and entry.server_name != server_name:
                 continue
+            if not self._visible(entry, entry_filter):
+                continue
             aliases = tuple(getattr(entry.tool, "aliases", ()))
             names = (entry.model_name, *aliases)
             model_terms = tuple(dict.fromkeys(_tokenize(" ".join(names))))
             model_term_set = set(model_terms)
+            remote_terms = tuple(
+                term
+                for term in dict.fromkeys(_tokenize(entry.remote_name or ""))
+                if term not in model_term_set
+            )
+            remote_term_set = set(remote_terms)
             server_terms = tuple(
                 term
                 for term in dict.fromkeys(_tokenize(entry.server_name))
-                if term not in model_term_set
+                if term not in model_term_set and term not in remote_term_set
+            )
+            connector_terms = tuple(
+                dict.fromkeys(_tokenize(f"{entry.connector_id or ''} {entry.connector_name or ''}"))
             )
             documents.append(
                 (
                     entry,
                     tuple(_normalize(name) for name in names),
+                    _normalize(entry.remote_name or ""),
                     _normalize(entry.tool_id),
                     _normalize(f"{entry.server_name} {entry.model_name}"),
                     model_terms,
+                    remote_terms,
                     server_terms,
+                    connector_terms,
                     tuple(dict.fromkeys(_tokenize(entry.description))),
                 )
             )
         if not documents:
             return []
 
-        average_model_name_length = sum(len(item[4]) for item in documents) / len(
+        average_model_name_length = sum(len(item[5]) for item in documents) / len(
             documents
         )
-        average_server_name_length = sum(len(item[5]) for item in documents) / len(
+        average_remote_name_length = sum(len(item[6]) for item in documents) / len(
             documents
         )
-        average_description_length = sum(len(item[6]) for item in documents) / len(
+        average_server_name_length = sum(len(item[7]) for item in documents) / len(
+            documents
+        )
+        average_connector_length = sum(len(item[8]) for item in documents) / len(documents)
+        average_description_length = sum(len(item[9]) for item in documents) / len(
             documents
         )
         document_frequencies = {
             term: (
-                sum(_prefix_term_frequency(term, item[4]) > 0 for item in documents),
                 sum(_prefix_term_frequency(term, item[5]) > 0 for item in documents),
                 sum(_prefix_term_frequency(term, item[6]) > 0 for item in documents),
+                sum(_prefix_term_frequency(term, item[7]) > 0 for item in documents),
+                sum(_prefix_term_frequency(term, item[8]) > 0 for item in documents),
+                sum(_prefix_term_frequency(term, item[9]) > 0 for item in documents),
             )
             for term in query_terms
         }
@@ -359,20 +461,26 @@ class MCPToolCatalog:
         for (
             entry,
             normalized_names,
+            normalized_remote_name,
             normalized_id,
             normalized_server_name,
             model_name_terms,
+            remote_name_terms,
             server_name_terms,
+            connector_terms,
             description_terms,
         ) in documents:
             exact_priority = 3
-            if normalized_query in normalized_names:
+            if normalized_query in (*normalized_names, normalized_remote_name):
                 exact_priority = 0
             elif normalized_query == normalized_id:
                 exact_priority = 1
             elif normalized_query == normalized_server_name:
                 exact_priority = 2
-            elif any(len(name) >= 3 and name in normalized_query for name in normalized_names):
+            elif any(
+                len(name) >= 3 and name in normalized_query
+                for name in (*normalized_names, normalized_remote_name)
+            ):
                 # Preserve main's compound-query behavior: when the model names
                 # a concrete tool inside a longer request, rank that explicit
                 # selection ahead of fuzzy BM25 matches.
@@ -382,13 +490,23 @@ class MCPToolCatalog:
             matched_terms = 0
             for term in query_terms:
                 model_name_frequency = _prefix_term_frequency(term, model_name_terms)
+                remote_name_frequency = _prefix_term_frequency(term, remote_name_terms)
                 server_name_frequency = _prefix_term_frequency(term, server_name_terms)
+                connector_frequency = _prefix_term_frequency(term, connector_terms)
                 description_frequency = _prefix_term_frequency(term, description_terms)
-                if model_name_frequency or server_name_frequency or description_frequency:
+                if (
+                    model_name_frequency
+                    or remote_name_frequency
+                    or server_name_frequency
+                    or connector_frequency
+                    or description_frequency
+                ):
                     matched_terms += 1
                 (
                     model_name_document_frequency,
+                    remote_name_document_frequency,
                     server_name_document_frequency,
+                    connector_document_frequency,
                     description_document_frequency,
                 ) = document_frequencies[term]
                 relevance += 2.0 * _bm25_term_score(
@@ -398,12 +516,26 @@ class MCPToolCatalog:
                     field_length=len(model_name_terms),
                     average_field_length=average_model_name_length,
                 )
+                relevance += 2.0 * _bm25_term_score(
+                    term_frequency=remote_name_frequency,
+                    document_frequency=remote_name_document_frequency,
+                    document_count=len(documents),
+                    field_length=len(remote_name_terms),
+                    average_field_length=average_remote_name_length,
+                )
                 relevance += 0.5 * _bm25_term_score(
                     term_frequency=server_name_frequency,
                     document_frequency=server_name_document_frequency,
                     document_count=len(documents),
                     field_length=len(server_name_terms),
                     average_field_length=average_server_name_length,
+                )
+                relevance += 0.75 * _bm25_term_score(
+                    term_frequency=connector_frequency,
+                    document_frequency=connector_document_frequency,
+                    document_count=len(documents),
+                    field_length=len(connector_terms),
+                    average_field_length=average_connector_length,
                 )
                 relevance += _bm25_term_score(
                     term_frequency=description_frequency,
@@ -433,6 +565,9 @@ class MCPToolCatalog:
                 tool=entry.tool,
                 generation=entry.generation,
                 always_load=entry.always_load,
+                connector_id=entry.connector_id,
+                connector_name=entry.connector_name,
+                remote_name=entry.remote_name,
                 name_conflict=counts[entry.model_name] > 1,
             )
             for tool_id, entry in self._entries.items()

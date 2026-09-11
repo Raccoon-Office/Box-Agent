@@ -39,7 +39,9 @@ uv run --project test_workspace/acp_eval acp-eval \
 By default, a case whose latest attempt has a terminal manifest is skipped only
 when its stored case fingerprint exactly matches the current record and input
 bytes, and when its stored producing runtime has the same comparable Python
-version/implementation, Box-Agent version, and Box-Agent Git commit. If any
+version/implementation, Box-Agent version, and Box-Agent Git commit. The stored
+model configuration digest must also match the requested model, token limit,
+and complete binding/routing configuration. If any
 runtime identity source is unavailable, resume is conservative and executes a
 new attempt. Changing the query, any other record field, an input path, or an
 input file's bytes also creates a new immutable attempt automatically. Request
@@ -82,8 +84,11 @@ incorrect types are rejected before execution. The original record, including
 metadata, remains in `input.json` and participates in the case fingerprint.
 Omitting these fields preserves the default thinking mode, filesystem policy,
 and client capabilities. The runner retains its own session/turn IDs, workspace
-layout, and default permission mode; permission requests are still cancelled.
+cwd, and default permission mode; permission requests are still cancelled.
 Plan approval metadata does not approve tool permission requests.
+
+When no legacy `output/` directory exists, artifact inventory lists the files
+named by cwd-relative ACP artifact events without treating staged inputs as outputs.
 
 ## v1 evidence layout
 
@@ -108,7 +113,9 @@ test_workspace/outputs/<evaluation>/
         ├── files-before.json
         ├── files-after.json
         ├── artifacts.json
-        └── completeness.json
+        ├── completeness.json
+        ├── effect_evaluation.json  # optional validated effect result or service error
+        └── effect_response.json    # original parsed service response, kept for audit
 ```
 
 `latest.json` atomically points to the latest attempt using its ID and a path
@@ -139,6 +146,30 @@ evaluation directory is copied away from the source checkout.
 There is deliberately no compatibility layer for older evaluation layouts.
 Delete obsolete output directories and rerun them with this runner.
 
+## Optional synchronous effect evaluation
+
+Set `BOX_AGENT_EFFECT_EVAL_URL` or pass `--effect-eval-url` to call an
+independently running agents-eval service after each newly executed Case has
+already reached its original terminal state:
+
+```bash
+BOX_AGENT_EFFECT_EVAL_URL=http://127.0.0.1:8766 \
+uv run --project test_workspace/acp_eval acp-eval \
+  --repo-root . \
+  --dataset test_workspace/inputs/smoke_test/dataset.jsonl \
+  --run-dir test_workspace/outputs/260826-effect \
+  --effect-eval-timeout-seconds 180
+```
+
+Only the absolute Attempt path, Case ID, Attempt ID, and optional dataset
+`benchmark_case_id` are sent to the local service. No Judge credentials are
+accepted or forwarded by this runner. A service failure is recorded separately
+and never changes the ACP or evidence-completeness outcome.
+
+The optional `--model` and `--model-max-tokens` flags bind the tested model on
+every ACP `session/new`. They select the product model under test; they do not
+configure or expose the independent agents-eval Judge model.
+
 ## Diagnostic interpretation and data sensitivity
 
 Raw files are evidence, not sanitized exports. `acp-stdin.raw`,
@@ -157,3 +188,7 @@ a failure. Inspect `process.jsonl` for the signal initiator and reason.
 does not judge the Agent's reasoning, answer, or artifacts. Provider-internal
 retries and cleanup steps that Box-Agent never emits remain unsupported rather
 than being reconstructed.
+
+Model selection, token limits and the complete model-binding/routing configuration are frozen and hashed as `model_config_sha256` before execution. Resume requires this producing-attempt identity to match as well as the existing input/runtime fingerprints. Changed settings or legacy attempts without that identity create a new attempt; prior attempt files are preserved.
+
+Effect responses with explicit mismatched case or attempt identifiers become a separate `service_error` without promoting scores or changing the original ACP/completeness result. The original parsed response remains in `effect_response.json`.

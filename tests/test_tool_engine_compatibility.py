@@ -1,7 +1,7 @@
 """C1 characterization of the pre-Engine setup and Agent tool contract.
 
-The fixed C1 fixture remains intact. Only the enumerated C5 name/description
-changes and direct/discoverable sets are applied before exact comparisons.
+The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
+description changes and the connector search extension are applied before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -25,6 +25,29 @@ from box_agent.tools.runtime import SkillRuntimeContext
 
 
 _ALWAYS_BASE = {"create_scheduled_task", "mcp_config"}
+_SKILLS = {"get_skill", "list_skills"}
+_LIST_SKILLS_SCHEMA = {
+    "aliases": [],
+    "schema": {
+        "name": "list_skills",
+        "description": (
+            "List or search locally installed Skill names, descriptions and availability. "
+            "Use an empty query to browse all available Skills, or an exact name to "
+            "diagnose an unavailable Skill. This does not load instructions or access "
+            "SkillHub. Follow next_offset for more results; if revision changes, restart "
+            "from offset 0. Use get_skill to read a chosen Skill."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "default": ""},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+            },
+            "additionalProperties": False,
+        },
+    },
+}
 _ALWAYS_WORKSPACE = {
     "request_user_input", "request_user_decision", "report_execution_result",
     "obsidian_create_note", "obsidian_update_note", "obsidian_daily_note",
@@ -51,6 +74,14 @@ _FLAGS_OFF = {
 _SCHEMA_FIXTURE = Path(__file__).parent / "fixtures/tool_engine/c1_schemas.json"
 _C5_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/c5_schema_changes.json").read_text()
+)
+_CWD_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/session_cwd_schema_changes.json").read_text()
+)
+_CONNECTOR_SEARCH_SCHEMA = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
+        encoding="utf-8"
+    )
 )
 _C5_DISCOVERABLE = {
     "append_file", "query_jsonl", "bash_output", "bash_kill", "sandbox_status",
@@ -158,7 +189,7 @@ def _llm(mode):
 async def _assemble(env, *, flags=None, defaults=False, llm_mode="none",
                     memory=False, sandbox=False, image_endpoint=False,
                     defer_skills=False, process_owner_id=None,
-                    workspace_name="workspace", use_output_dir=False):
+                    workspace_name="workspace"):
     config = _config(env, flags, defaults=defaults)
     if image_endpoint:
         config.image_generation.endpoint = "https://image.invalid/generate"
@@ -177,7 +208,7 @@ async def _assemble(env, *, flags=None, defaults=False, llm_mode="none",
         tools, config, workspace,
         sandbox_mode=sandbox, allow_full_access=False, non_interactive=True,
         output=lambda *_: None, llm=llm, skill_loader=loader,
-        use_output_dir=use_output_dir, process_owner_id=process_owner_id,
+        process_owner_id=process_owner_id,
         env_context={"obsidian": {"enabled": False}},
     )
     return SimpleNamespace(
@@ -204,6 +235,22 @@ def _normalized_schema(schema, profile):
 
 def _assert_schema_contract(tools, profile, *, child_read_tools=()):
     expected = json.loads(_SCHEMA_FIXTURE.read_text(encoding="utf-8"))["tools"]
+    # Preserve the old fixture and enumerate the Skill Engine's public additions.
+    expected["list_skills"] = _LIST_SKILLS_SCHEMA
+    expected["get_skill"]["schema"]["description"] = (
+        "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
+        "when paged. Read required_skills before their steps; related_skills are optional. "
+        "Skill guidance does not grant tools or permission. Use list_skills for names and availability. "
+        "When using a Skill, follow its applicable workflow, required reference files and verification, "
+        "consistent with the user request and permissions. If a required step is blocked, use an "
+        "available permitted recovery or report it as incomplete; do not treat required steps as optional."
+    )
+    expected["get_skill"]["schema"]["input_schema"]["additionalProperties"] = False
+    expected["get_skill"]["schema"]["input_schema"]["properties"].update({
+        "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset; omit to read the whole Skill when it fits."},
+        "limit": {"type": "integer", "minimum": 1, "description": "Maximum lines for a bounded page."},
+        "revision": {"type": "string", "description": "Version returned by a previous page; restart if it changed."},
+    })
     index = build_tool_name_index(tools)
     expected_call_names = set()
     for tool in tools:
@@ -217,6 +264,15 @@ def _assert_schema_contract(tools, profile, *, child_read_tools=()):
             entry["aliases"] = _C5_SCHEMA_CHANGES["aliases"][tool.name]
         if tool.name in _C5_SCHEMA_CHANGES["descriptions"]:
             entry["schema"]["description"] = _C5_SCHEMA_CHANGES["descriptions"][tool.name]
+        for change in _CWD_SCHEMA_CHANGES.get(tool.name, ()):
+            target = entry["schema"]
+            *parents, field = change["path"]
+            for key in parents:
+                target = target[key]
+            assert target[field] == change["before"], (tool.name, change["path"])
+            target[field] = change["after"]
+        if tool.name == "tool_search":
+            entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
         if tool.name == "sub_agent":
             # This default is the one capability-dependent schema field. The
             # caller supplies the independently expected read set, never a set
@@ -251,10 +307,10 @@ def _assert_schema_contract(tools, profile, *, child_read_tools=()):
         pytest.param({"flags": {"enable_todo": True}}, _TODO, id="todo"),
         pytest.param({"flags": {"enable_plan": True}}, _PLAN, id="plan"),
         pytest.param({"memory": True}, _MEMORY, id="memory-manager"),
-        pytest.param({"flags": {"enable_skills": True}}, {"get_skill"}, id="empty-skills"),
+        pytest.param({"flags": {"enable_skills": True}}, _SKILLS, id="empty-skills"),
         pytest.param(
             {"flags": {"enable_skills": True}, "defer_skills": True},
-            {"get_skill"}, id="deferred-empty-skills",
+            _SKILLS, id="deferred-empty-skills",
         ),
         pytest.param({"flags": {"enable_mcp": True}}, {"fixture_lookup"}, id="mcp"),
         pytest.param({"flags": {"enable_sub_agent": True}}, set(), id="subagent-no-llm"),
@@ -269,14 +325,14 @@ def _assert_schema_contract(tools, profile, *, child_read_tools=()):
         pytest.param({"image_endpoint": True}, {"generate_image"}, id="image-service"),
         pytest.param(
             {"defaults": True, "llm_mode": "text"},
-            _FILES | _BASH | _TODO | _PLAN | {"get_skill", "sub_agent", "fixture_lookup"},
+            _FILES | _BASH | _TODO | _PLAN | _SKILLS | {"sub_agent", "fixture_lookup"},
             id="config-defaults",
         ),
         pytest.param(
             {"defaults": True, "llm_mode": "vision", "memory": True,
              "sandbox": True, "image_endpoint": True, "process_owner_id": "fixture-session"},
-            _FILES | _BASH | _TODO | _PLAN | _MEMORY | _SANDBOX
-            | {"get_skill", "sub_agent", "fixture_lookup", "inspect_images", "generate_image"},
+            _FILES | _BASH | _TODO | _PLAN | _MEMORY | _SANDBOX | _SKILLS
+            | {"sub_agent", "fixture_lookup", "inspect_images", "generate_image"},
             id="all-capabilities-session-owned",
         ),
     ],
@@ -360,6 +416,7 @@ async def test_setup_preserves_shared_resources_and_session_owners(isolated_setu
     assert tools["plan_write"]._store is tools["plan_read"]._store
     assert tools["plan_write"]._store is not tools["todo_write"]._store
     assert tools["get_skill"].skill_loader is assembly.loader
+    assert tools["list_skills"].skill_loader is assembly.loader
     assert set(assembly.loader.loaded_skills) == {"fixture-skill"}
     assert tools["sub_agent"]._resolve_skill_loader() is assembly.loader
     assert tools["sandbox_status"]._bound_sandbox_tool is tools["execute_code"]
@@ -415,22 +472,29 @@ async def test_setup_agent_discovery_keeps_live_child_tools_and_session_activati
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("use_output_dir", [False, True], ids=["project-root", "output-root"])
-async def test_workspace_root_is_shared_by_file_shell_and_image_tools(isolated_setup, use_output_dir):
+@pytest.mark.parametrize("existing_output_child", [False, True], ids=["empty-cwd", "ordinary-output-child"])
+async def test_workspace_root_is_shared_by_file_shell_and_image_tools(isolated_setup, existing_output_child):
+    if existing_output_child:
+        (isolated_setup.profile / "workspace" / "output").mkdir(parents=True)
     assembly = await _assemble(
         isolated_setup, flags={"enable_file_tools": True, "enable_bash": True},
-        llm_mode="vision", image_endpoint=True, use_output_dir=use_output_dir,
+        llm_mode="vision", image_endpoint=True,
     )
     agent = _agent(assembly)
     tools = agent.tools
-    assert ("append_file" in agent.mcp_tool_exposure.prepare_tools(list(tools.values())).offered_names) is use_output_dir
-    expected_root = assembly.workspace / "output" if use_output_dir else assembly.workspace
+    assert "append_file" not in agent.mcp_tool_exposure.prepare_tools(list(tools.values())).offered_names
+    expected_root = assembly.workspace
     assert Path(tools["bash"].workspace_dir) == expected_root
     assert Path(tools["bash"].scope_root_dir) == assembly.workspace
     assert tools["generate_image"].output_dir == expected_root
     for name in _FILES | {"inspect_images"}:
         assert Path(tools[name].workspace_dir) == assembly.workspace
         assert Path(tools[name].relative_root_dir) == expected_root
+    for relative_path in ("report.txt", "output/report.txt"):
+        result = await tools["write_file"].execute(path=relative_path, content="report")
+        assert result.success
+        assert (expected_root / relative_path).read_text(encoding="utf-8") == "report"
+        assert tools["generate_image"]._resolve_output_path(relative_path) == expected_root / relative_path
 
 
 @pytest.mark.asyncio

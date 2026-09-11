@@ -1,18 +1,17 @@
 "use strict";
 
-// BOX_AGENT_OUTPUT_DIR is a host-owned path boundary. Roadmap writers reject
-// traversal, links/reparse points, and directory-identity changes before and
-// after publication. A separate process running with the same OS identity can
-// already mutate host-owned files directly; callers must not intentionally
-// replace the output-root topology while a synchronous write is in progress.
+// The process cwd is the caller-selected task directory and the output boundary.
+// Roadmap writers reject traversal, links/reparse points, and directory-identity
+// changes before and after publication. A separate process running with the same
+// OS identity can already mutate files directly; callers must not intentionally
+// replace the cwd topology while a synchronous write is in progress.
 
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-function artifactRoot() {
-  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
-  return configured ? path.resolve(configured) : process.cwd();
+function workingDirectoryRoot() {
+  return process.cwd();
 }
 
 function scratchRoot() {
@@ -22,7 +21,7 @@ function scratchRoot() {
 
 function resolveArtifactPath(filePath) {
   if (path.isAbsolute(filePath)) return path.resolve(filePath);
-  return path.resolve(artifactRoot(), filePath);
+  return path.resolve(workingDirectoryRoot(), filePath);
 }
 
 function isWithin(root, candidate) {
@@ -82,9 +81,7 @@ function sameArtifactInode(left, right) {
 }
 
 function snapshotOutputDirectoryChain(resolved, displayPath) {
-  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
-  if (!configured) return null;
-  const root = artifactRoot();
+  const root = workingDirectoryRoot();
   const parent = path.dirname(resolved);
   const paths = [root];
   let current = root;
@@ -188,12 +185,11 @@ function snapshotFileWithinRootSync(filePath, root, boundaryName) {
 
 function snapshotArtifactFileSync(filePath) {
   const resolved = resolveArtifactPath(filePath);
-  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
-  const root = configured ? artifactRoot() : path.parse(resolved).root;
+  const root = workingDirectoryRoot();
   return snapshotFileWithinRootSync(
     resolved,
     root,
-    configured ? "BOX_AGENT_OUTPUT_DIR" : "filesystem root",
+    "current working directory",
   );
 }
 
@@ -293,16 +289,9 @@ function cleanupScratchTaskDirectorySync(filePath, expectedSnapshot = null) {
 
 function prepareOutputPath(filePath) {
   const resolved = resolveOutputPath(filePath);
-  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
   const parent = path.dirname(resolved);
 
-  if (!configured) {
-    fs.mkdirSync(parent, { recursive: true });
-    rejectLink(resolved, filePath);
-    return resolved;
-  }
-
-  const root = artifactRoot();
+  const root = workingDirectoryRoot();
   fs.mkdirSync(root, { recursive: true });
   const realRoot = fs.realpathSync(root);
   const relativeParent = path.relative(root, parent);
@@ -324,7 +313,7 @@ function prepareOutputPath(filePath) {
   }
   if (!isWithin(realRoot, fs.realpathSync(parent))) {
     throw outputPathError(
-      "output path resolves outside BOX_AGENT_OUTPUT_DIR",
+      "output path resolves outside the current working directory",
       filePath,
     );
   }
@@ -400,14 +389,12 @@ function writeOutputFileSync(filePath, value, options = {}) {
 }
 
 function resolveOutputPath(filePath) {
-  const root = artifactRoot();
+  const root = workingDirectoryRoot();
   const resolved = path.isAbsolute(filePath)
     ? path.resolve(filePath)
     : path.resolve(root, filePath);
-  const configured = String(process.env.BOX_AGENT_OUTPUT_DIR || "").trim();
-  if (!configured) return resolved;
   if (!isWithin(root, resolved)) {
-    throw new Error(`output path must stay within BOX_AGENT_OUTPUT_DIR: ${filePath}`);
+    throw new Error(`output path must stay within the current working directory: ${filePath}`);
   }
   fs.mkdirSync(root, { recursive: true });
   const realRoot = fs.realpathSync(root);
@@ -418,13 +405,13 @@ function resolveOutputPath(filePath) {
     existingParent = parent;
   }
   if (!isWithin(realRoot, fs.realpathSync(existingParent))) {
-    throw new Error(`output path resolves outside BOX_AGENT_OUTPUT_DIR: ${filePath}`);
+    throw new Error(`output path resolves outside the current working directory: ${filePath}`);
   }
   return resolved;
 }
 
 module.exports = {
-  artifactRoot,
+  workingDirectoryRoot,
   cleanupScratchTaskDirectorySync,
   consumeArtifactFileSync,
   consumeScratchInputFileSync,

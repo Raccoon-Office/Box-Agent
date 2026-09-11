@@ -262,7 +262,7 @@ ACP handle 只指向当前内存 `SessionState`。它消失时，持久化逻辑
   "updated_at": "2026-08-26T10:05:00Z",
   "runtime_compatibility": {
     "workspace_identity": "...",
-    "artifact_mode": "output",
+    "working_directory": "/absolute/session/cwd",
     "session_mode": "general"
   },
   "messages": [],
@@ -296,6 +296,10 @@ ACP handle 只指向当前内存 `SessionState`。它消失时，持久化逻辑
   "payload_sha256": "..."
 }
 ```
+
+恢复旧记录时沿用该会话原有 cwd；历史 `artifact_mode`、`artifact_root_dir`
+和 `session_workspace_dir` 只作为未知/废弃字段忽略，不得重新解释输出目录或
+移动已有文件。
 
 ### 7.1 Messages
 

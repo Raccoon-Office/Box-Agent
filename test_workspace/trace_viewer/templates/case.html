@@ -5,6 +5,12 @@
 <section class="page-heading"><h1>{{ case.case_id }}</h1><p>{{ case.input.query or "无任务描述" }}</p></section>
 {% include "_tabs.html" %}
 <section class="metrics"><div><small>ACP</small><strong>{{ case.acp_status }}</strong></div><div><small>完整性</small><strong>{{ case.completeness_status }}</strong></div><div><small>耗时</small><strong>{{ case.duration if case.duration is not none else "—" }}s</strong></div><div><small>stderr</small><strong>{{ case.stderr_counts.error|default(0) }} / {{ case.stderr_counts.timeout|default(0) }} / {{ case.stderr_counts.warning|default(0) }}</strong></div></section>
+<section class="metrics effect-overview">
+  <div><small>任务类型</small><strong>{{ case.task_type or "未标注" }}</strong></div>
+  <div><small>结果指标</small><strong>{% if case.effect_summary.result_score is not none %}{{ case.effect_summary.result_score }} / {{ case.effect_summary.result_weight }}{% else %}未评估{% endif %}</strong></div>
+  <div><small>过程指标</small><strong>{% if case.effect_summary.process_score is not none %}{{ case.effect_summary.process_score }} / {{ case.effect_summary.process_weight }}{% else %}未评估{% endif %}</strong></div>
+  <div><small>成本</small><strong>{% if case.effect_summary.cost %}{{ case.effect_summary.cost.value }} {{ case.effect_summary.cost.unit }}{% else %}未采集{% endif %}</strong>{% if case.effect_summary.cost %}<small>{{ case.effect_summary.cost.label }}</small>{% endif %}</div>
+</section>
 {% if case.completeness_status != "complete" %}<aside class="notice"><strong>采集不完整</strong><span>{{ case.completeness.issues|join(", ") }}</span></aside>{% endif %}
 <section class="panel"><h2>任务输入</h2><pre>{{ input_text }}</pre></section>
 <section class="panel"><h2>最终回答</h2><pre>{{ case.assistant or "无最终回答" }}</pre></section>

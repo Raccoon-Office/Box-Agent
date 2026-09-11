@@ -65,8 +65,10 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
 
 - Inspect the real provided files, logs, repo paths, or source artifacts before
   explaining behavior or generating conclusions.
-- Save every research artifact with an artifact-root-relative `research/...`
-  tool path; create that directory before writing.
+- Resolve one absolute `{output_dir}` from the current conversation before
+  writing. If the model created a task directory, use it; otherwise use the
+  unchanged session cwd. Save every research artifact under
+  `{output_dir}/research/` and pass absolute paths to tools and scripts.
 - Reserved research artifact templates override the generic hyphen-separated
   filename style. Keep hyphens inside `{topic}`, but join every reserved suffix
   with the literal underscore shown in the template. For topic
@@ -75,12 +77,11 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
   `ai-quality-scheduling-dim01.md` or
   `ai-quality-scheduling-cross_verification.md`. Copy the Required Outputs
   filenames exactly for every dimension and handoff artifact.
-- In officev3 session-output mode, file tools and the shell use the active
-  artifact root whose host path ends in `output/`. The displayed session
-  workspace is the filesystem safety boundary, not the base for durable output.
-  Never derive an absolute research path from it or prepend another `output/`
-  segment (for example, do not use `$(pwd)/output/research`).
-- Never save research artifacts directly in the current working/artifact root.
+- Do not infer an output root from environment variables or legacy host
+  metadata. The chosen `{output_dir}` is ordinary task organization and does
+  not change the session cwd or workspace.
+- Never save research artifacts directly in `{output_dir}`; keep them under its
+  `research/` child.
 - Avoid CLI-specific assumptions. Use only tools actually available in the
   current host runtime.
 - Use native subagents only when the user explicitly asks for multi-agent,
@@ -123,7 +124,7 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
   remaining candidates `unverified`, and
   finish the handoff so downstream work can continue in `partial` or `framework`
   mode.
-- Maintain `research/{topic}_evidence.json` while researching. Every downstream
+- Maintain `{output_dir}/research/{topic}_evidence.json` while researching. Every downstream
   factual claim must be bound to one target entity, source URL, source type,
   page excerpt, confidence, and `verified` / `conflicting` / `unverified`
   status. Use the exact schema in
@@ -143,12 +144,14 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
 
 ## Start
 
-1. Treat the host's active artifact root as `{workspace}` for durable outputs;
-   do not derive output paths from the displayed session workspace.
+1. Set `{output_dir}` to the absolute directory selected in the current
+   conversation. Use a model-created task directory when one exists; otherwise
+   use the unchanged session cwd. Keep this choice consistent for related
+   follow-ups.
 2. Resolve `{skill_dir}` to the active installed directory containing this
    `SKILL.md`. Do not assume the current working directory is the skill
    directory.
-3. Create `research/` directly under that root.
+3. Create `{output_dir}/research/`.
 4. Pick a stable topic slug:
    - Prefer short ASCII, lowercase, hyphenated words.
    - If the topic is mostly non-ASCII or ambiguous, use
@@ -198,7 +201,7 @@ Use [prompts.md](references/prompts.md) for subagent/local-round templates.
 
 ## Required Outputs
 
-All files live under `research/`, relative to the active artifact root.
+All files live under `{output_dir}/research/`.
 
 | File | Route | Purpose |
 | --- | --- | --- |
@@ -225,7 +228,7 @@ if [ ! -f "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py"
   echo "ERROR: validate_research_artifacts.py not found under $RESEARCH_SYNTHESIS_SKILL_DIR/scripts" >&2
   exit 1
 fi
-${BOX_AGENT_PYTHON:-python3} "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" --research-dir "research" --topic "{topic}" --route A --report "research/qa/{topic}_research_check.json"
+${BOX_AGENT_PYTHON:-python3} "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" --research-dir "{output_dir}/research" --topic "{topic}" --route A --report "{output_dir}/research/qa/{topic}_research_check.json"
 ```
 
 Adjust `--route` for the selected route. `--min-dimensions N` is a recommended

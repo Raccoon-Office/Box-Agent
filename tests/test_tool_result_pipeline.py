@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from box_agent.events import ToolCallResult
+from box_agent.events import ArtifactEvent, DoneEvent, ToolCallResult
 from box_agent.kernel.tool_result_pipeline import (
     ToolResultPipelineInput,
     process_tool_result,
@@ -15,6 +16,7 @@ from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tool_result_storage import ToolResultStorage
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.engine import artifact_results
 
 
 class _OneToolCallLLM:
@@ -151,3 +153,117 @@ async def test_agent_loop_has_matching_tool_message_when_result_is_yielded(
             break
     finally:
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_safe", [False, True], ids=["serial", "parallel"])
+@pytest.mark.parametrize("limit", ["file_count", "timeout"])
+@pytest.mark.parametrize("explicit_reference", [False, True])
+async def test_incomplete_pre_scan_does_not_publish_unchanged_workspace_files(
+    tmp_path, monkeypatch, caplog, parallel_safe, limit, explicit_reference,
+) -> None:
+    for name in ("existing-a.txt", "existing-b.txt", "to-delete.txt"):
+        (tmp_path / name).write_text("existing content", encoding="utf-8")
+    if limit == "file_count":
+        monkeypatch.setenv("BOX_AGENT_ARTIFACT_SCAN_MAX_FILES", "2")
+    else:
+        monkeypatch.setenv("BOX_AGENT_ARTIFACT_SCAN_TIMEOUT_SECONDS", "2")
+        # The first scan expires; all following scans complete within budget.
+        ticks = iter((0.0, 3.0))
+        monkeypatch.setattr(
+            artifact_results, "perf_counter", lambda: next(ticks, 3.0),
+        )
+
+    class DeleteTool(_EchoTool):
+        async def execute(self) -> ToolResult:
+            (tmp_path / "to-delete.txt").unlink()
+            return ToolResult(
+                success=True,
+                content="See [existing-a.txt]" if explicit_reference else "deleted",
+            )
+
+    tool = DeleteTool(parallel_safe=parallel_safe)
+    events = [
+        event async for event in run_agent_loop(
+            llm=_OneToolCallLLM(tool.name),
+            messages=[Message(role="user", content="Delete the temporary file.")],
+            tools={tool.name: tool},
+            max_steps=2,
+            workspace_dir=str(tmp_path),
+        )
+    ]
+
+    assert [event.filename for event in events if isinstance(event, ArtifactEvent)] == (
+        ["existing-a.txt"] if explicit_reference else []
+    )
+    assert any(isinstance(event, DoneEvent) for event in events)
+    assert "Artifact scan skipped" in caplog.text
+
+
+@pytest.mark.parametrize("failure", ["walk", "stat"])
+def test_scan_access_error_does_not_publish_files_after_access_recovers(
+    tmp_path, monkeypatch, failure,
+) -> None:
+    (tmp_path / "visible.txt").write_text("existing", encoding="utf-8")
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    existing = protected / "existing.txt"
+    existing.write_text("existing", encoding="utf-8")
+    with monkeypatch.context() as patch:
+        if failure == "walk":
+            scandir = artifact_results.os.scandir
+
+            def denied_scandir(path):
+                if Path(path) == protected:
+                    raise PermissionError("directory temporarily inaccessible")
+                return scandir(path)
+
+            patch.setattr(artifact_results.os, "scandir", denied_scandir)
+        else:
+            stat = Path.stat
+
+            def denied_stat(path, *args, **kwargs):
+                if path == existing:
+                    raise PermissionError("file temporarily inaccessible")
+                return stat(path, *args, **kwargs)
+
+            patch.setattr(Path, "stat", denied_stat)
+        before = artifact_results._snapshot_workspace_signatures(str(tmp_path))
+
+    after = artifact_results._snapshot_workspace_signatures(str(tmp_path))
+    artifacts = artifact_results._detect_tool_artifacts(
+        "call-1", "echo", "done", None, before, after, str(tmp_path),
+    )
+
+    assert before is None
+    assert artifacts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_safe", [False, True], ids=["serial", "parallel"])
+async def test_incomplete_post_scan_still_publishes_explicit_tool_files(
+    tmp_path, monkeypatch, parallel_safe,
+) -> None:
+    monkeypatch.setenv("BOX_AGENT_ARTIFACT_SCAN_MAX_FILES", "1")
+    (tmp_path / "existing.txt").write_text("existing content", encoding="utf-8")
+
+    class WriteTool(_EchoTool):
+        async def execute(self) -> ToolResult:
+            (tmp_path / "report.txt").write_text("report", encoding="utf-8")
+            return ToolResult(success=True, content="Saved [report.txt]")
+
+    tool = WriteTool(parallel_safe=parallel_safe)
+    events = [
+        event async for event in run_agent_loop(
+            llm=_OneToolCallLLM(tool.name),
+            messages=[Message(role="user", content="Write the report.")],
+            tools={tool.name: tool},
+            max_steps=2,
+            workspace_dir=str(tmp_path),
+        )
+    ]
+
+    assert [event.filename for event in events if isinstance(event, ArtifactEvent)] == [
+        "report.txt",
+    ]
+    assert any(isinstance(event, DoneEvent) for event in events)

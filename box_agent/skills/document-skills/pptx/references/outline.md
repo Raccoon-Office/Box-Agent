@@ -140,9 +140,9 @@ cold "I can't do this".
 When the decision gate says an outline is needed, create an `outline.json`
 beside the future `deck.json`:
 
-In output mode, file-tool paths are already relative to the presentation
-artifact root. Use `write_file(path="outline.json", ...)`; do not pass the
-absolute session-workspace path and do not add another `output/` prefix. Prefer
+Pass `<PRESENTATION_DIR>` as the file tool's `workspaceDir` when supported, or
+use an absolute path under that directory. Do not add an automatic `output/`
+prefix. Prefer
 one initial call without `chunk_index` or `final` whenever the complete JSON fits
 in the current model response. Start ordered chunks only after explicit
 output-length/tool-argument recovery. Within the same active turn, continue

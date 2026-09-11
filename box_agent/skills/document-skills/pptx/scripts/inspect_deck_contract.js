@@ -2263,7 +2263,7 @@ function main() {
       },
       write_policy: {
         scaffold_command: "Pass every slide's ordered layout id (including repeats), --outline outline.json, and --out deck.json; then edit props only.",
-        artifact_root: process.env.BOX_AGENT_OUTPUT_DIR || process.cwd(),
+        presentation_directory: process.cwd(),
         initial_full_deck_writes: 0,
         initial_scaffold_writes: 1,
         next_step: "The selected layout fields/defaults below are complete. Patch deck.json and assets/generated/manifest.json in place; do not call inspect_layout again for these layout ids.",

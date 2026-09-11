@@ -153,6 +153,7 @@ def test_build_agent_forwards_shared_constructor_options(tmp_path) -> None:
     hooks = [object()]
     tool_limits = object()
     session_log = object()
+    allowed_connector_ids_provider = lambda: frozenset({"pkulaw"})
     agent = build_agent(
         agent_factory=CaptureAgent,
         llm_client=llm,
@@ -175,6 +176,7 @@ def test_build_agent_forwards_shared_constructor_options(tmp_path) -> None:
         max_truncated_tool_call_retries=1,
         truncated_tool_call_boost_cap=256,
         context_resource_dedup_enabled=False,
+        allowed_connector_ids_provider=allowed_connector_ids_provider,
         deferred_mcp_loading_enabled=False,
         session_log=session_log,
     )
@@ -201,6 +203,7 @@ def test_build_agent_forwards_shared_constructor_options(tmp_path) -> None:
         "max_truncated_tool_call_retries": 1,
         "truncated_tool_call_boost_cap": 256,
         "context_resource_dedup_enabled": False,
+        "allowed_connector_ids_provider": allowed_connector_ids_provider,
         "deferred_mcp_loading_enabled": False,
         "session_log": session_log,
     }

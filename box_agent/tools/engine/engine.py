@@ -7,10 +7,12 @@ import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import aclosing
 from copy import deepcopy
+from dataclasses import replace
 from time import perf_counter
 from typing import Any
 
 from ...events import AgentEvent, LLMActivityEvent, ToolCallResult, ToolCallStart
+from ...kernel.hook_types import HookContext, ResultText, copy_data
 from ...loop_guards import (
     FINAL_SUMMARY_EXCLUDED_TOOLS, delegated_tool_call_budget_wrapup_text,
     search_files_empty_result_guidance, search_files_result_is_empty,
@@ -19,7 +21,7 @@ from ...loop_guards import (
 from ...schema import Message, ToolCall
 from ...session_log import SessionLogDurabilityError
 from ...session_trace import emit_session_trace
-from ..base import Tool, ToolResult
+from ..base import Tool, ToolResult, ToolInvocationContext
 from ..browser_result_adapter import (
     _prepare_browser_snapshot_output, _prepare_browser_screenshot_output,
     _persist_browser_snapshot_output, _persist_browser_screenshot_output,
@@ -32,7 +34,6 @@ from ..file_result_adapter import (
     _model_history_placeholder_recovery_error, _model_history_recovery_target,
     _record_model_history_placeholder_recovery_result,
 )
-from ..skill_result_adapter import SkillResultAdapter
 from ..web_search_policy import SearchBatch, WebSearchPolicy
 from .artifact_results import (
     _snapshot_workspace_signatures, _detect_tool_artifacts,
@@ -93,6 +94,10 @@ class DefaultToolEngine:
 
     def configure_run(self, context: ToolRunContext, options: ToolExecutionOptions) -> None:
         """Bind run services once; keep every session-owned object borrowed."""
+        if context.artifact_root_dir is not None:
+            _log.warning(
+                "artifact_root_dir is deprecated and ignored; artifact discovery uses workspace_dir"
+            )
         self._context, self._options = context, options
         self._budget = ToolBudgetState(
             tool_call_limits=options.tool_call_limits,
@@ -102,7 +107,6 @@ class DefaultToolEngine:
             logger=_log,
         )
         self._search = WebSearchPolicy(options.web_search_batch_size, options.tool_call_limits.get("web_search", 0))
-        self._skills = SkillResultAdapter(context.messages, context.activate_skill)
         self._recovery: _ModelHistoryPlaceholderRecovery | None = None
         self._placeholder_repairs = 0
         self._framework_errors: dict[str, int] = {}
@@ -163,10 +167,10 @@ class DefaultToolEngine:
             elif call.name == "managed_browser_take_screenshot":
                 call.screenshot_target = None
         snapshot, snapshot_error = _prepare_browser_snapshot_output(
-            call.name, call.arguments, context.workspace_dir, context.artifact_root_dir,
+            call.name, call.arguments, context.workspace_dir,
         )
         screenshot, screenshot_error = _prepare_browser_screenshot_output(
-            call.name, call.arguments, context.workspace_dir, context.artifact_root_dir,
+            call.name, call.arguments, context.workspace_dir,
         )
         # The adapters consume a managed filename. Preserve that saved target
         # when rechecking unchanged arguments after a Hook, replace it if a Hook
@@ -187,13 +191,13 @@ class DefaultToolEngine:
                 self._recovery = _ModelHistoryPlaceholderRecovery(
                     tool_name=call.name, argument_name=argument,
                     target=_model_history_recovery_target(
-                        call.name, call.arguments, context.workspace_dir, context.artifact_root_dir,
+                        call.name, call.arguments, context.workspace_dir,
                     ),
                     action=str(call.arguments.get("action")) if call.name == "staged_file_write" else None,
                 )
             return f"{_MODEL_HISTORY_PLACEHOLDER_TOOL_ERROR} Rejected argument: {call.name}.{argument}."
         return _model_history_placeholder_recovery_error(
-            self._recovery, call.name, call.arguments, context.workspace_dir, context.artifact_root_dir,
+            self._recovery, call.name, call.arguments, context.workspace_dir,
         )
 
     async def _start_call(self, call: ToolCallRecord, prepared: PreparedTools,
@@ -233,16 +237,31 @@ class DefaultToolEngine:
             arguments=deepcopy(call.arguments), user_visible=call.user_visible,
             tool_id=call.tool_id, server_name=call.server_name,
         )
-        if context.hooks.hooks and call.user_visible and call.allowed:
-            call.arguments = deepcopy(await context.hooks.fire_tool_start(
-                tool_call_id=call.call_id, tool_name=call.name, arguments=call.arguments,
-            ))
-            final_path_error = self._prepare_paths(call)
-            final_error = (prepared.admission_error(call.name)
-                           or context.policy_error(call.name, call.arguments)
-                           or self._argument_error(call, summary) or final_path_error)
-            if final_error:
-                call.allowed, call.rejection = False, final_error
+        if call.user_visible and call.allowed:
+            if context.hook_dispatch is not None:
+                resolution = await context.hook_dispatch.before_tool(
+                    self._hook_context(call, control.step, "tool.before_execution"), call.arguments,
+                )
+                if resolution.action == "deny":
+                    call.allowed = False
+                    call.rejection = f"{resolution.code}: {resolution.reason}"
+                    call.hook_rejection = {
+                        "code": resolution.code, "reason": resolution.reason,
+                        "hook_id": resolution.hook_id, "source": resolution.source,
+                    }
+                else:
+                    call.arguments = copy_data(resolution.arguments)
+            elif context.hooks.hooks:
+                call.arguments = deepcopy(await context.hooks.fire_tool_start(
+                    tool_call_id=call.call_id, tool_name=call.name, arguments=call.arguments,
+                ))
+            if call.allowed:
+                final_path_error = self._prepare_paths(call)
+                final_error = (prepared.admission_error(call.name)
+                               or context.policy_error(call.name, call.arguments)
+                               or self._argument_error(call, summary) or final_path_error)
+                if final_error:
+                    call.allowed, call.rejection = False, final_error
         if call.allowed and call.target is not None:
             context.record_call(call, control.step)
         call.started_at = perf_counter()
@@ -257,14 +276,31 @@ class DefaultToolEngine:
                            tool_call_id=call.call_id, data=trace)
         if (not call.parallel and self._options.artifact_detection_enabled
                 and call.allowed and call.user_visible and context.workspace_dir):
-            call.before_files = _snapshot_workspace_signatures(context.workspace_dir, context.artifact_root_dir)
+            call.before_files = _snapshot_workspace_signatures(context.workspace_dir)
+
+    def _hook_context(self, call: ToolCallRecord, step: int, event: str, **payload: Any) -> HookContext:
+        """由装配层的运行身份创建本次工具调用快照。"""
+        base = self._context.hook_context
+        if base is None:
+            raise RuntimeError("HookDispatchPort 缺少装配层提供的 Run 身份")
+        return replace(
+            base, event=event, step=step, tool_call_id=call.call_id,
+            payload={"tool_name": call.name, "tool_call_id": call.call_id,
+                     "arguments": call.arguments, **payload},
+        )
 
     def _request(self, call: ToolCallRecord, prepared: PreparedTools) -> ToolInvocationRequest:
         error = call.rejection if not call.allowed else prepared.validate_call(call.name)
         if call.allowed and call.target is None:
             error = f"Unknown tool: {call.name}"
-        result = ToolResult(success=False, content="", error=error or "") if not call.allowed or error else None
-        return ToolInvocationRequest(call.call_id, call.name, call.arguments, immediate_result=result)
+        result = ToolResult(
+            success=False, content="", error=error or "", raw_output=call.hook_rejection,
+        ) if not call.allowed or error else None
+        return ToolInvocationRequest(
+            call.call_id, call.name, call.arguments, immediate_result=result,
+            on_invoke=lambda: setattr(call, "invoked", True),
+            invocation_context=ToolInvocationContext(parent_tool_call_id=call.call_id, skill_reader=self._context.skill_reader),
+        )
 
     def _log_result(self, call: ToolCallRecord, result: ToolResult) -> None:
         if self._context.logger:
@@ -292,6 +328,7 @@ class DefaultToolEngine:
                         ToolInvocationRequest(
                             call.call_id, call.name, call.arguments,
                             approved_permission_request=approval,
+                            on_invoke=lambda: setattr(call, "invoked", True),
                         )
                     ),
                     on_retry=lambda retry: self._log_result(call, retry),
@@ -308,11 +345,16 @@ class DefaultToolEngine:
         # Keep the actual execution outcome apart from adaptations and Hook
         # display changes. Large result payloads are referenced, not recopied.
         call.execution_result = result
+        call.executed = bool(
+            call.invoked and not result.permission_request
+            and (result.raw_output or {}).get("code") not in {"INVALID_TOOL_SCHEMA", "INVALID_TOOL_ARGUMENTS"}
+        )
         if control.result_transform is not None:
             result = control.result_transform(call.name, result)
         result = _persist_browser_snapshot_output(result, call.snapshot_target)
         result = _persist_browser_screenshot_output(result, call.screenshot_target)
-        result = self._skills.activate(call.target, call.arguments, result)
+        # Skill text remains an ordinary tool result. The reader has already
+        # applied its shared request budget; no system activation is performed.
         result, blocks, tokens = context.validate_followup(
             result, call.target, control.pending_followup_tokens + summary.transient_tokens,
         )
@@ -335,11 +377,21 @@ class DefaultToolEngine:
             if call.allowed and getattr(call.target, "ends_turn_on_success", False):
                 summary.completed_turn_ending_tool = call.name
         content, error = result.content, result.error
-        if context.hooks.hooks and call.user_visible:
+        text_resolution = None
+        if context.hook_dispatch is not None:
+            text_resolution = await context.hook_dispatch.after_tool(
+                self._hook_context(
+                    call, control.step, "tool.after_execution", executed=call.executed,
+                    success=result.success, user_visible=call.user_visible,
+                ), ResultText(content, error),
+            )
+            content, error = text_resolution.text.content, text_resolution.text.error
+        elif context.hooks.hooks and call.user_visible:
             content, error = await context.hooks.fire_tool_result(
                 tool_call_id=call.call_id, tool_name=call.name, success=result.success,
                 content=content, error=error,
             )
+        hook_text_modified = bool(text_resolution and text_resolution.modified)
         outcome = process_tool_result(ToolResultPipelineInput(
             messages=context.messages, tool_call_id=call.call_id, tool_name=call.name,
             arguments=call.arguments, result=result, visible_content=content, visible_error=error,
@@ -350,8 +402,18 @@ class DefaultToolEngine:
             policy_decision=call.policy_decision, tool_id=call.tool_id, server_name=call.server_name,
             turn_id=context.turn_id, step=control.step, started_at=call.started_at,
             parallel=call.parallel, commit_result=context.commit_result,
+            hook_text_modified=hook_text_modified,
         ))
         self._search.record_result(outcome, search)
+        if context.hook_dispatch is not None and not context.is_cancelled():
+            await context.hook_dispatch.observe(self._hook_context(
+                call, control.step, "tool.finished", executed=call.executed,
+                success=result.success, user_visible=call.user_visible,
+                content=outcome.visible_content, error=outcome.visible_error,
+                suppressed=bool(text_resolution and text_resolution.suppressed),
+                hook_source=text_resolution.source if text_resolution else None,
+                hook_rejection=call.hook_rejection,
+            ))
         for event in outcome.events:
             yield event
         if self._options.artifact_detection_enabled and result.success and context.workspace_dir:
@@ -359,16 +421,16 @@ class DefaultToolEngine:
                 if call.user_visible:
                     artifacts, paths = _detect_regex_artifacts(
                         call.call_id, call.name, outcome.visible_content, result.raw_output,
-                        context.workspace_dir, context.artifact_root_dir,
+                        context.workspace_dir,
                     )
                     emitted_paths.update(paths)
                     for artifact in artifacts:
                         yield artifact
             else:
-                after = _snapshot_workspace_signatures(context.workspace_dir, context.artifact_root_dir)
+                after = _snapshot_workspace_signatures(context.workspace_dir)
                 for artifact in _detect_tool_artifacts(
                     call.call_id, call.name, outcome.visible_content, result.raw_output,
-                    call.before_files, after, context.workspace_dir, context.artifact_root_dir,
+                    call.before_files, after, context.workspace_dir,
                 ):
                     yield artifact
 
@@ -435,8 +497,8 @@ class DefaultToolEngine:
             if context.is_cancelled():
                 return
         if parallel:
-            before = (_snapshot_workspace_signatures(context.workspace_dir, context.artifact_root_dir)
-                      if self._options.artifact_detection_enabled and context.workspace_dir else {})
+            before = (_snapshot_workspace_signatures(context.workspace_dir)
+                      if self._options.artifact_detection_enabled and context.workspace_dir else None)
             for call in parallel:
                 async for event in self._start_call(call, prepared, control, summary, search):
                     yield event
@@ -461,13 +523,21 @@ class DefaultToolEngine:
                             outcomes[call.call_id] = event.success
                         yield event
             if self._options.artifact_detection_enabled and context.workspace_dir:
-                after = _snapshot_workspace_signatures(context.workspace_dir, context.artifact_root_dir)
+                after = _snapshot_workspace_signatures(context.workspace_dir)
                 for artifact in _detect_changed_files(parallel[0].call_id, before, after, emitted, context.workspace_dir):
                     yield artifact
             if context.is_cancelled():
                 return
         for duplicate, source in duplicates:
-            for event in self._finish_duplicate(duplicate, source, outcomes.get(source.call_id), control.step):
+            duplicate_events = self._finish_duplicate(duplicate, source, outcomes.get(source.call_id), control.step)
+            if context.hook_dispatch is not None and not context.is_cancelled():
+                final = duplicate_events[-1]
+                await context.hook_dispatch.observe(self._hook_context(
+                    duplicate, control.step, "tool.finished", executed=False,
+                    success=final.success, content=final.content, error=final.error,
+                    duplicate_of=source.call_id, user_visible=False,
+                ))
+            for event in duplicate_events:
                 yield event
         if summary.repair_guidance:
             self._placeholder_repairs += 1

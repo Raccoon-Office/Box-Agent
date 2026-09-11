@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +130,11 @@ def _browser_config_summary(config: Any) -> list[str]:
 
 
 def _resolve_write_target() -> Path:
+    host_user_path = os.environ.get("BOX_AGENT_USER_MCP_CONFIG_PATH", "").strip()
+    if host_user_path:
+        target = state_path("config/mcp.json", Path(host_user_path).expanduser())
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
     if configured_box_agent_home() is not None:
         from box_agent.tools.mcp_loader import get_mcp_config_path
         target = state_path("config/mcp.json", get_mcp_config_path() or None)

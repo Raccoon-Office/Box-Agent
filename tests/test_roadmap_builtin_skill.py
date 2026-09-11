@@ -120,16 +120,19 @@ def test_roadmap_is_a_top_level_builtin_skill() -> None:
     assert "document-skills" not in skill.skill_path.parts
 
 
-def test_roadmap_skill_keeps_output_directory_deliverable_only() -> None:
+def test_roadmap_skill_keeps_generated_deliverables_in_selected_directory() -> None:
     skill = _loader().get_skill("roadmap")
 
     assert skill is not None
-    assert "Treat `output/` as a deliverables-only boundary" in skill.content
-    assert "Never create generator scripts" in skill.content
-    assert "unique task\ndirectory below `$BOX_AGENT_SCRATCH_DIR`" in skill.content
-    assert "after either success or failure" in skill.content
-    assert "session runtime clears any residue" in skill.content
-    assert "under `output/` is a versioned HTML" in skill.content
+    content = " ".join(skill.content.split())
+    assert "absolute task directory selected in the conversation" in content
+    assert "unchanged session cwd when no task directory was selected" in content
+    assert "Do not create an automatic `output/` directory" in content
+    assert "generator scripts, temporary JSON, logs, and other disposable support files" in content
+    assert "unique task directory below `$BOX_AGENT_SCRATCH_DIR`" in content
+    assert "after either success or failure" in content
+    assert "session runtime clears any residue" in content
+    assert "under `<ROADMAP_DIR>` is a versioned HTML deliverable; preserve pre-existing files" in content
     assert "`write_file` does not expand shell environment variables" in skill.content
     assert "copy that returned path exactly into `write_file`" in skill.content
     assert "Never guess a scratch path" in skill.content

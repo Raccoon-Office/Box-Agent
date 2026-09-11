@@ -58,7 +58,7 @@ def test_trusted_requirement_and_skill_hints_only_expose_allowed_real_tools(tmp_
     agent = Agent(llm_client=object(), system_prompt="test", tools=tools, workspace_dir=str(tmp_path))
     assert visible(agent) == frozenset({"tool_search"})
     agent.local_tool_exposure.require_tools(["plan_write", "plan_read", "not_allowed"])
-    agent._active_skill_prompts["browser-use"] = "Original loaded guidance"
+    agent.activate_skill_instructions("browser-use", "Original loaded guidance")
     assert visible(agent) == frozenset({"tool_search", "mcp_config", "plan_write", "plan_read"})
     assert "not_allowed" not in agent.tools
 

@@ -44,6 +44,7 @@ class ToolSearchTool(Tool):
         activated: OrderedDict[str, ActivatedMCPTool],
         *,
         protected_names_provider: Callable[[], frozenset[str]] | None = None,
+        allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
         readiness_timeout: float = 15.0,
         local_tools_provider: Callable[[], Iterable[Tool]] | None = None,
         activated_local_tools: OrderedDict[str, Tool] | None = None,
@@ -51,11 +52,19 @@ class ToolSearchTool(Tool):
         self._catalog = catalog
         self._activated = activated
         self._protected_names_provider = protected_names_provider
+        self._allowed_connector_ids_provider = allowed_connector_ids_provider
         self._readiness_timeout = readiness_timeout
         self._local_tools_provider = local_tools_provider
         self._activated_local = (
             activated_local_tools if activated_local_tools is not None else OrderedDict()
         )
+
+    def _entry_is_allowed(self, entry) -> bool:
+        if entry.connector_id is None:
+            return True
+        if self._allowed_connector_ids_provider is None:
+            return True
+        return entry.connector_id in self._allowed_connector_ids_provider()
 
     @property
     def name(self) -> str:
@@ -72,12 +81,16 @@ class ToolSearchTool(Tool):
             "deferred catalog tools are not exposed, while alwaysLoad tools remain "
             "visible without search. Use query for one keyword search, queries for "
             "independent bilingual or synonymous searches, or tool_names to activate "
-            "only exact catalog IDs or names. Provide at least one non-empty query, "
-            "queries, or tool_names input; they may be combined. "
-            "Prefer short capability, server, or tool "
+            "only exact catalog IDs, model-facing names, or unique original MCP names. "
+            "Passing only server_name activates all tools from that one enabled server. "
+            "Provide at least one non-empty query, queries, tool_names, server_name, or "
+            "connector input; they may be combined. Prefer short capability, server, "
+            "connector, or tool "
             "keywords; task-specific operands are tolerated but should be omitted "
-            "when possible. Set top_k to however many matching tool "
-            "schemas the task actually needs, including ten or more when appropriate. "
+            "when possible. Passing only connector activates all tools owned by "
+            "the uniquely matched enabled connector. Set top_k to however many "
+            "matching tool schemas the task actually needs, including ten or more "
+            "when appropriate. "
             "A query hit may activate a protocol-required companion, such as the "
             "snapshot paired with managed browser navigation, in addition to top_k. "
             "The response reports catalog_tool_count for the applied server scope, "
@@ -118,14 +131,29 @@ class ToolSearchTool(Tool):
                     "items": {"type": "string"},
                     "minItems": 1,
                     "description": (
-                        "Exact tool IDs or names to activate, such as "
-                        "mcp:server/tool or server/tool. No fuzzy fallback is used, "
-                        "and unlisted catalog tools remain hidden."
+                        "Exact tool IDs, model-facing names, or unique original MCP names "
+                        "to activate, such as mcp:server/tool, server/tool, or an "
+                        "MCP tools/list name. No fuzzy fallback is used, and unlisted "
+                        "catalog tools remain hidden."
                     ),
                 },
                 "server_name": {
                     "type": "string",
-                    "description": "Optional exact MCP server name filter.",
+                    "description": (
+                        "Exact internal MCP server name. On its own, activates all "
+                        "tools from that enabled server; with query, connector, or "
+                        "tool_names, it narrows the normal discovery scope."
+                    ),
+                },
+                "connector": {
+                    "type": "string",
+                    "description": (
+                        "Connector ID or unique display-name text from "
+                        "<connector-status>, such as pkulaw or 北大法宝. On its "
+                        "own, activates all tools owned by that enabled connector; "
+                        "with query, server_name, or tool_names, it narrows the "
+                        "normal discovery scope."
+                    ),
                 },
                 "top_k": {
                     "type": "integer",
@@ -133,7 +161,7 @@ class ToolSearchTool(Tool):
                     "default": 1,
                     "description": (
                         "Exact maximum number of query matches to return and activate; "
-                        "ignored for tool_names. Choose any positive count required by "
+                        "ignored for tool_names and server-only activation. Choose any positive count required by "
                         "the task; there is no small fixed cap. Protocol-required "
                         "companions may be activated in addition to these query matches. "
                         "Other unreturned catalog tools remain hidden."
@@ -149,6 +177,7 @@ class ToolSearchTool(Tool):
         queries: list[str] | None = None,
         tool_names: list[str] | None = None,
         server_name: str | None = None,
+        connector: str | None = None,
         top_k: int = 1,
     ) -> ToolResult:
         normalized_server_name = (
@@ -166,13 +195,33 @@ class ToolSearchTool(Tool):
             for item in tool_names or []
             if isinstance(item, str) and item.strip()
         ]
+        normalized_connector = (
+            connector.strip()
+            if isinstance(connector, str) and connector.strip()
+            else None
+        )
         search_input = {
             "query": query,
             "queries": normalized_queries,
             "tool_names": normalized_tool_names,
             "server_name": normalized_server_name,
+            "connector": normalized_connector,
         }
-        if not normalized_queries and not normalized_tool_names:
+        connector_direct = bool(
+            normalized_connector
+            and not normalized_server_name
+            and not normalized_queries
+            and not normalized_tool_names
+        )
+        server_direct = bool(
+            normalized_server_name and not normalized_queries and not normalized_tool_names
+        )
+        if (
+            not normalized_queries
+            and not normalized_tool_names
+            and not server_direct
+            and not connector_direct
+        ):
             payload = {
                 "success": False,
                 **search_input,
@@ -183,7 +232,7 @@ class ToolSearchTool(Tool):
                 "activated": [],
                 "conflicts": [],
                 "missing": [],
-                "notice": "Provide query, queries, or exact tool_names.",
+                "notice": "Provide query, queries, exact tool_names, server_name, or connector.",
             }
             return ToolResult(
                 success=False,
@@ -206,10 +255,37 @@ class ToolSearchTool(Tool):
         # callers keep the existing readiness wait, including explicit server queries.
         mcp_ready = (
             not self._catalog.loading
-            if self._local_tools_provider is not None and normalized_server_name is None
+            if (
+                self._local_tools_provider is not None
+                and normalized_server_name is None
+                and normalized_connector is None
+            )
             else await self._catalog.wait_until_ready(self._readiness_timeout)
         )
-        scoped_locals = local_tools if normalized_server_name is None else {}
+
+        resolved_connector_id = (
+            self._catalog.resolve_connector_id(
+                normalized_connector,
+                entry_filter=self._entry_is_allowed,
+            )
+            if normalized_connector
+            else None
+        )
+
+        def entry_is_in_scope(entry) -> bool:
+            if not self._entry_is_allowed(entry):
+                return False
+            if normalized_connector and (
+                resolved_connector_id is None
+                or entry.connector_id != resolved_connector_id
+            ):
+                return False
+            return normalized_server_name is None or entry.server_name == normalized_server_name
+
+        search_input["resolved_connector_id"] = resolved_connector_id
+        scoped_locals = (
+            local_tools if normalized_server_name is None and normalized_connector is None else {}
+        )
         local_entries = {
             name: MCPToolEntry(
                 tool_id=f"local:{name}", model_name=name, server_name="",
@@ -219,15 +295,15 @@ class ToolSearchTool(Tool):
         }
         mcp_entries = tuple(
             entry for entry in self._catalog.snapshot()
-            if mcp_ready and (
-                normalized_server_name is None or entry.server_name == normalized_server_name
-            )
+            if mcp_ready and entry_is_in_scope(entry)
         )
         catalog_tool_count = len(mcp_entries) if mcp_ready else None
         missing: list[str] = []
         pending: list[str] = []
         hits: list[MCPToolEntry] = []
-        if normalized_tool_names:
+        if connector_direct or server_direct:
+            hits = list(mcp_entries)
+        elif normalized_tool_names:
             seen_ids = set()
             for requested_name in normalized_tool_names:
                 local = local_index.get(_normalize(requested_name))
@@ -238,6 +314,7 @@ class ToolSearchTool(Tool):
                 if mcp_ready:
                     matches.extend(self._catalog.lookup_exact(
                         [requested_name], server_name=normalized_server_name,
+                        entry_filter=entry_is_in_scope,
                     )[0])
                 if not matches:
                     (missing if mcp_ready else pending).append(requested_name)
@@ -249,12 +326,13 @@ class ToolSearchTool(Tool):
             hits = self._catalog.search_many(
                 normalized_queries, server_name=normalized_server_name, top_k=top_k,
                 entries=(*mcp_entries, *local_entries.values()),
+                entry_filter=entry_is_in_scope,
             )
         query_matched_count = sum(not entry.tool_id.startswith("local:") for entry in hits)
         local_matched_count = len(hits) - query_matched_count
         hit_ids = {entry.tool_id for entry in hits}
         companion_entries = []
-        if not normalized_tool_names:
+        if not normalized_tool_names and not server_direct and not connector_direct:
             for entry in tuple(hits):
                 if entry.tool_id.startswith("local:"):
                     continue
@@ -262,6 +340,7 @@ class ToolSearchTool(Tool):
                     companions, _ = self._catalog.lookup_exact(
                         [companion_name],
                         server_name=entry.server_name,
+                        entry_filter=entry_is_in_scope,
                     )
                     for companion in companions:
                         if companion.tool_id in hit_ids:
@@ -322,6 +401,9 @@ class ToolSearchTool(Tool):
                 {
                     "name": entry.model_name,
                     "server_name": entry.server_name,
+                    "connector_id": entry.connector_id,
+                    "connector_name": entry.connector_name,
+                    "remote_name": entry.remote_name,
                     "description": entry.description,
                     "already_active": already_active,
                 }
@@ -398,6 +480,7 @@ class MCPToolExposureManager:
         activated_local_tools: OrderedDict[str, Tool] | None = None,
         deferred_local_names_provider: Callable[[], frozenset[str]] | None = None,
         deferred_mcp: bool = True,
+        allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
     ) -> None:
         self._catalog = catalog
         self._activated = activated
@@ -406,6 +489,17 @@ class MCPToolExposureManager:
         )
         self._deferred_local_names_provider = deferred_local_names_provider
         self._deferred_mcp = deferred_mcp
+        self._allowed_connector_ids_provider = allowed_connector_ids_provider
+
+    def _entry_is_allowed(self, entry) -> bool:
+        return self._connector_is_allowed(entry.connector_id)
+
+    def _connector_is_allowed(self, connector_id: str | None) -> bool:
+        if connector_id is None:
+            return True
+        if self._allowed_connector_ids_provider is None:
+            return True
+        return connector_id in self._allowed_connector_ids_provider()
 
     def prepare_tools(self, candidates: list[Tool]) -> ToolExposure:
         # ``candidates`` is the session's stable core-tool registry. Ordinary
@@ -429,7 +523,9 @@ class MCPToolExposureManager:
                 self._activated_local.pop(name, None)
         for tool in candidates:
             if getattr(tool, "mcp_tool_id", None) is not None:
-                if not self._deferred_mcp:
+                if not self._deferred_mcp and self._connector_is_allowed(
+                    getattr(tool, "mcp_connector_id", None)
+                ):
                     visible[tool.name] = tool
                     generation = getattr(tool, "mcp_generation", None)
                     if isinstance(generation, int):
@@ -438,6 +534,8 @@ class MCPToolExposureManager:
                 visible[tool.name] = tool
 
         for entry in self._catalog.snapshot() if self._deferred_mcp else ():
+            if not self._entry_is_allowed(entry):
+                continue
             if (
                 entry.name_conflict
                 or entry.model_name == TOOL_SEARCH_NAME
@@ -461,7 +559,6 @@ class MCPToolExposureManager:
             for tool in [*tool_map.values(), *exposure.tools]
             if tool.name != TOOL_SEARCH_NAME and (
                 getattr(tool, "mcp_tool_id", None) is None
-                or not self._deferred_mcp
                 or tool.name in exposure.offered_names
             )
         }
@@ -472,8 +569,15 @@ class MCPToolExposureManager:
         offered_generation: int | None,
         target_tool: Tool | None = None,
     ) -> str | None:
+        if target_tool is not None and not self._connector_is_allowed(
+            getattr(target_tool, "mcp_connector_id", None)
+        ):
+            return f"MCP tool '{name}' is not enabled for this conversation; search again."
         if offered_generation is None:
             return None
+        current = self._catalog.get_by_model_name(name)
+        if current is not None and not self._entry_is_allowed(current):
+            return f"MCP tool '{name}' is not enabled for this conversation; search again."
         if not self._deferred_mcp:
             if (
                 target_tool is not None
@@ -481,7 +585,6 @@ class MCPToolExposureManager:
             ):
                 return f"MCP tool '{name}' execution target changed after it was offered; prepare tools again."
             return None
-        current = self._catalog.get_by_model_name(name)
         if current is None:
             return f"MCP tool '{name}' is unavailable or has a name conflict; search again."
         if current.generation != offered_generation:

@@ -10,14 +10,27 @@ import box_agent.agent as agent_module
 from box_agent.agent import Agent, AgentRunOptions
 from box_agent.config import ToolLimitsConfig
 from box_agent.context_resources import ResourceClass, ResourceDescriptor
-from box_agent.events import ContentEvent, DoneEvent, StopReason
+from box_agent.events import ContentEvent, DoneEvent, StopReason, SummarizationEvent
 from box_agent.schema import FunctionCall, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
-from box_agent.tools.skill_preload import ACTIVE_SKILLS_HEADING, strip_active_skills
+from box_agent.skill_runtime import SkillRuntime
 
 
 class DummyLLM:
     pass
+
+
+class ReferenceCapturingLLM:
+    model = "test-model"
+    max_output_tokens = 1024
+
+    def __init__(self):
+        self.requests = []
+
+    async def generate_stream(self, *, messages, **kwargs):
+        self.requests.append([message.model_copy(deep=True) for message in messages])
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop")
 
 
 @pytest.mark.asyncio
@@ -33,6 +46,7 @@ async def test_agent_run_forwards_core_execution_options(
 
     monkeypatch.setattr(agent_module, "run_agent_loop", fake_run_agent_loop)
 
+    skill_runtime = SkillRuntime(None)
     agent = Agent(
         llm_client=DummyLLM(),
         system_prompt="system",
@@ -40,6 +54,7 @@ async def test_agent_run_forwards_core_execution_options(
         workspace_dir=str(tmp_path),
         thinking_enabled=True,
         tool_limits=ToolLimitsConfig(web_search={"total_calls": 31}),
+        skill_runtime=skill_runtime,
     )
 
     result = await agent.run(
@@ -54,7 +69,8 @@ async def test_agent_run_forwards_core_execution_options(
     assert captured["artifact_detection_enabled"] is False
     assert captured["thinking_enabled"] is True
     assert captured["tool_limits"].web_search.total_calls == 31
-    assert captured["active_skill_activator"] == agent.activate_skill_instructions
+    assert captured["skill_engine"] is skill_runtime is agent.skill_runtime
+    assert "active_skill_activator" not in captured
     assert captured["current_turn_text"] == "current user request"
     assert captured["context_resource_ledger"] is agent.context_resource_ledger
     assert captured["context_resource_dedup_enabled"] is True
@@ -138,11 +154,16 @@ async def test_agent_run_events_forwards_host_run_options(
         "memory_extractor",
         "inject_queue",
         "plan_approval",
-        "artifact_root_dir",
         "cache_fingerprint_context",
         "cache_fingerprint_sink",
     }
     for option_field in fields(AgentRunOptions):
+        if option_field.name == "artifact_root_dir":
+            assert option_field.name not in captured
+            continue
+        if option_field.name == "kernel_services" and options.kernel_services is None:
+            assert "kernel_services" not in captured
+            continue
         actual = captured[option_field.name]
         expected = getattr(options, option_field.name)
         if option_field.name in identity_fields:
@@ -314,11 +335,12 @@ def test_agent_public_runtime_configuration_and_history_reset(tmp_path: Path) ->
     assert agent.context_resource_ledger.source_ids == ()
 
 
-def test_agent_preserves_deduplicated_active_skills_across_prompt_updates(
+async def test_agent_preserves_deduplicated_references_across_prompt_updates(
     tmp_path: Path,
 ) -> None:
+    llm = ReferenceCapturingLLM()
     agent = Agent(
-        llm_client=DummyLLM(),
+        llm_client=llm,
         system_prompt="system",
         tools=[],
         workspace_dir=str(tmp_path),
@@ -327,24 +349,38 @@ def test_agent_preserves_deduplicated_active_skills_across_prompt_updates(
     agent.activate_skill_instructions("pptx", "# Skill: pptx\n\nOld instructions.")
     agent.activate_skill_instructions("pptx", "# Skill: pptx\n\nOld instructions.")
 
-    assert agent.system_prompt.count(ACTIVE_SKILLS_HEADING) == 1
-    assert agent.system_prompt.count("Old instructions.") == 1
+    agent.add_user_message("first input")
+    await agent.run()
+    assert "Old instructions." not in agent.system_prompt
+    assert str(llm.requests[0]).count("Old instructions.") == 1
+    assert llm.requests[0][-1].role == "user"
+    assert "Host-provided Skill reference" in str(llm.requests[0][-1].content)
+    assert "Old instructions." not in str(agent.messages)
+    assert agent.messages[1].content == "first input"
 
-    base_prompt = strip_active_skills(agent.system_prompt).replace("system", "updated", 1)
+    base_prompt = agent.system_prompt.replace("system", "updated", 1)
     agent.set_system_prompt(base_prompt)
     agent.activate_skill_instructions("pptx", "# Skill: pptx\n\nNew instructions.")
+    agent.add_user_message("second input")
+    await agent.run()
 
     assert agent.messages[0].content == agent.system_prompt
     assert agent.system_prompt.startswith("updated")
     assert "Old instructions." not in agent.system_prompt
-    assert agent.system_prompt.endswith("New instructions.")
+    assert "New instructions." not in agent.system_prompt
+    assert "Old instructions." not in str(llm.requests[-1])
+    assert str(llm.requests[-1]).count("New instructions.") == 1
+    assert llm.requests[-1][-1].role == "user"
+    assert agent.messages[-2].content == "second input"
+    assert "New instructions." not in str(agent.messages)
 
 
-def test_agent_reports_active_skill_budget_without_truncating_and_can_clear(
+async def test_agent_reports_reference_budget_without_truncating_source_and_can_clear(
     tmp_path: Path,
 ) -> None:
+    llm = ReferenceCapturingLLM()
     agent = Agent(
-        llm_client=DummyLLM(),
+        llm_client=llm,
         system_prompt="system",
         tools=[],
         workspace_dir=str(tmp_path),
@@ -358,14 +394,31 @@ def test_agent_reports_active_skill_budget_without_truncating_and_can_clear(
 
     assert diagnostics["names"] == ("first", "second")
     assert diagnostics["budget_exceeded"] is True
-    assert "FIRST_REQUIRED_RULE" in agent.system_prompt
-    assert "SECOND_REQUIRED_RULE" in agent.system_prompt
+    assert agent.skill_runtime.state.reads["first"].prompt == first
+    assert agent.skill_runtime.state.reads["second"].prompt == second
+    assert "FIRST_REQUIRED_RULE" not in agent.system_prompt
+    assert "SECOND_REQUIRED_RULE" not in agent.system_prompt
+    agent.add_user_message("bounded input")
+    events = [event async for event in agent.run_events()]
+    assert llm.requests == []
+    assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR for event in events)
+    # One bounded recovery can append compaction metadata. The original user
+    # text and full Skill sources survive; no truncated method is delivered.
+    assert sum(isinstance(event, SummarizationEvent) for event in events) == 1
+    assert any(message.role == "user" and message.content == "bounded input"
+               for message in agent.messages)
+    assert "FIRST_REQUIRED_RULE" not in str(agent.messages)
+    assert "SECOND_REQUIRED_RULE" not in str(agent.messages)
+    assert agent.skill_runtime.state.reads["first"].prompt == first
+    assert agent.skill_runtime.state.reads["second"].prompt == second
 
     assert agent.deactivate_skill_instructions("first") is True
     assert "FIRST_REQUIRED_RULE" not in agent.system_prompt
-    assert "SECOND_REQUIRED_RULE" in agent.system_prompt
+    assert agent.skill_runtime.state.reads["second"].prompt == second
+    assert agent.skill_runtime.state.selected == ("second",)
     assert agent.deactivate_skill_instructions("missing") is False
 
     agent.clear_active_skill_instructions()
-    assert ACTIVE_SKILLS_HEADING not in agent.system_prompt
+    assert agent.skill_runtime.state.reads == {}
+    assert agent.skill_runtime.state.selected == ()
     assert agent.active_skill_diagnostics()["names"] == ()

@@ -279,8 +279,11 @@ class TodoStore:
             self._change_sink(self.list())
 
     def restore(self, items: list[dict]) -> None:
-        candidate = [dict(item) for item in items]
-        _validate_todo_items(candidate)
+        try:
+            candidate = [dict(item) for item in items]
+            _validate_todo_items(candidate)
+        except (TypeError, ValueError):
+            candidate = []
         self._items = {item["id"]: item for item in candidate}
         max_id = max((int(item["id"]) for item in candidate), default=0)
         self._counter = count(max_id + 1)

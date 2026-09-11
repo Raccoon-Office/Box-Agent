@@ -8,6 +8,7 @@ import math
 import re
 import subprocess
 import sys
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -360,6 +361,7 @@ def _terminal_attempt(
     case_id: str,
     current_fingerprint: Mapping[str, Any],
     current_runtime: Mapping[str, Any],
+    model_config_sha256: str,
 ) -> dict[str, Any] | None:
     _validate_case_storage(output_dir, case_id)
     case_dir = output_dir / "cases" / case_id
@@ -418,6 +420,8 @@ def _terminal_attempt(
     if any(result.get(key) != value for key, value in expected_identity.items()):
         return None
     if result.get("case_fingerprint") != current_fingerprint:
+        return None
+    if result.get("model_config_sha256") != model_config_sha256:
         return None
     stored_runtime = _stable_runtime_identity(result.get("runtime"))
     comparable_runtime = _stable_runtime_identity(current_runtime)
@@ -496,6 +500,7 @@ def _write_attempt_batch_metadata(
     case_fingerprint: Mapping[str, Any],
     expected_fingerprint: Mapping[str, Any],
     runtime: Mapping[str, Any],
+    model_config_sha256: str,
 ) -> None:
     attempt_dir = (
         output_dir / "cases" / result.case_id / "attempts" / result.attempt_id
@@ -506,6 +511,7 @@ def _write_attempt_batch_metadata(
         raise ValueError(f"attempt run metadata is unreadable: {run_path}")
     run_document["case_fingerprint"] = dict(case_fingerprint)
     run_document["runtime"] = dict(runtime)
+    run_document["model_config_sha256"] = model_config_sha256
     matches = case_fingerprint == expected_fingerprint
     run_document["input_consistency"] = {
         "status": "matched" if matches else "mismatch",
@@ -621,6 +627,11 @@ def run_batch(
     case_ids: Sequence[str],
     *,
     retry_terminal: bool = False,
+    effect_eval_url: str | None = None,
+    effect_eval_timeout_seconds: float = 180.0,
+    model: str | None = None,
+    model_max_tokens: int | None = None,
+    model_binding: Mapping[str, Any] | None = None,
 ) -> int:
     """Run selected cases, atomically index attempts, and return a process code."""
 
@@ -628,6 +639,29 @@ def run_batch(
         raise ValueError("timeout_seconds must be finite and greater than zero")
     if parallelism < 1:
         raise ValueError("parallelism must be at least one")
+    if not math.isfinite(effect_eval_timeout_seconds) or effect_eval_timeout_seconds <= 0:
+        raise ValueError(
+            "effect_eval_timeout_seconds must be finite and greater than zero"
+        )
+    if model_max_tokens is not None and model_max_tokens < 1:
+        raise ValueError("model_max_tokens must be at least one")
+    if model_binding is not None:
+        if model is not None:
+            raise ValueError("model_binding cannot be combined with model")
+        if (
+            model_binding.get("source") != "builtin"
+            or not isinstance(model_binding.get("model"), str)
+            or not str(model_binding.get("model")).strip()
+        ):
+            raise ValueError("model_binding must contain a builtin model")
+    # Freeze the requested model/routing settings before fingerprinting and
+    # execution. A caller must not mutate a nested binding during the batch.
+    model_binding = deepcopy(dict(model_binding)) if model_binding is not None else None
+    model_config_sha256 = _canonical_sha256({
+        "model": model,
+        "model_max_tokens": model_max_tokens,
+        "model_binding": model_binding,
+    })
     dataset = Path(dataset).resolve()
     output_dir = Path(output_dir).resolve()
     repo_root = Path(repo_root).resolve()
@@ -661,6 +695,7 @@ def run_batch(
         "retry_terminal": retry_terminal,
         "dataset_fingerprint": dataset_fingerprint,
         "runtime": runtime,
+        "model_config_sha256": model_config_sha256,
         "started_at": started_at,
         "finished_at": None,
     }
@@ -679,6 +714,7 @@ def run_batch(
                     record["id"],
                     case_fingerprints[record["id"]],
                     runtime,
+                    model_config_sha256,
                 )
         except LatestIndexError as error:
             summaries[record["id"]] = _batch_error(
@@ -696,6 +732,11 @@ def run_batch(
         dataset_root=dataset.parent,
         timeout_seconds=timeout_seconds,
         python_executable=python_executable,
+        effect_eval_url=effect_eval_url,
+        effect_eval_timeout_seconds=effect_eval_timeout_seconds,
+        model=model,
+        model_max_tokens=model_max_tokens,
+        model_binding=dict(model_binding) if model_binding is not None else None,
     )
     if pending:
         with ThreadPoolExecutor(max_workers=min(parallelism, len(pending))) as executor:
@@ -735,6 +776,7 @@ def run_batch(
                         copied_fingerprint,
                         case_fingerprints[case_id],
                         runtime,
+                        model_config_sha256,
                     )
                     if mismatch:
                         raise InputFingerprintMismatch(
@@ -765,6 +807,7 @@ def run_batch(
         "finished_at": finished_at,
         "dataset_fingerprint": dataset_fingerprint,
         "runtime": runtime,
+        "model_config_sha256": model_config_sha256,
         "counts": counts,
         "cases": ordered,
     }

@@ -150,3 +150,47 @@ async def test_local_removal_or_replacement_revokes_previous_activation_but_keep
     tools.clear()
     assert exposure.prepare_tools(tools).tools == []
     assert not activated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("search_args", "expected"), [
+    ({"query": "lookup", "top_k": 10}, {"local_lookup", "legal_lookup"}),
+    ({"tool_names": ["lookup", "legal_lookup", "hidden_lookup"]}, {"local_lookup", "legal_lookup"}),
+    ({"connector": "law"}, {"legal_lookup"}),
+    ({"connector": "law", "query": "lookup"}, {"legal_lookup"}),
+    ({"connector": "law", "tool_names": ["local_lookup", "legal_lookup"]}, {"legal_lookup"}),
+    ({"connector": "hidden", "query": "lookup"}, set()),
+])
+async def test_connector_scope_remains_enforced_with_local_discovery(search_args, expected):
+    local = LocalTool("local_lookup", "Local utility", aliases=("lookup",))
+    catalog = MCPToolCatalog()
+    catalog.replace_server("legal", [FakeMCPTool(
+        "legal_lookup", "legal", "Lookup law", connector_id="law",
+    )])
+    catalog.replace_server("hidden", [FakeMCPTool(
+        "hidden_lookup", "hidden", "Lookup private data", connector_id="hidden",
+    )])
+    allowed = {"law"}
+    activated_mcp, activated_local = OrderedDict(), OrderedDict()
+    search = ToolSearchTool(
+        catalog, activated_mcp, local_tools_provider=lambda: [local],
+        activated_local_tools=activated_local,
+        allowed_connector_ids_provider=lambda: frozenset(allowed),
+    )
+    exposure = MCPToolExposureManager(
+        catalog, activated_mcp, activated_local_tools=activated_local,
+        deferred_local_names_provider=lambda: frozenset({local.name}),
+        allowed_connector_ids_provider=lambda: frozenset(allowed),
+    )
+
+    result = await search.execute(**search_args)
+    assert result.success
+    assert {hit["name"] for hit in json.loads(result.content)["activated"]} == expected
+    offered = exposure.prepare_tools([local])
+    assert offered.offered_names == frozenset(expected)
+    allowed.clear()
+    assert exposure.prepare_tools([local]).offered_names == frozenset(expected & {local.name})
+    if "legal_lookup" in expected:
+        assert "not enabled" in exposure.validate_call(
+            "legal_lookup", offered.mcp_generations["legal_lookup"],
+        )

@@ -1,160 +1,234 @@
-# Agent Session
+# Agent Session and Plugin Lifecycle
 
-`box_agent.agent_session.AgentSession` owns live Agent session state and its
-`Config` independently of ACP and CLI. ACP's `SessionState` extends it with host
-metadata. Existing field access such as `state.agent`, `state.inject_queue`,
-and `state.run_handle` uses the same underlying objects.
+`AgentSession.open(config=...)` is the managed entry point used by ACP and CLI.
+It retains the caller's Config, prepares configured capabilities once, creates
+the Agent, and owns session cleanup. Each `run_events()` creates a fresh run
+activation from that session's existing runtime. `SessionLog` remains the only
+durable session-state source.
 
-## Configuration and execution flow
+## Creation and execution
 
 ```mermaid
 flowchart TB
-    AC["ACP newSession<br/>Config + resolved host inputs"]
-    CREATE["SessionState.create<br/>inherited from AgentSession"]
-    CLI["CLI startup<br/>AgentSession.create(config, ...) "]
-    SS["AgentSession<br/>config / agent / cancellation / injection / Skills"]
-    HOST["ACP / CLI turn policy<br/>read session.config + host metadata"]
-    OPTIONS["AgentRunHandle → session.build_run_options<br/>Agent defaults + session state + explicit overrides"]
-    EVENTS["session.run_events"]
-    AGENT["Agent.run_events<br/>resolved constructor settings + AgentRunOptions"]
-    LOOP["runtime → core → composition / PluginHost<br/>KernelServices → AgentLoopKernel"]
-    LOG["SessionLog<br/>durable facts and recovery"]
-    ACP["ACP event renderer"]
-    TERM["CLI render_agent_events<br/>shared with legacy Agent.run"]
-
-    AC --> CREATE
-    CREATE -->|AgentService creates Agent| SS
-    CLI --> SS
-    SS --> HOST --> OPTIONS --> EVENTS --> AGENT --> LOOP
-    SS --> OPTIONS
-    AGENT --> LOG
-    LOOP -->|AgentEvent| EVENTS
-    EVENTS --> ACP
-    EVENTS --> TERM
+    subgraph HOST["Host adapters"]
+        ACP["ACP Server<br/>protocol, models, permissions, notifications"]
+        CLI["CLI<br/>config/probing, commands, rendering"]
+        INPUT["Config + SessionOptions + HostBindings<br/>normalized inputs and borrowed capabilities"]
+        ACP -->|"newSession"| INPUT
+        CLI -->|"startup"| INPUT
+    end
+    RUNTIME["Reusable PluginRuntime + PluginHost<br/>static catalog / validation / dependency ordering / scoped activation<br/>ACP application-owned; CLI private by default"]
+    subgraph CREATE["Once per session"]
+        OPEN["AgentSession.open / SessionState.open"]
+        CONTEXT["SessionContext<br/>same Config reference"]
+        PREP["PluginRuntime.open_session<br/>activate Process / Session scopes, then prepare"]
+        ASSEMBLY["Session plugins → session_assembly<br/>model → memory → tools/Skills/MCP → prompt → hooks"]
+        FACTORY["Internal create → AgentService<br/>construct Agent and restore Skill facts; finish_session binds catalog/grants"]
+        SESSION["AgentSession<br/>Config, Agent, PluginSession, live state<br/>ACP subclass: SessionState; state view: AgentRunHandle"]
+        INPUT --> OPEN --> CONTEXT --> PREP --> ASSEMBLY --> FACTORY --> SESSION
+    end
+    subgraph RUN["Each run"]
+        OPTIONS["Session.run_events / build_run_options<br/>defaults + session state + explicit overrides"]
+        CONTEXT_RUN["RunContext<br/>SessionContext + current Agent + final options"]
+        BIND["PluginSession.open_run → run.services<br/>reuse Host/session instances, activate fresh Run scope"]
+        SERVICES["ActivatedRegistry → KernelServices<br/>fresh bundle and HookManager"]
+        SESSION --> OPTIONS --> CONTEXT_RUN --> BIND --> SERVICES
+    end
+    subgraph EXEC["Execution and output"]
+        AGENT["Existing Agent.run_events"]
+        BRIDGE["runtime → core compatibility facade"]
+        COMPOSE["composition<br/>validate/forward services and close kernel event stream"]
+        KERNEL["AgentLoopKernel"]
+        EVENTS["AgentEvent → Agent / Session → host consumer"]
+        LEGACY["Legacy direct Agent / synchronous create<br/>unmanaged runs retain a fresh default Host"]
+        SERVICES --> AGENT --> BRIDGE --> COMPOSE --> KERNEL --> EVENTS
+        LEGACY -.-> AGENT
+    end
+    RUNTIME -.->|"same Host"| PREP
+    RUNTIME -.->|"same Host"| BIND
+    ACP -->|"later prompts"| OPTIONS
+    CLI -->|"tasks / turns / continuations"| OPTIONS
 ```
 
-`AgentSession.create(config=..., ...)` requires the existing `Config` and uses
-the same constructor settings that ACP and CLI previously passed directly to
-`AgentService.create_agent`. The existing Agent, runtime, and kernel contracts
-remain unchanged. The kernel receives resolved values and capabilities through
-those contracts; it does not receive a raw application Config or ACP state.
+The arrows show lifecycle and call flow. The kernel does not import the session,
+Config, PluginHost, or adapters. It receives resolved values and services.
+Managed composition does not create a second default Host or dispose resources
+owned by the session. It still owns closing the kernel event stream.
 
-| Input | Resolution and propagation |
+## Inputs and configuration timing
+
+| Input | Meaning |
 | --- | --- |
-| Step, parallelism, timeout, provider-stale, retry, deduplication, memory-promotion settings | `config.agent` → Agent constructor → existing runtime arguments |
-| Tool call and delegation limits | `config.tool_limits` → Agent → default run options |
-| Workspace and context budget | Explicit host-resolved overrides win; otherwise use `config.agent.workspace_dir` and `config.llm.context_token_limit` |
-| Deferred MCP exposure | Existing conjunction of MCP enabled, deferred loading enabled, and non-utility session |
-| Cancellation and injection | Session callback and queue → run options → existing loop |
-| Summary client and memory extractor | Session references → run options; explicit host options still win |
-| Configured hooks | Host hook loader → session factory → Agent defaults → run options |
-| Goal autopilot, research search budget, memory proposal thresholds | Existing adapter policy reads the session's Config |
-| Model binding between turns | Host model capabilities win; missing capabilities fall back to the session's Config |
+| `Config` | Existing configuration object, retained by reference through SessionContext and RunContext |
+| `SessionOptions` | Stable workspace cwd, execution/session mode, utility flag, permission policy and session state |
+| `HostBindings` | Borrowed model clients, application tool catalog, SkillLoader, memory, hooks, SessionLog, discovery tasks and host callbacks |
+| Skill Engine | Optional `skill_runtime` is forwarded to Agent; otherwise its loader is resolved from the final prepared Skill tools. |
+| `PluginRuntime` | Optional application-owned runtime shared across sessions; `open` creates a private runtime when omitted |
 
-Config is retained by reference. No new copy, reload, environment lookup, or
-serialization is introduced. Constructor settings are resolved when the Agent
-is created; existing turn-time policy continues to read Config at turn time.
-Mutating a shared Config therefore still affects its live readers. Replacing
-the adapter's default Config affects future sessions, while existing sessions
-retain their original reference. This is not a general configuration hot-reload
-API.
+Constructor settings keep their existing read timing. Step limits, tool limits,
+context budget and retry settings resolve when the Agent is constructed.
+Existing turn policy continues to read the same Config at turn time. Model
+switches and explicit run overrides resolve before the run service bundle is
+built. Replacing an adapter's default Config affects future sessions only.
+This is not a hot-reload API.
 
-## State ownership
+`session_assembly.py` calls the existing capability producers, retaining
+ACP/CLI prompt segment ordering, raw tool schemas and ordering, Skill selection
+and restoration, memory gates, utility suppression, and deferred MCP timing.
+The static initializer list always exists; existing Config gates inside those
+initializers decide which resources to prepare. There is no new `plugins`
+configuration key or plugin-directory scanning.
 
-| Owner | State |
+## Scope and ownership
+
+| Scope | Ownership and disposal |
 | --- | --- |
-| AgentSession | Agent/config, model clients, cancellation/injection, turn flags and errors, memory, permissions, output context, Skill runtime/selection/preload state, plan approval state, MCP fallback references |
-| ACP SessionState | ACP session mode and LLM binding metadata, trace writer, injection request deduplication, expert metadata, upstream session/task/title identifiers, task-registry errors, follow-up suggestion task |
-| Agent | Message history and its existing tools, goal, resolved execution settings, SessionLog reference |
-| SessionLog | Durable messages, tool calls/results, goal/plan/todo facts, active Skills, and turn boundaries |
+| Process | One PluginRuntime/Host and explicit process plugins. Process factories receive application context (currently `None`), never a session Config. ACP's existing model pool and discovery resources remain borrowed host capabilities. |
+| Session | Config-dependent built-in resources, prompt, tools and Skill state. Created once, isolated by session key, reused across turns. Only resources created by assembly are registered for cleanup. |
+| Run | Fresh RunContext, HookManager and KernelServices bound to current options. Activation ends on completion, error, cancellation or early stream closure. |
 
-Inheritance keeps ACP's current keyword-based construction and attribute
-access without duplicate state or a second copy of configuration. For existing
-callers that wrap a prebuilt Agent, `SessionState(agent=...)` and
-`AgentSession(agent=...)` remain supported. ACP binds its default Config on the
-first use of an unconfigured legacy state; it does not rebuild that Agent.
-New session creation should always use `create(config=...)`.
+Descriptors accept either the original no-argument `factory` or
+`context_factory(PluginFactoryContext)`. The latter receives its exact scope
+context and a read-only mapping of declared dependency IDs to instances.
+Dependencies cannot reference a shorter-lived scope. Validation and dependency
+ordering precede activation; asynchronous preparation runs outside Host
+lifecycle reservations.
 
-`AgentRunHandle` remains a lightweight view over the session. It delegates
-option construction to the session, while retaining the existing Agent-default
-fallback for callers wrapping a legacy state object.
+Closing a session stops its active run before releasing session resources.
+Closing a shared runtime waits for in-flight initialization, closes all sessions,
+then closes process resources. Initialization failures roll back; callbacks
+interrupted by cancellation remain available for a subsequent `aclose()`.
+Ordinary disposer failures are terminal, following PluginHost's existing
+semantics. The primary execution error is preserved when cleanup also fails.
+Duplicate active session keys and overlapping runs are rejected.
 
-## Independent use
+Borrowed clients, catalogs, discovery tasks and SessionLog are closed by their
+existing owners. `LLMClient.aclose()` closes its SDK transport; `for_model()`
+views sharing that transport must not close it independently.
 
-Callers prepare the provider and tools through their existing capability setup,
-then create the session:
+`AgentSession.create(skill_runtime=...)` forwards the supplied instance to Agent;
+it does not create a second set of Skill read or recovery records. The similarly
+named `skill_runtime_context` describes the Python/Node execution environment.
+CLI and ACP share the session's explicit Skill allowance set with directory and
+reading tools. Legacy `preloaded_*` fields describe actual delivery, not selection,
+current body visibility, or permission. The final run composition binds Context
+to the session's SkillRuntime and SessionLog while preserving managed capabilities.
+
+## Managed Python use
 
 ```python
 from contextlib import aclosing
 
 from box_agent.agent_session import AgentSession
+from box_agent.session_context import SessionOptions
 
-session = AgentSession.create(
+session = await AgentSession.open(
     config=config,
-    llm_client=llm,
-    system_prompt=system_prompt,
-    tools=tools,
+    options=SessionOptions(workspace_dir=workspace),
 )
-session.agent.add_user_message(user_text)
-options = session.build_run_options(logger=None)
-
-async with aclosing(session.run_events(options=options)) as events:
-    async for event in events:
-        await render(event)
+try:
+    session.agent.add_user_message(user_text)
+    async with aclosing(session.run_events()) as events:
+        async for event in events:
+            await render(event)
+finally:
+    await session.aclose()
 ```
 
-Call `session.request_cancel()` to request cancellation. The existing
-`session.run_handle.cancelled` property remains supported. Queue
-injections on `session.inject_queue` using the existing injection format.
-When consuming only part of the stream, close it with `aclosing` or `aclose`;
-the wrapper then closes the Agent stream so its normal cleanup and interrupted
-turn persistence run. SessionLog remains owned and closed by its existing
-caller.
+Pass `runtime=shared_runtime` to reuse one Host across multiple sessions, and
+close that runtime at application shutdown. Pass `HostBindings` to borrow
+already-probed models or other host-owned capabilities. A binding containing
+both `tools` and `system_prompt` opts into the prepared-resource contract.
 
-`run_events` marks the session active while its stream is open, records the
-completed stop reason, and restores the prior active state in `finally`. ACP
-can maintain a wider prompt scope across multiple goal continuations; an
-individual run does not end that scope. ACP explicitly closes its outer event
-stream before returning a protocol response. CLI's shared renderer closes the
-stream on completion, consumer errors, and cancellation.
+`AgentSession.create(config=..., llm_client=..., system_prompt=..., tools=...)`
+remains synchronous and backward compatible. It constructs a session from
+prepared resources without managed plugin ownership. Direct `Agent`,
+`AgentSession(agent=...)` and `SessionState(agent=...)` remain supported.
+Their runs retain the default per-run Host path. Use `session.run_events()`
+to run a managed session; direct calls to its Agent bypass managed run ownership.
 
-## ACP and CLI integration
+`AgentRunHandle` remains a view of the same session state. `build_run_options`
+binds cancellation, injection and summary/extraction references before explicit
+overrides. Managed sessions populate the internal `kernel_services` field;
+adapters should not supply it themselves.
 
-ACP creates `SessionState` through the shared factory and obtains the summary
-client, cancellation callback, injection queue, and memory extractor from the
-session option builder. Its cancel notification calls `request_cancel()`.
-Protocol metadata, permission reverse RPC, and event rendering stay in ACP.
+## Adapter boundaries
 
-CLI creates one `AgentSession` per invocation. Single tasks, goal continuations,
-and interactive turns all use `_run_session_turn` → `build_run_options` →
-`run_events`. CLI's Skill selector, preload names/hashes, source text, scratch
-directory, force-plan flag, and cancellation state belong to that session.
-`/clear` and `/clear_all` retain their existing history and sandbox behavior;
-they reuse the same session and reset its source binding.
+ACP retains request parsing, workspace/model binding, permission reverse RPC,
+task registration, initial goals, turn orchestration and event rendering.
+`SessionState` inherits the common session and extends it with ACP metadata.
+Rebinding closes the old session after workspace validation; failed restoration
+releases the unpublished session. Server shutdown closes sessions, background
+tasks, owned models and tool runtime resources.
 
-Esc requests cooperative cancellation on the session. Cancellation is reset
-for the next interactive turn, and the previous run task is settled before
-closing its trace or showing the next prompt. Terminal rendering, memory
-proposal interaction, final text, stop reason, and JSON summary behavior use
-the same event consumer as legacy `Agent.run()`.
+If a Run activation fails and its rollback is interrupted, PluginHost retains
+the unfinished Run resources under that session key, including resources that
+failed runtime Port validation. The session cannot activate another Run until
+cleanup finishes. Closing it retries those Run resources before releasing its
+Session dependencies; a second interruption leaves the session retryable and
+does not affect other sessions or Process resources.
 
-This extraction does not move ACP's complete prompt pipeline into the session.
-Host tool preparation, model binding, task registration, Skill activation,
-goal-autopilot orchestration, permission negotiation, and event rendering still
-run at their existing boundaries. Standalone callers supply any required
-host integration through `build_run_options(**overrides)`. No plugin discovery
-or lifecycle changes are part of this migration.
+CLI retains configuration setup/probing, terminal input, commands and rendering.
+One managed session serves task mode, interactive turns and goal continuations.
+`/clear` and `/clear_all` reuse that session. The CLI closes its session and every
+model client it created, including probe/reconfiguration clients, on exit.
 
-## Regression coverage
+### Durable CLI sessions
 
-`tests/test_agent_session.py` exercises the actual loop with different Config
-step limits, standalone cancellation, isolated mutable state, ACP session
-configuration retention, model-switch context budgets, interrupted stream
-cleanup, and legacy ACP state construction. Existing ACP, Agent, runtime,
-kernel, plugin, CLI, and persistence tests cover the unchanged downstream
-contracts. `tests/test_architecture_boundaries.py` prevents the session module
-from importing application adapters.
+CLI invocations create a SessionLog and print its logical ID. Pass
+`--session-id <id>` or `--resume <id>` to reopen it in the same workspace. The
+Agent, run options and diagnostic trace share that ID. A workspace mismatch is
+rejected, and a failed opening releases the log writer lock. The CLI closes its
+borrowed log after managed session cleanup, including failed startup paths.
 
-`tests/test_cli_session_trace.py` additionally exercises single-task and
-interactive session reuse, cancellation followed by a successful next turn,
-configured hooks, goal continuations, and unchanged trace/error semantics.
+```bash
+box-agent --session-id report-work --task "Inspect the report inputs"
+box-agent --resume report-work --task "Continue from the saved history"
+box-agent goal status --session-id report-work
+box-agent goal progress "Inputs checked" --session-id report-work
+```
+
+`SessionLog.open_or_create(..., prepare_resume=False)` lets shared session
+preparation validate current Skill sources before repairing interrupted calls.
+`SessionOptions.resume_session_log` enables this ordering. CLI restores strictly;
+ACP retains its existing partial restoration policy for optional Skill state.
+
+Named sessions use their log's goal even when it is empty; an unrelated workspace
+goal never overwrites it. For compatibility, fresh unnamed CLI sessions can seed
+and mirror the legacy workspace goal file. The goal command without a session ID
+retains that legacy target, while the named form shares the existing complete
+action and output policy with SessionLog persistence.
+
+Clearing history commits a required `surface/reset` event before clearing live
+messages. It retains goal/plan/todo/Skill facts and the append-only audit trail.
+Reset affects both surface reducers so later appends and compression cannot
+revive cleared messages. Older readers that do not understand this event reject
+the log; recovery-enabled hosts may archive it and start a replacement. Before
+rolling back a runtime that has written resets, retain a reader with reset
+support. Marking reset ignorable would incorrectly restore cleared history.
+
+Skill names and descriptions may enter the system catalog. Context assembles
+main-Agent Skill bodies into ordinary request material, or a reading tool returns
+them as tool content. Restore validation precedes SessionLog resume repair, and
+the session preserves Agent's retry and request-commit boundaries. Connector
+catalog and read permissions remain separate session gates; required dependencies
+and delegated reads obey those gates too.
+
+Skill content loading, matching and MCP discovery retain their existing lazy or
+deferred behavior. Moving preparation to session plugins does not eagerly load
+every Skill body or connect every MCP server at session start. Host callbacks
+and product workflows stay in their owning adapters/capability modules.
+
+## Verification
+
+`test_session_plugins.py`, `test_plugin_runtime_lifecycle.py`,
+`test_plugin_host_context.py` and `test_managed_kernel_services.py` cover scoped
+reuse, configuration identity, fresh run bindings, failure rollback,
+cancellation, consumer closure and compatibility. `test_session_adapter_assembly.py`
+checks shared ACP/CLI preparation, ordinary/project/utility prompt and raw tool
+schema contracts, restoration failure and ownership. Existing Agent, ACP, CLI,
+Skill, prompt and architecture suites remain relevant.
+
+Source tests and ACP source-process probes do not prove packaged host behavior.
+A runtime build/install, host restart and fresh live task are separate validation
+boundaries.

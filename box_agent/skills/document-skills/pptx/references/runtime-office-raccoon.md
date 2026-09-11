@@ -43,7 +43,7 @@ ${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" playwright
 ## 5. Workspace boundary
 
 1. Keep temporary logs, previews, generated images, and QA outputs inside the
-   current canonical delivery root selected by the runtime. Do not add another
+   `<PRESENTATION_DIR>` selected in the conversation. Do not add an automatic
    `output/` prefix.
 2. Do not create or delete outside workspace unless explicitly requested.
 3. Never `npm install` in deliverable workspace folders.

@@ -7,7 +7,8 @@ Before analysis:
 1. Check the current date/time with the available shell/time tool.
 2. Inventory provided files and explicit constraints.
 3. Avoid factual claims until files or search results have been reviewed.
-4. Create `{workspace}/research/`.
+4. Create `{output_dir}/research/` using the absolute task directory selected
+   in `SKILL.md`; do not substitute the session cwd when they differ.
 5. Record the route, time check, and search/file constraints in the first
    artifact written for the task.
 

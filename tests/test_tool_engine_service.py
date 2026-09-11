@@ -7,7 +7,7 @@ import pytest
 
 from box_agent.composition import compose_default_kernel_services
 from box_agent.core import run_agent_loop
-from box_agent.events import ToolCallResult
+from box_agent.events import ArtifactEvent, DoneEvent, ToolCallResult
 from box_agent.kernel.loop import AgentLoopKernel
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
@@ -118,3 +118,66 @@ def test_default_composition_builds_separate_run_engines_over_same_tools():
     assert first.tool_engine is not second.tool_engine
     assert first.tool_engine.prepare_tools().targets[tool.name] is tool
     assert second.tool_engine.prepare_tools().targets[tool.name] is tool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_safe", [False, True])
+@pytest.mark.parametrize("legacy_entrypoint", ["loop", "engine"])
+async def test_engine_discovers_cwd_files_and_warns_for_ignored_legacy_root(
+    tmp_path, caplog, parallel_safe, legacy_entrypoint,
+):
+    from box_agent.tools.engine.engine import DefaultToolEngine
+
+    report = tmp_path / "task" / "report.txt"
+    legacy_root = tmp_path / "legacy-output"
+    (tmp_path / "existing.txt").write_text("unrelated input", encoding="utf-8")
+
+    class WriteArtifact(MutableTool):
+        async def execute(self, value):
+            report.parent.mkdir()
+            report.write_text(value, encoding="utf-8")
+            # No file reference: only the engine's cwd diff can discover it.
+            return ToolResult(success=True, content="written")
+
+    class WriteThenDone:
+        requests = 0
+
+        async def generate_stream(self, **kwargs):
+            self.requests += 1
+            if self.requests == 1:
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    ToolCall(id="write-1", type="function", function=FunctionCall(
+                        name="write_record", arguments={"value": "report"},
+                    )),
+                ])
+            else:
+                yield StreamEvent(type="text", delta="Done.")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    class LegacyContextEngine(DefaultToolEngine):
+        def configure_run(self, context, options):
+            if legacy_entrypoint == "engine":
+                context = replace(context, artifact_root_dir=str(legacy_root))
+            super().configure_run(context, options)
+
+    tool = WriteArtifact()
+    tool.parallel_safe = parallel_safe
+    registry = {tool.name: tool}
+    services = replace(
+        compose_default_kernel_services({"llm": WriteThenDone(), "tools": registry}),
+        tool_engine=LegacyContextEngine(tools=registry),
+    )
+    kernel = AgentLoopKernel(
+        _services=services, messages=messages(), max_steps=2,
+        workspace_dir=str(tmp_path),
+        artifact_root_dir=str(legacy_root) if legacy_entrypoint == "loop" else None,
+    )
+    events = [event async for event in kernel.run()]
+
+    assert [event.rel_path for event in events if isinstance(event, ArtifactEvent)] == [
+        "task/report.txt",
+    ]
+    assert any(isinstance(event, DoneEvent) for event in events)
+    assert report.read_text(encoding="utf-8") == "report"
+    assert not legacy_root.exists()
+    assert "artifact_root_dir is deprecated and ignored" in caplog.text

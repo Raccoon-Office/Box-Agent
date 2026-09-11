@@ -109,7 +109,6 @@ class ArtifactObserver:
 
     workspace_dir: Any
     task_context: Any
-    artifact_root_dir: Any = None
     register_revision: Callable[..., Any] | None = None
 
     def observe(self, artifact: Any) -> ArtifactObservation:
@@ -120,7 +119,6 @@ class ArtifactObserver:
                 self.workspace_dir,
                 self.task_context,
                 artifact,
-                artifact_root_dir=self.artifact_root_dir,
             )
         except Exception as exc:
             return ArtifactObservation(error=exc)

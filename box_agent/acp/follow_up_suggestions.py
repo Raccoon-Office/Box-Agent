@@ -46,23 +46,7 @@ def build_follow_up_suggestions_generation_prompt(
     )
 
 
-def build_follow_up_suggestions_prompt() -> str:
-    """Return the opt-in response-metadata contract for local-agent sessions."""
-
-    return (
-        "## 后续建议（仅供本地 Agent 输入框使用）\n"
-        "当且仅当你已经完成当前用户任务、无需用户补充信息、也没有错误或待执行步骤时，"
-        "在可见回复的最后追加一个 `follow_up_suggestions` 围栏块。\n\n"
-        "格式必须严格如下：\n"
-        "```follow_up_suggestions\n"
-        '{"suggestions":["基于刚才结果可以继续做的具体事项", "另一个自然的下一步"]}\n'
-        "```\n\n"
-        "约束：\n"
-        "- 给 1 到 3 条建议；每条是一句可直接发出的后续请求，使用可见回复的主要语言。\n"
-        "- 建议必须基于刚完成的结果，具体且互不重复；不要给泛泛的“还有问题吗”。\n"
-        "- 简单问候、仅确认/致谢、任务失败、正在执行、需要用户确认或补充信息时不要输出该块。\n"
-        "- 围栏块是宿主读取的元数据，不要在可见正文解释它，也不要输出其他字段。"
-    )
+from box_agent.session_prompts import build_follow_up_suggestions_prompt
 
 
 def normalize_follow_up_suggestions(value: Any) -> list[str]:

@@ -282,6 +282,60 @@ def test_resume_skips_terminal_attempt_and_retry_preserves_it(
     assert read_json(output / "summary.json")["counts"]["executed"] == 1
 
 
+@pytest.mark.parametrize("first_settings, changed_settings", [
+    ({"model": "model-A"}, {"model": "model-B"}),
+    ({"model": "model-A", "model_max_tokens": 128},
+     {"model": "model-A", "model_max_tokens": 256}),
+    ({"model_binding": {"source": "builtin", "model": "model-A"}},
+     {"model_binding": {"source": "builtin", "model": "model-B"}}),
+    ({"model_binding": {"source": "builtin", "model": "model-A", "evaluationMode": "auto",
+                        "autoRouting": {"models": [{"model": "model-A", "abilityLevel": 1}]}}},
+     {"model_binding": {"source": "builtin", "model": "model-A", "evaluationMode": "auto",
+                        "autoRouting": {"models": [{"model": "model-B", "abilityLevel": 1}]}}}),
+])
+def test_model_settings_change_produces_new_attempt_and_preserves_old_result(
+    tmp_path, monkeypatch, first_settings, changed_settings,
+):
+    dataset = write_dataset(tmp_path / "dataset", [record("model-resume")])
+    repo = make_fake_repo(tmp_path / "repo")
+    output = tmp_path / "outputs" / "models"
+    monkeypatch.setattr(batch_runner_module, "_runtime_identity", lambda *_: stable_runtime())
+    assert run_batch(dataset, output, repo, 2.0, 1, [], **first_settings) == 0
+    attempts = output / "cases" / "model-resume" / "attempts"
+    first = next(attempts.iterdir())
+    original = (first / "run.json").read_bytes()
+    first_identity = read_json(first / "run.json")["model_config_sha256"]
+
+    assert run_batch(dataset, output, repo, 2.0, 1, [], **changed_settings) == 0
+    assert len(list(attempts.iterdir())) == 2
+    assert read_json(output / "summary.json")["counts"]["executed"] == 1
+    latest = read_json(output / "cases" / "model-resume" / "latest.json")
+    second = attempts / latest["attempt_id"]
+    assert read_json(second / "run.json")["model_config_sha256"] != first_identity
+    assert (first / "run.json").read_bytes() == original
+
+    assert run_batch(dataset, output, repo, 2.0, 1, [], **changed_settings) == 0
+    assert len(list(attempts.iterdir())) == 2
+    assert read_json(output / "summary.json")["counts"]["skipped_terminal"] == 1
+
+
+def test_legacy_attempt_without_model_identity_is_not_assumed_to_match(tmp_path, monkeypatch):
+    dataset = write_dataset(tmp_path / "dataset", [record("legacy-model")])
+    repo = make_fake_repo(tmp_path / "repo")
+    output = tmp_path / "outputs" / "legacy-model"
+    monkeypatch.setattr(batch_runner_module, "_runtime_identity", lambda *_: stable_runtime())
+    assert run_batch(dataset, output, repo, 2.0, 1, [], model="model-A") == 0
+    attempts = output / "cases" / "legacy-model" / "attempts"
+    first = next(attempts.iterdir())
+    legacy = read_json(first / "run.json")
+    legacy.pop("model_config_sha256")
+    (first / "run.json").write_text(json.dumps(legacy))
+    before = (first / "run.json").read_bytes()
+    assert run_batch(dataset, output, repo, 2.0, 1, [], model="model-A") == 0
+    assert len(list(attempts.iterdir())) == 2
+    assert (first / "run.json").read_bytes() == before
+
+
 def test_query_change_executes_new_attempt_without_retry_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

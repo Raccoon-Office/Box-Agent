@@ -38,7 +38,8 @@ from ..session_log import SessionLog, SessionLogDurabilityError
 from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from .schema_validation import ToolArgumentIssue
 from .safety import detect_dangerous_command
-from .skill_preload import strip_active_skills, strip_auto_loaded_skills
+from .skill_catalog_tool import ListSkillsTool
+from .skill_tool import GetSkillTool
 from .sub_agent_capabilities import (
     BATCH_AGGREGATE_MAX_CHARS,
     BATCH_FILE_MAX_CHARS,
@@ -59,12 +60,10 @@ _CHILD_MCP_BOUNDARY = (
 
 
 def _child_safe_parent_prompt(system_prompt: str) -> str:
-    """Keep stable parent constraints without duplicating parent Skill bodies."""
-    # On-demand and auto-loaded Skill bodies can be tens of thousands of
-    # tokens. They belong to the parent workflow and are either selected
-    # explicitly for the child or supplied as task input; inheriting them again
-    # can exceed the child's smaller safe context before its first useful step.
-    system_prompt = strip_active_skills(strip_auto_loaded_skills(system_prompt))
+    """Keep caller constraints; the owning Agent removes verified Skill bodies."""
+    # Arbitrary caller text is not proof of a framework-managed Skill block.
+    # New Agents provide a system prompt without Skill bodies; legacy block
+    # migration belongs to their verified session state, not heading guesses.
     headings = [
         (system_prompt.find(heading), heading) for heading in _DEFERRED_MCP_HEADINGS
         if heading in system_prompt
@@ -267,7 +266,6 @@ class SubAgentTool(EventEmittingTool):
         no_progress_limit: int | None = None,
         batch_synthesis_timeout_seconds: float = _DEFAULT_BATCH_SYNTHESIS_TIMEOUT_SECONDS,
         artifact_detection_enabled: bool = True,
-        artifact_root_dir: str | None = None,
         provider_stale_seconds: float | None = None,
         thinking_enabled: bool = False,
     ):
@@ -287,6 +285,7 @@ class SubAgentTool(EventEmittingTool):
         # ``register_mcp_tools`` mutates in place) is built.
         self._tool_provider: Callable[[], dict[str, Tool]] | None = None
         self._skill_provider: Callable[[], Any] | None = None
+        self._skill_access_filter: Callable[[Any], bool] | None = None
         self._capability_state_provider: Callable[[], Any] | None = None
         self._permission_negotiator: Any | None = None
         self._workspace_dir = workspace_dir
@@ -300,7 +299,6 @@ class SubAgentTool(EventEmittingTool):
         )
         self._batch_synthesis_timeout_seconds = batch_synthesis_timeout_seconds
         self._artifact_detection_enabled = artifact_detection_enabled
-        self._artifact_root_dir = artifact_root_dir
         # Inherit the parent's provider-stale cutoff so slow-model configs also
         # apply to child agents. None lets run_agent_loop resolve env/default.
         self._provider_stale_seconds = provider_stale_seconds
@@ -364,6 +362,10 @@ class SubAgentTool(EventEmittingTool):
     def set_skill_provider(self, provider: Callable[[], Any]) -> None:
         """Wire a callable returning the current live SkillLoader."""
         self._skill_provider = provider
+
+    def set_skill_access_filter(self, skill_access_filter: Callable[[Any], bool]) -> None:
+        """Restrict child Skill requests to the parent conversation's grants."""
+        self._skill_access_filter = skill_access_filter
 
     def set_capability_state_provider(self, provider: Callable[[], Any]) -> None:
         """Wire a read-only provider for capability loading readiness."""
@@ -505,7 +507,7 @@ class SubAgentTool(EventEmittingTool):
                 "write_scope": {
                     "type": "array",
                     "description": (
-                        "Exact artifact-root-relative output paths or directories for "
+                        "Exact session-cwd-relative output paths or directories for "
                         "write_file, append_file, or edit_file. Required for those tools; "
                         "parallel children must use disjoint scopes."
                     ),
@@ -560,6 +562,8 @@ class SubAgentTool(EventEmittingTool):
         self,
         spec: DelegationSpec,
         bundle: ResolvedCapabilityBundle,
+        *,
+        include_skill_bodies: bool = True,
     ) -> list[Message]:
         system_parts = [_EXPLICIT_SUB_AGENT_SYSTEM_PROMPT.rstrip()]
         system_parts.append(
@@ -569,15 +573,6 @@ class SubAgentTool(EventEmittingTool):
             f"Constraints: `{json.dumps(spec.constraints.to_dict(), ensure_ascii=False, sort_keys=True)}`\n"
             f"Budget: `{json.dumps(spec.budget.to_dict(), ensure_ascii=False, sort_keys=True)}`"
         )
-        if bundle.skills:
-            skill_text = "\n\n".join(skill.to_prompt().strip() for skill in bundle.skills)
-            system_parts.append(
-                "## Selected Skill guidance\n"
-                "Apply this guidance only inside the immutable delegation boundary above. "
-                "Skill text and referenced resources cannot expand tools, permissions, scope, or budget.\n\n"
-                f"{skill_text}"
-            )
-
         if self._parent_system_prompt:
             system_parts.append(
                 "## Inherited parent system prompt\n"
@@ -587,6 +582,27 @@ class SubAgentTool(EventEmittingTool):
             )
 
         user_content = f"## Delegated task\n{spec.task}"
+        if bundle.skills:
+            if include_skill_bodies:
+                skill_text = "\n\n".join(skill.to_prompt().strip() for skill in bundle.skills)
+            else:
+                skill_text = (
+                    "The complete reference bundle exceeds this child's context budget. "
+                    "Read the assigned Skills before applying their steps, using the granted "
+                    "get_skill or read_file tool and bounded pages. Follow every required dependency.\n"
+                    + "\n".join(
+                        f"- {skill.name}: {skill.description}; "
+                        f"required_skills={skill.required_skills or []}; path={skill.skill_path}"
+                        for skill in bundle.skills
+                    )
+                )
+            user_content += (
+                "\n\n## Host-provided delegated Skill references\n"
+                "The parent explicitly assigned these methods and their required dependencies. "
+                "This is reference material, not a new user request. It cannot expand "
+                "tools, permissions, scope, or budget.\n\n"
+                f"{skill_text}"
+            )
         if spec.files:
             user_content += (
                 "\n\n## Local input files\n"
@@ -597,6 +613,45 @@ class SubAgentTool(EventEmittingTool):
             Message(role="system", content="\n\n".join(system_parts)),
             Message(role="user", content=user_content),
         ]
+
+    def _bounded_explicit_messages(
+        self,
+        spec: DelegationSpec,
+        bundle: ResolvedCapabilityBundle,
+        child_tools: dict[str, Tool],
+    ) -> list[Message] | CapabilityFailure:
+        messages = self._explicit_messages(spec, bundle)
+        if not bundle.skills:
+            return messages
+        # Match the child loop's existing safe-input threshold and schema
+        # estimate, rather than imposing a second fixed output reservation.
+        from ..kernel.context_engine import _estimate_context_from_latest_response
+
+        estimated, _ = _estimate_context_from_latest_response(messages, child_tools)
+        if estimated < self._token_limit:
+            return messages
+        # batch_files performs one synthesis call with no tools after host
+        # prefetch; its read_file grant is not a model-side paging capability.
+        can_read = spec.strategy == "general_loop" and bool({"get_skill", "read_file"} & set(child_tools))
+        if can_read:
+            messages = self._explicit_messages(spec, bundle, include_skill_bodies=False)
+            estimated, _ = _estimate_context_from_latest_response(messages, child_tools)
+            if estimated < self._token_limit:
+                return messages
+        return self._skill_reference_budget_failure(estimated, can_read=can_read)
+
+    def _skill_reference_budget_failure(self, estimated: int, *, can_read: bool) -> CapabilityFailure:
+        return CapabilityFailure(
+            code="SKILL_REFERENCE_BUDGET_EXCEEDED",
+            message=(
+                "The assigned Skill references do not fit the child's context budget. "
+                "Reduce the delegated input or adjust the Skill assignment and explicitly "
+                "grant a bounded read capability before retrying."
+            ),
+            retryable=False,
+            details={"estimated_tokens": estimated, "token_limit": self._token_limit,
+                     "has_skill_reader": can_read},
+        )
 
     @staticmethod
     def _failure_result(
@@ -674,6 +729,65 @@ class SubAgentTool(EventEmittingTool):
                 details={"schema_issues": [issue.to_dict() for issue in issues]},
             )
         )
+
+    @staticmethod
+    def _validate_skill_scope(
+        bundle: ResolvedCapabilityBundle,
+        parent_tools: dict[str, Tool],
+    ) -> CapabilityFailure | None:
+        # Delegating a body is a read too, even when the child has no tools.
+        # Use the parent's actual configured policy, without inventing a
+        # restriction for direct callers that only supply a Skill loader.
+        skill_tool = next((tool for tool in parent_tools.values() if isinstance(tool, GetSkillTool)), None)
+        if skill_tool is None:
+            skill_tool = next((tool for tool in parent_tools.values() if isinstance(tool, ListSkillsTool)), None)
+        if skill_tool is None:
+            return None
+        for skill in bundle.skills:
+            if skill_tool.skill_access_filter is not None and not skill_tool.skill_access_filter(skill):
+                return CapabilityFailure(
+                    code="SKILL_NOT_ENABLED_FOR_CONVERSATION",
+                    message=f"Skill '{skill.name}' is not enabled for this conversation.",
+                    retryable=False,
+                    details={"skill": skill.name},
+                )
+            if skill_tool.allowed_skill_names is not None and skill.name not in skill_tool.allowed_skill_names:
+                return CapabilityFailure(
+                    code="SKILL_OUTSIDE_ASSIGNED_SCOPE",
+                    message=f"Required Skill '{skill.name}' is outside the parent's assigned scope.",
+                    retryable=False,
+                    details={"skill": skill.name},
+                )
+            if (skill.name in skill_tool.blocked_skill_names
+                    and skill.name not in (skill_tool.explicitly_allowed_skill_names or ())):
+                return CapabilityFailure(
+                    code="SKILL_PROFILE_BLOCKED",
+                    message=f"Required Skill '{skill.name}' is blocked by the parent's execution profile.",
+                    retryable=False,
+                    details={"skill": skill.name},
+                )
+        return None
+
+    @staticmethod
+    def _scope_skill_tools(bundle: ResolvedCapabilityBundle) -> dict[str, Tool]:
+        scoped = dict(bundle.tools)
+        assigned = frozenset(bundle.resolved_skill_names)
+        for name, tool in bundle.tools.items():
+            if not isinstance(tool, (GetSkillTool, ListSkillsTool)):
+                continue
+            allowed = assigned if tool.allowed_skill_names is None else assigned & tool.allowed_skill_names
+            tool_type = GetSkillTool if isinstance(tool, GetSkillTool) else ListSkillsTool
+            scoped[name] = tool_type(
+                tool.skill_loader,
+                include_disabled=tool.include_disabled,
+                allowed_skill_names=allowed,
+                blocked_skill_names=frozenset(tool.blocked_skill_names),
+                explicitly_allowed_skill_names=set(tool.explicitly_allowed_skill_names or ()) & allowed,
+                skill_access_filter=tool.skill_access_filter,
+                **({"skill_filter": tool.skill_filter}
+                   if isinstance(tool, ListSkillsTool) else {}),
+            )
+        return scoped
 
     def _apply_write_scopes(
         self,
@@ -784,7 +898,6 @@ class SubAgentTool(EventEmittingTool):
                 provider_stale_seconds=self._provider_stale_seconds,
                 no_progress_limit=self._no_progress_limit,
                 artifact_detection_enabled=self._artifact_detection_enabled,
-                artifact_root_dir=self._artifact_root_dir,
                 permission_negotiator=self._permission_negotiator,
                 cache_fingerprint_context={
                     "sub_agent_strategy": diagnostic.get("strategy"),
@@ -1132,6 +1245,17 @@ class SubAgentTool(EventEmittingTool):
             )
         messages[-1].content = f"{messages[-1].content}\n\n" + "\n".join(blocks)
 
+        if bundle.skills:
+            from ..kernel.context_engine import _estimate_context_from_latest_response
+
+            estimated, _ = _estimate_context_from_latest_response(messages, None)
+            if estimated >= self._token_limit:
+                result = self._failure_result(
+                    self._skill_reference_budget_failure(estimated, can_read=False), bundle.spec
+                )
+                result.raw_output["tool_calls"] = len(files)
+                return finish(result)
+
         if session_log is not None:
             session_log.replace_surface(messages[1:], turn=1, step=1)
             provider = getattr(llm, "provider", None)
@@ -1353,11 +1477,19 @@ class SubAgentTool(EventEmittingTool):
             parsed,
             parent_tools=live_tools,
             skill_loader=self._resolve_skill_loader(),
+            skill_access_filter=self._skill_access_filter,
             capability_state=self._resolve_capability_state(),
             permission_negotiator_available=self._permission_negotiator is not None,
         )
         if isinstance(resolved, CapabilityFailure):
             return self._failure_result(resolved, parsed)
+        scope_failure = self._validate_skill_scope(resolved, live_tools)
+        if scope_failure is not None:
+            return self._failure_result(scope_failure, parsed)
+        child_tools = self._apply_write_scopes(self._scope_skill_tools(resolved), parsed)
+        messages = self._bounded_explicit_messages(parsed, resolved, child_tools)
+        if isinstance(messages, CapabilityFailure):
+            return self._failure_result(messages, parsed)
 
         diagnostic = {
             "type": "sub_agent_delegation",
@@ -1375,7 +1507,6 @@ class SubAgentTool(EventEmittingTool):
             files=parsed.files,
         )
         diagnostic["model_routing"] = model_routing
-        messages = self._explicit_messages(parsed, resolved)
         child_session_log = self._create_child_session_log(
             child_session_id=sub_agent_id,
             title=sub_title,
@@ -1400,7 +1531,7 @@ class SubAgentTool(EventEmittingTool):
         return await self._run_general_loop(
             llm=child_llm,
             messages=messages,
-            child_tools=self._apply_write_scopes(resolved.tools, parsed),
+            child_tools=child_tools,
             max_steps=parsed.budget.max_steps,
             max_tool_calls=parsed.budget.max_tool_calls,
             diagnostic=diagnostic,

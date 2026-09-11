@@ -85,12 +85,12 @@ is refreshed together.
 
 ## Output bundle
 
-`output/<deck>/` below denotes the canonical `BOX_AGENT_OUTPUT_DIR` selected by
-the host. Commands run inside that root; they must not create another nested
-`output/` directory.
+`<PRESENTATION_DIR>/` below denotes the absolute directory selected in the
+conversation. Commands run inside that directory; they must not create an
+automatic nested `output/` directory.
 
 ```text
-output/<deck>/
+<PRESENTATION_DIR>/
 ├── index.html
 ├── outline.json
 ├── deck.json
@@ -111,7 +111,7 @@ output/<deck>/
 When the image manifest contains a full-slide/background `layout_contract`, add
 `qa/image_layout_contract.json` and require it to pass as well.
 
-Keep media artifact-root-relative. Do not use remote URLs, absolute paths, or
+Keep media presentation-directory-relative. Do not use remote URLs, absolute paths, or
 `..` segments. The standalone editor may embed a newly selected image as a data
 URL when the user downloads an updated HTML copy; normal generated decks keep
 large images in `assets/`.

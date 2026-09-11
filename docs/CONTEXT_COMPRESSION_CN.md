@@ -98,6 +98,18 @@ Preview (head + tail, up to 2.0KB):
 
 ## 上下文限制压缩
 
+### 能力与提交边界
+
+Kernel 通过 `CompactionInput` 调用 `CompactEnginePort`。默认引擎沿用现有压缩算法，
+不替换请求 Context 接口，也不增加第二套 Skill 加载策略。输入分别保留用于恢复运行状态的
+工具目录、用于估算的本次实际提供 schema、强制恢复标志及摘要请求输入上限。
+
+Context 先投影有效历史。压缩引擎必须在摘要调用或确定性兜底前调用 Kernel 提供的
+`before_summary`；Kernel 提交并 flush 返回的 surface 后才更新内存历史。请求交付及响应
+确认回调、最多一次压缩重试的规则保持不变。普通及 managed 装配均保留调用方提供的压缩器，
+包括布尔值为假的实例。`CompactionOutcome` 保留原 tuple 解包方式，超限标志必须与已有
+blocked 模式一致。
+
 ### 触发阈值
 
 ```text
@@ -149,7 +161,7 @@ recent 选择统一覆盖 user、assistant 和 tool message；assistant 工具�
 
 上下文压缩不再发现、重新读取或重放近期文件。
 
-Goal、Todo 和 Plan 通过显式、无副作用的 `compaction_state` 契约读取；压缩不会执行普通工具调用，合并后的运行状态消息上限为 12,000 字符。完整 active skill 指令继续固定在 system message 中，不再通过回放历史 `get_skill` 调用重建。控制策略查询“最新用户文本”时会排除内部摘要与运行状态消息。
+Goal、Todo 和 Plan 通过显式、无副作用的 `compaction_state` 契约读取；压缩不会执行普通工具调用，合并后的运行状态消息上限为 12,000 字符。SkillRuntime 管理选择及带版本的读取事实；Context 将显式选择或恢复的 Skill 正文放入普通请求资料，或接收真实读取工具的回复，并按最终可见文本核实覆盖。完整 Skill 正文不固定在 system message 中，也不会回放历史 `get_skill` 调用。分页、来源校验和请求提交边界见 [Skill Engine](design/skill-engine.md)。控制策略查询“最新用户文本”时会排除内部摘要与运行状态消息。
 
 若重建后的请求仍超过安全阈值，结果会标记为 blocked，不会静默发送一个已知超限的请求。
 

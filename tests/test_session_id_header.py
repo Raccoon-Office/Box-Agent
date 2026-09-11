@@ -408,7 +408,7 @@ async def test_session_bound_llm_adds_client_headers_only_for_raccoon_backend():
 
     assert hosted_capture.last_params is not None
     assert hosted_capture.last_params["extra_headers"] | {} == {
-        "x-client-name": "raccoon",
+        "x-client-name": "raccoon-ai",
         "x-client-platform": "desktop-macos-arm64",
         "x-client-version": "v0.21.1",
         "x-client-os-version": "15.6",
@@ -445,7 +445,13 @@ async def test_session_bound_llm_adds_client_headers_only_for_raccoon_backend():
     ("https://xiaohuanxiong.com/v1", True),
     ("https://personal.example/v1", False),
 ])
-async def test_openai_sdk_sends_product_headers_only_to_raccoon(url, hosted):
+@pytest.mark.parametrize("client_name,expected_name", [
+    ("raccoon-ai", "raccoon-ai"),
+    ("", "raccoon"),
+])
+async def test_openai_sdk_sends_product_headers_only_to_raccoon(
+    url, hosted, client_name, expected_name,
+):
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -486,8 +492,10 @@ async def test_openai_sdk_sends_product_headers_only_to_raccoon(url, hosted):
         base_url=client.api_base,
         http_client=http_client,
     )
+    session = SessionBoundLLM(client)
+    session.set_request_context(client_info=ClientInfo(name=client_name))
     try:
-        await client.generate(
+        await session.generate(
             messages=[Message(role="user", content="hi")],
             session_id="sess-utf8",
             turn_id="sess-utf8-turn-1",
@@ -499,7 +507,7 @@ async def test_openai_sdk_sends_product_headers_only_to_raccoon(url, hosted):
     assert captured["headers"]["authorization"] == f"Bearer {_API_KEY}"
     if hosted:
         assert captured["title"] == "季度复盘".encode("utf-8")
-        assert captured["headers"]["x-client-name"] == "raccoon"
+        assert captured["headers"]["x-client-name"] == expected_name
     else:
         assert not any(
             key.startswith(("x-raccoon-", "x-client-"))

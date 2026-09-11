@@ -764,7 +764,7 @@ class WriteTool(Tool):
                 "path": {
                     "type": "string",
                     "description": (
-                        "Prefer a path relative to the active project/artifact root "
+                        "Prefer a path relative to the active file root "
                         f"({self.relative_root_dir}). Absolute paths are used exactly "
                         "as supplied."
                     ),
@@ -1447,7 +1447,7 @@ class EditTool(Tool):
     async def execute(self, path: str, old_str: str, new_str: str) -> ToolResult:
         """Execute edit file."""
         try:
-            # Resolve relative paths from the active project/artifact root.
+            # Resolve relative paths from the session cwd.
             file_path = _resolve_from_active_root(
                 path,
                 workspace_dir=self.workspace_dir,

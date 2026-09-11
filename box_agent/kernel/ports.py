@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
+from .hook_types import HookContext, BeforeToolResolution, ResultText, ResultTextResolution
 from ..schema import LLMResponse, Message, StreamEvent
-from ..tools.base import Tool
+from ..tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
     from ..events import AgentEvent
     from ..schema import ToolCall
     from ..tools.engine.call_contracts import ToolExecutionOptions, ToolRunContext, ToolStepControl, ToolStepSummary
     from ..tools.engine.contracts import PreparedTools
+
+from .context_types import CompactionInput, CompactionOutcome
 
 
 @runtime_checkable
@@ -201,6 +204,17 @@ class HookBusPort(Protocol):
 
 
 @runtime_checkable
+class HookDispatchPort(Protocol):
+    """内核通过结构化接口消费 Hook 决策，旧端口保持原签名。"""
+
+    async def observe(self, context: HookContext) -> None: ...
+
+    async def before_tool(self, context: HookContext, arguments: Mapping[str, Any]) -> BeforeToolResolution: ...
+
+    async def after_tool(self, context: HookContext, result_text: ResultText) -> ResultTextResolution: ...
+
+
+@runtime_checkable
 class ToolCatalogPort(Protocol):
     """Stable collection operations used with existing ``Tool`` objects."""
 
@@ -303,6 +317,93 @@ class ToolEnginePort(Protocol):
     async def aclose(self) -> None: ...
 
 
+@runtime_checkable
+class PreparedContextPort(Protocol):
+    """Request-only projection consumed by Kernel without domain inspection."""
+
+    messages: list[Message]
+    context_messages: list[Message]
+    references: tuple[dict[str, Any], ...]
+    input_tokens: int
+    request_only_input_tokens: int
+    blocked_reason: str | None
+
+
+@runtime_checkable
+class SkillEnginePort(Protocol):
+    """Borrowed session source and delivery facts, without request ownership.
+
+    The outer assembly verifies source compatibility with its Skill tools;
+    the kernel consumes this behavior without discovering or rebinding sources.
+    Default built-in tools require the service's opaque ``loader`` binding to
+    match theirs; custom tool implementations own their binding contract.
+    """
+
+    @property
+    def read_facts(self) -> tuple[Any, ...]: ...
+
+    @property
+    def selected_names(self) -> tuple[str, ...]: ...
+
+    @property
+    def restoring_names(self) -> tuple[str, ...]: ...
+
+    @property
+    def restore_diagnostics(self) -> dict[str, str]: ...
+
+    @property
+    def legacy_system_suffix(self) -> str: ...
+
+    def resolve_reference(self, name: str) -> Any: ...
+
+    def record_delivery(self, snapshot: Any, metadata: dict[str, Any], *, reason: str) -> None: ...
+
+    def record_observation(self, snapshot: Any, metadata: dict[str, Any]) -> None: ...
+
+
+@runtime_checkable
+class ContextEnginePort(Protocol):
+    """Run-owned input projection over final resolved session capabilities.
+
+    Contexts may also implement ``project_history(messages)`` for effective
+    rules used by estimation and compaction. It must preserve order and roles
+    and must not mutate history or record delivery. Older contexts default to
+    an identity projection. The default Context shares this projection with
+    final request preparation.
+
+    Prepared results may supply ``on_committed`` for logged request delivery
+    and ``on_response`` for a nonempty response without stale/truncation flags.
+    Both callbacks are optional; the Kernel does not interpret their state.
+    """
+
+    def configure_run(self, *, skill_engine: SkillEnginePort | None = None,
+                      session_store: SessionStorePort | None = None) -> None: ...
+
+    def bind_history(self, messages: list[Message]) -> None: ...
+
+    def reserve_followup(self, blocks: list[dict[str, Any]]) -> None: ...
+
+    @property
+    def tool_reader(self) -> Callable[..., ToolResult] | None: ...
+
+    def prepare_request(self, messages: list[Message], *, prepared_tools: PreparedTools,
+                        token_limit: int, output_tokens: int = 0,
+                        extra_messages: tuple[Message, ...] = (),
+                        transient_message: Message | None = None,
+                        transient_tokens: int = 0) -> PreparedContextPort: ...
+
+
+@runtime_checkable
+class CompactEnginePort(Protocol):
+    """Decide compaction without applying the durable or live surface.
+
+    Call inputs.before_summary before summary execution; propagate its errors.
+    The Kernel commits the result before replacing live history.
+    """
+
+    async def compact_if_needed(self, inputs: "CompactionInput") -> "CompactionOutcome": ...
+
+
 @dataclass(frozen=True, slots=True)
 class KernelServices:
     """Resolved per-run capabilities consumed directly by the kernel."""
@@ -319,10 +420,20 @@ class KernelServices:
     tool_exposure: ToolExposurePort | None
     tool_result_store: ToolResultStorePort | None
     tool_engine: ToolEnginePort | None = None
+    hook_dispatch: HookDispatchPort | None = None
+    hook_context: HookContext | None = None
+    skill_engine: SkillEnginePort | None = None
+    context_engine: ContextEnginePort | None = None
+    compact_engine: CompactEnginePort | None = None
 
 
 __all__ = [
+    "CompactEnginePort",
+    "PreparedContextPort",
+    "ContextEnginePort",
+    "SkillEnginePort",
     "HookBusPort",
+    "HookDispatchPort",
     "KernelServices",
     "LLMPort",
     "MemoryExtractionPort",

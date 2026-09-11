@@ -59,8 +59,9 @@ remain in place; the existing hosted-login authentication rules are unchanged.
 Hosts may supply `_meta.client_info` during ACP initialize, session creation,
 or a lightweight LLM prompt. Supported fields are `name`, `platform`, `version`, `os_version`
 (or `osVersion`), `channel`, and `device_id` (or `deviceId`). On allowed model
-requests, `x-client-name` is fixed to `raccoon` and a missing or unsafe platform
-falls back to `unknown`. The host's product version is emitted as
+requests, `x-client-name` uses the host-supplied `name` after trimming whitespace;
+a missing, blank, or unsafe name falls back to `raccoon`. A missing or unsafe
+platform falls back to `unknown`. The host's product version is emitted as
 `x-client-version: vMAJOR.MINOR.PATCH`; an absent or invalid version is omitted.
 Box-Agent does not substitute its own package version for the host product version.
 Hosts remain responsible for supplying the protocol's platform enumeration.

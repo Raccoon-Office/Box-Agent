@@ -26,6 +26,7 @@ from box_agent.tools.mcp_loader import (
     MCPTimeoutConfig,
     WEB_SEARCH_MCP_MAX_CONCURRENCY,
     _determine_connection_type,
+    _mcp_tool_always_load,
     _public_mcp_tool_name,
     cleanup_mcp_connections,
     get_mcp_timeout_config,
@@ -34,6 +35,7 @@ from box_agent.tools.mcp_loader import (
     reconnect_auth_failed_mcp_servers_if_token_changed,
     set_mcp_timeout_config,
 )
+from box_agent.tools.mcp_sources import ResolvedMcpServer
 from box_agent.tools.model_tool_context import (
     current_model_tool_context,
     reset_model_tool_context,
@@ -61,7 +63,6 @@ def test_public_mcp_tool_name_sanitizes_provider_invalid_remote_name():
         for character in public_name
     )
     assert public_name == _public_mcp_tool_name("pkulaw", remote_name)
-    assert _public_mcp_tool_name("pkulaw", "search_law") == "search_law"
 
 
 def test_public_mcp_tool_name_avoids_sanitized_name_collisions():
@@ -69,6 +70,51 @@ def test_public_mcp_tool_name_avoids_sanitized_name_collisions():
     slashed = _public_mcp_tool_name("pkulaw", "law/search")
 
     assert dotted != slashed
+
+
+def test_connector_tools_receive_a_qualified_model_facing_name():
+    assert _public_mcp_tool_name("pkulaw", "search_case", "pkulaw") == "mcp__pkulaw__search_case"
+    assert _public_mcp_tool_name(
+        "pkulaw", "law.search", "pkulaw"
+    ).startswith("mcp__pkulaw__law_search__")
+
+
+def test_server_default_controls_tool_always_load_policy():
+    deferred = SimpleNamespace(meta={"boxAgent": {"alwaysLoad": False}})
+    assert _mcp_tool_always_load("ordinary-server", deferred, True) is True
+    assert _mcp_tool_always_load("ordinary-server", deferred, False) is False
+
+
+def test_connector_runtime_credential_is_injected_without_forwarding_private_fields(monkeypatch):
+    definition = ResolvedMcpServer(
+        name="pkulaw",
+        config={
+            "url": "https://example.test/mcp",
+            "credentialRef": "connector:pkulaw:default",
+            "_connectorId": "pkulaw",
+            "headers": {"X-Tenant": "tenant-a"},
+        },
+        owner="connector",
+        config_id="connector:pkulaw",
+        connector_id="pkulaw",
+        connector_name="北大法宝",
+        source_path="connectors/mcp.json",
+        fingerprint="fingerprint",
+    )
+    monkeypatch.setitem(
+        mcp_loader._mcp_runtime_credentials,
+        "connector:pkulaw:default",
+        {"Authorization": "Bearer secret"},
+    )
+
+    materialized = mcp_loader._materialize_server_config(definition)
+
+    assert "credentialRef" not in materialized
+    assert "_connectorId" not in materialized
+    assert materialized["headers"] == {
+        "X-Tenant": "tenant-a",
+        "Authorization": "Bearer secret",
+    }
 
 
 @pytest.mark.asyncio

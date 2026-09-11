@@ -1,5 +1,7 @@
 # Box-Agent Tool 整体设计与第一阶段重构方案
 
+当前重构分支的组织结构与完整调用过程见 [Tool / Skill 两张流程图](../tool-skill-workflows.md)。本文保留 Tool 第一阶段的设计背景；后续 Skill 行为以该图解及 [Skill 实现说明](../skill-engine.md)为准。
+
 日期：2026-09-08。状态：已批准，正在实施。**Tool 阶段一个 PR，Skill 阶段另一个 PR；每阶段都要保留原任务能力。** 本文是 Tool 设计的主文档；文件迁移、既有测试和提交操作放在 [实施明细](implementation.md)。
 
 源码依据：已逐项审阅的 2d06469，以及本轮拉取核对的最新 main **73cce3060dd708d50b0afff92b3f69acdeaf2d53**。两者之间的 PR112 只调整 managed stdio MCP 的 profile 传递、文档和测试，下面讨论的工具语义未变；实现必须继承该修复。

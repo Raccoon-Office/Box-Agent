@@ -12,8 +12,9 @@ checks remain the final resource-level authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+from .. import skill_dependencies
 from ..config import ToolLimitsConfig
 from .base import Tool
 
@@ -71,6 +72,7 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "inspect_images": ToolCapabilityMetadata(read=True, network=True),
     "generate_image": ToolCapabilityMetadata(write=True, network=True),
     "get_skill": ToolCapabilityMetadata(read=True),
+    "list_skills": ToolCapabilityMetadata(read=True),
     "memory_read": ToolCapabilityMetadata(read=True),
     "memory_search": ToolCapabilityMetadata(read=True),
     "memory_write": ToolCapabilityMetadata(write=True),
@@ -214,7 +216,7 @@ class CapabilityFailure:
             denied_tool = self.details.get("tool")
             if denied_reason == "write_scope_required" and denied_tool in PATH_SCOPED_WRITE_TOOLS:
                 payload["correction_hint"] = (
-                    "Retry once with an exact artifact-root-relative write_scope for "
+                    "Retry once with an exact session-cwd-relative write_scope for "
                     "only this child's output. Parallel children must use disjoint scopes."
                 )
         return payload
@@ -540,10 +542,11 @@ class CapabilityResolver:
         *,
         parent_tools: Mapping[str, Tool],
         skill_loader: Any | None = None,
+        skill_access_filter: Callable[[Any], bool] | None = None,
         capability_state: Any = "ready",
         permission_negotiator_available: bool = False,
     ) -> ResolvedCapabilityBundle | CapabilityFailure:
-        skills_or_failure = self._resolve_skills(spec, skill_loader)
+        skills_or_failure = self._resolve_skills(spec, skill_loader, skill_access_filter)
         if isinstance(skills_or_failure, CapabilityFailure):
             return skills_or_failure
         skills = skills_or_failure
@@ -623,6 +626,7 @@ class CapabilityResolver:
         self,
         spec: DelegationSpec,
         skill_loader: Any | None,
+        skill_access_filter: Callable[[Any], bool] | None,
     ) -> tuple[Any, ...] | CapabilityFailure:
         if not spec.skill_names:
             return ()
@@ -642,59 +646,20 @@ class CapabilityResolver:
                 retryable=True,
             )
 
-        resolved: dict[str, Any] = {}
-        visiting: list[str] = []
-
-        def visit(name: str) -> CapabilityFailure | None:
-            if name in resolved:
-                return None
-            if name in visiting:
-                cycle = visiting[visiting.index(name) :] + [name]
-                return CapabilityFailure(
-                    code="SKILL_DEPENDENCY_CYCLE",
-                    message="Selected Skill dependencies contain a cycle.",
-                    retryable=False,
-                    details={"cycle": cycle},
-                )
-
-            skill = skill_loader.get_skill(name)
-            if skill is None:
-                disabled = skill_loader.get_skill(name, include_disabled=True)
-                if disabled is not None:
+        try:
+            resolved = skill_dependencies.resolve_required_skills(skill_loader, spec.skill_names)
+            for skill in resolved:
+                if skill_access_filter is not None and not skill_access_filter(skill):
                     return CapabilityFailure(
-                        code="SKILL_DISABLED",
-                        message=f"Required Skill '{name}' is disabled.",
-                        retryable=False,
-                        details={"skill": name},
+                        code="SKILL_NOT_ENABLED_FOR_CONVERSATION",
+                        message=f"Required Skill '{skill.name}' is not enabled for this conversation.",
+                        retryable=False, details={"skill": skill.name},
                     )
-                return CapabilityFailure(
-                    code="SKILL_NOT_FOUND",
-                    message=f"Required Skill '{name}' was not found.",
-                    retryable=False,
-                    details={"skill": name},
-                )
-            if getattr(skill, "broken", False):
-                return CapabilityFailure(
-                    code="SKILL_BROKEN",
-                    message=f"Required Skill '{name}' is malformed and cannot be loaded.",
-                    retryable=False,
-                    details={
-                        "skill": name,
-                        "reason": getattr(skill, "broken_reason", None),
-                    },
-                )
-
-            visiting.append(name)
-            for dependency in sorted(set(skill.required_skills or [])):
-                failure = visit(dependency)
-                if failure is not None:
-                    return failure
-            visiting.pop()
-            resolved[name] = skill
-            return None
-
-        for name in spec.skill_names:
-            failure = visit(name)
-            if failure is not None:
-                return failure
-        return tuple(resolved.values())
+            return resolved
+        except skill_dependencies.SkillDependencyError as exc:
+            return CapabilityFailure(
+                code=exc.code,
+                message=exc.message,
+                retryable=False,
+                details=exc.details,
+            )

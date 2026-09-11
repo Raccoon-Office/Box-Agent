@@ -99,7 +99,7 @@ class ImageInspectionTool(Tool):
                     },
                     "description": (
                         "Local PNG/JPEG paths. Relative paths resolve from the active "
-                        "project/artifact root."
+                        "session cwd."
                     ),
                 },
                 "instruction": {
@@ -209,17 +209,15 @@ class ImageInspectionTool(Tool):
                 timeout=_IMAGE_INSPECTION_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            return self._error(
-                "IMAGE_REQUEST_FAILED",
-                f"image inspection timed out after {_IMAGE_INSPECTION_TIMEOUT:.0f}s",
-            )
+            return self._provider_error(TimeoutError(
+                f"image inspection timed out after {_IMAGE_INSPECTION_TIMEOUT:.0f}s"))
         except Exception as exc:  # pragma: no cover - provider exceptions vary
             if self._is_unsupported_image_input_error(str(exc)):
                 self._unsupported_error = (
                     "the configured model or provider does not support image input"
                 )
                 return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
-            return self._error("IMAGE_REQUEST_FAILED", "vision model request failed")
+            return self._provider_error(exc)
 
         content = response.content or ""
         if not content.strip():
@@ -508,6 +506,27 @@ class ImageInspectionTool(Tool):
             error=f"{code}: {message}",
             raw_output={"code": code, "tool": self.name},
         )
+
+    def _provider_error(self, exc: Exception) -> ToolResult:
+        """Expose actionable categories without raw provider payloads."""
+        from box_agent.llm.error_messages import structured_llm_error
+
+        details = structured_llm_error(exc)
+        category, status = details["category"], details["httpStatus"]
+        message = details["message"]
+        if category == "unknown":
+            if status in (400, 422):
+                category = "invalid_request"
+                message = "Vision request parameters are incompatible; check provider/model configuration before retrying."
+            else:
+                message = "Vision model request failed; inspect the correlated provider trace."
+        # Provider codes/types and unknown messages may echo credentials or
+        # image data. Only forward the stable diagnostic fields we need.
+        safe = {"category": category, "httpStatus": status,
+                "retryable": details["retryable"], "requestId": details["requestId"]}
+        error = f"IMAGE_REQUEST_FAILED: {message} (category={category}, http_status={status}, retryable={safe['retryable']})"
+        return ToolResult(success=False, error=error,
+                          raw_output={"code": "IMAGE_REQUEST_FAILED", "tool": self.name, "provider_error": safe})
 
     def _display_path(self, path: Path) -> str:
         try:

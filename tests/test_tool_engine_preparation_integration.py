@@ -64,6 +64,7 @@ async def test_preparation_preserves_legacy_order_schemas_and_aliases(
     legacy_names = build_tool_name_index(legacy_tools)
     baseline = json.loads(_SCHEMA_FIXTURE.read_text(encoding="utf-8"))["tools"]
     expected_names = _c5_names(set(baseline)) - _C5_DISCOVERABLE - {"obsidian_daily_note"}
+    expected_names.add("list_skills")
     expected_names.add("query_jsonl")  # The existing file configuration supplies JSONL directly.
     if not all_capabilities:
         expected_names -= {

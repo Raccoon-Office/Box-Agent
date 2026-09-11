@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 import heapq
 import inspect
 import re
-from typing import Any, Hashable, Iterable
+from typing import Any, Generic, Hashable, Iterable, cast
 
-from .descriptors import PluginDescriptor, PluginScope
+from .descriptors import PluginDescriptor, PluginFactoryContext, PluginScope
 from .registries import (
     ActivatedRegistry,
+    CapabilityT,
     CapabilityBinding,
     CapabilityPolicy,
     CapabilitySchema,
@@ -106,21 +108,37 @@ class _InstanceRecord:
     disposed: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class PluginContribution(Generic[CapabilityT]):
+    """把激活后的能力实例与真实插件描述符关联。"""
+
+    descriptor: PluginDescriptor
+    instance: CapabilityT
+
+
 class PluginActivation:
     """One immutable registry plus the run-scoped resources that own it."""
 
-    __slots__ = ("_disposed", "_host", "_run_records", "registry")
+    __slots__ = ("_disposed", "_host", "_run_records", "registry", "_contributions")
 
     def __init__(
         self,
         host: "PluginHost",
         registry: ActivatedRegistry,
         run_records: tuple[_InstanceRecord, ...],
+        contributions: tuple[PluginContribution, ...] = (),
     ) -> None:
         self._host = host
         self.registry = registry
         self._run_records = run_records
         self._disposed = False
+        self._contributions = contributions
+
+    def contributions(self, port_type: type[CapabilityT]) -> tuple[PluginContribution[CapabilityT], ...]:
+        """按激活顺序取得指定能力的实例与归属。"""
+        return cast(tuple[PluginContribution[CapabilityT], ...], tuple(
+            item for item in self._contributions if port_type in item.descriptor.capabilities
+        ))
 
     async def dispose(self) -> None:
         """Dispose this activation's run-scoped instances once."""
@@ -148,6 +166,7 @@ class PluginHost:
         self._process_instances: dict[str, _InstanceRecord] = {}
         self._session_instances: dict[Hashable, dict[str, _InstanceRecord]] = {}
         self._closing_sessions: set[Hashable] = set()
+        self._pending_run_rollbacks: dict[Hashable, list[_InstanceRecord]] = {}
         self._live_records: list[_InstanceRecord] = []
         self._closed = False
         self._lock = asyncio.Lock()
@@ -198,8 +217,20 @@ class PluginHost:
 
         return self._descriptors
 
+    @property
+    def has_live_instances(self) -> bool:
+        """Whether this Host still owns records that close must release."""
+        return bool(self._live_records)
+
     def validate(self) -> None:
         """Validate the whole static graph before any factory is invoked."""
+
+        self.resolve_dependencies()
+
+    def _select_descriptors(
+        self, plugin_ids: Iterable[str] | None,
+    ) -> tuple[PluginDescriptor, ...]:
+        """Validate catalog metadata, then cardinality for the selected closure."""
 
         policies = self._validate_schema(self._schema)
         descriptor_ids: dict[str, PluginDescriptor] = {}
@@ -216,28 +247,47 @@ class PluginHost:
                 )
             descriptor_ids[descriptor.plugin_id] = descriptor
             for port_type in descriptor.capabilities:
-                policy = policies.get(port_type)
-                if policy is None:
+                if port_type not in policies:
                     raise PluginValidationError(
                         "undeclared capability in descriptor "
                         f"{descriptor.plugin_id!r}: {port_type.__qualname__}"
                     )
+
+        selected: set[str] = set()
+        pending = list(descriptor_ids if plugin_ids is None else plugin_ids)
+        while pending:
+            plugin_id = pending.pop()
+            if not isinstance(plugin_id, str) or plugin_id not in descriptor_ids:
+                raise PluginValidationError(f"unknown plugin id: {plugin_id!r}")
+            if plugin_id in selected:
+                continue
+            selected.add(plugin_id)
+            descriptor = descriptor_ids[plugin_id]
+            for dependency in descriptor.dependencies:
+                if dependency not in descriptor_ids:
+                    raise PluginValidationError(
+                        f"missing dependency {dependency!r} for {descriptor.plugin_id!r}"
+                    )
+                pending.append(dependency)
+
+        descriptors = tuple(d for d in self._descriptors if d.plugin_id in selected)
+        lifetime = {PluginScope.PROCESS: 0, PluginScope.SESSION: 1, PluginScope.RUN: 2}
+        for descriptor in descriptors:
+            for dependency in descriptor.dependencies:
+                if lifetime[descriptor.scope] < lifetime[descriptor_ids[dependency].scope]:
+                    raise PluginValidationError(
+                        f"plugin {descriptor.plugin_id!r} cannot depend on "
+                        f"shorter-lived plugin {dependency!r}"
+                    )
+            for port_type in descriptor.capabilities:
                 providers = capability_ids[port_type]
-                if providers and policy is not CapabilityPolicy.MULTI:
+                if providers and policies[port_type] is not CapabilityPolicy.MULTI:
                     raise PluginValidationError(
                         "duplicate capability registration: "
                         f"{port_type.__qualname__} "
                         f"({providers[0]}, {descriptor.plugin_id})"
                     )
                 providers.append(descriptor.plugin_id)
-
-        known_ids = set(descriptor_ids)
-        for descriptor in self._descriptors:
-            for dependency in descriptor.dependencies:
-                if dependency not in known_ids:
-                    raise PluginValidationError(
-                        f"missing dependency {dependency!r} for {descriptor.plugin_id!r}"
-                    )
 
         for port_type, policy in policies.items():
             if (
@@ -247,6 +297,7 @@ class PluginHost:
                 raise PluginValidationError(
                     f"missing required capability: {port_type.__qualname__}"
                 )
+        return descriptors
 
     @staticmethod
     def _validate_schema(
@@ -328,16 +379,21 @@ class PluginHost:
                 )
         if len(set(descriptor.capabilities)) != len(descriptor.capabilities):
             raise PluginValidationError("duplicate capability declaration")
-        if not callable(descriptor.factory):
+        if (descriptor.factory is None) == (descriptor.context_factory is None):
+            raise PluginValidationError("plugin requires exactly one factory or context_factory")
+        if descriptor.factory is not None and not callable(descriptor.factory):
             raise PluginValidationError("plugin factory must be callable")
+        if descriptor.context_factory is not None and not callable(descriptor.context_factory):
+            raise PluginValidationError("plugin context_factory must be callable")
         if descriptor.disposer is not None and not callable(descriptor.disposer):
             raise PluginValidationError("plugin disposer must be callable")
 
-    def resolve_dependencies(self) -> tuple[PluginDescriptor, ...]:
+    def resolve_dependencies(
+        self, plugin_ids: Iterable[str] | None = None,
+    ) -> tuple[PluginDescriptor, ...]:
         """Return a deterministic stable topological ordering."""
 
-        self.validate()
-        descriptors = self._descriptors
+        descriptors = self._select_descriptors(plugin_ids)
         by_id = {descriptor.plugin_id: descriptor for descriptor in descriptors}
         indexes = {
             descriptor.plugin_id: index for index, descriptor in enumerate(descriptors)
@@ -383,15 +439,29 @@ class PluginHost:
         self,
         *,
         session_key: Hashable | None = None,
+        plugin_ids: Iterable[str] | None = None,
+        scopes: Iterable[PluginScope] | None = None,
+        contexts: Mapping[PluginScope, object] | None = None,
     ) -> PluginActivation:
         """Activate or reuse instances and return an immutable registry."""
 
-        ordered = self.resolve_dependencies()
+        plan = self.resolve_dependencies(plugin_ids)
+        selected_scopes = tuple(PluginScope) if scopes is None else tuple(scopes)
+        if any(not isinstance(scope, PluginScope) for scope in selected_scopes):
+            raise PluginScopeError("activation scopes must contain PluginScope values")
+        if contexts is not None and (
+            not isinstance(contexts, Mapping)
+            or any(not isinstance(scope, PluginScope) for scope in contexts)
+        ):
+            raise PluginScopeError("contexts must map PluginScope values to context objects")
+        scope_contexts = {} if contexts is None else dict(contexts)
+        ordered = tuple(d for d in plan if d.scope in selected_scopes)
         if any(
             descriptor.scope is PluginScope.SESSION for descriptor in ordered
         ):
             if session_key is None:
                 raise PluginScopeError("session-scoped plugins require a session key")
+        if session_key is not None:
             try:
                 hash(session_key)
             except TypeError as error:
@@ -409,15 +479,46 @@ class PluginHost:
             if self._schema is None:  # Guarded by resolve_dependencies().
                 raise PluginValidationError("malformed capability schema")
             builder = TypedRegistry(self._schema)
+            instances: dict[str, object] = {}
+            # Resolve excluded dependencies before invoking any factory. Partial
+            # activation may consume already-owned process/session dependencies.
+            active_ids = {descriptor.plugin_id for descriptor in ordered}
+            by_id = {descriptor.plugin_id: descriptor for descriptor in plan}
+            for descriptor in ordered:
+                for dependency in descriptor.dependencies:
+                    if dependency in active_ids:
+                        continue
+                    dependency_descriptor = by_id[dependency]
+                    cache = (
+                        self._process_instances
+                        if dependency_descriptor.scope is PluginScope.PROCESS
+                        else self._session_instances.get(session_key, {})
+                        if dependency_descriptor.scope is PluginScope.SESSION
+                        else {}
+                    )
+                    record = cache.get(dependency)
+                    if record is None:
+                        raise PluginScopeError(
+                            f"dependency {dependency!r} is outside activation scopes "
+                            "and has no cached instance"
+                        )
+                    instances[dependency] = record.instance
             created: list[_InstanceRecord] = []
             run_records: list[_InstanceRecord] = []
+            contributions: list[PluginContribution] = []
             try:
                 for descriptor in ordered:
                     record = await self._get_or_create(
                         descriptor,
                         session_key=session_key,
                         created=created,
+                        factory_context=PluginFactoryContext(
+                            scope_contexts.get(descriptor.scope),
+                            {dependency: instances[dependency] for dependency in descriptor.dependencies},
+                        ),
                     )
+                    instances[descriptor.plugin_id] = record.instance
+                    contributions.append(PluginContribution(descriptor, record.instance))
                     if descriptor.scope is PluginScope.RUN:
                         run_records.append(record)
                     for port_type in descriptor.capabilities:
@@ -432,6 +533,7 @@ class PluginHost:
                     self._remove_live_records(
                         record for record in created if record.disposed
                     )
+                    self._retain_run_rollback(created, session_key=session_key)
                 self._raise_activation_failure(
                     activation_error,
                     cleanup_errors=cleanup_errors,
@@ -439,7 +541,7 @@ class PluginHost:
                 )
                 raise AssertionError("unreachable")
 
-            return PluginActivation(self, builder.freeze(), tuple(run_records))
+            return PluginActivation(self, builder.freeze(), tuple(run_records), tuple(contributions))
         finally:
             await self._release_operation(reservation)
 
@@ -449,6 +551,7 @@ class PluginHost:
         *,
         session_key: Hashable | None,
         created: list[_InstanceRecord],
+        factory_context: PluginFactoryContext,
     ) -> _InstanceRecord:
         async with self._lock:
             if descriptor.scope is PluginScope.PROCESS:
@@ -461,7 +564,10 @@ class PluginHost:
                 if cached is not None:
                     return cached
 
-        instance = await self._invoke_callback(descriptor.factory)
+        if descriptor.context_factory is not None:
+            instance = await self._invoke_callback(descriptor.context_factory, factory_context)
+        else:
+            instance = await self._invoke_callback(descriptor.factory)
         record = _InstanceRecord(descriptor=descriptor, instance=instance)
         try:
             self._validate_runtime_ports(descriptor, instance)
@@ -472,6 +578,7 @@ class PluginHost:
             async with self._lock:
                 if record.disposed:
                     self._remove_live_records((record,))
+                self._retain_run_rollback((record,), session_key=session_key)
             if cleanup_cancellation is not None:
                 if cleanup_errors:
                     raise cleanup_cancellation from PluginCleanupError(cleanup_errors)
@@ -572,11 +679,47 @@ class PluginHost:
         finally:
             await self._release_operation(reservation)
 
+    def _retain_run_rollback(
+        self,
+        records: Iterable[_InstanceRecord],
+        *,
+        session_key: Hashable | None,
+    ) -> None:
+        """Keep failed activation cleanup owned by its session after activate raises."""
+        if session_key is None:
+            return
+        retained = [
+            record for record in records
+            if record.descriptor.scope is PluginScope.RUN and not record.disposed
+        ]
+        if retained:
+            pending = self._pending_run_rollbacks.get(session_key, ())
+            known = {id(record) for record in (*pending, *retained)}
+            # Validation rollback reaches here before its dependencies' outer
+            # rollback. Preserve creation order, not exception arrival order.
+            self._pending_run_rollbacks[session_key] = [
+                record for record in self._live_records if id(record) in known
+            ]
+            self._closing_sessions.add(session_key)
+
     async def dispose_session(self, session_key: Hashable) -> None:
-        """Dispose one session cache without affecting other sessions."""
+        """Retry this session's failed RUN rollback before releasing SESSION resources."""
 
         reservation = await self._reserve_operation("dispose session")
         try:
+            pending = tuple(self._pending_run_rollbacks.get(session_key, ()))
+            rollback_errors, rollback_cancellation = await self._dispose_records(
+                reversed(pending)
+            )
+            async with self._lock:
+                remaining = [record for record in pending if not record.disposed]
+                if remaining:
+                    self._pending_run_rollbacks[session_key] = remaining
+                else:
+                    self._pending_run_rollbacks.pop(session_key, None)
+                self._remove_live_records(record for record in pending if record.disposed)
+            if rollback_cancellation is not None:
+                self._raise_cleanup_failures(rollback_errors, rollback_cancellation)
             async with self._lock:
                 owned_records = tuple(
                     self._session_instances.get(session_key, {}).values()
@@ -602,7 +745,7 @@ class PluginHost:
                 self._remove_live_records(
                     record for record in owned_records if record.disposed
                 )
-            self._raise_cleanup_failures(cleanup_errors, cancellation)
+            self._raise_cleanup_failures(rollback_errors + cleanup_errors, cancellation)
         finally:
             await self._release_operation(reservation)
 
@@ -671,6 +814,12 @@ class PluginHost:
         record_ids = {id(record) for record in records}
         if not record_ids:
             return
+        for session_key, pending in tuple(self._pending_run_rollbacks.items()):
+            remaining = [record for record in pending if id(record) not in record_ids]
+            if remaining:
+                self._pending_run_rollbacks[session_key] = remaining
+            else:
+                del self._pending_run_rollbacks[session_key]
         self._process_instances = {
             plugin_id: record
             for plugin_id, record in self._process_instances.items()

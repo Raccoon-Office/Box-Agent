@@ -7,25 +7,79 @@ Box-Agent 采用稳定公共 API、宿主无关 Kernel 与静态装配边界。�
 
 ```mermaid
 flowchart TB
-    H["宿主适配层<br/>ACP / CLI / 自建 UI"]
-    SS["AgentSession<br/>Config + 会话运行状态"]
-    A["稳定公共 API<br/>Agent / AgentRunOptions / AgentEvent"]
-    R["运行时桥接<br/>box_agent.runtime"]
-    C["兼容门面<br/>box_agent.core"]
-    O["外层装配<br/>box_agent.composition"]
-    P["静态 PluginHost<br/>Descriptor / 强类型 Registry"]
-    S["不可变 KernelServices<br/>Kernel-owned Ports"]
-    L["AgentLoopKernel<br/>kernel.loop"]
-    E["Kernel 服务<br/>上下文 / 模型流 / 工具消息提交"]
-    T["工具能力<br/>tools/engine：准备 / 执行 / 结果"]
+    subgraph HOST["① 外部调用方"]
+        Office["officev3 / 编辑器 / ACP 客户端"]
+        Terminal["终端用户"]
+        Python["Python 调用方"]
+    end
 
-    H --> SS --> A --> R --> C --> O --> P --> S --> L --> E
-    L -->|ToolEnginePort| T
-    T -->|提交回调| E
+    subgraph ADAPTER["② 入口与宿主适配"]
+        ACP["ACP Server<br/>协议、模型绑定、权限交互、通知"]
+        CLI["CLI<br/>配置与模型探测、命令、终端交互"]
+        Inputs["会话输入<br/>Config + SessionOptions + HostBindings<br/>工作区、宿主回调与借入能力"]
+    end
+
+    subgraph PLUGINS["③ 插件运行时 · 跨 Run 复用"]
+        Runtime["PluginRuntime + PluginHost<br/>静态 Descriptor / 校验 / 依赖排序 / 分 Scope 激活<br/>ACP 应用级共享；CLI 默认由 Session 持有"]
+    end
+
+    subgraph SESSION["④ 创建会话 · 每个 Session 一次"]
+        Open["AgentSession.open / SessionState.open"]
+        Context["SessionContext<br/>保留同一 Config 引用"]
+        Prepare["PluginRuntime.open_session<br/>激活 Process / Session Scope<br/>按原 Config 开关准备能力"]
+        Assembly["内置 Session 插件 → session_assembly<br/>模型 → Memory → Tools / Skills / MCP → Prompt → Hooks<br/>复用现有能力模块，保留延迟加载时机"]
+        Construct["内部构造与完成初始化<br/>create → AgentService.create_agent<br/>finish_session：恢复并绑定 Skills"]
+        Session["AgentSession 实例<br/>Config、Agent、PluginSession、取消与注入、回合状态<br/>ACP 使用子类 SessionState；AgentRunHandle 代理同一状态"]
+        Open --> Context --> Prepare --> Assembly --> Construct --> Session
+    end
+
+    subgraph RUN["⑤ 每次 Run · 复用 Session，新建运行服务"]
+        RunEvents["Session.run_events<br/>build_run_options 合并默认值、会话状态与显式覆盖"]
+        RunContext["RunContext<br/>引用 SessionContext + 当前 Agent + 最终运行选项"]
+        Activate["PluginSession.open_run<br/>复用同一个 PluginHost<br/>复用 Session 实例，激活 Run Scope"]
+        Registry["ActivatedRegistry<br/>run.services → 新 KernelServices / HookManager"]
+        RunEvents --> RunContext --> Activate --> Registry
+    end
+
+    subgraph EXEC["⑥ 公共执行链与输出"]
+        Agent["已有 Agent.run_events"]
+        Bridge["runtime.run_agent_loop<br/>→ core.run_agent_loop 兼容门面"]
+        Composition["composition<br/>校验并传递已绑定 KernelServices<br/>管理 Kernel 事件流收尾"]
+        Loop["AgentLoopKernel<br/>唯一 step 循环"]
+        ToolEngine["工具能力 tools/engine<br/>准备 / 执行 / 结果适配"]
+        ToolMessages["kernel/tool_messages<br/>工具消息提交"]
+        Events["AgentEvent → Agent / Session"]
+        Output["ACP 通知 / CLI Renderer / Python 消费者"]
+        Trace["Session Trace / 日志 / 用量观测"]
+        Legacy["兼容：直接 Agent / 同步 create<br/>未托管运行仍每次创建默认 Host"]
+        Agent --> Bridge --> Composition --> Loop --> Events --> Output
+        Loop -->|"ToolEnginePort"| ToolEngine
+        ToolEngine -->|"提交回调"| ToolMessages
+        Legacy -.->|"旧路径"| Agent
+        Bridge -.->|"运行观测"| Trace
+        Output -.->|"事件与用量"| Trace
+    end
+
+    Office --> ACP
+    Terminal --> CLI
+    ACP -->|"newSession"| Inputs
+    CLI -->|"启动"| Inputs
+    Python -->|"托管 API"| Inputs
+    Python -.->|"兼容 API"| Legacy
+    Inputs --> Open
+
+    Runtime -.->|"提供同一 Host"| Prepare
+    Runtime -.->|"提供同一 Host"| Activate
+
+    ACP -->|"后续 prompt / 自动续跑"| RunEvents
+    CLI -->|"任务 / 交互回合 / 自动续跑"| RunEvents
+    Session -->|"复用已创建的会话"| RunEvents
+    Registry -->|"经 RunOptions 绑定"| Agent
 ```
 
 宿主调用路径因此为：**ACP/CLI → AgentSession → Agent → runtime → core 兼容门面 →
-外层 composition/PluginHost → 不可变 KernelServices → AgentLoopKernel**。
+外层 composition → AgentLoopKernel**。Session 的 PluginRuntime 在创建会话时
+准备能力，每次运行提供新的不可变 KernelServices。
 依赖方向指向 Kernel 自己拥有的契约。`box_agent/kernel/` 绝不导入
 PluginHost、composition、ACP、CLI、officev3 或其他产品适配器。Plugin 依赖
 `kernel.ports`；Kernel 只接收已经解析的服务，不查询 Registry。产品层与能力层
@@ -37,7 +91,7 @@ PluginHost、composition、ACP、CLI、officev3 或其他产品适配器。Plugi
 | 层级 | 主要代码 | 职责 |
 | --- | --- | --- |
 | 产品 / 接入层 | `box_agent/acp/`、`box_agent/cli.py`、宿主代码 | 协议转换、宿主元数据、ACP 协议渲染、CLI 入口接线与宿主明确选择 Skill |
-| 共享会话层 | `agent_session.py`、`agent_run.py` | 会话配置、Agent 运行状态、运行选项绑定与事件流入口 |
+| 共享会话层 | `agent_session.py`、`agent_run.py`、`session_context.py`、`session_assembly.py` | 配置驱动的能力准备、Agent 状态、运行选项绑定、事件流与资源归属 |
 | 能力层 | `box_agent/tools/`（除 `base.py`）、`box_agent/skills/`、`box_agent/llm/` 中的 Provider、`memory.py` | Tool、自包含 Skill、Provider、存储与领域校验器 |
 | 稳定公共 API | `agent.py`、`runtime.py`、`core.py`、`events.py`、`schema.py` | 向后兼容的调用方式与事件/schema 契约 |
 | 外层装配 | `composition.py`、`plugins/` | 显式 Descriptor、校验、依赖解析、分 Scope 激活、不可变服务装配与释放 |
@@ -68,12 +122,11 @@ async with aclosing(session.run_events(options=options)) as events:
 `box_agent.runtime` 导入 `run_agent_loop`。其他生产代码不得直接导入
 `box_agent.core`。
 
-`Agent.run_events()`、`Agent.run()`、`box_agent.runtime.run_agent_loop()`、
-`box_agent.runtime.invoke_tool_with_permissions()` 和
-`box_agent.core.run_agent_loop()` 的原调用形式与默认值保持兼容。独立调用
-`invoke_tool_with_permissions` 新增可选 `invocation_context` / `is_cancelled`，
-原 tuple 返回不变。调用方不会新增
-PluginHost、Registry 或 `KernelServices` 参数。ACP 消费
+原有 Agent API 与默认行为保持兼容。`AgentRunOptions` 和下层循环桥接新增可选的
+内部 `kernel_services` 参数，由托管 Session 填充；ACP/CLI 调用方不传入
+PluginHost、Registry 或服务集合。旧接口保留每次 Run 创建默认 Host 的路径。
+独立工具入口 `runtime.invoke_tool_with_permissions()` 还接受可选的
+`invocation_context` 和 `is_cancelled`；原 tuple 返回保持不变。ACP 消费
 `AgentSession.run_events(options=...)`，由它委派给
 `Agent.run_events(options=...)`，再把事件渲染成协议更新。CLI 通过
 `cli_renderer.py` 中的 `render_agent_events` 消费相同的会话事件流。
@@ -145,11 +198,18 @@ Host 复用直至关闭；Session 实例用显式 session key 隔离，并随该
 Run 实例只属于一次 activation，并在结束时释放。默认兼容路径为每次旧接口调用
 创建新 Host，并捕获调用方已有对象但不接管其所有权。
 
+托管 Session 复用同一个 PluginRuntime/Host。`AgentSession.open` 根据原有 Config
+开关准备模型、Memory、Tools/Skills/MCP、Prompt 和 Hooks；每次 `run_events` 根据
+最终运行选项激活新的 Run 服务。依赖 Config 的资源使用 Session Scope，Process
+factory 不接收会话 Config。异步准备在 Host 生命周期保留区之外执行。宿主借入能力
+仍由原所有者释放。上下文 factory、关闭顺序和兼容 `create` API 见
+[Agent Session](AGENT_SESSION.md)。
+
 替换能力时，装配层先准备显式 Descriptor 集合，删除/替换目标 Kernel Port 对应
 的 Descriptor，并在 `validate`/`activate` 前加入替代 Descriptor。激活后的
 Registry 再转换为 `KernelServices` 并传给 `AgentLoopKernel`；运行中的 Kernel
-不会发生替换。这是内部装配接缝，不会成为 Agent、CLI、ACP、runtime 或 Core 的
-新参数或配置键。
+不会发生替换。这是内部装配接缝，不新增 CLI/ACP 公共插件配置键；托管服务通过
+上文所述的内部可选参数向后传递。
 
 当前版本明确不支持 Python entry-point 扫描、目录扫描、热加载/热卸载、公共
 Plugin 配置或 `WorkflowPolicy`。本架构也不表示已完成动态插件发现或已部署打包
@@ -162,6 +222,21 @@ Plugin 配置或 `WorkflowPolicy`。本架构也不表示已完成动态插件�
 
 恢复活动 Skill 时使用当前 SkillLoader 提供的内容，历史内容哈希不同不会阻断
 会话恢复。内存中的哈希同步为当前内容哈希，恢复过程不改写历史日志。
+不可用的 Skill 直接跳过，其余可用 Skill 继续恢复；没有 SkillLoader 时，
+会话直接继续，不恢复活动 Skill。
+格式异常的可选 Skill/Todo 状态直接忽略，保留有效的对话历史。
+
+ACP 在验证会话 ID 和工作目录一致后，可降级恢复不兼容的日志版本、事件或
+无效消息记录。替换运行日志之前，原始字节完整保存为 `session.recovery-*.jsonl`。
+不回放历史工具；空的新日志允许下一次请求注入匹配的宿主续聊历史，再次重启后
+也保留这一机会。宿主没有提供历史时，新运行会话不会恢复原对话上下文。
+日志缺失时允许复用残留目录，已有日志与真实并发写锁仍受保护。
+创建 Agent 或准备恢复失败时，立即释放会话写锁。
+
+模型配置旧修订缺失时，若同一 profileId 的服务商和地址没有歧义，使用本地最新
+有效修订；仍存在的旧修订保持固定，并保留会话选择的模型。解析过程只记录配置
+和修订标识，不改写注册表或历史绑定。没有有效修订或服务商地址存在冲突时，
+仍需更新模型配置。
 
 一个 Session 在整个生命周期内只拥有一个规范化 cwd。用不同 workspace 打开
 同一 Session 时，会在修复或修改日志之前失败。语法等价路径可以接受；

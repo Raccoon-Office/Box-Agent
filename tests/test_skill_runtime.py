@@ -942,7 +942,10 @@ def test_skill_execution_env_prefers_managed_tools_and_shared_browser(tmp_path: 
 
     env = build_skill_execution_env(
         ctx,
-        base_env={"PATH": "/user/node/bin:/usr/bin"},
+        base_env={
+            "PATH": "/user/node/bin:/usr/bin",
+            "BOX_AGENT_OUTPUT_DIR": "/legacy/output",
+        },
         platform_name="darwin",
         home_dir=tmp_path,
     )
@@ -963,6 +966,7 @@ def test_skill_execution_env_prefers_managed_tools_and_shared_browser(tmp_path: 
     )
     assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == str(chromium)
     assert env["NODE_PATH"].split(":")[0] == str(skill_tools / "lib" / "node_modules")
+    assert "BOX_AGENT_OUTPUT_DIR" not in env
 
 
 def test_skill_execution_env_uses_windows_global_bin_layout(tmp_path: Path) -> None:

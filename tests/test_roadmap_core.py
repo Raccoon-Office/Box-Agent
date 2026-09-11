@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from copy import deepcopy
@@ -13,6 +14,8 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
+
+from box_agent.tools.skill_loader import SkillLoader
 
 
 SKILL_DIR = (
@@ -30,15 +33,21 @@ def _run(
     script: str,
     *args: str,
     env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if NODE is None:
         pytest.skip("Node.js is required to test the roadmap compiler")
+    command_cwd = cwd
+    if command_cwd is None and "--out" in args:
+        output_arg = Path(args[args.index("--out") + 1])
+        if output_arg.is_absolute():
+            command_cwd = output_arg.parent
     return subprocess.run(
         [str(NODE), str(SCRIPTS_DIR / script), *args],
         capture_output=True,
         text=True,
         check=False,
-        cwd=SKILL_DIR,
+        cwd=command_cwd or SKILL_DIR,
         env=env,
     )
 
@@ -105,6 +114,7 @@ def test_roadmap_core_has_no_pptx_or_deck_dependency() -> None:
 
 
 def _compile(tmp_path: Path, fixture: str) -> tuple[subprocess.CompletedProcess[str], dict, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     output = tmp_path / f"{Path(fixture).stem}-spec.json"
     report = tmp_path / f"{Path(fixture).stem}-report.json"
     result = _run(
@@ -674,7 +684,6 @@ def test_unified_builder_consumes_external_task_scratch_and_cleans_directory(
     helper.write_text("// temporary helper", encoding="utf-8")
     env = {
         **os.environ,
-        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
         "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
     }
 
@@ -685,6 +694,7 @@ def test_unified_builder_consumes_external_task_scratch_and_cleans_directory(
         "roadmap.html",
         "--consume-input",
         env=env,
+        cwd=output_dir,
     )
 
     assert result.returncode == 0, result.stderr
@@ -693,6 +703,52 @@ def test_unified_builder_consumes_external_task_scratch_and_cleans_directory(
     assert not task_scratch.exists()
     assert scratch_root.is_dir()
     assert not list(scratch_root.iterdir())
+
+
+def test_loaded_roadmap_builder_example_uses_the_selected_task_directory(
+    tmp_path: Path,
+) -> None:
+    bash = shutil.which("bash")
+    if bash is None or NODE is None:
+        pytest.skip("Bash and Node.js are required for the documented builder example")
+    skill = SkillLoader(SKILL_DIR).load_skill(SKILL_DIR / "SKILL.md")
+    assert skill is not None and not skill.broken
+    prompt = skill.to_prompt()
+    command = next(
+        line for line in prompt.splitlines()
+        if line.startswith("cd '<ROADMAP_DIR>' &&") and "--consume-input" in line
+    )
+    task_dir = tmp_path / "roadmap $HOME O'Brien [final]"
+    task_dir.mkdir()
+    existing = task_dir / "existing.txt"
+    existing.write_text("keep", encoding="utf-8")
+    scratch_root = tmp_path / ".box-agent-scratch"
+    task_scratch = scratch_root / "task-one"
+    task_scratch.mkdir(parents=True)
+    draft = task_scratch / "roadmap-draft.json"
+    shutil.copyfile(FIXTURES_DIR / "draft-natural-language.json", draft)
+
+    result = subprocess.run(
+        [bash, "-c", command.replace("'<ROADMAP_DIR>'", shlex.quote(str(task_dir)))],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "BOX_AGENT_NODE": str(NODE),
+            "ROADMAP_SKILL_DIR": str(SKILL_DIR),
+            "ROADMAP_DRAFT": str(draft),
+            "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert Path(json.loads(result.stdout)["path"]) == task_dir / "roadmap-v1.html"
+    assert existing.read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "roadmap-v1.html").exists()
+    assert not (task_dir / "output").exists()
+    assert not task_scratch.exists()
 
 
 def test_unified_builder_cleans_task_scratch_after_build_failure(tmp_path) -> None:
@@ -705,7 +761,6 @@ def test_unified_builder_cleans_task_scratch_after_build_failure(tmp_path) -> No
     draft.write_text('{"kind":"roadmap-draft"}', encoding="utf-8")
     env = {
         **os.environ,
-        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
         "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
     }
 
@@ -716,6 +771,7 @@ def test_unified_builder_cleans_task_scratch_after_build_failure(tmp_path) -> No
         "roadmap.html",
         "--consume-input",
         env=env,
+        cwd=output_dir,
     )
 
     assert result.returncode == 1
@@ -736,7 +792,6 @@ def test_unified_builder_rejects_consumed_input_outside_configured_scratch(
     shutil.copyfile(FIXTURES_DIR / "draft-natural-language.json", draft)
     env = {
         **os.environ,
-        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
         "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
     }
 
@@ -747,6 +802,7 @@ def test_unified_builder_rejects_consumed_input_outside_configured_scratch(
         "roadmap.html",
         "--consume-input",
         env=env,
+        cwd=output_dir,
     )
 
     assert result.returncode == 1
@@ -774,7 +830,6 @@ def test_unified_builder_rejects_scratch_input_symlink_and_cleans_task(
         pytest.skip(f"symlinks are unavailable in this environment: {error}")
     env = {
         **os.environ,
-        "BOX_AGENT_OUTPUT_DIR": str(output_dir),
         "BOX_AGENT_SCRATCH_DIR": str(scratch_root),
     }
 
@@ -785,6 +840,7 @@ def test_unified_builder_rejects_scratch_input_symlink_and_cleans_task(
         "roadmap.html",
         "--consume-input",
         env=env,
+        cwd=output_dir,
     )
 
     assert result.returncode == 1
@@ -944,7 +1000,7 @@ def test_unified_builder_emits_structured_error_report(tmp_path) -> None:
     assert report["pending_questions"][0]["field_path"] == "items.0.end"
 
 
-def test_roadmap_outputs_cannot_escape_configured_artifact_root(tmp_path) -> None:
+def test_roadmap_outputs_cannot_escape_command_cwd(tmp_path) -> None:
     output_dir = tmp_path / "output"
     output_dir.mkdir()
     env = {**os.environ, "BOX_AGENT_OUTPUT_DIR": str(output_dir)}
@@ -955,6 +1011,7 @@ def test_roadmap_outputs_cannot_escape_configured_artifact_root(tmp_path) -> Non
         "--out",
         "../escaped.html",
         env=env,
+        cwd=output_dir,
     )
     absolute = _run(
         "render_roadmap_html.js",
@@ -962,12 +1019,13 @@ def test_roadmap_outputs_cannot_escape_configured_artifact_root(tmp_path) -> Non
         "--out",
         str(tmp_path / "absolute.html"),
         env=env,
+        cwd=output_dir,
     )
 
     assert traversal.returncode == 1
-    assert "must stay within BOX_AGENT_OUTPUT_DIR" in traversal.stderr
+    assert "must stay within the current working directory" in traversal.stderr
     assert absolute.returncode == 1
-    assert "must stay within BOX_AGENT_OUTPUT_DIR" in absolute.stderr
+    assert "must stay within the current working directory" in absolute.stderr
     assert not (tmp_path / "escaped-v1.html").exists()
     assert not (tmp_path / "absolute.html").exists()
 
@@ -994,6 +1052,7 @@ def test_roadmap_outputs_reject_symlink_targets_and_parent_segments(tmp_path) ->
         "--out",
         "link.html",
         env=env,
+        cwd=output_dir,
     )
     parent_result = _run(
         "render_roadmap_html.js",
@@ -1001,6 +1060,7 @@ def test_roadmap_outputs_reject_symlink_targets_and_parent_segments(tmp_path) ->
         "--out",
         "linked-directory/roadmap.html",
         env=env,
+        cwd=output_dir,
     )
 
     assert target_result.returncode == 1
@@ -1008,7 +1068,7 @@ def test_roadmap_outputs_reject_symlink_targets_and_parent_segments(tmp_path) ->
     assert parent_result.returncode == 1
     assert (
         "symlink or reparse point" in parent_result.stderr
-        or "resolves outside BOX_AGENT_OUTPUT_DIR" in parent_result.stderr
+        or "resolves outside the current working directory" in parent_result.stderr
     )
     assert outside_file.read_text(encoding="utf-8") == "do not replace"
     assert not (outside_dir / "roadmap.html").exists()
@@ -1063,8 +1123,7 @@ try {
         capture_output=True,
         text=True,
         check=False,
-        cwd=SKILL_DIR,
-        env={**os.environ, "BOX_AGENT_OUTPUT_DIR": str(output_dir)},
+        cwd=output_dir,
     )
 
     assert result.returncode == 1
@@ -1097,6 +1156,7 @@ def test_unified_builder_rejects_consuming_symlink_targets_and_parent_segments(
         "target-roadmap.html",
         "--consume-input",
         env=env,
+        cwd=output_dir,
     )
     parent_result = _run(
         "build_roadmap_artifact.js",
@@ -1105,6 +1165,7 @@ def test_unified_builder_rejects_consuming_symlink_targets_and_parent_segments(
         "parent-roadmap.html",
         "--consume-input",
         env=env,
+        cwd=output_dir,
     )
 
     assert target_result.returncode == 1
@@ -1157,7 +1218,7 @@ try {
         capture_output=True,
         text=True,
         check=False,
-        cwd=SKILL_DIR,
+        cwd=tmp_path,
     )
 
     assert result.returncode == 1
@@ -1230,6 +1291,7 @@ def test_roadmap_output_replacement_is_atomic_and_leaves_no_temporary_file(
         "--out",
         "roadmap.html",
         env=env,
+        cwd=output_dir,
     )
 
     assert result.returncode == 0, result.stderr

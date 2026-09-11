@@ -127,6 +127,23 @@ Unsupported blocks and persistence failures remain unchanged. Since IDs are mark
 
 ## Context-limit compaction
 
+### Capability and commit boundary
+
+The Kernel supplies a `CompactionInput` to `CompactEnginePort`. The default
+engine delegates to the existing compression algorithm; it does not replace
+the request Context interface or introduce a second Skill loading policy.
+Inputs distinguish the tool catalog used for runtime-state recovery from the
+exact offered schemas used for estimation, and retain forced recovery and the
+summary-request input limit.
+
+Context projects effective history before compaction. The engine calls the
+Kernel's `before_summary` callback before a summary attempt or deterministic
+fallback. The Kernel commits the returned surface and flushes it before changing
+live messages; request delivery/response callbacks and the one-retry input-budget
+rule are unchanged. Static and managed composition preserve supplied compactors,
+including falsey instances. `CompactionOutcome` retains legacy tuple iteration;
+its limit flag must agree with its existing blocked mode.
+
 ### Threshold
 
 The trigger is derived from the model's input budget:
@@ -186,7 +203,7 @@ Recent selection applies to user, assistant, and tool messages. Assistant tool c
 
 Compaction does not discover, reread, or replay recent files.
 
-Current goal, todo, and plan state are read through their explicit, side-effect-free `compaction_state` contract; compaction never invokes a normal tool call. Their combined runtime-state message is capped at 12,000 characters. Full active skill instructions remain pinned in the system message and are not reconstructed by replaying historical `get_skill` calls. Internal summary/runtime-state messages are excluded whenever control policy asks for the latest real user text.
+Current goal, todo, and plan state are read through their explicit, side-effect-free `compaction_state` contract; compaction never invokes a normal tool call. Their combined runtime-state message is capped at 12,000 characters. SkillRuntime owns selection and versioned read facts. Context places selected or restored Skill bodies in ordinary request material, or they arrive through real reading-tool replies; it checks coverage against final visible text. Full Skill bodies are not pinned in the system message, and historical `get_skill` calls are never replayed. See [Skill Engine](design/skill-engine.md) for paging, source validation and request-commit behavior. Internal summary/runtime-state messages are excluded whenever control policy asks for the latest real user text.
 
 If the rebuilt request still exceeds the safe limit, the outcome is marked blocked instead of silently sending a known-oversized request.
 

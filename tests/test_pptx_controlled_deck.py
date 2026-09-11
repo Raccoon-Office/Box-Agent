@@ -10239,7 +10239,7 @@ def test_truth_validator_accepts_cover_slide_count_metadata(
     assert payload["ok"] is True
 
 
-def test_controlled_deck_scripts_resolve_relative_paths_from_canonical_output_root(
+def test_controlled_deck_scripts_use_cwd_and_ignore_legacy_output_env(
     tmp_path: Path,
 ) -> None:
     canonical = tmp_path / "session" / "output"
@@ -10263,10 +10263,10 @@ def test_controlled_deck_scripts_resolve_relative_paths_from_canonical_output_ro
     )
 
     assert scaffold.returncode == 0, scaffold.stderr
-    assert (canonical / "deck.json").is_file()
-    assert (canonical / "assets/generated/manifest.json").is_file()
-    assert (canonical / "qa/deck_contract.json").is_file()
-    assert not (wrong_cwd / "deck.json").exists()
+    assert (wrong_cwd / "deck.json").is_file()
+    assert (wrong_cwd / "assets/generated/manifest.json").is_file()
+    assert (wrong_cwd / "qa/deck_contract.json").is_file()
+    assert not (canonical / "deck.json").exists()
 
     validation = _run(
         "validate_deck_spec.js",
@@ -10287,9 +10287,9 @@ def test_controlled_deck_scripts_resolve_relative_paths_from_canonical_output_ro
 
     assert validation.returncode == 0, validation.stderr
     assert rendered.returncode == 0, rendered.stderr
-    assert json.loads((canonical / "qa/deck_spec.json").read_text())["ok"] is True
-    assert (canonical / "index.html").is_file()
-    assert not (wrong_cwd / "index.html").exists()
+    assert json.loads((wrong_cwd / "qa/deck_spec.json").read_text())["ok"] is True
+    assert (wrong_cwd / "index.html").is_file()
+    assert not (canonical / "index.html").exists()
 
 
 def test_pptx_theme_selection_has_no_hard_html_templates_dependency() -> None:
@@ -10305,7 +10305,11 @@ def test_pptx_theme_selection_has_no_hard_html_templates_dependency() -> None:
     assert "--require-field" in text
     assert "Do not convert visual styling language" in text
     assert "not `--require-field 1:tags`" in text
-    assert "BOX_AGENT_OUTPUT_DIR" in text
+    assert "BOX_AGENT_OUTPUT_DIR" not in text
+    assert "artifact-relative" not in text
+    assert "In output mode" not in text
+    assert "absolute `<PRESENTATION_DIR>`" in text
+    assert "workspaceDir" in text
     assert 'write_file(path="deck.json", ...)' in text
     assert "required `image_plan` key" in text
     assert "apply_deck_patch.js" in text
@@ -10327,9 +10331,13 @@ def test_pptx_skill_exposes_platform_specific_standalone_image_sync() -> None:
     assert skill is not None
     sync_script = str(SCRIPTS_DIR / "sync_image_manifest_status.js")
     assert sync_script in skill.content
-    assert '"$BOX_AGENT_NODE" "<LOADER_EXPANDED_SYNC_SCRIPT>"' in skill.content
-    assert '& "$env:BOX_AGENT_NODE" "<LOADER_EXPANDED_SYNC_SCRIPT>"' in skill.content
-    assert "already runs with `BOX_AGENT_OUTPUT_DIR` as its cwd" in skill.content
+    assert '"$BOX_AGENT_NODE" \'<LOADER_EXPANDED_SYNC_SCRIPT>\'' in skill.content
+    assert '& "$env:BOX_AGENT_NODE" \'<LOADER_EXPANDED_SYNC_SCRIPT>\'' in skill.content
+    assert "Set-Location -LiteralPath '<PRESENTATION_DIR>' -ErrorAction Stop;" in skill.content
+    assert "Box-Agent's Bash tool has no `workspaceDir`" in skill.content
+    assert "O''Brien" in skill.content
+    assert "cd '<PRESENTATION_DIR>' &&" in skill.content
+    assert "legacy output" in skill.content
     assert "synchronization invocation must be" in skill.content
     assert "the only command" in skill.content
 

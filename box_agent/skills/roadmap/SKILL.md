@@ -42,21 +42,37 @@ a presentation alone must not select this skill.
 6. Render ordinary conversation requests to the controlled HTML Artifact
    `roadmap-swimlane-v1` without loading another document skill.
 
-Resolve `{skill_dir}` to this skill's installed directory. For ordinary
-generation, create one temporary Draft input and run the unified builder. It
+Resolve `{skill_dir}` to this skill's installed directory and `<ROADMAP_DIR>`
+to the absolute task directory selected in the conversation, or the unchanged
+session cwd when no task directory was selected. For ordinary generation,
+create one temporary Draft input and run the unified builder. It
 compiles, migrates, lays out, renders, and self-checks in one process. A
 successful build consumes the temporary Draft and leaves only a versioned HTML
-deliverable in `output/`:
+deliverable in `<ROADMAP_DIR>`.
 
-Treat `output/` as a deliverables-only boundary. Never create generator scripts,
-temporary JSON, logs, or other support files there. Create a unique task
-directory below `$BOX_AGENT_SCRATCH_DIR` and place the temporary Draft and any
-helper there. Pass that Draft to the builder with `--consume-input`. The builder
+Keep this run's generator scripts, temporary JSON, logs, and other disposable
+support files in a unique task directory below `$BOX_AGENT_SCRATCH_DIR`.
+Place the temporary Draft and any helper there. Pass that Draft to the builder
+with `--consume-input`. The builder
 removes the task scratch directory after either success or failure, and the
 session runtime clears any residue at the end of the turn. Never place one
 task's files directly in the scratch root or reuse another task's directory.
 Before completing the task, verify that every file created by this Roadmap run
-under `output/` is a versioned HTML deliverable.
+under `<ROADMAP_DIR>` is a versioned HTML deliverable; preserve pre-existing files.
+Do not create an automatic `output/` directory.
+
+Box-Agent's Bash tool has no `workspaceDir` argument. Prefix every builder
+invocation with a directory change in the same tool call:
+
+- POSIX / bundled Git Bash: `cd '<ROADMAP_DIR>' &&`
+- PowerShell: `Set-Location -LiteralPath '<ROADMAP_DIR>' -ErrorAction Stop;`
+
+Use literal single-quoted paths. On POSIX, encode an embedded apostrophe by
+closing the string, inserting a double-quoted apostrophe, and reopening it
+(`O'Brien` becomes `'O'"'"'Brien'`). On PowerShell, double an embedded apostrophe
+(`O'Brien` becomes `'O''Brien'`). Preserve dollar signs, backticks, and brackets
+as filename characters. The prefix changes only this command's cwd; repeat it
+for later calls rather than assuming a previous `cd` persisted.
 
 `write_file` does not expand shell environment variables. Before writing the
 Draft, resolve its real absolute path with `bash`: create the task directory and
@@ -71,7 +87,7 @@ ROADMAP_DRAFT="$BOX_AGENT_SCRATCH_DIR/<task-id>/roadmap-draft.json"
 mkdir -p "$(dirname "$ROADMAP_DRAFT")"
 printf '%s\n' "$ROADMAP_DRAFT"
 # Use the printed absolute path with write_file, then run:
-${BOX_AGENT_NODE:-node} "$ROADMAP_SKILL_DIR/scripts/build_roadmap_artifact.js" "$ROADMAP_DRAFT" --out roadmap.html --consume-input
+cd '<ROADMAP_DIR>' && ${BOX_AGENT_NODE:-node} "$ROADMAP_SKILL_DIR/scripts/build_roadmap_artifact.js" "$ROADMAP_DRAFT" --out roadmap.html --consume-input
 ```
 
 Always inspect the builder report. If `pending_questions` is non-empty, the
@@ -96,11 +112,11 @@ builder. It reads the embedded source and emits the next HTML version without
 overwriting the input. Never prefer an older adjacent JSON file:
 
 ```bash
-${BOX_AGENT_NODE:-node} "$ROADMAP_SKILL_DIR/scripts/build_roadmap_artifact.js" roadmap-v1.html --out roadmap.html
+cd '<ROADMAP_DIR>' && ${BOX_AGENT_NODE:-node} "$ROADMAP_SKILL_DIR/scripts/build_roadmap_artifact.js" roadmap-v1.html --out roadmap.html
 ```
 
-The renderer writes a standard `.html` deliverable under
-`$BOX_AGENT_OUTPUT_DIR`, with `mime_type=text/html`,
+The renderer writes a standard `.html` deliverable in the caller-selected task
+directory (the command's cwd), with `mime_type=text/html`,
 `layout_id=roadmap-swimlane-v1`, embedded source in `#deck-document`, and
 structured diagnostics. Mention the resulting HTML filename so the shared
 artifact detector can publish it. The host renders the standard artifact event
@@ -108,8 +124,9 @@ as the single clickable workspace file card, so do not add a Markdown
 `workspace-file` or `local-file` link for the same HTML in the final response.
 Do not mention a versioned filename that was not returned by a successful
 builder invocation.
-When `$BOX_AGENT_OUTPUT_DIR` is configured, normal Roadmap outputs are confined
-to that directory; absolute paths and `..` traversal outside it are rejected.
+Normal Roadmap outputs are confined to that command cwd; absolute paths and
+`..` traversal outside it are rejected. Select another task directory with the
+documented command prefix, not with an output-root environment variable.
 
 The form/table editor changes RoadmapSpec fields and then invokes the same
 contract validator and geometry core. It never edits pixel positions directly.

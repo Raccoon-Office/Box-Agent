@@ -150,6 +150,7 @@ def build_skill_execution_env(
     if browser_executable:
         result["BOX_AGENT_BROWSER_EXECUTABLE_PATH"] = browser_executable
         result["AGENT_BROWSER_EXECUTABLE_PATH"] = browser_executable
+    result.pop("BOX_AGENT_OUTPUT_DIR", None)
     return result
 
 

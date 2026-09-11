@@ -5,7 +5,7 @@ import json
 import pytest
 
 from box_agent.core import run_agent_loop
-from box_agent.events import ToolCallResult
+from box_agent.events import ArtifactEvent, ToolCallResult
 from box_agent.hooks import BaseHook
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
@@ -87,7 +87,44 @@ async def test_hook_changed_browser_output_path_is_checked_before_execution(tmp_
     assert not results[0].success
     assert "BROWSER_SNAPSHOT_OUTPUT_PATH_INVALID" in results[0].error
     assert tool.executions == 0
-    assert not (tmp_path / "output" / "original.md").exists()
+    assert not (tmp_path / "original.md").exists()
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("capture_kind", ["snapshot", "screenshot"])
+async def test_engine_persists_browser_outputs_under_cwd_with_legacy_root_ignored(
+    tmp_path, parallel, capture_kind,
+):
+    filename = "task/qa/page.md" if capture_kind == "snapshot" else "task/qa/page.png"
+    expected = b"page contents" if capture_kind == "snapshot" else b"image"
+
+    class Capture(Tool):
+        name = "managed_browser_snapshot" if capture_kind == "snapshot" else "managed_browser_take_screenshot"
+        description = "Capture the current page."
+        parallel_safe = parallel
+        parameters = {"type": "object", "properties": {"filename": {"type": "string"}}}
+
+        async def execute(self, filename=None):
+            assert filename is None
+            return ToolResult(
+                success=True, content="page contents",
+                raw_output={"mcp_inline_images": [{"data": "aW1hZ2U=", "mime_type": "image/png"}]}
+                if capture_kind == "screenshot" else None,
+            )
+
+    tool = Capture()
+    events = [event async for event in run_agent_loop(
+        llm=CallsThenDone(tool.name, [{"filename": filename}]),
+        tools={tool.name: tool}, messages=[Message(role="user", content="Save a browser page capture.")],
+        workspace_dir=str(tmp_path), artifact_root_dir=str(tmp_path / "legacy-output"),
+        max_steps=2,
+    )]
+
+    assert (tmp_path / filename).read_bytes() == expected
+    assert [event.rel_path for event in events if isinstance(event, ArtifactEvent)] == [filename]
+    assert not (tmp_path / "legacy-output").exists()
 
 
 @pytest.mark.asyncio

@@ -194,6 +194,7 @@ class TestDetectDangerousCommand:
             ("BOX_AGENT_PYTHON", "${BOX_AGENT_PYTHON:-python3}"),
             ("BOX_AGENT_NPM", "${BOX_AGENT_NPM:-npm}"),
             ("BOX_AGENT_NPX", "${BOX_AGENT_NPX:-npx}"),
+            ("BOX_AGENT_SOFFICE", "$BOX_AGENT_SOFFICE"),
         ],
     )
     def test_injected_runtime_executable_reference_is_trusted(
@@ -213,20 +214,22 @@ class TestDetectDangerousCommand:
         ) is None
 
     @pytest.mark.parametrize(
-        "environment",
+        ("environment", "reference"),
         [
-            {},
-            {"BOX_AGENT_NODE": "node"},
+            ({}, "${BOX_AGENT_NODE:-node}"),
+            ({"BOX_AGENT_NODE": "node"}, "${BOX_AGENT_NODE:-node}"),
+            ({"BOX_AGENT_SOFFICE": "soffice"}, "$BOX_AGENT_SOFFICE"),
         ],
     )
     def test_unverified_runtime_executable_reference_requires_approval(
         self,
         environment,
+        reference,
     ):
         trusted = trusted_runtime_executable_references(environment)
 
         assert detect_dangerous_command(
-            "${BOX_AGENT_NODE:-node} scripts/validate.js",
+            f"{reference} scripts/validate.js",
             trusted_executable_references=trusted,
         ) is not None
 

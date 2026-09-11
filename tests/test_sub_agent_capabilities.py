@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from box_agent import skill_dependencies
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.sub_agent_capabilities import (
@@ -357,6 +358,30 @@ def test_selected_skill_requires_live_provider() -> None:
 
     assert isinstance(result, CapabilityFailure)
     assert result.code == "SKILL_PROVIDER_UNAVAILABLE"
+
+
+def test_shared_skill_dependency_failure_keeps_child_failure_contract(tmp_path, monkeypatch):
+    _write_skill(tmp_path, "selected")
+    loader = SkillLoader(tmp_path)
+    loader.discover_skills()
+    spec = _parse(skills=["selected"], required_tools=[])
+    failure = skill_dependencies.SkillDependencyError(
+        "SKILL_NOT_FOUND", "Required Skill 'dependency' was not found.", {"skill": "dependency"}
+    )
+
+    def reject_dependency(actual_loader, names):
+        assert actual_loader is loader
+        assert names == ("selected",)
+        raise failure
+
+    monkeypatch.setattr(skill_dependencies, "resolve_required_skills", reject_dependency)
+    result = CapabilityResolver().resolve(spec, parent_tools={}, skill_loader=loader)
+
+    assert isinstance(result, CapabilityFailure)
+    assert result.code == failure.code
+    assert result.message == failure.message
+    assert result.details == failure.details
+    assert result.retryable is False
 
 
 def test_skill_dependency_cycle_fails_deterministically(tmp_path: Path) -> None:

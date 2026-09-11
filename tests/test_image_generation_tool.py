@@ -1193,7 +1193,7 @@ def test_add_workspace_tools_passes_image_generation_config(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_output_mode_tools_share_artifact_relative_root(
+async def test_workspace_tools_share_stable_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1207,7 +1207,6 @@ async def test_output_mode_tools_share_artifact_relative_root(
     workspace = tmp_path / "session-a"
     workspace.mkdir()
     (workspace / "source.txt").write_text("uploaded", encoding="utf-8")
-    artifact_root = workspace / "output"
     tools = []
 
     class Config:
@@ -1227,8 +1226,6 @@ async def test_output_mode_tools_share_artifact_relative_root(
         workspace,
         allow_full_access=False,
         output=lambda *_: None,
-        use_output_dir=True,
-        artifact_root_dir=artifact_root,
     )
     by_name = {tool.name: tool for tool in tools}
 
@@ -1252,28 +1249,26 @@ async def test_output_mode_tools_share_artifact_relative_root(
         prompt="hero",
         output_path="assets/generated/hero.png",
     )
-    read_result = await by_name["read_file"].execute(path="../source.txt")
-    legacy_write_result = await by_name["write_file"].execute(
-        path="output/legacy.txt",
-        content="legacy-compatible",
+    read_result = await by_name["read_file"].execute(path="source.txt")
+    nested_write_result = await by_name["write_file"].execute(
+        path="nested/result.txt",
+        content="nested",
     )
 
     assert write_result.success
     assert image_result.success
     assert read_result.success
-    assert legacy_write_result.success
+    assert nested_write_result.success
     assert "uploaded" in read_result.content
-    assert (artifact_root / "assets/generated/manifest.json").is_file()
-    assert (artifact_root / "assets/generated/hero.png").is_file()
-    assert (artifact_root / "legacy.txt").read_text(encoding="utf-8") == "legacy-compatible"
-    assert not (artifact_root / "output/legacy.txt").exists()
-    assert by_name["bash"].workspace_dir == str(artifact_root)
+    assert (workspace / "assets/generated/manifest.json").is_file()
+    assert (workspace / "assets/generated/hero.png").is_file()
+    assert (workspace / "nested/result.txt").read_text(encoding="utf-8") == "nested"
+    assert by_name["bash"].workspace_dir == str(workspace)
     assert by_name["bash"].scope_root_dir == str(workspace)
-    assert by_name["bash"]._subprocess_env["BOX_AGENT_OUTPUT_DIR"] == str(artifact_root)
-    assert by_name["bash"]._subprocess_env["BOX_AGENT_SCRATCH_DIR"] == str(
-        workspace / ".box-agent-scratch"
-    )
-    assert (workspace / ".box-agent-scratch").is_dir()
+    assert "BOX_AGENT_OUTPUT_DIR" not in by_name["bash"]._subprocess_env
+    scratch_dir = Path(by_name["bash"]._subprocess_env["BOX_AGENT_SCRATCH_DIR"])
+    assert scratch_dir.parent == workspace / ".box-agent-scratch"
+    assert scratch_dir.is_dir()
 
     node = shutil.which("node")
     if node is None:
@@ -1294,7 +1289,7 @@ async def test_output_mode_tools_share_artifact_relative_root(
             "--report",
             "qa/image_manifest.json",
         ],
-        cwd=artifact_root,
+        cwd=workspace,
         check=False,
         capture_output=True,
         text=True,
@@ -1302,7 +1297,7 @@ async def test_output_mode_tools_share_artifact_relative_root(
     assert completed.returncode == 0, completed.stderr
 
 
-def test_project_mode_tools_keep_workspace_relative_root(tmp_path: Path) -> None:
+def test_workspace_tools_do_not_create_implicit_output_root(tmp_path: Path) -> None:
     tools = []
 
     class Config:
@@ -1322,7 +1317,6 @@ def test_project_mode_tools_keep_workspace_relative_root(tmp_path: Path) -> None
         tmp_path,
         allow_full_access=False,
         output=lambda *_: None,
-        use_output_dir=False,
     )
     by_name = {tool.name: tool for tool in tools}
 
@@ -1500,11 +1494,9 @@ async def test_intermediate_image_stays_available_without_artifact_publication(
             200, json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]}
         ),
     )
-    output = tmp_path / "output"
-    output.mkdir()
     before = _snapshot_workspace_signatures(str(tmp_path))
     tool = GenerateImageTool(
-        workspace_dir=str(tmp_path), output_dir=str(output),
+        workspace_dir=str(tmp_path),
         endpoint="https://image.example.test/v1/images/generations",
     )
     result = await tool.execute(
@@ -1512,18 +1504,18 @@ async def test_intermediate_image_stays_available_without_artifact_publication(
         watermark=False, publish_artifact=publish_artifact,
     )
     assert result.success
-    target = output / "assets/generated/hero.png"
+    target = tmp_path / "assets/generated/hero.png"
     assert target.read_bytes() == PNG_BYTES
     assert json.loads(result.model_context)["absolute_path"] == str(target)
     assert result.raw_output["type"] == ("artifact" if publish_artifact else "intermediate_asset")
     # An unrelated deliverable must still be discovered in the same batch.
-    other = output / "deck.html"
+    other = tmp_path / "deck.html"
     other.write_text("<html></html>")
     events = _detect_tool_artifacts(
         "image-call", "generate_image",
         result.content + "\n[deck.html]\n[assets/generated/hero.png]",
         result.raw_output, before, _snapshot_workspace_signatures(str(tmp_path)),
-        str(tmp_path), str(output),
+        str(tmp_path),
     )
     paths = {event.abs_path for event in events}
     assert str(other) in paths

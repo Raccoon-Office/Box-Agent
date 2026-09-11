@@ -23,7 +23,20 @@ class AgentService:
     def create_agent(self, **kwargs: Any) -> Agent:
         """Create one Agent using the shared constructor forwarding helper."""
 
-        return build_agent(agent_factory=self._agent_factory, **kwargs)
+        try:
+            return build_agent(agent_factory=self._agent_factory, **kwargs)
+        except BaseException:
+            session_log = kwargs.get("session_log")
+            if session_log is not None:
+                session_log.close()
+            raise
+
+    @staticmethod
+    def resolve_skill_loader(tools: list[Any]) -> Any:
+        """Use the same built-in reader binding as the public Agent constructor."""
+        from .plugins.defaults import skill_loader_from_catalog
+
+        return skill_loader_from_catalog({tool.name: tool for tool in tools})
 
 
 __all__ = ["AgentService"]

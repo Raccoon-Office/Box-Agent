@@ -4,7 +4,17 @@
 <nav class="crumb"><a href="/">评测目录</a><span>/</span><span>{{ run_name }}</span></nav>
 <section class="page-heading"><h1>{{ run_name }}</h1><p>{{ cases|length }} 个任务</p></section>
 <form class="search" method="get"><input type="search" name="q" value="{{ query }}" placeholder="搜索任务 ID 或内容" aria-label="搜索任务"><button>搜索</button></form>
-<div class="table-wrap"><table><thead><tr><th>任务</th><th>ACP</th><th>完整性</th><th>耗时</th><th>Error</th><th>Timeout</th><th>Warning</th></tr></thead><tbody>
-{% for case in cases %}<tr><td><a href="/runs/{{ run_name }}/cases/{{ case.case_id }}">{{ case.case_id }}</a></td><td>{{ case.acp_status }}</td><td>{{ case.completeness_status }}</td><td>{{ case.duration if case.duration is not none else "—" }}{% if case.duration is not none %}s{% endif %}</td><td>{{ case.stderr_counts.error|default(0) }}</td><td>{{ case.stderr_counts.timeout|default(0) }}</td><td>{{ case.stderr_counts.warning|default(0) }}</td></tr>{% else %}<tr><td colspan="7">没有匹配任务</td></tr>{% endfor %}
+<div class="table-wrap"><table class="run-detail-table"><thead><tr><th>任务</th><th>任务类型</th><th>ACP</th><th>完整性</th><th>结果指标</th><th>过程指标</th><th>成本</th><th>耗时</th><th>stderr <small>E / T / W</small></th></tr></thead><tbody>
+{% for case in cases %}<tr>
+  <td><a href="/runs/{{ run_name }}/cases/{{ case.case_id }}">{{ case.case_id }}</a></td>
+  <td>{{ case.task_type or "未标注" }}</td>
+  <td>{{ case.acp_status }}</td>
+  <td>{{ case.completeness_status }}</td>
+  <td class="effect-value">{% if case.effect_summary.result_score is not none %}<a href="/runs/{{ run_name }}/cases/{{ case.case_id }}/effect">{{ case.effect_summary.result_score }} / {{ case.effect_summary.result_weight }}</a>{% else %}<span class="metric-missing">未评估</span>{% endif %}</td>
+  <td class="effect-value">{% if case.effect_summary.process_score is not none %}<a href="/runs/{{ run_name }}/cases/{{ case.case_id }}/effect">{{ case.effect_summary.process_score }} / {{ case.effect_summary.process_weight }}</a>{% else %}<span class="metric-missing">未评估</span>{% endif %}</td>
+  <td class="cost-value">{% if case.effect_summary.cost %}<strong>{{ case.effect_summary.cost.value }} {{ case.effect_summary.cost.unit }}</strong><small>{{ case.effect_summary.cost.label }}</small>{% else %}<span class="metric-missing">未采集</span>{% endif %}</td>
+  <td>{{ case.duration if case.duration is not none else "—" }}{% if case.duration is not none %}s{% endif %}</td>
+  <td class="stderr-value">{{ case.stderr_counts.error|default(0) }} / {{ case.stderr_counts.timeout|default(0) }} / {{ case.stderr_counts.warning|default(0) }}</td>
+</tr>{% else %}<tr><td colspan="9">没有匹配任务</td></tr>{% endfor %}
 </tbody></table></div>
 {% endblock %}

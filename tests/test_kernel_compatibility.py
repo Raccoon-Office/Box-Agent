@@ -79,6 +79,7 @@ SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
         "tools",
         "permission_negotiator",
         "hooks",
+        "plugins",
         "memory_manager",
         "memory_extractor",
         "session_log",
@@ -144,6 +145,7 @@ LOOP_SIGNATURE = (
     ("workspace_dir", inspect.Parameter.KEYWORD_ONLY, None),
     ("permission_negotiator", inspect.Parameter.KEYWORD_ONLY, None),
     ("hooks", inspect.Parameter.KEYWORD_ONLY, None),
+    ("plugins", inspect.Parameter.KEYWORD_ONLY, ()),
     ("memory_manager", inspect.Parameter.KEYWORD_ONLY, None),
     ("memory_extractor", inspect.Parameter.KEYWORD_ONLY, None),
     ("memory_turn_id", inspect.Parameter.KEYWORD_ONLY, ""),
@@ -174,6 +176,8 @@ LOOP_SIGNATURE = (
     ("cache_fingerprint_context", inspect.Parameter.KEYWORD_ONLY, None),
     ("cache_fingerprint_sink", inspect.Parameter.KEYWORD_ONLY, None),
     ("active_skill_activator", inspect.Parameter.KEYWORD_ONLY, None),
+    ("skill_engine", inspect.Parameter.KEYWORD_ONLY, None),
+    ("context_engine", inspect.Parameter.KEYWORD_ONLY, None),
     ("current_turn_text", inspect.Parameter.KEYWORD_ONLY, None),
     ("context_resource_ledger", inspect.Parameter.KEYWORD_ONLY, None),
     ("context_resource_dedup_enabled", inspect.Parameter.KEYWORD_ONLY, True),
@@ -181,6 +185,7 @@ LOOP_SIGNATURE = (
     ("tool_result_storage", inspect.Parameter.KEYWORD_ONLY, None),
     ("session_log", inspect.Parameter.KEYWORD_ONLY, None),
     ("session_turn", inspect.Parameter.KEYWORD_ONLY, None),
+    ("kernel_services", inspect.Parameter.KEYWORD_ONLY, None),
 )
 
 INVOKE_TOOL_SIGNATURE = (
@@ -283,6 +288,7 @@ def test_kernel_exports_agent_loop_implementation_entrypoints() -> None:
         "workspace_dir",
         "permission_negotiator",
         "hooks",
+        "plugins",
         "memory_manager",
         "memory_extractor",
         "memory_turn_id",
@@ -313,6 +319,8 @@ def test_kernel_exports_agent_loop_implementation_entrypoints() -> None:
         "cache_fingerprint_context",
         "cache_fingerprint_sink",
         "active_skill_activator",
+        "skill_engine",
+        "context_engine",
         "current_turn_text",
         "context_resource_ledger",
         "context_resource_dedup_enabled",
@@ -320,6 +328,7 @@ def test_kernel_exports_agent_loop_implementation_entrypoints() -> None:
         "tool_result_storage",
         "session_log",
         "session_turn",
+        "kernel_services",
     )
     kernel_services = inspect.signature(kernel.run_agent_loop).parameters["_services"]
     assert kernel_services.kind is inspect.Parameter.KEYWORD_ONLY

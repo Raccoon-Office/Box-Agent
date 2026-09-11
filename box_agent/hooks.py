@@ -329,3 +329,10 @@ def load_hooks(class_paths: list[str]) -> list:
         except Exception as exc:
             log.warning("Failed to load hook %r: %s", path, exc)
     return hooks
+
+
+# 新总线实现独立存放，保留统一的公开导入入口。
+from .hook_bus import (
+    HookBus, HookConfigError, HookRegistration, HookStateError,
+    LegacyHookAdapter, build_hook_context,
+)

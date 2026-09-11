@@ -36,26 +36,23 @@ def test_registry_keeps_artifact_id_stable_and_versions_content(tmp_path: Path) 
         tmp_path,
         context,
         _artifact(file_path),
-        artifact_root_dir=output,
     )
     file_path.write_text("second", encoding="utf-8")
     second = register_artifact_revision(
         tmp_path,
         TaskContext(session_id="session-1", task_id="task-1", turn_id="turn-2"),
         _artifact(file_path),
-        artifact_root_dir=output,
     )
     finish_task(
         tmp_path,
         context,
         execution_status="completed",
-        artifact_root_dir=output,
     )
 
     assert first.artifact_id == second.artifact_id
     assert first.artifact_revision_id != second.artifact_revision_id
     record = json.loads(Path(second.manifest_path).read_text(encoding="utf-8"))
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
     assert record["execution_status"] == "completed"
     assert "delivery_status" not in record
     assert len(record["artifacts"][0]["revisions"]) == 2
@@ -82,10 +79,10 @@ def test_registry_reads_legacy_record_without_reinterpreting_delivery_status(
         encoding="utf-8",
     )
 
-    begin_task(tmp_path, context, artifact_root_dir=tmp_path / "output")
+    begin_task(tmp_path, context)
 
     record = json.loads(path.read_text(encoding="utf-8"))
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
     assert record["execution_status"] == "running"
     assert "delivery_status" not in record
 
@@ -99,12 +96,10 @@ def test_artifact_envelope_exposes_canonical_lineage(tmp_path: Path) -> None:
         tmp_path,
         context,
         artifact,
-        artifact_root_dir=tmp_path,
     )
 
     payload = _artifact_envelope(
         artifact,
-        str(tmp_path),
         session_id=context.session_id,
         task_id=context.task_id,
         turn_id=context.turn_id,

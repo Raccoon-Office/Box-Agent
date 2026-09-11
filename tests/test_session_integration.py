@@ -52,13 +52,13 @@ def test_multi_turn_conversation(mock_llm_client, temp_workspace):
     # Agent automatically adds workspace info to system prompt
     assert system_prompt in agent.messages[0].content
     assert "Current Workspace" in agent.messages[0].content
-    assert "session workspace and default working root" in agent.messages[0].content
+    assert "stable session cwd and default working root" in agent.messages[0].content
     assert (
         "does not by itself define every path the runtime may allow"
         in agent.messages[0].content
     )
     assert "filesystem safety boundary" not in agent.messages[0].content
-    assert "Relative tool paths resolve from each tool's active" in agent.messages[0].content
+    assert "Relative tool paths resolve from this cwd" in agent.messages[0].content
     assert "All relative paths will be resolved relative to this directory" not in agent.messages[0].content
 
     # Add first user message

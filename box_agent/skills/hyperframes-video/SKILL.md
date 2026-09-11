@@ -18,7 +18,7 @@ Use the host-provided HyperFrames runtime for video deliverables when it is avai
 - Pass the project directory (`.`) to `inspect` and `render`, not `index.html`. For `render`, omit `--composition` unless rendering a separate composition HTML file; `--composition main` is wrong because `main` is an id, not a file path.
 - Keep exactly one root HTML file with `data-composition-id` in the project root. Do not leave `template-index.html`, backups, or reference copies with composition metadata beside `index.html`; put references outside the project or save them as `.txt` without composition attributes.
 - Start from `$HYPERFRAMES_TEMPLATE_DIR` when it exists; it contains the stable composition contract. Treat it as the template root itself, not a templates parent. It may already end in `templates/basic-composition`, so copy it with `cp -R "$HYPERFRAMES_TEMPLATE_DIR"/. <project-dir>/` and use vendor assets from `"$HYPERFRAMES_TEMPLATE_DIR/vendor"`; do not append another `/basic-composition`.
-- Write generated videos under the workspace output/artifact directory unless the user named another path.
+- Write generated videos under the selected task directory or unchanged session cwd, unless the user named another path; do not infer a separate output/artifact root.
 - Render with `--strict` first. If strict fails, fix the composition and retry rather than handing raw CLI errors to the user.
 
 ## Existing HTML / Webpage to Video
@@ -85,7 +85,7 @@ When changing the composition id, change the timeline key to exactly match it.
 
 ## Workflow
 
-1. Create a project folder, usually `hyperframes-video` or another clear artifact path under the active artifact root.
+1. Create a project folder, usually `hyperframes-video` or another clear task path under the session cwd or the user's explicit destination.
 2. Copy the template:
 
 ```bash

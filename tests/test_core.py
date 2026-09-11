@@ -525,7 +525,7 @@ class ActiveSkillTool(Tool):
 
 
 @pytest.mark.asyncio
-async def test_get_skill_moves_full_instructions_to_system_prompt() -> None:
+async def test_get_skill_keeps_full_instructions_in_tool_result() -> None:
     messages = _msgs()
     llm = CapturingStreamLLM(
         [
@@ -561,11 +561,71 @@ async def test_get_skill_moves_full_instructions_to_system_prompt() -> None:
     tool_message = next(message for message in second_request if message.role == "tool")
     result_event = next(event for event in events if isinstance(event, ToolCallResult))
 
-    assert "## Active Skill Instructions" in system_message.content
-    assert "MANDATORY_SKILL_RULE" in system_message.content
-    assert "MANDATORY_SKILL_RULE" not in tool_message.content
-    assert "loaded into active system instructions" in tool_message.content
+    assert "## Active Skill Instructions" not in system_message.content
+    assert "MANDATORY_SKILL_RULE" not in system_message.content
+    assert "MANDATORY_SKILL_RULE" in tool_message.content
+    assert "loaded into active system instructions" not in tool_message.content
     assert "MANDATORY_SKILL_RULE" in result_event.content
+
+
+@pytest.mark.asyncio
+async def test_selected_skill_is_reference_on_each_step_and_real_tool_read_reuses_it(tmp_path):
+    from box_agent.skill_runtime import SkillRuntime
+    from box_agent.tools.skill_loader import SkillLoader
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    root = tmp_path / "demo"
+    root.mkdir()
+    (root / "SKILL.md").write_text("---\nname: demo\ndescription: demo\n---\nREAL_SKILL_BODY\n")
+    loader = SkillLoader(sources=[(tmp_path, "user")])
+    loader.discover_skills()
+    runtime = SkillRuntime(loader)
+    runtime.select(["demo"])
+    messages = _msgs()
+    original_user = messages[-1].content
+    llm = CapturingStreamLLM([
+        LLMResponse(content="", tool_calls=[ToolCall(id="read_demo", type="function",
+            function=FunctionCall(name="get_skill", arguments={"skill_name": "demo"}))], finish_reason="tool"),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+    await collect(run_agent_loop(llm=llm, messages=messages, tools={"get_skill": GetSkillTool(loader)},
+                                 skill_engine=runtime, max_steps=3))
+    assert len(llm.message_calls) == 2
+    for request in llm.message_calls:
+        assert "REAL_SKILL_BODY" not in request[0].content
+        assert sum(str(m.content).count("REAL_SKILL_BODY") for m in request) == 1
+    assert messages[1].content == original_user
+    assert "reuse" in next(m.content for m in messages if m.role == "tool")
+    assert all(m.request_only_input_tokens > 0 for m in messages if m.role == "assistant")
+
+
+@pytest.mark.asyncio
+async def test_multiple_skill_results_share_next_request_budget(tmp_path):
+    from box_agent.kernel.context_engine import _fallback_context_estimate
+    from box_agent.tools.skill_loader import SkillLoader
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    for name in ("first", "second"):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: method\n---\n" + (f"{name} useful instructions " * 4 + "\n") * 140
+        )
+    loader = SkillLoader(sources=[(tmp_path, "user")])
+    loader.discover_skills()
+    tool = GetSkillTool(loader)
+    llm = CapturingStreamLLM([
+        LLMResponse(content="", tool_calls=[ToolCall(id=name, type="function", function=FunctionCall(
+            name="get_skill", arguments={"skill_name": name})) for name in ("first", "second")], finish_reason="tool"),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+    messages = _msgs()
+    await collect(run_agent_loop(llm=llm, messages=messages, tools={tool.name: tool}, max_steps=3, token_limit=9000))
+    results = [message for message in messages if message.role == "tool"]
+    assert len(results) == 2
+    assert all("[Skill reference]" in message.content for message in results)
+    assert '"has_more": true' in results[1].content
+    assert _fallback_context_estimate(llm.message_calls[1], {tool.name: tool}) + 1024 <= 9000
 
 
 class ChunkedStreamLLM:
@@ -1168,7 +1228,7 @@ async def test_repetitive_stream_is_aborted_before_it_floods_history():
     content_events = [event for event in events if isinstance(event, ContentEvent)]
     errors = [event for event in events if isinstance(event, ErrorEvent)]
     done = [event for event in events if isinstance(event, DoneEvent)]
-    assert len(content_events) == 7
+    assert len(content_events) == 14  # At most seven chunks per attempt, one retry.
     assert len(errors) == 1 and errors[0].is_fatal is True
     assert "repetitive output" in errors[0].message
     assert done and done[-1].stop_reason == StopReason.ERROR
@@ -5215,12 +5275,12 @@ async def test_messages_mutated_in_place():
 # ── Artifact detection tests ─────────────────────────────────
 
 
-def test_artifact_detect_in_output_dir(tmp_path):
-    """File under {workspace}/output/ is found via regex."""
+def test_artifact_detect_in_nested_task_dir(tmp_path):
+    """A file under cwd is found via its cwd-relative path."""
     out = tmp_path / "output"
     out.mkdir()
     (out / "chart.png").write_bytes(b"\x89PNG")
-    arts = _detect_artifacts("t1", "jupyter", "Here is the result [chart.png]", str(tmp_path))
+    arts = _detect_artifacts("t1", "jupyter", "Here is the result [output/chart.png]", str(tmp_path))
     assert len(arts) == 1
     a = arts[0]
     assert a.filename == "chart.png"
@@ -5234,8 +5294,7 @@ def test_artifact_detect_in_output_dir(tmp_path):
     assert a.produced_at != ""
 
 
-def test_artifact_detect_in_explicit_artifact_root(tmp_path):
-    """Host-supplied session output roots are scanned instead of shared output/."""
+def test_artifact_detect_in_nested_directory_from_cwd(tmp_path):
     session_out = tmp_path / "session-a" / "output"
     session_out.mkdir(parents=True)
     (session_out / "chart.png").write_bytes(b"\x89PNG")
@@ -5243,9 +5302,8 @@ def test_artifact_detect_in_explicit_artifact_root(tmp_path):
     arts = _detect_artifacts(
         "t1",
         "jupyter",
-        "Here is the result [chart.png]",
+        "Here is the result [session-a/output/chart.png]",
         str(tmp_path),
-        artifact_root_dir=session_out,
     )
 
     assert len(arts) == 1
@@ -5254,9 +5312,8 @@ def test_artifact_detect_in_explicit_artifact_root(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_browser_snapshot_relative_filename_uses_artifact_root(tmp_path):
-    output_dir = tmp_path / "session-a" / "output"
-    (output_dir / "research").mkdir(parents=True)
+async def test_browser_snapshot_relative_filename_uses_session_cwd(tmp_path):
+    (tmp_path / "research").mkdir()
     snapshot = RecordingBrowserSnapshotTool()
     llm = MockLLM(
         [
@@ -5285,12 +5342,11 @@ async def test_browser_snapshot_relative_filename_uses_artifact_root(tmp_path):
             tools={"managed_browser_snapshot": snapshot},
             max_steps=5,
             workspace_dir=str(tmp_path),
-            artifact_root_dir=output_dir,
         )
     )
 
     assert snapshot.filenames == [""]
-    persisted = output_dir / "research" / "source.md"
+    persisted = tmp_path / "research" / "source.md"
     assert persisted.read_text(encoding="utf-8") == "snapshot:"
     assert any(
         isinstance(event, ArtifactEvent) and event.abs_path == str(persisted)
@@ -5299,9 +5355,8 @@ async def test_browser_snapshot_relative_filename_uses_artifact_root(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_managed_browser_snapshot_relative_filename_uses_artifact_root(tmp_path):
-    output_dir = tmp_path / "session-a" / "output"
-    (output_dir / "research").mkdir(parents=True)
+async def test_managed_browser_snapshot_relative_filename_uses_session_cwd(tmp_path):
+    (tmp_path / "research").mkdir()
     snapshot = RecordingBrowserSnapshotTool("managed_browser_snapshot")
     llm = MockLLM(
         [
@@ -5330,12 +5385,11 @@ async def test_managed_browser_snapshot_relative_filename_uses_artifact_root(tmp
             tools={"managed_browser_snapshot": snapshot},
             max_steps=5,
             workspace_dir=str(tmp_path),
-            artifact_root_dir=output_dir,
         )
     )
 
     assert snapshot.filenames == [""]
-    persisted = output_dir / "research" / "source.md"
+    persisted = tmp_path / "research" / "source.md"
     assert persisted.read_text(encoding="utf-8") == "snapshot:"
     assert any(
         isinstance(event, ArtifactEvent) and event.abs_path == str(persisted)
@@ -5344,9 +5398,7 @@ async def test_managed_browser_snapshot_relative_filename_uses_artifact_root(tmp
 
 
 @pytest.mark.asyncio
-async def test_browser_snapshot_relative_filename_cannot_escape_artifact_root(tmp_path):
-    output_dir = tmp_path / "output"
-    output_dir.mkdir()
+async def test_browser_snapshot_relative_filename_cannot_escape_session_cwd(tmp_path):
     snapshot = RecordingBrowserSnapshotTool()
     llm = MockLLM(
         [
@@ -5375,7 +5427,6 @@ async def test_browser_snapshot_relative_filename_cannot_escape_artifact_root(tm
             tools={"managed_browser_snapshot": snapshot},
             max_steps=5,
             workspace_dir=str(tmp_path),
-            artifact_root_dir=output_dir,
         )
     )
 
@@ -5385,26 +5436,24 @@ async def test_browser_snapshot_relative_filename_cannot_escape_artifact_root(tm
 
 
 def test_artifact_detect_data_kind(tmp_path):
-    """CSV under output/ is classified as data."""
+    """CSV under a cwd child directory is classified as data."""
     out = tmp_path / "output"
     out.mkdir()
     (out / "results.csv").write_text("a,b\n1,2")
-    arts = _detect_artifacts("t2", "jupyter", "Saved to [results.csv]", str(tmp_path))
+    arts = _detect_artifacts("t2", "jupyter", "Saved to [output/results.csv]", str(tmp_path))
     assert len(arts) == 1
     assert arts[0].kind == "data"
     assert "csv" in arts[0].mime
     assert arts[0].rel_path == "output/results.csv"
 
 
-def test_browser_screenshot_is_persisted_inside_artifact_root(tmp_path):
-    output_dir = tmp_path / "output"
+def test_browser_screenshot_is_persisted_inside_session_cwd(tmp_path):
     arguments = {"filename": "qa/slide-01.png"}
 
     target, error = core._prepare_browser_screenshot_output(
         "managed_browser_take_screenshot",
         arguments,
         str(tmp_path),
-        output_dir,
     )
     result = core._persist_browser_screenshot_output(
         ToolResult(
@@ -5421,7 +5470,7 @@ def test_browser_screenshot_is_persisted_inside_artifact_root(tmp_path):
 
     assert error is None
     assert arguments == {}
-    assert (output_dir / "qa/slide-01.png").read_bytes() == b"image"
+    assert (tmp_path / "qa/slide-01.png").read_bytes() == b"image"
     assert result.success is True
     assert "Screenshot persisted" in result.content
 
@@ -5452,11 +5501,11 @@ def test_inline_screenshot_bytes_are_redacted_from_trace_payload():
     }
 
 
-def test_artifact_detect_ignores_workspace_root(tmp_path):
-    """Files at workspace root (user-supplied inputs) are NOT picked up."""
+def test_artifact_detects_explicit_workspace_root_reference(tmp_path):
+    """Explicitly referenced files at cwd root are valid artifacts."""
     (tmp_path / "user-upload.png").write_bytes(b"\x89PNG")
     arts = _detect_artifacts("t3", "jupyter", "See [user-upload.png]", str(tmp_path))
-    assert arts == []
+    assert [artifact.filename for artifact in arts] == ["user-upload.png"]
 
 
 def test_artifact_detect_no_match(tmp_path):
@@ -5472,7 +5521,7 @@ def test_artifact_detect_multiple(tmp_path):
     out.mkdir()
     (out / "a.png").write_bytes(b"\x89PNG")
     (out / "b.pdf").write_bytes(b"%PDF")
-    arts = _detect_artifacts("t5", "jupyter", "Results: [a.png] and [b.pdf]", str(tmp_path))
+    arts = _detect_artifacts("t5", "jupyter", "Results: [output/a.png] and [output/b.pdf]", str(tmp_path))
     assert len(arts) == 2
     names = {a.filename for a in arts}
     assert names == {"a.png", "b.pdf"}
@@ -5503,7 +5552,7 @@ def test_detect_new_files_dedupes_against_regex_artifacts(tmp_path):
     (out / "chart.png").write_bytes(b"\x89PNG")
 
     pre_files: set = set()
-    regex_arts = _detect_artifacts("tc", "jupyter", "Saved [chart.png]", str(tmp_path))
+    regex_arts = _detect_artifacts("tc", "jupyter", "Saved [output/chart.png]", str(tmp_path))
     assert len(regex_arts) == 1
 
     already = {a.abs_path for a in regex_arts}
@@ -5513,7 +5562,7 @@ def test_detect_new_files_dedupes_against_regex_artifacts(tmp_path):
     assert new_arts == [], "file already emitted by regex pass must not be re-emitted"
 
 
-def test_snapshot_workspace_uses_explicit_artifact_root(tmp_path):
+def test_snapshot_workspace_scans_original_cwd_recursively(tmp_path):
     session_out = tmp_path / "session-b" / "output"
     default_out = tmp_path / "output"
     session_out.mkdir(parents=True)
@@ -5522,9 +5571,51 @@ def test_snapshot_workspace_uses_explicit_artifact_root(tmp_path):
     expected.write_bytes(b"ppt")
     (default_out / "old.png").write_bytes(b"old")
 
-    files = _snapshot_workspace(str(tmp_path), artifact_root_dir=session_out)
+    files = _snapshot_workspace(str(tmp_path))
 
-    assert files == {expected}
+    assert files == {expected, default_out / "old.png"}
+
+
+def test_snapshot_workspace_excludes_dependencies_caches_and_agent_internals(tmp_path):
+    included = tmp_path / "task" / "report.md"
+    included.parent.mkdir()
+    included.write_text("report", encoding="utf-8")
+    for directory in (
+        ".git",
+        ".box-agent",
+        ".box-agent-scratch",
+        ".pytest_cache",
+        ".venv",
+        "node_modules",
+        "__pycache__",
+    ):
+        ignored = tmp_path / directory / "ignored.txt"
+        ignored.parent.mkdir()
+        ignored.write_text("ignored", encoding="utf-8")
+
+    assert _snapshot_workspace(str(tmp_path)) == {included}
+
+
+def test_snapshot_workspace_file_cap_warns_and_keeps_explicit_path_fallback(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setenv("BOX_AGENT_ARTIFACT_SCAN_MAX_FILES", "1")
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="box_agent.core"):
+        snapshot = _snapshot_workspace(str(tmp_path))
+
+    assert snapshot is None
+    assert "explicit tool file paths remain available" in caplog.text
+    artifacts = _detect_artifacts(
+        "tool-1", "write_file", "Saved [second.txt]", str(tmp_path)
+    )
+    assert [artifact.abs_path for artifact in artifacts] == [str(second)]
 
 
 @pytest.mark.asyncio
@@ -5641,7 +5732,6 @@ async def test_run_agent_loop_emits_new_revision_artifact_after_edit(tmp_path):
             },
             max_steps=3,
             workspace_dir=str(tmp_path),
-            artifact_root_dir=output,
         )
     )
 
@@ -5945,23 +6035,24 @@ def test_avoid_collision(tmp_path):
 
 def test_artifact_envelope_shape(tmp_path):
     from box_agent.acp import _artifact_envelope
-    from box_agent.core import ensure_output_dir, _make_artifact
-    out = ensure_output_dir(tmp_path)
+    from box_agent.core import _make_artifact
+    out = tmp_path / "reports"
+    out.mkdir()
     f = out / "report.xlsx"
     f.write_bytes(b"PK\x03\x04")
     art = _make_artifact("tc-1", f, tmp_path)
-    env = _artifact_envelope(art, str(out), session_id="office-session-1")
+    env = _artifact_envelope(art, session_id="office-session-1")
     assert env["type"] == "artifact"
     assert env["kind"] == "spreadsheet"
     assert env["filename"] == "report.xlsx"
-    assert env["rel_path"] == "output/report.xlsx"
-    assert env["abs_path"].endswith("output/report.xlsx")
+    assert env["rel_path"] == "reports/report.xlsx"
+    assert env["abs_path"].endswith("reports/report.xlsx")
     assert env["uri"].startswith("file://")
     assert env["size"] == 4
     assert env["sha256"]
     assert env["produced_at"]
     assert env["tool_call_id"] == "tc-1"
-    assert env["output_dir"] == str(out)
+    assert "output_dir" not in env
     assert env["session_id"] == "office-session-1"
     assert env["sessionId"] == "office-session-1"
     # canonical schema only — no legacy aliases
@@ -5996,6 +6087,7 @@ def test_roadmap_artifact_envelope_includes_controlled_metadata(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=tmp_path,
     )
     assert rendered.returncode == 0, rendered.stderr
 

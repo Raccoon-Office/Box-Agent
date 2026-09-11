@@ -5,7 +5,7 @@
 All outputs must be under:
 
 ```text
-{workspace}/research/
+{output_dir}/research/
 ```
 
 ## Citation Format
@@ -107,7 +107,7 @@ Entity/source rules:
 ### Validation Report
 
 After the Markdown artifacts are complete, run the bundled validator with
-`--report {workspace}/research/qa/{topic}_research_check.json`. The report is
+`--report {output_dir}/research/qa/{topic}_research_check.json`. The report is
 the machine-readable handoff to downstream presentation/report workflows. Its
 stable boundary is `presentation_handoff` schema v1:
 

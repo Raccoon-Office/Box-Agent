@@ -6,6 +6,7 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
 import signal
 import shutil
 from dataclasses import asdict, dataclass, field
@@ -15,6 +16,7 @@ from time import monotonic, monotonic_ns
 from typing import Any, Callable, Mapping, Sequence
 
 from acp_eval import SCHEMA_VERSION
+from acp_eval.effect_client import EffectEvaluationConfig, evaluate_attempt
 from acp_eval.ids import new_attempt_id
 from acp_eval.lifecycle import ProcessRecorder, drain_stream, stop_process
 from acp_eval.models import AttemptManifest, CaseMetadata, RunResult
@@ -27,6 +29,14 @@ from acp_eval.storage import atomic_write_json, sha256_file
 # This is transport backpressure capacity, not a frame-size ceiling. Frames are
 # assembled from persisted 64 KiB chunks and may be arbitrarily larger.
 ACP_STREAM_BUFFER_LIMIT = 4 * 1024 * 1024
+_AUTO_ROUTE_TAGS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("presentation", re.compile(r"PPT|PPTX|演示文稿|幻灯片|slides?|presentation", re.I)),
+    ("data-analysis", re.compile(r"数据|表格|CSV|Excel|统计|data|spreadsheet", re.I)),
+    ("code", re.compile(r"代码|开发|网页|网站|HTML|code|develop|website", re.I)),
+    ("document", re.compile(r"文档|文件|报告|PDF|Word|document|report", re.I)),
+    ("analysis", re.compile(r"分析|比较|评估|analysis|compare|evaluate", re.I)),
+    ("reasoning", re.compile(r"推理|论证|证明|reasoning|proof", re.I)),
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +46,11 @@ class CaseConfig:
     dataset_root: Path
     timeout_seconds: float
     python_executable: str
+    effect_eval_url: str | None = None
+    effect_eval_timeout_seconds: float = 180.0
+    model: str | None = None
+    model_max_tokens: int | None = None
+    model_binding: dict[str, Any] | None = None
 
 
 @dataclass
@@ -180,10 +195,12 @@ def _new_attempt_dir(case_dir: Path) -> tuple[str, Path]:
 
 def _session_params(
     workspace: Path, case_id: str, metadata: CaseMetadata | None = None,
+    *, model: str | None = None, model_max_tokens: int | None = None,
+    model_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     workspace = workspace.resolve()
     metadata = metadata or CaseMetadata()
-    return {
+    params = {
         "cwd": str(workspace),
         "mcpServers": [],
         "_meta": {
@@ -195,12 +212,59 @@ def _session_params(
                 "allowed_directories": list(metadata.allowed_directories),
                 "filesystem_scope": "session_workspace",
             },
-            "workspace_layout": {
-                "artifact_root_dir": str(workspace / "output"),
-            },
             **metadata.session,
         },
     }
+    binding = dict(model_binding) if model_binding is not None else None
+    if binding is None and model:
+        binding = {"source": "builtin", "model": model}
+        if model_max_tokens is not None:
+            binding["maxTokens"] = model_max_tokens
+    if binding is not None:
+        params["_meta"].update(llm_binding=binding, enableBuiltinModelRouting=True)
+    return params
+
+
+def _resolve_model_binding(
+    model_binding: Mapping[str, Any] | None,
+    query: str,
+) -> dict[str, Any] | None:
+    if model_binding is None:
+        return None
+    binding = dict(model_binding)
+    mode = binding.pop("evaluationMode", "manual")
+    if mode == "manual":
+        return binding
+    if mode != "auto":
+        raise ValueError("unsupported evaluation model routing mode")
+    auto_routing = binding.get("autoRouting")
+    candidates = (
+        auto_routing.get("models", [])
+        if isinstance(auto_routing, Mapping)
+        else []
+    )
+    task_tags = {
+        tag for tag, pattern in _AUTO_ROUTE_TAGS if pattern.search(query)
+    } or {"general", "chat"}
+    eligible = [candidate for candidate in candidates if isinstance(candidate, Mapping)]
+    if not eligible:
+        raise ValueError("automatic model routing has no eligible model")
+    selected = max(
+        eligible,
+        key=lambda candidate: (
+            len(task_tags.intersection(candidate.get("tags", []))),
+            int(candidate.get("abilityLevel", 0)),
+        ),
+    )
+    if not isinstance(selected.get("model"), str) or not selected["model"]:
+        raise ValueError("automatic model routing selected an invalid model")
+    binding["model"] = selected["model"]
+    for key in ("contextWindow", "maxTokens"):
+        if key in selected:
+            binding[key] = selected[key]
+        else:
+            binding.pop(key, None)
+    return binding
 
 
 def _prompt_params(
@@ -356,9 +420,16 @@ async def _exchange(
     timeout_seconds: float,
     metadata: CaseMetadata | None = None,
     input_files: Sequence[Path] = (),
+    *, model: str | None = None,
+    model_max_tokens: int | None = None,
+    model_binding: Mapping[str, Any] | None = None,
 ) -> None:
     deadline = monotonic() + timeout_seconds
-    session_params = _session_params(workspace, case_id, metadata)
+    session_params = _session_params(
+        workspace, case_id, metadata,
+        model=model, model_max_tokens=model_max_tokens,
+        model_binding=_resolve_model_binding(model_binding, query),
+    )
     session_meta = session_params.get("_meta")
     upstream_session_id = (
         session_meta.get("session_id")
@@ -562,8 +633,11 @@ async def _run_process(
                 case_id,
                 query,
                 config.timeout_seconds,
-                metadata,
-                input_files,
+                metadata=metadata,
+                input_files=input_files,
+                model=config.model,
+                model_max_tokens=config.model_max_tokens,
+                model_binding=config.model_binding,
             )
         except asyncio.TimeoutError:
             state.acp_status = "timeout"
@@ -1498,4 +1572,21 @@ def run_case(record: Mapping[str, Any], config: CaseConfig) -> RunResult:
             process_recorder,
             state,
         )
+    if config.effect_eval_url:
+        # This additive integration runs only after the original ACP evidence
+        # package has reached its terminal state. Service failures are captured
+        # in effect_evaluation.json and never change ACP/completeness outcomes.
+        try:
+            evaluate_attempt(
+                attempt_dir,
+                record,
+                EffectEvaluationConfig(
+                    config.effect_eval_url,
+                    timeout_seconds=config.effect_eval_timeout_seconds,
+                ),
+            )
+        except Exception:
+            # The evaluator is an optional observer. Even a local persistence
+            # failure must not rewrite the already-finalized ACP outcome.
+            pass
     return result

@@ -13,7 +13,8 @@ from ..base import Tool, ToolResult
 if TYPE_CHECKING:
     from ...context_resources import ContextResourceLedger
     from ...events import ToolCallResult
-    from ...hooks import HookManager
+    from ...kernel.ports import HookBusPort, HookDispatchPort
+    from ...kernel.hook_types import HookContext
     from ...logger import AgentLogger
     from ...tool_result_storage import ToolResultStorage
 
@@ -39,7 +40,7 @@ class ToolRunContext:
     """Borrowed services and narrow kernel callbacks for one outer run."""
 
     messages: list[Message]
-    hooks: HookManager
+    hooks: HookBusPort
     result_storage: ToolResultStorage
     is_cancelled: Callable[[], bool]
     record_call: Callable[[ToolCallRecord, int], None]
@@ -48,6 +49,7 @@ class ToolRunContext:
     validate_followup: Callable[[ToolResult, Tool | None, int], tuple[ToolResult, list[dict[str, Any]] | None, int]]
     policy_error: Callable[[str, dict[str, Any]], str | None]
     workspace_dir: str | None = None
+    # Deprecated compatibility input; artifact discovery always uses workspace_dir.
     artifact_root_dir: str | Path | None = None
     session_id: str = ""
     turn_id: str = ""
@@ -55,6 +57,9 @@ class ToolRunContext:
     logger: AgentLogger | None = None
     resource_ledger: ContextResourceLedger | None = None
     activate_skill: Callable[[str, str], None] | None = None
+    hook_dispatch: HookDispatchPort | None = None
+    hook_context: HookContext | None = None
+    skill_reader: Callable[..., ToolResult] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +90,13 @@ class ToolCallRecord:
     started_at: float = 0.0
     snapshot_target: Path | None = None
     screenshot_target: Path | None = None
-    before_files: dict[Path, tuple[int, int]] = field(default_factory=dict)
+    before_files: dict[Path, tuple[int, int]] | None = None
     execution_result: ToolResult | None = None
     policy_decision: dict[str, Any] | None = None
     parallel: bool = False
+    invoked: bool = False
+    executed: bool = False
+    hook_rejection: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

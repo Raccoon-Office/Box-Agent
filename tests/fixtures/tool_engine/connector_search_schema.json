@@ -1,0 +1,40 @@
+{
+  "name": "tool_search",
+  "description": "Search allowed local utilities and the connected deferred MCP catalog by capability. Local utilities include file append, diagnostics, plans, progress, goals, memory, scheduling and integrations when available. Every hit returned by this call is immediately activated for this session and only those activated hits are added to the next model step; other deferred catalog tools are not exposed, while alwaysLoad tools remain visible without search. Use query for one keyword search, queries for independent bilingual or synonymous searches, or tool_names to activate only exact catalog IDs, model-facing names, or unique original MCP names. Passing only server_name activates all tools from that one enabled server. Provide at least one non-empty query, queries, tool_names, server_name, or connector input; they may be combined. Prefer short capability, server, connector, or tool keywords; task-specific operands are tolerated but should be omitted when possible. Passing only connector activates all tools owned by the uniquely matched enabled connector. Set top_k to however many matching tool schemas the task actually needs, including ten or more when appropriate. A query hit may activate a protocol-required companion, such as the snapshot paired with managed browser navigation, in addition to top_k. The response reports catalog_tool_count for the applied server scope, matched_count after query limits, and activated_count after conflict filtering; these counts remain MCP-only, with local counts reported separately. server_name selects only MCP tools. Never infer the catalog total from top_k or matched_count. This search activates tools but does not execute them.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "One capability, action, server, or tool keyword query. Kept for compatibility; prefer queries for independent alternatives."
+      },
+      "queries": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1,
+        "description": "Independent keyword queries merged by each tool's best relevance. Use separate Chinese, English, synonym, or exact capability phrases. Prefix matches are supported and unmatched task operands are tolerated."
+      },
+      "tool_names": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1,
+        "description": "Exact tool IDs, model-facing names, or unique original MCP names to activate, such as mcp:server/tool, server/tool, or an MCP tools/list name. No fuzzy fallback is used, and unlisted catalog tools remain hidden."
+      },
+      "server_name": {
+        "type": "string",
+        "description": "Exact internal MCP server name. On its own, activates all tools from that enabled server; with query, connector, or tool_names, it narrows the normal discovery scope."
+      },
+      "connector": {
+        "type": "string",
+        "description": "Connector ID or unique display-name text from <connector-status>, such as pkulaw or \u5317\u5927\u6cd5\u5b9d. On its own, activates all tools owned by that enabled connector; with query, server_name, or tool_names, it narrows the normal discovery scope."
+      },
+      "top_k": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 1,
+        "description": "Exact maximum number of query matches to return and activate; ignored for tool_names and server-only activation. Choose any positive count required by the task; there is no small fixed cap. Protocol-required companions may be activated in addition to these query matches. Other unreturned catalog tools remain hidden."
+      }
+    },
+    "additionalProperties": false
+  }
+}

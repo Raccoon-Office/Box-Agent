@@ -35,6 +35,7 @@ import yaml
 
 from box_agent import LLMClient, __version__
 from box_agent.agent_session import AgentSession
+from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.cli_renderer import render_agent_events
 from box_agent.agent_runtime import (
     build_agent,
@@ -44,7 +45,6 @@ from box_agent.agent_runtime import (
     build_permission_engine,
 )
 from box_agent.cli_renderer import Colors
-from box_agent.artifacts import ensure_output_dir
 from box_agent.agent import (
     Agent,
     GoalState,
@@ -72,11 +72,7 @@ from box_agent.tools.mcp_loader import (
     reconnect_auth_failed_mcp_servers_if_token_changed,
 )
 from box_agent.tools.skill_preload import (
-    # Compatibility import for callers that patched the historical builder;
-    # turn execution delegates to ``prepare_auto_loaded_skills`` below.
-    build_auto_loaded_skills_prompt,
     resolve_explicit_skill_invocation,
-    turn_preload_skill_names,
 )
 from box_agent.tools.setup import (
     add_workspace_tools,
@@ -109,8 +105,8 @@ from box_agent.project_context import (
     build_project_startup_context_prompt,
     compose_prompt_segments,
 )
-from box_agent.skill_runtime import prepare_auto_loaded_skills
 from box_agent.workspace_registry import WorkspaceRegistry, WorkspaceRegistryError
+from box_agent.session_log import SessionLog, default_session_root
 
 from box_agent.user_paths import state_path
 
@@ -885,109 +881,129 @@ def cmd_goal(
     evidence: list[str] | None = None,
     progress: list[str] | None = None,
     json_output: bool = False,
+    session_id: str | None = None,
 ) -> int:
-    """Scriptable CLI goal management without starting the agent runtime."""
-    action = (action or "status").strip().lower()
-    text_value = " ".join(text or []).strip()
-    evidence_items = [item.strip() for item in (evidence or []) if item.strip()]
-    progress_items = [item.strip() for item in (progress or []) if item.strip()]
-    goal = _load_goal_state(workspace_dir)
-    now = datetime.now().isoformat()
-
-    def emit(ok: bool = True, error: str | None = None) -> int:
-        if json_output:
-            payload = {"ok": ok, "goal": goal_payload(goal)}
-            if error:
-                payload["error"] = error
-            _json_print(payload)
-        else:
-            if error:
-                print(f"{Colors.RED}❌ {error}{Colors.RESET}")
-            elif goal is None:
-                print(f"{Colors.DIM}No goal for workspace: {workspace_dir}{Colors.RESET}")
+    """Scriptable CLI goal management with one action policy for both stores."""
+    logical_session_id = (session_id or "").strip()
+    opened = (SessionLog.open_or_create(
+        default_session_root(), session_id=logical_session_id,
+        cwd=workspace_dir, origin="cli",
+    ) if logical_session_id else None)
+    log = opened.log if opened is not None else None
+    try:
+        def save_goal(value):
+            if log is not None:
+                log.append("goal/change", {"goal": goal_payload(value)})
+                log.flush()
             else:
-                temp_agent = Agent.__new__(Agent)
-                temp_agent.goal = goal
-                print_goal_status(temp_agent)
-        return 0 if ok else 1
+                _save_goal_state(workspace_dir, value)
 
-    if action in ("status", "get"):
+        action = (action or "status").strip().lower()
+        text_value = " ".join(text or []).strip()
+        evidence_items = [item.strip() for item in (evidence or []) if item.strip()]
+        progress_items = [item.strip() for item in (progress or []) if item.strip()]
+        goal = goal_state_from_payload(log.replay().goal) if log is not None else _load_goal_state(workspace_dir)
+        now = datetime.now().isoformat()
+
+        def emit(ok: bool = True, error: str | None = None) -> int:
+            if json_output:
+                payload = {"ok": ok, "goal": goal_payload(goal)}
+                if opened is not None:
+                    payload.update(sessionId=logical_session_id, resumed=opened.resumed)
+                if error:
+                    payload["error"] = error
+                _json_print(payload)
+            else:
+                if error:
+                    print(f"{Colors.RED}❌ {error}{Colors.RESET}")
+                elif goal is None:
+                    print(f"{Colors.DIM}No goal for workspace: {workspace_dir}{Colors.RESET}")
+                else:
+                    temp_agent = Agent.__new__(Agent)
+                    temp_agent.goal = goal
+                    print_goal_status(temp_agent)
+            return 0 if ok else 1
+
+        if action in ("status", "get"):
+            return emit()
+
+        if action == "set":
+            if not text_value:
+                return emit(False, "Goal objective is required.")
+            goal = GoalState(
+                objective=text_value,
+                status="active",
+                created_at=now,
+                updated_at=now,
+                evidence=evidence_items,
+                progress=progress_items,
+            )
+            save_goal(goal)
+            return emit()
+
+        if action == "clear":
+            goal = None
+            save_goal(None)
+            return emit()
+
+        if goal is None:
+            return emit(False, "No goal is set for this workspace.")
+
+        if action == "pause":
+            goal.status = "paused"
+            goal.updated_at = now
+        elif action == "resume":
+            goal.status = "active"
+            goal.blocked_reason = None
+            goal.updated_at = now
+        elif action == "complete":
+            goal.status = "complete"
+            goal.blocked_reason = None
+            if text_value:
+                evidence_items.append(text_value)
+            if not evidence_items:
+                evidence_items.append("Completed via `box-agent goal complete`.")
+            for item in evidence_items:
+                if item not in goal.evidence:
+                    goal.evidence.append(item)
+            for item in progress_items:
+                if item not in goal.progress:
+                    goal.progress.append(item)
+            goal.completed_by = "cli"
+            goal.updated_at = now
+        elif action == "progress":
+            if text_value:
+                progress_items.append(text_value)
+            if not progress_items:
+                return emit(False, "Progress text is required.")
+            for item in progress_items:
+                if item not in goal.progress:
+                    goal.progress.append(item)
+            for item in evidence_items:
+                if item not in goal.evidence:
+                    goal.evidence.append(item)
+            goal.updated_at = now
+        elif action == "block":
+            reason = text_value
+            if not reason:
+                return emit(False, "Blocked reason is required.")
+            goal.status = "blocked"
+            goal.blocked_reason = reason
+            for item in evidence_items:
+                if item not in goal.evidence:
+                    goal.evidence.append(item)
+            for item in progress_items:
+                if item not in goal.progress:
+                    goal.progress.append(item)
+            goal.updated_at = now
+        else:
+            return emit(False, f"Unknown goal action: {action}")
+
+        save_goal(goal)
         return emit()
-
-    if action == "set":
-        if not text_value:
-            return emit(False, "Goal objective is required.")
-        goal = GoalState(
-            objective=text_value,
-            status="active",
-            created_at=now,
-            updated_at=now,
-            evidence=evidence_items,
-            progress=progress_items,
-        )
-        _save_goal_state(workspace_dir, goal)
-        return emit()
-
-    if action == "clear":
-        goal = None
-        _save_goal_state(workspace_dir, None)
-        return emit()
-
-    if goal is None:
-        return emit(False, "No goal is set for this workspace.")
-
-    if action == "pause":
-        goal.status = "paused"
-        goal.updated_at = now
-    elif action == "resume":
-        goal.status = "active"
-        goal.blocked_reason = None
-        goal.updated_at = now
-    elif action == "complete":
-        goal.status = "complete"
-        goal.blocked_reason = None
-        if text_value:
-            evidence_items.append(text_value)
-        if not evidence_items:
-            evidence_items.append("Completed via `box-agent goal complete`.")
-        for item in evidence_items:
-            if item not in goal.evidence:
-                goal.evidence.append(item)
-        for item in progress_items:
-            if item not in goal.progress:
-                goal.progress.append(item)
-        goal.completed_by = "cli"
-        goal.updated_at = now
-    elif action == "progress":
-        if text_value:
-            progress_items.append(text_value)
-        if not progress_items:
-            return emit(False, "Progress text is required.")
-        for item in progress_items:
-            if item not in goal.progress:
-                goal.progress.append(item)
-        for item in evidence_items:
-            if item not in goal.evidence:
-                goal.evidence.append(item)
-        goal.updated_at = now
-    elif action == "block":
-        reason = text_value
-        if not reason:
-            return emit(False, "Blocked reason is required.")
-        goal.status = "blocked"
-        goal.blocked_reason = reason
-        for item in evidence_items:
-            if item not in goal.evidence:
-                goal.evidence.append(item)
-        for item in progress_items:
-            if item not in goal.progress:
-                goal.progress.append(item)
-        goal.updated_at = now
-    else:
-        return emit(False, f"Unknown goal action: {action}")
-
-    _save_goal_state(workspace_dir, goal)
-    return emit()
+    finally:
+        if log is not None:
+            log.close()
 
 
 def _workspace_from_args(args: argparse.Namespace) -> Path:
@@ -1089,6 +1105,11 @@ Examples:
         help="Disable Jupyter sandbox mode (sandbox is enabled by default)",
     )
 
+    parser.add_argument(
+        "--session-id", "--resume", dest="session_id", default=None,
+        help="Resume or create a durable logical Session by ID",
+    )
+
     # Subcommands
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -1138,6 +1159,11 @@ Examples:
         type=str,
         default=None,
         help="Workspace directory for this goal command",
+    )
+
+    goal_parser.add_argument(
+        "--session-id", "--resume", dest="session_id", default=argparse.SUPPRESS,
+        help="Read or update the canonical SessionLog by ID",
     )
 
     # setup subcommand
@@ -1791,6 +1817,8 @@ async def run_agent(
     deep_think: bool = False,
     force_plan_start: bool = False,
     goal_autopilot_enabled: bool = True,
+    *,
+    session_id: str | None = None,
 ) -> int:
     """Run Agent in interactive or non-interactive mode.
 
@@ -1804,6 +1832,7 @@ async def run_agent(
         deep_think: If True, enable thinking mode for the run
         force_plan_start: If True, require the next turn to publish a plan first
         goal_autopilot_enabled: If True, continue active goals in --task mode within configured budgets
+        session_id: Optional logical session ID, supplied by keyword
     """
     session_start = datetime.now()
 
@@ -1875,984 +1904,783 @@ async def run_agent(
     # Convert provider string to LLMProvider enum
     provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
 
-    llm_client = build_llm_client(
-        client_factory=LLMClient,
-        api_key=config.llm.api_key,
-        provider=provider,
-        api_base=config.llm.api_base,
-        model=config.llm.model,
-        retry_config=retry_config if config.llm.retry.enabled else None,
-        max_output_tokens=config.llm.max_output_tokens,
-        auth_file=config.llm.auth_file,
-        timeout=config.llm.timeout,
-        reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
-    )
+    owned_clients = []
+    session_log = None
 
-    # Set retry callback
-    if config.llm.retry.enabled:
-        llm_client.retry_callback = on_retry
-        print(f"{Colors.GREEN}✅ LLM retry mechanism enabled (max {config.llm.retry.max_retries} retries){Colors.RESET}")
+    def _new_client(**kwargs):
+        client = build_llm_client(**kwargs)
+        owned_clients.append(client)
+        return client
 
-    # 2.5 Verify API connectivity with a lightweight test call (no retry)
-    if verify_api:
-        print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
-        try:
-            from box_agent.retry import RetryConfig as VerifyRetryConfig
-            # Use a temporary client with retry disabled to avoid long waits
-            _verify_client = build_llm_client(
-                client_factory=LLMClient,
-                api_key=config.llm.api_key,
-                provider=provider,
-                api_base=config.llm.api_base,
-                model=config.llm.model,
-                retry_config=VerifyRetryConfig(enabled=False),
-                max_output_tokens=config.llm.max_output_tokens,
-                auth_file=config.llm.auth_file,
-                timeout=config.llm.timeout,
-                reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
-            )
-            await _probe_llm_api(_verify_client)
-            print(f"{Colors.GREEN}OK{Colors.RESET}")
-        except Exception as e:
-            err_str = str(e)
-            print(f"{Colors.RED}FAILED{Colors.RESET}")
-            print(f"\n{Colors.RED}❌ API connection failed: {err_str}{Colors.RESET}")
-            print()
-            print(f"{Colors.DIM}  api_key:    {config.llm.api_key[:8]}...{Colors.RESET}")
-            print(f"{Colors.DIM}  api_base:   {config.llm.api_base}{Colors.RESET}")
-            print(f"{Colors.DIM}  provider:   {config.llm.provider}{Colors.RESET}")
-            print(f"{Colors.DIM}  model:      {config.llm.model}{Colors.RESET}")
-            print()
-            if task:
-                print(f"{Colors.YELLOW}Use `--no-verify-api` to skip the startup probe when you expect the first LLM call to handle connectivity.{Colors.RESET}")
-                return 1
-            # Offer to re-run setup wizard
+    try:
+        llm_client = _new_client(
+            client_factory=LLMClient,
+            api_key=config.llm.api_key,
+            provider=provider,
+            api_base=config.llm.api_base,
+            model=config.llm.model,
+            retry_config=retry_config if config.llm.retry.enabled else None,
+            max_output_tokens=config.llm.max_output_tokens,
+            auth_file=config.llm.auth_file,
+            timeout=config.llm.timeout,
+            reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
+        )
+
+        # Set retry callback
+        if config.llm.retry.enabled:
+            llm_client.retry_callback = on_retry
+            print(f"{Colors.GREEN}✅ LLM retry mechanism enabled (max {config.llm.retry.max_retries} retries){Colors.RESET}")
+
+        # 2.5 Verify API connectivity with a lightweight test call (no retry)
+        if verify_api:
+            print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
             try:
-                answer = input(f"{Colors.BRIGHT_CYAN}Would you like to reconfigure? [Y/n]: {Colors.RESET}").strip().lower()
-            except (EOFError, KeyboardInterrupt):
+                from box_agent.retry import RetryConfig as VerifyRetryConfig
+                # Use a temporary client with retry disabled to avoid long waits
+                _verify_client = _new_client(
+                    client_factory=LLMClient,
+                    api_key=config.llm.api_key,
+                    provider=provider,
+                    api_base=config.llm.api_base,
+                    model=config.llm.model,
+                    retry_config=VerifyRetryConfig(enabled=False),
+                    max_output_tokens=config.llm.max_output_tokens,
+                    auth_file=config.llm.auth_file,
+                    timeout=config.llm.timeout,
+                    reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
+                )
+                await _probe_llm_api(_verify_client)
+                print(f"{Colors.GREEN}OK{Colors.RESET}")
+            except Exception as e:
+                err_str = str(e)
+                print(f"{Colors.RED}FAILED{Colors.RESET}")
+                print(f"\n{Colors.RED}❌ API connection failed: {err_str}{Colors.RESET}")
                 print()
-                return 1
-            if answer in ("", "y", "yes"):
-                if run_setup_wizard(config_path):
-                    # Retry loading config and verifying
-                    try:
-                        config = Config.from_yaml(config_path)
-                        provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
-                        llm_client = build_llm_client(
-                            client_factory=LLMClient,
-                            api_key=config.llm.api_key,
-                            provider=provider,
-                            api_base=config.llm.api_base,
-                            model=config.llm.model,
-                            retry_config=retry_config if config.llm.retry.enabled else None,
-                            max_output_tokens=config.llm.max_output_tokens,
-                            auth_file=config.llm.auth_file,
-                            timeout=config.llm.timeout,
-                            reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
-                        )
-                        if config.llm.retry.enabled:
-                            llm_client.retry_callback = on_retry
-                        print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
-                        _verify_client2 = build_llm_client(
-                            client_factory=LLMClient,
-                            api_key=config.llm.api_key,
-                            provider=provider,
-                            api_base=config.llm.api_base,
-                            model=config.llm.model,
-                            retry_config=VerifyRetryConfig(enabled=False),
-                            max_output_tokens=config.llm.max_output_tokens,
-                            auth_file=config.llm.auth_file,
-                            timeout=config.llm.timeout,
-                            reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
-                        )
-                        await _probe_llm_api(_verify_client2)
-                        print(f"{Colors.GREEN}OK{Colors.RESET}")
-                    except Exception as e2:
-                        print(f"{Colors.RED}FAILED{Colors.RESET}")
-                        print(f"\n{Colors.RED}❌ API connection still failed: {e2}{Colors.RESET}")
-                        print(f"{Colors.YELLOW}Please check your configuration: {config_path}{Colors.RESET}")
+                print(f"{Colors.DIM}  api_key:    {config.llm.api_key[:8]}...{Colors.RESET}")
+                print(f"{Colors.DIM}  api_base:   {config.llm.api_base}{Colors.RESET}")
+                print(f"{Colors.DIM}  provider:   {config.llm.provider}{Colors.RESET}")
+                print(f"{Colors.DIM}  model:      {config.llm.model}{Colors.RESET}")
+                print()
+                if task:
+                    print(f"{Colors.YELLOW}Use `--no-verify-api` to skip the startup probe when you expect the first LLM call to handle connectivity.{Colors.RESET}")
+                    return 1
+                # Offer to re-run setup wizard
+                try:
+                    answer = input(f"{Colors.BRIGHT_CYAN}Would you like to reconfigure? [Y/n]: {Colors.RESET}").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return 1
+                if answer in ("", "y", "yes"):
+                    if run_setup_wizard(config_path):
+                        # Retry loading config and verifying
+                        try:
+                            config = Config.from_yaml(config_path)
+                            provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
+                            llm_client = _new_client(
+                                client_factory=LLMClient,
+                                api_key=config.llm.api_key,
+                                provider=provider,
+                                api_base=config.llm.api_base,
+                                model=config.llm.model,
+                                retry_config=retry_config if config.llm.retry.enabled else None,
+                                max_output_tokens=config.llm.max_output_tokens,
+                                auth_file=config.llm.auth_file,
+                                timeout=config.llm.timeout,
+                                reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
+                            )
+                            if config.llm.retry.enabled:
+                                llm_client.retry_callback = on_retry
+                            print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
+                            _verify_client2 = _new_client(
+                                client_factory=LLMClient,
+                                api_key=config.llm.api_key,
+                                provider=provider,
+                                api_base=config.llm.api_base,
+                                model=config.llm.model,
+                                retry_config=VerifyRetryConfig(enabled=False),
+                                max_output_tokens=config.llm.max_output_tokens,
+                                auth_file=config.llm.auth_file,
+                                timeout=config.llm.timeout,
+                                reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
+                            )
+                            await _probe_llm_api(_verify_client2)
+                            print(f"{Colors.GREEN}OK{Colors.RESET}")
+                        except Exception as e2:
+                            print(f"{Colors.RED}FAILED{Colors.RESET}")
+                            print(f"\n{Colors.RED}❌ API connection still failed: {e2}{Colors.RESET}")
+                            print(f"{Colors.YELLOW}Please check your configuration: {config_path}{Colors.RESET}")
+                            return 1
+                    else:
                         return 1
                 else:
                     return 1
-            else:
-                return 1
-    else:
-        print(f"{Colors.DIM}Skipping startup API verification (--no-verify-api).{Colors.RESET}")
-
-    # 3. Initialize memory manager (before base tools, so tools get the reference)
-    memory_mgr = None
-    if config.agent.enable_memory:
-        from box_agent.memory import MemoryManager
-
-        memory_mgr = build_memory_manager(
-            memory_dir=config.agent.memory_dir,
-            dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
-            manager_factory=MemoryManager,
-        )
-
-    # 3.4 One-time OpenClaw import
-    if memory_mgr:
-        try:
-            await memory_mgr.import_openclaw(llm_client)
-        except Exception:
-            pass
-
-    # 3.4.1 Memory maintenance (decay / archive cleanup / dedup / compact).
-    # Off the critical path — the compact phase can issue a slow LLM call on
-    # large CONTEXT.md. Fire-and-forget, same pattern as the background MCP
-    # loader, so the REPL is responsive even if maintenance takes a while.
-    maintainer_task: asyncio.Task | None = None
-    if memory_mgr and config.agent.memory_maintainer_enabled:
-        from box_agent.memory_maintainer import MemoryMaintainer
-
-        async def _run_maintainer() -> None:
-            try:
-                await MemoryMaintainer(memory_mgr, config.agent, llm=llm_client).run_if_due()
-            except Exception:
-                pass
-
-        maintainer_task = asyncio.create_task(_run_maintainer(), name="memory-maintainer")
-
-    # 3.5 Memory extractor (lifecycle-triggered auto memory)
-    memory_extractor = None
-    if memory_mgr and config.agent.enable_memory_extraction:
-        from box_agent.memory import MemoryExtractor
-
-        memory_extractor = build_memory_extractor(
-            llm=llm_client,
-            memory_manager=memory_mgr,
-            cooldown=config.agent.memory_extraction_cooldown,
-            step_interval=config.agent.memory_extraction_step_interval,
-            extractor_factory=MemoryExtractor,
-        )
-
-    # 3.5 Initialize base tools (independent of workspace). MCP loads in the background.
-    # CLI keeps skill discovery inline so users still see the "Loading Claude Skills..."
-    # status line; the ACP path defers it (see run_acp_server).
-    tools, skill_loader, mcp_task, _skill_task = await initialize_base_tools(
-        config, memory_manager=memory_mgr, llm=llm_client
-    )
-    cli_preloaded_skill_hashes: dict[str, str] = {}
-    if skill_loader:
-        from box_agent.tools.skill_tool import GetSkillTool
-
-        tools = [
-            GetSkillTool(
-                skill_loader,
-                preloaded_skill_hashes=cli_preloaded_skill_hashes,
-            )
-            if isinstance(tool, GetSkillTool)
-            else tool
-            for tool in tools
-        ]
-
-    # 4. Add workspace-dependent tools
-    non_interactive = task is not None
-    allow_full_access = config.tools.allow_full_access
-
-    # Build PermissionEngine + GrantStore for CLI (parity with ACP)
-    perm_engine = None
-    grant_store = None
-    if not non_interactive:
-        from box_agent.tools.permissions import GrantStore
-        grant_store = GrantStore()
-    if not allow_full_access:
-        from box_agent.tools.permissions import CapabilityPolicy, PermissionEngine
-        if grant_store is None:
-            from box_agent.tools.permissions import GrantStore
-            grant_store = GrantStore()
-        # Honor officev3.permissions.filesystem (scope + allowed_directories)
-        # when the block is present — same code path the ACP server uses.
-        # Otherwise fall back to a default session_workspace policy rooted at
-        # the workspace directory.
-        if getattr(config.officev3, "_present", False):
-            policy = CapabilityPolicy.from_config(config)
-            if not policy.session_workspace_root:
-                policy = policy.model_copy(update={"session_workspace_root": str(workspace_dir)})
         else:
-            policy = CapabilityPolicy(session_workspace_root=str(workspace_dir))
-        perm_engine = build_permission_engine(
-            policy,
-            workspace_dir,
-            grant_store=grant_store,
-            engine_factory=PermissionEngine,
+            print(f"{Colors.DIM}Skipping startup API verification (--no-verify-api).{Colors.RESET}")
+
+        # The CLI owns connectivity and UI; Session plugins prepare capabilities.
+        non_interactive = task is not None
+        allow_full_access = config.tools.allow_full_access
+        cli_env_context = build_cli_env_context()
+        logical_session_id = (session_id or "").strip() or f"cli-{uuid4().hex}"
+        legacy_goal_file = not bool((session_id or "").strip())
+        session_open = SessionLog.open_or_create(
+            default_session_root(), session_id=logical_session_id,
+            cwd=workspace_dir, origin="cli", prepare_resume=False,
         )
-
-    cli_env_context = build_cli_env_context()
-    skill_runtime_context = build_skill_runtime_context(
-        sandbox_mode=sandbox_mode,
-        env_context=cli_env_context,
-        shell_python_path=resolve_cli_shell_python(),
-    )
-
-    skill_scratch_dir = add_workspace_tools(
-        tools, config, workspace_dir,
-        sandbox_mode=sandbox_mode,
-        allow_full_access=allow_full_access,
-        non_interactive=non_interactive,
-        llm=llm_client,
-        permission_engine=perm_engine,
-        skill_runtime_context=skill_runtime_context,
-        skill_loader=skill_loader,
-        capability_state_provider=(
-            lambda: "loading"
-            if mcp_task is not None and not mcp_task.done()
-            else "ready"
-        ),
-        use_output_dir=not code_workspace,
-        env_context=cli_env_context,
-        session_mode="code_agent" if code_workspace else "general",
-    )
-
-    if not allow_full_access:
-        print(f"{Colors.YELLOW}🔒 Safety mode: tools restricted to workspace ({workspace_dir}){Colors.RESET}")
-    if non_interactive:
-        print(f"{Colors.YELLOW}🔒 Non-interactive mode: commands requiring safety approval will be rejected{Colors.RESET}")
-
-    # 5. Load System Prompt (with priority search)
-    system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
-    if system_prompt_path and system_prompt_path.exists():
-        system_prompt = render_system_prompt_template(
-            system_prompt_path.read_text(encoding="utf-8")
-        )
-        print(f"{Colors.GREEN}✅ Loaded system prompt (from: {system_prompt_path}){Colors.RESET}")
-    else:
-        system_prompt = "You are Box-Agent, an intelligent assistant that can help users complete various tasks."
-        print(f"{Colors.YELLOW}⚠️  System prompt not found, using default{Colors.RESET}")
-
-    # 6. Inject Skills Metadata into System Prompt (Progressive Disclosure - Level 1)
-    # NOTE: actual skill list is injected per-turn via SkillSelector below
-    # (keyword-filtered against the cumulative user query). Here we just
-    # replace the placeholder with a sentinel that the selector can find.
-    if skill_loader:
-        from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
-        system_prompt = system_prompt.replace("{SKILLS_METADATA}", SKILL_SLOT_SENTINEL)
-        print(
-            f"{Colors.GREEN}✅ {len(skill_loader.loaded_skills)} skills available "
-            f"(injected per-turn via keyword filter){Colors.RESET}"
-        )
-    else:
-        # Remove placeholder if skills not enabled
-        system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
-
-    # 6.5 Inject Sandbox info if enabled
-    if sandbox_mode:
-        system_prompt = system_prompt.replace(
-            "{SANDBOX_INFO}",
-            build_sandbox_info_prompt(use_output_dir=not code_workspace),
-        )
-        print(f"{Colors.GREEN}✅ Sandbox mode enabled with execute_code tool{Colors.RESET}")
-    else:
-        # Remove placeholder if sandbox not enabled
-        system_prompt = system_prompt.replace("{SANDBOX_INFO}", "")
-
-    system_prompt = compose_prompt_segments(
-        system_prompt,
-        replacements={
-            "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(
-                use_output_dir=not code_workspace
-            )
-        },
-        segments=(
-            PROJECT_WORKSPACE_MODE_PROMPT if code_workspace else None,
-            build_project_startup_context_prompt(workspace_dir)
-            if code_workspace
-            else None,
-        ),
-    )
-
-    if code_workspace:
-        code_prompt_path = Config.find_config_file(config.agent.code_prompt_path)
-        if code_prompt_path and code_prompt_path.exists():
-            code_prompt = code_prompt_path.read_text(encoding="utf-8").strip()
-            if code_prompt:
-                system_prompt = append_prompt_segment(system_prompt, code_prompt)
-                print(
-                    f"{Colors.GREEN}✅ Loaded code workspace prompt "
-                    f"(from: {code_prompt_path}){Colors.RESET}"
-                )
-        else:
-            print(f"{Colors.YELLOW}⚠️  Code workspace prompt not found{Colors.RESET}")
-
-    system_prompt = compose_prompt_segments(
-        system_prompt,
-        segments=(
-            build_image_generation_prompt(config),
-            build_skill_runtime_prompt(skill_runtime_context),
-        ),
-    )
-
-    if cli_env_context is not None:
-        from box_agent.env_context import build_env_context_prompt
-
-        env_prompt = build_env_context_prompt(cli_env_context)
-        if env_prompt:
-            system_prompt = append_prompt_segment(system_prompt, env_prompt)
-            print(f"{Colors.GREEN}✅ Loaded CLI environment context{Colors.RESET}")
-
-    # 6.6 Inject Memory context
-    memory_block = None
-    if memory_mgr:
-        memory_block = await asyncio.to_thread(memory_mgr.recall)
-        if memory_block:
-            system_prompt = append_prompt_segment(system_prompt, memory_block)
-            print(f"{Colors.GREEN}✅ Loaded memory context{Colors.RESET}")
-
-    # 7. Create the shared Agent session
-    from box_agent.hooks import load_hooks
-    hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
-    agent_session = AgentSession.create(
-        config=config,
-        agent_factory=Agent,
-        llm_client=llm_client,
-        system_prompt=system_prompt,
-        tools=tools,
-        workspace_dir=str(workspace_dir),
-        hooks=hooks,
-        thinking_enabled=deep_think,
-        memory_extractor=memory_extractor,
-        memory_block=memory_block,
-        permission_engine=perm_engine,
-        grant_store=grant_store,
-        skill_scratch_dir=skill_scratch_dir,
-        skill_runtime_context=skill_runtime_context,
-        skill_loader=skill_loader,
-        env_context=cli_env_context,
-        preloaded_skill_hashes=cli_preloaded_skill_hashes,
-        force_plan_start=force_plan_start,
-    )
-    agent = agent_session.agent
-
-    agent_session.source_text = bind_user_source_text(agent.tools, "", "")
-    restored_goal = _restore_cli_goal(agent, workspace_dir)
-    if initial_goal and initial_goal.strip():
-        restored_goal = agent.set_goal(initial_goal)
-        _save_goal_state(workspace_dir, agent.goal)
-
-    # Wire CLI permission negotiator (parity with ACP in-band negotiation)
-    if grant_store is not None and not non_interactive:
-        from box_agent.cli_permissions import CLIPermissionNegotiator
-        agent.set_permission_negotiator(CLIPermissionNegotiator(grant_store))
-
-    # Wire memory extractor
-    if memory_extractor:
-        agent.set_memory_extractor(memory_extractor)
-
-    # Wire memory promotion negotiator (interactive prompts).
-    # Non-interactive `--task` mode skips it to avoid blocking on stdin.
-    if memory_mgr and agent_session.config.agent.memory_promotion_proposal_enabled and not task:
-        from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
-        agent.set_memory_proposal_negotiator(CLIMemoryProposalNegotiator(memory_mgr))
-
-    def _set_agent_system_prompt(system_prompt: str) -> None:
-        agent.set_system_prompt(system_prompt)
-
-    # 7.5 Skill selector: filter skill metadata per turn based on cumulative user query
-    if agent_session.skill_loader:
-        from box_agent.tools.skill_loader import SkillSelector, move_skill_slot_to_end
-
-        relocated_prompt = move_skill_slot_to_end(agent.messages[0].content)
-        if relocated_prompt != agent.messages[0].content:
-            _set_agent_system_prompt(relocated_prompt)
-        agent_session.skill_selector = SkillSelector(agent_session.skill_loader)
-        agent_session.skill_selector.bind(agent.messages[0].content)
-
-    def _sync_cli_cache_fingerprint_context() -> None:
-        sync_skill_cache_fingerprint_context(
-            agent.cache_fingerprint_context,
-            matched_skill_names=(
-                agent_session.skill_selector.matched_skill_names
-                if agent_session.skill_selector is not None
-                else None
+        session_log = session_open.log
+        agent_session = await AgentSession.open(
+            config=config, agent_factory=Agent,
+            options=SessionOptions(
+                profile="cli", workspace_dir=workspace_dir, sandbox_mode=sandbox_mode,
+                resume_session_log=session_open.resumed,
+                non_interactive=non_interactive,
+                session_mode="code_agent" if code_workspace else None,
+                shell_python_path=resolve_cli_shell_python(),
             ),
-            preloaded_skill_names=agent_session.preloaded_skill_names,
-        )
-
-    def _apply_skill_filter(user_input: str) -> tuple[str, ...]:
-        if agent_session.skill_selector is None:
-            _sync_cli_cache_fingerprint_context()
-            return ()
-        new_prompt = agent_session.skill_selector.update(user_input)
-        if new_prompt is not None:
-            _set_agent_system_prompt(new_prompt)
-        _sync_cli_cache_fingerprint_context()
-        return agent_session.skill_selector.matched_skill_names
-
-    def _apply_cli_auto_loaded_skills(user_input: str) -> None:
-        if agent_session.skill_loader is None or agent_session.skill_selector is None:
-            _sync_cli_cache_fingerprint_context()
-            return
-        explicit_skill = resolve_explicit_skill_invocation(agent_session.skill_loader, user_input)
-        preload_names = turn_preload_skill_names(
-            agent_session.skill_selector.matched_skill_names,
-            agent_session.env_context,
-            user_input,
-            selected_skill_names=(
-                (explicit_skill.name,)
-                if explicit_skill is not None
-                else ()
+            host=HostBindings(
+                llm_client=llm_client, session_log=session_log,
+                base_tools_factory=initialize_base_tools,
+                workspace_tools_factory=add_workspace_tools,
+                output=print,
             ),
-        )
-        if not preload_names and not agent_session.preloaded_skill_names:
-            _sync_cli_cache_fingerprint_context()
-            return
-        result, unloaded_skill_names = prepare_auto_loaded_skills(
-            agent_session.skill_loader,
-            agent.system_prompt,
-            preload_names,
-            preloaded_skill_names=agent_session.preloaded_skill_names,
-            preloaded_skill_hashes=agent_session.preloaded_skill_hashes,
-            prompt_builder=build_auto_loaded_skills_prompt,
-        )
-        _sync_cli_cache_fingerprint_context()
-        for missing_name in result.missing_names:
-            print(f"{Colors.YELLOW}⚠️  Skill preload target not found: {missing_name}{Colors.RESET}")
-        if result.changed:
-            _set_agent_system_prompt(result.system_prompt)
-        if unloaded_skill_names:
-            print(
-                f"{Colors.DIM}Auto-unloaded skills: "
-                f"{', '.join(sorted(unloaded_skill_names))}{Colors.RESET}"
-            )
-        if result.loaded_names and result.changed:
-            print(
-                f"{Colors.DIM}Auto-loaded skills: "
-                f"{', '.join(result.loaded_names)}{Colors.RESET}"
-            )
-
-    async def _refresh_mcp_after_auth_change() -> None:
-        results = await reconnect_auth_failed_mcp_servers_if_token_changed()
-        if not results:
-            return
-        if not agent_session.config.tools.mcp.deferred_loading_enabled:
-            register_mcp_tools(agent.tools, get_all_mcp_tools())
-        for result in results:
-            name = result["name"]
-            if result.get("success"):
-                print(
-                    f"{Colors.GREEN}✅ Reconnected MCP server '{name}' "
-                    f"after login token refresh{Colors.RESET}"
-                )
-            else:
-                print(
-                    f"{Colors.YELLOW}⚠️  MCP reconnect failed for '{name}': "
-                    f"{result.get('error') or 'unknown error'}{Colors.RESET}"
-                )
-
-    # One diagnostic file per CLI invocation; no synthetic ACP identity.
-    trace_session_id = f"cli-{uuid4().hex}"
-    try:
-        trace_writer = SessionTraceWriter(session_id=trace_session_id, acp_session_id="")
-    except Exception:
-        # Invalid diagnostic paths must not prevent an otherwise valid run.
-        # Keep a disabled context so an enclosing caller's trace stays isolated.
-        trace_writer = SessionTraceWriter(
-            session_id=trace_session_id, acp_session_id="",
-            trace_dir=workspace_dir, enabled=False,
-        )
-    trace_writer.write(
-        "session.start",
-        data={
-            "entrypoint": "cli",
-            "workspace": str(workspace_dir),
-            "session_mode": "code_agent" if code_workspace else "general",
-            "artifact_mode": "project" if code_workspace else "output",
-            "model": agent_session.config.llm.model,
-            "context_window": agent_session.config.llm.context_window,
-            "max_output_tokens": agent_session.config.llm.max_output_tokens,
-            "context_token_limit": agent_session.config.llm.context_token_limit,
-        },
-    )
-
-    # 8. Display welcome information
-    if not task:
-        print_banner()
-        print_session_info(agent, workspace_dir, agent_session.config.llm.model)
-        if restored_goal is not None:
-            print(f"{Colors.DIM}Loaded workspace goal: {restored_goal.status} — {restored_goal.objective}{Colors.RESET}\n")
-
-    # 8.5 Non-interactive mode: execute task and exit
-    if task:
-        print(f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n")
-        # Block on MCP only when user is actually about to run
-        loaded_mcp_tools = await await_mcp_tools(mcp_task)
-        if not agent_session.config.tools.mcp.deferred_loading_enabled:
-            register_mcp_tools(agent.tools, loaded_mcp_tools)
-        await _refresh_mcp_after_auth_change()
-        _apply_skill_filter(task)
-        _apply_cli_auto_loaded_skills(task)
-        agent_session.source_text = bind_user_source_text(
-            agent.tools, agent_session.source_text, task,
-        )
-        agent.add_user_message(task)
-        ok = True
-        error: str | None = None
-        final_content = ""
-        auto_enabled = (
-            goal_autopilot_enabled
-            and agent_session.config.agent.goal_autopilot_enabled
-            and agent_session.config.agent.goal_autopilot_max_turns > 0
-        )
-        auto_started = perf_counter()
-        autopilot = GoalAutopilotController(
-            started_at=auto_started,
-            max_turns=agent_session.config.agent.goal_autopilot_max_turns,
-            max_seconds=agent_session.config.agent.goal_autopilot_max_seconds,
-            no_progress_limit=agent_session.config.agent.goal_autopilot_no_progress_turns,
+            thinking_enabled=deep_think, env_context=cli_env_context,
+            session_id=logical_session_id,
+            force_plan_start=force_plan_start,
         )
         try:
-            with traced_session_turn(trace_writer, content=task) as traced_turn:
-                final_content = await _run_session_turn(
-                    agent_session,
-                    force_plan_start=agent_session.force_plan_start,
-                    current_turn_text=task,
-                )
-                while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
-                    if autopilot.budget_exhausted_at(perf_counter()):
-                        break
-                    if agent.goal is None:
-                        break
-                    autopilot.begin_continuation()
-                    print(
-                        f"\n{Colors.DIM}Goal autopilot continuing "
-                        f"{autopilot.continuations}/{agent_session.config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
-                    )
-                    agent.add_user_message(
-                        goal_autopilot_prompt(
-                            agent.goal,
-                            autopilot.continuations,
-                            agent_session.config.agent.goal_autopilot_max_turns,
-                        )
-                    )
-                    before_signature = goal_autopilot_progress_signature(agent.goal)
-                    final_content = await _run_session_turn(agent_session)
-                    after_signature = goal_autopilot_progress_signature(agent.goal)
-                    if should_continue_goal_autopilot(agent, agent.last_stop_reason):
-                        if autopilot.record_progress(before_signature, after_signature):
-                            break
-                traced_turn.content = final_content
-                traced_turn.stop_reason = agent.last_stop_reason
-            if agent.last_stop_reason == StopReason.ERROR.value:
-                ok = False
-                error = final_content.strip() or "Agent execution failed."
-        except Exception as e:
-            ok = False
-            error = str(e)
-            print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
-        finally:
-            if autopilot.budget_exhausted and agent.goal is not None and agent.goal.status == "active":
-                print(
-                    f"\n{Colors.YELLOW}⚠️  Goal autopilot stopped after "
-                    f"{autopilot.continuations} continuation(s); goal remains active.{Colors.RESET}"
-                )
-            if autopilot.no_progress_exhausted and agent.goal is not None and agent.goal.status == "active":
-                print(
-                    f"\n{Colors.YELLOW}⚠️  Goal autopilot stopped after "
-                    f"{autopilot.no_progress_turns} continuation(s) without recorded goal progress.{Colors.RESET}"
-                )
-            _save_goal_state(workspace_dir, agent.goal)
-            if agent_session.skill_scratch_dir is not None:
-                try:
-                    cleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
-                except Exception as cleanup_error:
-                    print(
-                        f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "
-                        f"{cleanup_error}{Colors.RESET}",
-                        file=sys.stderr,
-                    )
-            print_stats(agent, session_start)
-            if json_summary:
-                waiting_for_user = (
-                    agent.last_stop_reason == StopReason.WAITING_FOR_USER.value
-                )
-                _json_print({
-                    "ok": ok,
-                    "error": error,
-                    "runStatus": (
-                        "waiting_for_user"
-                        if waiting_for_user
-                        else ("completed" if ok else "error")
-                    ),
-                    "completed": ok and not waiting_for_user,
-                    "workspace": str(workspace_dir),
-                    "task": task,
-                    "goal": goal_payload(agent.goal),
-                    "goalAutopilot": {
-                        "enabled": auto_enabled,
-                        "continuations": autopilot.continuations,
-                        "budgetExhausted": autopilot.budget_exhausted,
-                        "noProgressExhausted": autopilot.no_progress_exhausted,
-                        "noProgressTurns": autopilot.no_progress_turns,
-                        "lastStopReason": agent.last_stop_reason,
-                    },
-                    "stats": _session_stats(agent, session_start),
-                })
-
-        # Cleanup MCP connections
-        await _quiet_cleanup()
-        return 0 if ok else 1
-
-    # 9. Setup prompt_toolkit session
-    # Command completer
-    command_completer = WordCompleter(
-        [
-            "/help",
-            "/clear",
-            "/clear_all",
-            "/history",
-            "/stats",
-            "/sandbox_status",
-            "/log",
-            "/goal",
-            "/goal pause",
-            "/goal resume",
-            "/goal clear",
-            "/goal complete",
-            "/memory",
-            "/exit",
-            "/quit",
-            "/q",
-        ],
-        ignore_case=True,
-        sentence=True,
-    )
-
-    # Custom style for prompt
-    prompt_style = Style.from_dict(
-        {
-            "prompt": "#00ff00 bold",  # Green and bold
-            "separator": "#666666",  # Gray
-        }
-    )
-
-    # Custom key bindings
-    kb = KeyBindings()
-
-    @kb.add("c-u")  # Ctrl+U: Clear current line
-    def _(event):
-        """Clear the current input line"""
-        event.current_buffer.reset()
-
-    @kb.add("c-l")  # Ctrl+L: Clear screen (optional bonus)
-    def _(event):
-        """Clear the screen"""
-        event.app.renderer.clear()
-
-    @kb.add("c-j")  # Ctrl+J (对应 Ctrl+Enter)
-    def _(event):
-        """Insert a newline"""
-        event.current_buffer.insert_text("\n")
-
-    # Create prompt session with history and auto-suggest
-    # Use FileHistory for persistent history across sessions (stored in user's home directory)
-    history_file = state_path('.history')
-    history_file.parent.mkdir(parents=True, exist_ok=True)
-    session = PromptSession(
-        history=FileHistory(str(history_file)),
-        auto_suggest=AutoSuggestFromHistory(),
-        completer=command_completer,
-        style=prompt_style,
-        key_bindings=kb,
-    )
-
-    # 10. Interactive loop
-    while True:
-        try:
-            # Build prompt with optional sandbox session_id
+            resources = agent_session.plugin_session.resources
+            tools = resources.tools
+            memory_mgr = resources.memory_manager
+            memory_extractor = agent_session.memory_extractor
+            skill_loader = agent_session.skill_loader
+            mcp_task = resources.mcp_task
+            grant_store = agent_session.grant_store
+            if not allow_full_access:
+                print(f"{Colors.YELLOW}🔒 Safety mode: tools restricted to workspace ({workspace_dir}){Colors.RESET}")
+            if non_interactive:
+                print(f"{Colors.YELLOW}🔒 Non-interactive mode: commands requiring safety approval will be rejected{Colors.RESET}")
+            if skill_loader:
+                print(f"{Colors.GREEN}✅ {len(skill_loader.loaded_skills)} skills available (injected per-turn via keyword filter){Colors.RESET}")
             if sandbox_mode:
-                # Try to get current session_id from sandbox tool
-                sandbox_session_id = None
-                for tool in tools:
-                    if isinstance(tool, JupyterSandboxTool):
-                        sandbox_session_id = tool.session_id
-                        break
-                if sandbox_session_id:
-                    prompt_parts = [
-                        ("class:prompt", f"You [{sandbox_session_id}]"),
-                        ("", " › "),
-                    ]
-                else:
-                    prompt_parts = [
-                        ("class:prompt", "You"),
-                        ("", " › "),
-                    ]
-            else:
-                prompt_parts = [
-                    ("class:prompt", "You"),
-                    ("", " › "),
-                ]
+                print(f"{Colors.GREEN}✅ Sandbox mode enabled with execute_code tool{Colors.RESET}")
+            if cli_env_context is not None:
+                print(f"{Colors.GREEN}✅ Loaded CLI environment context{Colors.RESET}")
+            if agent_session.memory_block:
+                print(f"{Colors.GREEN}✅ Loaded memory context{Colors.RESET}")
+            agent = agent_session.agent
 
-            # Get user input using prompt_toolkit
-            user_input = await session.prompt_async(
-                prompt_parts,
-                multiline=False,
-                enable_history_search=True,
+            agent_session.source_text = bind_user_source_text(agent.tools, "", "")
+            print(f"{Colors.DIM}Session: {logical_session_id}{Colors.RESET}")
+            restored_goal = agent.goal
+            if legacy_goal_file and not session_open.resumed:
+                restored_goal = _restore_cli_goal(agent, workspace_dir)
+                if restored_goal is not None:
+                    session_log.append("goal/change", {"goal": goal_payload(agent.goal)})
+                    session_log.flush()
+
+            def _save_cli_goal() -> None:
+                if legacy_goal_file:
+                    _save_goal_state(workspace_dir, agent.goal)
+
+            if initial_goal and initial_goal.strip():
+                restored_goal = agent.set_goal(initial_goal)
+                _save_cli_goal()
+
+            # Wire CLI permission negotiator (parity with ACP in-band negotiation)
+            if grant_store is not None and not non_interactive:
+                from box_agent.cli_permissions import CLIPermissionNegotiator
+                agent.set_permission_negotiator(CLIPermissionNegotiator(grant_store))
+
+            # Wire memory extractor
+            if memory_extractor:
+                agent.set_memory_extractor(memory_extractor)
+
+            # Wire memory promotion negotiator (interactive prompts).
+            # Non-interactive `--task` mode skips it to avoid blocking on stdin.
+            if memory_mgr and agent_session.config.agent.memory_promotion_proposal_enabled and not task:
+                from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
+                agent.set_memory_proposal_negotiator(CLIMemoryProposalNegotiator(memory_mgr))
+
+            def _set_agent_system_prompt(system_prompt: str) -> None:
+                agent.set_system_prompt(system_prompt)
+
+            def _sync_cli_cache_fingerprint_context() -> None:
+                sync_skill_cache_fingerprint_context(
+                    agent.cache_fingerprint_context,
+                    matched_skill_names=(
+                        agent_session.skill_selector.matched_skill_names
+                        if agent_session.skill_selector is not None
+                        else None
+                    ),
+                    preloaded_skill_names=(),
+                )
+
+            def _apply_skill_filter(user_input: str) -> tuple[str, ...]:
+                if agent_session.skill_selector is None:
+                    _sync_cli_cache_fingerprint_context()
+                    return ()
+                new_prompt = agent_session.skill_selector.update(user_input)
+                if new_prompt is not None:
+                    _set_agent_system_prompt(new_prompt)
+                _sync_cli_cache_fingerprint_context()
+                return agent_session.skill_selector.matched_skill_names
+
+            def _select_cli_skills(user_input: str) -> None:
+                explicit = resolve_explicit_skill_invocation(agent_session.skill_loader, user_input)
+                agent_session.explicitly_allowed_skill_names.clear()
+                if explicit is not None:
+                    agent_session.explicitly_allowed_skill_names.add(explicit.name)
+                if agent.skill_runtime is not None:
+                    agent.skill_runtime.select((explicit.name,) if explicit else ())
+                _sync_cli_cache_fingerprint_context()
+
+            async def _refresh_mcp_after_auth_change() -> None:
+                results = await reconnect_auth_failed_mcp_servers_if_token_changed()
+                if not results:
+                    return
+                if not agent_session.config.tools.mcp.deferred_loading_enabled:
+                    register_mcp_tools(agent.tools, get_all_mcp_tools())
+                for result in results:
+                    name = result["name"]
+                    if result.get("success"):
+                        print(
+                            f"{Colors.GREEN}✅ Reconnected MCP server '{name}' "
+                            f"after login token refresh{Colors.RESET}"
+                        )
+                    else:
+                        print(
+                            f"{Colors.YELLOW}⚠️  MCP reconnect failed for '{name}': "
+                            f"{result.get('error') or 'unknown error'}{Colors.RESET}"
+                        )
+
+            # Diagnostics and kernel runs use the same logical Session identity.
+            trace_session_id = logical_session_id
+            try:
+                trace_writer = SessionTraceWriter(session_id=trace_session_id, acp_session_id="")
+            except Exception:
+                # Invalid diagnostic paths must not prevent an otherwise valid run.
+                # Keep a disabled context so an enclosing caller's trace stays isolated.
+                trace_writer = SessionTraceWriter(
+                    session_id=trace_session_id, acp_session_id="",
+                    trace_dir=workspace_dir, enabled=False,
+                )
+            trace_writer.write(
+                "session.start",
+                data={
+                    "entrypoint": "cli",
+                    "workspace": str(workspace_dir),
+                    "session_mode": "code_agent" if code_workspace else "general",
+                    "model": agent_session.config.llm.model,
+                    "context_window": agent_session.config.llm.context_window,
+                    "max_output_tokens": agent_session.config.llm.max_output_tokens,
+                    "context_token_limit": agent_session.config.llm.context_token_limit,
+                },
             )
-            user_input = user_input.strip()
 
-            if not user_input:
-                continue
+            # 8. Display welcome information
+            if not task:
+                print_banner()
+                print_session_info(agent, workspace_dir, agent_session.config.llm.model)
+                if restored_goal is not None:
+                    print(f"{Colors.DIM}Loaded workspace goal: {restored_goal.status} — {restored_goal.objective}{Colors.RESET}\n")
 
-            # Handle commands
-            if user_input.startswith("/"):
-                command = user_input.lower()
+            # 8.5 Non-interactive mode: execute task and exit
+            if task:
+                print(f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n")
+                # Block on MCP only when user is actually about to run
+                loaded_mcp_tools = await await_mcp_tools(mcp_task)
+                if not agent_session.config.tools.mcp.deferred_loading_enabled:
+                    register_mcp_tools(agent.tools, loaded_mcp_tools)
+                await _refresh_mcp_after_auth_change()
+                _apply_skill_filter(task)
+                _select_cli_skills(task)
+                agent_session.source_text = bind_user_source_text(
+                    agent.tools, agent_session.source_text, task,
+                )
+                agent.add_user_message(task)
+                ok = True
+                error: str | None = None
+                final_content = ""
+                auto_enabled = (
+                    goal_autopilot_enabled
+                    and agent_session.config.agent.goal_autopilot_enabled
+                    and agent_session.config.agent.goal_autopilot_max_turns > 0
+                )
+                auto_started = perf_counter()
+                autopilot = GoalAutopilotController(
+                    started_at=auto_started,
+                    max_turns=agent_session.config.agent.goal_autopilot_max_turns,
+                    max_seconds=agent_session.config.agent.goal_autopilot_max_seconds,
+                    no_progress_limit=agent_session.config.agent.goal_autopilot_no_progress_turns,
+                )
+                try:
+                    with traced_session_turn(trace_writer, content=task) as traced_turn:
+                        final_content = await _run_session_turn(
+                            agent_session,
+                            force_plan_start=agent_session.force_plan_start,
+                            current_turn_text=task,
+                        )
+                        while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                            if autopilot.budget_exhausted_at(perf_counter()):
+                                break
+                            if agent.goal is None:
+                                break
+                            autopilot.begin_continuation()
+                            print(
+                                f"\n{Colors.DIM}Goal autopilot continuing "
+                                f"{autopilot.continuations}/{agent_session.config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
+                            )
+                            agent.add_user_message(
+                                goal_autopilot_prompt(
+                                    agent.goal,
+                                    autopilot.continuations,
+                                    agent_session.config.agent.goal_autopilot_max_turns,
+                                )
+                            )
+                            before_signature = goal_autopilot_progress_signature(agent.goal)
+                            final_content = await _run_session_turn(agent_session)
+                            after_signature = goal_autopilot_progress_signature(agent.goal)
+                            if should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                                if autopilot.record_progress(before_signature, after_signature):
+                                    break
+                        traced_turn.content = final_content
+                        traced_turn.stop_reason = agent.last_stop_reason
+                    if agent.last_stop_reason == StopReason.ERROR.value:
+                        ok = False
+                        error = final_content.strip() or "Agent execution failed."
+                except Exception as e:
+                    ok = False
+                    error = str(e)
+                    print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
+                finally:
+                    if autopilot.budget_exhausted and agent.goal is not None and agent.goal.status == "active":
+                        print(
+                            f"\n{Colors.YELLOW}⚠️  Goal autopilot stopped after "
+                            f"{autopilot.continuations} continuation(s); goal remains active.{Colors.RESET}"
+                        )
+                    if autopilot.no_progress_exhausted and agent.goal is not None and agent.goal.status == "active":
+                        print(
+                            f"\n{Colors.YELLOW}⚠️  Goal autopilot stopped after "
+                            f"{autopilot.no_progress_turns} continuation(s) without recorded goal progress.{Colors.RESET}"
+                        )
+                    _save_cli_goal()
+                    if agent_session.skill_scratch_dir is not None:
+                        try:
+                            cleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
+                        except Exception as cleanup_error:
+                            print(
+                                f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "
+                                f"{cleanup_error}{Colors.RESET}",
+                                file=sys.stderr,
+                            )
+                    print_stats(agent, session_start)
+                    if json_summary:
+                        waiting_for_user = (
+                            agent.last_stop_reason == StopReason.WAITING_FOR_USER.value
+                        )
+                        _json_print({
+                            "ok": ok,
+                            "error": error,
+                            "runStatus": (
+                                "waiting_for_user"
+                                if waiting_for_user
+                                else ("completed" if ok else "error")
+                            ),
+                            "completed": ok and not waiting_for_user,
+                            "workspace": str(workspace_dir),
+                            "task": task,
+                            "goal": goal_payload(agent.goal),
+                            "goalAutopilot": {
+                                "enabled": auto_enabled,
+                                "continuations": autopilot.continuations,
+                                "budgetExhausted": autopilot.budget_exhausted,
+                                "noProgressExhausted": autopilot.no_progress_exhausted,
+                                "noProgressTurns": autopilot.no_progress_turns,
+                                "lastStopReason": agent.last_stop_reason,
+                            },
+                            "stats": _session_stats(agent, session_start),
+                        })
 
-                if command in ["/exit", "/quit", "/q"]:
-                    print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
+                return 0 if ok else 1
+
+            # 9. Setup prompt_toolkit session
+            # Command completer
+            command_completer = WordCompleter(
+                [
+                    "/help",
+                    "/clear",
+                    "/clear_all",
+                    "/history",
+                    "/stats",
+                    "/sandbox_status",
+                    "/log",
+                    "/goal",
+                    "/goal pause",
+                    "/goal resume",
+                    "/goal clear",
+                    "/goal complete",
+                    "/memory",
+                    "/exit",
+                    "/quit",
+                    "/q",
+                ],
+                ignore_case=True,
+                sentence=True,
+            )
+
+            # Custom style for prompt
+            prompt_style = Style.from_dict(
+                {
+                    "prompt": "#00ff00 bold",  # Green and bold
+                    "separator": "#666666",  # Gray
+                }
+            )
+
+            # Custom key bindings
+            kb = KeyBindings()
+
+            @kb.add("c-u")  # Ctrl+U: Clear current line
+            def _(event):
+                """Clear the current input line"""
+                event.current_buffer.reset()
+
+            @kb.add("c-l")  # Ctrl+L: Clear screen (optional bonus)
+            def _(event):
+                """Clear the screen"""
+                event.app.renderer.clear()
+
+            @kb.add("c-j")  # Ctrl+J (对应 Ctrl+Enter)
+            def _(event):
+                """Insert a newline"""
+                event.current_buffer.insert_text("\n")
+
+            # Create prompt session with history and auto-suggest
+            # Use FileHistory for persistent history across sessions (stored in user's home directory)
+            history_file = state_path('.history')
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            session = PromptSession(
+                history=FileHistory(str(history_file)),
+                auto_suggest=AutoSuggestFromHistory(),
+                completer=command_completer,
+                style=prompt_style,
+                key_bindings=kb,
+            )
+
+            # 10. Interactive loop
+            while True:
+                try:
+                    # Build prompt with optional sandbox session_id
+                    if sandbox_mode:
+                        # Try to get current session_id from sandbox tool
+                        sandbox_session_id = None
+                        for tool in tools:
+                            if isinstance(tool, JupyterSandboxTool):
+                                sandbox_session_id = tool.session_id
+                                break
+                        if sandbox_session_id:
+                            prompt_parts = [
+                                ("class:prompt", f"You [{sandbox_session_id}]"),
+                                ("", " › "),
+                            ]
+                        else:
+                            prompt_parts = [
+                                ("class:prompt", "You"),
+                                ("", " › "),
+                            ]
+                    else:
+                        prompt_parts = [
+                            ("class:prompt", "You"),
+                            ("", " › "),
+                        ]
+
+                    # Get user input using prompt_toolkit
+                    user_input = await session.prompt_async(
+                        prompt_parts,
+                        multiline=False,
+                        enable_history_search=True,
+                    )
+                    user_input = user_input.strip()
+
+                    if not user_input:
+                        continue
+
+                    # Handle commands
+                    if user_input.startswith("/"):
+                        command = user_input.lower()
+
+                        if command in ["/exit", "/quit", "/q"]:
+                            print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
+                            print_stats(agent, session_start)
+                            break
+
+                        elif command == "/help":
+                            print_help()
+                            continue
+
+                        elif command == "/clear":
+                            # Clear message history but keep system prompt
+                            cleared_count = agent.clear_history()
+                            agent_session.source_text = bind_user_source_text(agent.tools, "", "")
+                            print(f"{Colors.GREEN}✅ Cleared {cleared_count} messages, starting new session{Colors.RESET}\n")
+                            if sandbox_mode:
+                                print(f"{Colors.YELLOW}⚠️  Note: /clear does not clear sandbox state.{Colors.RESET}")
+                                print(f"{Colors.DIM}   Use /clear_all to clear both messages and sandbox.{Colors.RESET}\n")
+                            continue
+
+                        elif command == "/clear_all":
+                            # Clear both message history AND sandbox kernel
+                            cleared_count = agent.clear_history()
+                            agent_session.source_text = bind_user_source_text(agent.tools, "", "")
+                            if sandbox_mode:
+                                await JupyterSandboxTool.shutdown_all()
+                                print(f"{Colors.GREEN}✅ Cleared {cleared_count} messages and shut down sandbox kernel{Colors.RESET}\n")
+                            else:
+                                print(f"{Colors.GREEN}✅ Cleared {cleared_count} messages{Colors.RESET}\n")
+                            continue
+
+                        elif command == "/history":
+                            print(f"\n{Colors.BRIGHT_CYAN}Current session message count: {len(agent.messages)}{Colors.RESET}\n")
+                            continue
+
+                        elif command == "/stats":
+                            print_stats(agent, session_start)
+                            continue
+
+                        elif command == "/sandbox_status":
+                            if sandbox_mode:
+                                # Find the sandbox status tool and execute it
+                                for tool in tools:
+                                    if isinstance(tool, SandboxStatusTool):
+                                        result, _ = await invoke_tool_with_permissions(tool, {})
+                                        if result.success:
+                                            print(f"\n{Colors.BRIGHT_CYAN}{result.content}{Colors.RESET}\n")
+                                        else:
+                                            print(f"{Colors.RED}❌ {result.error}{Colors.RESET}\n")
+                                        break
+                            else:
+                                print(f"{Colors.YELLOW}⚠️  Sandbox mode not enabled{Colors.RESET}\n")
+                            continue
+
+                        elif command == "/log" or command.startswith("/log "):
+                            # Parse /log command
+                            parts = user_input.split(maxsplit=1)
+                            if len(parts) == 1:
+                                # /log - show log directory
+                                show_log_directory(open_file_manager=True)
+                            else:
+                                # /log <filename> - read specific log file
+                                filename = parts[1].strip("\"'")
+                                read_log_file(filename)
+                            continue
+
+                        elif command == "/goal" or command.startswith("/goal "):
+                            handle_goal_command(agent, user_input)
+                            _save_cli_goal()
+                            continue
+
+                        elif command == "/memory" or command.startswith("/memory "):
+                            parts = user_input.split(maxsplit=1)
+                            sub = parts[1].strip().lower() if len(parts) > 1 else ""
+                            if sub == "review":
+                                if not memory_mgr:
+                                    print(f"{Colors.YELLOW}⚠️  Memory disabled in config.{Colors.RESET}\n")
+                                else:
+                                    from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
+                                    from box_agent.events import MemoryProposalEvent, MemoryPromotionCandidate
+                                    entries = await asyncio.to_thread(
+                                        memory_mgr.list_promotion_candidates,
+                                        hit_threshold=agent_session.config.agent.memory_promotion_hit_threshold,
+                                        cooldown_days=0,  # manual review bypasses cooldown
+                                    )
+                                    if not entries:
+                                        print(f"{Colors.DIM}🧠 暂无可升级到核心记忆的候选条目。{Colors.RESET}\n")
+                                    else:
+                                        await asyncio.to_thread(
+                                            memory_mgr.mark_proposed,
+                                            [e.id for e in entries],
+                                        )
+                                        evt = MemoryProposalEvent(
+                                            candidates=tuple(
+                                                MemoryPromotionCandidate(
+                                                    entry_id=e.id,
+                                                    content=e.content,
+                                                    hits=e.hits,
+                                                    confidence=e.confidence,
+                                                ) for e in entries
+                                            )
+                                        )
+                                        await CLIMemoryProposalNegotiator(memory_mgr).negotiate(evt)
+                            else:
+                                print(f"{Colors.DIM}用法: /memory review — 审阅可升级到核心记忆的候选条目{Colors.RESET}\n")
+                            continue
+
+                        else:
+                            print(f"{Colors.RED}❌ Unknown command: {user_input}{Colors.RESET}")
+                            print(f"{Colors.DIM}Type /help to see available commands{Colors.RESET}\n")
+                            continue
+
+                    # Normal conversation - exit check
+                    if user_input.lower() in ["exit", "quit", "q"]:
+                        print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
+                        print_stats(agent, session_start)
+                        break
+
+                    # Run Agent with Esc cancellation support
+                    # Finish background MCP discovery. Deferred mode leaves ordinary
+                    # MCP tools catalog-only; legacy eager mode registers them here.
+                    loaded_mcp_tools = await await_mcp_tools(mcp_task)
+                    if not agent_session.config.tools.mcp.deferred_loading_enabled:
+                        register_mcp_tools(agent.tools, loaded_mcp_tools)
+                    await _refresh_mcp_after_auth_change()
+                    mcp_task = None  # clear so we don't re-await the cached result each turn
+
+                    print(
+                        f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
+                        f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
+                    )
+                    _apply_skill_filter(user_input)
+                    _select_cli_skills(user_input)
+                    agent_session.source_text = bind_user_source_text(
+                        agent.tools, agent_session.source_text, user_input
+                    )
+                    agent.add_user_message(user_input)
+
+                    # Reset the shared session cancellation flag for this user turn.
+                    agent_session.cancelled = False
+
+                    esc_listener_stop = threading.Event()
+                    esc_cancelled = [False]
+
+                    def esc_key_listener():
+                        """Listen for Esc key in a separate thread."""
+                        if platform.system() == "Windows":
+                            try:
+                                import msvcrt
+
+                                while not esc_listener_stop.is_set():
+                                    if msvcrt.kbhit():
+                                        char = msvcrt.getch()
+                                        if char == b"\x1b":  # Esc
+                                            print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
+                                            esc_cancelled[0] = True
+                                            agent_session.request_cancel()
+                                            break
+                                    esc_listener_stop.wait(0.05)
+                            except Exception:
+                                pass
+                            return
+
+                        # Unix/macOS
+                        try:
+                            import select
+                            import termios
+                            import tty
+
+                            fd = sys.stdin.fileno()
+                            old_settings = termios.tcgetattr(fd)
+
+                            try:
+                                tty.setcbreak(fd)
+                                while not esc_listener_stop.is_set():
+                                    rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                                    if rlist:
+                                        char = sys.stdin.read(1)
+                                        if char == "\x1b":  # Esc
+                                            print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
+                                            esc_cancelled[0] = True
+                                            agent_session.request_cancel()
+                                            break
+                            finally:
+                                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                        except Exception:
+                            pass
+
+                    esc_thread = threading.Thread(target=esc_key_listener, daemon=True)
+                    esc_thread.start()
+
+                    try:
+                        with traced_session_turn(trace_writer, content=user_input) as traced_turn:
+                            agent_task = asyncio.create_task(
+                                _run_session_turn(
+                                    agent_session,
+                                    force_plan_start=agent_session.force_plan_start,
+                                    current_turn_text=user_input,
+                                )
+                            )
+                            try:
+                                agent_session.force_plan_start = False
+
+                                while not agent_task.done():
+                                    if esc_cancelled[0]:
+                                        agent_session.request_cancel()
+                                    await asyncio.sleep(0.1)
+
+                                traced_turn.content = agent_task.result()
+                                traced_turn.stop_reason = agent.last_stop_reason
+                            finally:
+                                # The child inherits this trace context: settle it before
+                                # closing the turn or returning to the next CLI prompt.
+                                if not agent_task.done():
+                                    agent_task.cancel()
+                                    await asyncio.gather(agent_task, return_exceptions=True)
+
+                    except asyncio.CancelledError:
+                        print(f"\n{Colors.BRIGHT_YELLOW}⚠️  Agent execution cancelled{Colors.RESET}")
+                    finally:
+                        agent_session.cancelled = False
+                        esc_listener_stop.set()
+                        esc_thread.join(timeout=0.2)
+                        _save_cli_goal()
+                        if agent_session.skill_scratch_dir is not None:
+                            try:
+                                cleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
+                            except Exception as cleanup_error:
+                                print(
+                                    f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "
+                                    f"{cleanup_error}{Colors.RESET}",
+                                    file=sys.stderr,
+                                )
+
+                    # Visual separation
+                    print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
+
+                except EOFError:
+                    print(
+                        f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent"
+                        f"{Colors.RESET}\n"
+                    )
                     print_stats(agent, session_start)
                     break
 
-                elif command == "/help":
-                    print_help()
-                    continue
-
-                elif command == "/clear":
-                    # Clear message history but keep system prompt
-                    cleared_count = agent.clear_history()
-                    agent_session.source_text = bind_user_source_text(agent.tools, "", "")
-                    print(f"{Colors.GREEN}✅ Cleared {cleared_count} messages, starting new session{Colors.RESET}\n")
-                    if sandbox_mode:
-                        print(f"{Colors.YELLOW}⚠️  Note: /clear does not clear sandbox state.{Colors.RESET}")
-                        print(f"{Colors.DIM}   Use /clear_all to clear both messages and sandbox.{Colors.RESET}\n")
-                    continue
-
-                elif command == "/clear_all":
-                    # Clear both message history AND sandbox kernel
-                    cleared_count = agent.clear_history()
-                    agent_session.source_text = bind_user_source_text(agent.tools, "", "")
-                    if sandbox_mode:
-                        await JupyterSandboxTool.shutdown_all()
-                        print(f"{Colors.GREEN}✅ Cleared {cleared_count} messages and shut down sandbox kernel{Colors.RESET}\n")
-                    else:
-                        print(f"{Colors.GREEN}✅ Cleared {cleared_count} messages{Colors.RESET}\n")
-                    continue
-
-                elif command == "/history":
-                    print(f"\n{Colors.BRIGHT_CYAN}Current session message count: {len(agent.messages)}{Colors.RESET}\n")
-                    continue
-
-                elif command == "/stats":
+                except KeyboardInterrupt:
+                    print(f"\n\n{Colors.BRIGHT_YELLOW}👋 Interrupt signal detected, exiting...{Colors.RESET}\n")
                     print_stats(agent, session_start)
-                    continue
+                    break
 
-                elif command == "/sandbox_status":
-                    if sandbox_mode:
-                        # Find the sandbox status tool and execute it
-                        for tool in tools:
-                            if isinstance(tool, SandboxStatusTool):
-                                result, _ = await invoke_tool_with_permissions(tool, {})
-                                if result.success:
-                                    print(f"\n{Colors.BRIGHT_CYAN}{result.content}{Colors.RESET}\n")
-                                else:
-                                    print(f"{Colors.RED}❌ {result.error}{Colors.RESET}\n")
-                                break
-                    else:
-                        print(f"{Colors.YELLOW}⚠️  Sandbox mode not enabled{Colors.RESET}\n")
-                    continue
+                except Exception as e:
+                    print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
+                    print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
 
-                elif command == "/log" or command.startswith("/log "):
-                    # Parse /log command
-                    parts = user_input.split(maxsplit=1)
-                    if len(parts) == 1:
-                        # /log - show log directory
-                        show_log_directory(open_file_manager=True)
-                    else:
-                        # /log <filename> - read specific log file
-                        filename = parts[1].strip("\"'")
-                        read_log_file(filename)
-                    continue
+            return 0
+        finally:
+            from box_agent.session_assembly import attach_cleanup_error
 
-                elif command == "/goal" or command.startswith("/goal "):
-                    handle_goal_command(agent, user_input)
-                    _save_goal_state(workspace_dir, agent.goal)
-                    continue
-
-                elif command == "/memory" or command.startswith("/memory "):
-                    parts = user_input.split(maxsplit=1)
-                    sub = parts[1].strip().lower() if len(parts) > 1 else ""
-                    if sub == "review":
-                        if not memory_mgr:
-                            print(f"{Colors.YELLOW}⚠️  Memory disabled in config.{Colors.RESET}\n")
-                        else:
-                            from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
-                            from box_agent.events import MemoryProposalEvent, MemoryPromotionCandidate
-                            entries = await asyncio.to_thread(
-                                memory_mgr.list_promotion_candidates,
-                                hit_threshold=agent_session.config.agent.memory_promotion_hit_threshold,
-                                cooldown_days=0,  # manual review bypasses cooldown
-                            )
-                            if not entries:
-                                print(f"{Colors.DIM}🧠 暂无可升级到核心记忆的候选条目。{Colors.RESET}\n")
-                            else:
-                                await asyncio.to_thread(
-                                    memory_mgr.mark_proposed,
-                                    [e.id for e in entries],
-                                )
-                                evt = MemoryProposalEvent(
-                                    candidates=tuple(
-                                        MemoryPromotionCandidate(
-                                            entry_id=e.id,
-                                            content=e.content,
-                                            hits=e.hits,
-                                            confidence=e.confidence,
-                                        ) for e in entries
-                                    )
-                                )
-                                await CLIMemoryProposalNegotiator(memory_mgr).negotiate(evt)
-                    else:
-                        print(f"{Colors.DIM}用法: /memory review — 审阅可升级到核心记忆的候选条目{Colors.RESET}\n")
-                    continue
-
-                else:
-                    print(f"{Colors.RED}❌ Unknown command: {user_input}{Colors.RESET}")
-                    print(f"{Colors.DIM}Type /help to see available commands{Colors.RESET}\n")
-                    continue
-
-            # Normal conversation - exit check
-            if user_input.lower() in ["exit", "quit", "q"]:
-                print(f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent{Colors.RESET}\n")
-                print_stats(agent, session_start)
-                break
-
-            # Run Agent with Esc cancellation support
-            # Finish background MCP discovery. Deferred mode leaves ordinary
-            # MCP tools catalog-only; legacy eager mode registers them here.
-            loaded_mcp_tools = await await_mcp_tools(mcp_task)
-            if not agent_session.config.tools.mcp.deferred_loading_enabled:
-                register_mcp_tools(agent.tools, loaded_mcp_tools)
-            await _refresh_mcp_after_auth_change()
-            mcp_task = None  # clear so we don't re-await the cached result each turn
-
-            print(
-                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
-                f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
-            )
-            _apply_skill_filter(user_input)
-            _apply_cli_auto_loaded_skills(user_input)
-            agent_session.source_text = bind_user_source_text(
-                agent.tools, agent_session.source_text, user_input
-            )
-            agent.add_user_message(user_input)
-
-            # Reset the shared session cancellation flag for this user turn.
-            agent_session.cancelled = False
-
-            esc_listener_stop = threading.Event()
-            esc_cancelled = [False]
-
-            def esc_key_listener():
-                """Listen for Esc key in a separate thread."""
-                if platform.system() == "Windows":
-                    try:
-                        import msvcrt
-
-                        while not esc_listener_stop.is_set():
-                            if msvcrt.kbhit():
-                                char = msvcrt.getch()
-                                if char == b"\x1b":  # Esc
-                                    print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
-                                    esc_cancelled[0] = True
-                                    agent_session.request_cancel()
-                                    break
-                            esc_listener_stop.wait(0.05)
-                    except Exception:
-                        pass
-                    return
-
-                # Unix/macOS
-                try:
-                    import select
-                    import termios
-                    import tty
-
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-
-                    try:
-                        tty.setcbreak(fd)
-                        while not esc_listener_stop.is_set():
-                            rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-                            if rlist:
-                                char = sys.stdin.read(1)
-                                if char == "\x1b":  # Esc
-                                    print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
-                                    esc_cancelled[0] = True
-                                    agent_session.request_cancel()
-                                    break
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                except Exception:
-                    pass
-
-            esc_thread = threading.Thread(target=esc_key_listener, daemon=True)
-            esc_thread.start()
-
+            primary_error = sys.exc_info()[1]
             try:
-                with traced_session_turn(trace_writer, content=user_input) as traced_turn:
-                    agent_task = asyncio.create_task(
-                        _run_session_turn(
-                            agent_session,
-                            force_plan_start=agent_session.force_plan_start,
-                            current_turn_text=user_input,
-                        )
-                    )
-                    try:
-                        agent_session.force_plan_start = False
-
-                        while not agent_task.done():
-                            if esc_cancelled[0]:
-                                agent_session.request_cancel()
-                            await asyncio.sleep(0.1)
-
-                        traced_turn.content = agent_task.result()
-                        traced_turn.stop_reason = agent.last_stop_reason
-                    finally:
-                        # The child inherits this trace context: settle it before
-                        # closing the turn or returning to the next CLI prompt.
-                        if not agent_task.done():
-                            agent_task.cancel()
-                            await asyncio.gather(agent_task, return_exceptions=True)
-
-            except asyncio.CancelledError:
-                print(f"\n{Colors.BRIGHT_YELLOW}⚠️  Agent execution cancelled{Colors.RESET}")
+                await agent_session.aclose()
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                attach_cleanup_error(primary_error, cleanup_error)
             finally:
-                agent_session.cancelled = False
-                esc_listener_stop.set()
-                esc_thread.join(timeout=0.2)
-                _save_goal_state(workspace_dir, agent.goal)
-                if agent_session.skill_scratch_dir is not None:
-                    try:
-                        cleanup_skill_scratch_dir(agent_session.skill_scratch_dir)
-                    except Exception as cleanup_error:
-                        print(
-                            f"{Colors.YELLOW}⚠️  Failed to clean Skill scratch: "
-                            f"{cleanup_error}{Colors.RESET}",
-                            file=sys.stderr,
-                        )
-
-            # Visual separation
-            print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
-
-        except EOFError:
-            print(
-                f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Box Agent"
-                f"{Colors.RESET}\n"
-            )
-            print_stats(agent, session_start)
-            break
-
-        except KeyboardInterrupt:
-            print(f"\n\n{Colors.BRIGHT_YELLOW}👋 Interrupt signal detected, exiting...{Colors.RESET}\n")
-            print_stats(agent, session_start)
-            break
-
-        except Exception as e:
-            print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
-            print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
-
-    # 11. Cleanup MCP connections
-    await _quiet_cleanup()
-    return 0
+                await _quiet_cleanup()
+    finally:
+        from box_agent.session_assembly import close_owned_clients
+        try:
+            await close_owned_clients(owned_clients)
+        finally:
+            if session_log is not None:
+                session_log.close()
 
 
 def main() -> int:
@@ -2914,6 +2742,7 @@ def main() -> int:
             evidence=args.evidence,
             progress=args.progress,
             json_output=args.json,
+            session_id=getattr(args, "session_id", None),
         )
 
     # Ensure user config exists; run setup wizard on first launch
@@ -2942,11 +2771,6 @@ def main() -> int:
     except WorkspaceRegistryError as exc:
         print(f"{Colors.RED}❌ Workspace config error: {exc}{Colors.RESET}")
         return 1
-    if workspace_profile is None or workspace_profile.task_type != "code":
-        # General tasks keep their canonical output directory. Code workspaces
-        # edit the project tree directly and must not create it implicitly.
-        ensure_output_dir(workspace_dir)
-
     # Run the agent (config always loaded from package directory)
     try:
         return asyncio.run(
@@ -2954,6 +2778,7 @@ def main() -> int:
                 workspace_dir,
                 task=args.task,
                 initial_goal=args.goal,
+                session_id=getattr(args, "session_id", None),
                 sandbox_mode=not args.no_sandbox,
                 verify_api=not args.no_verify_api,
                 json_summary=args.json,

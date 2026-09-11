@@ -115,7 +115,9 @@ def test_data_analysis_prompt_includes_plot_contract_and_general_prompt_does_not
     agent, _ = _make_agent(tmp_path, llm)
     agent._system_prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
 
-    general_prompt = agent._build_session_prompt("general", workspace=tmp_path)
+    general_prompt = agent._build_session_prompt(
+        "general", workspace=tmp_path, enable_general_directory_policy=True
+    )
     analysis_prompt = agent._build_session_prompt("data_analysis", workspace=tmp_path)
 
     assert "多文件交付" in general_prompt
@@ -138,7 +140,6 @@ def test_code_agent_prompt_includes_software_engineering_contract(tmp_path):
     code_prompt = agent._build_session_prompt(
         "code_agent",
         workspace=tmp_path,
-        artifact_mode="project",
     )
 
     assert "Software Engineering Mode (code_agent)" not in general_prompt
@@ -166,7 +167,7 @@ def test_code_agent_prompt_includes_software_engineering_contract(tmp_path):
     assert "Project Startup Context" in code_prompt
     assert "cwd 已是 `{workspace}/output/`" not in code_prompt
     assert "不要在最终文本手写或猜测 `local-file://`" in code_prompt
-    assert "项目内相对位置即可" in code_prompt
+    assert "工作目录内相对位置即可" in code_prompt
 
 
 def test_code_agent_prompt_reads_workspace_agents_md(tmp_path):
@@ -182,7 +183,6 @@ def test_code_agent_prompt_reads_workspace_agents_md(tmp_path):
     code_prompt = agent._build_session_prompt(
         "code_agent",
         workspace=tmp_path,
-        artifact_mode="project",
     )
 
     assert "Project Startup Context" not in general_prompt
@@ -205,7 +205,6 @@ def test_code_agent_prompt_includes_git_status_summary(tmp_path):
     code_prompt = agent._build_session_prompt(
         "code_agent",
         workspace=tmp_path,
-        artifact_mode="project",
     )
 
     assert "Git repository: yes" in code_prompt

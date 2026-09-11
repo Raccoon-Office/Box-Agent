@@ -32,6 +32,25 @@ class StreamInterruptionRecovery:
         )
 
 
+class RepetitiveStreamRecovery:
+    """Allow one fresh response after discarding malformed repetitive output."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def request(self, *, step: int, max_steps: int) -> str | None:
+        if self.attempts >= 1 or step + 1 >= max_steps:
+            return None
+        self.attempts += 1
+        return (
+            "[System recovery: The last model response was discarded because it "
+            "repeated a short pattern. Generate a fresh valid response to continue "
+            "the task. Preserve committed tool results and do not repeat completed "
+            "actions. No tool calls from the discarded response were executed. "
+            "Use the provided tool schemas for any remaining actions.]"
+        )
+
+
 def resolve_provider_stale_seconds(
     config_value: float | None = None,
     *,

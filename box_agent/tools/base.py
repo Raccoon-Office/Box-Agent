@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +45,7 @@ class ToolInvocationContext:
 
     event_queue: asyncio.Queue | None = None
     parent_tool_call_id: str = ""
+    skill_reader: Callable[..., ToolResult] | None = None
 
 
 class Tool:
