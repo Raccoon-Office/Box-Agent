@@ -82,7 +82,7 @@ Treat these namespaces as a security boundary. Never pass snapshots, element ref
 
 ## Parallel sub-agents and the managed browser
 
-Parallel `sub_agent` runs in the same session each get their own managed browser context. When a child returns, that context is closed. The parent can see the child's snapshots in the transcript, but must not reuse that child's snapshots, element refs, or tab identifiers.
+When per-session isolation is enabled, parallel `sub_agent` runs in the same session each get their own managed browser context. Shared stdio fallback configurations still serialize browser access and may return `BROWSER_RUNTIME_BUSY`. When a child returns, that context is closed. The parent can see the child's snapshots in the transcript, but must not reuse that child's snapshots, element refs, or tab identifiers.
 
 ## Switch the managed browser window
 

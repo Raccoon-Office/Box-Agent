@@ -61,6 +61,11 @@ def test_multiplex_allowed_for_isolated_stdio_playwright():
         ("playwright", _pw(["--isolated", "--shared-browser-context"]), "--shared-browser-context"),
         ("playwright", _pw(["--isolated", "--user-data-dir", "/tmp/p"]), "--user-data-dir"),
         ("playwright", _pw(["--isolated", "--port", "8931"]), "--port"),
+        ("playwright", _pw(["--isolated", "--port=8931"]), "--port"),
+        ("playwright", _pw(["--isolated", "--user-data-dir=/tmp/profile"]), "--user-data-dir"),
+        ("playwright", _pw(["--isolated", "--cdp-endpoint=http://localhost:9222"]), "--cdp-endpoint"),
+        ("playwright", _pw(["--isolated", "--extension"]), "--extension"),
+        ("playwright", _pw(["--isolated", "--config", "browser.json"]), "--config"),
         ("playwright", {"url": "http://localhost:8931/mcp"}, "URL-based"),
         ("playwright", {"args": ["--isolated"]}, "no command"),
     ],
@@ -74,6 +79,26 @@ def test_multiplex_respects_config_switch():
     disabled = PlaywrightIsolationConfig(enabled=False)
     reason = playwright_multiplex_blocker("playwright", _pw(["--isolated"]), disabled)
     assert reason is not None and "playwright_per_session_context" in reason
+
+
+@pytest.mark.parametrize("setting", ["SHARED_BROWSER_CONTEXT", "CDP_ENDPOINT", "CONFIG"])
+def test_multiplex_rejects_environment_browser_overrides(setting):
+    config = _pw(["--isolated"])
+    key = f"PLAYWRIGHT_MCP_{setting}"
+    config["env"] = {key: "configured"}
+    assert key in playwright_multiplex_blocker("playwright", config)
+
+
+async def test_multiplex_shutdown_stops_process_even_if_pool_close_is_cancelled():
+    from unittest.mock import AsyncMock
+
+    conn = MCPServerConnection("playwright", connection_type="stdio_http", command="node")
+    conn.session_pool = SimpleNamespace(close_all=AsyncMock(side_effect=asyncio.CancelledError))
+    process = SimpleNamespace(stop=AsyncMock())
+    conn.server_process = process
+    with pytest.raises(asyncio.CancelledError):
+        await conn._shutdown_multiplexed_server()
+    process.stop.assert_awaited_once()
 
 
 def test_effective_connection_type_switches_playwright_to_stdio_http(monkeypatch):

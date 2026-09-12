@@ -150,6 +150,8 @@ When the `playwright` entry is a stdio command that includes `--isolated` (and d
 2. opens one short-lived MCP client to list the tools, then closes it (no browser is launched for discovery);
 3. opens one MCP client **per agent session** on first use, and a further client **per `sub_agent` run** (`{parentSessionId}:{sub_agent_id}`). `@playwright/mcp` gives every HTTP client its own `BrowserContext` on a shared Chromium process, so concurrent ACP sessions and parallel sub-agents get independent tabs, cookies and storage and never block each other. In headed mode every active context shows its own window. A sub-agent's context is closed when that child returns.
 
+Custom `--config`, CDP/remote endpoints, extension attachment, and browser/transport environment overrides retain shared stdio mode because per-session ownership cannot be guaranteed. Both `--flag value` and `--flag=value` forms are checked. Cancellation during tab cleanup or pool shutdown still settles the owned MCP client tasks; a closed pool cannot create new clients.
+
 Tuning lives under `tools.mcp` in `config.yaml`:
 
 | Key | Default | Meaning |

@@ -141,6 +141,8 @@ box-agent goal complete --evidence "uv run pytest tests/ -q passed"
 2. 用一个短命 MCP 客户端列出工具后立刻关闭（发现阶段不会启动浏览器）；
 3. **每个 agent session 首次调用时**各自建立一个 MCP 客户端，**每个 `sub_agent` 运行**再派生 `{父session}:{sub_agent_id}` 客户端。`@playwright/mcp` 会给每个 HTTP 客户端一个独立的 `BrowserContext`（共享一个 Chromium 进程），因此并发的 ACP 会话和同一会话内并行的子 Agent 拥有各自的标签页、Cookie 和存储，互不阻塞；有头模式下每个活跃上下文对应一个独立窗口。子 Agent 返回时关闭其上下文。
 
+自定义 `--config`、CDP／远端连接、扩展接管以及浏览器／传输环境变量覆盖会保留共享 stdio 模式，因为这些配置无法保证每个会话独立拥有上下文。参数检查同时覆盖 `--flag value` 和 `--flag=value`。关闭标签页或整个池时收到取消，仍会完成 MCP client 的资源清理；池关闭后不能再创建 client。
+
 可在 `config.yaml` 的 `tools.mcp` 下调节：
 
 | 配置项 | 默认值 | 含义 |

@@ -246,6 +246,8 @@ class PlaywrightSessionPool:
     async def _create(self, key: str) -> _PooledClient:
         condition = self._sync()
         async with condition:
+            if self._closed:
+                raise RuntimeError("PlaywrightSessionPool is closed")
             # Another task may have created it while we waited for the lock.
             live = self._live(key)
             if live is not None:
@@ -259,6 +261,11 @@ class PlaywrightSessionPool:
             # Make room.
             deadline = self._time() + self._wait_timeout
             while len(self.active_keys()) >= self._max_clients:
+                if self._closed:
+                    raise RuntimeError("PlaywrightSessionPool is closed")
+                live = self._live(key)
+                if live is not None:
+                    return live
                 victim = self._evictable()
                 if victim is not None:
                     await self._close_client(victim, reason="lru-evict")
@@ -271,6 +278,12 @@ class PlaywrightSessionPool:
                 except asyncio.TimeoutError:
                     raise BrowserSessionLimitError(self._max_clients) from None
 
+            if self._closed:
+                raise RuntimeError("PlaywrightSessionPool is closed")
+            live = self._live(key)
+            if live is not None:
+                return live
+
             generation = self._generation
             loop = asyncio.get_running_loop()
             ready: asyncio.Future[Any] = loop.create_future()
@@ -281,9 +294,12 @@ class PlaywrightSessionPool:
             )
             try:
                 session = await ready
+                if self._closed:
+                    raise RuntimeError("PlaywrightSessionPool is closed")
             except BaseException:
                 close_requested.set()
                 runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
                 raise
             now = self._time()
             client = _PooledClient(
@@ -316,27 +332,32 @@ class PlaywrightSessionPool:
         if client.closing:
             return
         client.closing = True
-        self._clients.pop(client.key, None)
-        await self._close_tabs(client)
-        client.close_requested.set()
-        if client.runner is not None:
+        try:
+            await self._close_tabs(client)
+        finally:
+            # Cancelling tab cleanup must still release the task that owns the
+            # MCP transport. Keep it registered until teardown has settled.
+            client.close_requested.set()
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(client.runner), timeout=_CLIENT_CLOSE_TIMEOUT
+                if client.runner is not None:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(client.runner), timeout=_CLIENT_CLOSE_TIMEOUT
+                        )
+                    except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+                        client.runner.cancel()
+                        await asyncio.gather(client.runner, return_exceptions=True)
+                        if isinstance(error, asyncio.CancelledError):
+                            raise
+            finally:
+                if self._clients.get(client.key) is client:
+                    self._clients.pop(client.key)
+                if self._condition is not None:
+                    self._condition.notify_all()
+                sys.stderr.write(
+                    f"[browser] closed managed browser context for session {client.key!r} "
+                    f"({reason})\n"
                 )
-            except asyncio.TimeoutError:
-                client.runner.cancel()
-            except BaseException as error:  # noqa: BLE001
-                if isinstance(error, asyncio.CancelledError):
-                    raise
-                # Transport teardown noise; the runner already swallowed what
-                # it could and the process-level cleanup will reap the rest.
-        sys.stderr.write(
-            f"[browser] closed managed browser context for session {client.key!r} "
-            f"({reason})\n"
-        )
-        if self._condition is not None:
-            self._condition.notify_all()
 
     def _ensure_reaper(self) -> None:
         if self._idle_timeout <= 0 or self._closed:
@@ -377,12 +398,12 @@ class PlaywrightSessionPool:
             if client.calls > 0:
                 return client
             client.in_use += 1
+            client.calls += 1
             try:
                 await asyncio.wait_for(
                     client.session.call_tool("browser_tabs", arguments={"action": "list"}),
                     timeout=_WARM_UP_TIMEOUT,
                 )
-                client.calls += 1
             except Exception as error:  # noqa: BLE001
                 sys.stderr.write(
                     f"[browser] warm-up for session {client.key!r} failed: {error}\n"
@@ -411,6 +432,8 @@ class PlaywrightSessionPool:
 
     async def resolve(self, key: str | None = None) -> Any:
         """Return the ClientSession for ``key`` (default: current session key)."""
+        if self._closed:
+            raise RuntimeError("PlaywrightSessionPool is closed")
         key = key or self._resolve_key()
         live = self._live(key)
         if live is not None:
@@ -463,11 +486,23 @@ class PlaywrightSessionPool:
         """Close every client (and stop the reaper when ``final``)."""
         if final:
             self._closed = True
-        if self._reaper is not None:
-            self._reaper.cancel()
-            self._reaper = None
-        condition = self._sync()
-        async with condition:
-            for client in list(self._clients.values()):
-                await self._close_client(client, reason="pool-shutdown")
-        self._generation += 1
+
+        async def finish_close() -> None:
+            reaper, self._reaper = self._reaper, None
+            if reaper is not None:
+                reaper.cancel()
+                await asyncio.gather(reaper, return_exceptions=True)
+            condition = self._sync()
+            async with condition:
+                for client in list(self._clients.values()):
+                    await self._close_client(client, reason="pool-shutdown")
+            self._generation += 1
+
+        cleanup = asyncio.create_task(finish_close())
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            # Finish every client, including those not reached when the caller
+            # was cancelled, before propagating cancellation to the host.
+            await cleanup
+            raise

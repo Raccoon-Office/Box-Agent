@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -1560,5 +1561,7 @@ class SubAgentTool(EventEmittingTool):
             reset_browser_session_key(token)
             try:
                 await close_browser_session(child_key)
-            except Exception:
-                pass
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    "browser session cleanup failed for %s: %s", child_key, error,
+                )

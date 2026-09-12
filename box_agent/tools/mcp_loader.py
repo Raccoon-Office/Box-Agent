@@ -407,15 +407,27 @@ def playwright_multiplex_blocker(
     if not server_config.get("command"):
         return "playwright entry has no command"
     args = [str(a) for a in server_config.get("args", []) or []]
+    flags = {arg.split("=", 1)[0] for arg in args}
     if "--isolated" not in args:
         return "--isolated missing (persistent profile cannot be shared per session)"
-    if "--shared-browser-context" in args:
+    if "--shared-browser-context" in flags:
         return "--shared-browser-context forces one context for every client"
-    if "--user-data-dir" in args:
+    if "--user-data-dir" in flags:
         return "--user-data-dir pins a persistent profile"
     for flag in ("--port", "--host", "--allowed-hosts"):
-        if flag in args:
+        if flag in flags:
             return f"{flag} is already set in mcp.json; leave HTTP mode to the user"
+    for flag in ("--cdp-endpoint", "--remote-endpoint", "--extension", "--config"):
+        if flag in flags:
+            return f"{flag} supplies browser ownership outside the isolated managed context"
+    env = server_config.get("env") or {}
+    for setting in (
+        "SHARED_BROWSER_CONTEXT", "USER_DATA_DIR", "CDP_ENDPOINT", "REMOTE_ENDPOINT",
+        "EXTENSION", "CONFIG", "PORT", "HOST", "ALLOWED_HOSTS",
+    ):
+        key = f"PLAYWRIGHT_MCP_{setting}"
+        if env.get(key):
+            return f"{key} overrides the managed browser configuration"
     return None
 
 
@@ -1501,17 +1513,16 @@ class MCPServerConnection:
 
     async def _shutdown_multiplexed_server(self) -> None:
         pool, self.session_pool = self.session_pool, None
-        if pool is not None:
-            try:
-                await pool.close_all(final=True)
-            except Exception:  # noqa: BLE001
-                pass
         process, self.server_process = self.server_process, None
-        if process is not None:
-            try:
+        try:
+            if pool is not None:
+                try:
+                    await pool.close_all(final=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            if process is not None:
                 await process.stop()
-            except Exception:  # noqa: BLE001
-                pass
 
     async def disconnect(self):
         """Properly disconnect from the MCP server."""

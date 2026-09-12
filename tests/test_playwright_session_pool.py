@@ -277,3 +277,98 @@ async def test_close_all_closes_everything_and_reports_snapshot():
     with pytest.raises(RuntimeError):
         async with pool.lease("C"):
             pass
+
+
+async def test_cancelling_tab_cleanup_still_settles_the_client_runner(monkeypatch):
+    factory = FakeFactory(tabs_per_session=1)
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    async with pool.lease("A") as session:
+        pass
+    cleaning = asyncio.Event()
+
+    async def stalled_cleanup(client):
+        cleaning.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pool, "_close_tabs", stalled_cleanup)
+    runner = pool._clients["A"].runner
+    closer = asyncio.create_task(pool.close("A"))
+    await cleaning.wait()
+    closer.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await closer
+        assert session.closed
+        assert runner.done()
+        assert pool.active_keys() == []
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+
+
+async def test_final_shutdown_prevents_resolve_and_waiting_leases_from_reopening():
+    factory = FakeFactory()
+    pool = PlaywrightSessionPool(factory, max_clients=1, idle_timeout=0)
+    async with pool.lease("A"):
+        waiter = asyncio.create_task(pool.resolve("B"))
+        await asyncio.sleep(0)
+        await pool.close_all(final=True)
+        try:
+            with pytest.raises(RuntimeError, match="closed"):
+                await waiter
+            with pytest.raises(RuntimeError, match="closed"):
+                await pool.resolve("C")
+        finally:
+            await pool.close_all(final=True)
+
+
+async def test_cancelled_warmup_still_cleans_tabs_on_close(monkeypatch):
+    factory = FakeFactory(tabs_per_session=1)
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    session = await pool.resolve("A")
+    warmup = asyncio.Event()
+    original = session.call_tool
+
+    async def stall(name, arguments):
+        if arguments.get("action") == "list":
+            warmup.set()
+            await asyncio.Event().wait()
+        return await original(name, arguments)
+
+    monkeypatch.setattr(session, "call_tool", stall)
+
+    async def use():
+        async with pool.lease("A"):
+            pass
+
+    task = asyncio.create_task(use())
+    await warmup.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await pool.close_all(final=True)
+    assert session.closed
+    assert session.tabs == 0
+
+
+async def test_cancelled_shutdown_closes_all_clients(monkeypatch):
+    factory = FakeFactory()
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    await pool.resolve("A")
+    await pool.resolve("B")
+    closing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_tabs(client):
+        closing.set()
+        await release.wait()
+
+    monkeypatch.setattr(pool, "_close_tabs", delayed_tabs)
+    task = asyncio.create_task(pool.close_all(final=True))
+    await closing.wait()
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert all(session.closed for session in factory.created)
+    assert pool.active_keys() == []
