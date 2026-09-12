@@ -1805,12 +1805,13 @@ async def _run_session_turn(session: AgentSession, **overrides: Any) -> str:
 
     user_message = overrides.pop("user_message")
     session_id = overrides.pop("session_id")
-    run_id = overrides.pop("turn_id", f"turn-{uuid4().hex}")
+    run_id = f"run-{uuid4().hex}"
+    turn_id = overrides.pop("turn_id", run_id)
     handle = await AgentService().start(
         RunRequest(run_id, session_id, user_message),
         session=session,
         options=session.build_run_options(
-            session_id=session_id, turn_id=run_id, **overrides,
+            session_id=session_id, turn_id=turn_id, **overrides,
         ),
     )
     async with handle:
@@ -2232,6 +2233,7 @@ async def run_agent(
                             agent_session,
                             user_message=task,
                             session_id=logical_session_id,
+                            turn_id=traced_turn.turn_id,
                             force_plan_start=agent_session.force_plan_start,
                             current_turn_text=task,
                         )
@@ -2254,6 +2256,7 @@ async def run_agent(
                             final_content = await _run_session_turn(
                                 agent_session, user_message=continuation,
                                 session_id=logical_session_id,
+                                turn_id=traced_turn.turn_id,
                             )
                             after_signature = goal_autopilot_progress_signature(agent.goal)
                             if should_continue_goal_autopilot(agent, agent.last_stop_reason):
@@ -2618,6 +2621,7 @@ async def run_agent(
                                     agent_session,
                                     user_message=user_input,
                                     session_id=logical_session_id,
+                                    turn_id=traced_turn.turn_id,
                                     force_plan_start=agent_session.force_plan_start,
                                     current_turn_text=user_input,
                                 )

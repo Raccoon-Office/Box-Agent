@@ -58,9 +58,13 @@ class AgentService:
 
         if not isinstance(request, RunRequest):
             raise TypeError("request must be a RunRequest")
+        if getattr(session, "_closed", False) or getattr(session, "_closing", False):
+            raise RuntimeError("agent session is closed")
+        current_handle = getattr(session, "_run_handle", None)
+        if (getattr(current_handle, "is_active", False)
+                or getattr(session, "_active_run_task", None) is not None):
+            raise RuntimeError("session already has an active run")
         control = RunControl()
-        if request.user_message is not None:
-            session.agent.add_user_message(request.user_message)
         if options is None:
             options = session.build_run_options(
                 session_id=request.session_id,
@@ -75,6 +79,11 @@ class AgentService:
             if options is not None
             else None
         )
+        if isinstance(permission_broker, PermissionBroker):
+            permission_broker.bind_run(
+                run_id=request.run_id,
+                grant_store=getattr(session, "grant_store", None),
+            )
 
         handle = AgentRunHandle.for_run(
             state=session,
@@ -89,6 +98,17 @@ class AgentService:
         )
         if isinstance(permission_broker, PermissionBroker):
             permission_broker.set_event_sink(handle.publish)
+        # No await between the ownership check and runner reservation: another
+        # start cannot append history or replace this handle in that interval.
+        if request.user_message is not None:
+            session.agent.add_user_message(request.user_message)
+            grant_store = getattr(session, "grant_store", None)
+            if grant_store is not None:
+                grant_store.clear_prompt_grants()
+        # ACP can own a wider prompt spanning preparation and continuations.
+        # Its cancellation must survive starting an inner protocol run.
+        if not getattr(session, "turn_active", False):
+            session.cancelled = False
         session._run_handle = handle
         handle._start()
         return handle

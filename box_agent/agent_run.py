@@ -223,7 +223,11 @@ class AgentRunHandle:
                     artifacts=tuple(self._artifacts),
                     error={"type": type(exc).__name__, "message": str(exc)},
                 )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
         finally:
+            if self._permission_broker is not None:
+                self._permission_broker.cancel()
             if self._result is None:
                 self._result = RunResult(
                     run_id=self.run_id,
@@ -297,6 +301,9 @@ class AgentRunHandle:
         self._start()
         if not isinstance(command, ControlCommand):
             raise TypeError("command must be a ControlCommand")
+        if (not self.is_active or self._result is not None
+                or getattr(self._state, "_run_handle", self) is not self):
+            raise RuntimeError("command does not belong to the active run")
         if command.kind is ControlCommandKind.PERMISSION_RESPONSE:
             if self._permission_broker is None:
                 raise RuntimeError("permission response channel is not available")
@@ -370,6 +377,8 @@ class AgentRunHandle:
 
         if self._runner_task is None:
             return
+        if self._permission_broker is not None:
+            self._permission_broker.cancel()
         if not self._runner_task.done():
             self._runner_task.cancel()
         await asyncio.gather(self._runner_task, return_exceptions=True)

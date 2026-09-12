@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .api import ControlCommand
 from .events import PermissionRequestEvent
+from .tools.permissions import GrantStore
 
 
 class RunControl:
@@ -28,7 +29,7 @@ class RunControl:
         return self._cancelled
 
     def request_pause(self) -> None:
-        if not self._cancelled and self._state == "running":
+        if not self._cancelled and self._state in {"running", "resuming"}:
             self._state = "pausing"
             self._resume_gate.clear()
 
@@ -47,7 +48,7 @@ class RunControl:
 
         if self._cancelled:
             return False
-        if not self._resume_gate.is_set():
+        while not self._resume_gate.is_set():
             self._state = "paused"
             await self._resume_gate.wait()
         if self._cancelled:
@@ -64,12 +65,23 @@ class PermissionBroker:
         *,
         run_id: str,
         on_request: Callable[[dict[str, object]], Awaitable[None] | None],
+        grant_store: GrantStore | None = None,
     ) -> None:
         self._run_id = run_id
         self._on_request = on_request
         self._event_sink: Callable[[PermissionRequestEvent], Awaitable[None] | None] | None = None
-        self._pending: dict[str, asyncio.Future[bool]] = {}
+        self._pending: dict[str, tuple[dict[str, object], asyncio.Future[str | None]]] = {}
         self._cancelled = False
+        self._grant_store = grant_store
+
+    def bind_run(self, *, run_id: str, grant_store: GrantStore | None) -> None:
+        """Bind once to the owning run and its existing permission store."""
+        if (run_id != self._run_id or self._event_sink is not None
+                or self._cancelled or self._pending):
+            raise ValueError("permission broker belongs to a different or finished run")
+        if self._grant_store is not None and self._grant_store is not grant_store:
+            raise ValueError("permission broker belongs to a different grant store")
+        self._grant_store = grant_store
 
     def set_event_sink(
         self,
@@ -81,13 +93,15 @@ class PermissionBroker:
         if self._cancelled:
             return False
         request_id = str(permission_request.get("request_id") or uuid4().hex)
+        if request_id in self._pending:
+            raise ValueError("permission request_id is already pending")
         future = asyncio.get_running_loop().create_future()
-        self._pending[request_id] = future
         request = {
+            **dict(permission_request),
             "run_id": self._run_id,
             "request_id": request_id,
-            **dict(permission_request),
         }
+        self._pending[request_id] = (request, future)
         try:
             if self._event_sink is not None:
                 notification = self._event_sink(PermissionRequestEvent(
@@ -107,7 +121,13 @@ class PermissionBroker:
                 notification = self._on_request(request)
             if notification is not None:
                 await notification
-            return await future
+            grant_scope = await future
+            if grant_scope is None or self._cancelled:
+                return False
+            if self._grant_store is not None:
+                return self._grant_store.apply_permission_grant(request, grant_scope)
+            # Safety retries need a one-shot decision, not a durable grant.
+            return request.get("scope") == "safety"
         except asyncio.CancelledError:
             raise
         finally:
@@ -121,22 +141,40 @@ class PermissionBroker:
             return False
         option_id = command.payload.get("option_id", command.payload.get("optionId"))
         approved = command.payload.get("approved")
-        if isinstance(approved, bool):
-            decision = approved
-        elif isinstance(option_id, str):
-            decision = option_id not in {"reject", "deny", "denied"}
-        else:
+        choices = {
+            "approve": "prompt", "approve_session": "session",
+            "reject": None, "deny": None, "denied": None,
+        }
+        if "approved" in command.payload and not isinstance(approved, bool):
+            raise ValueError("approved must be a boolean")
+        if option_id is not None and (
+            not isinstance(option_id, str) or option_id not in choices
+        ):
+            raise ValueError("unknown permission response option")
+        if option_id is None and approved is None:
             raise ValueError("permission_response requires option_id or approved")
-        future = self._pending[request_id]
-        if not future.done():
-            future.set_result(decision)
+        if (option_id is not None and approved is not None
+                and approved != (choices[option_id] is not None)):
+            raise ValueError("conflicting permission response")
+        grant_scope = (
+            choices[option_id] if option_id is not None
+            else ("prompt" if approved else None)
+        )
+        request, future = self._pending[request_id]
+        if future.done():
+            return False
+        if grant_scope is not None:
+            support_key = "temporary_supported" if grant_scope == "prompt" else "persistent_supported"
+            if request.get(support_key, True) is False:
+                raise ValueError("permission response option is not supported by this request")
+        future.set_result(grant_scope)
         return True
 
     def cancel(self) -> None:
         self._cancelled = True
-        for future in self._pending.values():
+        for _request, future in self._pending.values():
             if not future.done():
-                future.set_result(False)
+                future.set_result(None)
 
 
 __all__ = ["PermissionBroker", "RunControl"]

@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -521,6 +522,34 @@ class GrantStore:
         """Called at the start of each prompt to reset prompt-level grants."""
         self._prompt_grants.clear()
         self._prompt_dirs.clear()
+
+    def apply_permission_grant(
+        self, request: Mapping[str, object], grant_scope: str,
+    ) -> bool:
+        """Apply an approved host decision with the requested scope and lifetime."""
+        if grant_scope not in {"prompt", "session"}:
+            return False
+        support_key = "temporary_supported" if grant_scope == "prompt" else "persistent_supported"
+        if request.get(support_key, True) is False:
+            return False
+        scope = str(request.get("scope") or "")
+        requested_scope = str(request.get("requested_scope") or "")
+        if scope == "safety":
+            # Dangerous-command approval is consumed once by the tool retry.
+            return True
+        path = str(request.get("path") or "")
+        if scope == "filesystem" and path:
+            try:
+                resolved = Path(path).expanduser().resolve()
+                directory = resolved if resolved.is_dir() else resolved.parent
+                self.add_filesystem_dir_grant(directory, grant_scope)
+            except (OSError, RuntimeError, ValueError):
+                return False
+            return True
+        if not scope or not requested_scope:
+            return False
+        self.add_grant(scope, requested_scope, grant_scope)
+        return True
 
 
 # ── Bash helper ──

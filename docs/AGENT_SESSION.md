@@ -170,6 +170,29 @@ The Python SDK exposes the same boundary through `AgentClient(session)`. Use
 `await client.start(request)` when the caller needs the handle's event stream
 and control methods. The SDK does not own Session construction or cleanup.
 
+`start()` rejects closed or busy sessions before adding a message or replacing
+the active handle, including when the previous runner has not started yet.
+Commands sent to a completed or superseded handle raise `RuntimeError`; they
+cannot cancel or inject into another run. A new top-level turn clears the previous
+run's cancellation flag; cancellation of an enclosing ACP prompt is preserved.
+Closing a handle settles its runner, preserving asyncio
+cancellation while making the cancelled `RunResult` available.
+
+Create a new `PermissionBroker` for each run. The service binds it to that run
+and the Session's existing `GrantStore`. Responses accept `approved: bool` or
+`option_id` (`approve`, `approve_session`, `reject`, `deny`, `denied`); unknown,
+conflicting, or unoffered options raise `ValueError`. Filesystem approvals grant
+only the requested directory (the parent for a file target). A new user message
+clears prompt grants, while session grants survive; continuations with
+`user_message=None` retain prompt grants. Without a grant store, the broker can
+only approve one-shot safety requests. ACP retains its permission reverse RPC
+and uses the same grant application logic; the new broker does not replace
+that transport.
+
+CLI trace turn IDs identify the user turn, while each continuation has its own
+run ID. ACP binds trace context before starting the producer task, so internal
+LLM and tool records remain associated with the host turn.
+
 ## Adapter boundaries
 
 ACP retains request parsing, workspace/model binding, permission reverse RPC,

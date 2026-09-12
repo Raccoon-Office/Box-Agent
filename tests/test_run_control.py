@@ -9,6 +9,7 @@ from box_agent.core import run_agent_loop
 from box_agent.events import DoneEvent, StopReason
 from box_agent.run_control import PermissionBroker, RunControl
 from box_agent.schema import Message, StreamEvent
+from box_agent.tools.permissions import GrantStore
 
 
 @pytest.mark.asyncio
@@ -85,6 +86,7 @@ async def test_permission_broker_matches_response_by_request_id() -> None:
     broker = PermissionBroker(
         run_id="run-1",
         on_request=requests.put,
+        grant_store=GrantStore(),
     )
     pending = asyncio.create_task(
         broker.negotiate({"scope": "filesystem", "requested_scope": "workspace"})
@@ -111,3 +113,58 @@ async def test_permission_broker_cancel_releases_waiters() -> None:
     broker.cancel()
 
     assert await pending is False
+
+
+@pytest.mark.asyncio
+async def test_latest_pause_is_honored_after_resume_before_checkpoint():
+    control = RunControl()
+    control.request_pause()
+    control.request_resume()
+    control.request_pause()
+    checkpoint = asyncio.create_task(control.checkpoint())
+    await asyncio.sleep(0)
+    try:
+        assert not checkpoint.done()
+        assert control.state == "paused"
+    finally:
+        control.request_cancel()
+        await checkpoint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"option_id": "garbage"}, {"option_id": "reject_once"}, {"option_id": ""},
+    {"approved": True, "option_id": "reject"},
+    {"approved": False, "option_id": "approve"},
+])
+async def test_invalid_permission_response_never_approves(payload):
+    requests = asyncio.Queue()
+    broker = PermissionBroker(run_id="run", on_request=requests.put)
+    pending = asyncio.create_task(broker.negotiate({"scope": "safety"}))
+    request = await requests.get()
+    try:
+        with pytest.raises(ValueError):
+            await broker.respond(ControlCommand("permission_response", request["request_id"], payload))
+        assert not pending.done()
+    finally:
+        broker.cancel()
+        assert await pending is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("option, flags", [
+    ("approve", {"temporary_supported": False}),
+    ("approve_session", {"persistent_supported": False}),
+])
+async def test_permission_response_cannot_select_an_unoffered_option(option, flags):
+    requests = asyncio.Queue()
+    broker = PermissionBroker(run_id="run", on_request=requests.put)
+    pending = asyncio.create_task(broker.negotiate({"scope": "safety", **flags}))
+    request = await requests.get()
+    try:
+        with pytest.raises(ValueError, match="not supported"):
+            await broker.respond(ControlCommand.permission_response(request["request_id"], option_id=option))
+        assert not pending.done()
+    finally:
+        broker.cancel()
+        assert await pending is False
