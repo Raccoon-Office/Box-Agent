@@ -297,6 +297,23 @@ async def test_managed_process_times_out_when_port_never_opens():
     assert proc.running is False
 
 
+async def test_managed_windows_process_uses_sdk_executable_resolution(monkeypatch):
+    from unittest.mock import AsyncMock
+    from mcp.os.win32 import utilities
+
+    monkeypatch.setattr(mcp_loader, "sys", SimpleNamespace(platform="win32", stderr=sys.stderr))
+    monkeypatch.setattr(utilities, "get_windows_executable_command", lambda command: "C:/node/npx.cmd")
+    monkeypatch.setattr(mcp_loader, "_track_server", lambda process: None)
+    process = SimpleNamespace(pid=42, returncode=None, stderr=SimpleNamespace(readline=AsyncMock(return_value=b"")))
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    proc = ManagedHttpServerProcess("playwright", "npx", ["--isolated"], None, port=8931)
+    monkeypatch.setattr(proc, "_port_open", AsyncMock(return_value=True))
+    await proc.start(ready_timeout=1)
+    await proc._stderr_task
+    assert spawn.call_args.args[0] == "C:/node/npx.cmd"
+
+
 # ---------------------------------------------------------------------------
 # Orphan protection: records + stale-server reaping
 # ---------------------------------------------------------------------------

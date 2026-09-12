@@ -696,10 +696,15 @@ class ManagedHttpServerProcess:
         if self.port is None:
             self.port = _pick_free_loopback_port()
         creationflags = 0
+        command = self.command
         if sys.platform == "win32":
+            from mcp.os.win32.utilities import get_windows_executable_command
+
+            # Retain the SDK stdio path's npx/uvx .cmd/.exe resolution.
+            command = get_windows_executable_command(command)
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self.process = await asyncio.create_subprocess_exec(
-            self.command,
+            command,
             *self.launch_args(),
             env=self._spawn_env(),
             cwd=self.cwd,
