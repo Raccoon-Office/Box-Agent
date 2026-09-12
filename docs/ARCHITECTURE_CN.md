@@ -101,6 +101,55 @@ PluginHost、composition、ACP、CLI、officev3 或其他产品适配器。Plugi
 
 ## 公共接入方式
 
+新的宿主接入可以使用统一运行协议。`RunRequest` 描述一次运行的输入，
+`AgentRunHandle` 管理一次运行，`ControlCommand` 负责运行中的外部控制，
+`EventEnvelope` 提供带运行 ID 和顺序号的事件，`RunResult` 汇总最终结果：
+
+```python
+from box_agent import AgentService, RunRequest, ControlCommand
+
+handle = await AgentService().start(
+    RunRequest(
+        run_id="run-123",
+        session_id="session-456",
+        user_message="分析当前目录中的报告",
+    ),
+    session=session,
+)
+
+async for event in handle.events():
+    await render_for_host(event.payload)
+
+result = await handle.result()
+```
+
+Python SDK 对同一边界提供了更短的调用方式：
+
+```python
+from box_agent import AgentClient, RunRequest
+
+client = AgentClient(session)
+result = await client.run(
+    RunRequest(
+        run_id="run-123",
+        session_id="session-456",
+        user_message="分析当前目录中的报告",
+    )
+)
+```
+
+需要流式输出或中途控制时使用 `await client.start(request)`，再消费返回的
+`AgentRunHandle.events()`、调用 `send()` 和 `result()`。SDK 不负责创建或关闭
+Session，Session 的生命周期仍由宿主负责。
+
+宿主当前可以通过 `handle.send(ControlCommand.cancel())`、
+`handle.send(ControlCommand("pause"))`、`handle.send(ControlCommand("resume"))`、
+`handle.send(ControlCommand.inject_message(...))` 控制运行。权限协商通过
+`PermissionBroker` 发出带 `request_id` 的 `PermissionRequestEvent`，宿主再发送
+`ControlCommand("permission_response", request_id=..., payload={"approved": True})`；
+运行内核会在下一次模型或工具动作前暂停，权限响应按请求 ID 唤醒对应等待者。当前适配层仍可使用
+下面的兼容 API；它最终继续复用同一个 Session 和 Kernel 执行链。
+
 产品适配器通过 `AgentSession.run_events()` 执行一轮，并提供完整的
 `AgentRunOptions` 快照：
 

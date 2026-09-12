@@ -332,6 +332,7 @@ class PermissionRequestEvent:
     persistent_label: str = ""  # optional UI label for the "always allow" option
     command: str = ""           # safety requests only: command requiring approval
     risk: str = ""              # safety requests only: short risk classification
+    request_id: str = ""         # host response correlation id, when available
 
 
 # ── In-stream injection ────────────────────────────────────────

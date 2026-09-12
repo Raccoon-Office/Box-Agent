@@ -98,7 +98,18 @@ def test_acp_uses_agent_event_api_and_shared_permission_runtime() -> None:
         and node.func.attr == "run_events"
         and any(keyword.arg == "options" for keyword in node.keywords)
     ]
-    assert len(run_events_calls) == 1
+    assert len(run_events_calls) == 0
+    service_start_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "start"
+        and isinstance(node.func.value, ast.Call)
+        and isinstance(node.func.value.func, ast.Name)
+        and node.func.value.func.id == "AgentService"
+    ]
+    assert len(service_start_calls) == 1
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,137 @@
+# Box-Agent Python SDK reference configuration.
+# Copy this file, replace the API settings, and run examples/sdk/run_sdk.py.
+
+# Main model. For a hosted xiaohuanxiong.com gateway, api_key may stay empty
+# and auth_file can point to the host login file. For a direct endpoint, set a
+# real key or export BOX_AGENT_API_KEY; run_sdk.py injects that environment
+# variable without writing it into this file.
+api_key: "YOUR_API_KEY_HERE"
+api_base: "https://api.anthropic.com"
+provider: "anthropic"
+model: "claude-sonnet-4-20250514"
+context_window: 180000
+max_output_tokens: 63999
+timeout: 1200.0
+
+retry:
+  enabled: true
+  max_retries: 3
+  initial_delay: 1.0
+  max_delay: 60.0
+  exponential_base: 2.0
+
+# Optional lightweight model for titles/summaries. Remove this block to reuse
+# the main model for those calls.
+# lite_llm:
+#   provider: "openai"
+#   api_base: "https://api.openai.com/v1"
+#   api_key: "YOUR_LITE_API_KEY"
+#   model: "gpt-4o-mini"
+#   max_output_tokens: 4096
+#   timeout: 600.0
+
+# Agent execution limits.
+max_steps: 300
+max_parallel_tools: 8
+parallel_tool_timeout_seconds: 900
+provider_stale_seconds: 300
+sub_agent_token_limit: 50000
+sub_agent_batch_synthesis_timeout_seconds: 600
+goal_autopilot_enabled: true
+goal_autopilot_max_turns: 3
+goal_autopilot_max_seconds: 14400
+goal_autopilot_no_progress_turns: 2
+workspace_dir: "./workspace"
+system_prompt_path: "system_prompt.md"
+analysis_prompt_path: "analysis_prompt.md"
+code_prompt_path: "code_prompt.md"
+retry_on_suspected_truncation: true
+context_resource_dedup_enabled: true
+max_truncation_continuations: 3
+max_truncated_tool_call_retries: 3
+truncated_tool_call_boost_cap: 32768
+
+# Memory is session-independent durable state. Set enable_memory: false when
+# the host wants a stateless SDK process.
+enable_memory: true
+memory_dir: "~/.box-agent/memory"
+enable_memory_extraction: true
+memory_extraction_cooldown: 300
+memory_extraction_step_interval: 10
+memory_maintainer_enabled: true
+memory_maintainer_interval_hours: 24
+memory_decay_days: 30
+memory_archive_days: 90
+memory_dedup_jaccard: 0.85
+memory_compaction_enabled: true
+memory_context_max_entries: 50
+memory_context_max_tokens: 8000
+memory_conflict_resolution_enabled: true
+memory_conflict_cluster_threshold: 0.3
+memory_conflict_max_clusters_per_run: 5
+memory_promotion_proposal_enabled: true
+memory_promotion_hit_threshold: 5
+memory_promotion_cooldown_days: 14
+
+tool_limits:
+  general:
+    max_tool_calls: 160
+    max_delegated_tool_calls: 512
+    final_summary_after_calls: 200
+    wrapup_remaining_steps: 10
+  web_search:
+    batch_size: 8
+    concurrency: 2
+    total_calls: 80
+    deep_research_total_calls: 150
+  search_files:
+    consecutive_empty_limit: 8
+  sub_agent:
+    general_max_steps: 80
+    legacy_max_steps: 60
+    general_max_tool_calls: 48
+    no_progress_steps: 8
+
+tools:
+  allow_full_access: false
+  enable_file_tools: true
+  enable_bash: true
+  bash_default_timeout_seconds: 300
+  bash_max_timeout_seconds: 1200
+  enable_todo: true
+  enable_plan: true
+  enable_sub_agent: true
+  enable_skills: true
+  skills_dir: "./skills"
+  enable_mcp: true
+  mcp_config_path: "mcp.json"
+  mcp:
+    deferred_loading_enabled: true
+    connect_timeout: 60.0
+    execute_timeout: 120.0
+    sse_read_timeout: 180.0
+
+# Optional image generation tool. Leave endpoint empty to disable its remote
+# service while retaining the rest of the tool catalog.
+image_generation:
+  endpoint: ""
+  api_key: ""
+  model: "gpt-image-1"
+  timeout: 300.0
+  max_dimension: 1024
+
+# The same capability model is used by SDK, CLI and ACP. These settings are
+# read-only runtime policy; the PermissionBroker below handles per-request
+# approval responses.
+officev3:
+  permissions:
+    filesystem:
+      scope: session_workspace
+      allowed_directories: []
+    memory:
+      openclaw_import: false
+  paths:
+    session_workspace_root: ""
+
+# Hook class paths, if the host has installed custom hooks.
+hooks: []

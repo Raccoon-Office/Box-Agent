@@ -105,6 +105,7 @@ class AgentRunOptions:
     cache_fingerprint_sink: Callable[[dict[str, Any]], None] | None = None
     current_turn_text: str | None = None
     kernel_services: KernelServices | None = None
+    run_control: Any | None = None
     plugins: tuple[Any, ...] = ()
 
 
@@ -1078,6 +1079,7 @@ class Agent:
             web_search_total_limit=effective_options.web_search_total_limit,
             token_limit=self.token_limit,
             is_cancelled=effective_options.is_cancelled,
+            run_control=effective_options.run_control,
             logger=effective_options.logger,
             workspace_dir=str(self.workspace_dir),
             permission_negotiator=effective_options.permission_negotiator,

@@ -76,6 +76,7 @@ from box_agent.agent_runtime import (
     build_permission_engine,
 )
 from box_agent.agent_run import AgentRunHandle
+from box_agent.api import RunRequest
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
 from box_agent.agent import (
     Agent,
@@ -163,7 +164,10 @@ from box_agent.llm.model_routing import normalize_auto_routing, resolve_model_cl
 from box_agent.llm.model_profiles import client_for_model_profile
 from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
 from box_agent.runtime import invoke_tool_with_permissions
-from box_agent.session_trace import SessionTraceWriter, scoped_session_trace
+from box_agent.session_trace import (
+    SessionTraceWriter, reset_session_trace_writer, scoped_session_trace,
+    set_session_trace_writer,
+)
 from box_agent.session_log import SessionLog
 from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import parse_session_continuation
@@ -4351,7 +4355,26 @@ class BoxACPAgent:
             ),
             current_turn_text=plan_start_text,
         )
-        events = state.run_events(options=run_options)
+        # start() creates the producer task. Bind its trace before task creation;
+        # wrapping only the event consumer cannot propagate ContextVars to it.
+        trace_token = (
+            set_session_trace_writer(observer.trace_writer, turn_id=turn_id)
+            if observer.trace_writer is not None else None
+        )
+        try:
+            protocol_handle = await AgentService().start(
+                RunRequest(
+                    run_id=turn_id or state.current_turn_id or f"acp-run-{uuid4().hex}",
+                    session_id=session_id,
+                ),
+                session=state,
+                options=run_options,
+            )
+        finally:
+            if trace_token is not None:
+                reset_session_trace_writer(trace_token)
+        run_handle = protocol_handle
+        events = protocol_handle.events()
         if observer.trace_writer is not None:
             events = scoped_session_trace(
                 events,
@@ -4359,7 +4382,8 @@ class BoxACPAgent:
                 turn_id=turn_id,
             )
         async with aclosing(events):
-            async for event in events:
+            async for envelope in events:
+                event = envelope.payload
                 try:
                     await _sync_explicit_skill_deliveries()
                     match event:
@@ -5122,45 +5146,17 @@ class _PermissionNegotiator:
                     requested_scope=requested_scope,
                 )
                 return False
-            grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId, "prompt")
-            if is_safety_request:
-                log.info(
-                    "permission/granted",
-                    scope=scope,
-                    requested_scope=requested_scope,
-                    grant_scope="one_shot",
-                )
-                return True
-            if scope == "filesystem" and path_hint:
-                # Record at directory granularity. Use the path itself when it
-                # is already a directory; otherwise fall back to its parent.
-                # Spec section 4: only open the requested directory, never the
-                # entire user_home, on a "allow once" / "always allow" choice.
-                grant_dir = self._derive_grant_dir(path_hint)
-                if grant_dir is not None:
-                    self._store.add_filesystem_dir_grant(grant_dir, grant_scope)
-                    log.info(
-                        "permission/granted",
-                        scope=scope,
-                        directory=str(grant_dir),
-                        grant_scope=grant_scope,
-                    )
-                    return True
-                log.warn(
-                    "permission/grant_path_invalid",
-                    scope=scope,
-                    path=path_hint,
-                    message="Could not derive grant directory from path; rejecting",
-                )
+            grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId)
+            if grant_scope is None:
                 return False
-            self._store.add_grant(scope, requested_scope, grant_scope)
+            granted = self._store.apply_permission_grant(permission_request, grant_scope)
             log.info(
-                "permission/granted",
+                "permission/granted" if granted else "permission/denied",
                 scope=scope,
                 requested_scope=requested_scope,
-                grant_scope=grant_scope,
+                grant_scope="one_shot" if is_safety_request else grant_scope,
             )
-            return True
+            return granted
 
         log.info(
             "permission/denied",
@@ -5169,21 +5165,6 @@ class _PermissionNegotiator:
         )
         return False
 
-    @staticmethod
-    def _derive_grant_dir(path: str) -> Path | None:
-        """Resolve *path* and return its directory.
-
-        For an existing directory, returns the directory itself. For an
-        existing file or a non-existent target, returns the parent. ``None``
-        means the path could not be resolved.
-        """
-        try:
-            resolved = Path(path).expanduser().resolve()
-        except (OSError, RuntimeError):
-            return None
-        if resolved.is_dir():
-            return resolved
-        return resolved.parent
 
 
 class _MemoryProposalNegotiator:
