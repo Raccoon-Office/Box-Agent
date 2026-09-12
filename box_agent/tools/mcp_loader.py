@@ -6,10 +6,13 @@ import inspect
 import json
 import os
 import re
+import socket
+import subprocess
 import sys
 import tempfile
 import time
-from contextlib import AsyncExitStack, asynccontextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -37,7 +40,7 @@ else:
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 
 try:
     from mcp.client.streamable_http import (
@@ -73,6 +76,14 @@ from .mcp_sources import (
     resolve_mcp_sources,
 )
 from .model_tool_context import current_model_tool_context
+from .playwright_session_pool import (
+    BrowserSessionLimitError,
+    PlaywrightSessionPool,
+    close_all_tabs,
+)
+
+# Async context manager factory yielding the ClientSession to use for one call.
+SessionLease = Callable[[], AbstractAsyncContextManager[Any]]
 
 
 _MODEL_TOOL_NAME_MAX_LENGTH = 64
@@ -234,7 +245,9 @@ def _mcp_connection_error_message(
 
 
 # Connection type aliases
-ConnectionType = Literal["stdio", "sse", "http", "streamable_http"]
+# ``stdio_http`` is internal: a stdio-style command that box-agent spawns in
+# HTTP mode and then dials once per agent session (Playwright multiplexing).
+ConnectionType = Literal["stdio", "sse", "http", "streamable_http", "stdio_http"]
 
 # The hosted WebSearch service documents five as its stable concurrency. Keep
 # this internal: per-turn fan-out may be tuned, but concurrent Agent sessions
@@ -330,6 +343,426 @@ def get_mcp_timeout_config() -> MCPTimeoutConfig:
     return _default_timeout_config
 
 
+# --------------------------------------------------------------------------
+# Managed browser isolation (one Playwright BrowserContext per agent session
+# and per sub_agent run)
+# --------------------------------------------------------------------------
+
+PLAYWRIGHT_SERVER_NAME = "playwright"
+_MULTIPLEX_LOOPBACK_HOST = "127.0.0.1"
+_MULTIPLEX_READY_POLL_INTERVAL = 0.1
+_MULTIPLEX_STOP_GRACE_SECONDS = 3.0
+
+
+@dataclass
+class PlaywrightIsolationConfig:
+    """Runtime knobs for per-session Playwright contexts (from ``tools.mcp``)."""
+
+    enabled: bool = _DEFAULT_MCP_CONFIG.playwright_per_session_context
+    max_clients: int = _DEFAULT_MCP_CONFIG.playwright_max_session_clients
+    idle_timeout: float = _DEFAULT_MCP_CONFIG.playwright_session_idle_timeout
+
+
+_playwright_isolation_config = PlaywrightIsolationConfig()
+
+
+def set_playwright_isolation_config(
+    enabled: bool | None = None,
+    max_clients: int | None = None,
+    idle_timeout: float | None = None,
+) -> None:
+    if enabled is not None:
+        _playwright_isolation_config.enabled = enabled
+    if max_clients is not None:
+        _playwright_isolation_config.max_clients = max(1, int(max_clients))
+    if idle_timeout is not None:
+        _playwright_isolation_config.idle_timeout = max(0.0, float(idle_timeout))
+
+
+def get_playwright_isolation_config() -> PlaywrightIsolationConfig:
+    return _playwright_isolation_config
+
+
+def playwright_multiplex_blocker(
+    server_name: str,
+    server_config: dict,
+    isolation: PlaywrightIsolationConfig | None = None,
+) -> str | None:
+    """Return why ``server_config`` cannot be multiplexed, or ``None`` when it can.
+
+    Multiplexing means: spawn ``@playwright/mcp`` once in HTTP mode and open
+    one MCP client per agent session. Upstream only hands each client its own
+    ``BrowserContext`` when ``--isolated`` is set and
+    ``--shared-browser-context`` is not; a persistent profile
+    (``--user-data-dir`` / no ``--isolated``) is launched per client instead,
+    which would fork Chromium per session and fight over the profile lock.
+    """
+    isolation = isolation or _playwright_isolation_config
+    if server_name != PLAYWRIGHT_SERVER_NAME:
+        return "not the playwright server"
+    if not isolation.enabled:
+        return "tools.mcp.playwright_per_session_context is false"
+    if _determine_connection_type(server_config) != "stdio":
+        return "playwright entry is URL-based; box-agent does not own the process"
+    if not server_config.get("command"):
+        return "playwright entry has no command"
+    args = [str(a) for a in server_config.get("args", []) or []]
+    flags = {arg.split("=", 1)[0] for arg in args}
+    if "--isolated" not in args:
+        return "--isolated missing (persistent profile cannot be shared per session)"
+    if "--shared-browser-context" in flags:
+        return "--shared-browser-context forces one context for every client"
+    if "--user-data-dir" in flags:
+        return "--user-data-dir pins a persistent profile"
+    for flag in ("--port", "--host", "--allowed-hosts"):
+        if flag in flags:
+            return f"{flag} is already set in mcp.json; leave HTTP mode to the user"
+    for flag in ("--cdp-endpoint", "--remote-endpoint", "--extension", "--config"):
+        if flag in flags:
+            return f"{flag} supplies browser ownership outside the isolated managed context"
+    env = server_config.get("env") or {}
+    for setting in (
+        "SHARED_BROWSER_CONTEXT", "USER_DATA_DIR", "CDP_ENDPOINT", "REMOTE_ENDPOINT",
+        "EXTENSION", "CONFIG", "PORT", "HOST", "ALLOWED_HOSTS",
+    ):
+        key = f"PLAYWRIGHT_MCP_{setting}"
+        if env.get(key):
+            return f"{key} overrides the managed browser configuration"
+    return None
+
+
+def _pick_free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((_MULTIPLEX_LOOPBACK_HOST, 0))
+        return int(sock.getsockname()[1])
+
+
+# ---------------------------------------------------------------------------
+# Orphan protection for owned HTTP MCP servers.
+#
+# A stdio MCP child dies with its pipe when box-agent exits. An HTTP child does
+# not notice its parent going away, so we (1) kill live children at interpreter
+# exit, (2) persist {owner_pid, port} records and, on the next start, ask any
+# server whose owner is gone to shut itself down via upstream's
+# ``GET /killkillkill`` endpoint. Records owned by a still-running process (e.g.
+# a CLI session alongside the ACP server) are left alone.
+# ---------------------------------------------------------------------------
+
+_live_server_processes: "set[ManagedHttpServerProcess]" = set()
+_atexit_registered = False
+
+
+def _managed_server_state_path() -> Path:
+    override = os.environ.get("BOX_AGENT_RUN_STATE_DIR")
+    base = Path(override) if override else Path.home() / ".box-agent" / "run"
+    return base / "managed-mcp-servers.json"
+
+
+def _read_server_records() -> list[dict]:
+    path = _managed_server_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def _write_server_records(records: list[dict]) -> None:
+    path = _managed_server_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(records, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as error:
+        _warn(f"[mcp] could not persist managed server record: {error}")
+
+
+def _record_server(process: "ManagedHttpServerProcess") -> None:
+    records = [
+        r for r in _read_server_records()
+        if not (r.get("owner_pid") == os.getpid() and r.get("port") == process.port)
+    ]
+    records.append(
+        {
+            "name": process.name,
+            "owner_pid": os.getpid(),
+            "pid": process.pid,
+            "port": process.port,
+            "started_at": time.time(),
+        }
+    )
+    _write_server_records(records)
+
+
+def _forget_server(process: "ManagedHttpServerProcess") -> None:
+    records = [
+        r for r in _read_server_records()
+        if not (r.get("owner_pid") == os.getpid() and r.get("port") == process.port)
+    ]
+    _write_server_records(records)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        synchronize = 0x00100000
+        handle = kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return False
+        try:
+            # WAIT_TIMEOUT (0x102) → still running; WAIT_OBJECT_0 → exited.
+            return kernel32.WaitForSingleObject(handle, 0) == 0x102
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _ask_server_to_exit(port: int, timeout: float = 2.0) -> bool:
+    """Use upstream's ``/killkillkill`` endpoint; returns True when it answered."""
+    url = f"http://{_MULTIPLEX_LOOPBACK_HOST}:{port}/killkillkill"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url)
+    except Exception:  # noqa: BLE001
+        return False
+    return response.status_code == 200
+
+
+async def reap_stale_managed_servers() -> list[dict]:
+    """Shut down HTTP MCP servers whose owning box-agent process is gone."""
+    records = _read_server_records()
+    if not records:
+        return []
+    keep: list[dict] = []
+    reaped: list[dict] = []
+    for record in records:
+        owner = int(record.get("owner_pid") or 0)
+        port = int(record.get("port") or 0)
+        if owner == os.getpid() or (owner and _pid_alive(owner)):
+            keep.append(record)
+            continue
+        if port and await _ask_server_to_exit(port):
+            reaped.append(record)
+            _warn(
+                f"[mcp] reaped orphaned {record.get('name', 'mcp')} server "
+                f"port={port} (owner pid {owner} is gone)"
+            )
+        # Either reaped or nothing listening any more: drop the record.
+    if len(keep) != len(records):
+        _write_server_records(keep)
+    return reaped
+
+
+def _kill_live_servers_at_exit() -> None:
+    for process in list(_live_server_processes):
+        child = process.process
+        if child is None or child.returncode is not None:
+            continue
+        try:
+            child.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _forget_server(process)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _track_server(process: "ManagedHttpServerProcess") -> None:
+    global _atexit_registered
+    _live_server_processes.add(process)
+    _record_server(process)
+    if not _atexit_registered:
+        import atexit
+
+        atexit.register(_kill_live_servers_at_exit)
+        _atexit_registered = True
+
+
+def _untrack_server(process: "ManagedHttpServerProcess") -> None:
+    _live_server_processes.discard(process)
+    _forget_server(process)
+
+
+class ManagedHttpServerProcess:
+    """Spawn a stdio-style MCP command in ``--port`` HTTP mode and own its lifetime.
+
+    Used for ``@playwright/mcp``: the configured ``command``/``args`` from
+    mcp.json are launched with ``--port P --host 127.0.0.1 --allowed-hosts
+    127.0.0.1:P`` appended, then box-agent dials ``http://127.0.0.1:P/mcp``
+    once per agent session. stderr of the child is forwarded to our stderr
+    (stdout stays pure ACP protocol); stdout of the child is discarded.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str] | None,
+        *,
+        cwd: str | None = None,
+        port: int | None = None,
+    ):
+        self.name = name
+        self.command = command
+        self.base_args = list(args)
+        self.env = env
+        self.cwd = cwd or tempfile.gettempdir()
+        self.port = port
+        self.process: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task | None = None
+        self._listening = asyncio.Event()
+
+    @property
+    def url(self) -> str:
+        if self.port is None:
+            raise RuntimeError("server process has no port yet")
+        return f"http://{_MULTIPLEX_LOOPBACK_HOST}:{self.port}/mcp"
+
+    @property
+    def pid(self) -> int | None:
+        return self.process.pid if self.process is not None else None
+
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.returncode is None
+
+    def launch_args(self) -> list[str]:
+        if self.port is None:
+            raise RuntimeError("server process has no port yet")
+        return [
+            *self.base_args,
+            "--port",
+            str(self.port),
+            "--host",
+            _MULTIPLEX_LOOPBACK_HOST,
+            "--allowed-hosts",
+            f"{_MULTIPLEX_LOOPBACK_HOST}:{self.port}",
+        ]
+
+    def _spawn_env(self) -> dict[str, str]:
+        # Mirror mcp.client.stdio: SDK default allowlist, overridden by the
+        # server's own env from mcp.json (plus the Windows supplement).
+        return {**get_default_environment(), **(self.env or {})}
+
+    async def _drain_stderr(self) -> None:
+        assert self.process is not None and self.process.stderr is not None
+        prefix = f"[{self.name}] "
+        try:
+            while True:
+                line = await self.process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if not text:
+                    continue
+                if "Listening on" in text:
+                    self._listening.set()
+                _warn(prefix + text)
+        except (asyncio.CancelledError, ValueError):
+            pass
+        except Exception as error:  # noqa: BLE001
+            _warn(f"{prefix}stderr drain stopped: {error}")
+
+    async def _port_open(self) -> bool:
+        try:
+            _reader, writer = await asyncio.open_connection(
+                _MULTIPLEX_LOOPBACK_HOST, self.port
+            )
+        except OSError:
+            return False
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    async def start(self, ready_timeout: float) -> None:
+        """Spawn the child and wait until its HTTP port accepts connections."""
+        if self.port is None:
+            self.port = _pick_free_loopback_port()
+        creationflags = 0
+        command = self.command
+        if sys.platform == "win32":
+            from mcp.os.win32.utilities import get_windows_executable_command
+
+            # Retain the SDK stdio path's npx/uvx .cmd/.exe resolution.
+            command = get_windows_executable_command(command)
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self.process = await asyncio.create_subprocess_exec(
+            command,
+            *self.launch_args(),
+            env=self._spawn_env(),
+            cwd=self.cwd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=creationflags,
+        )
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(), name=f"mcp-{self.name}-stderr"
+        )
+        _track_server(self)
+        deadline = time.monotonic() + ready_timeout
+        while True:
+            if self.process.returncode is not None:
+                _untrack_server(self)
+                raise RuntimeError(
+                    f"{self.name} MCP server exited with code {self.process.returncode} "
+                    "before listening"
+                )
+            if await self._port_open():
+                return
+            if time.monotonic() >= deadline:
+                await self.stop()
+                raise TimeoutError(
+                    f"{self.name} MCP server did not listen on port {self.port} "
+                    f"within {ready_timeout}s"
+                )
+            await asyncio.sleep(_MULTIPLEX_READY_POLL_INTERVAL)
+
+    async def stop(self) -> None:
+        process = self.process
+        if process is not None and process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), _MULTIPLEX_STOP_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), _MULTIPLEX_STOP_GRACE_SECONDS)
+                except asyncio.TimeoutError:
+                    _warn(f"[{self.name}] MCP server pid={process.pid} did not exit after kill")
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._stderr_task = None
+        _untrack_server(self)
+
+
 class MCPTool(Tool):
     """Wrapper for MCP tools with timeout handling."""
 
@@ -338,7 +771,7 @@ class MCPTool(Tool):
         name: str,
         description: str,
         parameters: dict[str, Any],
-        session: ClientSession,
+        session: ClientSession | None,
         server_name: str = "",
         remote_name: str | None = None,
         fixed_arguments: dict[str, Any] | None = None,
@@ -347,11 +780,22 @@ class MCPTool(Tool):
         connector_id: str | None = None,
         connector_name: str | None = None,
         concurrency_limiter: asyncio.Semaphore | None = None,
+        session_lease: SessionLease | None = None,
     ):
+        """
+        ``session`` is the fixed ClientSession shared by every caller (classic
+        one-connection-per-server mode). ``session_lease`` instead resolves a
+        session per call — an async context manager factory such as
+        ``PlaywrightSessionPool.lease`` — so each agent session can be routed to
+        its own MCP client. Exactly one of the two must be provided.
+        """
+        if session is None and session_lease is None:
+            raise ValueError("MCPTool requires either session or session_lease")
         self._name = name
         self._remote_name = remote_name or name
         self._server_name = server_name
         self._fixed_arguments = dict(fixed_arguments or {})
+        self._session_lease = session_lease
         self._description = description
         self._parameters = parameters
         self._session = session
@@ -416,7 +860,11 @@ class MCPTool(Tool):
         waiting_for_concurrency_slot = self._concurrency_limiter is not None
 
         try:
-            if self._server_name == "playwright":
+            # Legacy shared-browser mode only: one Playwright stdio session for
+            # every agent session, so distinct turns must take turns. With a
+            # session lease each agent session owns its BrowserContext and no
+            # cross-session serialization is needed.
+            if self._server_name == "playwright" and self._session_lease is None:
                 try:
                     async with _timeout(min(timeout, 5.0)):
                         await acquire_browser_runtime_for_current_turn()
@@ -445,10 +893,28 @@ class MCPTool(Tool):
                         call_arguments["max_output_tokens"] = (
                             model_context.max_output_tokens
                         )
-                result = await self._session.call_tool(
-                    self._remote_name,
-                    arguments=call_arguments,
-                )
+                if self._session_lease is not None:
+                    async with self._session_lease() as leased_session:
+                        if (
+                            self._server_name == PLAYWRIGHT_SERVER_NAME
+                            and self._remote_name == "browser_close"
+                        ):
+                            # Upstream keeps this client's BrowserContext (and
+                            # its windows) alive while other clients share the
+                            # browser; close our tabs first so "close" is real.
+                            try:
+                                await close_all_tabs(leased_session)
+                            except Exception as tab_error:  # noqa: BLE001
+                                _warn(f"[browser] tab cleanup before close skipped: {tab_error}")
+                        result = await leased_session.call_tool(
+                            self._remote_name,
+                            arguments=call_arguments,
+                        )
+                else:
+                    result = await self._session.call_tool(
+                        self._remote_name,
+                        arguments=call_arguments,
+                    )
 
             # MCP tool results are a list of content items
             content_parts = []
@@ -516,6 +982,8 @@ class MCPTool(Tool):
                 content="",
                 error=error,
             )
+        except BrowserSessionLimitError as e:
+            return ToolResult(success=False, content="", error=str(e))
         except Exception as e:
             release_browser_runtime_after_call = browser_runtime_acquired
             error = public_browser_tool_text(self._server_name, str(e))
@@ -529,6 +997,79 @@ class MCPTool(Tool):
                 self._concurrency_limiter.release()
             if browser_runtime_acquired and release_browser_runtime_after_call:
                 await release_browser_runtime_for_current_turn()
+
+
+async def _open_streamable_http(
+    exit_stack: AsyncExitStack,
+    *,
+    url: str | None,
+    headers: dict[str, str] | None,
+    auth: httpx.Auth | None,
+    connect_timeout: float,
+    sse_read_timeout: float,
+):
+    """Open a Streamable HTTP transport on ``exit_stack`` and return (read, write).
+
+    Shared by the per-server discovery connection and the per-session
+    Playwright clients so both speak the same MCP 1.x / 2.x dialect.
+    """
+    parameters = inspect.signature(streamable_http_client).parameters
+    if "http_client" in parameters and "headers" not in parameters:
+        # MCP 2.x moved headers/auth/timeouts onto a caller-owned httpx2
+        # client and changed the transport result from three values to two.
+        if create_mcp_http_client is None:
+            raise RuntimeError(
+                "MCP streamable HTTP requires create_mcp_http_client"
+            )
+        import httpx2
+
+        transport_auth = auth
+        if isinstance(auth, DynamicBearerAuth):
+            dynamic_auth = auth
+
+            class Httpx2DynamicBearerAuth(httpx2.Auth):
+                """MCP 2.x auth hook retaining per-request token refresh."""
+
+                async def async_auth_flow(self, request):
+                    if "authorization" not in request.headers:
+                        token = resolve_auth_token(
+                            dynamic_auth.explicit_token,
+                            dynamic_auth.auth_file,
+                        )
+                        if token and should_attach_auth_header(str(request.url)):
+                            request.headers["Authorization"] = f"Bearer {token}"
+                    yield request
+
+            transport_auth = Httpx2DynamicBearerAuth()
+
+        http_client_context = create_mcp_http_client(
+            headers=headers if headers else None,
+            timeout=httpx2.Timeout(
+                connect=connect_timeout,
+                read=sse_read_timeout,
+                write=connect_timeout,
+                pool=connect_timeout,
+            ),
+            auth=transport_auth,
+        )
+        http_client = await exit_stack.enter_async_context(http_client_context)
+        streams = await exit_stack.enter_async_context(
+            streamable_http_client(url=url, http_client=http_client)
+        )
+    else:
+        # MCP 1.x accepts transport configuration directly and returns
+        # (read, write, get_session_id).
+        streams = await exit_stack.enter_async_context(
+            streamable_http_client(
+                url=url,
+                headers=headers if headers else None,
+                timeout=connect_timeout,
+                sse_read_timeout=sse_read_timeout,
+                auth=auth,
+            )
+        )
+    read_stream, write_stream = streams[:2]
+    return read_stream, write_stream
 
 
 class MCPServerConnection:
@@ -578,6 +1119,17 @@ class MCPServerConnection:
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack | None = None
         self.tools: list[MCPTool] = []
+        # ``stdio_http`` only: the server process we own and the per-session
+        # client pool that hands every agent session its own BrowserContext.
+        self.server_process: ManagedHttpServerProcess | None = None
+        self.session_pool: PlaywrightSessionPool | None = None
+
+    @property
+    def transport_label(self) -> str:
+        """Human-readable transport for status reporting (command for stdio-style)."""
+        if self.connection_type in ("stdio", "stdio_http"):
+            return self.command or ""
+        return self.url or self.command or ""
 
     def _get_connect_timeout(self) -> float:
         """Get effective connect timeout."""
@@ -613,23 +1165,28 @@ class MCPServerConnection:
         def elapsed_ms() -> int:
             return round((time.monotonic() - started_at) * 1000)
 
-        command_label = f" command={self.command!r}" if self.connection_type == "stdio" else ""
+        command_label = (
+            f" command={self.command!r}"
+            if self.connection_type in ("stdio", "stdio_http")
+            else ""
+        )
         _warn(
             f"[mcp] connect:start server={self.name!r} transport={self.connection_type} "
             f"timeout_s={connect_timeout}{command_label}"
         )
 
         async def _close_exit_stack() -> BaseException | None:
-            if not self.exit_stack:
-                return None
             cleanup_error: BaseException | None = None
-            try:
-                await self.exit_stack.aclose()
-            except BaseException as error:  # noqa: BLE001
-                cleanup_error = error
-            finally:
-                self.exit_stack = None
-                self.session = None
+            if self.exit_stack:
+                try:
+                    await self.exit_stack.aclose()
+                except BaseException as error:  # noqa: BLE001
+                    cleanup_error = error
+                finally:
+                    self.exit_stack = None
+                    self.session = None
+            # A failed multiplexed connect must not leave an orphan HTTP server.
+            await self._shutdown_multiplexed_server()
             return cleanup_error
 
         def _warn_unexpected_cleanup_error(cleanup_error: BaseException | None) -> None:
@@ -639,10 +1196,16 @@ class MCPServerConnection:
 
         try:
             self.exit_stack = AsyncExitStack()
+            session_lease: SessionLease | None = None
 
             # Wrap connection with timeout
             async with _timeout(connect_timeout):
-                if self.connection_type == "stdio":
+                if self.connection_type == "stdio_http":
+                    stage = "spawn-http-server"
+                    await self._start_multiplexed_server(connect_timeout)
+                    stage = "open-http-transport"
+                    read_stream, write_stream = await self._connect_streamable_http()
+                elif self.connection_type == "stdio":
                     stage = "open-stdio-transport"
                     read_stream, write_stream = await self._connect_stdio()
                 elif self.connection_type == "sse":
@@ -677,6 +1240,16 @@ class MCPServerConnection:
                     f"elapsed_ms={elapsed_ms()} tool_count={len(tools_list.tools)}"
                 )
 
+            if self.connection_type == "stdio_http":
+                # The connection above was only a discovery client (no tool call
+                # → upstream never launched a browser for it). Drop it so the
+                # only live clients are the per-session ones from the pool.
+                stage = "close-discovery-client"
+                await self._close_discovery_client()
+                self.session_pool = self._build_session_pool()
+                session_lease = self.session_pool.lease
+                session = None
+
             # Wrap each tool with execute timeout
             execute_timeout = self._get_execute_timeout()
             for tool in tools_list.tools:
@@ -704,10 +1277,17 @@ class MCPServerConnection:
                     connector_id=self.connector_id,
                     connector_name=self.connector_name,
                     concurrency_limiter=self._concurrency_limiter_for_tool(tool.name),
+                    session_lease=session_lease,
                 )
                 self.tools.append(mcp_tool)
 
             conn_info = self.url if self.url else self.command
+            if self.connection_type == "stdio_http" and self.server_process is not None:
+                conn_info = (
+                    f"{self.command} → {self.server_process.url} "
+                    f"pid={self.server_process.pid} per-session contexts, "
+                    f"max {self.session_pool.max_clients}"
+                )
             _warn(f"✓ Connected to MCP server '{self.name}' ({self.connection_type}: {conn_info}) - loaded {len(self.tools)} tools")
             for tool in self.tools:
                 desc = tool.description[:60] if len(tool.description) > 60 else tool.description
@@ -868,68 +1448,86 @@ class MCPServerConnection:
 
     async def _connect_streamable_http(self):
         """Connect via Streamable HTTP transport with timeout parameters."""
+        return await _open_streamable_http(
+            self.exit_stack,
+            url=self.url,
+            headers=self.headers,
+            auth=self.auth,
+            connect_timeout=self._get_connect_timeout(),
+            sse_read_timeout=self._get_sse_read_timeout(),
+        )
+
+    # ------------------------------------------------------------------
+    # stdio_http (Playwright multiplexing) helpers
+    # ------------------------------------------------------------------
+    async def _start_multiplexed_server(self, ready_timeout: float) -> None:
+        """Spawn the configured command in HTTP mode and point ``self.url`` at it."""
+        try:
+            await reap_stale_managed_servers()
+        except Exception as error:  # noqa: BLE001
+            _warn(f"[mcp] stale server reap skipped: {error}")
+        self.server_process = ManagedHttpServerProcess(
+            name=self.name,
+            command=self.command or "",
+            args=self.args,
+            env=self._build_stdio_env(),
+        )
+        await self.server_process.start(ready_timeout)
+        self.url = self.server_process.url
+        _warn(
+            f"[mcp] {self.name}: spawned HTTP MCP server pid={self.server_process.pid} "
+            f"url={self.url}"
+        )
+
+    async def _close_discovery_client(self) -> None:
+        if self.exit_stack is None:
+            return
+        try:
+            await self.exit_stack.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self.exit_stack = None
+            self.session = None
+
+    def _build_session_pool(self) -> PlaywrightSessionPool:
+        isolation = get_playwright_isolation_config()
         connect_timeout = self._get_connect_timeout()
-        sse_read_timeout = self._get_sse_read_timeout()
 
-        parameters = inspect.signature(streamable_http_client).parameters
-        if "http_client" in parameters and "headers" not in parameters:
-            # MCP 2.x moved headers/auth/timeouts onto a caller-owned httpx2
-            # client and changed the transport result from three values to two.
-            if create_mcp_http_client is None:
-                raise RuntimeError(
-                    "MCP streamable HTTP requires create_mcp_http_client"
-                )
-            import httpx2
-
-            transport_auth = self.auth
-            if isinstance(self.auth, DynamicBearerAuth):
-                dynamic_auth = self.auth
-
-                class Httpx2DynamicBearerAuth(httpx2.Auth):
-                    """MCP 2.x auth hook retaining per-request token refresh."""
-
-                    async def async_auth_flow(self, request):
-                        if "authorization" not in request.headers:
-                            token = resolve_auth_token(
-                                dynamic_auth.explicit_token,
-                                dynamic_auth.auth_file,
-                            )
-                            if token and should_attach_auth_header(str(request.url)):
-                                request.headers["Authorization"] = f"Bearer {token}"
-                        yield request
-
-                transport_auth = Httpx2DynamicBearerAuth()
-
-            http_client_context = create_mcp_http_client(
-                headers=self.headers if self.headers else None,
-                timeout=httpx2.Timeout(
-                    connect=connect_timeout,
-                    read=sse_read_timeout,
-                    write=connect_timeout,
-                    pool=connect_timeout,
-                ),
-                auth=transport_auth,
-            )
-            http_client = await self.exit_stack.enter_async_context(
-                http_client_context
-            )
-            streams = await self.exit_stack.enter_async_context(
-                streamable_http_client(url=self.url, http_client=http_client)
-            )
-        else:
-            # MCP 1.x accepts transport configuration directly and returns
-            # (read, write, get_session_id).
-            streams = await self.exit_stack.enter_async_context(
-                streamable_http_client(
-                    url=self.url,
-                    headers=self.headers if self.headers else None,
-                    timeout=connect_timeout,
-                    sse_read_timeout=sse_read_timeout,
+        async def _session_factory(exit_stack: AsyncExitStack) -> ClientSession:
+            async with _timeout(connect_timeout):
+                read_stream, write_stream = await _open_streamable_http(
+                    exit_stack,
+                    url=self.url or "",
+                    headers=self.headers,
                     auth=self.auth,
+                    connect_timeout=connect_timeout,
+                    sse_read_timeout=self._get_sse_read_timeout(),
                 )
-            )
-        read_stream, write_stream = streams[:2]
-        return read_stream, write_stream
+                session = await exit_stack.enter_async_context(
+                    ClientSession(read_stream, write_stream)
+                )
+                await session.initialize()
+            return session
+
+        return PlaywrightSessionPool(
+            _session_factory,
+            max_clients=isolation.max_clients,
+            idle_timeout=isolation.idle_timeout,
+        )
+
+    async def _shutdown_multiplexed_server(self) -> None:
+        pool, self.session_pool = self.session_pool, None
+        process, self.server_process = self.server_process, None
+        try:
+            if pool is not None:
+                try:
+                    await pool.close_all(final=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            if process is not None:
+                await process.stop()
 
     async def disconnect(self):
         """Properly disconnect from the MCP server."""
@@ -944,6 +1542,7 @@ class MCPServerConnection:
             finally:
                 self.exit_stack = None
                 self.session = None
+        await self._shutdown_multiplexed_server()
 
 
 # Global connections registry
@@ -1062,9 +1661,39 @@ def _record_status(
     )
 
 
+def get_playwright_session_pool() -> PlaywrightSessionPool | None:
+    """Return the live per-session Playwright client pool, if multiplexing is active."""
+    conn = next((c for c in _mcp_connections if c.name == PLAYWRIGHT_SERVER_NAME), None)
+    return conn.session_pool if conn is not None else None
+
+
+def get_browser_isolation_status() -> dict | None:
+    """Describe the managed-browser isolation mode for ``_mcp/status`` consumers."""
+    conn = next((c for c in _mcp_connections if c.name == PLAYWRIGHT_SERVER_NAME), None)
+    if conn is None:
+        return None
+    if conn.session_pool is not None:
+        snapshot = conn.session_pool.snapshot()
+        if conn.server_process is not None:
+            snapshot["pid"] = conn.server_process.pid
+            snapshot["url"] = conn.server_process.url
+        return snapshot
+    return {"mode": "shared_context"}
+
+
+async def close_browser_session(session_key: str) -> bool:
+    """Close the managed BrowserContext owned by ``session_key`` (no-op if none)."""
+    pool = get_playwright_session_pool()
+    if pool is None:
+        return False
+    return await pool.close(session_key)
+
+
 def get_mcp_status() -> list[dict]:
-    return [
-        {
+    browser = get_browser_isolation_status()
+    statuses = []
+    for s in _mcp_status.values():
+        entry = {
             "name": s.name,
             "owner": s.owner,
             "configId": s.config_id,
@@ -1078,8 +1707,10 @@ def get_mcp_status() -> list[dict]:
             "error": s.error,
             "authStatus": s.auth_status,
         }
-        for s in _mcp_status.values()
-    ]
+        if s.name == PLAYWRIGHT_SERVER_NAME and browser is not None:
+            entry["browser"] = browser
+        statuses.append(entry)
+    return statuses
 
 
 def _determine_connection_type(server_config: dict) -> ConnectionType:
@@ -1091,6 +1722,20 @@ def _determine_connection_type(server_config: dict) -> ConnectionType:
     if server_config.get("url"):
         return "streamable_http"
     return "stdio"
+
+
+def _effective_connection_type(server_name: str, server_config: dict) -> ConnectionType:
+    """Connection type after applying Playwright per-session multiplexing."""
+    conn_type = _determine_connection_type(server_config)
+    if server_name == PLAYWRIGHT_SERVER_NAME and conn_type == "stdio":
+        blocker = playwright_multiplex_blocker(server_name, server_config)
+        if blocker is None:
+            return "stdio_http"
+        _warn(
+            "[mcp] playwright: per-session browser contexts disabled "
+            f"({blocker}); falling back to one shared stdio session"
+        )
+    return conn_type
 
 
 def set_mcp_runtime_credential(credential_ref: str, headers: dict[str, str]) -> list[str]:
@@ -1171,7 +1816,7 @@ def _waiting_for_credential(definition: ResolvedMcpServer) -> bool:
 
 def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
     server_config = _materialize_server_config(definition)
-    conn_type = _determine_connection_type(server_config)
+    conn_type = _effective_connection_type(definition.name, server_config)
     url = server_config.get("url")
     configured_headers = server_config.get("headers", {})
     auth = _dynamic_bearer_auth_for_url(
@@ -1363,12 +2008,12 @@ async def load_mcp_tools_async(
                 )
                 continue
 
-            conn_type = _determine_connection_type(server_config)
+            conn_type = _effective_connection_type(server_name, server_config)
             url = server_config.get("url")
             command = server_config.get("command")
 
             # Validate config
-            if conn_type == "stdio" and not command:
+            if conn_type in ("stdio", "stdio_http") and not command:
                 _warn(f"No command specified for STDIO server: {server_name}")
                 continue
             if conn_type in ("sse", "http", "streamable_http") and not url:
@@ -1382,7 +2027,7 @@ async def load_mcp_tools_async(
 
         # Seed connecting state before gather so UI shows spinner during window
         for conn in connections:
-            _record_status(conn.name, "connecting", transport=conn.url or conn.command or "")
+            _record_status(conn.name, "connecting", transport=conn.transport_label)
 
         results = await asyncio.gather(
             *(conn.connect() for conn in connections),
@@ -1395,7 +2040,7 @@ async def load_mcp_tools_async(
                 _warn(f"✗ MCP server '{conn.name}' raised during connect: {success}")
                 _record_status(
                     conn.name, "failed",
-                    transport=conn.url or conn.command or "",
+                    transport=conn.transport_label,
                     error=str(success),
                     auth_status=_mcp_auth_status(success),
                 )
@@ -1406,14 +2051,14 @@ async def load_mcp_tools_async(
                 all_tools.extend(conn.tools)
                 _record_status(
                     conn.name, "connected",
-                    transport=conn.url or conn.command or "",
+                    transport=conn.transport_label,
                     tool_count=len(conn.tools),
                     tools=[t.name for t in conn.tools],
                 )
             else:
                 _record_status(
                     conn.name, "failed",
-                    transport=conn.url or conn.command or "",
+                    transport=conn.transport_label,
                     error=conn.last_error or "connect() returned False",
                     auth_status=conn.last_auth_status,
                 )

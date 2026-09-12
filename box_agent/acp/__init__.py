@@ -122,10 +122,13 @@ from box_agent.tools.skillhub_install_tool import (
     SKILLHUB_INSTALL_METHOD,
     SkillHubInstallTool,
 )
+from box_agent.tools.mcp_loader import close_browser_session
 from box_agent.tools.browser_runtime_scope import (
     release_browser_runtime,
     reset_browser_runtime_owner,
+    reset_browser_session_key,
     set_browser_runtime_owner,
+    set_browser_session_key,
 )
 from box_agent.config import Config, derive_context_token_limit
 from box_agent.turn_policy import (
@@ -1905,6 +1908,17 @@ class BoxACPAgent:
                 if existing_log is not None:
                     existing_log.close()
                 del self._sessions[existing_handle]
+                # The retired handle owned a managed BrowserContext (if it ever
+                # used the browser); release it so it does not linger until
+                # the idle reaper or count against the session cap.
+                try:
+                    await close_browser_session(existing_handle)
+                except Exception as browser_error:  # noqa: BLE001
+                    log.error(
+                        "browser/session_close_failed",
+                        session_id=existing_handle,
+                        error=str(browser_error),
+                    )
             session_root = state_path('sessions')
             try:
                 session_log = SessionLog.open(
@@ -2711,6 +2725,10 @@ class BoxACPAgent:
             turn_meter.merge(attachment_meter)
         browser_owner = f"{session_id}:{turn_id}"
         browser_owner_token = set_browser_runtime_owner(browser_owner)
+        # Per-session BrowserContext routing: every Playwright call made by
+        # this turn (including nested sub-agent runs after they rebind the key)
+        # starts from the MCP client owned by this session.
+        browser_session_token = set_browser_session_key(session_id)
         auto_enabled = (
             state.config.agent.goal_autopilot_enabled
             and state.config.agent.goal_autopilot_max_turns > 0
@@ -2859,6 +2877,7 @@ class BoxACPAgent:
                 )
             finally:
                 reset_browser_runtime_owner(browser_owner_token)
+                reset_browser_session_key(browser_session_token)
             turn_meter = get_token_meter()
             reset_token_meter(meter_token)
         waiting_for_user = stop_reason == StopReason.WAITING_FOR_USER.value
@@ -3217,6 +3236,7 @@ class BoxACPAgent:
                 return {"error": str(exc)}
         if method == "mcp/status":
             from box_agent.tools.mcp_loader import (
+                get_browser_isolation_status,
                 get_mcp_config_path,
                 get_mcp_config_paths,
                 get_mcp_status,
@@ -3224,13 +3244,17 @@ class BoxACPAgent:
             )
             servers = get_mcp_status()
             loading = is_mcp_loading()
+            browser = get_browser_isolation_status()
             log.info("mcp/status", count=len(servers), loading=loading)
-            return {
+            response = {
                 "servers": servers,
                 "loading": loading,
                 "configPath": get_mcp_config_path(),
                 "configPaths": get_mcp_config_paths(),
             }
+            if browser is not None:
+                response["browser"] = browser
+            return response
         if method == "mcp/credential/set":
             credential_ref = params.get("credentialRef", "")
             headers = params.get("headers", {})

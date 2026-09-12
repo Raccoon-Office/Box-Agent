@@ -39,7 +39,11 @@ from box_agent.tools.jupyter_tool import (
     SandboxEnvironment,
     SandboxStatusTool,
 )
-from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
+from box_agent.tools.mcp_loader import (
+    load_mcp_tools_async,
+    set_mcp_timeout_config,
+    set_playwright_isolation_config,
+)
 from box_agent.tools.mcp_bootstrap import bootstrap_managed_mcp_config
 from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
@@ -412,6 +416,11 @@ async def initialize_base_tools(
             connect_timeout=mcp_config.connect_timeout,
             execute_timeout=mcp_config.execute_timeout,
             sse_read_timeout=mcp_config.sse_read_timeout,
+        )
+        set_playwright_isolation_config(
+            enabled=mcp_config.playwright_per_session_context,
+            max_clients=mcp_config.playwright_max_session_clients,
+            idle_timeout=mcp_config.playwright_session_idle_timeout,
         )
         # Keep CLI and ACP on the same user-owned configuration. Reconcile the
         # hosted search endpoint and any MCP servers advertised by the frozen

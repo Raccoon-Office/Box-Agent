@@ -2235,6 +2235,103 @@ async def test_parallel_new_style_calls_do_not_leak_resolved_tools():
     assert result_web.raw_output["resolved_tools"] == ["web_search"]
 
 
+# ── Browser context isolation ────────────────────────────────
+
+
+class _KeyObservingLLM:
+    """Record the browser session key visible inside each child run."""
+
+    def __init__(self, delay: float = 0.0):
+        self.observed: list[str | None] = []
+        self._delay = delay
+
+    async def generate_stream(self, messages, tools=None, **kwargs):
+        from box_agent.tools.browser_runtime_scope import current_browser_session_key
+
+        self.observed.append(current_browser_session_key())
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
+
+
+async def test_sub_agent_binds_derived_browser_session_key():
+    """A child run sees `<parent>:<sub_agent_id>` and the parent key is restored."""
+    from box_agent.tools.browser_runtime_scope import (
+        current_browser_session_key,
+        reset_browser_session_key,
+        set_browser_session_key,
+    )
+
+    llm = _KeyObservingLLM()
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    token = set_browser_session_key("sess-1")
+    try:
+        result = await tool.execute(task="browse something")
+        assert current_browser_session_key() == "sess-1"
+    finally:
+        reset_browser_session_key(token)
+
+    assert result.success is True
+    assert len(llm.observed) == 1
+    child_key = llm.observed[0]
+    assert child_key is not None and child_key.startswith("sess-1:subagent-")
+    assert child_key != "sess-1"
+
+
+async def test_sub_agent_closes_its_browser_context_on_return(monkeypatch):
+    """The derived key's BrowserContext is closed once the child returns."""
+    from box_agent.tools import mcp_loader
+    from box_agent.tools.browser_runtime_scope import (
+        reset_browser_session_key,
+        set_browser_session_key,
+    )
+
+    closed: list[str] = []
+
+    async def fake_close(session_key: str) -> bool:
+        closed.append(session_key)
+        return True
+
+    monkeypatch.setattr(mcp_loader, "close_browser_session", fake_close)
+
+    llm = _KeyObservingLLM()
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    token = set_browser_session_key("sess-2")
+    try:
+        await tool.execute(task="browse something")
+    finally:
+        reset_browser_session_key(token)
+
+    assert closed == [llm.observed[0]]
+    assert closed[0].startswith("sess-2:subagent-")
+
+
+async def test_parallel_sub_agents_get_distinct_browser_keys():
+    """Sibling children in one session never share a browser session key."""
+    from box_agent.tools.browser_runtime_scope import (
+        reset_browser_session_key,
+        set_browser_session_key,
+    )
+
+    llm = _KeyObservingLLM(delay=0.01)
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    token = set_browser_session_key("sess-3")
+    try:
+        results = await asyncio.gather(
+            tool.execute(task="site A"),
+            tool.execute(task="site B"),
+            tool.execute(task="site C"),
+        )
+    finally:
+        reset_browser_session_key(token)
+
+    assert all(r.success for r in results)
+    assert len(llm.observed) == 3
+    assert len(set(llm.observed)) == 3
+    assert all(k.startswith("sess-3:subagent-") for k in llm.observed)
+
+
 def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path) -> None:
     """Sub-agent config and live capability providers flow through setup."""
     from box_agent.config import AgentConfig, ToolLimitsConfig, ToolsConfig

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -1527,17 +1528,40 @@ class SubAgentTool(EventEmittingTool):
                 session_log=child_session_log,
             )
 
-        return await self._run_general_loop(
-            llm=child_llm,
-            messages=messages,
-            child_tools=child_tools,
-            max_steps=parsed.budget.max_steps,
-            max_tool_calls=parsed.budget.max_tool_calls,
-            diagnostic=diagnostic,
-            queue=queue,
-            parent_tool_call_id=parent_tool_call_id,
-            task_preview=task_preview,
-            sub_agent_id=sub_agent_id,
-            title=sub_title,
-            session_log=child_session_log,
+        # Isolate this child's managed browser from siblings in the same
+        # parent session. The pool keys MCP clients by ContextVar, so a
+        # derived key gives the child its own BrowserContext. Close it on
+        # return so headed windows do not linger after the sub-agent ends.
+        from .browser_runtime_scope import (
+            current_browser_session_key,
+            reset_browser_session_key,
+            set_browser_session_key,
         )
+        from .mcp_loader import close_browser_session
+
+        parent_key = current_browser_session_key()
+        child_key = f"{parent_key or '__default__'}:{sub_agent_id}"
+        token = set_browser_session_key(child_key)
+        try:
+            return await self._run_general_loop(
+                llm=child_llm,
+                messages=messages,
+                child_tools=child_tools,
+                max_steps=parsed.budget.max_steps,
+                max_tool_calls=parsed.budget.max_tool_calls,
+                diagnostic=diagnostic,
+                queue=queue,
+                parent_tool_call_id=parent_tool_call_id,
+                task_preview=task_preview,
+                sub_agent_id=sub_agent_id,
+                title=sub_title,
+                session_log=child_session_log,
+            )
+        finally:
+            reset_browser_session_key(token)
+            try:
+                await close_browser_session(child_key)
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    "browser session cleanup failed for %s: %s", child_key, error,
+                )

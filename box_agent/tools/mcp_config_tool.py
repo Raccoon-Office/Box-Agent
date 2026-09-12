@@ -121,10 +121,21 @@ def _browser_config_summary(config: Any) -> list[str]:
     else:
         profile = "runtime-default"
 
+    # Per-session BrowserContext isolation is only possible for an isolated
+    # (ephemeral) profile; keep the reason visible so the model does not try
+    # to "fix" concurrency by launching duplicate playwright entries.
+    from box_agent.tools.mcp_loader import playwright_multiplex_blocker
+
+    blocker = playwright_multiplex_blocker("playwright", config)
+    per_session_context = (
+        "true" if blocker is None else f"false ({blocker})"
+    )
+
     return [
         f"mode={'headless' if headless else 'headed'}",
         f"isolated={str(isolated).lower()}",
         f"profile={profile}",
+        f"per_session_context={per_session_context}",
         f"executable=configured={str(has_executable).lower()}",
     ]
 

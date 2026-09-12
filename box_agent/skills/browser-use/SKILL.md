@@ -80,6 +80,10 @@ Treat these namespaces as a security boundary. Never pass snapshots, element ref
 - If there is no reliable recent browser context, treat the request as a new task and choose the mode from its current state and interaction requirements.
 - If a later step genuinely requires the other mode, switch using a fresh browser operation and keep the two modes' state isolated. Briefly explain the switch when it changes what the user will see or which session state is available.
 
+## Parallel sub-agents and the managed browser
+
+When per-session isolation is enabled, parallel `sub_agent` runs in the same session each get their own managed browser context. Shared stdio fallback configurations still serialize browser access and may return `BROWSER_RUNTIME_BUSY`. When a child returns, that context is closed. The parent can see the child's snapshots in the transcript, but must not reuse that child's snapshots, element refs, or tab identifiers.
+
 ## Switch the managed browser window
 
 Treat the managed Playwright MCP as headless by default. Change its window mode only when the user explicitly requests headed/headless behavior or when a failure is plausibly caused by headless operation. Do not switch merely because an ordinary navigation or selector failed.

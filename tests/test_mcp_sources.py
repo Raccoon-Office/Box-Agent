@@ -651,8 +651,10 @@ async def test_source_update_waits_for_cold_discovery_before_replacing_its_conne
         return True
 
     old = SimpleNamespace(name="law", url=server["url"], command=None, connect=connect_old,
+                          transport_label=server["url"],
                           disconnect=AsyncMock(), tools=[FakeMCPTool("old_lookup", "law", connector_id="law")])
     new = SimpleNamespace(name="law", url="https://new.example.test/mcp", command=None,
+                          transport_label="https://new.example.test/mcp",
                           connect=AsyncMock(return_value=True), disconnect=AsyncMock(),
                           tools=[FakeMCPTool("new_lookup", "law", connector_id="law")])
     monkeypatch.setattr(mcp_loader, "_build_connection", lambda definition: old if definition.config["url"] == old.url else new)

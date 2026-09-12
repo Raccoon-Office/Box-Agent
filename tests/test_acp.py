@@ -7332,3 +7332,81 @@ async def test_acp_streams_short_model_preface_before_tool(tmp_path):
     tool_index = _first_tool_call_index(conn.updates)
     assert tool_index != -1
     assert preface_index < tool_index
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_binds_browser_session_key_to_session_id(tmp_path, monkeypatch):
+    """Every Playwright call inside a turn resolves to the ACP session's own client."""
+    from box_agent.tools.browser_runtime_scope import current_browser_session_key
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False, enable_skills=False),
+    )
+    observed: list[str | None] = []
+    real_loop = runtime_module._run_agent_loop
+
+    def observing_loop(**kwargs):
+        observed.append(current_browser_session_key())
+        return real_loop(**kwargs)
+
+    monkeypatch.setattr(runtime_module, "_run_agent_loop", observing_loop)
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    assert current_browser_session_key() is None
+    await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+    )
+
+    assert observed == [session.sessionId]
+    assert current_browser_session_key() is None  # reset after the turn
+
+
+@pytest.mark.asyncio
+async def test_acp_rebind_closes_retired_handles_browser_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    closed: list[str] = []
+
+    async def fake_close(session_key: str) -> bool:
+        closed.append(session_key)
+        return True
+
+    monkeypatch.setattr(acp_module, "close_browser_session", fake_close)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "office-rebind"})
+
+    first = await agent.newSession(request)
+    assert closed == []
+    second = await agent.newSession(request)
+
+    assert second.sessionId != first.sessionId
+    assert closed == [first.sessionId]
+    assert first.sessionId not in agent._sessions
+    agent._sessions[second.sessionId].agent.session_log.close()
+
+
+@pytest.mark.asyncio
+async def test_acp_mcp_status_reports_browser_isolation_mode(tmp_path, monkeypatch):
+    from box_agent.tools import mcp_loader
+
+    snapshot = {"mode": "per_session_context", "activeClients": 2, "maxClients": 4}
+    monkeypatch.setattr(mcp_loader, "get_browser_isolation_status", lambda: snapshot)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+
+    result = await agent.extMethod("mcp/status", {})
+
+    assert result["browser"] == snapshot
