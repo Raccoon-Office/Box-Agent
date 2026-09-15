@@ -35,6 +35,7 @@ Box-Agent normalizes common result shapes, including Custom `Result.ImageResults
   "refs": [
     {
       "reference_tag": "ref_1",
+      "reference_aliases": ["ref_upstream-result-id"],
       "title": "Shandong University",
       "url": "https://example.com/shandong-university",
       "domain": "example.com",
@@ -56,7 +57,7 @@ Box-Agent normalizes common result shapes, including Custom `Result.ImageResults
 }
 ```
 
-Use `image_details` when available; `images` is the compatibility URL list. `image_details` can retain provider width, height, alt, shape, clarity, category, watermark, description, and style metadata. `url` prefers the source or landing page and falls back to the image URL when the provider supplies no landing page. Download from `image_details[].url`. Missing optional fields are omitted. Hosts consuming ACP updates should dispatch `rawOutput.type == "web_search"` and correlate the event with the original call by `toolCallId`.
+`reference_tag` is the canonical display citation. When a valid upstream result ID differs from that tag, optional `reference_aliases` contains its `ref_`-prefixed form so hosts can resolve model citations without changing the displayed citation. Use `image_details` when available; `images` is the compatibility URL list. `image_details` can retain provider width, height, alt, shape, clarity, category, watermark, description, and style metadata. `url` prefers the source or landing page and falls back to the image URL when the provider supplies no landing page. Download from `image_details[].url`. Missing optional fields, including `reference_aliases`, are omitted. Hosts consuming ACP updates should dispatch `rawOutput.type == "web_search"` and correlate the event with the original call by `toolCallId`.
 
 Direct tool output may still contain provider JSON. Custom image entries are under `Result.ImageResults[]` and use `Image.Url`. In the Global API shape, image entries are under `Result.Documents[].Snippet[]`; select entries whose `Type` is `image` and read `Image.ImageUrl`.
 
