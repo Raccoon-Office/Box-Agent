@@ -82,7 +82,9 @@ function writeInput(file, input, root) {
   input.request_created_at = JSON.parse(fs.readFileSync(requestMeta, "utf8")).created_at;
   const { catalog, ...metadata } = input;
   write(file, metadata);
-  require("./design_recovery.js").fallback(input, root, "Design pending; baseline generated from validated outline", 0);
+  require("./design_recovery.js").fallback({ ...input, input_file: path.resolve(file),
+    outline_file: path.resolve(path.dirname(file), input.outline_file) }, root,
+    "Design pending; baseline generated from validated outline", 0);
 }
 function accept(inputPath, planPath) {
   const { input, root } = plans.readInput(inputPath);
@@ -127,9 +129,8 @@ function accept(inputPath, planPath) {
     const layoutIds = [...new Set((originalDecision?.slides || []).map(slide => slide.layout_id))];
     write(correctionFile, { brief_file: input.request_file,
       base_session_id: response.session_id, base_response_hash: response.response_hash,
-      // A parsed original decision is sufficient for a bounded correction;
-      // require a full reread only when no trustworthy decision exists.
-      requires_full_read: !originalDecision,
+      // A patch requires a completed, fully read original, not just parseable JSON.
+      requires_full_read: Boolean(response.error) || !originalDecision,
       page_count: input.outline.slides.length, original_decision: originalDecision,
       editable_fields: fields, issues: [error.message],
       layout_options: plans.catalog().layouts.filter(layout => layoutIds.includes(layout.id))
@@ -167,7 +168,7 @@ function main() {
   if (action === "prepare") {
     const root = path.dirname(targetPath);
     const outline = JSON.parse(fs.readFileSync(targetPath, "utf8"));
-    const baseline = { title: opts.title || outline.deck_goal || "Presentation", outline,
+    const baseline = { title: opts.title || outline.deck_goal || "Presentation", outline, outline_file:targetPath,
       user_constraints: require("./design_contract_core.js").inferDesignContract({ source_text: core.runtimeSourceBinding().source_text }, []) };
     require("./design_recovery.js").fallback(baseline, root, "Outline awaiting validation; content is not verified");
     const report = path.join(root, "qa", "outline_check.json");

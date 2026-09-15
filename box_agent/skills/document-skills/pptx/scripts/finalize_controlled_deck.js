@@ -473,8 +473,8 @@ function main() {
       ? "runtime_probe" : null,
   ].filter(Boolean);
   const degraded = degradedStages.length > 0;
-  console.log(
-    JSON.stringify({
+  const fileHash = file => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const deliveryReceipt = {
       ok: true,
       deck: deckPath,
       html: outputPath,
@@ -484,8 +484,12 @@ function main() {
       degraded,
       degraded_stages: degradedStages,
       delivery_status: degraded ? "degraded" : "complete",
-    })
-  );
+      html_sha256: fileHash(outputPath),
+      deck_sha256: fileHash(deckPath),
+      report_sha256: Object.fromEntries(Object.values(reports).map(file => [file, fileHash(file)])),
+  };
+  writeJson(path.join(reportDir, "delivery_receipt.json"), deliveryReceipt);
+  console.log(JSON.stringify(deliveryReceipt));
 }
 
 try {

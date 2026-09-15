@@ -54,13 +54,13 @@ function decisionFromResponses(responses, input, plans) {
   // read, completed second response may still succeed through normal validation.
   if (first.error) {
     if (!second || second.error) throw new Error(second?.error || first.error);
-    return { decision: normalizeCorrectionUpdate(parse(second.text), parse(first.text)), correction_fields: [] };
+    return { decision: parse(second.text), correction_fields: [] };
   }
   let base;
   try { base = parse(first.text); }
   catch (error) {
     if (!second || second.error) throw error;
-    return { decision: normalizeCorrectionUpdate(parse(second.text), base), correction_fields: [] };
+    return { decision: parse(second.text), correction_fields: [] };
   }
   if (responses.length === 1) return { decision: base, correction_fields: [] };
   let error;
@@ -94,9 +94,10 @@ function chunks(value, size) {
   }
   return result;
 }
-function recoveryDeck(input, proposedCount = 0) {
+function recoveryDeck(input) {
   const core = require("./deck_spec_core.js");
   const colors = require("./design_contract_core.js");
+  const layouts = require("../layouts/registry.js");
   const theme = core.getTheme("plain-neutral");
   const issues = [];
   const palette = colors.mergePaletteDecision({ background: "#FFFFFF", text: "#1D1D1F",
@@ -111,35 +112,67 @@ function recoveryDeck(input, proposedCount = 0) {
   const add = (layout_id, props, source) => pages.push({ id: `slide-${String(pages.length + 1).padStart(2,"0")}`,
     layout_id, props, source_outline_page: source });
   const outline = input.outline.slides;
-  const first = outline[0] || {};
-  add("cover-editorial-v1", { eyebrow: "产品与主题介绍", title: chunks(input.title || first.title || "演示",84)[0],
-    subtitle: chunks(first.message || first.title,160)[0] || "", marker: "", meta: "基础主题 · 内容待核验", tags: [],
-    composition: "poster", alignment: "left" }, 1);
   const groups = outline.flatMap((slide, index) => {
+    const result = [];
+    const bullets = slide.bullets || [];
+    const isCover = slide.layout === "cover" || layouts.getLayout(slide.layout)?.roles.includes("cover");
+    let coverKeepsBullets = false;
+    if (isCover) {
+      // A cover is already one of the outline pages. Keep its complete content
+      // on that page when the registered fields can hold it.
+      const tagsFit = bullets.length <= 6 && bullets.every(value => Array.from(value).length <= 24);
+      const combined = [slide.message || "", ...bullets].filter(Boolean).join("\n");
+      coverKeepsBullets = tagsFit || Array.from(combined).length <= 160;
+      result.push({ source:index+1, cover: { eyebrow:"产品与主题介绍",
+        title:chunks(slide.title || input.title || "演示",84)[0],
+        subtitle:!tagsFit && coverKeepsBullets ? combined : chunks(slide.message,160)[0] || "",
+        marker:"", meta:"基础主题 · 内容待核验", tags:tagsFit ? bullets : [],
+        composition:"poster", alignment:"left" } });
+    }
     const title = chunks(slide.title || "内容",64)[0];
     // Keep the full title/message as content if they exceed their header capacity.
-    const content = [...(Array.from(slide.title || "").length > 64 ? [slide.title] : []),
-      ...(Array.from(slide.message || "").length > 120 ? [slide.message] : []), ...(slide.bullets || [])]
+    const content = [...(Array.from(slide.title || "").length > (isCover ? 84 : 64) ? [slide.title] : []),
+      ...(Array.from(slide.message || "").length > (isCover ? 160 : 120) ? [slide.message] : []),
+      ...(coverKeepsBullets ? [] : bullets)]
       .flatMap(value => chunks(value,100));
-    const result = [];
+    if (isCover && !content.length) return result;
     const capacity = Math.ceil(Math.max(1,content.length) / Math.ceil(Math.max(1,content.length)/6));
     for (let i = 0; i < Math.max(1,content.length); i += capacity) result.push({ title,
-      subtitle: Array.from(slide.message || "").length <= 120 ? slide.message || "" : "",
+      subtitle: !isCover && Array.from(slide.message || "").length <= 120 ? slide.message || "" : "",
       content: content.slice(i,i+capacity), source: index+1 });
     return result;
   });
-  const desired = Math.min(39, Math.max(groups.length, Number.isInteger(proposedCount) ? proposedCount-1 : 0));
-  while (groups.length < desired) {
-    const candidates = groups.map((group,index)=>({index,size:group.content.length})).filter(item=>item.size>1)
-      .sort((a,b)=>b.size-a.size);
-    if (!candidates.length) break;
-    const index = candidates[0].index, group = groups[index];
-    const rest = group.content.splice(Math.ceil(group.content.length/2));
-    groups.splice(index+1,0,{...group,content:rest});
+  let coverLayoutDegraded = false;
+  // The normal deck schema permits at most 40 slides. If a cover alone caused
+  // overflow, retain its original page/content using an existing body layout.
+  for (let index = 0; groups.length > 40 && index < groups.length; index++) {
+    const group = groups[index];
+    if (!group.cover) continue;
+    let end = index + 1;
+    while (end < groups.length && groups[end].source === group.source) end++;
+    if (end === index + 1) continue;
+    const original = outline[group.source - 1];
+    const title = original.title || input.title || "演示";
+    const message = original.message || "";
+    const content = [...(Array.from(title).length > 64 ? [title] : []),
+      ...(Array.from(message).length > 120 ? [message] : []), ...(original.bullets || [])]
+      .flatMap(value => chunks(value,100));
+    if (content.length > 6) continue;
+    groups.splice(index, end-index, { source:group.source, title:chunks(title,64)[0],
+      subtitle:Array.from(message).length <= 120 ? message : "", content });
+    coverLayoutDegraded = true;
+    recoveryWarnings.push(`Cover on outline page ${group.source} uses a registered body layout to preserve all content and the page-count limit; the requested cover visual role is not preserved.`);
   }
-  // A full 40-page outline must not exceed the normal schema just for a cover.
-  if (groups.length >= 40) pages.pop();
+  if (groups.length > 40) {
+    const error = new Error(`Recovery content requires ${groups.length} pages, exceeding the normal deck schema limit of 40; no content was discarded.`);
+    error.code = "RECOVERY_CAPACITY_EXCEEDED";
+    throw error;
+  }
   for (const group of groups) {
+    if (group.cover) {
+      add("cover-editorial-v1", group.cover, group.source);
+      continue;
+    }
     const items = group.content.map((body,index)=>({title:body.match(/^([^：:]{1,24})[：:]/)?.[1] || `要点 ${index+1}`,body}));
     if (items.length >= 3) add("cards-grid-v1", { eyebrow: "内容要点", title: group.title, subtitle: group.subtitle,
       items, variant: "balanced", composition: "open" }, group.source);
@@ -150,10 +183,38 @@ function recoveryDeck(input, proposedCount = 0) {
     design:require("./composition_core.js").createDeckDesign(theme), ...(contract ? {design_contract:contract} : {}), slides:pages };
   const checked = core.validateAndNormalizeDeck(deck);
   if (!checked.ok) throw new Error(`Recovery deck validation failed: ${checked.issues.join("; ")}`);
-  return { deck:checked.normalized, theme, warnings:[...recoveryWarnings,...issues,...checked.warnings] };
+  return { deck:checked.normalized, theme, coverLayoutDegraded,
+    warnings:[...recoveryWarnings,...issues,...checked.warnings] };
 }
 function fallback(input, root, reason, proposedCount = 0, publish = true) {
-  const { deck, theme, warnings } = recoveryDeck(input, proposedCount);
+  // Bind the actual content files after their writers finish. Response attempts
+  // and correction receipts live elsewhere and cannot stale this binding.
+  const content_inputs = {};
+  for (const [name, file] of [["outline", input.outline_file], ["design_input", input.input_file]]) {
+    if (!file) continue;
+    const absolute = path.resolve(root, file);
+    content_inputs[name] = { path:absolute,
+      sha256:require("crypto").createHash("sha256").update(fs.readFileSync(absolute)).digest("hex") };
+  }
+  let recovered;
+  try { recovered = recoveryDeck(input); }
+  catch (error) {
+    if (error.code !== "RECOVERY_CAPACITY_EXCEEDED") throw error;
+    const existing = ["index.html", "fallback.html"].map(name=>path.join(root,name))
+      .find(file=>fs.existsSync(file) && fs.statSync(file).isFile());
+    const report = {ok:Boolean(existing),status:"partial",terminal:true,content_inputs,
+      artifact:existing || null,primary_artifact:existing || null,
+      input_artifact:input.outline_file ? path.resolve(root,input.outline_file) : path.join(root,"design_input.json"),reason:error.message,
+      outline_pages:input.outline.slides.length,actual_pages:null,
+      page_count_satisfied:false,content_complete:false,
+      warnings:["Existing HTML is retained unchanged and is not a complete rendering of the current request. Full current content remains in input_artifact."],
+      next:"Stop authoring; disclose the capacity conflict and deliver the retained HTML together with the complete input. Do not claim complete content or exact page-count delivery."};
+    const reportFile = path.join(root,"qa","design_delivery.json");
+    fs.mkdirSync(path.dirname(reportFile),{recursive:true});
+    fs.writeFileSync(reportFile,JSON.stringify(report,null,2)+"\n");
+    return report;
+  }
+  const { deck, theme, warnings, coverLayoutDegraded } = recovered;
   const rendered = require("./render_deck_html.js").renderDocument(deck,theme);
   // Identify an untouched generated recovery document without confusing it with
   // a normal accepted deck. A hash below prevents overwriting manual edits.
@@ -179,9 +240,12 @@ function fallback(input, root, reason, proposedCount = 0, publish = true) {
   if (publishIndex) fs.writeFileSync(index,html);
   const deckPath = path.join(root,`recovery-${digest(html).slice(0,12)}.deck.json`);
   fs.writeFileSync(deckPath,JSON.stringify(deck,null,2)+"\n");
-  const report = {ok:true,status:"degraded",terminal:true,artifact,primary_artifact:publishIndex?index:artifact,
+  const pageCountSatisfied = deck.slides.length === input.outline.slides.length;
+  if (!pageCountSatisfied) warnings.push(`Outline page count target ${input.outline.slides.length} was not met: preserving all content required ${deck.slides.length} pages.`);
+  const report = {ok:true,status:pageCountSatisfied && !coverLayoutDegraded?"degraded":"partial",terminal:true,content_inputs,artifact,primary_artifact:publishIndex?index:artifact,
     deck:deckPath,html_hash:digest(html),reason,outline_pages:input.outline.slides.length,
-    proposed_pages:proposedCount || null,actual_pages:deck.slides.length,
+    proposed_pages:proposedCount || null,actual_pages:deck.slides.length,page_count_satisfied:pageCountSatisfied,
+    cover_layout_degraded:coverLayoutDegraded,
     warnings:["Registered neutral design; normal editor retained. Content and visual quality remain unverified.",...warnings],
     next:"Deliver the normal editable presentation and degradation report; do not repeat design retries."};
   fs.mkdirSync(path.dirname(reportFile),{recursive:true});

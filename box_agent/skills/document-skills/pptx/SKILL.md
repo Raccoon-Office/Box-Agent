@@ -169,14 +169,19 @@ floor, not a completed visual review. Keep it until the normal deck is rendered.
 If `can_retry: true`, send the same brief path and `correction_file` to the designer
 once with budget {"max_steps": 16, "max_tool_calls": 24}. Tell this fresh role to
 read correction_file, which includes the original decision and legal layout enums.
-If requires_full_read is false, that file is sufficient; do not reread all packets.
-Request only the named fields as a JSON patch; the program preserves every
-other field. The correction must not reread the full catalog or recreate the deck.
-Run accept again. On `status: degraded`, stop PPT authoring immediately: do not
+If requires_full_read is false, that file is sufficient; request only the named
+fields as a JSON patch, preserving every other field without rereading all packets.
+If requires_full_read is true, read brief_file and all its required packets, then
+return a complete decision; there is no trustworthy first decision to patch.
+Do not search the full catalog or recreate the deck.
+Run accept again. On `status: degraded` or `status: partial`, stop PPT authoring immediately: do not
 call `inspect_deck_contract`, `apply_deck_patch`, `finalize_controlled_deck`, edit
 `deck.json`, delete slides, or start another design call. Deliver `primary_artifact` and explain the
 limitations from `qa/design_delivery.json`; skip design/scaffold retries. Missing,
 malformed or still-invalid designer output must not leave the user without a deck.
+If the report says content_complete is false, also deliver input_artifact and
+disclose that the retained HTML does not contain all current content; do not claim
+the requested page count or complete current delivery.
 Recovery uses plain-neutral with registered cover/cards/closing layouts and the
 normal deck schema, renderer, playback, layout editor, save and export controls.
 Never substitute a separate text-only HTML implementation.

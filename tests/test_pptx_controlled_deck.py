@@ -11578,6 +11578,13 @@ def test_controlled_finalizer_runs_compact_complete_chain(tmp_path: Path) -> Non
     )
     assert contract_report["refreshed_by"] == "finalize_controlled_deck"
     assert len(contract_report["deck_hash"]) == 64
+    delivery_receipt = json.loads((tmp_path / "qa" / "delivery_receipt.json").read_text())
+    import hashlib
+    assert delivery_receipt["html_sha256"] == hashlib.sha256((tmp_path / "index.html").read_bytes()).hexdigest()
+    assert delivery_receipt["deck_sha256"] == hashlib.sha256(deck_path.read_bytes()).hexdigest()
+    assert all(delivery_receipt["report_sha256"][str(tmp_path / "qa" / name)] ==
+               hashlib.sha256((tmp_path / "qa" / name).read_bytes()).hexdigest()
+               for name in ("deck_spec.json", "html_self_check.json", "runtime_probe.json"))
     truth_report = json.loads((tmp_path / "qa" / "truth_check.json").read_text())
     assert truth_report["advisory"] is True
     assert truth_report["warnings"]

@@ -339,7 +339,7 @@ function readInput(inputPath) {
   if (input.protocol_version !== 2 || input.request_file !== requestFile) {
     throw new Error("design_input: run prepare for the current independent-response protocol");
   }
-  return { input: { ...fresh, request_file: input.request_file,
+  return { input: { ...fresh, input_file: inputFile, outline_file: outlineFile, request_file: input.request_file,
     request_created_at: input.request_created_at }, outlineFile, root };
 }
 function readValidatedPlan(planPath, inputPath) {
