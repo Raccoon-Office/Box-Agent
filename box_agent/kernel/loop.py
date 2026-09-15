@@ -1052,7 +1052,7 @@ async def _run_agent_loop_impl(
             llm=llm, api_total_tokens=api_total_tokens,
             session_id=session_id, turn_id=turn_id, title=title,
             api_prompt_tokens=api_prompt_tokens, tools=tools,
-            summary_llm=summary_llm,
+            summary_llm=summary_llm, thinking_enabled=thinking_enabled,
             allow_llm_summary=summary_failure_cooldown_steps == 0,
             before_summary=before_summary,
             force=force, estimate_tools=estimate_tools,

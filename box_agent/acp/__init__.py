@@ -3501,6 +3501,16 @@ class BoxACPAgent:
             call_kind = "utility"
         raw_session_id = meta.get("session_id")
         session_id = raw_session_id.strip() if isinstance(raw_session_id, str) else ""
+        session_state = next(
+            (
+                state for state in getattr(self, "_sessions", {}).values()
+                if session_id and state.upstream_session_id == session_id
+            ),
+            None,
+        )
+        thinking_enabled = (
+            session_state.agent.thinking_enabled if session_state is not None else False
+        )
         turn_id = _meta_string(meta, "turn_id", "turnId")
         title = (
             _meta_string(meta, "title", "session_title", "sessionTitle")
@@ -3586,6 +3596,7 @@ class BoxACPAgent:
                     title=title,
                     call_kind=call_kind,
                     timeout=timeout,
+                    thinking_enabled=thinking_enabled,
                 )
         except LightweightInvalidArgs as exc:
             return {"error": {"code": exc.code, "message": str(exc)}}
@@ -4257,6 +4268,7 @@ class BoxACPAgent:
                     title=state.upstream_title,
                     call_kind="utility",
                     timeout=8.0,
+                    thinking_enabled=state.agent.thinking_enabled,
                 )
             except LightweightPromptError as exc:
                 log.info(

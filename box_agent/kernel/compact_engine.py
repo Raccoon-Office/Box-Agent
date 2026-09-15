@@ -19,4 +19,5 @@ class DefaultCompactEngine:
             before_summary=inputs.before_summary,
             force=inputs.force, estimate_tools=inputs.estimate_tools,
             summary_input_token_limit=inputs.summary_input_token_limit,
+            thinking_enabled=inputs.thinking_enabled,
         )

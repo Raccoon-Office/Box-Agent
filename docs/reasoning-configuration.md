@@ -6,9 +6,12 @@ inherits its parent's current choice in both ordinary delegation and batch file
 synthesis. Changing the parent setting between turns also changes subsequent
 children; standalone `SubAgentTool` callers can pass `thinking_enabled` explicitly.
 
-Utility calls, including image inspection, long-page summaries and the
-continuation judge, continue to request `thinking_enabled=False`. They use the
-same provider adapter, so endpoint compatibility applies to them too.
+Context compaction, image inspection, the continuation judge, and ACP follow-up
+suggestions inherit the current session's thinking choice. ACP `llm/prompt`
+inherits that choice when its upstream session ID matches a live session;
+standalone utility calls and the independent web-extraction process default to
+`thinking_enabled=False`. Each selected client keeps its own provider and
+endpoint configuration, including when routing selects another summary model.
 
 ## Endpoints that reject `none`
 
@@ -26,8 +29,8 @@ runtime, edit the configuration under its own `BOX_AGENT_HOME`.
 
 | Value | Effect when the model dialect normally sends `none` |
 | --- | --- |
-| omitted or `null` | Preserve the existing provider behavior: send `none`. |
-| `none` | Explicitly retain `none`. |
+| omitted or `null` | Use the model's default: normally `none`, or `low` for the known model below. |
+| `none` | Explicitly retain `none`; rejected locally for a known model that cannot accept it. |
 | `low` | Send `low` instead. This reduces reasoning; it does **not** guarantee reasoning is disabled. |
 
 Other values fail configuration validation. This option affects the existing
@@ -36,6 +39,13 @@ field onto other models or alter their native thinking controls. Requests with
 thinking enabled retain the existing mapping, including `high` for SenseNova.
 Anthropic requests are unchanged.
 
+The exact model ID
+`SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp` is known to reject
+`none`. Its disabled default is `low` in both streaming and completion requests.
+When thinking is disabled, an explicit `none` override raises a configuration
+error before any HTTP request or retry. Other model IDs, including aliases, retain their existing defaults;
+configure their endpoint explicitly when its supported efforts differ.
+
 The CLI can update and inspect the same setting:
 
 ```bash
@@ -43,7 +53,7 @@ box-agent config --set reasoning_effort_when_disabled low
 box-agent config --get llm.reasoning_effort_when_disabled
 ```
 
-Remove the key or set it to `null` to restore the previous behavior. No automatic
+Remove the key or set it to `null` to restore the model's default. No automatic
 parameter negotiation is performed. A deterministic HTTP 422 is returned as an
 error without repeating the same invalid request, including in the streaming
 path. Retryable transport/service failures retain their existing retry policy.

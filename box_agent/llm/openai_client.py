@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_TOKENS = 64000
 _DEEP_THINK_REASONING_EFFORT = "high"
 _DEFAULT_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
+# These deployed model IDs reject "none". Keep the capability exception exact;
+# other SenseNova models and operator-added dialect prefixes retain their defaults.
+_SENSENOVA_NO_DISABLE_MODELS = frozenset({
+    "sensenova-flash-lite-20260727-v39-fp8-step4k-dpov2-mtp",
+})
 _SENSENOVA_MODEL_PREFIXES_ENV = "BOX_AGENT_SENSENOVA_MODEL_PREFIXES"
 _SENSENOVA_PREFIX_BOUNDARIES = frozenset("-_/:.")
 _GLM_5_3_MODEL_MARKERS = ("glm-5-3", "glm-5.3")
@@ -64,6 +69,10 @@ _SENSENOVA_PSEUDO_PARAMETER_RE = re.compile(
     re.DOTALL,
 )
 _MAX_RECOVERED_SENSENOVA_TOOL_CALLS = 4
+
+
+class _ThinkingConfigurationError(ValueError):
+    """A configured thinking choice cannot be represented by the model."""
 
 
 def _litellm_extra_body(payload: dict[str, Any]) -> dict[str, Any]:
@@ -142,7 +151,15 @@ def _apply_thinking_params(
         params["reasoning_effort"] = _DEEP_THINK_REASONING_EFFORT
         return
     if _is_sensenova_model(model):
-        params["reasoning_effort"] = reasoning_effort_when_disabled or "none"
+        if normalized_model in _SENSENOVA_NO_DISABLE_MODELS:
+            if reasoning_effort_when_disabled == "none":
+                raise _ThinkingConfigurationError(
+                    f"Model {model!r} does not support reasoning_effort_when_disabled='none'; "
+                    "use 'low' or omit the override"
+                )
+            params["reasoning_effort"] = reasoning_effort_when_disabled or "low"
+        else:
+            params["reasoning_effort"] = reasoning_effort_when_disabled or "none"
 
 
 def _tool_parameter_types(
@@ -900,7 +917,10 @@ class OpenAIClient(LLMClientBase):
             retry_decorator = async_retry(
                 config=self.retry_config,
                 on_retry=self.retry_callback,
-                should_retry=is_retryable_llm_error,
+                should_retry=lambda exc: (
+                    not isinstance(exc, _ThinkingConfigurationError)
+                    and is_retryable_llm_error(exc)
+                ),
             )
             api_call = retry_decorator(self._make_api_request)
             response = await api_call(

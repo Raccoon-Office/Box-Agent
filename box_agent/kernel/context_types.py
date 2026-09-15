@@ -33,6 +33,7 @@ class CompactionInput:
     force: bool = False
     estimate_tools: dict[str, Any] | None = None
     summary_input_token_limit: int | None = None
+    thinking_enabled: bool = False
 
 
 @dataclass(frozen=True)

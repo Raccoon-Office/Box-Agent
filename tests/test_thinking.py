@@ -124,7 +124,7 @@ async def test_openai_request_sends_high_reasoning_effort_when_enabled(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("thinking_enabled", "expected_effort"),
-    [(True, "high"), (False, "none")],
+    [(True, "high"), (False, "low")],
 )
 async def test_sensenova_request_sends_top_level_reasoning_effort(
     thinking_enabled,

@@ -3,7 +3,8 @@
 Single-shot prompts (titles, summaries, rewrites) that must
 NOT spin up an Agent session, load tools/skills/MCP, touch memory, or write
 to conversation history. Wraps :func:`LLMClient.generate` with a hard
-timeout, no tools, no extended thinking, and a structured result.
+timeout, no tools, and a structured result. Session-owned calls can inherit
+the session's thinking choice; standalone calls default to disabled thinking.
 
 The ACP ``llm/prompt`` extension method is a thin shell around this
 service — see :meth:`box_agent.acp.BoxACPAgent.extMethod`.
@@ -79,6 +80,7 @@ async def run_lightweight_prompt(
     title: str = "Box-Agent",
     call_kind: str = "utility",
     timeout: float = 30.0,
+    thinking_enabled: bool = False,
 ) -> LightweightResult:
     """Run a single tool-free LLM completion.
 
@@ -93,6 +95,8 @@ async def run_lightweight_prompt(
         title: Optional upstream trace title.
         timeout: Hard wall-clock cap in seconds. Raised as
             :class:`LightweightTimeout` on expiry.
+        thinking_enabled: Current session choice when this request belongs to
+            a session. The selected client's provider maps it to wire parameters.
 
     Returns:
         :class:`LightweightResult` with the model text, token usage, finish
@@ -121,7 +125,7 @@ async def run_lightweight_prompt(
             llm.generate(
                 messages=messages,
                 tools=None,
-                thinking_enabled=False,
+                thinking_enabled=thinking_enabled,
                 session_id=session_id,
                 turn_id=turn_id,
                 title=title,

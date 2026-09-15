@@ -148,6 +148,8 @@ async def _create_summary(
     session_id: str = "",
     turn_id: str = "",
     title: str = "",
+    *,
+    thinking_enabled: bool = False,
 ) -> str:
     """Append one instruction to the exact history so provider KV cache survives."""
 
@@ -161,7 +163,7 @@ async def _create_summary(
     async for event in llm.generate_stream(
         messages=[*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)],
         tools=None,
-        thinking_enabled=False,
+        thinking_enabled=thinking_enabled,
         session_id=session_id,
         turn_id=turn_id,
         title=title,
@@ -648,6 +650,7 @@ async def _maybe_summarize(
     estimate_tools: dict[str, Any] | None = None,
     summary_input_token_limit: int | None = None,
     before_summary: Callable[[int], None] | None = None,
+    thinking_enabled: bool = False,
 ) -> CompactionOutcome:
     """Compact once when the complete next request exceeds its safe limit."""
     if skip_check:
@@ -747,6 +750,7 @@ async def _maybe_summarize(
             session_id=session_id,
             turn_id=turn_id,
             title=title,
+            thinking_enabled=thinking_enabled,
         )
         if not summary.strip():
             raise RuntimeError("summary provider returned empty content")
