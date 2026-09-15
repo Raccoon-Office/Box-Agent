@@ -170,6 +170,11 @@ The optional `--model` and `--model-max-tokens` flags bind the tested model on
 every ACP `session/new`. They select the product model under test; they do not
 configure or expose the independent agents-eval Judge model.
 
+For automatic or advanced routing, pass the complete ACP `llm_binding` JSON
+object with `--model-binding-json` instead. It must be a JSON object and is
+mutually exclusive with `--model`; its frozen configuration also contributes to
+`model_config_sha256`.
+
 ## Diagnostic interpretation and data sensitivity
 
 Raw files are evidence, not sanitized exports. `acp-stdin.raw`,
