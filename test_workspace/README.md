@@ -88,7 +88,7 @@ uv run python test_workspace/run_acp_eval.py \
   --title smoke-with-effect
 ```
 
-每个 Case 会先按原有逻辑完成 ACP 采集和终态落盘，再调用独立服务，并把原样返回保存到 Attempt 的 `effect_evaluation.json`。服务不可达或响应错误会写入 `service_error`（能落盘时），不会改变原来的 ACP、完整性和批次成功状态。DeepSeek 等 Judge 密钥只配置在 `agents-eval` 服务进程，不传入 Box-Agent。
+每个 Case 会先按原有逻辑完成 ACP 采集和终态落盘，再调用独立服务。校验后的效果结果（或 `service_error`）保存为 Attempt 的 `effect_evaluation.json`；已成功解析的原始服务响应另存为 `effect_response.json` 供审计。服务不可达或响应错误不会改变原来的 ACP、完整性和批次成功状态。DeepSeek 等 Judge 密钥只配置在 `agents-eval` 服务进程，不传入 Box-Agent。
 
 dataset 记录可选增加 `benchmark_case_id`（如 `case-05`）以使用 agents-eval 官方指标；未提供时使用通用 40 分过程指标和 60 分结果指标。
 

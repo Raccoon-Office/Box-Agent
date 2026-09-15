@@ -20,6 +20,12 @@ contracts.
 | Current published/unreleased state | [Release State](RELEASE_STATE.md) | Same document |
 | Third-party model API behavior | [Third-party API Compatibility](THIRD_PARTY_API_COMPATIBILITY.md) | Same document |
 
+## Evaluation tools
+
+| Topic | Documentation | Related modules | Update trigger |
+| --- | --- | --- | --- |
+| Offline ACP evaluation, model routing, effect results, and Trace Viewer launch controls | [Evaluation workspace](../test_workspace/README.md) | `test_workspace/acp_eval/`, `test_workspace/trace_viewer/`, `test_workspace/run_acp_eval.py` | Evaluation capture, model binding, effect-result, authentication, or Viewer-launch behavior changes |
+
 ## Core runtime behavior
 
 | Topic | English | 中文 |
