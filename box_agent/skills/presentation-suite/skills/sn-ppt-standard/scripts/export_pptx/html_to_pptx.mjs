@@ -21,6 +21,9 @@ async function ensureDependencies() {
   const echartsMarker = resolve(nodeModules, 'echarts');
 
   if (!existsSync(pptxgenMarker) || !existsSync(playwrightMarker) || !existsSync(echartsMarker)) {
+    if (process.env.BOX_AGENT_PPTX_NO_INSTALL === '1') {
+      throw new Error('Exporter dependencies unavailable: missing local pptxgenjs/playwright/echarts; automatic installation disabled (BOX_AGENT_PPTX_NO_INSTALL=1).');
+    }
     console.error('[setup] 首次运行，正在安装 npm 依赖...');
     try {
       execSync('npm install --omit=dev', { cwd: __dirname, stdio: ['ignore', 2, 2] });
@@ -35,6 +38,9 @@ async function ensureDependencies() {
   const exe = pickBrowserExe();
   if (exe && existsSync(exe)) {
     return;
+  }
+  if (process.env.BOX_AGENT_PPTX_NO_INSTALL === '1') {
+    throw new Error('Chromium unavailable: no usable local browser; automatic installation disabled (BOX_AGENT_PPTX_NO_INSTALL=1).');
   }
   console.error('[setup] 本地无可用 Chromium，正在安装 Playwright Chromium...');
   try {

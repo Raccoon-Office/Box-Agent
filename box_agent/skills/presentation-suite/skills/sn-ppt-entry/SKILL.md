@@ -54,13 +54,27 @@ Draft / Standard / Deep。用户可以覆盖；用户未覆盖时采用推荐，
 - `dynamic_html` -> `sn-ppt-dazzle`：带动效和翻页交互的 `deck.html`；不承诺保留动画的 PPTX。
 
 对外描述 PPTX 文件交付，不宣传或承诺可编辑、原位编辑能力。
-用户未明确要求动态时采用 `static_html`；只要 HTML 时关闭对应 PPTX 后处理。
+以公共入口核对的用户原文和真实选择回复为准，保留完整原始需求及后续更正；当前用户
+明确更正优先。`task_pack.json` 只记录任务信息，不能授权模式或覆盖这些依据。
+在演示或课件任务中，肯定要求播放时对象运动、内容随时间变化，或操作引发讲解内容变化，
+就是动态要求，使用 `dynamic_html`；例如课件里行星转动或滑块控制过程变化。
+按完整需求的含义判断，不依赖“动态 PPT”等固定词；普通翻页、编辑标题不是内容动效。
+老师、太阳系等身份或题材、“生动一点”等风格，以及“行业动态”“动态规划”等主题，
+都不能据此推断动态；提问、比较、引用和否定也不是动态制作授权。
+`unknown`、解析失败或缺失字段不等于静态。先恢复已有选择与原文依据；仍无法确定或
+相互冲突时返回公共入口，用真实选择卡澄清，不重建任务或静默默认 `static_html`。
+只有确认完整需求没有动态要求、没有未决解析失败或冲突时才默认 `static_html`；
+静态仍默认 HTML + PPTX，只要 HTML 时关闭对应 PPTX 后处理。
+下方 `task_pack.json` 是已确认静态任务的示例，不能作为覆盖动态原需求的默认值。
+独立网页模拟器、应用或数据看板不因 HTML、动画或交互而进入本流程；已有演示的局部
+文字、颜色修改保留目录、输出和已完成阶段，不因制作时的编辑操作切换为动态。
+静态与动态共用 Entry 和 Story，再按确认的 `choices.output` 进入唯一生产出口。
 已有 PPTX 的原位编辑、模板填充与已选设计模式冲突时，保留原始需求、附件和交付格式，
 先向用户澄清是否改用快速模式；只有用户明确同意后才加载 `ppt-fast`，不得自动切换。
 已有 SN HTML 任务继续使用其任务目录与输出选择。
 恢复旧静态任务的 `web_html` / `web` 字段时，先读取原任务包，保留相同绝对 `deck_dir`、
 材料、大纲、页面和已交付产物，仅将 `choices.output` 改为 `static_html`、`ppt_mode` 改为
-`standard`，把原 `web_postprocess`（包括用户明确的 `[]`）迁到 `static_postprocess`，
+`standard`，把原 `web_postprocess`（包括用户明确的 `[]`）迁到 `choices.static_postprocess`，
 再移除旧字段；两种后处理字段已有冲突时先澄清，不覆盖已有选择。该迁移不改变用户已选的
 设计模式；字段迁移本身不重做 Research 或 Story，本轮标题等内容修改按下方恢复规则
 局部更新 Story。旧 `creative` 图片整页出口未提供，保留产物并说明。
@@ -149,9 +163,9 @@ Markdown 直接用文件工具写入，不要用 `execute_code` 内嵌一个重�
 ```
 
 当 `choices.output` 是 `static_html` 时，`ppt_mode` 必须是 `standard`，
-`static_postprocess` 默认是 `["pptx"]`；只有用户明确只要 HTML 时写 `[]`。
+`choices.static_postprocess` 默认是 `["pptx"]`；只有用户明确只要 HTML 时写 `[]`。
 当 `choices.output` 是 `dynamic_html` 时，`ppt_mode` 必须是 `dazzle`，不触发 PPTX 后处理。
-动态任务的 `static_postprocess` 为 `[]`。
+动态任务的 `choices.static_postprocess` 为 `[]`。
 
 | `choices.output` | `ppt_mode` |
 |---|---|
@@ -276,18 +290,20 @@ Hermes/OpenClaw 实际读取的用户级 `.env`、缺失项和配置模板。
 11. **出口分发**：Story 已完成且当前磁盘 `outline.md` 已按本档位确认后，
     `static_html` 调用 `sn-ppt-standard`，`dynamic_html` 调用 `sn-ppt-dazzle`；始终传入相同绝对
     `deck_dir`。不得绕过 Story；出口不再研究、重排页面或重写大纲。
-12. **后处理和收尾**：静态页面完成后，父级先按 Standard 的命令执行
-    `deck.py build` 与 `deck.py audit`，核对 `<deck_dir>/present.html` 存在、覆盖全部页面且
-    播放器可打开，再完成最终像素检查。逐页 HTML/PNG 或 PPTX 已存在都不能跳过这一步。
-    随后按 `static_postprocess` 使用 Standard 自有 exporter
-    `scripts/export_pptx/html_to_pptx.mjs` 导出 PPTX，默认同时交付；只有用户明确只要 HTML
-    时才可省略 PPTX，任何静态任务都不能因此省略 `present.html`。
+12. **后处理和收尾**：完成页面修复与内容核验、更新任务包后，父级按公共 `pptx`
+    的 `scripts/finalize.py` 命令统一执行 Standard 的 build、audit 和所需正式 exporter；
+    不再手工重复 build/audit/export。核对回执中的 `<deck_dir>/present.html` 存在、覆盖
+    全部页面、播放器可打开，随后按 Standard 覆盖 build 后的最终像素，必要的图片与
+    Review 记录只写 renders / _trace，不再修改制作输入。逐页 HTML/PNG 或已有 PPTX
+    不能替代这一步。静态默认 HTML + PPTX，只有用户明确只要 HTML 时省略 PPTX。
     只缺播放器时复用已有页面补齐收尾，不重做 Research、Story 或整册页面。
-    把已验证的绝对路径登记到 `task_pack.state.artifacts.present_html`，最终回复必须给出
-    `present.html` 的可点击链接，保留它引用的 slides、样式与资源，不能只给文件夹或 PPTX。
-    必需产物缺失或转换失败时保留现有产物、状态写 `partial` 并记录错误；不得用宿主工具、
-    python-pptx 或自写脚本替换 exporter，不伪造文件路径。动态出口交付 `deck.html` 及其
-    实际使用的本地资源，并提供真实 HTML 链接。只登记真实存在的产物到 `task_pack.state.artifacts`。
+    任务包只登记调用前已验证存在的产物；本次新增产物以正式回执为准，不为补记字段
+    修改已绑定输入。最终回复给出回执中的真实 HTML/PPTX 链接，保留本地依赖资源。
+    必需产物缺失或转换失败时保留产物并披露 partial 与原始错误；不得用宿主工具、
+    python-pptx 或自写脚本替换 exporter，不伪造路径。动态完成原 Dazzle 全册检查后由
+    同一 finalize 命令核验 `deck.html` 与本地资源；它不会调用静态 exporter。
+    独立 SN 没有公共 pptx 脚本时按 Standard 原 build → audit → exporter 流程收尾，
+    再核对最终像素与真实文件，不额外调用不存在的公共脚本。
 
 ## 恢复规则
 
@@ -325,3 +341,28 @@ Hermes/OpenClaw 实际读取的用户级 `.env`、缺失项和配置模板。
 6. 不用 mock 数字冒充事实；缺口应回到 Research/Story 或明确标示。
 7. 不因 Static 默认的 PPTX 后处理失败删除可用的 HTML、图片或 PPTX。
 8. 不新增外部模型客户端、额外 API 配置、通用状态机或大型调度脚本。
+
+## 方法采用与同任务恢复
+
+公共 `pptx` 的需求与交付义务贯穿整个任务，保持它与当前后端同时采用。
+下方阶段替换只退休已完成内部阶段，不退休公共 `pptx`；最终产物、回执及真实交付
+完成后才可 `get_skill(skill_name="pptx", usage="release")`。
+
+实际执行本方法用 `get_skill(..., usage="use")`（默认值）；仅查看其他出口、Tools/Doctor
+文档用 `usage="reference"`，不改变当前采用方法或用户路线。完成阶段后读取下一阶段时
+可传 `replace=["旧方法名"]`，仅新读取成功后退休旧方法；读取失败保留原方法并处理错误。
+例如 Entry → Story 用 `get_skill(skill_name="sn-ppt-story", usage="use", replace=["sn-ppt-entry"])`；
+Story → 已确认的 Standard/Dazzle 同样替换 Story。只退休方法用
+`get_skill(skill_name="旧方法名", usage="release")`。不要以参考读取自动切换制作出口。
+仅用户明确开始独立新任务才传 `new_task=True`，并在该新任务第一次方法读取时、澄清前声明；
+不得在后续阶段交接时补传。选择卡回复、继续、补充材料、页面修改、
+压缩后恢复和阶段交接均延续原任务，不能把短回复当成完整需求。
+从可用对话历史、通用任务上下文及实际工作文件恢复原始目标、全部附件、用户明确选择、
+后续更正、页数、格式、同一绝对目录与已完成阶段。task_pack 是工作数据，不能证明用户选择。
+原始动态要求与 task_pack 静态字段冲突时先修正工作数据，保留 Research/Story 成果；
+真实选择依据丢失或冲突未解时用 `request_user_decision` 澄清，不从默认字段推断静态。
+
+按所选出口的收尾时序，父级从公共 `pptx` Skill 的实际目录运行
+`scripts/finalize.py --workspace <工作空间> --deck-dir <同一目录> --requirements <需求文件> --task-pack <任务包>`。
+先完成任务包阶段/产物字段更新，再执行正式收尾；调用后修改输入必须重跑。
+检查 stdout 和 `_trace/finalize-receipt.json` 的产物与警告；技术回执不能替代视觉或内容检查。

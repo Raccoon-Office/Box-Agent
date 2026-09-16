@@ -85,7 +85,7 @@ Box-Agent 路线将 shell 与页面写入分离：
 1. Slide 子代理只写自己 `write_scope` 内的 HTML，并返回待渲染页码。
 2. 父级运行 `render.py --batch`，再用 `inspect_images(strategy="native")` 看新 PNG。
 3. 有硬伤时，父级把新鲜像素证据和精确问题交给同页范围的修复子代理；最多遵守根 Skill 规定的修复预算。
-4. 父级重渲并复看。最终 Review 同样由父级先提供新鲜 PNG、Review 子代理集中修复、父级统一重渲/build；父级统一执行重渲、build、inspect 和 Standard exporter，只有最终 PNG 与 `present.html` 验证通过后才导出，失败登记 `state.status=partial`。
+4. 父级重渲并复看。最终 Review 同样由父级先提供新鲜 PNG、Review 子代理集中修复；修复完成后，在最终像素检查前，父级按公共 `pptx` 的绝对路径命令运行 `finalize.py`，由它统一 build/audit/export，再检查最终 PNG 与 `present.html`。不要重复手工导出；像素检查导致源文件修改时重新 finalize 并复看。技术回执不代替视觉检查，检查失败须如实报告未完成与修复项，不能宣称交付完成。
 
 渲染命令应单独执行以保留非零退出码。失败先读 `_trace/render-issues.json` 并修对应 HTML，再运行已有的指定页入口，例如：
 
@@ -93,6 +93,6 @@ Box-Agent 路线将 shell 与页面写入分离：
 python "<SKILL_ROOT>/scripts/render.py" --batch "$DECK_DIR" --pages 2,7
 ```
 
-不要用 `| tail` 或后接 `echo` 覆盖渲染退出码，也不要原样重复渲染未修复的质量失败页。导出成功后，按 stdout JSON 的精确 `output` 路径检查文件；不要执行 `ls "$DECK_DIR/*.pptx"`（星号被引用不会展开）并因此重导出。导出失败不能自行把用户要求的 PPTX 改称 HTML 已交付。字体 manifest 的源字体映射用于 PPTX 文本；接收机器仍需安装源字体，浏览器 WOFF2 并未嵌入 PPTX。
+不要用 `| tail` 或后接 `echo` 覆盖渲染退出码，也不要原样重复渲染未修复的质量失败页。正式收尾后，读取 stdout JSON 及 `_trace/finalize-receipt.json` 的 `status`、`warnings` 和 `artifacts[].path`，按其中精确路径检查文件；仅 `status=complete` 表示技术核验完成，视觉与内容仍按 Review 实际结果判断。取消或超时必须读取本次失败回执；强制终止留下的 `in_progress` 也不是成功。不要执行 `ls "$DECK_DIR/*.pptx"`（星号被引用不会展开）并因此重导出。导出失败不能自行把用户要求的 PPTX 改称 HTML 已交付。字体 manifest 的源字体映射用于 PPTX 文本；接收机器仍需安装源字体，浏览器 WOFF2 并未嵌入 PPTX。
 
 工具名或权限失败先按本契约修正一次；相同失败再次出现就保存原始错误、调用参数和产物状态，返回 `blocked`，不得搜索或修改 Box-Agent 源码。

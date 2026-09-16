@@ -27,7 +27,13 @@ triggers:
 - `<DECK_DIR>/task_pack.json`；
 - `<DECK_DIR>/info_pack.json`；
 - `<DECK_DIR>/outline.md`；
-- `task_pack.choices.output == "dynamic_html"`，或旧任务的 `ppt_mode == "dazzle"`。
+- `task_pack.choices.output == "dynamic_html"`，且与用户原文、真实选择回复及后续更正一致。
+  仅旧任务完全缺少 `choices.output` 字段、且原有动态选择有依据时，才兼容
+  `ppt_mode == "dazzle"`；空值、unknown 或非法值不算字段缺失。
+
+`choices.output` 已存在时，旧 `ppt_mode` 不能覆盖它。两者冲突（例如
+`static_html` 与 `dazzle`）或缺少选择依据时，停止并返回 Entry / 公共入口核对，
+不得强行进入 Dazzle。任务包本身不能代替用户授权，当前明确更正优先。
 
 任一条件不满足时停止并返回 `sn-ppt-entry` 补齐，不自行新建 deck 目录、不从 query 绕过 `sn-ppt-story`。
 开始和恢复时都 **重新读取`read_file`磁盘上的当前 `outline.md`**，不得使用`sn-ppt-story` 的 write_file 返回内容或对话上下文中的 outline；`outline.md`是 Dazzle 的唯一内容输入并固定：
@@ -284,3 +290,28 @@ Box-Agent 优先使用原生 `generate_image`，视觉核对使用 `inspect_imag
 
 - `references/style-families.md` —— 风格家族库：气质 / 适用与禁用场景 / palette 示例 / 字体方向 / 该风格下 fancy 怎么发力。阶段 0 必读。
 - `references/fancy-cookbook.md` —— 技法配方：入场动画 / 跨页过渡 / 全局背景 / 交互彩蛋，含核心代码模式与参数安全范围。阶段 0 选型时读。
+
+## 方法采用与同任务恢复
+
+公共 `pptx` 的需求与交付义务贯穿整个任务，保持它与当前后端同时采用。
+下方阶段替换只退休已完成内部阶段，不退休公共 `pptx`；最终产物、回执及真实交付
+完成后才可 `get_skill(skill_name="pptx", usage="release")`。
+
+实际执行本方法用 `get_skill(..., usage="use")`（默认值）；仅查看其他出口、Tools/Doctor
+文档用 `usage="reference"`，不改变当前采用方法或用户路线。完成阶段后读取下一阶段时
+可传 `replace=["旧方法名"]`，仅新读取成功后退休旧方法；读取失败保留原方法并处理错误。
+例如 Entry → Story 用 `get_skill(skill_name="sn-ppt-story", usage="use", replace=["sn-ppt-entry"])`；
+Story → 已确认的 Standard/Dazzle 同样替换 Story。只退休方法用
+`get_skill(skill_name="旧方法名", usage="release")`。不要以参考读取自动切换制作出口。
+仅用户明确开始独立新任务才传 `new_task=True`，并在该新任务第一次方法读取时、澄清前声明；
+不得在后续阶段交接时补传。选择卡回复、继续、补充材料、页面修改、
+压缩后恢复和阶段交接均延续原任务，不能把短回复当成完整需求。
+从可用对话历史、通用任务上下文及实际工作文件恢复原始目标、全部附件、用户明确选择、
+后续更正、页数、格式、同一绝对目录与已完成阶段。task_pack 是工作数据，不能证明用户选择。
+原始动态要求与 task_pack 静态字段冲突时先修正工作数据，保留 Research/Story 成果；
+真实选择依据丢失或冲突未解时用 `request_user_decision` 澄清，不从默认字段推断静态。
+
+按所选出口的收尾时序，父级从公共 `pptx` Skill 的实际目录运行
+`scripts/finalize.py --workspace <工作空间> --deck-dir <同一目录> --requirements <需求文件> --task-pack <任务包>`。
+先完成任务包阶段/产物字段更新，再执行正式收尾；调用后修改输入必须重跑。
+检查 stdout 和 `_trace/finalize-receipt.json` 的产物与警告；技术回执不能替代视觉或内容检查。

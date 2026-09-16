@@ -30,6 +30,7 @@ static_pages（仅是信号，不是错误：庄重场景的静帧页可以是�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -216,13 +217,13 @@ class DeckRenderer:
     """单次 CLI 调用：起独立 chromium → 渲染 → 关闭。"""
 
     def __init__(self, html_path: Path, out_dir: Path, motion_check: bool = True) -> None:
-        self.html_path = html_path
-        self.out_dir = out_dir
+        self.html_path = html_path.resolve()
+        self.out_dir = out_dir.resolve()
         self.motion_check = motion_check
         self.console_errors: list[str] = []
         self.rendered_this_run: set[int] = set()
         self.meta: dict = {
-            "deck": str(html_path),
+            "deck": str(self.html_path),
             "w": DECK_W, "h": DECK_H,
             "mode": "", "nav": "",
             "n_pages": 0,
@@ -498,6 +499,7 @@ class DeckRenderer:
     # ── 收尾 ─────────────────────────────────────────────────────────
     def finalize(self) -> None:
         self.meta["console_errors"] = self.console_errors
+        self.meta["deck_sha256"] = hashlib.sha256(self.html_path.read_bytes()).hexdigest()
         # --page 模式合并进已有 render.json（保留其他页的记录）；--all 整体覆盖
         manifest = self.out_dir / "render.json"
         if self.meta["mode"].startswith("page:") and manifest.exists():

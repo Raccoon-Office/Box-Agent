@@ -138,8 +138,12 @@ async def test_acp_without_loader_continues_without_rewriting_historical_skill_f
             assert provider.requests
             assert "METHOD_BODY" not in str(provider.requests)
             records = [event for event in state.agent.session_log.events if event["type"] == "skill/change"]
-            assert len(records) == 1
-            assert state.agent.session_log.replay().skills[0]["name"] == "demo"
+            original_skills = records[0]["data"]["skills"]
+            assert original_skills == [{"name": "demo", "sha256": sha256(b"historical").hexdigest(),
+                                        "loadOrder": 1}]
+            assert all(event["data"]["skills"] == original_skills for event in records)
+            assert all("task" in event["data"] for event in records[1:])
+            assert state.agent.session_log.replay().skills == original_skills
             assert path.read_bytes().startswith(before)
     finally:
         await adapter.aclose()
@@ -397,17 +401,28 @@ def test_public_skill_change_retries_persistence_even_after_in_memory_change(tmp
 
 
 @pytest.mark.asyncio
-async def test_next_run_retries_pending_skill_write_before_requesting_model(tmp_path):
+@pytest.mark.parametrize("failure", ["append", "flush"])
+@pytest.mark.parametrize("initial_state", ["legacy", "adopted", "task-only"])
+@pytest.mark.parametrize("new_input", [False, True])
+async def test_next_run_retries_pending_skill_write_before_requesting_model(tmp_path, failure, initial_state, new_input):
     seed_log(tmp_path / "sessions", tmp_path)
     log = SessionLog.open(tmp_path / "sessions", session_id="restore-skill", cwd=tmp_path)
-    store = RecoverableSkillStore(log, "append")
+    if initial_state != "legacy":
+        runtime = SkillRuntime(None, session_log=log)
+        runtime.register_reference("demo", "METHOD_BODY")
+        runtime.adopt_method(runtime.resolve_reference("demo"))
+        if initial_state == "task-only":
+            log.append("skill/change", {"skills": [], "task": runtime.task.record()})
+            log.flush()
+    store = RecoverableSkillStore(log, failure)
     provider = CapturingProvider()
     try:
         agent = Agent(llm_client=provider, system_prompt="BASE", tools=[], session_log=store,
                       workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, max_steps=1)
         with pytest.raises(OSError, match="retryable Skill"):
             agent.clear_active_skill_instructions()
-        agent.add_user_message("continue without any restored method")
+        if new_input:
+            agent.add_user_message("continue without any restored method")
         store.armed = True
         with pytest.raises(OSError, match="retryable Skill"):
             _ = [event async for event in agent.run_events()]
@@ -416,5 +431,16 @@ async def test_next_run_retries_pending_skill_write_before_requesting_model(tmp_
         assert len(provider.requests) == 1
         assert "METHOD_BODY" not in str(provider.requests)
         assert log.replay().skills == []
+        assert log.replay().skill_task["methods"] == []
+        log.close()
+        log = SessionLog.open(tmp_path / "sessions", session_id="restore-skill", cwd=tmp_path)
+        restarted_provider = CapturingProvider()
+        restarted = Agent(llm_client=restarted_provider, system_prompt="BASE", tools=[], session_log=log,
+                          workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, max_steps=1)
+        restarted.add_user_message("continue after restart")
+        _ = [event async for event in restarted.run_events()]
+        assert len(restarted_provider.requests) == 1
+        assert "METHOD_BODY" not in str(restarted_provider.requests)
+        assert restarted.skill_runtime.task.methods == {}
     finally:
         log.close()

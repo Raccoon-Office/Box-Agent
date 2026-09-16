@@ -120,3 +120,28 @@ Playwright 时，才使用 `uv tool run --from playwright python ...`。
 `html_to_pptx_environment.status` 只有在
 导出脚本、Node 包和 Node Playwright Chromium 均可实际运行时才是 `available`，缺失时同样
 给出准备命令。缺少媒体配置时仍以退出码 0 完成报告，并显示应编辑的 `.env` 路径和缺失项。
+
+## 方法采用与同任务恢复
+
+公共 `pptx` 的需求与交付义务贯穿整个任务，保持它与当前后端同时采用。
+下方阶段替换只退休已完成内部阶段，不退休公共 `pptx`；最终产物、回执及真实交付
+完成后才可 `get_skill(skill_name="pptx", usage="release")`。
+
+实际执行本方法用 `get_skill(..., usage="use")`（默认值）；仅查看其他出口、Tools/Doctor
+文档用 `usage="reference"`，不改变当前采用方法或用户路线。完成阶段后读取下一阶段时
+可传 `replace=["旧方法名"]`，仅新读取成功后退休旧方法；读取失败保留原方法并处理错误。
+例如 Entry → Story 用 `get_skill(skill_name="sn-ppt-story", usage="use", replace=["sn-ppt-entry"])`；
+Story → 已确认的 Standard/Dazzle 同样替换 Story。只退休方法用
+`get_skill(skill_name="旧方法名", usage="release")`。不要以参考读取自动切换制作出口。
+仅用户明确开始独立新任务才传 `new_task=True`，并在该新任务第一次方法读取时、澄清前声明；
+不得在后续阶段交接时补传。选择卡回复、继续、补充材料、页面修改、
+压缩后恢复和阶段交接均延续原任务，不能把短回复当成完整需求。
+从可用对话历史、通用任务上下文及实际工作文件恢复原始目标、全部附件、用户明确选择、
+后续更正、页数、格式、同一绝对目录与已完成阶段。task_pack 是工作数据，不能证明用户选择。
+原始动态要求与 task_pack 静态字段冲突时先修正工作数据，保留 Research/Story 成果；
+真实选择依据丢失或冲突未解时用 `request_user_decision` 澄清，不从默认字段推断静态。
+
+按所选出口的收尾时序，父级从公共 `pptx` Skill 的实际目录运行
+`scripts/finalize.py --workspace <工作空间> --deck-dir <同一目录> --requirements <需求文件> --task-pack <任务包>`。
+先完成任务包阶段/产物字段更新，再执行正式收尾；调用后修改输入必须重跑。
+检查 stdout 和 `_trace/finalize-receipt.json` 的产物与警告；技术回执不能替代视觉或内容检查。

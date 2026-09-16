@@ -31,7 +31,13 @@ OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "dazzle-box-native-tools", "bundle-third-party-notices",
             "static-player-delivery-gate", "design-mode-delivery-wording",
             "owned-renderer-lifecycle", "original-uploaded-font-family",
-            "intermediate-render-artifacts"]
+            "intermediate-render-artifacts",
+            "explicit-exporter-no-install", "managed-exporter-browser-cleanup",
+            "dynamic-render-deck-hash",
+            "dynamic-render-absolute-paths", "semantic-dynamic-presentation-scope",
+            "dazzle-output-choice-precedence", "skill-owned-formal-finalizer",
+            "generic-skill-adoption", "explicit-task-pack-postprocess-path", "retain-public-delivery-method",
+            "formal-command-parent-death-browser-guard", "required-reference-finalizer-contract"]
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite"
 LICENSE_INPUT_PATH = "scripts/presentation_suite_licenses/echarts-5.5.0"
 LICENSE_INPUT_DIR = Path(__file__).resolve().parents[1] / LICENSE_INPUT_PATH
@@ -88,11 +94,101 @@ def _replace_section(text: str, start: str, end: str, replacement: str) -> str:
     return before + replacement + end + after
 
 
+
+SKILL_ADOPTION_PROTOCOL = """
+## 方法采用与同任务恢复
+
+公共 `pptx` 的需求与交付义务贯穿整个任务，保持它与当前后端同时采用。
+下方阶段替换只退休已完成内部阶段，不退休公共 `pptx`；最终产物、回执及真实交付
+完成后才可 `get_skill(skill_name="pptx", usage="release")`。
+
+实际执行本方法用 `get_skill(..., usage="use")`（默认值）；仅查看其他出口、Tools/Doctor
+文档用 `usage="reference"`，不改变当前采用方法或用户路线。完成阶段后读取下一阶段时
+可传 `replace=["旧方法名"]`，仅新读取成功后退休旧方法；读取失败保留原方法并处理错误。
+例如 Entry → Story 用 `get_skill(skill_name="sn-ppt-story", usage="use", replace=["sn-ppt-entry"])`；
+Story → 已确认的 Standard/Dazzle 同样替换 Story。只退休方法用
+`get_skill(skill_name="旧方法名", usage="release")`。不要以参考读取自动切换制作出口。
+仅用户明确开始独立新任务才传 `new_task=True`，并在该新任务第一次方法读取时、澄清前声明；
+不得在后续阶段交接时补传。选择卡回复、继续、补充材料、页面修改、
+压缩后恢复和阶段交接均延续原任务，不能把短回复当成完整需求。
+从可用对话历史、通用任务上下文及实际工作文件恢复原始目标、全部附件、用户明确选择、
+后续更正、页数、格式、同一绝对目录与已完成阶段。task_pack 是工作数据，不能证明用户选择。
+原始动态要求与 task_pack 静态字段冲突时先修正工作数据，保留 Research/Story 成果；
+真实选择依据丢失或冲突未解时用 `request_user_decision` 澄清，不从默认字段推断静态。
+"""
+
+
 def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
     """Keep upstream production methods, adapting only the shipped route closure."""
     data = _render_lifecycle_overlay(relative, data)
     data = _font_source_overlay(relative, data)
     data = _artifact_publication_overlay(relative, data)
+    if relative == "skills/sn-ppt-dazzle/scripts/render_deck.py":
+        text = _replace_once(data.decode("utf-8"), "import argparse\n", "import argparse\nimport hashlib\n")
+        text = _replace_once(text, "        self.html_path = html_path\n        self.out_dir = out_dir\n",
+            "        self.html_path = html_path.resolve()\n        self.out_dir = out_dir.resolve()\n")
+        text = _replace_once(text, '            "deck": str(html_path),\n',
+            '            "deck": str(self.html_path),\n')
+        text = _replace_once(text, '        self.meta["console_errors"] = self.console_errors\n',
+            '        self.meta["console_errors"] = self.console_errors\n'
+            '        self.meta["deck_sha256"] = hashlib.sha256(self.html_path.read_bytes()).hexdigest()\n')
+        return text.encode("utf-8")
+    if relative == "skills/sn-ppt-standard/scripts/export_pptx/lib/dom_extractor.mjs":
+        text = _replace_once(data.decode("utf-8"),
+            "export async function extractPages(htmlPaths) {\n"
+            "  let browser;\n"
+            "  try {\n"
+            "    browser = await chromium.launch({ headless: true, executablePath: pickBrowserExe() });",
+            "export async function extractPages(htmlPaths) {\n"
+            "  let browser, launching, closing;\n"
+            "  const managed = process.env.BOX_AGENT_PPTX_MANAGED_DELIVERY === '1';\n"
+            "  const closeOwnedBrowser = () => closing ||= (async () => {\n"
+            "    const owned = browser || await launching;\n"
+            "    if (owned) await owned.close();\n"
+            "  })();\n"
+            "  const stop = signal => {\n"
+            "    void closeOwnedBrowser().catch(error => {\n"
+            "      process.stderr.write(`[dom_extractor] owned browser cleanup failed: ${error.message}\\n`);\n"
+            "    }).finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));\n"
+            "  };\n"
+            "  const onTerm = () => stop('SIGTERM');\n"
+            "  const onInt = () => stop('SIGINT');\n"
+            "  const removeSignals = () => {\n"
+            "    if (managed) { process.off('SIGTERM', onTerm); process.off('SIGINT', onInt); }\n"
+            "  };\n"
+            "  if (managed) { process.on('SIGTERM', onTerm); process.on('SIGINT', onInt); }\n"
+            "  try {\n"
+            "    let executablePath = pickBrowserExe();\n"
+            "    if (managed && executablePath && process.env.PPT_DELIVERY_BROWSER_GUARD) {\n"
+            "      process.env.PPT_DELIVERY_BROWSER_EXE = executablePath;\n"
+            "      executablePath = process.env.PPT_DELIVERY_BROWSER_GUARD;\n"
+            "    }\n"
+            "    launching = chromium.launch({ headless: true, executablePath });\n"
+            "    browser = await launching;")
+        text = _replace_once(text,
+            "    // Browser unavailable — return null IR for every page.",
+            "    removeSignals();\n"
+            "    // Browser unavailable — return null IR for every page.")
+        text = _replace_once(text,
+            "  } finally {\n    await browser.close();\n  }\n\n  return results;",
+            "  } finally {\n"
+            "    try { await closeOwnedBrowser(); } finally { removeSignals(); }\n"
+            "  }\n\n  return results;")
+        return text.encode("utf-8")
+    if relative == "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs":
+        text = _replace_once(data.decode("utf-8"),
+            "    console.error('[setup] 首次运行，正在安装 npm 依赖...');",
+            "    if (process.env.BOX_AGENT_PPTX_NO_INSTALL === '1') {\n"
+            "      throw new Error('Exporter dependencies unavailable: missing local pptxgenjs/playwright/echarts; automatic installation disabled (BOX_AGENT_PPTX_NO_INSTALL=1).');\n"
+            "    }\n"
+            "    console.error('[setup] 首次运行，正在安装 npm 依赖...');")
+        text = _replace_once(text,
+            "  console.error('[setup] 本地无可用 Chromium，正在安装 Playwright Chromium...');",
+            "  if (process.env.BOX_AGENT_PPTX_NO_INSTALL === '1') {\n"
+            "    throw new Error('Chromium unavailable: no usable local browser; automatic installation disabled (BOX_AGENT_PPTX_NO_INSTALL=1).');\n"
+            "  }\n"
+            "  console.error('[setup] 本地无可用 Chromium，正在安装 Playwright Chromium...');")
+        return text.encode("utf-8")
     if relative == "skills/sn-ppt-standard/assets/vendor/echarts.min.js":
         if not re.search(rb'\.version=["\']5\.5\.0["\']', data):
             raise ValueError("ECharts runtime version needs review against pinned license inputs")
@@ -127,15 +223,31 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
             "`bundled/static-ppt-skill-suite/skills/sn-ppt-web/assets/licenses/OFL-1.1.txt`",
             "`skills/sn-ppt-standard/assets/licenses/OFL-1.1.txt`")
         return text.encode("utf-8")
+    if relative == "skills/sn-ppt-standard/references/box-agent-tool-contract.md":
+        text = _replace_once(data.decode("utf-8"),
+            "4. 父级重渲并复看。最终 Review 同样由父级先提供新鲜 PNG、Review 子代理集中修复、父级统一重渲/build；父级统一执行重渲、build、inspect 和 Standard exporter，只有最终 PNG 与 `present.html` 验证通过后才导出，失败登记 `state.status=partial`。",
+            "4. 父级重渲并复看。最终 Review 同样由父级先提供新鲜 PNG、Review 子代理集中修复；修复完成后，在最终像素检查前，父级按公共 `pptx` 的绝对路径命令运行 `finalize.py`，由它统一 build/audit/export，再检查最终 PNG 与 `present.html`。不要重复手工导出；像素检查导致源文件修改时重新 finalize 并复看。技术回执不代替视觉检查，检查失败须如实报告未完成与修复项，不能宣称交付完成。")
+        text = _replace_once(text,
+            "导出成功后，按 stdout JSON 的精确 `output` 路径检查文件；",
+            "正式收尾后，读取 stdout JSON 及 `_trace/finalize-receipt.json` 的 `status`、`warnings` 和 `artifacts[].path`，按其中精确路径检查文件；仅 `status=complete` 表示技术核验完成，视觉与内容仍按 Review 实际结果判断。取消或超时必须读取本次失败回执；强制终止留下的 `in_progress` 也不是成功。")
+        return text.encode("utf-8")
     if relative == "skills/sn-ppt-standard/SKILL.md":
         text = _replace_once(data.decode("utf-8"), "## Box-Agent 兼容入口\n", """## 整册 HTML 完成条件
 
 `<DECK_DIR>/present.html` 是静态整册的必交付入口，包括全生图、只要 PPTX、只要 HTML
 和续改任务。逐页 HTML/PNG、子代理完成或 PPTX 导出成功，都不等于整册完成。
-父级必须执行下方的 `deck.py build` 与 `deck.py audit`，确认播放器覆盖全部页且可打开；
+父级必须通过下述托管工具或独立 CLI 执行 `deck.py build` 与 `deck.py audit`，确认播放器覆盖全部页且可打开；
 再完成最终像素检查及所需 PPTX 导出。只缺播放器时复用已有页面补齐收尾，不重新制作整册。
 最终回复必须给出真实 `present.html` 的可点击链接，并保留其依赖的 slides、样式与资源；
 未生成或核验失败则保存现有产物、登记 `partial` 和错误，不得声称完成或伪造链接。
+
+Box 公共入口将本 Skill 的正式 build、audit 和所需 PPTX exporter 封装在
+`pptx/scripts/finalize.py`；完成页面修复与内容核验后、最终像素检查前，按公共 `pptx` 的命令传入实际
+`--workspace`、`--deck-dir`、`--requirements` 和 `--task-pack`，检查具体回执，
+不要重复执行收尾。它不依赖安装 box_agent，不解释用户语义，也不创建任务状态机。
+静态默认 HTML + PPTX，只要 HTML 的例外必须来自用户；task_pack 字段须与用户原文、
+真实选择及后续更正一致，不能从静态字段覆盖动态需求。
+独立 SN 未附公共 pptx 脚本时继续按下方原 CLI 流程执行，不改用临时转换器。
 
 ## Box-Agent 兼容入口
 """)
@@ -146,6 +258,31 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
         text = _replace_once(text,
             '`deck.py build` 生成并校验 `present.html`（缺失即报错，deck.py:1294-1295）。`present.html` 是必交付产物：不得省略 build、不得拿其他文件代替它交付。',
             '`deck.py build` 生成 `present.html`；随后单独执行 `deck.py audit`，检查文件存在、全部页引用、本地资源与播放器运行情况。两条命令都必须成功，不用后续命令掩盖退出码。`present.html` 不得省略，也不能用 PPTX 或其他文件替代；通过后登记绝对路径到 `state.artifacts.present_html` 并在最终回复提供链接。')
+        text = _replace_once(text,
+            "    - 成功且 `DECK_DIR/<DECK_ID>.pptx` 确实存在后，登记 `state.artifacts.pptx`；",
+            "    - Box 只读取正式回执中的 PPTX 路径、状态和错误，不补写已绑定 task_pack。"
+            "独立 SN 成功且 `DECK_DIR/<DECK_ID>.pptx` 确实存在后，登记 `state.artifacts.pptx`；")
+        text = _replace_once(text,
+            '```bash\npython "$SKILL_ROOT/scripts/deck.py" build "$DECK_DIR" --expected <总页数>',
+            '以下手工命令与产物登记仅适用于独立 SN；Box 已由 finalize 完成，只读取回执，'
+            '不重复命令或补写已绑定 task_pack。\n\n'
+            '```bash\npython "$SKILL_ROOT/scripts/deck.py" build "$DECK_DIR" --expected <总页数>')
+        text = _replace_once(text,
+            "每次失败由运行时恢复该组最后一次已看过的版本。",
+            "父级与原页组在返修前保留最后验证版；失败时由原页组显式恢复该版本，不依赖宿主自动恢复。")
+        text = _replace_once(text,
+            "运行时不得禁止写入最终验收合同明确要求的这两份文件，也不得在收口阶段允许继续修改页面。",
+            "Review 和父级应按正常工具权限补齐这两份验收记录，收口阶段不得继续修改页面。")
+        text = _replace_once(text,
+            "6. 修复确认后先同步讲稿，再执行一次 `deck.py build`。随后重新生成",
+            "6. 修复确认后先同步讲稿。Box 公共入口此时执行一次 `pptx/scripts/finalize.py`，"
+            "统一完成 build、audit 和所需正式 exporter；不再手工重复。独立 SN 此时执行 "
+            "`deck.py build` 并按后续命令 audit/export。随后重新生成")
+        text = _replace_once(text,
+            "8. **PPTX 导出（必做步骤，不是可选项）**：当 `static_postprocess` 含 `pptx` 时，**必须**执行以下唯一导出命令，不得跳过、不得改用任何其他工具：",
+            "8. **PPTX 导出（必做步骤，不是可选项）**：当 `static_postprocess` 含 `pptx` 时，"
+            "Box 第 6 步的 finalize 已调用以下唯一 exporter，核对回执与文件即可，不重复执行。"
+            "独立 SN **必须**执行以下命令，不得跳过或改用其他工具：")
         return text.encode("utf-8")
     if relative == "skills/sn-ppt-entry/SKILL.md":
         text = data.decode("utf-8")
@@ -160,7 +297,21 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
 - `dynamic_html` -> `sn-ppt-dazzle`：带动效和翻页交互的 `deck.html`；不承诺保留动画的 PPTX。
 
 对外描述 PPTX 文件交付，不宣传或承诺可编辑、原位编辑能力。
-用户未明确要求动态时采用 `static_html`；只要 HTML 时关闭对应 PPTX 后处理。
+以公共入口核对的用户原文和真实选择回复为准，保留完整原始需求及后续更正；当前用户
+明确更正优先。`task_pack.json` 只记录任务信息，不能授权模式或覆盖这些依据。
+在演示或课件任务中，肯定要求播放时对象运动、内容随时间变化，或操作引发讲解内容变化，
+就是动态要求，使用 `dynamic_html`；例如课件里行星转动或滑块控制过程变化。
+按完整需求的含义判断，不依赖“动态 PPT”等固定词；普通翻页、编辑标题不是内容动效。
+老师、太阳系等身份或题材、“生动一点”等风格，以及“行业动态”“动态规划”等主题，
+都不能据此推断动态；提问、比较、引用和否定也不是动态制作授权。
+`unknown`、解析失败或缺失字段不等于静态。先恢复已有选择与原文依据；仍无法确定或
+相互冲突时返回公共入口，用真实选择卡澄清，不重建任务或静默默认 `static_html`。
+只有确认完整需求没有动态要求、没有未决解析失败或冲突时才默认 `static_html`；
+静态仍默认 HTML + PPTX，只要 HTML 时关闭对应 PPTX 后处理。
+下方 `task_pack.json` 是已确认静态任务的示例，不能作为覆盖动态原需求的默认值。
+独立网页模拟器、应用或数据看板不因 HTML、动画或交互而进入本流程；已有演示的局部
+文字、颜色修改保留目录、输出和已完成阶段，不因制作时的编辑操作切换为动态。
+静态与动态共用 Entry 和 Story，再按确认的 `choices.output` 进入唯一生产出口。
 已有 PPTX 的原位编辑、模板填充与已选设计模式冲突时，保留原始需求、附件和交付格式，
 先向用户澄清是否改用快速模式；只有用户明确同意后才加载 `ppt-fast`，不得自动切换。
 已有 SN HTML 任务继续使用其任务目录与输出选择。
@@ -194,18 +345,20 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
         text = _replace_section(text, '12. **出口分发**：', '## 恢复规则\n', """12. **出口分发**：Story 已完成且当前磁盘 `outline.md` 已按本档位确认后，
     `static_html` 调用 `sn-ppt-standard`，`dynamic_html` 调用 `sn-ppt-dazzle`；始终传入相同绝对
     `deck_dir`。不得绕过 Story；出口不再研究、重排页面或重写大纲。
-13. **后处理和收尾**：静态页面完成后，父级先按 Standard 的命令执行
-    `deck.py build` 与 `deck.py audit`，核对 `<deck_dir>/present.html` 存在、覆盖全部页面且
-    播放器可打开，再完成最终像素检查。逐页 HTML/PNG 或 PPTX 已存在都不能跳过这一步。
-    随后按 `static_postprocess` 使用 Standard 自有 exporter
-    `scripts/export_pptx/html_to_pptx.mjs` 导出 PPTX，默认同时交付；只有用户明确只要 HTML
-    时才可省略 PPTX，任何静态任务都不能因此省略 `present.html`。
+13. **后处理和收尾**：完成页面修复与内容核验、更新任务包后，父级按公共 `pptx`
+    的 `scripts/finalize.py` 命令统一执行 Standard 的 build、audit 和所需正式 exporter；
+    不再手工重复 build/audit/export。核对回执中的 `<deck_dir>/present.html` 存在、覆盖
+    全部页面、播放器可打开，随后按 Standard 覆盖 build 后的最终像素，必要的图片与
+    Review 记录只写 renders / _trace，不再修改制作输入。逐页 HTML/PNG 或已有 PPTX
+    不能替代这一步。静态默认 HTML + PPTX，只有用户明确只要 HTML 时省略 PPTX。
     只缺播放器时复用已有页面补齐收尾，不重做 Research、Story 或整册页面。
-    把已验证的绝对路径登记到 `task_pack.state.artifacts.present_html`，最终回复必须给出
-    `present.html` 的可点击链接，保留它引用的 slides、样式与资源，不能只给文件夹或 PPTX。
-    必需产物缺失或转换失败时保留现有产物、状态写 `partial` 并记录错误；不得用宿主工具、
-    python-pptx 或自写脚本替换 exporter，不伪造文件路径。动态出口交付 `deck.html` 及其
-    实际使用的本地资源，并提供真实 HTML 链接。只登记真实存在的产物到 `task_pack.state.artifacts`。
+    任务包只登记调用前已验证存在的产物；本次新增产物以正式回执为准，不为补记字段
+    修改已绑定输入。最终回复给出回执中的真实 HTML/PPTX 链接，保留本地依赖资源。
+    必需产物缺失或转换失败时保留产物并披露 partial 与原始错误；不得用宿主工具、
+    python-pptx 或自写脚本替换 exporter，不伪造路径。动态完成原 Dazzle 全册检查后由
+    同一 finalize 命令核验 `deck.html` 与本地资源；它不会调用静态 exporter。
+    独立 SN 没有公共 pptx 脚本时按 Standard 原 build → audit → exporter 流程收尾，
+    再核对最终像素与真实文件，不额外调用不存在的公共脚本。
 
 """)
         # Remove the omitted workbench step while keeping the remaining workflow ordered.
@@ -221,6 +374,14 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
         return text.encode("utf-8")
     if relative == "skills/sn-ppt-dazzle/SKILL.md":
         text = data.decode("utf-8")
+        text = _replace_once(text,
+            '- `task_pack.choices.output == "dynamic_html"`，或旧任务的 `ppt_mode == "dazzle"`。',
+            '- `task_pack.choices.output == "dynamic_html"`，且与用户原文、真实选择回复及后续更正一致。\n'
+            '  仅旧任务完全缺少 `choices.output` 字段、且原有动态选择有依据时，才兼容\n'
+            '  `ppt_mode == "dazzle"`；空值、unknown 或非法值不算字段缺失。\n\n'
+            '`choices.output` 已存在时，旧 `ppt_mode` 不能覆盖它。两者冲突（例如\n'
+            '`static_html` 与 `dazzle`）或缺少选择依据时，停止并返回 Entry / 公共入口核对，\n'
+            '不得强行进入 Dazzle。任务包本身不能代替用户授权，当前明确更正优先。')
         if text.count("`vision_analyze`") != 5:
             raise ValueError("Dazzle visual-tool overlay needs review")
         text = text.replace("`vision_analyze`", "`inspect_images`")
@@ -301,6 +462,15 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
             source_sha256 = hashlib.sha256(data).hexdigest()
             data = _apply_integration_overlay(str(relative), data)
             if relative.name == "SKILL.md":
+                # Qualify inline paths against Entry's existing nested JSON
+                # contract; do not invent a second top-level CLI schema.
+                text = data.decode("utf-8").replace("`static_postprocess`", "`choices.static_postprocess`")
+                data = text.encode("utf-8")
+                data += (SKILL_ADOPTION_PROTOCOL + "\n按所选出口的收尾时序，父级从公共 `pptx` Skill 的实际目录运行\n"
+                         "`scripts/finalize.py --workspace <工作空间> --deck-dir <同一目录> "
+                         "--requirements <需求文件> --task-pack <任务包>`。\n"
+                         "先完成任务包阶段/产物字段更新，再执行正式收尾；调用后修改输入必须重跑。\n"
+                         "检查 stdout 和 `_trace/finalize-receipt.json` 的产物与警告；技术回执不能替代视觉或内容检查。\n").encode("utf-8")
                 data = _apply_host_metadata(data)
             target = staged / relative
             target.parent.mkdir(parents=True, exist_ok=True)

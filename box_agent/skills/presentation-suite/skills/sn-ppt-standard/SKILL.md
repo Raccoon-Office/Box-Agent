@@ -1,6 +1,6 @@
 ---
 name: sn-ppt-standard
-description: 仅在 `sn-ppt-entry` 与 `sn-ppt-story` 已准备绝对 `DECK_DIR` 和 `outline.md` 后使用；生成每页独立 HTML（1600×900）、渲染 PNG、逐页讲稿、`present.html`，并按 `static_postprocess` 选择生成由 Standard 自有 exporter 转换的 PPTX。**`present.html` 始终是必交付产物，缺失即技术故障，不得交付；`static_postprocess` 含 `pptx` 时 PPTX 同为必交付产物（缺一即技术故障），且只能由 Standard 自有 exporter 生成；仅当用户明确要求只要 HTML（`static_postprocess` 为 `[]`）时，PPTX 才可不交付。**
+description: 仅在 `sn-ppt-entry` 与 `sn-ppt-story` 已准备绝对 `DECK_DIR` 和 `outline.md` 后使用；生成每页独立 HTML（1600×900）、渲染 PNG、逐页讲稿、`present.html`，并按 `choices.static_postprocess` 选择生成由 Standard 自有 exporter 转换的 PPTX。**`present.html` 始终是必交付产物，缺失即技术故障，不得交付；`choices.static_postprocess` 含 `pptx` 时 PPTX 同为必交付产物（缺一即技术故障），且只能由 Standard 自有 exporter 生成；仅当用户明确要求只要 HTML（`choices.static_postprocess` 为 `[]`）时，PPTX 才可不交付。**
 metadata:
   allow_override: false
   user_visible: false
@@ -14,10 +14,18 @@ metadata:
 
 `<DECK_DIR>/present.html` 是静态整册的必交付入口，包括全生图、只要 PPTX、只要 HTML
 和续改任务。逐页 HTML/PNG、子代理完成或 PPTX 导出成功，都不等于整册完成。
-父级必须执行下方的 `deck.py build` 与 `deck.py audit`，确认播放器覆盖全部页且可打开；
+父级必须通过下述托管工具或独立 CLI 执行 `deck.py build` 与 `deck.py audit`，确认播放器覆盖全部页且可打开；
 再完成最终像素检查及所需 PPTX 导出。只缺播放器时复用已有页面补齐收尾，不重新制作整册。
 最终回复必须给出真实 `present.html` 的可点击链接，并保留其依赖的 slides、样式与资源；
 未生成或核验失败则保存现有产物、登记 `partial` 和错误，不得声称完成或伪造链接。
+
+Box 公共入口将本 Skill 的正式 build、audit 和所需 PPTX exporter 封装在
+`pptx/scripts/finalize.py`；完成页面修复与内容核验后、最终像素检查前，按公共 `pptx` 的命令传入实际
+`--workspace`、`--deck-dir`、`--requirements` 和 `--task-pack`，检查具体回执，
+不要重复执行收尾。它不依赖安装 box_agent，不解释用户语义，也不创建任务状态机。
+静态默认 HTML + PPTX，只要 HTML 的例外必须来自用户；task_pack 字段须与用户原文、
+真实选择及后续更正一致，不能从静态字段覆盖动态需求。
+独立 SN 未附公共 pptx 脚本时继续按下方原 CLI 流程执行，不改用临时转换器。
 
 ## Box-Agent 兼容入口
 
@@ -27,7 +35,7 @@ metadata:
 本 Skill 不接收裸 query，不自行创建任务目录。只接受绝对 `DECK_DIR`，且必须存在 `task_pack.json`、`info_pack.json` 和 `outline.md`。
 `choices.output` 必须为 `static_html`，且 `ppt_mode` 必须为 `standard`。开始和恢复时重新读取磁盘上的 `outline.md`；不得自行 Research、重复解析材料、改写 outline、增删页面、重排页序或新增事实。输入不满足时返回 Entry。
 
-执行顺序：复用 task pack → 完成原有计划 → `deck.py prepare "$DECK_DIR" --expected N` 成功 → 委派页面制作 → 父级指定页渲染并看图、修复 → `deck.py build "$DECK_DIR" --expected N` 后检查最终像素与播放器 → 按 `static_postprocess` 导出。质量失败先读诊断并修页；Box-Agent 的绝对写域、指定页重渲和导出结果读取示例见工具契约。
+执行顺序：复用 task pack → 完成原有计划 → `deck.py prepare "$DECK_DIR" --expected N` 成功 → 委派页面制作 → 父级指定页渲染并看图、修复 → `deck.py build "$DECK_DIR" --expected N` 后检查最终像素与播放器 → 按 `choices.static_postprocess` 导出。质量失败先读诊断并修页；Box-Agent 的绝对写域、指定页重渲和导出结果读取示例见工具契约。
 
 ## 1. 所有模式共享的合同
 
@@ -77,7 +85,7 @@ slides/slide_NN.html
 renders/slide_NN.png
 speech.md
 present.html   ← 必交付产物：由 `deck.py build` 生成，缺失即技术故障
-`<DECK_DIR>/<DECK_ID>.pptx`   ← 必交付产物（`static_postprocess` 含 `pptx` 时）：只能由 `scripts/export_pptx/html_to_pptx.mjs` 生成
+`<DECK_DIR>/<DECK_ID>.pptx`   ← 必交付产物（`choices.static_postprocess` 含 `pptx` 时）：只能由 `scripts/export_pptx/html_to_pptx.mjs` 生成
 ```
 
 `outline.md` 是页面事实、页数、页序、标题、结论和内容关系的真相源；`plan/grounded-knowledge.md` 由 Standard Orchestrator 按 Grounding gate 汇总 Entry/Story 已交接的事实与证据，不新增研究或事实，也不得覆盖 `outline.md`。
@@ -214,7 +222,7 @@ python "$SKILL_ROOT/scripts/deck.py" prepare "$DECK_DIR" --expected <总页数>
 2. 先把 `attachment_visual_map` 中 must-show / reuse 的图片复制并登记来源，再交给对应 Image 分组；论文命名 Figure 先由 Image 使用 `deck.py material-figure` 从页图生成独立、可追溯的 Figure 裁图，整页 PNG 只作为定位上下文。每个 Image 分组将候选路径绑定到稳定 `asset_id`，由 `deck.py asset-contact` 生成一张带 ID 的素材联系表，默认只做一次整组 Vision；只有被标红、要求抠图、比例可疑或主体完整性无法从缩略图判断的素材才打开单图复核。Image 用 `asset-review` 写回最终状态后，Orchestrator 只按 `ready` 的 `asset_id → actual path + origin + crop_contract` 回填逐页计划；候选、被替换与废弃图片不算正式素材。`assets/catalog.json` 是唯一素材真相源，必须保留下载 URL、生成模型、用户附件路径和派生关系；Image 的自然语言总结不能代替 catalog。逐页图片先锁定 `presentation: subject-only | framed-scene | full-bleed | evidence-crop`（这是位图的展示/背景处理合同，**只允许这四个枚举**；`split-media`/`right-half`/`cards`/分屏等是版式不是 presentation，放到 `layout`；**无位图页完全省略 presentation**，不写 `无`/`none` 占位）：任何要悬浮、跨色场叠放或作为独立角色/物件的图都属于 `subject-only`，必须由 Image 完成透明检查、主体抠图、最终 Alpha 检查与必要的单图 Vision，再回填可用的 `*-cutout.png`；普通 RGB 图不得作为透明资产返回 `ready`。带背景图片只能作为有意的画框场景、满幅裁切或证据裁图，不能把其白底/奶油底矩形偶然贴到另一种画布上。Slide 不临时去背，也不用 CSS mask/multiply 冒充。映射确有问题时交回同一个 Image 复核。失败素材先换可行的真实图或生成图路线，确实不可得时才改为 Canvas 或排版降级，并写清原因，不留占位。Slide 启动前，Image 必须有 `status: ready` 的完成合同，catalog 中所有计划 `asset_id` 都必须为 `ready`、实际文件存在，且路径与裁切合同已经回填逐页计划。
 3. 一个 Production group 委派一个 Slide，可并行执行；goal 的首行必须精确写成 `Slide Group <group_id> [NN,NN]:`，例如 `Slide Group bookends [01,20]:`。页码所有权以已冻结的 `production_group` 为准；不用“负责封面和结尾”、“第一组页面”等叙述取代组 ID 与标准页码头。显式带上 `response_language`、`deliverable_language` 与该组 `boundary_handoff`。不得为了提高并发把已经冻结的多页 group 再拆成“一页一个 Slide”；只有计划本身确实定义为单页组时才单页委派。同组必须同时满足叙事亲缘、设计亲缘和制作负荷相容；复杂 Canvas、独立数据图或重图像合成页在没有真正共享构图系统时应单独成组。Grouping 提供的是共享设计记忆，不是批量降精度：同一个 Slide 按组内页序串行完成每页闭环。
 4. Slide 先读取 Style Lock 与组合同，然后对每一页依次执行“完整首稿 → 父级单页渲染 → 父级 `inspect_images(strategy=\"native\")` → 最多一次合并修复 → 父级重渲复看”；当前页达到 ready 后才进入下一页。全部页面完成后，再批量渲染本组并查看组内全部最终 PNG，确认亲缘性与明显回归，但不为审美偏好开启新循环。封面、每张章节页、结尾页都必须完成自己的单页闭环。首次看图后的“合并修改 → 重渲 → 复看”记为一轮 refine，每页最多 1 轮；仍有真实硬伤时改用更稳定的结构或返回 blocked。最后一次修改后没有重新渲染和看图，不得返回 ready。
-5. 等待全部页面完成后再启动首次 Review。新建或复杂编辑过程中不得额外委派 `simple_edit` 或 `review-fix` 角色；Orchestrator 不得追逐 `cjkTypography`、`crowded`、bbox/contrast 候选、轻微换行/标点等 advisory，也不得在 Review 前开启审美清门循环。Review 发现有新鲜像素/DOM 证据的真实硬伤时，只交回原所属 Slide Group；每组最多返修 2 次，每次失败由运行时恢复该组最后一次已看过的版本。返修后才可启动下一次 Review，Review 总计最多 3 次。
+5. 等待全部页面完成后再启动首次 Review。新建或复杂编辑过程中不得额外委派 `simple_edit` 或 `review-fix` 角色；Orchestrator 不得追逐 `cjkTypography`、`crowded`、bbox/contrast 候选、轻微换行/标点等 advisory，也不得在 Review 前开启审美清门循环。Review 发现有新鲜像素/DOM 证据的真实硬伤时，只交回原所属 Slide Group；每组最多返修 2 次，父级与原页组在返修前保留最后验证版；失败时由原页组显式恢复该版本，不依赖宿主自动恢复。返修后才可启动下一次 Review，Review 总计最多 3 次。
 
 ### 阶段 5：全册 Review 与交付
 
@@ -231,13 +239,13 @@ mode=final_review
 
 1. **完整诊断：**先看 overview，再按 `review-contact.json` 分批看完全部联系表和必要单页；每批将覆盖页码与发现记入同一 `_trace/review-issues.md`。全册覆盖并冻结账本前禁止修改或渲染；不因 Deck 页数较长而跳过后续批次。
 2. **内容保真核验：**任务含附件或使用了 Research 时，在像素修改前把每页屏显事实与 `grounded-knowledge.md` 对照；有附件时沿 `info_pack.raw_documents` 核对原始解析内容、表格和页图，已有 Material 摘要或 coverage ledger 仅作辅证，并写 `_trace/content-fidelity.md`。数字、名称、日期、单位、产品身份、原话或关系无法追溯、自相矛盾时修正或 blocked。生成图只能承担概念/氛围表达；若用于具名真实产品、人物或案例识别，页面必须明确标“概念示意”，不能作为事实证据。仅当既无附件、又无 Research 和高风险外部事实时，`content_fidelity` 才可为 `not-applicable`。
-   Review 停滞收口时允许补齐或更新的正式产物只有 `_trace/review-issues.md` 与 `_trace/content-fidelity.md`；运行时不得禁止写入最终验收合同明确要求的这两份文件，也不得在收口阶段允许继续修改页面。
+   Review 停滞收口时允许补齐或更新的正式产物只有 `_trace/review-issues.md` 与 `_trace/content-fidelity.md`；Review 和父级应按正常工具权限补齐这两份验收记录，收口阶段不得继续修改页面。
 3. **集中修复：**Review 既诊断也直接修复本次边界内可安全解决的问题；当前文件与已有素材能解决的问题不得只上报给 Orchestrator。按共同根因先全局、后局部，全部修改结束后才统一批量渲染。这一整批“修改 → 批量渲染 → focus 复验”记为 Review 的 1 轮 refine。任何 HTML/`base.css` 修改都会使旧 PNG 失效，重渲前禁止再次调用 Vision；Canvas/SVG/HTML 叠加页必须同步修正 CSS 尺寸、Canvas 属性、SVG `viewBox`、JS 坐标与节点锚点，不能只放大外容器。机检中的 `boxoverflow`、bbox 相交和装饰相交仅为定位候选；若新鲜像素没有真实遮挡、裁切或不可读，不得为清除告警缩字、压缩主体或删除有构图作用的元素。
 4. 改过 base.css/字体时全册 batch；只改局部时 page batch。该批渲染用于确认修复没有退化，不是最终交付证据。
 5. 生成一次 focus 联系表确认变化页。单个 Review 只做 1 轮 refine；仍有可见硬伤时返回 `blocked`，由 Orchestrator 将有证据的硬伤交回原页组。原页组保留最后验证版、做一次合并修复并重渲复看；新版退化或仍未解决时恢复验证版。修复后启动新的 Review 复验，最多形成 3 次 Review，不新增审美目标。
-6. 修复确认后先同步讲稿，再执行一次 `deck.py build`。随后重新生成 `renders/review-contact.json` 与最终联系表，并用 Vision 覆盖 build 后的全部最终像素；若 build 改变 `base.css`、字体或任一页面渲染，build 前看过的 PNG 全部视为过期。最终看图后只允许更新 `_trace/review-issues.md` / `_trace/content-fidelity.md` 与返回合同，不得再改页面、渲染或 build。
+6. 修复确认后先同步讲稿。Box 公共入口此时执行一次 `pptx/scripts/finalize.py`，统一完成 build、audit 和所需正式 exporter；不再手工重复。独立 SN 此时执行 `deck.py build` 并按后续命令 audit/export。随后重新生成 `renders/review-contact.json` 与最终联系表，并用 Vision 覆盖 build 后的全部最终像素；若 build 改变 `base.css`、字体或任一页面渲染，build 前看过的 PNG 全部视为过期。最终看图后只允许更新 `_trace/review-issues.md` / `_trace/content-fidelity.md` 与返回合同，不得再改页面、渲染或 build。
 7. **产物核验（硬门）**：Review 返回 `ready` 后，父级必须逐项确认 `outline.md`、全部 HTML/PNG、讲稿、`present.html` 与播放器均存在，并确认 `DECK_DIR/present.html` 可打开。`present.html` 由第 6 步 `deck.py build` 生成，**不得以其他文件或仅 PPTX 替代；缺失即技术故障，不得交付**。
-8. **PPTX 导出（必做步骤，不是可选项）**：当 `static_postprocess` 含 `pptx` 时，**必须**执行以下唯一导出命令，不得跳过、不得改用任何其他工具：
+8. **PPTX 导出（必做步骤，不是可选项）**：当 `choices.static_postprocess` 含 `pptx` 时，Box 第 6 步的 finalize 已调用以下唯一 exporter，核对回执与文件即可，不重复执行。独立 SN **必须**执行以下命令，不得跳过或改用其他工具：
 
     ```bash
     node "$SKILL_ROOT/scripts/export_pptx/html_to_pptx.mjs" --deck-dir "$DECK_DIR" --pages-dir "$DECK_DIR/slides" --output "$DECK_DIR/<DECK_ID>.pptx" --force
@@ -245,11 +253,13 @@ mode=final_review
 
     - **这是 PPTX 的唯一合法产出路径**：禁止用 python-pptx、自写 python 脚本、宿主 Agent 原生演示工具或手工重建 PPTX 替代；导出失败时也不得用这些方式"补产出"，只能按下方失败分支处理。
     - Linux 下若该命令报 chromium 启动失败 / `Target page, context or browser has been closed` / 缺动态库（如 libnspr4.so），先执行 `export LD_LIBRARY_PATH="$HOME/.box-agent/runtime/linux-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"` 再重跑同一条命令，最多重试一次；仍失败进入失败分支。
-    - 成功且 `DECK_DIR/<DECK_ID>.pptx` 确实存在后，登记 `state.artifacts.pptx`；失败则写入 `state.last_error`（保留原始错误原文）、将 `state.status` 设为 `partial`、保留全部 HTML 产物并如实向用户报告，**不得伪造 PPTX 路径**。
+    - Box 只读取正式回执中的 PPTX 路径、状态和错误，不补写已绑定 task_pack。独立 SN 成功且 `DECK_DIR/<DECK_ID>.pptx` 确实存在后，登记 `state.artifacts.pptx`；失败则写入 `state.last_error`（保留原始错误原文）、将 `state.status` 设为 `partial`、保留全部 HTML 产物并如实向用户报告，**不得伪造 PPTX 路径**。
 
-Review 超时、返回 `blocked`、缺少最终像素复验或没有自然返回合同时，先进入有限恢复流程，而不是立即把整项任务判失败。达到 3 次 Review 或每个受影响页组 2 次返修预算后停止继续改页，保留 `_trace/review-issues.md`，恢复每组最后验证版并执行确定性 build。只要全部 slide、非空最终渲染、`speech.md` 与可打开的 `present.html` 存在，任务以“完成（有待改进）”交付并携带 warnings；只有缺页、渲染缺失/空白、播放器无法构建/打开或**缺少 `present.html`** 等不可用技术故障才判失败。`static_postprocess` 含 `pptx` 时，导出失败按第 8 步登记 `partial` 并如实交付 HTML 版，**不得以 python-pptx 等替代工具另产 PPTX 冒充完成**。
+Review 超时、返回 `blocked`、缺少最终像素复验或没有自然返回合同时，先进入有限恢复流程，而不是立即把整项任务判失败。达到 3 次 Review 或每个受影响页组 2 次返修预算后停止继续改页，保留 `_trace/review-issues.md`，恢复每组最后验证版并执行确定性 build。只要全部 slide、非空最终渲染、`speech.md` 与可打开的 `present.html` 存在，任务以“完成（有待改进）”交付并携带 warnings；只有缺页、渲染缺失/空白、播放器无法构建/打开或**缺少 `present.html`** 等不可用技术故障才判失败。`choices.static_postprocess` 含 `pptx` 时，导出失败按第 8 步登记 `partial` 并如实交付 HTML 版，**不得以 python-pptx 等替代工具另产 PPTX 冒充完成**。
 
 Review 不只查“有没有溢出”，还要比较全册设计兑现：封面是否具有统治性焦点和必要层级，章节页是否既有亲缘性又体现章节推进，结尾是否回应开场；普通页是否在投影字阶下充分使用画布并形成明确阅读路径；每个章节边界是否仍属于同一基础画布家族，整页换场是否有明确的进入与退出承接；屏显是否泄漏内部规划字段、来源、文件名或无听众价值的伪元数据。由父级实际调用 `inspect_images(strategy=\"native\")` 查看最终像素；未调用时必须 blocked。
+
+以下手工命令与产物登记仅适用于独立 SN；Box 已由 finalize 完成，只读取回执，不重复命令或补写已绑定 task_pack。
 
 ```bash
 python "$SKILL_ROOT/scripts/deck.py" build "$DECK_DIR" --expected <总页数>
@@ -335,3 +345,28 @@ Review：
 | `install.sh` | 保留：跨环境依赖、字体和 Chromium 安装无法由运行脚本可靠替代；依赖清单已内联 |
 
 首次部署依赖解析 venv、PyMuPDF、可分发字体、FontTools/Brotli 和 Playwright Chromium；用 `scripts/install.sh` 安装。运行脚本时若 skill 挂载路径不同，使用实际 skill root。
+
+## 方法采用与同任务恢复
+
+公共 `pptx` 的需求与交付义务贯穿整个任务，保持它与当前后端同时采用。
+下方阶段替换只退休已完成内部阶段，不退休公共 `pptx`；最终产物、回执及真实交付
+完成后才可 `get_skill(skill_name="pptx", usage="release")`。
+
+实际执行本方法用 `get_skill(..., usage="use")`（默认值）；仅查看其他出口、Tools/Doctor
+文档用 `usage="reference"`，不改变当前采用方法或用户路线。完成阶段后读取下一阶段时
+可传 `replace=["旧方法名"]`，仅新读取成功后退休旧方法；读取失败保留原方法并处理错误。
+例如 Entry → Story 用 `get_skill(skill_name="sn-ppt-story", usage="use", replace=["sn-ppt-entry"])`；
+Story → 已确认的 Standard/Dazzle 同样替换 Story。只退休方法用
+`get_skill(skill_name="旧方法名", usage="release")`。不要以参考读取自动切换制作出口。
+仅用户明确开始独立新任务才传 `new_task=True`，并在该新任务第一次方法读取时、澄清前声明；
+不得在后续阶段交接时补传。选择卡回复、继续、补充材料、页面修改、
+压缩后恢复和阶段交接均延续原任务，不能把短回复当成完整需求。
+从可用对话历史、通用任务上下文及实际工作文件恢复原始目标、全部附件、用户明确选择、
+后续更正、页数、格式、同一绝对目录与已完成阶段。task_pack 是工作数据，不能证明用户选择。
+原始动态要求与 task_pack 静态字段冲突时先修正工作数据，保留 Research/Story 成果；
+真实选择依据丢失或冲突未解时用 `request_user_decision` 澄清，不从默认字段推断静态。
+
+按所选出口的收尾时序，父级从公共 `pptx` Skill 的实际目录运行
+`scripts/finalize.py --workspace <工作空间> --deck-dir <同一目录> --requirements <需求文件> --task-pack <任务包>`。
+先完成任务包阶段/产物字段更新，再执行正式收尾；调用后修改输入必须重跑。
+检查 stdout 和 `_trace/finalize-receipt.json` 的产物与警告；技术回执不能替代视觉或内容检查。

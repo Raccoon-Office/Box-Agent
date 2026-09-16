@@ -878,10 +878,33 @@ function _attachSvgPngsToIR(_ir, _svgPngs) {
  * @returns {Promise<Array<{path:string, ir:Object|null, error?:string}>>}
  */
 export async function extractPages(htmlPaths) {
-  let browser;
+  let browser, launching, closing;
+  const managed = process.env.BOX_AGENT_PPTX_MANAGED_DELIVERY === '1';
+  const closeOwnedBrowser = () => closing ||= (async () => {
+    const owned = browser || await launching;
+    if (owned) await owned.close();
+  })();
+  const stop = signal => {
+    void closeOwnedBrowser().catch(error => {
+      process.stderr.write(`[dom_extractor] owned browser cleanup failed: ${error.message}\n`);
+    }).finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
+  };
+  const onTerm = () => stop('SIGTERM');
+  const onInt = () => stop('SIGINT');
+  const removeSignals = () => {
+    if (managed) { process.off('SIGTERM', onTerm); process.off('SIGINT', onInt); }
+  };
+  if (managed) { process.on('SIGTERM', onTerm); process.on('SIGINT', onInt); }
   try {
-    browser = await chromium.launch({ headless: true, executablePath: pickBrowserExe() });
+    let executablePath = pickBrowserExe();
+    if (managed && executablePath && process.env.PPT_DELIVERY_BROWSER_GUARD) {
+      process.env.PPT_DELIVERY_BROWSER_EXE = executablePath;
+      executablePath = process.env.PPT_DELIVERY_BROWSER_GUARD;
+    }
+    launching = chromium.launch({ headless: true, executablePath });
+    browser = await launching;
   } catch (e) {
+    removeSignals();
     // Browser unavailable — return null IR for every page.
     // pptx_builder handles null IR gracefully (blank slide + continue).
     console.error(`[dom_extractor] Chromium unavailable: ${e.message}`);
@@ -919,7 +942,7 @@ export async function extractPages(htmlPaths) {
       }
     }
   } finally {
-    await browser.close();
+    try { await closeOwnedBrowser(); } finally { removeSignals(); }
   }
 
   return results;
