@@ -68,6 +68,7 @@ from .browser_tool_names import (
     public_browser_tool_parameters,
     public_browser_tool_text,
 )
+from .cua_runtime_config import with_builtin_standalone_cua
 from .mcp_tool_catalog import get_mcp_tool_catalog
 from .mcp_sources import (
     McpConfigSource,
@@ -88,6 +89,13 @@ SessionLease = Callable[[], AbstractAsyncContextManager[Any]]
 
 _MODEL_TOOL_NAME_MAX_LENGTH = 64
 _INVALID_MODEL_TOOL_NAME_CHARACTER = re.compile(r"[^a-zA-Z0-9_-]")
+_CUA_COMPUTER_USE_SERVER_NAME = "cua-computer-use"
+_CUA_WINDOW_STATE_TOOL_NAME = "get_window_state"
+_CUA_LIST_WINDOWS_TOOL_NAME = "list_windows"
+_CUA_CLICK_TOOL_NAME = "click"
+_CUA_SNAPSHOT_ID = re.compile(r"^s[0-9a-f]{8}$")
+_CUA_WINDOW_SUMMARY_LIMIT = 50
+_CUA_SESSION_ENDED = re.compile(r"session '[^']+' has ended;")
 
 
 def _warn(msg: str) -> None:
@@ -160,6 +168,142 @@ def _structured_mcp_error_message(content: str) -> str | None:
         if any(error.get(key) not in (None, "", False) for key in ("code", "type")):
             return "Tool returned error"
     return None
+
+
+def _cua_snapshot_context_line(
+    server_name: str,
+    remote_name: str,
+    result: Any,
+) -> str | None:
+    """Expose the Cua snapshot handle without duplicating its large element payload."""
+    if (
+        server_name != _CUA_COMPUTER_USE_SERVER_NAME
+        or remote_name != _CUA_WINDOW_STATE_TOOL_NAME
+    ):
+        return None
+    structured_content = getattr(result, "structuredContent", None)
+    if not isinstance(structured_content, dict):
+        return None
+    snapshot_id = structured_content.get("snapshot_id")
+    if not isinstance(snapshot_id, str) or not _CUA_SNAPSHOT_ID.fullmatch(snapshot_id):
+        return None
+    return f"snapshot_id={snapshot_id}"
+
+
+def _cua_window_list_context(
+    server_name: str,
+    remote_name: str,
+    result: Any,
+) -> str | None:
+    """Render Cua's structured window inventory for model window selection."""
+    if (
+        server_name != _CUA_COMPUTER_USE_SERVER_NAME
+        or remote_name != _CUA_LIST_WINDOWS_TOOL_NAME
+    ):
+        return None
+    structured_content = getattr(result, "structuredContent", None)
+    if not isinstance(structured_content, dict):
+        return None
+    windows = structured_content.get("windows")
+    if not isinstance(windows, list) or not windows:
+        return None
+
+    valid_windows = [window for window in windows if isinstance(window, dict)]
+    if not valid_windows:
+        return None
+
+    def _priority(window: dict[str, Any]) -> tuple[bool, bool, bool, int]:
+        z_index = window.get("z_index")
+        return (
+            window.get("on_current_space") is True,
+            window.get("is_on_screen") is True,
+            bool(str(window.get("title") or "").strip()),
+            z_index if isinstance(z_index, int) else -1,
+        )
+
+    prioritized = sorted(valid_windows, key=_priority, reverse=True)
+    visible = prioritized[:_CUA_WINDOW_SUMMARY_LIMIT]
+    lines = [
+        "window_candidates:",
+        (
+            "selection_hint=prefer a titled window on the current Space; "
+            "untitled windows may be helper surfaces; use exact pid and window_id"
+        ),
+    ]
+    for window in visible:
+        window_id = window.get("window_id")
+        pid = window.get("pid")
+        if not isinstance(window_id, int) or not isinstance(pid, int):
+            continue
+        app_name = str(window.get("app_name") or "").replace("\n", " ").strip()
+        title = str(window.get("title") or "").replace("\n", " ").strip()
+        bounds = window.get("bounds")
+        bounds_text = ""
+        if isinstance(bounds, dict):
+            coordinates = [bounds.get(key) for key in ("x", "y", "width", "height")]
+            if all(isinstance(value, (int, float)) for value in coordinates):
+                x, y, width, height = coordinates
+                bounds_text = f" bounds={x},{y},{width}x{height}"
+        lines.append(
+            f'- window_id={window_id} pid={pid} app="{app_name}" title="{title}"'
+            f" on_screen={window.get('is_on_screen')}"
+            f" current_space={window.get('on_current_space')}"
+            f" z_index={window.get('z_index')}{bounds_text}"
+        )
+
+    rendered_count = len(lines) - 2
+    if rendered_count == 0:
+        return None
+    if len(valid_windows) > rendered_count:
+        lines.append(
+            f"window_candidates_truncated={rendered_count}/{len(valid_windows)}; "
+            "call list_windows with pid to narrow the result"
+        )
+    return "\n".join(lines)
+
+
+def _cua_tool_description(
+    server_name: str,
+    remote_name: str,
+    description: str,
+) -> str:
+    if (
+        server_name == _CUA_COMPUTER_USE_SERVER_NAME
+        and remote_name == _CUA_CLICK_TOOL_NAME
+    ):
+        return (
+            f"{description}\n\n"
+            "Box-Agent Cua compatibility: for element_token clicks, always include "
+            "the pid and window_id from the same latest get_window_state snapshot. "
+            "Do not reuse a token across windows."
+        )
+    return description
+
+
+def _cua_session_label(session_id: str) -> str:
+    """Return a short stable Cua lifecycle label for one Box-Agent run."""
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+    return f"box-agent-{digest}"
+
+
+def _mcp_text_content(result: Any) -> str:
+    return "\n".join(
+        item.text
+        for item in getattr(result, "content", [])
+        if isinstance(getattr(item, "text", None), str)
+    )
+
+
+def _cua_session_ended_result(result: Any) -> bool:
+    return bool(_CUA_SESSION_ENDED.search(_mcp_text_content(result)))
+
+
+def _mcp_result_failed(result: Any) -> bool:
+    content = _mcp_text_content(result)
+    return bool(
+        getattr(result, "isError", False)
+        or _structured_mcp_error_message(content)
+    )
 
 
 def _walk_exception_tree(error: BaseException | None):
@@ -796,7 +940,11 @@ class MCPTool(Tool):
         self._server_name = server_name
         self._fixed_arguments = dict(fixed_arguments or {})
         self._session_lease = session_lease
-        self._description = description
+        self._description = _cua_tool_description(
+            self._server_name,
+            self._remote_name,
+            description,
+        )
         self._parameters = parameters
         self._session = session
         self._execute_timeout = execute_timeout
@@ -886,35 +1034,76 @@ class MCPTool(Tool):
                     concurrency_slot_acquired = True
                     waiting_for_concurrency_slot = False
                 call_arguments = {**kwargs, **self._fixed_arguments}
+                model_context = current_model_tool_context()
                 if is_web_extract:
-                    model_context = current_model_tool_context()
-                    if model_context is not None:
+                    if (
+                        model_context is not None
+                        and model_context.model
+                        and model_context.max_output_tokens > 0
+                    ):
                         call_arguments["model"] = model_context.model
                         call_arguments["max_output_tokens"] = (
                             model_context.max_output_tokens
                         )
-                if self._session_lease is not None:
-                    async with self._session_lease() as leased_session:
-                        if (
-                            self._server_name == PLAYWRIGHT_SERVER_NAME
-                            and self._remote_name == "browser_close"
-                        ):
-                            # Upstream keeps this client's BrowserContext (and
-                            # its windows) alive while other clients share the
-                            # browser; close our tabs first so "close" is real.
-                            try:
-                                await close_all_tabs(leased_session)
-                            except Exception as tab_error:  # noqa: BLE001
-                                _warn(f"[browser] tab cleanup before close skipped: {tab_error}")
-                        result = await leased_session.call_tool(
-                            self._remote_name,
-                            arguments=call_arguments,
-                        )
-                else:
-                    result = await self._session.call_tool(
+                cua_run_session = ""
+                parameter_properties = self._parameters.get("properties", {})
+                if (
+                    self._server_name == _CUA_COMPUTER_USE_SERVER_NAME
+                    and model_context is not None
+                    and model_context.session_id
+                ):
+                    cua_run_session = _cua_session_label(model_context.session_id)
+                    if (
+                        isinstance(parameter_properties, dict)
+                        and "session" in parameter_properties
+                    ):
+                        call_arguments["session"] = cua_run_session
+
+                async def _call_tool(session: ClientSession) -> Any:
+                    if (
+                        self._server_name == PLAYWRIGHT_SERVER_NAME
+                        and self._remote_name == "browser_close"
+                    ):
+                        # Upstream keeps this client's BrowserContext (and
+                        # its windows) alive while other clients share the
+                        # browser; close our tabs first so "close" is real.
+                        try:
+                            await close_all_tabs(session)
+                        except Exception as tab_error:  # noqa: BLE001
+                            _warn(f"[browser] tab cleanup before close skipped: {tab_error}")
+                    current_result = await session.call_tool(
                         self._remote_name,
                         arguments=call_arguments,
                     )
+                    if (
+                        cua_run_session
+                        and self._remote_name not in {"start_session", "end_session"}
+                        and _cua_session_ended_result(current_result)
+                    ):
+                        recovery_arguments = (
+                            {"session": cua_run_session}
+                            if "session" in call_arguments
+                            else {}
+                        )
+                        recovery = await session.call_tool(
+                            "start_session",
+                            arguments=recovery_arguments,
+                        )
+                        if _mcp_result_failed(recovery):
+                            return recovery
+                        return await session.call_tool(
+                            self._remote_name,
+                            arguments=call_arguments,
+                        )
+                    return current_result
+
+                if self._session_lease is not None:
+                    async with self._session_lease() as leased_session:
+                        result = await _call_tool(leased_session)
+                else:
+                    if self._session is None:  # pragma: no cover - constructor invariant
+                        raise RuntimeError("MCP session is unavailable")
+                    result = await _call_tool(self._session)
 
             # MCP tool results are a list of content items
             content_parts = []
@@ -931,6 +1120,28 @@ class MCPTool(Tool):
                     content_parts.append(str(item))
 
             content_str = "\n".join(content_parts)
+            cua_snapshot_context = _cua_snapshot_context_line(
+                self._server_name,
+                self._remote_name,
+                result,
+            )
+            if cua_snapshot_context and cua_snapshot_context not in content_str.splitlines():
+                content_str = (
+                    f"{cua_snapshot_context}\n{content_str}"
+                    if content_str
+                    else cua_snapshot_context
+                )
+            cua_window_list_context = _cua_window_list_context(
+                self._server_name,
+                self._remote_name,
+                result,
+            )
+            if cua_window_list_context:
+                content_str = (
+                    f"{content_str}\n{cua_window_list_context}"
+                    if content_str
+                    else cua_window_list_context
+                )
 
             is_error = result.isError if hasattr(result, "isError") else False
 
@@ -1094,6 +1305,7 @@ class MCPServerConnection:
         always_load: bool = False,
         connector_id: str | None = None,
         connector_name: str | None = None,
+        definition_fingerprint: str = "",
     ):
         self.name = name
         self.connection_type = connection_type
@@ -1112,6 +1324,7 @@ class MCPServerConnection:
         self.always_load = always_load
         self.connector_id = connector_id
         self.connector_name = connector_name
+        self.definition_fingerprint = definition_fingerprint
         self._web_search_concurrency_limiter: asyncio.Semaphore | None = None
         # Connection state
         self.last_error: str | None = None
@@ -1554,7 +1767,7 @@ _mcp_source_reconcile_lock = asyncio.Lock()
 @dataclass
 class McpServerStatus:
     name: str
-    state: str  # connecting | connected | failed | disabled
+    state: str  # idle | connecting | connected | failed | disabled
     owner: str = "user"
     config_id: str = ""
     connector_id: str | None = None
@@ -1603,6 +1816,55 @@ def get_mcp_config_paths() -> dict[str, str]:
     return {source.owner: str(source.path) for source in _mcp_sources}
 
 
+def _cua_owned_runtime(
+    definition: ResolvedMcpServer | None,
+) -> tuple[str, str] | None:
+    if (
+        definition is None
+        or definition.name != _CUA_COMPUTER_USE_SERVER_NAME
+        or definition.config.get("boxAgentOwnedDaemon") is not True
+    ):
+        return None
+    command = definition.config.get("command")
+    args = definition.config.get("args")
+    if not isinstance(command, str) or not isinstance(args, list):
+        return None
+    try:
+        socket_path = args[args.index("--socket") + 1]
+    except (ValueError, IndexError):
+        return None
+    if not isinstance(socket_path, str):
+        return None
+    return command, socket_path
+
+
+def get_mcp_server_config(name: str) -> dict | None:
+    """Read the latest resolved config without changing the lifecycle baseline."""
+    if _mcp_config_path:
+        current = _resolve_registered_sources(_mcp_config_path)
+        definition = current.get(name)
+    else:
+        definition = _mcp_server_definitions.get(name)
+    if definition is None:
+        return None
+    return _materialize_server_config(definition)
+
+
+def is_mcp_server_connection_current(name: str) -> bool:
+    """Return whether the live connection matches the latest resolved definition."""
+    if _mcp_config_path:
+        current = _resolve_registered_sources(_mcp_config_path).get(name)
+    else:
+        current = _mcp_server_definitions.get(name)
+    if current is None:
+        return False
+    connection = next((item for item in _mcp_connections if item.name == name), None)
+    return (
+        connection is not None
+        and connection.definition_fingerprint == current.fingerprint
+    )
+
+
 def get_mcp_tools_for_server(name: str) -> list:
     """Return the Tool objects currently held by a connected server."""
     conn = next((c for c in _mcp_connections if c.name == name), None)
@@ -1628,6 +1890,10 @@ async def disconnect_mcp_server(name: str) -> dict:
         _mcp_connections = [c for c in _mcp_connections if c.name != name]
     get_mcp_tool_catalog().remove_server(name)
     _record_status(name, "disabled")
+    if name == _CUA_COMPUTER_USE_SERVER_NAME:
+        from .cua_runtime_daemon import stop_standalone_cua_daemon
+
+        await stop_standalone_cua_daemon()
     return {"success": True, "removedTools": removed_tools}
 
 
@@ -1850,6 +2116,7 @@ def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
         always_load=bool(server_config.get("alwaysLoad", False)),
         connector_id=definition.connector_id,
         connector_name=definition.connector_name,
+        definition_fingerprint=definition.fingerprint,
     )
 
 
@@ -1888,7 +2155,7 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
     )
     for conflict in resolved.conflicts:
         _warn(f"Skipping conflicting MCP server: {conflict}")
-    return resolved.servers
+    return with_builtin_standalone_cua(resolved.servers)
 
 
 def _resolve_mcp_config_path(config_path: str) -> Path | None:
@@ -2001,6 +2268,19 @@ async def load_mcp_tools_async(
                 _record_status(server_name, "disabled", definition=definition)
                 continue
 
+            if (
+                server_name == _CUA_COMPUTER_USE_SERVER_NAME
+                and server_config.get("startOnDemand", False)
+            ):
+                _warn(f"Deferring on-demand MCP server: {server_name}")
+                _record_status(
+                    server_name,
+                    "idle",
+                    transport=server_config.get("url") or server_config.get("command") or "",
+                    definition=definition,
+                )
+                continue
+
             if _waiting_for_credential(definition):
                 _record_status(
                     server_name, "connecting",
@@ -2082,8 +2362,13 @@ async def load_mcp_tools_async(
 async def cleanup_mcp_connections():
     """Clean up all MCP connections."""
     global _mcp_connections, _mcp_server_definitions, _mcp_sources
-    for connection in _mcp_connections:
-        await connection.disconnect()
+    from .cua_runtime_daemon import stop_standalone_cua_daemon
+
+    try:
+        for connection in _mcp_connections:
+            await connection.disconnect()
+    finally:
+        await stop_standalone_cua_daemon()
     _mcp_connections.clear()
     _mcp_reconnect_locks.clear()
     _mcp_server_definitions = {}
@@ -2103,8 +2388,18 @@ async def reconnect_mcp_server(name: str) -> dict:
                 # Reading another server's new credential version does not mean
                 # its existing connection has used it. Update this server only.
                 current = _resolve_registered_sources(_mcp_config_path)
-                if name in current:
-                    _mcp_server_definitions[name] = current[name]
+                after = current.get(name)
+                if name == _CUA_COMPUTER_USE_SERVER_NAME:
+                    from .cua_runtime_daemon import (
+                        get_standalone_cua_daemon_runtime,
+                        stop_standalone_cua_daemon,
+                    )
+
+                    owned_runtime = get_standalone_cua_daemon_runtime()
+                    if owned_runtime is not None and owned_runtime != _cua_owned_runtime(after):
+                        await stop_standalone_cua_daemon()
+                if after is not None:
+                    _mcp_server_definitions[name] = after
                 else:
                     _mcp_server_definitions.pop(name, None)
             except Exception as error:
@@ -2236,7 +2531,10 @@ async def _reconcile_mcp_sources_locked(
             _record_status(name, "disabled", definition=after)
             return None
 
-    async def reconnect(name: str, action: str) -> dict:
+    async def reconnect(
+        name: str,
+        action: str,
+    ) -> dict:
         result = await reconnect_mcp_server(name)
         return {"name": name, "action": action, **result}
 
@@ -2269,7 +2567,12 @@ async def _reconcile_mcp_sources_locked(
             # Retry failures, but leave healthy or still-loading servers alone.
             if status is None or status.state != "failed":
                 continue
-        operations.append(reconnect(name, "added" if before is None else "modified"))
+        operations.append(
+            reconnect(
+                name,
+                "added" if before is None else "modified",
+            )
+        )
 
     # Reconnects and revocations share per-server locks, while unrelated names
     # start independently even if one removal waits for a slow connection.

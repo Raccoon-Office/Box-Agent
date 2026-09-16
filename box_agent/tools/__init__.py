@@ -2,6 +2,7 @@
 
 from .base import Tool, ToolResult
 from .bash_tool import BashTool
+from .cua_runtime_tool import EnsureCuaReadyTool
 from .file import JsonlQueryTool, ReadTool
 from .file_tools import (
     AppendTool,
@@ -32,6 +33,7 @@ __all__ = [
     "EditTool",
     "StagedFileWriteTool",
     "BashTool",
+    "EnsureCuaReadyTool",
     "ObsidianCreateNoteTool",
     "ObsidianUpdateNoteTool",
     "ObsidianDailyNoteTool",

@@ -447,6 +447,18 @@
         }
       }
     },
+    "ensure_cua_ready": {
+      "aliases": [],
+      "schema": {
+        "name": "ensure_cua_ready",
+        "description": "Ensure desktop computer-use is ready before operating native applications. This idempotent tool checks the configured Cua Driver connection and starts or reconnects it when needed. In app-hosted mode it only attaches to the Electron-managed daemon; in standalone mode Box-Agent prepares the platform's supported Cua runtime and connects its MCP proxy. Call it once when a desktop task begins or after a connection failure, then use tool_search for the required Cua tools. It never downloads or updates the executable, widens the permission policy, or changes the selected runtime mode.",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      }
+    },
     "mcp_config": {
       "aliases": [],
       "schema": {

@@ -21,7 +21,7 @@ DOCUMENT_SKILL_ARTIFACT_SUFFIXES: dict[str, tuple[str, ...]] = {
     "pdf": (".pdf",),
 }
 MATCHED_PRELOAD_SKILLS: frozenset[str] = frozenset(
-    {*DOCUMENT_SKILL_ARTIFACT_SUFFIXES, "research-synthesis"}
+    {*DOCUMENT_SKILL_ARTIFACT_SUFFIXES, "computer-use", "research-synthesis"}
 )
 _DOCUMENT_ARTIFACT_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (

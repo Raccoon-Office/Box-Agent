@@ -175,6 +175,341 @@ async def test_mcp_tool_preserves_inline_image_content_for_host_persistence():
 
 
 @pytest.mark.asyncio
+async def test_cua_window_state_exposes_snapshot_id_without_large_structured_payload():
+    class FakeSession:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text='window_id=42\n- [7] AXButton "Open"')],
+                structuredContent={
+                    "snapshot_id": "s0000002a",
+                    "elements": [{"element_index": 7, "label": "Open"}],
+                },
+                isError=False,
+            )
+
+    tool = MCPTool(
+        name="get_window_state",
+        description="window state",
+        parameters={"type": "object"},
+        session=FakeSession(),
+        server_name="cua-computer-use",
+    )
+
+    result = await tool.execute(pid=1, window_id=42)
+
+    assert result.success is True
+    assert result.content == 'snapshot_id=s0000002a\nwindow_id=42\n- [7] AXButton "Open"'
+    assert "elements" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_non_cua_mcp_does_not_expose_structured_snapshot_id():
+    class FakeSession:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="unchanged")],
+                structuredContent={"snapshot_id": "s0000002a"},
+                isError=False,
+            )
+
+    tool = MCPTool(
+        name="get_window_state",
+        description="window state",
+        parameters={"type": "object"},
+        session=FakeSession(),
+        server_name="another-mcp-server",
+    )
+
+    result = await tool.execute()
+
+    assert result.success is True
+    assert result.content == "unchanged"
+
+
+@pytest.mark.asyncio
+async def test_cua_tool_recovers_ended_implicit_session_once():
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            if len(self.calls) == 1:
+                return SimpleNamespace(
+                    content=[
+                        SimpleNamespace(
+                            text=(
+                                "session 'mcp-old' has ended; tool call "
+                                "'get_accessibility_tree' was rejected."
+                            )
+                        )
+                    ],
+                    isError=True,
+                )
+            return SimpleNamespace(content=[], isError=False)
+
+    session = FakeSession()
+    tool = MCPTool(
+        name="get_accessibility_tree",
+        description="desktop accessibility tree",
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        session=session,
+        server_name="cua-computer-use",
+    )
+    token = set_model_tool_context(
+        model="sn-glm-5-2",
+        max_output_tokens=100_000,
+        session_id="office-session-a",
+    )
+    try:
+        result = await tool.execute()
+    finally:
+        reset_model_tool_context(token)
+
+    assert result.success is True
+    assert session.calls == [
+        ("get_accessibility_tree", {}),
+        ("start_session", {}),
+        ("get_accessibility_tree", {}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cua_tool_overrides_model_session_with_stable_run_session():
+    class FakeSession:
+        arguments = None
+
+        async def call_tool(self, name, arguments):
+            self.arguments = arguments
+            return SimpleNamespace(content=[], isError=False)
+
+    session = FakeSession()
+    tool = MCPTool(
+        name="get_window_state",
+        description="window state",
+        parameters={
+            "type": "object",
+            "properties": {"session": {"type": "string"}},
+        },
+        session=session,
+        server_name="cua-computer-use",
+    )
+    token = set_model_tool_context(
+        model="sn-glm-5-2",
+        max_output_tokens=100_000,
+        session_id="office-session-a",
+    )
+    try:
+        result = await tool.execute(session="model-selected-session")
+    finally:
+        reset_model_tool_context(token)
+
+    assert result.success is True
+    assert session.arguments == {
+        "session": mcp_loader._cua_session_label("office-session-a")
+    }
+
+
+@pytest.mark.asyncio
+async def test_cua_tool_does_not_retry_when_session_recovery_fails():
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            if name == "start_session":
+                return SimpleNamespace(
+                    content=[SimpleNamespace(text="daemon unavailable")],
+                    isError=True,
+                )
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="session 'mcp-old' has ended;")],
+                isError=True,
+            )
+
+    session = FakeSession()
+    tool = MCPTool(
+        name="list_windows",
+        description="windows",
+        parameters={"type": "object", "properties": {}},
+        session=session,
+        server_name="cua-computer-use",
+    )
+    token = set_model_tool_context(
+        model="sn-glm-5-2",
+        max_output_tokens=100_000,
+        session_id="office-session-a",
+    )
+    try:
+        result = await tool.execute()
+    finally:
+        reset_model_tool_context(token)
+
+    assert result.success is False
+    assert result.error == "daemon unavailable"
+    assert session.calls == [("list_windows", {}), ("start_session", {})]
+
+
+@pytest.mark.asyncio
+async def test_non_cua_tool_preserves_model_supplied_session_argument():
+    class FakeSession:
+        arguments = None
+
+        async def call_tool(self, name, arguments):
+            self.arguments = arguments
+            return SimpleNamespace(content=[], isError=False)
+
+    session = FakeSession()
+    tool = MCPTool(
+        name="some_tool",
+        description="some tool",
+        parameters={
+            "type": "object",
+            "properties": {"session": {"type": "string"}},
+        },
+        session=session,
+        server_name="another-mcp-server",
+    )
+    token = set_model_tool_context(
+        model="sn-glm-5-2",
+        max_output_tokens=100_000,
+        session_id="office-session-a",
+    )
+    try:
+        result = await tool.execute(session="model-selected-session")
+    finally:
+        reset_model_tool_context(token)
+
+    assert result.success is True
+    assert session.arguments == {"session": "model-selected-session"}
+
+
+@pytest.mark.asyncio
+async def test_cua_list_windows_exposes_prioritized_structured_candidates():
+    class FakeSession:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="Found 3 window(s).")],
+                structuredContent={
+                    "windows": [
+                        {
+                            "window_id": 110847,
+                            "pid": 29940,
+                            "app_name": "飞书",
+                            "title": "",
+                            "bounds": {"x": 0, "y": 0, "width": 1568, "height": 984},
+                            "z_index": 9,
+                            "is_on_screen": True,
+                            "on_current_space": True,
+                        },
+                        {
+                            "window_id": 84014,
+                            "pid": 29940,
+                            "app_name": "飞书",
+                            "title": "飞书",
+                            "bounds": {"x": 0, "y": 0, "width": 1568, "height": 984},
+                            "z_index": 7,
+                            "is_on_screen": True,
+                            "on_current_space": True,
+                        },
+                        {
+                            "window_id": 112384,
+                            "pid": 29940,
+                            "app_name": "飞书",
+                            "title": "",
+                            "bounds": {"x": 0, "y": 0, "width": 1568, "height": 71},
+                            "z_index": 10,
+                            "is_on_screen": False,
+                            "on_current_space": False,
+                        },
+                    ]
+                },
+                isError=False,
+            )
+
+    tool = MCPTool(
+        name="list_windows",
+        description="list windows",
+        parameters={"type": "object"},
+        session=FakeSession(),
+        server_name="cua-computer-use",
+    )
+
+    result = await tool.execute(pid=29940)
+
+    assert result.success is True
+    assert result.content.startswith("Found 3 window(s).\nwindow_candidates:")
+    assert result.content.index("window_id=84014") < result.content.index(
+        "window_id=110847"
+    )
+    assert 'title="飞书"' in result.content
+    assert "bounds=0,0,1568x984" in result.content
+    assert "selection_hint=prefer a titled window" in result.content
+
+
+@pytest.mark.asyncio
+async def test_non_cua_list_windows_keeps_structured_candidates_hidden():
+    class FakeSession:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="Found 1 window(s).")],
+                structuredContent={
+                    "windows": [
+                        {
+                            "window_id": 42,
+                            "pid": 7,
+                            "app_name": "Other",
+                            "title": "Other",
+                        }
+                    ]
+                },
+                isError=False,
+            )
+
+    tool = MCPTool(
+        name="list_windows",
+        description="list windows",
+        parameters={"type": "object"},
+        session=FakeSession(),
+        server_name="another-mcp-server",
+    )
+
+    result = await tool.execute()
+
+    assert result.success is True
+    assert result.content == "Found 1 window(s)."
+
+
+def test_cua_click_description_requires_snapshot_window_identity():
+    tool = MCPTool(
+        name="click",
+        description="click an element",
+        parameters={"type": "object"},
+        session=SimpleNamespace(),
+        server_name="cua-computer-use",
+    )
+
+    assert "always include the pid and window_id" in tool.description
+    assert "same latest get_window_state snapshot" in tool.description
+
+
+def test_non_cua_click_description_is_unchanged():
+    tool = MCPTool(
+        name="click",
+        description="click an element",
+        parameters={"type": "object"},
+        session=SimpleNamespace(),
+        server_name="another-mcp-server",
+    )
+
+    assert tool.description == "click an element"
+
+
+@pytest.mark.asyncio
 async def test_auth_refresh_reconnects_structured_401_and_403_failures(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(mcp_loader, "_mcp_auth_token", "old-token")
@@ -575,12 +910,14 @@ class TestMCPToolExecution:
             context = current_model_tool_context()
             assert context is not None
             assert context.model == "sn-glm-5-2"
+            assert context.session_id == "office-session-a"
             yield "event"
 
         events = scoped_model_tool_context(
             source(),
             model="sn-glm-5-2",
             max_output_tokens=100_000,
+            session_id="office-session-a",
         )
 
         assert await events.__anext__() == "event"
@@ -588,6 +925,21 @@ class TestMCPToolExecution:
         close = getattr(events, "aclose")
         await asyncio.create_task(close())
         assert current_model_tool_context() is None
+
+    def test_model_context_keeps_session_without_model_capabilities(self):
+        token = set_model_tool_context(
+            model="",
+            max_output_tokens=0,
+            session_id="office-session-a",
+        )
+        try:
+            context = current_model_tool_context()
+            assert context is not None
+            assert context.model == ""
+            assert context.max_output_tokens == 0
+            assert context.session_id == "office-session-a"
+        finally:
+            reset_model_tool_context(token)
 
     @pytest.mark.parametrize(
         "error_value",

@@ -25,7 +25,7 @@ from box_agent.tools.mcp_loader import MCPTool
 from box_agent.tools.runtime import SkillRuntimeContext
 
 
-_ALWAYS_BASE = {"create_scheduled_task", "mcp_config"}
+_ALWAYS_BASE = {"create_scheduled_task", "ensure_cua_ready", "mcp_config"}
 _SKILLS = {"get_skill", "list_skills"}
 _LIST_SKILLS_SCHEMA = {
     "aliases": [],

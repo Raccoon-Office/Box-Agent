@@ -19,6 +19,7 @@ contracts.
 | Review change history | [Change index](changes/README.md) | Same document |
 | Current published/unreleased state | [Release State](RELEASE_STATE.md) | Same document |
 | Third-party model API behavior | [Third-party API Compatibility](THIRD_PARTY_API_COMPATIBILITY.md) | Same document |
+| Native desktop Computer Use | [Computer Use](COMPUTER_USE.md) | [桌面控制](COMPUTER_USE_CN.md) |
 
 ## Core runtime behavior
 

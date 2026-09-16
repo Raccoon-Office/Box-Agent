@@ -22,6 +22,7 @@ from box_agent.tools.base import Tool
 from box_agent.tools.argument_limits import RECOMMENDED_GENERATED_BODY_CHARS
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.execution_result_tool import ReportExecutionResultTool
+from box_agent.tools.cua_runtime_tool import EnsureCuaReadyTool
 from box_agent.tools.file import JsonlQueryTool, ReadTool
 from box_agent.tools.file_tools import (
     AppendTool,
@@ -306,6 +307,9 @@ async def initialize_base_tools(
 
     tools.append(McpConfigTool())
     _out(f"{Colors.GREEN}✅ Loaded MCP Config tool (mcp_config){Colors.RESET}")
+
+    tools.append(EnsureCuaReadyTool())
+    _out(f"{Colors.GREEN}✅ Loaded Cua readiness tool (ensure_cua_ready){Colors.RESET}")
 
     # 2. Claude Skills (loaded from package directory)
     if config.tools.enable_skills:

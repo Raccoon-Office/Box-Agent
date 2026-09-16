@@ -34,6 +34,7 @@ def run_agent_loop(**kwargs: Any) -> AsyncIterator[AgentEvent]:
         events,
         model=getattr(llm, "model", ""),
         max_output_tokens=getattr(llm, "max_output_tokens", 0),
+        session_id=kwargs.get("session_id", ""),
     )
 
 
