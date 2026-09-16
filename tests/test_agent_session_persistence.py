@@ -14,7 +14,12 @@ from box_agent.agent import Agent
 from box_agent.events import DoneEvent, SummarizationEvent
 from box_agent.hooks import BaseHook
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
-from box_agent.session_log import SessionLog, SessionLogDurabilityError
+from box_agent.session_log import (
+    SessionLog,
+    SessionLogDurabilityError,
+    SessionLogReplayError,
+)
+from box_agent.session_projection import SessionProjection
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from box_agent.tools.skill_loader import SkillLoader
@@ -310,8 +315,10 @@ class _PostCompactionLLM:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.saw_replacement = False
+        self.normal_messages: list[Message] = []
 
-    async def generate_stream(self, **_kwargs):
+    async def generate_stream(self, **kwargs):
+        self.normal_messages = list(kwargs.get("messages", ()))
         event_types = [event["type"] for event in _read_durable_events(self.path)]
         self.saw_replacement = event_types[-2:] == [
             "request/header",
@@ -319,6 +326,83 @@ class _PostCompactionLLM:
         ] and "compaction/end" in event_types
         yield StreamEvent(type="text", delta="after compaction")
         yield StreamEvent(type="finish", finish_reason="stop")
+
+
+class _ReplayAuthoritativeStore:
+    """Make the post-flush replay visibly authoritative for the kernel test."""
+
+    def __init__(self, log: SessionLog) -> None:
+        self.log = log
+        self.after_replace = False
+        self.replay_override_used = False
+
+    def __getattr__(self, name):
+        return getattr(self.log, name)
+
+    def replace_surface(self, messages, **kwargs):
+        result = self.log.replace_surface(messages, **kwargs)
+        self.after_replace = True
+        return result
+
+    def replay(self):
+        projection = self.log.replay()
+        if not self.after_replace or self.replay_override_used or not projection.messages:
+            return projection
+        self.replay_override_used = True
+        messages = list(projection.messages)
+        first = messages[0]
+        messages[0] = first.model_copy(
+            update={"content": f"{first.content}\n[canonical replay surface]"}
+        )
+        return SessionProjection(
+            messages=messages,
+            goal=projection.goal,
+            plan=projection.plan,
+            todos=projection.todos,
+            skills=projection.skills,
+        )
+
+
+class _ReplayFailureStore(_ReplayAuthoritativeStore):
+    def replay(self):
+        if self.after_replace:
+            raise ValueError("replay failed after committed replacement")
+        return self.log.replay()
+
+
+class _NoReplayStore:
+    """Third-party SessionStorePort implementing only the minimal contract.
+
+    It delegates the durable operations (append / append_unlogged_messages /
+    replace_surface / flush) plus the Agent-layer reads it needs to run a turn
+    to a real SessionLog, but deliberately does NOT expose ``replay``. The
+    kernel must feature-detect the missing capability and keep the validated
+    post-compaction in-memory surface instead of forcing replay(). No
+    ``__getattr__`` delegation so ``getattr(store, "replay", None) is None``.
+    """
+
+    def __init__(self, log: SessionLog) -> None:
+        self._log = log
+
+    def append(self, *args, **kwargs):
+        return self._log.append(*args, **kwargs)
+
+    def append_unlogged_messages(self, *args, **kwargs):
+        return self._log.append_unlogged_messages(*args, **kwargs)
+
+    def replace_surface(self, *args, **kwargs):
+        return self._log.replace_surface(*args, **kwargs)
+
+    def flush(self):
+        return self._log.flush()
+
+    @property
+    def events(self):
+        return self._log.events
+
+    @property
+    def failed(self):
+        return self._log.failed
 
 
 @pytest.mark.asyncio
@@ -361,6 +445,120 @@ async def test_compaction_is_durable_before_live_context_switch(tmp_path):
         event["type"] == "user/message"
         and str(event["data"].get("content", "")).startswith("old-0:")
         for event in log.events
+    )
+    log.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_replaces_live_messages_from_post_flush_replay(tmp_path):
+    root = tmp_path / "sessions"
+    log = SessionLog.create(root, session_id="replay-authoritative", cwd=tmp_path)
+    store = _ReplayAuthoritativeStore(log)
+    llm = _PostCompactionLLM(log.path)
+    summary_llm = _SummaryCheckpointLLM(log.path)
+    agent = Agent(
+        llm_client=llm,
+        system_prompt="system",
+        tools=[],
+        workspace_dir=str(tmp_path),
+        token_limit=8_000,
+        deferred_mcp_loading_enabled=False,
+        session_log=store,
+    )
+    for index in range(24):
+        role = "user" if index % 2 == 0 else "assistant"
+        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 2_000))
+    agent.add_user_message("latest request")
+
+    events = [event async for event in agent.run_events(
+        options=replace(agent.default_run_options(), summary_llm=summary_llm)
+    )]
+
+    assert any(isinstance(event, SummarizationEvent) for event in events)
+    assert store.replay_override_used
+    assert "[canonical replay surface]" in str(llm.normal_messages[1].content)
+    assert "[canonical replay surface]" in str(agent.messages[1].content)
+    log.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_replay_failure_does_not_close_turn_with_old_live_surface(tmp_path):
+    root = tmp_path / "sessions"
+    log = SessionLog.create(root, session_id="replay-failure", cwd=tmp_path)
+    store = _ReplayFailureStore(log)
+    agent = Agent(
+        llm_client=_PostCompactionLLM(log.path),
+        system_prompt="system",
+        tools=[],
+        workspace_dir=str(tmp_path),
+        token_limit=8_000,
+        deferred_mcp_loading_enabled=False,
+        session_log=store,
+    )
+    for index in range(24):
+        role = "user" if index % 2 == 0 else "assistant"
+        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 2_000))
+    agent.add_user_message("latest request")
+
+    with pytest.raises(SessionLogReplayError, match="committed"):
+        _ = [event async for event in agent.run_events(
+            options=replace(agent.default_run_options(), summary_llm=_SummaryCheckpointLLM(log.path))
+        )]
+
+    assert "turn/end" not in [event["type"] for event in log.events]
+    persisted_messages = log.replay().messages
+    assert any(
+        "durable compacted history" in str(message.content)
+        for message in persisted_messages
+    )
+    assert all("old-0:" not in str(message.content) for message in persisted_messages)
+    log.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_without_native_replay_keeps_in_memory_surface(tmp_path):
+    """SessionStorePort compatibility: a third-party Store that only implements
+    the minimal contract (no native ``replay``) must still compact. The kernel
+    keeps the validated post-compaction in-memory surface instead of requiring
+    replay() (docs/design/skill-engine.md §6)."""
+    root = tmp_path / "sessions"
+    log = SessionLog.create(root, session_id="no-replay-store", cwd=tmp_path)
+    store = _NoReplayStore(log)
+    assert getattr(store, "replay", None) is None
+    llm = _PostCompactionLLM(log.path)
+    summary_llm = _SummaryCheckpointLLM(log.path)
+    agent = Agent(
+        llm_client=llm,
+        system_prompt="system",
+        tools=[],
+        workspace_dir=str(tmp_path),
+        token_limit=8_000,
+        deferred_mcp_loading_enabled=False,
+        session_log=store,
+    )
+    for index in range(24):
+        role = "user" if index % 2 == 0 else "assistant"
+        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 2_000))
+    agent.add_user_message("latest request")
+
+    events = [event async for event in agent.run_events(
+        options=replace(agent.default_run_options(), summary_llm=summary_llm)
+    )]
+
+    # Compaction ran and did not raise SessionLogReplayError.
+    assert any(isinstance(event, SummarizationEvent) for event in events)
+    assert any(isinstance(event, DoneEvent) for event in events)
+    # The live surface came from the in-memory post-compaction messages: it
+    # carries the summary and drops the old history, without replay().
+    assert any(
+        "durable compacted history" in str(message.content)
+        for message in agent.messages
+    )
+    assert all("old-0:" not in str(message.content) for message in agent.messages)
+    # The durable surface is still committed via replace_surface + flush.
+    assert any(
+        "durable compacted history" in str(message.content)
+        for message in log.replay().messages
     )
     log.close()
 
