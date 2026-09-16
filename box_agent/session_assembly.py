@@ -75,6 +75,7 @@ async def prepare_model(resources: SessionResources) -> None:
                 retryable_exceptions=(Exception,),
             ) if retry.enabled else None,
             max_output_tokens=llm.max_output_tokens, auth_file=llm.auth_file,
+            max_request_body_bytes=llm.max_request_body_bytes,
             timeout=llm.timeout,
             reasoning_effort_when_disabled=llm.reasoning_effort_when_disabled,
         )

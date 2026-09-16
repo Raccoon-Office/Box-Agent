@@ -45,6 +45,11 @@ _SOFT_CATEGORIES: frozenset[str] = frozenset({"content_filter"})
 # so put more specific categories before generic ones.
 _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
+        "request_body_too_large",
+        ("request_body_too_large", "request body exceeds", "payload too large", "request entity too large"),
+        "本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
+    ),
+    (
         "content_filter",
         ("content_filter", "content filter", "content management policy",
          "data_inspection_failed", "risk_control", "inappropriate", "flagged"),
@@ -147,6 +152,9 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
         haystack = ""
 
     try:
+        if _safe_http_status_code(root) == 413:
+            return FriendlyError(message="本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
+                                 category="request_body_too_large")
         if _looks_like_unsupported_model(haystack):
             return FriendlyError(
                 message=_MODEL_CONFIGURATION_MESSAGE,
@@ -307,6 +315,7 @@ def _error_code_from_body(body: object) -> int | str | None:
 # Error categories that a retry cannot fix — deterministic client-side faults.
 # (Mirrors the classifier categories in ``_RULES``.)
 _NON_RETRYABLE_CATEGORIES: frozenset[str] = frozenset({
+    "request_body_too_large",
     "content_filter",
     "auth",
     "permission",
