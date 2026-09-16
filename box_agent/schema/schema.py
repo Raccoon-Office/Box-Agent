@@ -1,7 +1,8 @@
 from enum import Enum
 from typing import Any, Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class LLMProvider(str, Enum):
@@ -96,6 +97,27 @@ class TokenUsage(BaseModel):
 
 class Message(BaseModel):
     """Chat message."""
+
+    _input_id: str | None = PrivateAttr(default=None)
+    # Used only while committing a fresh tool result, never projected or replayed
+    # onto messages. Capability state can share that result's durable event.
+    _commit_state_updates: dict[str, Any] | None = PrivateAttr(default=None)
+
+    @property
+    def input_id(self) -> str:
+        """Stable internal input provenance; never part of a provider payload."""
+        if self._input_id is None:
+            self._input_id = uuid4().hex
+        return self._input_id
+
+    def __eq__(self, other: object) -> bool:
+        # Provenance distinguishes repeated inputs for replay, not semantic
+        # message equality used by existing history and protocol consumers.
+        if isinstance(other, Message) and self._input_id != other._input_id:
+            left, right = self.model_copy(), other.model_copy()
+            left._input_id = right._input_id = None
+            return BaseModel.__eq__(left, right)
+        return super().__eq__(other)
 
     role: str  # "system", "user", "assistant", "tool"
     source: Literal["user", "runtime"] = Field(default="user", exclude=True)

@@ -579,7 +579,8 @@ async def test_late_handler_durability_error_still_releases_run_providers(tmp_pa
 
 
 @pytest.mark.parametrize("managed", [False, True])
-async def test_skill_reread_checks_text_after_hook_suppression(tmp_path, managed):
+@pytest.mark.parametrize("always_redact", [False, True])
+async def test_skill_reread_checks_text_after_hook_suppression(tmp_path, managed, always_redact):
     from box_agent.tools.skill_loader import SkillLoader
     from box_agent.tools.skill_tool import GetSkillTool
 
@@ -593,7 +594,11 @@ async def test_skill_reread_checks_text_after_hook_suppression(tmp_path, managed
         model = "fixture"
         calls = 0
 
+        def __init__(self):
+            self.requests = []
+
         async def generate_stream(self, messages, tools=None, **kwargs):
+            self.requests.append([message.model_copy(deep=True) for message in messages])
             self.calls += 1
             if self.calls <= 2:
                 yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
@@ -609,11 +614,12 @@ async def test_skill_reread_checks_text_after_hook_suppression(tmp_path, managed
 
     async def suppress_first(ctx):
         results.append(dict(ctx.payload))
-        return ResultTextDecision.replace("REDACTED") if len(results) == 1 else ResultTextDecision.keep()
+        return ResultTextDecision.replace("REDACTED") if always_redact or len(results) == 1 else ResultTextDecision.keep()
 
+    model = ReaderModel()
     kwargs = dict(
         config=Config(llm={"model": "fixture"}, agent={}, tools={}),
-        llm_client=ReaderModel(), system_prompt="system",
+        llm_client=model, system_prompt="system",
         tools=[GetSkillTool(loader)], workspace_dir=tmp_path,
         plugins=(plugin([HookSpec("redact", ("tool.after_execution",), "result_text", suppress_first)]),),
     )
@@ -632,7 +638,14 @@ async def test_skill_reread_checks_text_after_hook_suppression(tmp_path, managed
         events = [event async for event in session.run_events()]
         tool_messages = [message for message in session.agent.messages if message.role == "tool"]
         assert tool_messages[0].content == "REDACTED"
-        assert "PRIVATE_METHOD_BODY" in tool_messages[1].content
+        assert "PRIVATE_METHOD_BODY" not in str(model.requests[1])
+        if always_redact:
+            assert tool_messages[1].content == "REDACTED"
+            assert "PRIVATE_METHOD_BODY" not in str(model.requests)
+            assert not session.agent.skill_runtime.task.methods
+        else:
+            assert "PRIVATE_METHOD_BODY" in tool_messages[1].content
+            assert "method" in session.agent.skill_runtime.task.methods
         outputs = [event for event in events if isinstance(event, ToolCallResult)]
         assert len(outputs) == 2 and all(event.success for event in outputs)
         assert len(session.agent.skill_runtime.read_facts) == 1

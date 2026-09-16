@@ -539,7 +539,9 @@ class DummyLLM:
     def __init__(self):
         self.calls = 0
 
-    async def generate(self, messages, tools):
+    async def generate(self, messages, tools, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         self.calls += 1
         if self.calls == 1:
             return LLMResponse(
@@ -1360,7 +1362,9 @@ class DoneLLM:
         yield StreamEvent(type="text", delta="done")
         yield StreamEvent(type="finish", finish_reason="stop")
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="done", finish_reason="stop")
 
 
@@ -2372,7 +2376,9 @@ class GoalAutopilotCompleteLLM:
             yield StreamEvent(type="text", delta="goal done")
             yield StreamEvent(type="finish", finish_reason="stop")
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="done", finish_reason="stop")
 
 
@@ -2385,7 +2391,9 @@ class GoalAutopilotNeverCompleteLLM:
         yield StreamEvent(type="text", delta=f"still active {self.calls}")
         yield StreamEvent(type="finish", finish_reason="stop")
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="done", finish_reason="stop")
 
 
@@ -2421,7 +2429,9 @@ class GoalAutopilotBlockLLM:
             yield StreamEvent(type="text", delta="blocked")
             yield StreamEvent(type="finish", finish_reason="stop")
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="done", finish_reason="stop")
 
 
@@ -2542,7 +2552,9 @@ class ClarifyThenResumePptLLM:
             yield StreamEvent(type="text", delta="已根据补充数据继续完成 HTML。")
             yield StreamEvent(type="finish", finish_reason="stop")
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="done", finish_reason="stop")
 
 
@@ -2633,7 +2645,9 @@ class MalformedActionHintLLM:
         )
         yield StreamEvent(type="finish", finish_reason="stop")
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="", finish_reason="stop")
 
 
@@ -3152,7 +3166,9 @@ class WebBudgetLLM:
             yield StreamEvent(type="text", delta="final from gathered evidence")
             yield StreamEvent(type="finish", finish_reason="stop")
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="final from gathered evidence", finish_reason="stop")
 
 

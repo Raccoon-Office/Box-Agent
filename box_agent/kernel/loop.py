@@ -61,6 +61,7 @@ from .context_engine import (
     _validate_transient_followup_result,
 )
 from .ports import KernelServices
+from .execution_lifecycle import ExecutionAction
 from .tool_messages import ToolMessageCommitter, session_log_messages
 from ..tools.engine.call_contracts import (
     ToolExecutionOptions, ToolRunContext, ToolStepControl, ToolStepSummary,
@@ -176,7 +177,7 @@ from ..tools.base import (
 from ..tools.argument_limits import RECOMMENDED_GENERATED_BODY_CHARS
 from ..tools.browser_intent import BrowserToolIntentPolicy
 from ..tool_result_storage import ToolResultStorage
-from ..turn_continuation import TurnContinuationController
+from ..turn_continuation import TurnContinuationController, TurnContinuationError
 from ..turn_policy import (
     text_is_short_non_task_reply,
     text_requests_plan_start,
@@ -964,6 +965,16 @@ async def _run_agent_loop_impl(
     tool_engine = _services.tool_engine
     assert tool_engine is not None
     tool_messages = ToolMessageCommitter(messages, session_log, session_turn)
+    run_lifecycle = _services.run_lifecycle
+
+    def lifecycle_policy_error(name, args):
+        return (browser_intent_policy.tool_call_error(name, args)
+                or (run_lifecycle.tool_call_error(name, args) if run_lifecycle is not None else None))
+
+    def commit_tool_result(message, event, result_step):
+        tool_messages.commit_result(message, event, result_step)
+        if run_lifecycle is not None:
+            run_lifecycle.observe_tool_result(event)
 
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
@@ -980,9 +991,9 @@ async def _run_agent_loop_impl(
             hook_dispatch=_services.hook_dispatch, hook_context=_services.hook_context,
             is_cancelled=cancelled, record_call=tool_messages.record_call,
             flush_calls=tool_messages.flush_calls,
-            commit_result=tool_messages.commit_result,
+            commit_result=commit_tool_result,
             validate_followup=validate_followup,
-            policy_error=browser_intent_policy.tool_call_error,
+            policy_error=lifecycle_policy_error,
             workspace_dir=workspace_dir,
             session_id=session_id, turn_id=turn_id,
             permission_negotiator=permission_negotiator, logger=logger,
@@ -1026,6 +1037,13 @@ async def _run_agent_loop_impl(
         if run_control is not None and not await run_control.checkpoint():
             return False
         return not cancelled()
+
+    async def lifecycle_step_end() -> StepEnd:
+        """Close an already-started step before a lifecycle yields to new input."""
+        elapsed, total = perf_counter() - step_start, perf_counter() - run_start
+        if hook_mgr.hooks:
+            await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+        return StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
 
     async def compact_context(history_token_limit, *, force=False, estimate_tools=None):
         """Apply one compaction through the same durable surface/event path."""
@@ -1120,6 +1138,8 @@ async def _run_agent_loop_impl(
                 session_log.flush()
             messages.clear()
             messages.extend(new_msgs)
+            if run_lifecycle is not None:
+                run_lifecycle.after_compaction()
             if resource_ledger is not None:
                 resource_ledger.rotate_epoch()
                 _log.info(
@@ -1144,6 +1164,318 @@ async def _run_agent_loop_impl(
             api_total_tokens = 0
             api_prompt_tokens = 0
         return result, event
+
+    async def execute_tool_step(calls, prepared_tools, *, origin="model"):
+        """One real engine batch, shared by provider and runtime requests."""
+        nonlocal empty_args_signature, empty_args_repeats
+        nonlocal visible_tool_call_total, plan_write_succeeded, plan_approval_gate_completed
+        nonlocal pending_transient_followup_tokens, final_summary_guidance_injected, no_progress_steps
+        # ── Cancellation check (before tools) ──────────────
+        if not await run_checkpoint():
+            _cleanup_incomplete_messages(messages)
+            if hook_mgr.hooks:
+                await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+            yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+            return
+
+        # Resolve backwards-compatible aliases only against tools offered in
+        # this model step. Keep the persisted assistant turn unchanged, while
+        # all execution policy sees the canonical tool name.
+        if run_lifecycle is not None:
+            run_lifecycle.before_calls(tuple(calls))
+            if not await run_checkpoint():
+                _cleanup_incomplete_messages(messages)
+                yield await cancellation_done_event()
+                return
+        execution_tool_calls = prepared_tools.canonicalize_calls(calls)
+
+        # ── Execute tool calls ──────────────────────────────
+        # Loop-guard: bail out if the model emits the same all-empty-args
+        # tool_call set as the previous turn. This is the signature of an
+        # upstream protocol bug (e.g. relay truncation) where empty args
+        # come back, error responses get fed back, and the model just
+        # repeats — without this check the loop runs to max_steps.
+        all_empty = all(not tc.function.arguments for tc in execution_tool_calls)
+        if all_empty and origin == "model":
+            sig = tuple(sorted(tc.function.name for tc in execution_tool_calls))
+            if sig == empty_args_signature:
+                empty_args_repeats += 1
+            else:
+                empty_args_signature = sig
+                empty_args_repeats = 1
+            if empty_args_repeats >= EMPTY_ARGS_LIMIT:
+                msg = (
+                    f"Aborting: model emitted empty-arguments tool_calls "
+                    f"{empty_args_repeats}x in a row ({list(sig)}). "
+                    "This usually indicates an upstream relay bug or model "
+                    "loop. See logs for the raw stream."
+                )
+                _cleanup_incomplete_messages(messages)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+                yield ErrorEvent(message=msg, is_fatal=True)
+                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                return
+        else:
+            empty_args_signature = None
+            empty_args_repeats = 0
+
+        # The kernel decides the conversation boundary. The engine owns all
+        # per-call preparation, scheduling, permission continuation and results.
+        step_contains_plan_write = any(tc.function.name == "plan_write" for tc in execution_tool_calls)
+        organic_plan_approval_gate_enabled = (
+            pause_after_plan_write and not plan_approval_approved
+            and not plan_approval_gate_enabled and has_plan_tool and step_contains_plan_write
+        )
+        plan_approval_gate_active = plan_approval_gate_enabled or organic_plan_approval_gate_enabled
+
+        def decorate_control_result(name: str, result: ToolResult) -> ToolResult:
+            if plan_approval_gate_active and name == "plan_write" and result.success:
+                return result.model_copy(update={"raw_output": _attach_plan_approval_payload(
+                    result.raw_output, request_id=plan_approval_request_id,
+                )})
+            return result
+
+        control = ToolStepControl(
+            step=step + 1,
+            allowed_names=frozenset({"plan_write"}) if plan_approval_gate_active else None,
+            blocked_reason=_PLAN_APPROVAL_SKIP_MESSAGE,
+            result_transform=decorate_control_result,
+            pending_followup_tokens=pending_transient_followup_tokens, origin=origin,
+        )
+        tool_summary: ToolStepSummary | None = None
+        async with aclosing(tool_engine.execute_calls(prepared_tools, calls, control)) as records:
+            async for record in records:
+                if isinstance(record, ToolStepSummary):
+                    tool_summary = record
+                else:
+                    yield record
+        if cancelled():
+            _cleanup_incomplete_messages(messages)
+            if hook_mgr.hooks:
+                await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+            yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+            return
+        if tool_summary is None:
+            raise RuntimeError("Tool engine ended without a step summary")
+        step_made_progress = tool_summary.made_progress
+        visible_tool_call_total += tool_summary.visible_calls
+        completed_turn_ending_tool = tool_summary.completed_turn_ending_tool
+        plan_write_succeeded = plan_write_succeeded or "plan_write" in tool_summary.successful_tools
+        plan_approval_gate_completed = plan_approval_gate_completed or (
+            plan_approval_gate_active and "plan_write" in tool_summary.successful_tools
+        )
+        pending_transient_followup_blocks.extend(tool_summary.transient_blocks)
+        pending_transient_followup_tokens += tool_summary.transient_tokens
+        if tool_summary.repair_guidance:
+            messages.append(Message(role="user", source="runtime", content=format_injected_message(tool_summary.repair_guidance)))
+            yield InjectedMessageEvent(content=tool_summary.repair_guidance, injection_id=None, user_visible=False)
+
+        if completed_turn_ending_tool is not None:
+            elapsed = perf_counter() - step_start
+            total = perf_counter() - run_start
+            if hook_mgr.hooks:
+                await hook_mgr.fire_step_end(
+                    step=step + 1,
+                    elapsed_seconds=elapsed,
+                    total_elapsed_seconds=total,
+                )
+                await hook_mgr.fire_done(
+                    stop_reason=StopReason.WAITING_FOR_USER,
+                    final_content=_WAITING_FOR_USER_DONE_CONTENT,
+                )
+            yield StepEnd(
+                step=step + 1,
+                elapsed_seconds=elapsed,
+                total_elapsed_seconds=total,
+            )
+            yield DoneEvent(
+                stop_reason=StopReason.WAITING_FOR_USER,
+                final_content=_WAITING_FOR_USER_DONE_CONTENT,
+            )
+            return
+
+        if plan_approval_gate_completed:
+            elapsed = perf_counter() - step_start
+            total = perf_counter() - run_start
+            if hook_mgr.hooks:
+                await hook_mgr.fire_step_end(
+                    step=step + 1,
+                    elapsed_seconds=elapsed,
+                    total_elapsed_seconds=total,
+                )
+                await hook_mgr.fire_done(
+                    stop_reason=StopReason.END_TURN,
+                    final_content=_PLAN_APPROVAL_DONE_CONTENT,
+                )
+            yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            yield DoneEvent(
+                stop_reason=StopReason.END_TURN,
+                final_content=_PLAN_APPROVAL_DONE_CONTENT,
+            )
+            return
+
+        if tool_summary.search_guidance:
+            messages.append(Message(role="user", source="runtime", content=format_injected_message(tool_summary.search_guidance)))
+            yield InjectedMessageEvent(content=tool_summary.search_guidance, injection_id=None, user_visible=False)
+
+        if (
+            visible_tool_call_total > final_summary_after_calls
+            and not final_summary_guidance_injected
+        ):
+            final_summary_guidance_injected = True
+            summary_text = final_summary_wrapup_text(
+                visible_tool_call_total,
+                final_summary_after_calls,
+            )
+            messages.append(Message(role="user", source="runtime", content=format_injected_message(summary_text)))
+            yield InjectedMessageEvent(content=summary_text, injection_id=None, user_visible=False)
+
+        # ── Step end ────────────────────────────────────────
+        # Update the no-progress counter (only steps that ran tools reach
+        # here — the no-tool-call path returns earlier with END_TURN).
+        if no_progress_limit:
+            if step_made_progress:
+                no_progress_steps = 0
+            else:
+                no_progress_steps += 1
+
+        elapsed = perf_counter() - step_start
+        total = perf_counter() - run_start
+        yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+        if hook_mgr.hooks:
+            await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+
+        # ── Periodic memory extraction (background) ──────────
+        if memory_extractor:
+            asyncio.create_task(
+                memory_extractor.maybe_extract(
+                    messages,
+                    "step_interval",
+                    turn_id=memory_turn_id,
+                )
+            )
+
+    def request_material():
+        """Use the same live overlays and accepted follow-up input at every boundary."""
+        extra = [message for message in (auto_memory_context_message,) if message is not None]
+        if run_lifecycle is not None:
+            extra.extend(run_lifecycle.context_messages())
+        transient = (Message(role="user", source="runtime",
+                             content=list(pending_transient_followup_blocks), trace_redact_content=True)
+                     if pending_transient_followup_blocks else None)
+        return extra, transient
+
+    async def reject_context(message, *, budget_blocked, blocked_code=None):
+        """Keep input readiness failures distinct from recoverable budget pressure."""
+        code = ("CONTEXT_INPUT_BUDGET_EXCEEDED" if budget_blocked
+                else blocked_code or "CONTEXT_INPUT_NOT_READY")
+        category = ("context_length" if budget_blocked
+                    else "skill_dependency" if code.startswith("SKILL_") else "context_readiness")
+        if hook_mgr.hooks:
+            await hook_mgr.fire_error(message=message, is_fatal=True, exception=None)
+            await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=message)
+        yield ErrorEvent(message=message, is_fatal=True, error_code=code, error_category=category)
+        yield DoneEvent(stop_reason=StopReason.ERROR, final_content=message)
+
+    async def apply_execution_action(action: ExecutionAction, *, prepared=None, allow_compaction=True):
+        """Keep runtime instructions distinct from provider output and bounded by this step."""
+        if not await run_checkpoint():
+            yield await cancellation_done_event()
+            return
+        if action.tool_calls:
+            calls = list(action.tool_calls)
+            if prepared is None:
+                prepared = tool_engine.prepare_tools(is_tool_visible=browser_intent_policy.is_tool_visible)
+            assistant = Message(role="assistant", source="runtime", content=action.content, tool_calls=calls)
+            # Preparation owns one complete batch, not each individual read.
+            # Include pending protocol envelopes without recording unsent calls.
+            envelopes = [Message(role="tool", name=call.function.name, tool_call_id=call.id, content="")
+                         for call in calls]
+            budget_tools = {tool.name: tool for tool in prepared.definitions}
+            output_budget = getattr(llm, "max_output_tokens", 0)
+
+            def prepare_batch():
+                extra, transient = request_material()
+                candidate = [*messages, assistant]
+                if context_engine is not None:
+                    prepare = getattr(context_engine, "prepare_tool_batch", context_engine.prepare_request)
+                    projection = prepare(
+                        candidate, prepared_tools=prepared, token_limit=token_limit,
+                        output_tokens=output_budget if isinstance(output_budget, int) else 0,
+                        extra_messages=tuple(extra), transient_message=transient,
+                        transient_tokens=pending_transient_followup_tokens,
+                    )
+                    blocked = projection.blocked_reason
+                    budget_blocked = bool(blocked and getattr(projection, "budget_blocked", False))
+                    blocked_code = getattr(projection, "blocked_code", None)
+                else:
+                    full_input = [*candidate, *extra, *envelopes, *([transient] if transient is not None else [])]
+                    blocked = ("Runtime tool input exceeds the safe context budget."
+                               if _fallback_context_estimate(full_input, budget_tools) > token_limit else None)
+                    budget_blocked = bool(blocked)
+                    blocked_code = None
+                reserve = _fallback_context_estimate([assistant, *envelopes, *extra], {})
+                if transient is not None:
+                    reserve += max(pending_transient_followup_tokens,
+                                   _fallback_context_estimate([transient], {}))
+                return blocked, budget_blocked, blocked_code, max(1, token_limit - reserve - REQUEST_INPUT_HEADROOM_TOKENS)
+
+            blocked, budget_blocked, blocked_code, history_limit = prepare_batch()
+            if budget_blocked and allow_compaction:
+                estimated_history, _ = _estimate_context_from_latest_response(
+                    messages, budget_tools, api_total_tokens=api_total_tokens,
+                    api_prompt_tokens=api_prompt_tokens,
+                )
+                _, summarization_event = await compact_context(
+                    history_limit, force=estimated_history < history_limit, estimate_tools=budget_tools,
+                )
+                if summarization_event is not None:
+                    yield summarization_event
+                if not await run_checkpoint():
+                    yield await cancellation_done_event()
+                    return
+                if inject_queue is not None and not inject_queue.empty():
+                    yield await lifecycle_step_end()
+                    return
+                blocked, budget_blocked, blocked_code, _ = prepare_batch()
+            if blocked:
+                yield await lifecycle_step_end()
+                async for event in reject_context(blocked, budget_blocked=budget_blocked, blocked_code=blocked_code):
+                    yield event
+                return
+            messages.append(assistant)
+            if context_engine is not None:
+                context_engine.bind_history(messages)
+            if session_log is not None and session_turn is not None:
+                session_log.append_unlogged_messages(session_log_messages(messages),
+                                                     turn=session_turn, step=step + 1)
+                session_log.flush()
+            async with aclosing(execute_tool_step(calls, prepared, origin="runtime")) as records:
+                async for event in records:
+                    yield event
+            return
+        elapsed, total = perf_counter() - step_start, perf_counter() - run_start
+        if hook_mgr.hooks:
+            await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+        yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+        if action.stop_reason is not None:
+            if hook_mgr.hooks:
+                await hook_mgr.fire_done(stop_reason=action.stop_reason, final_content=action.content)
+            if action.stop_reason == StopReason.ERROR:
+                yield ErrorEvent(message=action.content, is_fatal=True)
+            yield DoneEvent(stop_reason=action.stop_reason, final_content=action.content)
+        elif action.content:
+            messages.append(Message(role="user", source="runtime", content=action.content))
+            yield InjectedMessageEvent(content=action.content, injection_id=None, user_visible=False)
+
+    if run_lifecycle is not None:
+        if not await run_checkpoint():
+            yield await cancellation_done_event()
+            return
+        await run_lifecycle.begin_run(messages=messages, current_turn_text=current_turn_text,
+                                      llm=llm, thinking_enabled=thinking_enabled, is_cancelled=cancelled)
 
     for step in range(max_steps):
         if resource_ledger is not None:
@@ -1249,6 +1581,25 @@ async def _run_agent_loop_impl(
             messages.append(Message(role="user", source="runtime", content=format_injected_message(guidance)))
             yield InjectedMessageEvent(content=guidance, injection_id=None, user_visible=False)
 
+        if run_lifecycle is not None and not plan_approval_gate_enabled:
+            action = await run_lifecycle.before_step(messages)
+            if not await run_checkpoint():
+                yield await cancellation_done_event()
+                return
+            if inject_queue is not None and not inject_queue.empty():
+                # Preparation awaited external work; a newer user turn wins.
+                continue
+            if action is not None:
+                yield StepStart(step=step + 1, max_steps=max_steps)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_start(step=step + 1, max_steps=max_steps)
+                async with aclosing(apply_execution_action(action)) as records:
+                    async for event in records:
+                        yield event
+                        if isinstance(event, DoneEvent):
+                            return
+                continue
+
         # ── Fresh tool-result aggregate budget (Layer 1) ───
         # This runs immediately before the next LLM request. Decisions are
         # frozen by tool_use_id so later turns keep the same cache prefix.
@@ -1278,21 +1629,7 @@ async def _run_agent_loop_impl(
         tool_list = list(prepared_tools.definitions)
         offered_tools_by_name = prepared_tools.targets
         budget_tools_by_name = {tool.name: tool for tool in tool_list}
-        request_context_messages = [
-            message
-            for message in (auto_memory_context_message,)
-            if message is not None
-        ]
-        transient_message = (
-            Message(
-                role="user",
-                source="runtime",
-                content=list(pending_transient_followup_blocks),
-                trace_redact_content=True,
-            )
-            if pending_transient_followup_blocks
-            else None
-        )
+        request_context_messages, transient_message = request_material()
         extra_tokens = (_fallback_context_estimate(request_context_messages, {})
                         if request_context_messages else 0)
         transient_tokens = (max(pending_transient_followup_tokens,
@@ -1372,6 +1709,13 @@ async def _run_agent_loop_impl(
                 projection.blocked_reason
                 and getattr(projection, "budget_blocked", False)
             )
+            if projection.blocked_reason and not projection_budget_blocked:
+                async for event in reject_context(
+                    projection.blocked_reason, budget_blocked=False,
+                    blocked_code=getattr(projection, "blocked_code", None),
+                ):
+                    yield event
+                return
             estimated_history, _ = _estimate_context_from_latest_response(
                 messages,
                 budget_tools_by_name,
@@ -1422,6 +1766,26 @@ async def _run_agent_loop_impl(
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return
             if context_compacted:
+                # One bounded re-entry after durable history changed. A domain
+                # may need a real tool read before this step reaches the model.
+                # Runtime actions consume this step, so this cannot form an
+                # unbudgeted compaction/preparation loop.
+                if run_lifecycle is not None and not plan_approval_gate_enabled:
+                    action = await run_lifecycle.before_step(messages)
+                    if not await run_checkpoint():
+                        yield await cancellation_done_event()
+                        return
+                    if inject_queue is not None and not inject_queue.empty():
+                        yield await lifecycle_step_end()
+                        continue
+                    if action is not None:
+                        async with aclosing(apply_execution_action(action, allow_compaction=False)) as records:
+                            async for event in records:
+                                yield event
+                                if isinstance(event, DoneEvent):
+                                    return
+                        continue
+                request_context_messages, transient_message = request_material()
                 # Rebinding is mandatory: persistent read facts do not prove
                 # the corresponding tool text survived compaction.
                 projection = context_engine.prepare_request(
@@ -1433,11 +1797,11 @@ async def _run_agent_loop_impl(
                 )
             if projection.blocked_reason:
                 msg = projection.blocked_reason or "Context remains above the safe input limit after bounded compaction."
-                if hook_mgr.hooks:
-                    await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
-                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
-                yield ErrorEvent(message=msg, is_fatal=True)
-                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                async for event in reject_context(
+                    msg, budget_blocked=getattr(projection, "budget_blocked", False),
+                    blocked_code=getattr(projection, "blocked_code", None),
+                ):
+                    yield event
                 return
             request_messages = projection.context_messages
             provider_request_messages = projection.messages
@@ -1461,9 +1825,39 @@ async def _run_agent_loop_impl(
                                  error_code="CONTEXT_INPUT_BUDGET_EXCEEDED", error_category="context_length")
                 yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                 return
+            if context_compacted and run_lifecycle is not None:
+                # Manually constructed legacy bundles have the same bounded
+                # lifecycle recovery contract as the prepare-first path.
+                if not plan_approval_gate_enabled:
+                    action = await run_lifecycle.before_step(messages)
+                    if not await run_checkpoint():
+                        yield await cancellation_done_event()
+                        return
+                    if inject_queue is not None and not inject_queue.empty():
+                        yield await lifecycle_step_end()
+                        continue
+                    if action is not None:
+                        async with aclosing(apply_execution_action(action, allow_compaction=False)) as records:
+                            async for event in records:
+                                yield event
+                                if isinstance(event, DoneEvent):
+                                    return
+                        continue
+                request_context_messages, transient_message = request_material()
             request_messages = [*messages, *request_context_messages]
             provider_request_messages = ([*request_messages, transient_message]
                                          if transient_message is not None else request_messages)
+            if (run_lifecycle is not None
+                    and _fallback_context_estimate(provider_request_messages, budget_tools_by_name) > token_limit):
+                msg = "Lifecycle context exceeds the safe input budget after bounded compaction."
+                yield await lifecycle_step_end()
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+                yield ErrorEvent(message=msg, is_fatal=True,
+                                 error_code="CONTEXT_INPUT_BUDGET_EXCEEDED", error_category="context_length")
+                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                return
 
         # Hooks and compaction can yield control after the step-start check.
         # Honour cancellation before committing Skill delivery or any request.
@@ -2416,24 +2810,45 @@ async def _run_agent_loop_impl(
                 )
                 return
 
-            continuation = await turn_continuation.evaluate(
-                llm=llm,
-                user_request=continuation_user_request,
-                content=response.content,
-                finish_reason=response.finish_reason,
-                tools_available=bool(tool_list),
-                thinking_enabled=thinking_enabled,
-                decision_tool_available="request_user_decision" in offered_tools_by_name,
-                step=step,
-                max_steps=max_steps,
-                cancelled=cancelled(),
-                session_id=session_id,
-                turn_id=turn_id,
-                title=title,
-                should_interrupt=lambda: cancelled() or (
-                    inject_queue is not None and not inject_queue.empty()
-                ),
-            )
+            if run_lifecycle is not None:
+                action = await run_lifecycle.before_finish(response.content)
+                if not await run_checkpoint():
+                    yield await cancellation_done_event()
+                    return
+                if inject_queue is not None and not inject_queue.empty():
+                    yield await lifecycle_step_end()
+                    continue
+                if action is not None:
+                    async with aclosing(apply_execution_action(action)) as records:
+                        async for event in records:
+                            yield event
+                            if isinstance(event, DoneEvent):
+                                return
+                    continue
+
+            continuation_error = None
+            try:
+                continuation = await turn_continuation.evaluate(
+                    llm=llm,
+                    user_request=continuation_user_request,
+                    content=response.content,
+                    finish_reason=response.finish_reason,
+                    tools_available=bool(tool_list),
+                    thinking_enabled=thinking_enabled,
+                    decision_tool_available="request_user_decision" in offered_tools_by_name,
+                    step=step,
+                    max_steps=max_steps,
+                    cancelled=cancelled(),
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    title=title,
+                    should_interrupt=lambda: cancelled() or (
+                        inject_queue is not None and not inject_queue.empty()
+                    ),
+                )
+            except TurnContinuationError as exc:
+                continuation = None
+                continuation_error = exc
             # Re-enter the existing cancellation/queue handlers before accepting
             # a verdict made while the user was cancelling or changing the task.
             if cancelled() or (inject_queue is not None and not inject_queue.empty()):
@@ -2450,7 +2865,23 @@ async def _run_agent_loop_impl(
                     elapsed_seconds=elapsed,
                     total_elapsed_seconds=total,
                 )
+                if cancelled():
+                    yield await cancellation_done_event()
+                    return
                 continue
+            if continuation_error is not None:
+                # Keep the candidate in history, but never turn a failed judge
+                # or exhausted continuation allowance into completion evidence.
+                error_text = str(continuation_error)
+                yield await lifecycle_step_end()
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(
+                        message=error_text, is_fatal=True, exception=continuation_error,
+                    )
+                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=error_text)
+                yield ErrorEvent(message=error_text, is_fatal=True)
+                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=error_text)
+                return
             if continuation is not None:
                 messages.append(Message(role="user", source="runtime", content=continuation.prompt))
                 yield InjectedMessageEvent(
@@ -2494,186 +2925,11 @@ async def _run_agent_loop_impl(
             yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
             return
 
-        # ── Cancellation check (before tools) ──────────────
-        if not await run_checkpoint():
-            _cleanup_incomplete_messages(messages)
-            if hook_mgr.hooks:
-                await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
-            yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
-            return
-
-        # Resolve backwards-compatible aliases only against tools offered in
-        # this model step. Keep the persisted assistant turn unchanged, while
-        # all execution policy sees the canonical tool name.
-        execution_tool_calls = prepared_tools.canonicalize_calls(response.tool_calls)
-
-        # ── Execute tool calls ──────────────────────────────
-        # Loop-guard: bail out if the model emits the same all-empty-args
-        # tool_call set as the previous turn. This is the signature of an
-        # upstream protocol bug (e.g. relay truncation) where empty args
-        # come back, error responses get fed back, and the model just
-        # repeats — without this check the loop runs to max_steps.
-        all_empty = all(not tc.function.arguments for tc in execution_tool_calls)
-        if all_empty:
-            sig = tuple(sorted(tc.function.name for tc in execution_tool_calls))
-            if sig == empty_args_signature:
-                empty_args_repeats += 1
-            else:
-                empty_args_signature = sig
-                empty_args_repeats = 1
-            if empty_args_repeats >= EMPTY_ARGS_LIMIT:
-                msg = (
-                    f"Aborting: model emitted empty-arguments tool_calls "
-                    f"{empty_args_repeats}x in a row ({list(sig)}). "
-                    "This usually indicates an upstream relay bug or model "
-                    "loop. See logs for the raw stream."
-                )
-                _cleanup_incomplete_messages(messages)
-                if hook_mgr.hooks:
-                    await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
-                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
-                yield ErrorEvent(message=msg, is_fatal=True)
-                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
-                return
-        else:
-            empty_args_signature = None
-            empty_args_repeats = 0
-
-        # The kernel decides the conversation boundary. The engine owns all
-        # per-call preparation, scheduling, permission continuation and results.
-        step_contains_plan_write = any(tc.function.name == "plan_write" for tc in execution_tool_calls)
-        organic_plan_approval_gate_enabled = (
-            pause_after_plan_write and not plan_approval_approved
-            and not plan_approval_gate_enabled and has_plan_tool and step_contains_plan_write
-        )
-        plan_approval_gate_active = plan_approval_gate_enabled or organic_plan_approval_gate_enabled
-
-        def decorate_control_result(name: str, result: ToolResult) -> ToolResult:
-            if plan_approval_gate_active and name == "plan_write" and result.success:
-                return result.model_copy(update={"raw_output": _attach_plan_approval_payload(
-                    result.raw_output, request_id=plan_approval_request_id,
-                )})
-            return result
-
-        control = ToolStepControl(
-            step=step + 1,
-            allowed_names=frozenset({"plan_write"}) if plan_approval_gate_active else None,
-            blocked_reason=_PLAN_APPROVAL_SKIP_MESSAGE,
-            result_transform=decorate_control_result,
-            pending_followup_tokens=pending_transient_followup_tokens,
-        )
-        tool_summary: ToolStepSummary | None = None
-        async with aclosing(tool_engine.execute_calls(prepared_tools, response.tool_calls, control)) as records:
-            async for record in records:
-                if isinstance(record, ToolStepSummary):
-                    tool_summary = record
-                else:
-                    yield record
-        if cancelled():
-            _cleanup_incomplete_messages(messages)
-            if hook_mgr.hooks:
-                await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
-            yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
-            return
-        if tool_summary is None:
-            raise RuntimeError("Tool engine ended without a step summary")
-        step_made_progress = tool_summary.made_progress
-        visible_tool_call_total += tool_summary.visible_calls
-        completed_turn_ending_tool = tool_summary.completed_turn_ending_tool
-        plan_write_succeeded = plan_write_succeeded or "plan_write" in tool_summary.successful_tools
-        plan_approval_gate_completed = plan_approval_gate_completed or (
-            plan_approval_gate_active and "plan_write" in tool_summary.successful_tools
-        )
-        pending_transient_followup_blocks.extend(tool_summary.transient_blocks)
-        pending_transient_followup_tokens += tool_summary.transient_tokens
-        if tool_summary.repair_guidance:
-            messages.append(Message(role="user", source="runtime", content=format_injected_message(tool_summary.repair_guidance)))
-            yield InjectedMessageEvent(content=tool_summary.repair_guidance, injection_id=None, user_visible=False)
-
-        if completed_turn_ending_tool is not None:
-            elapsed = perf_counter() - step_start
-            total = perf_counter() - run_start
-            if hook_mgr.hooks:
-                await hook_mgr.fire_step_end(
-                    step=step + 1,
-                    elapsed_seconds=elapsed,
-                    total_elapsed_seconds=total,
-                )
-                await hook_mgr.fire_done(
-                    stop_reason=StopReason.WAITING_FOR_USER,
-                    final_content=_WAITING_FOR_USER_DONE_CONTENT,
-                )
-            yield StepEnd(
-                step=step + 1,
-                elapsed_seconds=elapsed,
-                total_elapsed_seconds=total,
-            )
-            yield DoneEvent(
-                stop_reason=StopReason.WAITING_FOR_USER,
-                final_content=_WAITING_FOR_USER_DONE_CONTENT,
-            )
-            return
-
-        if plan_approval_gate_completed:
-            elapsed = perf_counter() - step_start
-            total = perf_counter() - run_start
-            if hook_mgr.hooks:
-                await hook_mgr.fire_step_end(
-                    step=step + 1,
-                    elapsed_seconds=elapsed,
-                    total_elapsed_seconds=total,
-                )
-                await hook_mgr.fire_done(
-                    stop_reason=StopReason.END_TURN,
-                    final_content=_PLAN_APPROVAL_DONE_CONTENT,
-                )
-            yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-            yield DoneEvent(
-                stop_reason=StopReason.END_TURN,
-                final_content=_PLAN_APPROVAL_DONE_CONTENT,
-            )
-            return
-
-        if tool_summary.search_guidance:
-            messages.append(Message(role="user", source="runtime", content=format_injected_message(tool_summary.search_guidance)))
-            yield InjectedMessageEvent(content=tool_summary.search_guidance, injection_id=None, user_visible=False)
-
-        if (
-            visible_tool_call_total > final_summary_after_calls
-            and not final_summary_guidance_injected
-        ):
-            final_summary_guidance_injected = True
-            summary_text = final_summary_wrapup_text(
-                visible_tool_call_total,
-                final_summary_after_calls,
-            )
-            messages.append(Message(role="user", source="runtime", content=format_injected_message(summary_text)))
-            yield InjectedMessageEvent(content=summary_text, injection_id=None, user_visible=False)
-
-        # ── Step end ────────────────────────────────────────
-        # Update the no-progress counter (only steps that ran tools reach
-        # here — the no-tool-call path returns earlier with END_TURN).
-        if no_progress_limit:
-            if step_made_progress:
-                no_progress_steps = 0
-            else:
-                no_progress_steps += 1
-
-        elapsed = perf_counter() - step_start
-        total = perf_counter() - run_start
-        yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-        if hook_mgr.hooks:
-            await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-
-        # ── Periodic memory extraction (background) ──────────
-        if memory_extractor:
-            asyncio.create_task(
-                memory_extractor.maybe_extract(
-                    messages,
-                    "step_interval",
-                    turn_id=memory_turn_id,
-                )
-            )
+        async with aclosing(execute_tool_step(response.tool_calls, prepared_tools)) as records:
+            async for event in records:
+                yield event
+                if isinstance(event, DoneEvent):
+                    return
 
     # ── Max steps exhausted ─────────────────────────────────
     msg = f"Task couldn't be completed after {max_steps} steps."
@@ -2706,6 +2962,7 @@ _SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
         "session_log",
         "tool_exposure_manager",
         "tool_result_storage",
+        "run_lifecycle",
     }
 )
 

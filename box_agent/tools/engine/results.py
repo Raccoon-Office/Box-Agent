@@ -56,6 +56,7 @@ class ToolResultPipelineInput:
     parallel: bool = False
     commit_result: Callable[[Message, ToolCallResult, int], None] | None = None
     hook_text_modified: bool = False
+    origin: str = "model"
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,7 @@ def process_tool_result(
 
     tool_message = Message(
         role="tool",
+        source="runtime" if pipeline_input.origin == "runtime" else "user",
         content=model_content,
         tool_call_id=pipeline_input.tool_call_id,
         name=pipeline_input.tool_name,
@@ -172,11 +174,20 @@ def process_tool_result(
         policy_decision=pipeline_input.policy_decision,
         tool_id=pipeline_input.tool_id,
         server_name=pipeline_input.server_name,
+        origin=pipeline_input.origin,
     )
-    if pipeline_input.commit_result is None:
-        pipeline_input.messages.append(tool_message)
-    else:
-        pipeline_input.commit_result(tool_message, result_event, pipeline_input.step)
+    if result._prepare_model_commit is not None:
+        tool_message._commit_state_updates = result._prepare_model_commit(tool_message)
+    try:
+        if pipeline_input.commit_result is None:
+            pipeline_input.messages.append(tool_message)
+        else:
+            pipeline_input.commit_result(tool_message, result_event, pipeline_input.step)
+    finally:
+        tool_message._commit_state_updates = None
+    if result._on_model_committed is not None:
+        result._on_model_committed(tool_message)
+        result._on_model_committed = None
     _record_context_resource_history(
         tool_call_id=pipeline_input.tool_call_id,
         decision=resource_decision,
@@ -188,6 +199,7 @@ def process_tool_result(
 
     trace_data: dict[str, Any] = {
         "tool_name": pipeline_input.tool_name,
+        "origin": pipeline_input.origin,
         "tool_id": pipeline_input.tool_id,
         "server_name": pipeline_input.server_name,
         "success": result.success,

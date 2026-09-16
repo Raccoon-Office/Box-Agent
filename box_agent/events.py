@@ -118,7 +118,7 @@ class LLMActivityEvent:
 
 @dataclass(frozen=True)
 class ToolCallStart:
-    """LLM requested a tool call."""
+    """A model or runtime requested a tool call; origin is explicit."""
 
     tool_call_id: str
     tool_name: str
@@ -126,6 +126,7 @@ class ToolCallStart:
     user_visible: bool = True
     tool_id: str | None = None
     server_name: str | None = None
+    origin: str = "model"
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class ToolCallResult:
     policy_decision: dict[str, Any] | None = None
     tool_id: str | None = None
     server_name: str | None = None
+    origin: str = "model"
 
 
 @dataclass(frozen=True)

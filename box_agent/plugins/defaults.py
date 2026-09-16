@@ -8,6 +8,7 @@ from ..kernel.ports import (
     HookBusPort,
     HookDispatchPort,
     KernelServices,
+    RunLifecyclePort,
     LLMPort,
     MemoryExtractionPort,
     MemoryLookupPort,
@@ -53,6 +54,7 @@ DEFAULT_CAPABILITY_SCHEMA = CapabilitySchema(
         CapabilityBinding(SkillEnginePort, CapabilityPolicy.OPTIONAL_SINGLE),
         CapabilityBinding(ContextEnginePort, CapabilityPolicy.OPTIONAL_SINGLE),
         CapabilityBinding(CompactEnginePort, CapabilityPolicy.OPTIONAL_SINGLE),
+        CapabilityBinding(RunLifecyclePort, CapabilityPolicy.OPTIONAL_SINGLE),
     )
 )
 
@@ -121,6 +123,7 @@ def default_plugin_descriptors(
     skill_engine: SkillEnginePort | None = None,
     context_engine: ContextEnginePort | None = None,
     compact_engine: CompactEnginePort | None = None,
+    run_lifecycle: RunLifecyclePort | None = None,
 ) -> tuple[PluginDescriptor, ...]:
     """Return deterministic descriptors for the supplied runtime instances."""
 
@@ -155,6 +158,7 @@ def default_plugin_descriptors(
         ("default.skill-engine", SkillEnginePort, skill_engine, True),
         ("default.context-engine", ContextEnginePort, context_engine, True),
         ("default.compact-engine", CompactEnginePort, compact_engine, True),
+        ("default.run-lifecycle", RunLifecyclePort, run_lifecycle, True),
     )
     descriptors = tuple(
         replace(
@@ -202,6 +206,7 @@ def create_default_plugin_host(
     skill_engine: SkillEnginePort | None = None,
     context_engine: ContextEnginePort | None = None,
     compact_engine: CompactEnginePort | None = None,
+    run_lifecycle: RunLifecyclePort | None = None,
 ) -> PluginHost:
     """Create a fresh static host for one outer agent-loop run."""
 
@@ -225,6 +230,7 @@ def create_default_plugin_host(
             skill_engine=skill_engine,
             context_engine=context_engine,
             compact_engine=compact_engine,
+            run_lifecycle=run_lifecycle,
         ) + tuple(plugins),
         schema=DEFAULT_CAPABILITY_SCHEMA,
     )
@@ -242,6 +248,22 @@ def _bind_skill_store(skill_engine: SkillEnginePort | None, session_store: Sessi
             "Replace SkillEnginePort and SessionStorePort together with the same Store."
         )
     if isinstance(skill_engine, SkillRuntime):
+        if (skill_engine.session_log is None and session_store is not None
+                and callable(getattr(session_store, "replay", None))):
+            task = getattr(session_store.replay(), "skill_task", None)
+            if task is not None:
+                if skill_engine._modern_task_state and skill_engine.task.record() != task:
+                    raise ValueError("Skill task facts conflict with the final SessionStorePort.")
+                skill_engine.restore_task(task)
+            elif skill_engine._modern_task_state:
+                # In-memory observation does not prove that a newly bound
+                # Store has persisted modern adoption semantics or task facts.
+                skill_engine.session_log = session_store
+                try:
+                    skill_engine._persist_task()
+                except Exception:
+                    skill_engine.session_log = None
+                    raise
         skill_engine.session_log = session_store
 
 
@@ -271,6 +293,7 @@ def kernel_services_from_registry(registry: ActivatedRegistry) -> KernelServices
         skill_engine=registry.get(SkillEnginePort),
         context_engine=context_engine,
         compact_engine=registry.get(CompactEnginePort),
+        run_lifecycle=registry.get(RunLifecyclePort),
     )
 
 
@@ -291,6 +314,7 @@ def compose_default_services(
     skill_engine: SkillEnginePort | None = None,
     context_engine: ContextEnginePort | None = None,
     compact_engine: CompactEnginePort | None = None,
+    run_lifecycle: RunLifecyclePort | None = None,
 ) -> KernelServices:
     """Resolve a run-local Context over borrowed services without discovery or I/O."""
 
@@ -322,6 +346,7 @@ def compose_default_services(
         skill_engine=skill_engine,
         context_engine=context_engine,
         compact_engine=compact_engine,
+        run_lifecycle=run_lifecycle,
     )
 
 

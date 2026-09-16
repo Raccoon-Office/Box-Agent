@@ -645,6 +645,7 @@ class SessionLog:
                 messages,
                 turn=turn,
                 step=step if step is not None else 0,
+                tool_result_metadata=tool_result_metadata,
             )
 
         appended: list[dict[str, Any]] = []
@@ -652,8 +653,12 @@ class SessionLog:
             messages[len(persisted_payloads) :],
             live_payloads[len(persisted_payloads) :],
         ):
+            if message.source == "runtime":
+                payload["source"] = message.source
             if message.role == "user":
                 payload["source"] = message.source
+                if message.source == "user":
+                    payload["inputId"] = message.input_id
                 appended.append(
                     self.append(
                         "user/message",
@@ -665,7 +670,7 @@ class SessionLog:
                 appended.append(
                     self.append(
                         "assistant/message",
-                        {"turn": turn, "step": step, "message": payload},
+                        {"turn": turn, "step": step, "message": payload, **({"origin": "runtime"} if message.source == "runtime" else {})},
                         surface_op="append",
                     )
                 )
@@ -705,6 +710,8 @@ class SessionLog:
             data = event["data"]
             message_data = data if event["type"] == "user/message" else data["message"]
             message = Message.model_validate(message_data)
+            if message.role == "user" and message.source == "user":
+                message._input_id = message_data.get("inputId") or f"{self.header['id']}:{event['seq']}"
             operation = event.get("surfaceOp")
             node = (event["seq"], message)
             if operation == "append":
@@ -725,10 +732,15 @@ class SessionLog:
         step: int,
         surface_op: str | dict[str, Any],
         source_event_seqs: list[int] | None = None,
+        tool_result_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload = message.model_dump(mode="json", exclude_none=True)
+        if message.source == "runtime":
+            payload["source"] = message.source
         if message.role == "user":
             payload["source"] = message.source
+            if message.source == "user":
+                payload["inputId"] = message.input_id
             return self.append(
                 "user/message",
                 payload,
@@ -738,14 +750,17 @@ class SessionLog:
         if message.role == "assistant":
             return self.append(
                 "assistant/message",
-                {"turn": turn, "step": step, "message": payload},
+                {"turn": turn, "step": step, "message": payload, **({"origin": "runtime"} if message.source == "runtime" else {})},
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
             )
         if message.role == "tool":
+            metadata = (tool_result_metadata or {}).get(message.tool_call_id)
             return self.append(
                 "tool/result",
-                {"turn": turn, "step": step, "message": payload},
+                {"turn": turn, "step": step, "message": payload,
+                 **({"result": metadata} if metadata is not None else {}),
+                 **({"origin": "runtime"} if message.source == "runtime" else {})},
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
             )
@@ -757,6 +772,7 @@ class SessionLog:
         *,
         turn: int,
         step: int,
+        tool_result_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Append a replacement whose replay is exactly ``messages``."""
 
@@ -777,6 +793,7 @@ class SessionLog:
                         "end": source_seqs[-1],
                     },
                     source_event_seqs=source_seqs,
+                    tool_result_metadata=tool_result_metadata,
                 )
             )
             remaining = messages[1:]
@@ -789,6 +806,7 @@ class SessionLog:
                     turn=turn,
                     step=step,
                     surface_op="append",
+                    tool_result_metadata=tool_result_metadata,
                 )
             )
         return appended
@@ -806,6 +824,17 @@ class SessionLog:
         plan: dict[str, Any] | None = None
         todos: list[dict[str, Any]] = []
         skills: list[dict[str, Any]] = []
+        skill_task: dict[str, Any] | None = None
+        seen_input_ids: set[str] = set()
+
+        def task_snapshot(value):
+            task = deepcopy(value) if isinstance(value, dict) else None
+            if task is not None:
+                ids = task.get("user_input_ids", ())
+                if isinstance(ids, (list, tuple)) and all(isinstance(item, str) for item in ids):
+                    seen_input_ids.update(ids)
+            return task
+
         for event in self._events:
             event_type = event.get("type")
             data = event["data"]
@@ -827,7 +856,14 @@ class SessionLog:
             if event_type == "skill/change":
                 value = data.get("skills")
                 skills = deepcopy(value) if isinstance(value, list) else []
+                if "task" in data:
+                    skill_task = task_snapshot(data["task"])
                 continue
+            if event_type == "tool/result":
+                result = data.get("result")
+                updates = result.get("stateUpdates") if isinstance(result, dict) else None
+                if isinstance(updates, dict) and "skill_task" in updates:
+                    skill_task = task_snapshot(updates["skill_task"])
             if event_type not in {
                 "user/message",
                 "assistant/message",
@@ -845,6 +881,18 @@ class SessionLog:
                 raise SessionLogCorrupted(
                     f"session event {event['seq']} has an invalid message"
                 ) from exc
+            if message.role == "user" and message.source == "user":
+                input_id = message_data.get("inputId") or f"{self.header['id']}:{event['seq']}"
+                if not isinstance(input_id, str):
+                    raise SessionLogCorrupted(f"session event {event['seq']} has invalid inputId")
+                message._input_id = input_id
+                if skill_task is not None and input_id not in seen_input_ids:
+                    skill_task.setdefault("user_input_ids", [
+                        f"legacy-task:{skill_task.get('task_id', '')}:{i}"
+                        for i in range(len(skill_task.get("user_inputs", ())))])
+                    skill_task.setdefault("user_inputs", []).append(deepcopy(message.content))
+                    skill_task.setdefault("user_input_ids", []).append(input_id)
+                seen_input_ids.add(input_id)
             operation = event.get("surfaceOp")
             node = (event["seq"], message)
             if operation == "append":
@@ -878,6 +926,7 @@ class SessionLog:
             plan=plan,
             todos=todos,
             skills=skills,
+            skill_task=skill_task,
         )
 
     def repair_interrupted_turn(self) -> list[dict[str, Any]]:

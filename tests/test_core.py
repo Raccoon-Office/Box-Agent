@@ -96,7 +96,9 @@ class MockLLM:
         self._responses = list(responses)
         self._idx = 0
 
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         resp = self._responses[self._idx]
         self._idx += 1
         return resp
@@ -616,7 +618,7 @@ async def test_multiple_skill_results_share_next_request_budget(tmp_path):
     tool = GetSkillTool(loader)
     llm = CapturingStreamLLM([
         LLMResponse(content="", tool_calls=[ToolCall(id=name, type="function", function=FunctionCall(
-            name="get_skill", arguments={"skill_name": name})) for name in ("first", "second")], finish_reason="tool"),
+            name="get_skill", arguments={"skill_name": name, "usage": "reference"})) for name in ("first", "second")], finish_reason="tool"),
         LLMResponse(content="done", finish_reason="stop"),
     ])
     messages = _msgs()

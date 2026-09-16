@@ -11,12 +11,13 @@ from ..schema import LLMResponse, Message, StreamEvent
 from ..tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
-    from ..events import AgentEvent
+    from ..events import AgentEvent, ToolCallResult
     from ..schema import ToolCall
     from ..tools.engine.call_contracts import ToolExecutionOptions, ToolRunContext, ToolStepControl, ToolStepSummary
     from ..tools.engine.contracts import PreparedTools
 
 from .context_types import CompactionInput, CompactionOutcome
+from .execution_lifecycle import ExecutionAction
 
 
 @runtime_checkable
@@ -142,6 +143,7 @@ class SessionStorePort(Protocol):
         *,
         turn: int,
         step: int,
+        tool_result_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def flush(self) -> None: ...
@@ -374,6 +376,13 @@ class ContextEnginePort(Protocol):
     Prepared results may supply ``on_committed`` for logged request delivery
     and ``on_response`` for a nonempty response without stale/truncation flags.
     Both callbacks are optional; the Kernel does not interpret their state.
+
+    Contexts may implement ``prepare_tool_batch`` with the same arguments and
+    result as ``prepare_request`` to bind a fresh cumulative tool-read budget.
+    It must discard unsent request-only projections, retain supplied overlays
+    and transient reservations, and neither project nor acknowledge provider
+    delivery. Older contexts fall back to request preparation without invoking
+    its delivery callbacks.
     """
 
     def configure_run(self, *, skill_engine: SkillEnginePort | None = None,
@@ -404,6 +413,22 @@ class CompactEnginePort(Protocol):
     async def compact_if_needed(self, inputs: "CompactionInput") -> "CompactionOutcome": ...
 
 
+@runtime_checkable
+class RunLifecyclePort(Protocol):
+    """Domain-owned facts and admission; runtime calls use the normal ToolEngine."""
+
+    async def begin_run(self, *, messages: list[Message], current_turn_text: str | None,
+                        llm: LLMPort, thinking_enabled: bool,
+                        is_cancelled: Callable[[], bool]) -> None: ...
+    async def before_step(self, messages: list[Message]) -> "ExecutionAction | None": ...
+    async def before_finish(self, content: str) -> "ExecutionAction | None": ...
+    def context_messages(self) -> tuple[Message, ...]: ...
+    def before_calls(self, calls: tuple[ToolCall, ...]) -> None: ...
+    def tool_call_error(self, name: str, args: dict[str, Any]) -> str | None: ...
+    def observe_tool_result(self, event: "ToolCallResult") -> None: ...
+    def after_compaction(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class KernelServices:
     """Resolved per-run capabilities consumed directly by the kernel."""
@@ -425,6 +450,7 @@ class KernelServices:
     skill_engine: SkillEnginePort | None = None
     context_engine: ContextEnginePort | None = None
     compact_engine: CompactEnginePort | None = None
+    run_lifecycle: RunLifecyclePort | None = None
 
 
 __all__ = [
@@ -435,6 +461,7 @@ __all__ = [
     "HookBusPort",
     "HookDispatchPort",
     "KernelServices",
+    "RunLifecyclePort",
     "LLMPort",
     "MemoryExtractionPort",
     "MemoryLookupPort",

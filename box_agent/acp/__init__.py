@@ -756,6 +756,55 @@ def _latest_user_request_for_plan_detection(prompt_text: str) -> str:
     return text
 
 
+def _user_request_for_skill_selection(prompt_text: str) -> str:
+    """Unwrap only a recognizable outer request, preserving labels in its body.
+
+    Host sections and user examples share a plain-text channel. Unknown or
+    ambiguous context layouts retain the whole text rather than lose a task.
+    This deliberately does not change the legacy Plan/history interpretation.
+    """
+    text = (prompt_text or "").strip()
+    for marker in _USER_QUESTION_MARKERS:
+        if text.startswith(marker):
+            return text[len(marker):].strip()
+
+    if text.startswith("<attachments>") and "</attachments>" in text:
+        tail = text.split("</attachments>", 1)[1].strip()
+        for marker in _USER_QUESTION_MARKERS:
+            if tail.startswith(marker):
+                return tail[len(marker):].strip()
+
+    first_line = text.splitlines()[0].strip() if text else ""
+    history = first_line in _USER_ROLE_LABELS | _ASSISTANT_ROLE_LABELS or text.startswith((
+        "最近对话：", "以下是当前会话最近的上下文，请在此基础上继续回答：",
+    ))
+    if not history and not text.startswith("当前会话已有用户上传文件："):
+        return text
+
+    candidates, sections = [], []
+    offset, previous_blank = 0, False
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        for marker in _USER_QUESTION_MARKERS:
+            if stripped.startswith(marker):
+                start = offset + len(line) - len(stripped) + len(marker)
+                candidates.append(start)
+                if previous_blank:
+                    sections.append(start)
+                break
+        offset += len(line)
+        previous_blank = not line.strip()
+    # OfficeV3 joins outer sections with a blank line. Once that boundary is
+    # found, keep the entire user body, including its own question/answer lines.
+    if len(sections) == 1:
+        return text[sections[0]:].strip()
+    if not sections and len(candidates) == 1:
+        return text[candidates[0]:].strip()  # Legacy history without blank separators.
+    if not candidates and history and not any(marker in text for marker in _USER_QUESTION_MARKERS):
+        return _latest_user_request_for_plan_detection(text)
+    return text
+
+
 def _user_source_text_for_binding(prompt_text: str) -> str:
     """Recover only real user-authored text from an officev3 history wrapper.
 
@@ -2316,6 +2365,7 @@ class BoxACPAgent:
         state.cancelled = False
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
         plan_detection_text = _latest_user_request_for_plan_detection(user_text)
+        skill_selection_text = _user_request_for_skill_selection(user_text)
         source_binding_text = (
             _user_source_text_for_binding(user_text)
             if not state.source_text.strip()
@@ -2348,8 +2398,8 @@ class BoxACPAgent:
                 "[/HOST_USER_DECISION_RESPONSE]\n\n"
                 f"{user_text}"
             )
-        # Host-only language guidance must not influence semantic skill routing.
-        skill_selection_text = user_text
+        # Host decisions, language guidance and connector status stay in the
+        # model prompt, but not the Skill search text captured above.
         ui_language = _meta_string(prompt_meta, "ui_language", "uiLanguage").lower()
         if ui_language in {"en", "ja", "zh"}:
             display_language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[ui_language]

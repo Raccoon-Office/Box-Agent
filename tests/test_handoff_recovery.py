@@ -113,7 +113,9 @@ class ScriptedProvider:
         self.scripts = scripts
         self.requests = []
 
-    async def generate(self, **kwargs):
+    async def generate(self, messages, **kwargs):
+        if kwargs.get('call_kind') == 'turn_continuation_judge':
+            return LLMResponse(content='{"continue":false}', finish_reason='stop')
         return LLMResponse(content='<summary>Earlier task.</summary>', finish_reason='stop')
 
     async def generate_stream(self, messages, **kwargs):

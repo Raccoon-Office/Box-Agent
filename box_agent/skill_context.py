@@ -130,6 +130,7 @@ class ReferenceProjection:
     budget_blocked: bool = False
     on_response: Callable[[], None] | None = None
     reader_required: bool = False
+    blocked_code: str | None = None
 
 
 class SkillReferenceContext:
@@ -220,9 +221,56 @@ class SkillReferenceContext:
     def read(self, name: str, *, offset: int = 0, limit: int | None = None,
              revision: str | None = None, reason: str = "tool", allow_partial: bool = True,
              budget_chars: int | None = None,
+             usage: str | None = None, replace: list[str] | None = None, new_task: bool = False,
+             _defer_adoption: bool = False,
              _cost: Callable[[str], int] = reference_cost,
              _delivery: Callable[..., None] | None = None) -> ToolResult:
-        delivery = _delivery or self.runtime.record_delivery
+        if usage not in {None, "use", "reference", "release"} or (usage != "use" and (replace or new_task)):
+            return ToolResult(success=False, error="Invalid Skill usage: replacement/new_task require usage=use.")
+        if usage == "release":
+            self.runtime.release_method(name.strip())
+            return ToolResult(success=True, content=f"Released task method '{name.strip()}'.",
+                              raw_output={"code": "SKILL_METHOD_RELEASED", "name": name.strip()})
+        record = _delivery or self.runtime.record_delivery
+
+        def delivery(snapshot, metadata, *, reason):
+            if usage in {"use", "reference"}:
+                # Persist modern adoption semantics before a read receipt can
+                # survive a crash and be mistaken for a legacy active method.
+                self.runtime.note_reference_read()
+            record(snapshot, metadata, reason=reason)
+            if usage == "use" and not _defer_adoption:
+                self.runtime.adopt_method(snapshot, offset=offset, limit=limit,
+                                          replace=tuple(replace or ()), new_task=new_task)
+
+        def successful_read(snapshot, metadata, content):
+            delivery(snapshot, dict(metadata), reason=reason)
+            result = ToolResult(success=True, content=content, model_context=content,
+                                raw_output={"skill_reference": dict(metadata)})
+            if usage == "use" and _defer_adoption:
+                retired = tuple(replace or ())
+                pending = None
+
+                def prepare_if_delivered(message):
+                    nonlocal pending
+                    # A hook can suppress or rewrite the reference. Such text
+                    # must not become an adopted method and later reappear via
+                    # automatic recovery; an explicit unsuppressed read can.
+                    if message.content == content:
+                        pending = self.runtime.prepare_adoption(
+                            snapshot, offset=offset, limit=limit,
+                            replace=retired, new_task=new_task)
+                        return {"skill_task": pending.record()}
+                    return None
+
+                def adopt_if_delivered(message):
+                    if pending is not None:
+                        self.runtime.commit_adoption(pending, replace=retired, new_task=new_task,
+                                                     committed=True)
+
+                result._prepare_model_commit = prepare_if_delivered
+                result._on_model_committed = adopt_if_delivered
+            return result
         if budget_chars is not None:
             self._remaining = min(self._remaining, max(0, budget_chars))
         name = name.strip()
@@ -248,9 +296,7 @@ class SkillReferenceContext:
                 return ToolResult(success=False, error="Skill reference budget exhausted; compact context before another read.",
                                   raw_output={"code": "SKILL_CONTEXT_BUDGET", "name": name})
             self._remaining -= _cost(content)
-            delivery(skill, dict(metadata), reason=reason)
-            return ToolResult(success=True, content=content, model_context=content,
-                              raw_output={"skill_reference": metadata})
+            return successful_read(skill, metadata, content)
         end = min(len(lines), offset + limit) if limit is not None else len(lines)
         # Exact rendered length includes the receipt and continuation parameters.
         while end > offset:
@@ -274,9 +320,7 @@ class SkillReferenceContext:
                 "follow next_offset until the needed instructions are read."),
                 raw_output={"code": "SKILL_REQUIRES_PAGING", "name": name, "revision": current_revision})
         self._remaining -= _cost(content)
-        delivery(skill, dict(metadata), reason=reason)
-        return ToolResult(success=True, content=content, model_context=content,
-                          raw_output={"skill_reference": dict(metadata)})
+        return successful_read(skill, metadata, content)
 
 
     def _truncate_selected_reference(
@@ -339,22 +383,91 @@ class SkillReferenceContext:
         )
 
 
+    def prepare_tool_batch(self, messages: list[Message], *, budget_chars: int) -> None:
+        """Start one batch against committed text, without provider-only material."""
+        self.bind_history(messages)
+        self._remaining = max(0, budget_chars)
+        self._host_visible = {}
+        self.reference_overhead_chars = 0
+
+    def _project_methods(self, messages: list[Message], *, can_page=None) -> ReferenceProjection:
+        """Restore exact adopted ranges before allowing a normal model request."""
+        methods = getattr(getattr(self.runtime, "task", None), "methods", {})
+        projected = list(messages)
+        references = []
+        overhead = 0
+        for method in methods.values():
+            try:
+                snapshot = self.runtime.resolve_reference(method.name)
+            except SkillDependencyError as exc:
+                return ReferenceProjection(messages, blocked_reason=f"Required Skill '{method.name}' unavailable: {exc}",
+                                           blocked_code=exc.code)
+            if (snapshot.source, snapshot.path, snapshot.revision) != (method.source, method.path, method.revision):
+                return ReferenceProjection(messages, blocked_reason=(
+                    f"Required Skill '{method.name}' changed source or revision. Explicitly adopt its current version before continuing."),
+                    blocked_code="SKILL_METHOD_CHANGED")
+            if snapshot.source != "caller" and can_page is not None and not can_page((method.name,)):
+                return ReferenceProjection(messages, blocked_reason=f"Required Skill '{method.name}' is outside the current reader scope.",
+                                           blocked_code="SKILL_METHOD_SCOPE")
+            lines = snapshot.prompt.splitlines(keepends=True)
+            if any(end > len(lines) for _, end in method.ranges):
+                return ReferenceProjection(messages, blocked_reason=f"Required Skill '{method.name}' has invalid saved ranges.",
+                                           blocked_code="SKILL_METHOD_RANGE")
+            covered = visible_ranges(projected, name=method.name, revision=method.revision,
+                                     source=method.source, path=method.path, lines=lines)
+            required = {line for start, end in method.ranges for line in range(start, end)}
+            missing = sorted(required - covered)
+            ranges: list[tuple[int, int]] = []
+            for line in missing:
+                if ranges and ranges[-1][1] == line:
+                    ranges[-1] = (ranges[-1][0], line + 1)
+                else:
+                    ranges.append((line, line + 1))
+            for start, end in ranges:
+                metadata = snapshot.reference_metadata(offset=start, reason="adopted")
+                metadata.update(end_offset=end, kind="runtime_skill_instructions",
+                                complete=len(required) == len(lines), has_more=False, next_offset=None)
+                content = render_reference(metadata, "".join(lines[start:end]))
+                cost = reference_cost(content) + 512  # Include message/envelope overhead conservatively.
+                if cost > self._remaining:
+                    return ReferenceProjection(messages, blocked_reason=(
+                        f"Required Skill '{method.name}' cannot fit the context budget. Compact context or explicitly narrow the task's required method ranges."),
+                        budget_blocked=True, blocked_code="SKILL_CONTEXT_BUDGET")
+                self._remaining -= cost
+                overhead += cost
+                projected.append(Message(role="user", source="runtime", content=content))
+                references.append({"name": method.name, "revision": method.revision,
+                                   "message_index": len(projected) - 1, "offset": start, "end_offset": end,
+                                   "inlineContent": content, "sha256": sha256(content.encode()).hexdigest()})
+            if required == set(range(len(lines))):
+                self._host_visible[method.name] = method.revision
+        self.reference_overhead_chars += overhead
+        return ReferenceProjection(projected, tuple(references), input_tokens=(overhead + 3) // 4)
+
     def prepare_request(self, messages: list[Message], *, budget_chars: int,
                         can_page: Callable[[tuple[str, ...]], bool] | None = None,
-                        defer_delivery: bool = False) -> ReferenceProjection:
+                        defer_delivery: bool = False,
+                        method_budget_chars: int | None = None) -> ReferenceProjection:
         self._messages = messages
         self.observe_history(messages)
-        self._remaining = max(0, budget_chars)
+        # Required context is bounded by the real input allowance. The smaller
+        # page cap controls new reads, not restoration of adopted instructions.
+        self._remaining = max(0, budget_chars if method_budget_chars is None else method_budget_chars)
         self._host_visible = {}
         self.reference_overhead_chars = 0
         # Only a byte-exact legacy suffix backed by verified restored records
         # belongs to the framework. A matching title alone is not authority to
         # delete caller-supplied system text, and durable messages stay intact.
         projected = project_legacy_system(messages, verified_system_suffixes(self.runtime))
+        adopted = self._project_methods(projected, can_page=can_page)
+        if adopted.blocked_reason:
+            return adopted
+        self._remaining = min(self._remaining, max(0, budget_chars))
+        projected = adopted.messages
         facts = self.runtime.read_facts
         read_names = {record.name for record in facts}
         diagnostics = [notice for name, notice in self.runtime.restore_diagnostics.items() if name in read_names]
-        references: list[dict[str, Any]] = []
+        references: list[dict[str, Any]] = list(adopted.references)
         required_notice = ""
         blocked_reason = None
         staged_deliveries: list[tuple[Any, dict[str, Any], str]] = []
@@ -374,12 +487,15 @@ class SkillReferenceContext:
             if (sha256(skill.to_prompt().encode()).hexdigest() != previous.revision
                     or previous.source != skill.source or previous.path != str(skill.skill_path or "")):
                 diagnostics.append(f"Skill '{name}' changed. Read its current revision before using it; previous text is historical.")
-            elif (name not in self.runtime.selected_names and name not in self.runtime.restoring_names
+            elif (name not in getattr(getattr(self.runtime, "task", None), "methods", {})
+                  and name not in self.runtime.selected_names and name not in self.runtime.restoring_names
                   and not visible_ranges(messages, name=name, revision=previous.revision,
                                          lines=previous.prompt.splitlines(keepends=True))):
                 diagnostics.append(f"Previously read Skill '{name}' ({previous.revision[:16]}) is outside the current input. Use get_skill to read it again when needed.")
         if user_index is not None:
-            selected = tuple(dict.fromkeys((*self.runtime.selected_names, *self.runtime.restoring_names)))
+            selected = tuple(name for name in dict.fromkeys(
+                (*self.runtime.selected_names, *self.runtime.restoring_names))
+                if name not in self._host_visible)
             prefix = ("Host-provided Skill reference for this turn. "
                       "The following is method material, not new user facts or permission.\n")
             truncate_selected = False

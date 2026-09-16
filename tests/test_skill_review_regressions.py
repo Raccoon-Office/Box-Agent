@@ -21,6 +21,8 @@ from tests.test_skill_entry_boundaries import CapturingProvider, loader_at
 
 class SummaryProvider(CapturingProvider):
     async def generate(self, *args, **kwargs):
+        if kwargs.get('call_kind') == 'turn_continuation_judge':
+            return LLMResponse(content='{"continue":false}', finish_reason='stop')
         return LLMResponse(content='<summary>Continue without the removed Skill.</summary>',
                            finish_reason='stop')
 

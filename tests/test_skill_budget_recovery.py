@@ -183,8 +183,18 @@ def crowded_history(runtime, *, prior_read=False):
 async def test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts(runtime, monkeypatch):
     history = crowded_history(runtime, prior_read=True)
     runtime.select(["demo"])
-    tool = GetSkillTool(runtime.loader)
-    limit = _fallback_context_estimate(history, {tool.name:tool}) + 100
+    class CompactReader(GetSkillTool):
+        # Keep this fixture in the projection-only overflow regime even as
+        # the public Skill adoption protocol adds schema/documentation cost.
+        description = "Read a Skill."
+        parameters = {"type": "object", "properties": {"skill_name": {"type": "string"}},
+                      "required": ["skill_name"]}
+
+    tool = CompactReader(runtime.loader)
+    limit = _fallback_context_estimate(history, {tool.name: tool}) + 100
+    from box_agent.kernel.context_engine import _SUMMARY_REQUEST
+    assert _fallback_context_estimate(
+        [*history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)], None) > limit
     provider = Provider()
     hook = StepHook()
     projections = []

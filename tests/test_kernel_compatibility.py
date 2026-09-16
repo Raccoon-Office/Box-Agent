@@ -85,6 +85,7 @@ SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
         "session_log",
         "tool_exposure_manager",
         "tool_result_storage",
+        "run_lifecycle",
     }
 )
 
@@ -187,6 +188,7 @@ LOOP_SIGNATURE = (
     ("session_turn", inspect.Parameter.KEYWORD_ONLY, None),
     ("kernel_services", inspect.Parameter.KEYWORD_ONLY, None),
     ("run_control", inspect.Parameter.KEYWORD_ONLY, None),
+    ("run_lifecycle", inspect.Parameter.KEYWORD_ONLY, None),
 )
 
 INVOKE_TOOL_SIGNATURE = (
@@ -331,6 +333,7 @@ def test_kernel_exports_agent_loop_implementation_entrypoints() -> None:
         "session_turn",
             "kernel_services",
             "run_control",
+            "run_lifecycle",
         )
     kernel_services = inspect.signature(kernel.run_agent_loop).parameters["_services"]
     assert kernel_services.kind is inspect.Parameter.KEYWORD_ONLY

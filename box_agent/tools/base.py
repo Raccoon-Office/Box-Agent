@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from .schema_validation import (
     ToolArgumentIssue,
@@ -18,6 +18,11 @@ from .schema_validation import (
 
 class ToolResult(BaseModel):
     """Tool execution result."""
+
+    # Capability-owned bookkeeping may depend on the final stored model text,
+    # after hooks and result processing. This callback never crosses the wire.
+    _on_model_committed: Callable[[Any], None] | None = PrivateAttr(default=None)
+    _prepare_model_commit: Callable[[Any], dict[str, Any] | None] | None = PrivateAttr(default=None)
 
     success: bool
     content: str = ""

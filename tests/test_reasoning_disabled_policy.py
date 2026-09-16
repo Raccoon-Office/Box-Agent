@@ -166,6 +166,17 @@ async def test_utility_image_web_and_continuation_judge_share_provider_policy(tm
 
 
 @pytest.mark.asyncio
+async def test_rejected_judge_request_is_not_a_completed_verdict():
+    from box_agent.turn_continuation import TurnContinuationError, model_says_continue
+
+    async with wire_client(policy="low", reject=True) as (client, requests):
+        with pytest.raises(TurnContinuationError, match="completion check failed"):
+            await model_says_continue(client, user_request="Do the task", candidate_response="Completed")
+        assert len(requests) == 1
+        assert requests[0]["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["deepseek-v4", "qwen-test", "gpt-4.1", "gemini-2.5-pro", "glm-5.3"])
 async def test_disabled_override_preserves_other_provider_dialects(model):
     async with wire_client(policy=None, model=model) as (before, before_requests):

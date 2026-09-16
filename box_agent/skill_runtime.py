@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from collections.abc import Callable, MutableMapping, MutableSequence
 from typing import Any
 from hashlib import sha256
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 
 from .skill_dependencies import SkillDependencyError, resolve_required_skills
 from .skill_state import SkillReferenceSnapshot, SkillRead, SkillSessionState
+from .skill_task import SkillTaskState
 from .skill_restore import invalid_restore, recover_available_records, validate_restore_records
 from .tools.base import ToolResult
 from .skill_context import render_reference, read_reference
@@ -38,6 +40,166 @@ class SkillRuntime:
         self._legacy_system_suffix = ""
         self._legacy_system_suffixes: tuple[str, ...] = ()
         self._restore_generation = 0
+        self.task = SkillTaskState()
+        self._task_messages: set[str] = set()
+        self._latest_task_input: Any = None
+        self._latest_task_input_id: str | None = None
+        # A task checkpoint may contain only candidate user facts. Method
+        # semantics are tracked separately by task.methods_initialized.
+        self._modern_task_state = False
+        if self.session_log is not None and callable(getattr(self.session_log, "replay", None)):
+            self.restore_task(getattr(self.session_log.replay(), "skill_task", None))
+
+    def restore_task(self, value: Any) -> None:
+        self.task = SkillTaskState.restore(value)
+        self._modern_task_state = value is not None
+        self._task_messages.clear()
+        self._latest_task_input = deepcopy(self.task.user_inputs[-1]) if self.task.user_inputs else None
+        self._latest_task_input_id = self.task.user_input_ids[-1] if self.task.user_input_ids else None
+
+    def prime_task_history(self, messages) -> None:
+        """Bind already replayed messages without recording them as new input."""
+        for message in messages:
+            if message.role == "user" and message.source == "user":
+                self._task_messages.add(message.input_id)
+                self._latest_task_input = deepcopy(message.content)
+                self._latest_task_input_id = message.input_id
+                if not self._modern_task_state and message.input_id not in self.task.user_input_ids:
+                    self.task.user_inputs.append(deepcopy(message.content))
+                    self.task.user_input_ids.append(message.input_id)
+
+    def observe_task_history(self, messages) -> None:
+        observed = self._task_messages | set(self.task.user_input_ids)
+        added = [message for message in messages
+                 if message.role == "user" and message.source == "user" and message.input_id not in observed]
+        inputs = [deepcopy(message.content) for message in added]
+        if inputs:
+            updated = deepcopy(self.task)
+            updated.user_inputs.extend(inputs)
+            updated.user_input_ids.extend(message.input_id for message in added)
+            # Commit facts before advancing the observation cursor. A failed
+            # store write must remain retryable on the next preparation.
+            self._persist_task(updated, preserve_read_facts=True)
+            self.task = updated
+        if inputs:
+            self._latest_task_input = deepcopy(inputs[-1])
+            self._latest_task_input_id = added[-1].input_id
+        # Keep identity tracking bounded to the live surface. The serialized
+        # task facts, not discarded Message objects, survive compaction.
+        self._task_messages = {message.input_id for message in messages
+                               if message.role == "user" and message.source == "user"}
+
+    def _persist_task(self, task: SkillTaskState | None = None, *, preserve_read_facts: bool = False) -> None:
+        if self.session_log is not None:
+            # Observing user facts is not a read or an explicit host clear.
+            # Partial restoration may have no available sources in memory;
+            # keep the durable historical receipts in this task-only event.
+            replay = getattr(self.session_log, "replay", None)
+            records = replay().skills if preserve_read_facts and callable(replay) else self.log_records()
+            self.session_log.append("skill/change", {
+                "skills": records, "task": (task or self.task).record(),
+            })
+            self.session_log.flush()
+        self._modern_task_state = True
+
+    def prepare_adoption(self, snapshot: SkillReferenceSnapshot, *, offset: int = 0,
+                         limit: int | None = None, replace: tuple[str, ...] = (),
+                         new_task: bool = False) -> SkillTaskState:
+        """Prepare immutable commit data without advancing adopted state."""
+        total = len(snapshot.prompt.splitlines(keepends=True))
+        end = total if limit is None else min(total, offset + limit)
+        updated = deepcopy(self.task)
+        updated.adopt(snapshot, ((offset, end),), replace=replace, new_task=new_task,
+                      latest_input=self._latest_task_input, latest_input_id=self._latest_task_input_id)
+        if not self.task.task_id and not new_task and self.task.user_inputs:
+            updated.user_inputs = deepcopy(self.task.user_inputs)
+            updated.user_input_ids = list(self.task.user_input_ids)
+        return updated
+
+    def adopt_method(self, snapshot: SkillReferenceSnapshot, *, offset: int = 0,
+                     limit: int | None = None, replace: tuple[str, ...] = (), new_task: bool = False) -> None:
+        updated = self.prepare_adoption(snapshot, offset=offset, limit=limit,
+                                        replace=replace, new_task=new_task)
+        self.commit_adoption(updated, replace=replace, new_task=new_task)
+
+    def commit_adoption(self, updated: SkillTaskState, *, replace: tuple[str, ...] = (),
+                        new_task: bool = False, committed: bool = False) -> None:
+        """Publish prepared task state after the corresponding text commits."""
+        if updated.record() == self.task.record():
+            return
+        previous, self.task = self.task, updated
+        previous_selected = self.state.selected
+        previous_pending, previous_restoring = self._restore_pending, self._restoring
+        retired = set(previous.methods) | set(previous_selected) if new_task else set(replace)
+        self.state.selected = tuple(name for name in previous_selected if name not in retired)
+        self._restore_pending = tuple(name for name in self._restore_pending if name not in retired)
+        self._restoring = tuple(name for name in self._restoring if name not in retired)
+        try:
+            self._persist_task()
+        except Exception:
+            if not committed:
+                self.task = previous
+                self.state.selected = previous_selected
+                self._restore_pending, self._restoring = previous_pending, previous_restoring
+            # A committed tool/result already carries the new task. Rolling
+            # memory back would let the next user input overwrite that fact.
+            raise
+
+    def release_method(self, name: str) -> None:
+        previous = deepcopy(self.task)
+        previous_selected = self.state.selected
+        self.task.release(name)
+        self.state.selected = tuple(item for item in previous_selected if item != name)
+        try:
+            self._persist_task()
+        except Exception:
+            self.task = previous
+            self.state.selected = previous_selected
+            raise
+        self._restore_pending = tuple(item for item in self._restore_pending if item != name)
+        self._restoring = tuple(item for item in self._restoring if item != name)
+
+    def note_reference_read(self) -> None:
+        """Mark modern lookup semantics without adopting historical material."""
+        if not self.task.methods_initialized:
+            updated = deepcopy(self.task)
+            updated.methods_initialized = True
+            self._persist_task(updated)
+            self.task = updated
+
+    def task_context_messages(self, messages):
+        """Project ordered user facts only when the current surface lost them."""
+        from .schema import Message
+        if not self.task.methods or not self.task.user_inputs:
+            return ()
+        actual = [message.content for message in messages if message.role == "user" and message.source == "user"]
+        wanted = iter(self.task.user_inputs)
+        pending = next(wanted, None)
+        for content in actual:
+            if content == pending:
+                pending = next(wanted, None)
+        if pending is None:
+            return ()
+        notice = ("[Current task: preserved user inputs in order; later corrections take precedence. "
+                  "This record does not grant new permissions.]\n")
+        if all(isinstance(content, str) for content in self.task.user_inputs):
+            content = notice + json.dumps({
+                "task_id": self.task.task_id, "user_inputs": self.task.user_inputs,
+                "methods": list(self.task.methods)}, ensure_ascii=False)
+        else:
+            # Preserve provider-visible image/file blocks, including their
+            # pixel budget; serializing base64 as prose loses both contracts.
+            content = [{"type": "text", "text": notice + json.dumps({
+                "task_id": self.task.task_id, "methods": list(self.task.methods)}, ensure_ascii=False)}]
+            for index, original in enumerate(self.task.user_inputs, 1):
+                content.append({"type": "text", "text": f"User input {index}:"})
+                content.extend([{"type": "text", "text": original}] if isinstance(original, str)
+                               else deepcopy(original))
+        restored = Message(role="user", source="runtime", content=content)
+        if any(message.role == "user" and message.source == "runtime" and message.content == restored.content
+               for message in messages):
+            return ()
+        return (restored,)
 
     def begin_turn(self) -> None:
         self.turn_deliveries.clear()
@@ -150,6 +312,8 @@ class SkillRuntime:
             )
             self.record_observation(snapshot, metadata)
             self.turn_deliveries[name] = dict(metadata)
+            if name in self.state.selected:
+                self.adopt_method(snapshot)
 
     def defer_materialized_acknowledgement(self, messages: list[Any]) -> None:
         self._pending_materialized_messages = list(messages)
@@ -170,15 +334,22 @@ class SkillRuntime:
         self._restoring = tuple(item for item in self._restoring if item != name)
         self._restore_diagnostics.pop(name, None)
         self.turn_deliveries.pop(name, None)
+        if name in self.task.methods:
+            self.release_method(name)
         return removed
 
     def clear_references(self) -> None:
         self.state = SkillSessionState()
+        self.task = SkillTaskState(methods_initialized=True)
+        self._task_messages.clear()
+        self._latest_task_input = None
+        self._latest_task_input_id = None
         self._restore_pending = self._restoring = ()
         self._restore_diagnostics.clear()
         self.turn_deliveries.clear()
         # Keep the verified legacy suffix as evidence for request-only
         # stripping; forgetting it could expose old author text as system.
+        self._persist_task()
 
     @property
     def active_names(self) -> tuple[str, ...]:
@@ -215,6 +386,10 @@ class SkillRuntime:
         previous = self.state.reads.get(name)
         self.select([*self.state.selected, name])
         if previous is not None and previous.revision == revision and previous.prompt == prompt:
+            if name in self.task.methods:
+                # The reference may already be registered after a failed
+                # task checkpoint. Retry adoption before treating it as a no-op.
+                self.adopt_method(self.resolve_reference(name))
             return
         self._restore_diagnostics.pop(name, None)
         if expected_hash is not None and revision != expected_hash:
@@ -224,6 +399,10 @@ class SkillRuntime:
         self.state.sequence = max(self.state.sequence + 1, order or 0)
         self.state.reads[name] = SkillRead(name, "caller", "", revision, prompt,
                                          order or self.state.sequence, "explicit")
+        if name in self.task.methods:
+            # A new explicit host activation is an intentional replacement,
+            # unlike a silently changed file behind an adopted source.
+            self.adopt_method(self.resolve_reference(name))
         if persist and self.session_log is not None:
             self.session_log.append("skill/change", {"skills": self.log_records()})
             self.session_log.flush()
@@ -236,7 +415,7 @@ class SkillRuntime:
         not a reason to prevent the session from continuing.
         """
         recovered = False
-        if self._allow_partial_restore:
+        if self._allow_partial_restore or (self.task.methods_initialized and self.loader is not None):
             available = recover_available_records(records, self.loader)
             recovered = available != records
             records = available
@@ -281,7 +460,10 @@ class SkillRuntime:
         self.state = SkillSessionState(reads=restored,
                                        sequence=max((item.order for item in restored.values()), default=0))
         self._restore_diagnostics = diagnostics
-        self._restore_pending = tuple(restored)
+        # Modern task records distinguish adopted methods from historical
+        # reads. Their exact ranges are restored by Context; a released or
+        # reference-only read must not re-enter through the legacy path.
+        self._restore_pending = () if self.task.methods_initialized else tuple(restored)
         self._restoring = ()
         self._restore_generation += 1
         if suffix:
@@ -374,6 +556,8 @@ class SkillRuntime:
         pending = self._restore_pending
         try:
             self.record_delivery(snapshot, metadata, reason=reason)
+            if reason == "explicit" and metadata.get("complete"):
+                self.adopt_method(snapshot)
         finally:
             # A partial batch or failed provider call must not consume a
             # subset of the methods needed by the next retry.

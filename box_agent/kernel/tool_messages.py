@@ -30,6 +30,7 @@ class ToolMessageCommitter:
         self.session_log.append("tool/call", {
             "turn": self.turn, "step": step, "callId": call.call_id,
             "name": call.name, "arguments": call.arguments,
+            **({"origin": "runtime"} if call.origin == "runtime" else {}),
         })
         if call.parallel:
             self._parallel_calls_pending = True
@@ -53,6 +54,9 @@ class ToolMessageCommitter:
                 "success": event.success, "content": event.content,
                 "error": event.error, "rawOutput": event.raw_output,
                 "policyDecision": event.policy_decision,
+                **({"stateUpdates": message._commit_state_updates}
+                   if message._commit_state_updates is not None else {}),
+                **({"origin": "runtime"} if event.origin == "runtime" else {}),
             }},
         )
 

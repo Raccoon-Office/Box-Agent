@@ -246,6 +246,8 @@ class _CaptureStreamLLM:
         self.instances.append(self)
 
     async def generate(self, *args, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue": false}', finish_reason="stop")
         return LLMResponse(content="ok", finish_reason="stop")
 
     async def generate_stream(self, *, messages, **kwargs):

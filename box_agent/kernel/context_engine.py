@@ -859,7 +859,7 @@ def request_input_tokens(messages: list[Message], tools: Any) -> int:
 
 
 def skill_reference_budget_chars(messages: list[Message], tools: Any, token_limit: int,
-                                 output_tokens: int = 0) -> int:
+                                 output_tokens: int = 0, *, char_limit: int | None = 50_000) -> int:
     """Allocate from the safe *input* limit; model output was already reserved.
 
     ``output_tokens`` remains accepted for caller compatibility. The fixed
@@ -867,4 +867,4 @@ def skill_reference_budget_chars(messages: list[Message], tools: Any, token_limi
     """
     estimated = request_input_tokens(messages, tools)
     spare_tokens = max(0, token_limit - estimated - REQUEST_INPUT_HEADROOM_TOKENS)
-    return min(50_000, spare_tokens * 4)
+    return spare_tokens * 4 if char_limit is None else min(char_limit, spare_tokens * 4)

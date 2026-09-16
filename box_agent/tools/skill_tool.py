@@ -48,6 +48,10 @@ class GetSkillTool(Tool):
             "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
             "when paged. Read required_skills before their steps; related_skills are optional. "
             "Skill guidance does not grant tools or permission. Use list_skills for names and availability. "
+            "A normal read adopts this method for the current task and restores its required text after compaction. "
+            "Use usage=reference for lookup only; replace retires previous methods after a successful read. "
+            "Use usage=release when a method/task is finished. For a different user task, set new_task=true "
+            "on its first method read, before asking clarification: it starts from the latest real user message. "
             + SKILL_USAGE_GUIDANCE
         )
 
@@ -63,6 +67,12 @@ class GetSkillTool(Tool):
                 "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset; omit to read the whole Skill when it fits."},
                 "limit": {"type": "integer", "minimum": 1, "description": "Maximum lines for a bounded page."},
                 "revision": {"type": "string", "description": "Version returned by a previous page; restart if it changed."},
+                "usage": {"type": "string", "enum": ["use", "reference", "release"], "default": "use",
+                          "description": "Adopt as current method, consult only, or release the adopted method."},
+                "replace": {"type": "array", "items": {"type": "string"}, "uniqueItems": True,
+                            "description": "Previously adopted methods to retire only after this read succeeds."},
+                "new_task": {"type": "boolean", "default": False,
+                             "description": "Start from the latest real user message before clarification; never set for a reply or continue."},
             },
             "required": ["skill_name"],
             "additionalProperties": False,
@@ -98,7 +108,8 @@ class GetSkillTool(Tool):
     def _read(self, skill_name: str, *, reader=None, **kwargs: Any) -> ToolResult:
         from ..skill_runtime import SkillRuntime
 
-        denied = self.check_access(skill_name)
+        kwargs.setdefault("usage", "use")
+        denied = self.check_access(skill_name) if kwargs["usage"] != "release" else None
         if denied is not None:
             return denied
         name = skill_name.strip()
@@ -108,12 +119,17 @@ class GetSkillTool(Tool):
         return read(name, **kwargs)
 
     async def execute(self, skill_name: str, offset: int = 0, limit: int | None = None,
-                      revision: str | None = None) -> ToolResult:
-        return self._read(skill_name, offset=offset, limit=limit, revision=revision)
+                      revision: str | None = None, usage: str = "use",
+                      replace: list[str] | None = None, new_task: bool = False) -> ToolResult:
+        return self._read(skill_name, offset=offset, limit=limit, revision=revision,
+                          usage=usage, replace=replace, new_task=new_task)
 
     async def _invoke_validated(self, arguments: dict[str, Any], *,
                                 context: ToolInvocationContext | None) -> ToolResult:
-        return self._read(**arguments, reader=context.skill_reader if context is not None else None)
+        return self._read(
+            **arguments, reader=context.skill_reader if context is not None else None,
+            _defer_adoption=bool(context and context.parent_tool_call_id),
+        )
 
 
 def create_skill_tools(

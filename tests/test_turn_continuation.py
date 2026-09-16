@@ -10,11 +10,15 @@ import pytest
 
 import box_agent.turn_continuation as continuation_module
 from box_agent.core import run_agent_loop
-from box_agent.events import DoneEvent, InjectedMessageEvent, StopReason, ToolCallResult
+from box_agent.events import (
+    DoneEvent, ErrorEvent, InjectedMessageEvent, StepEnd, StepStart, StopReason, ToolCallResult,
+)
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
-from box_agent.turn_continuation import TurnContinuationController, model_says_continue
+from box_agent.turn_continuation import (
+    TurnContinuationController, TurnContinuationError, model_says_continue,
+)
 
 
 class JudgeLLM:
@@ -65,17 +69,20 @@ async def test_judge_passes_candidate_and_request_without_exposing_tools(
 
 
 @pytest.mark.asyncio
-async def test_model_judge_rejects_false_or_invalid_response() -> None:
+async def test_model_judge_accepts_explicit_false() -> None:
     assert not await model_says_continue(
         JudgeLLM('{"continue":false}'),
         user_request="解释答案。",
         candidate_response="答案是 42。",
     )
-    assert not await model_says_continue(
-        JudgeLLM("not json"),
-        user_request="生成文件。",
-        candidate_response="我会生成文件。",
-    )
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["not json", "{}", "[]", '{"continue":"false"}', '{"continue":0}'])
+async def test_invalid_judge_response_is_not_a_completed_verdict(decision) -> None:
+    with pytest.raises(TurnContinuationError, match="completion check failed"):
+        await model_says_continue(
+            JudgeLLM(decision), user_request="生成文件。", candidate_response="我会生成文件。",
+        )
 
 
 @pytest.mark.asyncio
@@ -91,17 +98,17 @@ async def test_judge_rejects_non_text_responses_without_invoking_content_methods
         async def generate(self, *args, **kwargs):
             return SimpleNamespace(content=NonTextContent())
 
-    assert not await model_says_continue(
-        InvalidLLM(), user_request="制作 PPT", candidate_response="请选择用途。",
-    )
+    with pytest.raises(TurnContinuationError, match="completion check failed"):
+        await model_says_continue(
+            InvalidLLM(), user_request="制作 PPT", candidate_response="请选择用途。",
+        )
     assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_controller_requires_tools_budget_and_normal_finish() -> None:
+async def test_controller_requires_tools_and_normal_finish() -> None:
     cases = (
         {"tools_available": False},
-        {"step": 1, "max_steps": 2},
         {"finish_reason": "length"},
         {"cancelled": True},
     )
@@ -142,8 +149,11 @@ async def test_controller_is_bounded_to_two_continuations() -> None:
 
     assert first is not None and first.attempt == 1
     assert second is not None and second.attempt == 2
+    with pytest.raises(TurnContinuationError, match="continuation limit"):
+        await controller.evaluate(llm=JudgeLLM(), user_request="创建文件。", **arguments)
+    # A fresh, valid negative verdict may still finish after two continuations.
     assert await controller.evaluate(
-        llm=JudgeLLM(), user_request="创建文件。", **arguments
+        llm=JudgeLLM('{"continue":false}'), user_request="创建文件。", **arguments
     ) is None
 
 
@@ -279,10 +289,10 @@ class BlockingJudgeLLM(MockLLM):
 async def test_judge_timeout_cancels_provider_request(monkeypatch) -> None:
     monkeypatch.setattr(continuation_module, "JUDGE_TIMEOUT_SECONDS", 0.02)
     llm = BlockingJudgeLLM()
-    result = await asyncio.wait_for(model_says_continue(
-        llm, user_request="制作 PPT", candidate_response="请选择用途。",
-    ), timeout=1)
-    assert result is False
+    with pytest.raises(TurnContinuationError, match="completion check failed"):
+        await asyncio.wait_for(model_says_continue(
+            llm, user_request="制作 PPT", candidate_response="请选择用途。",
+        ), timeout=1)
     assert llm.judge_closed.is_set()
 
 
@@ -507,7 +517,7 @@ async def test_loop_continuation_is_bounded() -> None:
             LLMResponse(content="我会创建文件并运行测试。", finish_reason="stop"),
             LLMResponse(content="我会创建文件并运行测试。", finish_reason="stop"),
         ],
-        judge_decisions=[True, True],
+        judge_decisions=[True, True, True],
     )
     tool = SearchTool()
 
@@ -528,4 +538,131 @@ async def test_loop_continuation_is_bounded() -> None:
         [event for event in events if isinstance(event, InjectedMessageEvent)]
     ) == 2
     done = [event for event in events if isinstance(event, DoneEvent)][-1]
-    assert done.stop_reason is StopReason.END_TURN
+    assert done.stop_reason is StopReason.ERROR
+    assert len(llm.judge_requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["service", "configuration", "invalid_json", "timeout"])
+@pytest.mark.parametrize("max_steps", [1, 4])
+async def test_loop_judge_failure_never_becomes_normal_completion(monkeypatch, failure, max_steps) -> None:
+    monkeypatch.setattr(continuation_module, "JUDGE_TIMEOUT_SECONDS", 0.02)
+    closed = asyncio.Event()
+
+    class FailedJudgeLLM(MockLLM):
+        async def generate(self, messages, **kwargs):
+            self.judge_requests.append(messages)
+            try:
+                if failure == "service":
+                    raise ConnectionError("private provider detail")
+                if failure == "configuration":
+                    raise ValueError("private configuration detail")
+                if failure == "invalid_json":
+                    return LLMResponse(content="invalid", finish_reason="stop")
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+    llm = FailedJudgeLLM([LLMResponse(content="Task completed.", finish_reason="stop")])
+    messages = [Message(role="user", content="Create a report.")]
+    events = await asyncio.wait_for(_collect_events(run_agent_loop(
+        llm=llm, messages=messages, tools={"search_files": SearchTool()}, max_steps=max_steps,
+        truncation_continuation_enabled=False,
+    )), 1)
+    assert llm.calls == len(llm.judge_requests) == 1
+    assert closed.is_set()
+    assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [StopReason.ERROR]
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+    assert len(errors) == 1 and errors[0].is_fatal
+    assert "private" not in errors[0].message
+    assert [event.step for event in events if isinstance(event, StepStart)] == [1]
+    assert [event.step for event in events if isinstance(event, StepEnd)] == [1]
+    assert any(message.role == "assistant" and message.content == "Task completed." for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_steps", [1, 4])
+@pytest.mark.parametrize("interruption", ["cancel", "message"])
+async def test_interruption_wins_over_judge_failure_even_at_step_limit(max_steps, interruption) -> None:
+    cancelled, queue = asyncio.Event(), asyncio.Queue()
+
+    class InterruptedJudgeLLM(MockLLM):
+        async def generate(self, messages, **kwargs):
+            if not self.judge_requests:
+                self.judge_requests.append(messages)
+                if interruption == "cancel":
+                    cancelled.set()
+                else:
+                    queue.put_nowait("New request.")
+                raise ConnectionError("failed together with interruption")
+            return await super().generate(messages, **kwargs)
+
+    llm = InterruptedJudgeLLM([
+        LLMResponse(content="Old answer.", finish_reason="stop"),
+        LLMResponse(content="New answer.", finish_reason="stop"),
+    ])
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="Old request.")],
+        tools={"search_files": SearchTool()}, max_steps=max_steps,
+        is_cancelled=cancelled.is_set, inject_queue=queue,
+    ))
+    expected = (StopReason.CANCELLED if interruption == "cancel" else
+                StopReason.MAX_STEPS if max_steps == 1 else StopReason.END_TURN)
+    assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [expected]
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert [event.step for event in events if isinstance(event, StepStart)] == [
+        event.step for event in events if isinstance(event, StepEnd)
+    ]
+    if interruption == "message" and max_steps > 1:
+        assert any("New request." in message.content for message in llm.stream_requests[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", [True, False])
+async def test_last_step_requires_a_valid_completed_verdict(decision) -> None:
+    llm = MockLLM([LLMResponse(content="Candidate answer.", finish_reason="stop")],
+                  judge_decisions=[decision])
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="Do the task.")],
+        tools={"search_files": SearchTool()}, max_steps=1,
+    ))
+    assert len(llm.judge_requests) == 1
+    assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [
+        StopReason.ERROR if decision else StopReason.END_TURN
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_only_llm_remains_compatible_without_optional_judge() -> None:
+    llm = MockLLM([LLMResponse(content="Completed answer.", finish_reason="stop")])
+    llm.generate = None
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="Do the task.")],
+        tools={"search_files": SearchTool()}, max_steps=1,
+    ))
+    assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [StopReason.END_TURN]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_verdict_after_two_continuations_is_still_checked(failed) -> None:
+    class FinalJudgeLLM(MockLLM):
+        async def generate(self, messages, **kwargs):
+            if failed and len(self.judge_requests) == 2:
+                self.judge_requests.append(messages)
+                raise ConnectionError("third verdict failed")
+            return await super().generate(messages, **kwargs)
+
+    llm = FinalJudgeLLM([
+        LLMResponse(content="I will act now.", finish_reason="stop"),
+        LLMResponse(content="I will act now.", finish_reason="stop"),
+        LLMResponse(content="Final result.", finish_reason="stop"),
+    ], judge_decisions=[True, True, False])
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="Do the task.")],
+        tools={"search_files": SearchTool()}, max_steps=5,
+    ))
+    assert llm.calls == len(llm.judge_requests) == 3
+    assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [
+        StopReason.ERROR if failed else StopReason.END_TURN
+    ]

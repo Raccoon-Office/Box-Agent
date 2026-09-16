@@ -24,7 +24,9 @@ class _RecordingConn:
 
 
 class _FollowUpLLM:
-    async def generate(self, messages, tools=None):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         return LLMResponse(content="完成。", finish_reason="stop")
 
     async def generate_stream(self, messages, tools=None, **_):

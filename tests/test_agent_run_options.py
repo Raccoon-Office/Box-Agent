@@ -11,7 +11,7 @@ from box_agent.agent import Agent, AgentRunOptions
 from box_agent.config import ToolLimitsConfig
 from box_agent.context_resources import ResourceClass, ResourceDescriptor
 from box_agent.events import ContentEvent, DoneEvent, StopReason, SummarizationEvent
-from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.skill_runtime import SkillRuntime
 
@@ -218,7 +218,9 @@ class _OrderedEventsLLM:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def generate(self, **_kwargs):
+    async def generate(self, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") == "turn_continuation_judge":
+            return LLMResponse(content='{"continue":false}', finish_reason="stop")
         raise AssertionError("this fixture must not need context summarization")
 
     async def generate_stream(self, **_kwargs):

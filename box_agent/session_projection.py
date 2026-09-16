@@ -28,6 +28,7 @@ class SessionProjection:
     _plan: dict[str, Any] | None
     _todos: tuple[dict[str, Any], ...]
     _skills: tuple[dict[str, Any], ...]
+    _skill_task: dict[str, Any] | None
 
     def __init__(
         self,
@@ -36,12 +37,14 @@ class SessionProjection:
         plan: dict[str, Any] | None,
         todos: Sequence[dict[str, Any]],
         skills: Sequence[dict[str, Any]],
+        skill_task: dict[str, Any] | None = None,
     ) -> None:
         object.__setattr__(self, "_messages", deepcopy(tuple(messages)))
         object.__setattr__(self, "_goal", deepcopy(goal))
         object.__setattr__(self, "_plan", deepcopy(plan))
         object.__setattr__(self, "_todos", deepcopy(tuple(todos)))
         object.__setattr__(self, "_skills", deepcopy(tuple(skills)))
+        object.__setattr__(self, "_skill_task", deepcopy(skill_task))
 
     @property
     def messages(self) -> list[Message]:
@@ -62,6 +65,10 @@ class SessionProjection:
     @property
     def skills(self) -> list[dict[str, Any]]:
         return deepcopy(list(self._skills))
+
+    @property
+    def skill_task(self) -> dict[str, Any] | None:
+        return deepcopy(self._skill_task)
 
 
 __all__ = ["SessionProjection"]

@@ -458,7 +458,7 @@ def test_default_capability_schema_covers_kernel_services_in_field_order() -> No
 
     from box_agent.kernel.ports import ToolEnginePort, HookDispatchPort
     from box_agent.plugins.hooks import HookProviderPort
-    from box_agent.kernel.ports import ContextEnginePort, SkillEnginePort, CompactEnginePort
+    from box_agent.kernel.ports import ContextEnginePort, SkillEnginePort, CompactEnginePort, RunLifecyclePort
 
     ports_by_field = {
         "llm": LLMPort,
@@ -477,6 +477,7 @@ def test_default_capability_schema_covers_kernel_services_in_field_order() -> No
         "skill_engine": SkillEnginePort,
         "context_engine": ContextEnginePort,
         "compact_engine": CompactEnginePort,
+        "run_lifecycle": RunLifecyclePort,
     }
     # Provider 是多实现贡献，调用身份是值对象，二者不按服务字段一一映射。
     assert {binding.port_type for binding in bindings} == set(ports_by_field.values()) | {HookProviderPort}

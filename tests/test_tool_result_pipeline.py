@@ -324,3 +324,33 @@ async def test_incomplete_post_scan_still_publishes_explicit_tool_files(
         "report.txt",
     ]
     assert any(isinstance(event, DoneEvent) for event in events)
+
+
+@pytest.mark.parametrize("fail_commit", [False, True])
+def test_tool_delivery_callback_observes_only_committed_processed_text(tmp_path, fail_commit):
+    messages, delivered = [], []
+    result = ToolResult(success=True, content="original", model_context="original")
+    result._on_model_committed = lambda message: delivered.append(message.content)
+    assert "_on_model_committed" not in result.model_dump()
+    assert "_on_model_committed" not in ToolResult.model_json_schema()["properties"]
+
+    def commit(message, _event, _step):
+        assert delivered == []
+        if fail_commit:
+            raise OSError("commit failed")
+        messages.append(message)
+
+    args = ToolResultPipelineInput(
+        messages=messages, tool_call_id="callback", tool_name="echo", arguments={},
+        result=result, visible_content="processed", visible_error=None,
+        result_storage=ToolResultStorage(tmp_path), hook_text_modified=True,
+        commit_result=commit,
+    )
+    if fail_commit:
+        with pytest.raises(OSError, match="commit failed"):
+            process_tool_result(args)
+        assert delivered == []
+    else:
+        process_tool_result(args)
+        assert delivered == ["processed"]
+        assert result._on_model_committed is None

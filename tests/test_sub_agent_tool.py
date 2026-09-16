@@ -683,7 +683,12 @@ async def test_general_loop_uses_parent_permission_negotiator_and_retries(tmp_pa
         yield StreamEvent(type="text", delta="inventory complete")
         yield StreamEvent(type="finish", finish_reason="stop")
 
+    async def fake_generate(messages, tools=None, **kwargs):
+        assert kwargs.get("call_kind") == "turn_continuation_judge"
+        return LLMResponse(content='{"continue":false}', finish_reason="stop")
+
     llm = AsyncMock()
+    llm.generate.side_effect = fake_generate
     llm.generate_stream = fake_stream
     read_tool = CountingReadTool()
     negotiator = FilesystemNegotiator(store)

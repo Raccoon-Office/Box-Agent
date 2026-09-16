@@ -38,6 +38,7 @@ _SERVICE_OWNED_RUN_ARGUMENTS = frozenset(
         "skill_engine",
         "context_engine",
         "compact_engine",
+        "run_lifecycle",
     }
 )
 
@@ -75,6 +76,7 @@ def _default_capabilities(run_arguments: Mapping[str, Any]) -> dict[str, Any]:
         "skill_engine": skill_engine,
         "context_engine": run_arguments.get("context_engine"),
         "compact_engine": run_arguments.get("compact_engine"),
+        "run_lifecycle": run_arguments.get("run_lifecycle"),
     }
 
 
@@ -362,6 +364,11 @@ async def run_agent_loop_with_default_services(
 
     capabilities = _default_capabilities(run_arguments)
     if managed_services is not None:
+        supplied_lifecycle = managed_services.run_lifecycle
+        requested_lifecycle = capabilities["run_lifecycle"]
+        if (requested_lifecycle is not None and supplied_lifecycle is not requested_lifecycle):
+            raise ValueError("kernel_services contradict effective run capabilities: run_lifecycle")
+        capabilities["run_lifecycle"] = supplied_lifecycle
         for name in ("skill_engine", "context_engine"):
             supplied = getattr(managed_services, name)
             if supplied is not None and supplied is not capabilities[name]:

@@ -254,6 +254,12 @@ def _assert_schema_contract(tools, profile, *, child_read_tools=()):
         "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset; omit to read the whole Skill when it fits."},
         "limit": {"type": "integer", "minimum": 1, "description": "Maximum lines for a bounded page."},
         "revision": {"type": "string", "description": "Version returned by a previous page; restart if it changed."},
+        "usage": {"type": "string", "enum": ["use", "reference", "release"], "default": "use",
+                  "description": "Adopt as current method, consult only, or release the adopted method."},
+        "replace": {"type": "array", "items": {"type": "string"}, "uniqueItems": True,
+                    "description": "Previously adopted methods to retire only after this read succeeds."},
+        "new_task": {"type": "boolean", "default": False,
+                     "description": "Start from the latest real user message before clarification; never set for a reply or continue."},
     })
     index = build_tool_name_index(tools)
     expected_call_names = set()
@@ -278,6 +284,19 @@ def _assert_schema_contract(tools, profile, *, child_read_tools=()):
                 target = target[key]
             assert target[field] == change["before"], (tool.name, change["path"])
             target[field] = change["after"]
+        if tool.name == "get_skill":
+            # Apply the new generic method contract after the historical
+            # description overlays, whose before/after assertions stay intact.
+            anchor = "Use list_skills for names and availability. "
+            additions = (
+        "A normal read adopts this method for the current task and restores its required text after compaction. "
+        "Use usage=reference for lookup only; replace retires previous methods after a successful read. "
+        "Use usage=release when a method/task is finished. For a different user task, set new_task=true "
+        "on its first method read, before asking clarification: it starts from the latest real user message. "
+            )
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor, anchor + additions, 1,
+            )
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
         if tool.name == "sub_agent":

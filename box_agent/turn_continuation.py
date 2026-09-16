@@ -67,6 +67,10 @@ _CONTINUATION_PROMPT: Final[str] = (
 )
 
 
+class TurnContinuationError(RuntimeError):
+    """Completion was not verified, or required continuation cannot proceed."""
+
+
 async def model_says_continue(
     llm: Any,
     *,
@@ -79,7 +83,10 @@ async def model_says_continue(
     title: str = "",
     should_interrupt: Callable[[], bool] | None = None,
 ) -> bool:
-    """Ask the bound model whether a candidate final response is premature."""
+    """Ask whether a final is premature; failures are never negative verdicts.
+
+    A missing optional ``generate`` capability retains the legacy no-judge path.
+    """
     candidate = (candidate_response or "").strip()
     if not candidate or (should_interrupt is not None and should_interrupt()):
         return False
@@ -127,21 +134,25 @@ async def model_says_continue(
         if should_interrupt is not None and should_interrupt():
             return False
         if not isinstance(response.content, str):
-            return False
+            raise ValueError("judge response is not text")
         decision = json.loads(response.content.strip())
+        if not isinstance(decision, dict) or type(decision.get("continue")) is not bool:
+            raise ValueError("judge response requires a boolean continue field")
     except Exception as exc:
         log.warning(
             "turn_continuation/judge_failed session_id=%s error=%s",
             session_id or "-",
             type(exc).__name__,
         )
-        return False
+        raise TurnContinuationError(
+            f"Turn completion check failed ({type(exc).__name__}); task completion is unverified."
+        ) from exc
     finally:
         if judge_task is not None:
             if not judge_task.done():
                 judge_task.cancel()
             await asyncio.gather(judge_task, return_exceptions=True)
-    return isinstance(decision, dict) and decision.get("continue") is True
+    return decision["continue"]
 
 
 @dataclass(frozen=True)
@@ -184,8 +195,6 @@ class TurnContinuationController:
             cancelled
             or not tools_available
             or finish_reason not in _NORMAL_FINISH_REASONS
-            or step + 1 >= max_steps
-            or self._continuations >= self._max_continuations
         ):
             return None
 
@@ -201,6 +210,14 @@ class TurnContinuationController:
             should_interrupt=should_interrupt,
         ):
             return None
+
+        # Limits bound execution, not the evidence needed to accept a final.
+        # A valid negative verdict may finish here; a positive verdict cannot
+        # turn into success merely because another continuation is unavailable.
+        if step + 1 >= max_steps:
+            raise TurnContinuationError("Task remains incomplete: no execution steps remain.")
+        if self._continuations >= self._max_continuations:
+            raise TurnContinuationError("Task remains incomplete: the continuation limit was reached.")
 
         self._continuations += 1
         request = TurnContinuationRequest(

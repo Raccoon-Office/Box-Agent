@@ -657,6 +657,9 @@ class Agent:
                     self._pending_skill_restore = self.restored_skills
         else:
             self.restored_skills = []
+        prime_task = getattr(self.skill_runtime, "prime_task_history", None)
+        if callable(prime_task):
+            prime_task(self.messages)
         self._sync_child_system_prompt()
 
     @property
@@ -768,21 +771,29 @@ class Agent:
         return removed
 
     def clear_active_skill_instructions(self) -> None:
-        self.skill_runtime.clear_references()
+        # Preserve the clear intent even if its task checkpoint fails. The
+        # next run must retry persistence before restoring or requesting.
         self._pending_skill_restore = []
+        self._skill_persistence_pending = self.session_log is not None
+        self.skill_runtime.clear_references()
         self._persist_active_skills()
 
     def _persist_active_skills(self) -> None:
         if self.session_log is not None:
+            retry_pending = self._skill_persistence_pending
             self._skill_persistence_pending = True
             records = {row["name"]: row for row in self._pending_skill_restore}
             records.update((row["name"], row) for row in self.skill_runtime.log_records())
             ordered = sorted(records.values(), key=lambda row: row["loadOrder"])
-            if ordered == self._persisted_active_skill_records:
+            task = self.skill_runtime.task.record()
+            # replay() can include an append whose flush failed. A pending
+            # write must reach flush again even when its values compare equal.
+            if (not retry_pending and ordered == self._persisted_active_skill_records
+                    and self.session_log.replay().skill_task == task):
                 self._skill_persistence_pending = False
                 return
             self.session_log.append("skill/change", {
-                "skills": ordered,
+                "skills": ordered, "task": task,
             })
             self.session_log.flush()
             self._persisted_active_skill_records = deepcopy(ordered)
@@ -1140,6 +1151,10 @@ class Agent:
 
         from .context_input import DefaultContextEngine
 
+        # Lifecycles are supplied explicitly by generic plugin/host composition.
+        managed_services = effective_options.kernel_services
+        run_lifecycle = managed_services.run_lifecycle if managed_services is not None else None
+
         run_arguments = dict(
             llm=effective_options.llm,
             summary_llm=effective_options.summary_llm,
@@ -1153,6 +1168,7 @@ class Agent:
             token_limit=self.token_limit,
             is_cancelled=effective_options.is_cancelled,
             run_control=effective_options.run_control,
+            run_lifecycle=run_lifecycle,
             logger=effective_options.logger,
             workspace_dir=str(self.workspace_dir),
             permission_negotiator=effective_options.permission_negotiator,
@@ -1195,8 +1211,8 @@ class Agent:
             session_log=self.session_log,
             session_turn=session_turn,
         )
-        if effective_options.kernel_services is not None:
-            run_arguments["kernel_services"] = effective_options.kernel_services
+        if managed_services is not None:
+            run_arguments["kernel_services"] = managed_services
         events = run_agent_loop(**run_arguments)
         try:
             async for event in events:

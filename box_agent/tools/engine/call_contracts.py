@@ -71,6 +71,7 @@ class ToolStepControl:
     blocked_reason: str = ""
     result_transform: Callable[[str, ToolResult], ToolResult] | None = None
     pending_followup_tokens: int = 0
+    origin: str = "model"
 
 
 @dataclass(slots=True)
@@ -97,6 +98,7 @@ class ToolCallRecord:
     invoked: bool = False
     executed: bool = False
     hook_rejection: dict[str, Any] | None = None
+    origin: str = "model"
 
 
 @dataclass(slots=True)

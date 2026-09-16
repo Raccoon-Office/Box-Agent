@@ -235,7 +235,7 @@ class DefaultToolEngine:
         yield ToolCallStart(
             tool_call_id=call.call_id, tool_name=call.name,
             arguments=deepcopy(call.arguments), user_visible=call.user_visible,
-            tool_id=call.tool_id, server_name=call.server_name,
+            tool_id=call.tool_id, server_name=call.server_name, origin=call.origin,
         )
         if call.user_visible and call.allowed:
             if context.hook_dispatch is not None:
@@ -267,6 +267,7 @@ class DefaultToolEngine:
         call.started_at = perf_counter()
         trace = {
             "tool_name": call.name, "tool_id": call.tool_id, "server_name": call.server_name,
+            "origin": call.origin,
             "arguments": call.arguments, "allowed_to_execute": call.allowed,
             "user_visible": call.user_visible,
         }
@@ -402,7 +403,7 @@ class DefaultToolEngine:
             policy_decision=call.policy_decision, tool_id=call.tool_id, server_name=call.server_name,
             turn_id=context.turn_id, step=control.step, started_at=call.started_at,
             parallel=call.parallel, commit_result=context.commit_result,
-            hook_text_modified=hook_text_modified,
+            hook_text_modified=hook_text_modified, origin=call.origin,
         ))
         self._search.record_result(outcome, search)
         if context.hook_dispatch is not None and not context.is_cancelled():
@@ -460,7 +461,7 @@ class DefaultToolEngine:
             signature = name, json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
             tool_id, server_name = prepared.target_identity(name)
             call = ToolCallRecord(normalized.id, original.function.name, name, arguments,
-                                  prepared.targets.get(name), tool_id, server_name)
+                                  prepared.targets.get(name), tool_id, server_name, origin=control.origin)
             if signature in first_by_signature:
                 duplicates.append((call, first_by_signature[signature]))
             else:
@@ -558,19 +559,21 @@ class DefaultToolEngine:
         context = self._context
         trace = {
             "tool_name": call.name, "tool_id": call.tool_id, "server_name": call.server_name,
+            "origin": call.origin,
             "arguments": call.arguments, "allowed_to_execute": False, "user_visible": False,
             "duplicate_of": source.call_id,
         }
         emit_session_trace("tool.request", turn_id=context.turn_id, step=step, tool_call_id=call.call_id, data=trace)
         start = ToolCallStart(tool_call_id=call.call_id, tool_name=call.name, arguments=call.arguments,
-                              user_visible=False, tool_id=call.tool_id, server_name=call.server_name)
+                              user_visible=False, tool_id=call.tool_id, server_name=call.server_name, origin=call.origin)
         event = ToolCallResult(tool_call_id=call.call_id, tool_name=call.name, success=succeeded is True,
                                content=content, error=error, user_visible=False,
-                               tool_id=call.tool_id, server_name=call.server_name)
-        context.commit_result(Message(role="tool", content=content or error or "",
+                               tool_id=call.tool_id, server_name=call.server_name, origin=call.origin)
+        context.commit_result(Message(role="tool", source="runtime" if call.origin == "runtime" else "user", content=content or error or "",
                                       tool_call_id=call.call_id, name=call.name), event, step)
         emit_session_trace("tool.response", turn_id=context.turn_id, step=step, tool_call_id=call.call_id, data={
             "tool_name": call.name, "tool_id": call.tool_id, "server_name": call.server_name,
+            "origin": call.origin,
             "success": succeeded is True, "content": content, "error": error, "raw_output": None,
             "model_content": content or error or "", "policy_decision": None, "user_visible": False,
             "duplicate_of": source.call_id, "duration_ms": 0,
