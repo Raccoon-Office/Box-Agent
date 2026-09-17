@@ -19,6 +19,7 @@ import pytest
 from box_agent.correction import (
     CorrectionCurator,
     CorrectionDraft,
+    CorrectionNotice,
     CorrectionReject,
     CorrectionSubject,
     normalize_error_fingerprint,
@@ -292,6 +293,9 @@ def test_reject_preference_and_secrets(mgr: MemoryManager):
 @pytest.mark.asyncio
 async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr: MemoryManager):
     tool = MemoryWriteCorrectionTool(mgr)
+    empty = await MemoryListCorrectionsTool(mgr).execute()
+    assert empty.content == "暂无纠错记忆。"
+
     bad = await tool.execute(
         lesson="save the password hunter2 for deploy",
         symptom="auth",
@@ -300,7 +304,7 @@ async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr:
         subject_name="deploy",
     )
     assert bad.success is False
-    assert "secret" in (bad.error or "").lower() or "password" in (bad.error or "").lower() or "forbidden" in (bad.error or "").lower()
+    assert bad.error == "无法写入纠错记忆：内容属于偏好/密钥，已拒绝。"
 
     ok = await tool.execute(
         lesson="pin cryptography==42.0.0 when wheel build fails on musl",
@@ -310,7 +314,7 @@ async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr:
         subject_name="pip",
     )
     assert ok.success is True
-    assert "draft" in ok.content.lower()
+    assert ok.content.startswith("纠错记忆草稿已创建：")
     draft_id = ok.raw_output["id"]
 
     listed = await MemoryListCorrectionsTool(mgr).execute(status="draft")
@@ -322,11 +326,13 @@ async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr:
 
     confirmed = await tool.execute(confirm=True, draft_id=draft_id)
     assert confirmed.success is True
+    assert confirmed.content.startswith("纠错记忆已确认并生效：")
     assert confirmed.raw_output["status"] == "active"
     assert any("cryptography" in h.lower() for h in mgr.search("cryptography"))
 
     superseded = await MemorySupersedeCorrectionTool(mgr).execute(entry_id=draft_id)
     assert superseded.success is True
+    assert superseded.content.startswith("纠错记忆已作废：")
     assert mgr.search("cryptography") == []
 
 
@@ -349,26 +355,32 @@ def test_runtime_hook_two_failures_writes_correction(mgr: MemoryManager):
     from box_agent.correction import notify_tool_failure_for_correction
 
     err = "PermissionError: [Errno 13] Permission denied: '/tmp/out.txt'"
-    notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
+    first_tip = notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
+    assert first_tip is None
     assert mgr.list_corrections() == []
 
-    notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
+    second_tip = notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
     listed = mgr.list_corrections()
     assert len(listed) == 1
     assert listed[0].status == "active"
     assert listed[0].subject_kind == "tool"
     assert listed[0].subject_name == "bash"
     assert listed[0].source == "auto"
+    assert isinstance(second_tip, CorrectionNotice)
+    assert second_tip.lesson.startswith("When seeing '")
+    assert second_tip.subject_kind == "tool"
+    assert second_tip.subject_name == "bash"
 
 
 def test_runtime_hook_one_failure_no_write(mgr: MemoryManager):
     from box_agent.correction import notify_tool_failure_for_correction
 
-    notify_tool_failure_for_correction(
+    tip = notify_tool_failure_for_correction(
         mgr,
         tool_name="bash",
         raw_error="OSError: broken pipe on write",
     )
+    assert tip is None
     assert mgr.list_corrections() == []
 
 
@@ -376,20 +388,27 @@ def test_runtime_hook_one_shot_env_fix_never_writes(mgr: MemoryManager):
     from box_agent.correction import notify_tool_failure_for_correction
 
     msg = "Missing font NotoSansCJK; downloaded font successfully and retry ok"
-    notify_tool_failure_for_correction(mgr, tool_name="pptx_export", raw_error=msg)
-    notify_tool_failure_for_correction(mgr, tool_name="pptx_export", raw_error=msg)
+    first_tip = notify_tool_failure_for_correction(
+        mgr, tool_name="pptx_export", raw_error=msg,
+    )
+    second_tip = notify_tool_failure_for_correction(
+        mgr, tool_name="pptx_export", raw_error=msg,
+    )
+    assert first_tip is None
+    assert second_tip is None
     assert mgr.list_corrections() == []
 
 
 def test_process_tool_result_invokes_correction_observer(mgr: MemoryManager, tmp_path: Path):
     from box_agent.correction import notify_tool_failure_for_correction
+    from box_agent.events import ProgressEvent
     from box_agent.schema import Message
     from box_agent.tool_result_storage import ToolResultStorage
     from box_agent.tools.base import ToolResult
     from box_agent.tools.engine.results import ToolResultPipelineInput, process_tool_result
 
     def observer(tool_name, result, visible_error):
-        notify_tool_failure_for_correction(
+        return notify_tool_failure_for_correction(
             mgr,
             tool_name=tool_name,
             raw_error=str(visible_error or result.error or ""),
@@ -398,23 +417,35 @@ def test_process_tool_result_invokes_correction_observer(mgr: MemoryManager, tmp
 
     storage = ToolResultStorage(str(tmp_path / "results"))
     err = "RuntimeError: repeated widget failure xyz"
+    outcomes = []
     for _ in range(2):
-        process_tool_result(
-            ToolResultPipelineInput(
-                messages=[],
-                tool_call_id="c1",
-                tool_name="widget",
-                arguments={},
-                result=ToolResult(success=False, content="", error=err),
-                visible_content="",
-                visible_error=err,
-                result_storage=storage,
-                correction_observer=observer,
+        outcomes.append(
+            process_tool_result(
+                ToolResultPipelineInput(
+                    messages=[],
+                    tool_call_id="c1",
+                    tool_name="widget",
+                    arguments={},
+                    result=ToolResult(success=False, content="", error=err),
+                    visible_content="",
+                    visible_error=err,
+                    result_storage=storage,
+                    correction_observer=observer,
+                    step=7,
+                )
             )
         )
     listed = mgr.list_corrections()
     assert len(listed) == 1
     assert listed[0].subject_name == "widget"
+    assert not any(isinstance(event, ProgressEvent) for event in outcomes[0].events)
+    progress = [event for event in outcomes[1].events if isinstance(event, ProgressEvent)]
+    assert len(progress) == 1
+    assert progress[0].step == 7
+    assert progress[0].content.startswith("已记下纠错：")
+    assert progress[0].content.endswith(
+        " · tool:widget\n说「已修好」可作废；说「我的纠错记忆」可查看。"
+    )
 
 
 def test_memory_manager_lazy_correction_curator(mgr: MemoryManager):

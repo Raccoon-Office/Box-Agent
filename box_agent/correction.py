@@ -86,6 +86,15 @@ class CorrectionDraft:
     source: CorrectionSource = "explicit"
 
 
+@dataclass(frozen=True)
+class CorrectionNotice:
+    """Structured notice emitted only after an auto-curated write succeeds."""
+
+    lesson: str
+    subject_kind: SubjectKind
+    subject_name: str
+
+
 def normalize_error_fingerprint(raw: str) -> str:
     """Normalize noisy error strings into a stable fingerprint.
 
@@ -230,17 +239,17 @@ def notify_tool_failure_for_correction(
     tool_name: str,
     raw_error: str,
     content: str = "",
-) -> None:
-    """Soft side-effect: observe a failed tool call and maybe write a correction.
+) -> CorrectionNotice | None:
+    """Observe a failed tool call and return a notice after a successful write.
 
     Never raises into the tool pipeline. Auto-curation writes ``active`` when the
     repeat threshold is met (explicit remembers still go draft→confirm via tools).
     """
     if memory_manager is None:
-        return
+        return None
     name = (tool_name or "").strip()
     if not name:
-        return
+        return None
     try:
         curator = getattr(memory_manager, "correction_curator", None)
         if curator is None:
@@ -253,7 +262,12 @@ def notify_tool_failure_for_correction(
             one_shot_env_fix=one_shot,
         )
         if draft is None:
-            return
+            return None
         memory_manager.write_correction(draft, status="active")
+        return CorrectionNotice(
+            lesson=draft.lesson,
+            subject_kind=draft.subject.kind,
+            subject_name=draft.subject.name,
+        )
     except Exception:
-        return
+        return None

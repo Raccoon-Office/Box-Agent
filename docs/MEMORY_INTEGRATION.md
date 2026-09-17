@@ -304,4 +304,11 @@ Correction memory stores durable failure lessons ("remember this pitfall / forge
 
 When the same `error_fingerprint` + `subject` fails repeatedly inside a time window (default: 2 failures within 6 hours), `CorrectionCurator.observe_failure` may emit a draft that the runtime writes as an active correction. One-shot environment fixes (for example a missing font downloaded successfully once) are never stored.
 
+After an auto-write succeeds, S1 surfaces a user-visible `ProgressEvent` light tip (the lesson may be reasonably truncated):
+
+```text
+已记下纠错：{lesson} · {kind}:{name}
+说「已修好」可作废；说「我的纠错记忆」可查看。
+```
+
 `subject.kind` is one of: `skill` | `tool` | `path_pattern` | `env` | `workflow`.

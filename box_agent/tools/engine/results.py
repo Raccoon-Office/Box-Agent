@@ -8,7 +8,14 @@ from time import perf_counter
 from typing import Any
 
 from ...context_resources import ContextResourceLedger
-from ...events import AgentEvent, PermissionRequestEvent, ToolCallResult, WebSearchEvent
+from ...correction import CorrectionNotice
+from ...events import (
+    AgentEvent,
+    PermissionRequestEvent,
+    ProgressEvent,
+    ToolCallResult,
+    WebSearchEvent,
+)
 from ...schema import Message
 from ...session_trace import emit_session_trace
 from ...tool_result_storage import ToolResultStorage
@@ -56,7 +63,7 @@ class ToolResultPipelineInput:
     parallel: bool = False
     commit_result: Callable[[Message, ToolCallResult, int], None] | None = None
     hook_text_modified: bool = False
-    correction_observer: Callable[[str, ToolResult, str | None], None] | None = None
+    correction_observer: Callable[[str, ToolResult, str | None], CorrectionNotice | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,12 +89,13 @@ def process_tool_result(
     result = pipeline_input.result
     visible_content = pipeline_input.visible_content
     visible_error = pipeline_input.visible_error
+    correction_notice: CorrectionNotice | None = None
     if (
         not result.success
         and pipeline_input.correction_observer is not None
     ):
         try:
-            pipeline_input.correction_observer(
+            correction_notice = pipeline_input.correction_observer(
                 pipeline_input.tool_name,
                 result,
                 visible_error,
@@ -227,6 +235,20 @@ def process_tool_result(
     )
 
     events: list[AgentEvent] = [result_event]
+    if correction_notice is not None:
+        lesson = " ".join(correction_notice.lesson.split())
+        if len(lesson) > 80:
+            lesson = lesson[:79].rstrip() + "…"
+        events.append(
+            ProgressEvent(
+                step=pipeline_input.step,
+                content=(
+                    f"已记下纠错：{lesson} · "
+                    f"{correction_notice.subject_kind}:{correction_notice.subject_name}\n"
+                    "说「已修好」可作废；说「我的纠错记忆」可查看。"
+                ),
+            )
+        )
     if result.success and pipeline_input.user_visible:
         web_search_payload = _extract_web_search_payload(
             pipeline_input.tool_name,

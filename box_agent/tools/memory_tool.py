@@ -308,18 +308,18 @@ class MemoryListCorrectionsTool(Tool):
                 include_inactive=include_inactive,
             )
             if not entries:
-                return ToolResult(success=True, content="No corrections found.")
+                return ToolResult(success=True, content="暂无纠错记忆。")
             lines = []
             for e in entries:
                 lines.append(
-                    f"- id={e.id} status={e.status} "
-                    f"subject={e.subject_kind}:{e.subject_name}"
+                    f"- id={e.id} 状态={e.status} "
+                    f"对象={e.subject_kind}:{e.subject_name}"
                     f"{('@' + e.subject_version) if e.subject_version else ''} "
-                    f"fp={e.error_fingerprint}\n  {e.content}"
+                    f"指纹={e.error_fingerprint}\n  {e.content}"
                 )
             return ToolResult(
                 success=True,
-                content=f"Found {len(entries)} correction(s):\n" + "\n".join(lines),
+                content=f"共找到 {len(entries)} 条纠错记忆：\n" + "\n".join(lines),
                 raw_output={
                     "type": "memory_list_corrections",
                     "corrections": [
@@ -337,7 +337,7 @@ class MemoryListCorrectionsTool(Tool):
                 },
             )
         except Exception as e:
-            return ToolResult(success=False, content="", error=f"Failed to list corrections: {e}")
+            return ToolResult(success=False, content="", error=f"列出纠错记忆失败：{e}")
 
 
 class MemoryWriteCorrectionTool(Tool):
@@ -410,7 +410,7 @@ class MemoryWriteCorrectionTool(Tool):
                 entry = await asyncio.to_thread(self._mgr.confirm_correction_draft, draft_id)
                 return ToolResult(
                     success=True,
-                    content=f"Correction confirmed active: id={entry.id}\n{entry.content}",
+                    content=f"纠错记忆已确认并生效：id={entry.id}\n{entry.content}",
                     raw_output={"type": "memory_write_correction", "id": entry.id, "status": entry.status},
                 )
 
@@ -419,7 +419,7 @@ class MemoryWriteCorrectionTool(Tool):
                 return ToolResult(
                     success=False,
                     content="",
-                    error=f"Refused to store {forbidden} content in correction memory.",
+                    error="无法写入纠错记忆：内容属于偏好/密钥，已拒绝。",
                 )
 
             from box_agent.correction import (
@@ -430,11 +430,11 @@ class MemoryWriteCorrectionTool(Tool):
             )
 
             if not lesson.strip():
-                return ToolResult(success=False, content="", error="lesson is required")
+                return ToolResult(success=False, content="", error="缺少 lesson（纠错经验）。")
             if not subject_name.strip():
-                return ToolResult(success=False, content="", error="subject_name is required")
+                return ToolResult(success=False, content="", error="缺少 subject_name（适用对象名称）。")
             if not error_fingerprint.strip():
-                return ToolResult(success=False, content="", error="error_fingerprint is required")
+                return ToolResult(success=False, content="", error="缺少 error_fingerprint（错误指纹）。")
 
             subject = CorrectionSubject(
                 kind=subject_kind,  # type: ignore[arg-type]
@@ -452,8 +452,12 @@ class MemoryWriteCorrectionTool(Tool):
                 from box_agent.correction import CorrectionCurator
 
                 CorrectionCurator().reject_if_forbidden(draft)
-            except CorrectionReject as exc:
-                return ToolResult(success=False, content="", error=str(exc))
+            except CorrectionReject:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error="无法写入纠错记忆：内容属于偏好/密钥，已拒绝。",
+                )
 
             entry = await asyncio.to_thread(
                 self._mgr.write_correction,
@@ -463,8 +467,8 @@ class MemoryWriteCorrectionTool(Tool):
             return ToolResult(
                 success=True,
                 content=(
-                    f"Correction draft created: id={entry.id}. "
-                    f"Call again with confirm=true and draft_id={entry.id} to activate."
+                    f"纠错记忆草稿已创建：id={entry.id}。"
+                    f"请再次调用并传入 confirm=true 和 draft_id={entry.id} 以启用。"
                 ),
                 raw_output={
                     "type": "memory_write_correction",
@@ -473,7 +477,7 @@ class MemoryWriteCorrectionTool(Tool):
                 },
             )
         except Exception as e:
-            return ToolResult(success=False, content="", error=f"Failed to write correction: {e}")
+            return ToolResult(success=False, content="", error=f"写入纠错记忆失败：{e}")
 
 
 class MemorySupersedeCorrectionTool(Tool):
@@ -521,13 +525,13 @@ class MemorySupersedeCorrectionTool(Tool):
             )
             return ToolResult(
                 success=True,
-                content=f"Correction superseded: id={entry.id} status={entry.status}",
+                content=f"纠错记忆已作废：id={entry.id} status={entry.status}",
                 raw_output={"type": "memory_supersede_correction", "id": entry.id, "status": entry.status},
             )
         except KeyError:
-            return ToolResult(success=False, content="", error=f"Correction not found: {entry_id}")
+            return ToolResult(success=False, content="", error=f"未找到纠错记忆：{entry_id}")
         except Exception as e:
-            return ToolResult(success=False, content="", error=f"Failed to supersede correction: {e}")
+            return ToolResult(success=False, content="", error=f"作废纠错记忆失败：{e}")
 
 
 class MemoryDeleteCorrectionTool(Tool):
@@ -567,10 +571,10 @@ class MemoryDeleteCorrectionTool(Tool):
             entry = await asyncio.to_thread(self._mgr.delete_correction, entry_id)
             return ToolResult(
                 success=True,
-                content=f"Correction deleted: id={entry.id} status={entry.status}",
+                content=f"纠错记忆已删除：id={entry.id} status={entry.status}",
                 raw_output={"type": "memory_delete_correction", "id": entry.id, "status": entry.status},
             )
         except KeyError:
-            return ToolResult(success=False, content="", error=f"Correction not found: {entry_id}")
+            return ToolResult(success=False, content="", error=f"未找到纠错记忆：{entry_id}")
         except Exception as e:
-            return ToolResult(success=False, content="", error=f"Failed to delete correction: {e}")
+            return ToolResult(success=False, content="", error=f"删除纠错记忆失败：{e}")

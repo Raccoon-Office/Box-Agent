@@ -986,7 +986,7 @@ async def _run_agent_loop_impl(
             raw = str(result.error)
         elif getattr(result, "content", None):
             raw = str(result.content)
-        notify_tool_failure_for_correction(
+        return notify_tool_failure_for_correction(
             memory_lookup,
             tool_name=tool_name,
             raw_error=raw,
