@@ -23,7 +23,14 @@
 | `image_generate(prompt, aspect_ratio)` | `generate_image(prompt, output_path, size, watermark=false)` |
 | `delegate_task(...)` | `sub_agent(title, task, required_tools, write_scope, budget)` |
 
-视觉模型优先使用 `strategy="native"`，让当前角色直接看新鲜像素。只有工具明确返回 `IMAGE_NATIVE_UNSUPPORTED` 时才改用 `proxy`，并在交接中标明这是代理视觉结论。每次最多检查 6 张图；HTML/CSS 修改后必须先重渲再看。
+视觉模型优先使用 `strategy="native"`，让当前角色直接看新鲜像素。只有工具明确返回 `IMAGE_NATIVE_UNSUPPORTED` 时才改用 `proxy`，并在交接中标明这是代理视觉结论。HTML/CSS 修改后必须先重渲再看。
+
+### 视觉检查分批（PPT Skill）
+
+- 每次模型响应最多调用一次 `inspect_images`，每批最多 4 张图；工具的通用上限不改变本 Skill 的分批上限。不得在同一响应中并行发出多个 `inspect_images` 调用（包括多个 `native` 调用）来规避限制。
+- 等待本批工具实际返回，并由模型看图形成检查结论后，先记录已覆盖页码或素材 ID、发现的问题和待检查清单，再在后续模型响应中检查下一批；工具调用成功或图片已附加都不等于已看图。
+- 保留原有总览/联系表与逐页细查流程；总览不能替代逐页细查。按原验收要求覆盖全部页面和待检素材，遗漏、失败或修改后尚未复看的页面不能标为检查完成。
+- `REQUEST_BODY_TOO_LARGE` 表示失败请求中的图片未被模型看到，不增加已覆盖清单，不得宣称本批或整册检查完成。保持原图质量，将失败批次缩小为 2 张、必要时 1 张后顺序重试；不得降低图片质量、跳过页面，也不得仅为绕过请求字节限制改用 `proxy`。单张仍超限时按待验收项读取相关高清局部，记录已检查区域及尚未检查区域；局部检查不能冒称整页已覆盖，只有原验收要求的区域与内容全部核验才标记页面完成。无法完成覆盖时保留未完成状态、错误与待检清单，如实报告阻塞。
 
 ## 3. Box-Agent 委派合同
 

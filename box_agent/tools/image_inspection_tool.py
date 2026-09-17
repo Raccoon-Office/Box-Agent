@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from box_agent.llm.capabilities import image_input_support
+from box_agent.llm.image_payload import RequestBodyTooLargeError
 from box_agent.schema import Message
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.safety import validate_path_in_workspace
@@ -234,6 +235,9 @@ class ImageInspectionTool(Tool):
         except asyncio.TimeoutError:
             return self._provider_error(TimeoutError(
                 f"image inspection timed out after {_IMAGE_INSPECTION_TIMEOUT:.0f}s"))
+        except RequestBodyTooLargeError as exc:
+            return ToolResult(success=False, error=str(exc),
+                              raw_output={"tool": self.name, **exc.details()})
         except Exception as exc:  # pragma: no cover - provider exceptions vary
             if self._is_unsupported_image_input_error(str(exc)):
                 self._unsupported_error = (

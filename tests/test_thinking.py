@@ -124,7 +124,7 @@ async def test_openai_request_sends_high_reasoning_effort_when_enabled(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("thinking_enabled", "expected_effort"),
-    [(True, "high"), (False, "none")],
+    [(True, "high"), (False, "low")],
 )
 async def test_sensenova_request_sends_top_level_reasoning_effort(
     thinking_enabled,
@@ -621,11 +621,20 @@ async def test_generic_openai_stream_does_not_execute_tool_markup_from_thinking(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("thinking_enabled", "expected_effort"),
-    [(True, "high"), (False, "none")],
+    ("model", "thinking_enabled", "override", "expected_effort"),
+    [
+        ("SenseNova-Flash-Lite-test", True, None, "high"),
+        ("SenseNova-Flash-Lite-test", False, None, "none"),
+        ("SenseNova-Flash-Lite-test", False, "low", "low"),
+        ("SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp", False, None, "low"),
+        ("SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp", True, None, "high"),
+        ("SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp", False, "none", "none"),
+    ],
 )
 async def test_sensenova_sdk_sends_reasoning_effort_in_wire_body(
+    model,
     thinking_enabled,
+    override,
     expected_effort,
 ):
     """The SDK sends SenseNova reasoning control at the HTTP body top level."""
@@ -660,7 +669,8 @@ async def test_sensenova_sdk_sends_reasoning_effort_in_wire_body(
     client = OpenAIClient(
         api_key="k",
         api_base="https://token.sensenova.cn/v1",
-        model="SenseNova-Flash-Lite-test",
+        model=model,
+        reasoning_effort_when_disabled=override,
     )
     await client.client.close()
     client.client = AsyncOpenAI(
