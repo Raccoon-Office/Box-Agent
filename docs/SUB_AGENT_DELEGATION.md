@@ -41,15 +41,26 @@ objects are not accepted.
 
 ### Safe defaults
 
-When `required_tools` is omitted, the child receives only the currently
-available members of this trusted local-read set:
+When `required_tools` is omitted, the child receives the currently available
+members of this read/search set:
 
 - `read_file`
 - `query_jsonl`
 - `search_files`
+- `web_search` and `web_extract`
 
-An explicit empty list creates a tool-free child. Selected Skills add guidance
-only; Skill metadata cannot add tools or widen policy.
+When `skills` are assigned, available `get_skill` and `list_skills` are also
+included, limited to those Skills and their dependencies within the parent's
+allowed Skill scope. Image, process, and unknown MCP tools are not defaults.
+
+When `required_tools` is omitted with a valid, non-empty `write_scope`, the child
+also receives the parent's available `write_file`, `edit_file`, and `append_file`.
+All file writes retain the scope wrapper and original resource permissions.
+Declared outputs use the general child loop even with `files`. If the parent has
+no file-write tools, `REQUIRED_TOOL_NOT_FOUND` is returned before the child starts.
+
+An explicit empty list creates a tool-free child. Skill metadata cannot add
+tools or widen policy. Explicit tool lists are never expanded by the default rules.
 
 The child inherits stable parent safety and workspace constraints, but not the
 parent's managed auto-loaded or on-demand Skill bodies. Child-specific Skill
@@ -59,7 +70,7 @@ begins.
 
 ## Derived child policy
 
-The runtime derives policy from explicitly selected tools instead of asking the
+The runtime derives policy from selected or defaulted tools instead of asking the
 model to author permission booleans:
 
 - `bash` is delegated only when explicitly selected and a parent-session
@@ -95,8 +106,9 @@ artifact-root-relative `write_scope`:
 The runtime wraps those tools and rejects paths outside the delegated scope
 before invoking the live parent tool. Parallel children must receive disjoint
 scopes. A child may pass either the artifact-root-relative path or its resolved
-absolute equivalent; both are checked against the same live file-tool root. A
-scope without a path-based write tool is invalid.
+absolute equivalent; both are checked against the same live file-tool root.
+Omitted `required_tools` uses available scoped file-write tools; an explicit
+tool list without a path-based write tool conflicts with a supplied scope.
 `write_scope` does not constrain shell semantics; explicitly delegated `bash`
 commands are wrapped so every exact command requires one-shot parent approval.
 
@@ -104,19 +116,26 @@ commands are wrapped so every exact command requires one-shot parent approval.
 
 Passing `files` supplies local task inputs to either execution path. The
 runtime selects the internal batch optimization only when the resolved tool set
-is exactly `read_file`; requesting any additional tool keeps the normal agent
-loop while still listing the files in the delegated task:
+is exactly `read_file`; additional tools keep the normal agent loop while still
+listing the files in the delegated task. To select this bounded path explicitly:
 
 ```json
 {
   "task": "Compare the documents and summarize their differences.",
-  "files": ["docs/a.md", "docs/b.md"]
+  "files": ["docs/a.md", "docs/b.md"],
+  "required_tools": ["read_file"]
 }
 ```
 
+With omitted tools, `files` requires an available `read_file` but does not remove
+other defaults. One compatibility rule preserves old file summaries: if no output
+scope is declared and the effective step budget (request capped by host) is one,
+omitted tools resolve to `read_file` only for one synthesis call. Explicit tool
+lists remain exact; their budgets are never increased.
+
 For the batch path:
 
-- `required_tools` defaults to and must resolve to `read_file` only;
+- the effective tool set must be `read_file` only;
 - `files` contains 1-32 unique local paths;
 - reads run concurrently and must prove complete through structured metadata;
 - one selected file is limited to 64,000 characters;
