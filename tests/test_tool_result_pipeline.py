@@ -80,7 +80,7 @@ async def test_render_images_stay_on_disk_but_only_overview_is_published(
                     target.with_name(f".{name}.artifact.json").write_text(
                         '{"type":"intermediate_asset"}', encoding="utf-8",
                     )
-                target.write_bytes(b"rendered image")
+                target.write_bytes(b"whole deck overview" if name == "deck-overview.png" else b"rendered image")
             # Explicit text references and workspace-diff discovery must agree.
             return ToolResult(success=success, content=(
                 "[slide-01.png] [contact-sheet-review-01.png] [deck-overview.png]"

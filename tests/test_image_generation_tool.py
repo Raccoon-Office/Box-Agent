@@ -1521,6 +1521,17 @@ async def test_intermediate_image_stays_available_without_artifact_publication(
     assert str(other) in paths
     assert (str(target) in paths) == publish_artifact
 
+    # A later shell call renames the image without moving its sidecar (the
+    # Dunhuang regression). Discovery is reconstructed from disk, not a cache.
+    before_rename = _snapshot_workspace_signatures(str(tmp_path))
+    renamed = target.with_name("slide-02-image.png")
+    target.rename(renamed)
+    events = _detect_tool_artifacts(
+        "rename-call", "bash", "[assets/generated/slide-02-image.png]", None,
+        before_rename, _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
+    )
+    assert (str(renamed) in {event.abs_path for event in events}) == publish_artifact
+
 
 @pytest.mark.asyncio
 async def test_intermediate_image_failure_does_not_publish_artifact(

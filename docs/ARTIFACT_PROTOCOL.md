@@ -31,14 +31,25 @@ it to the host. Before writing `slide-01.png`, write the adjacent hidden sidecar
 The marker applies to that exact file, including later revisions. Both output-text
 reference detection and workspace-diff detection honor it; neither guesses from
 directory names or extensions. Missing, malformed, or oversized (>4 KiB) metadata
-does not suppress publication. Sidecars themselves are excluded from directory scans.
+does not suppress publication. Sidecars themselves are excluded from publication.
+
+`generate_image` persists this metadata before returning, including `sha256` and
+`size_bytes`. Discovery enriches script-produced markers with these fields while
+the original exists. Within the same workspace, an unmarked byte-identical file
+inherits intermediate status after rename or copy, and receives its own sidecar.
+The old sidecar is retained as file provenance even when its image was moved.
+This uses an index rebuilt per discovery call, not a process-global cache or
+separate session-state database, and works after runtime restart. Content hashing
+is bounded to 64 MiB per file and uses the existing workspace scan limits.
+Changed-content derivatives are not inferred from hashes; their producer must
+mark them explicitly. Independent image delivery remains supported.
 
 The bundled HTML/PPTX exporter, PPTX QA renderers (Poppler, pdf.js, and Quick Look),
 and SN renderers mark single-page screenshots and SN partial/focus review sheets
 this way, including partial images left by failed rendering. They leave the
 whole-deck overview and final HTML/PPTX unmarked. Tools can still read marked images for QA. If the user
-explicitly requests a screenshot as a deliverable, remove its sidecar after
-rendering and reference the file in tool output, or return a structured
+explicitly requests a screenshot as a deliverable, set its sidecar to
+`{"type":"artifact"}` and reference the file in tool output, or return a structured
 `type: "artifact"` result. Markers do not retract previously published messages.
 
 ## Wire format

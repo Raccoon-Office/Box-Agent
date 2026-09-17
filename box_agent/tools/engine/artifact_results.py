@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -15,6 +14,7 @@ from ...artifacts import (
     make_artifact as _make_artifact,
 )
 from ...events import ArtifactEvent
+from ...artifact_publication import SUFFIX, intermediate_fingerprints, is_intermediate
 
 _log = logging.getLogger("box_agent.core")
 
@@ -33,23 +33,6 @@ _ARTIFACT_REF_RE = re.compile(
 )
 
 
-def _is_intermediate_artifact(path: Path) -> bool:
-    """Honor producer-owned publication metadata, without guessing from names.
-
-    A portable producer can write ``.<filename>.artifact.json`` next to its
-    output with ``{"type": "intermediate_asset"}``. This affects automatic
-    discovery only; the file stays available for tools and explicit delivery.
-    """
-    metadata = path.with_name(f".{path.name}.artifact.json")
-    try:
-        if metadata.stat().st_size > 4096:
-            return False
-        value = json.loads(metadata.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(value, dict) and value.get("type") == "intermediate_asset"
-
-
 def _detect_artifacts(
     tool_call_id: str,
     tool_name: str,
@@ -58,6 +41,9 @@ def _detect_artifacts(
 ) -> list[ArtifactEvent]:
     """Scan tool output for file references that resolve under the session cwd."""
     if not workspace_dir or not content:
+        return []
+    references = list(_ARTIFACT_REF_RE.finditer(content))
+    if not references:
         return []
 
     try:
@@ -74,9 +60,10 @@ def _detect_artifacts(
     except OSError:
         return []
 
+    fingerprints = _publication_fingerprints(workspace_dir)
     artifacts: list[ArtifactEvent] = []
     seen_paths: set[Path] = set()
-    for match in _ARTIFACT_REF_RE.finditer(content):
+    for match in references:
         filename = match.group(1)
         try:
             if len(filename) > _MAX_ARTIFACT_REF_CHARS or any(
@@ -88,7 +75,7 @@ def _detect_artifacts(
             candidate.relative_to(out)
             if candidate in seen_paths or not candidate.is_file():
                 continue
-            if _is_intermediate_artifact(candidate):
+            if is_intermediate(candidate, fingerprints):
                 continue
             artifact = _make_artifact(tool_call_id, candidate, ws)
         except (OSError, RuntimeError, UnicodeError, ValueError):
@@ -155,7 +142,7 @@ def _warn_scan_limit(root: Path, reason: str) -> None:
     )
 
 
-def _snapshot_workspace(workspace_dir: str) -> set[Path] | None:
+def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: bool = False) -> set[Path] | None:
     """Return a bounded recursive file snapshot rooted at the session cwd.
 
     An incomplete walk returns None, distinct from a valid empty snapshot, so
@@ -204,7 +191,8 @@ def _snapshot_workspace(workspace_dir: str) -> set[Path] | None:
                     _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
                     return None
                 entry = current / filename
-                if entry.name.startswith(".") or entry.suffix == ".tmp":
+                is_metadata = entry.name.startswith(".") and entry.name.endswith(SUFFIX) and len(entry.name) > len(SUFFIX) + 1
+                if (entry.name.startswith(".") and not (include_publication_metadata and is_metadata)) or entry.suffix == ".tmp":
                     continue
                 if not entry.is_file():
                     continue
@@ -215,6 +203,13 @@ def _snapshot_workspace(workspace_dir: str) -> set[Path] | None:
     except OSError:
         return None
     return files
+
+
+def _publication_fingerprints(workspace_dir: str) -> dict[int, set[str]]:
+    files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
+    return intermediate_fingerprints(
+        path for path in (files or ()) if path.name.startswith(".") and path.name.endswith(SUFFIX)
+    )
 
 
 def _snapshot_workspace_signatures(
@@ -249,13 +244,14 @@ def _detect_new_files(
         return []
 
     ws = Path(workspace_dir).resolve()
+    fingerprints = _publication_fingerprints(workspace_dir)
     artifacts: list[ArtifactEvent] = []
     for fpath in sorted(new_files):
         if fpath.name.startswith(".") or fpath.name.startswith("~") or fpath.suffix == ".tmp":
             continue
         if str(fpath.resolve()) in already_emitted:
             continue
-        if _is_intermediate_artifact(fpath):
+        if is_intermediate(fpath, fingerprints):
             continue
         artifacts.append(_make_artifact(tool_call_id, fpath, ws))
 
@@ -281,6 +277,7 @@ def _detect_changed_files(
         return []
 
     ws = Path(workspace_dir).resolve()
+    fingerprints = _publication_fingerprints(workspace_dir)
     artifacts: list[ArtifactEvent] = []
     for file_path in sorted(changed_files):
         if (
@@ -291,7 +288,7 @@ def _detect_changed_files(
             continue
         if str(file_path.resolve()) in already_emitted:
             continue
-        if _is_intermediate_artifact(file_path):
+        if is_intermediate(file_path, fingerprints):
             continue
         artifacts.append(_make_artifact(tool_call_id, file_path, ws))
     return artifacts

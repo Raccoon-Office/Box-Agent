@@ -246,6 +246,10 @@ only for user-required semantic data fields, never decoration.
 
 ### 5. Acquire media and fill content
 
+Before issuing any image-generation batch, read `assets/generated/manifest.json`
+and collect each selected row's exact `output_path`. Generate directly to those
+paths; do not generate descriptive aliases first and rename them afterwards.
+
 Read `references/image-assets.md` for image acquisition. Follow the scaffolded
 `acquire_via`: `user` keeps localized supplied assets; `web` uses image search;
 `ai` uses generation; `none` stays image-free. Web rows use the exact search query

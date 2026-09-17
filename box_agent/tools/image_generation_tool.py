@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 import httpx
 
 from box_agent.auth import request_auth_headers
+from box_agent.artifact_publication import write_metadata
 from box_agent.llm.debug_logging import (
     log_image_generation_error_meta,
     log_image_generation_request,
@@ -631,6 +632,13 @@ class GenerateImageTool(Tool):
                 }
 
             target.parent.mkdir(parents=True, exist_ok=True)
+            # Persist before the image becomes discoverable. The digest survives
+            # arbitrary shell renames/copies and later tool calls or restarts.
+            write_metadata(target, {
+                "type": "artifact" if publish_artifact else "intermediate_asset",
+                "size_bytes": len(image_bytes),
+                "sha256": hashlib.sha256(image_bytes).hexdigest(),
+            })
             target.write_bytes(image_bytes)
 
             rel_path = self._display_path(target)
