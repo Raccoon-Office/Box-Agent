@@ -2,17 +2,17 @@
 
 const CAPTURE_CSS = `
 /* Hide every non-decoration element during capture so the bitmap contains
- * only the slide-level background and pure decoration (no text, no <img>,
+ * only the slide-level background and pure decoration (no HTML text, no <img>,
  * no text containers / cards / pills). */
 .pptx-capture-mode [data-pptx-non-decoration] {
   visibility: hidden !important;
 }
-/* Hide text rendered inside decoration SVGs too (icons sometimes include
- * <text>/<tspan> labels we never want baked into the bitmap). */
-.pptx-capture-mode [data-pptx-decoration] text,
-.pptx-capture-mode [data-pptx-decoration] tspan {
-  fill: transparent !important;
-  -webkit-text-fill-color: transparent !important;
+/* A decoration SVG is flattened as a complete graphic, including its labels.
+ * Content ancestors are hidden above; restore only SVG elements that were
+ * visible before capture so their inherited visibility cannot erase the
+ * graphic. Authored hidden elements, opacity, display and clipping stay intact. */
+.pptx-capture-mode [data-pptx-decoration][data-pptx-capture-visible] {
+  visibility: visible !important;
 }
 `;
 
@@ -129,6 +129,20 @@ async function markDecorationNodes(page) {
           el.setAttribute("data-pptx-decoration", "");
         }
       });
+      // Snapshot before capture-mode hides text-bearing containers. Do not
+      // blanket-show SVG descendants: visibility:hidden can be authored on an
+      // SVG group while one of its children explicitly overrides it to visible.
+      // Marked diagrams and charts are non-decoration and stay on their own
+      // export paths rather than being duplicated in the background bitmap.
+      slide.querySelectorAll("svg[data-pptx-decoration], svg[data-pptx-decoration] *")
+        .forEach(el => {
+          el.removeAttribute("data-pptx-capture-visible");
+          if (el.hasAttribute("data-pptx-decoration") &&
+              !el.hasAttribute("data-pptx-non-decoration") &&
+              getComputedStyle(el).visibility === "visible") {
+            el.setAttribute("data-pptx-capture-visible", "");
+          }
+        });
     });
   });
 }
