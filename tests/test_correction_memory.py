@@ -294,7 +294,7 @@ def test_reject_preference_and_secrets(mgr: MemoryManager):
 async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr: MemoryManager):
     tool = MemoryWriteCorrectionTool(mgr)
     empty = await MemoryListCorrectionsTool(mgr).execute()
-    assert empty.content == "暂无纠错记忆。"
+    assert empty.content == "还没有可复用的纠错记忆。"
 
     bad = await tool.execute(
         lesson="save the password hunter2 for deploy",
@@ -304,7 +304,7 @@ async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr:
         subject_name="deploy",
     )
     assert bad.success is False
-    assert bad.error == "无法写入纠错记忆：内容属于偏好/密钥，已拒绝。"
+    assert bad.error == "这条不算可复用纠错（偏好/敏感/一次性），没记下。"
 
     ok = await tool.execute(
         lesson="pin cryptography==42.0.0 when wheel build fails on musl",

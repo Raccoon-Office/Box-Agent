@@ -308,7 +308,7 @@ class MemoryListCorrectionsTool(Tool):
                 include_inactive=include_inactive,
             )
             if not entries:
-                return ToolResult(success=True, content="暂无纠错记忆。")
+                return ToolResult(success=True, content="还没有可复用的纠错记忆。")
             lines = []
             for e in entries:
                 lines.append(
@@ -419,7 +419,7 @@ class MemoryWriteCorrectionTool(Tool):
                 return ToolResult(
                     success=False,
                     content="",
-                    error="无法写入纠错记忆：内容属于偏好/密钥，已拒绝。",
+                    error="这条不算可复用纠错（偏好/敏感/一次性），没记下。",
                 )
 
             from box_agent.correction import (
@@ -456,7 +456,7 @@ class MemoryWriteCorrectionTool(Tool):
                 return ToolResult(
                     success=False,
                     content="",
-                    error="无法写入纠错记忆：内容属于偏好/密钥，已拒绝。",
+                    error="这条不算可复用纠错（偏好/敏感/一次性），没记下。",
                 )
 
             entry = await asyncio.to_thread(
