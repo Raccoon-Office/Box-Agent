@@ -735,6 +735,84 @@ async def test_compact_creates_backup_before_overwrite(memory_dir):
     assert backups[0].read_text(encoding="utf-8") == original_text
 
 
+@pytest.mark.asyncio
+async def test_compact_isolates_corrections_preserves_metadata(memory_dir):
+    """Corrections must not lose entry_type/status through generic compaction.
+
+    Deleted correction content must stay out of default search after maintenance.
+    """
+    import json as _json
+
+    from box_agent.correction import CorrectionDraft, CorrectionSubject
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    canary = "removedcanary_UniqueDeletedCorrectionXYZ"
+
+    active = mgr.write_correction(
+        CorrectionDraft(
+            lesson="retry with --legacy-peer-deps on ERESOLVE",
+            symptom="ERESOLVE peer dependency",
+            subject=CorrectionSubject(kind="tool", name="npm"),
+            error_fingerprint="eresolve peer dependency",
+            source="explicit",
+        ),
+        status="active",
+    )
+    deleted = mgr.write_correction(
+        CorrectionDraft(
+            lesson=f"do not reuse this deleted lesson containing {canary}",
+            symptom=canary,
+            subject=CorrectionSubject(kind="tool", name="npm-deleted"),
+            error_fingerprint=f"deleted-fp-{canary}",
+            source="explicit",
+        ),
+        status="active",
+    )
+    mgr.delete_correction(deleted.id)
+
+    assert len(mgr.list_corrections(include_inactive=True)) == 2
+    assert mgr.search(canary) == []
+
+    # Ordinary entries force the compact path while corrections stay present.
+    existing = mgr.read_all_context_entries()
+    a = _new_entry("- ordinary alpha durable memory", topic="general")
+    b = _new_entry("- ordinary beta retained fact", topic="general")
+    mgr.write_all_context_entries(list(existing) + [a, b])
+
+    canned = _json.dumps(
+        [
+            {
+                "content": "- compacted ordinary memories",
+                "hits": 0,
+                "sources": [a.id, b.id],
+            },
+        ]
+    )
+    llm = FakeCompactLLM(canned)
+    m = MemoryMaintainer(
+        mgr,
+        _maint_cfg(memory_context_max_entries=1),
+        llm=llm,
+    )
+    await m._compact(datetime.now(timezone.utc))
+
+    assert llm.calls == 1
+    listed = mgr.list_corrections(include_inactive=True)
+    assert len(listed) == 2
+    by_id = {e.id: e for e in listed}
+    assert by_id[active.id].status == "active"
+    assert by_id[active.id].entry_type == "correction"
+    assert by_id[active.id].error_fingerprint == "eresolve_peer_dependency"
+    assert by_id[active.id].subject_kind == "tool"
+    assert by_id[active.id].subject_name == "npm"
+    assert by_id[deleted.id].status == "deleted"
+    assert by_id[deleted.id].entry_type == "correction"
+    assert canary in by_id[deleted.id].content
+    assert mgr.search(canary) == []
+    assert any(e.id == active.id for e in mgr.list_corrections())
+
+
+
 # ── _resolve_conflicts (Phase 3.5: LLM semantic conflict arbitration) ─
 
 

@@ -290,6 +290,93 @@ def test_reject_preference_and_secrets(mgr: MemoryManager):
         )
 
 
+_MODERN_CREDENTIAL_PREFIXES = (
+    "sk-proj-",
+    "sk-ant-",
+    "github_pat_",
+    "AKIA",
+)
+
+
+def _synthetic_credential(prefix: str) -> str:
+    return prefix + "SyntheticTestValueNotARealCredential123456789XYZ"
+
+
+@pytest.mark.parametrize("prefix", _MODERN_CREDENTIAL_PREFIXES)
+def test_classify_forbidden_modern_credential_formats(prefix: str):
+    from box_agent.correction import classify_forbidden_content
+
+    value = _synthetic_credential(prefix)
+    assert classify_forbidden_content(f"Retry using {value}") == "secret"
+    assert classify_forbidden_content("pin cryptography on musl") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", _MODERN_CREDENTIAL_PREFIXES)
+async def test_write_correction_tool_refuses_modern_credentials_no_disk(
+    mgr: MemoryManager, prefix: str
+):
+    value = _synthetic_credential(prefix)
+    corrections_path = mgr.context_dir / "corrections.md"
+    before = (
+        corrections_path.read_text(encoding="utf-8")
+        if corrections_path.exists()
+        else ""
+    )
+
+    tool = MemoryWriteCorrectionTool(mgr)
+    result = await tool.execute(
+        lesson=f"Retry using {value}",
+        error_fingerprint="connection rejected",
+        subject_name="probe",
+    )
+    assert result.success is False
+    assert result.error == "这条不算可复用纠错（偏好/敏感/一次性），没记下。"
+
+    after = (
+        corrections_path.read_text(encoding="utf-8")
+        if corrections_path.exists()
+        else ""
+    )
+    assert after == before
+    assert value not in after
+    assert mgr.list_corrections(include_inactive=True) == []
+
+
+@pytest.mark.parametrize("prefix", _MODERN_CREDENTIAL_PREFIXES)
+def test_auto_notify_refuses_modern_credentials_no_disk(
+    mgr: MemoryManager, prefix: str
+):
+    from box_agent.correction import notify_tool_failure_for_correction
+
+    value = _synthetic_credential(prefix)
+    err = f"Auth failed with token {value}"
+    corrections_path = mgr.context_dir / "corrections.md"
+    before = (
+        corrections_path.read_text(encoding="utf-8")
+        if corrections_path.exists()
+        else ""
+    )
+
+    first = notify_tool_failure_for_correction(
+        mgr, tool_name="bash", raw_error=err
+    )
+    second = notify_tool_failure_for_correction(
+        mgr, tool_name="bash", raw_error=err
+    )
+    assert first is None
+    assert second is None
+    assert mgr.list_corrections(include_inactive=True) == []
+
+    after = (
+        corrections_path.read_text(encoding="utf-8")
+        if corrections_path.exists()
+        else ""
+    )
+    assert after == before
+    assert value not in after
+
+
 @pytest.mark.asyncio
 async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr: MemoryManager):
     tool = MemoryWriteCorrectionTool(mgr)

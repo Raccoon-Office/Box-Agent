@@ -34,11 +34,21 @@ _UUID_RE = re.compile(
 _WS_RE = re.compile(r"\s+")
 
 _SECRET_RE = re.compile(
-    r"(?i)\b("
+    r"(?i)(?:"
+    # Keyword / label forms need word boundaries on both sides.
+    r"\b(?:"
     r"api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|"
-    r"password|passwd|secret|bearer|private[_-]?key|client[_-]?secret|"
-    r"sk-[a-z0-9]{10,}|ghp_[a-z0-9]{20,}|xox[baprs]-"
-    r")\b"
+    r"password|passwd|secret|bearer|private[_-]?key|client[_-]?secret"
+    r")\b|"
+    # Modern provider token forms: allow hyphens after sk- (sk-proj-/sk-ant-),
+    # GitHub fine-grained PATs, and AWS AKIA-style access key ids.
+    # No trailing \\b on these so a longer glued synthetic/real token still matches.
+    r"\bsk-[a-z0-9-]{10,}|"
+    r"\bgithub_pat_[a-z0-9_]{20,}|"
+    r"\bAKIA[0-9A-Z]{16}|"
+    r"\bghp_[a-z0-9]{20,}|"
+    r"\bxox[baprs]-"
+    r")"
 )
 _PREFERENCE_RE = re.compile(
     r"(?i)\b("
