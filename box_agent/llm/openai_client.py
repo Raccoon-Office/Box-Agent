@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_TOKENS = 64000
 _DEEP_THINK_REASONING_EFFORT = "high"
 _DEFAULT_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
+# This deployed model accepts low/medium/high, but rejects none (HTTP 422).
+_SENSENOVA_LOW_DEFAULT_MODELS = frozenset({
+    "sensenova-flash-lite-20260727-v39-fp8-step4k-dpov2-mtp",
+})
 _SENSENOVA_MODEL_PREFIXES_ENV = "BOX_AGENT_SENSENOVA_MODEL_PREFIXES"
 _SENSENOVA_PREFIX_BOUNDARIES = frozenset("-_/:.")
 _GLM_5_3_MODEL_MARKERS = ("glm-5-3", "glm-5.3")
@@ -142,7 +146,8 @@ def _apply_thinking_params(
         params["reasoning_effort"] = _DEEP_THINK_REASONING_EFFORT
         return
     if _is_sensenova_model(model):
-        params["reasoning_effort"] = reasoning_effort_when_disabled or "none"
+        default_effort = "low" if normalized_model in _SENSENOVA_LOW_DEFAULT_MODELS else "none"
+        params["reasoning_effort"] = reasoning_effort_when_disabled or default_effort
 
 
 def _tool_parameter_types(
