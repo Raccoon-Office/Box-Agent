@@ -42,7 +42,7 @@ function writeInput(file, input, root) {
   })));
   const themeFiles = packets("themes", directory.themes.map(theme => ({
     id: theme.id,
-    traits: Object.fromEntries(["canvas", "heading", "shadow", "display_font"].map(key => [key, theme.visual_traits?.[key]])),
+    traits: Object.fromEntries(["canvas", "heading", "shadow", "display_font", "body_font"].map(key => [key, theme.visual_traits?.[key]])),
     fit: (theme.selection?.industry_fit || [])[0] || "",
   })));
   const layoutFiles = packets("layouts", directory.layouts.map(layout => ({
@@ -65,7 +65,7 @@ function writeInput(file, input, root) {
     required_read_files: [...contentFiles, ...themeFiles, ...layoutFiles, ...paletteFiles, ...harmonyFiles, ...profileFiles],
     details_directory: detailDir,
     reading_policy: "Read every listed content/index file completely. Then shortlist at most 3 themes from traits and audience; read only shortlisted themes and chosen layout details using details_directory/themes/<id>.json and details_directory/layouts/<id>.json. Do not search the entire catalog. Final output must have exactly page_count slides.",
-    visual_requirements: { fields: require("./theme_match.js").OPTIONS, allow_plain_fallback: "boolean; false when user-required visual features must not be relaxed", policy: "Choose visual requirements before theme. Match visual_traits, not original colors. If no catalog theme matches and fallback is allowed, program selects plain-neutral, preserving exact palette and layouts." },
+    visual_requirements: { fields: require("./theme_match.js").OPTIONS, allow_plain_fallback: "boolean; false when user-required visual features must not be relaxed", policy: "Preserve explicit user visual constraints as hard filters before choosing a theme. Use audience and inferred style preferences to compare candidates; do not turn your own font preferences into hard constraints. Use any for font categories the user did not constrain; a fixed palette does not constrain fonts. Check all five visual_traits in theme details before returning. Use the registered theme's fonts unchanged. Match traits, not original colors. If no catalog theme matches and fallback is allowed, program selects plain-neutral, preserving exact palette and layouts." },
     palette_contract: { version: 2, required_roles: ["background", "text", "primary", "accent", "secondary"],
       required_usage: "accent_usage: sparse | balanced | dominant",
       policy: "Return exact #RRGGBB values for every role, including theme defaults. User colors remain locked; fill missing roles only. User palettes default to sparse accent usage unless explicitly specified." },

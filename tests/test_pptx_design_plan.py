@@ -490,6 +490,12 @@ def test_brief_is_bounded_and_details_are_loaded_only_when_needed(design_case):
     layouts = [item for file in brief["layout_index_files"] for item in json.loads(Path(file).read_text())]
     assert len(themes) == len(data["catalog"]["themes"])
     assert len(layouts) == len(data["catalog"]["layouts"])
+    details = {theme["id"]: theme for theme in data["catalog"]["themes"]}
+    for theme in themes:
+        assert theme["traits"] == {
+            key: details[theme["id"]]["visual_traits"][key]
+            for key in ("canvas", "heading", "shadow", "display_font", "body_font")
+        }
     assert all("presets" not in theme for theme in themes)
     assert all("fields" not in layout for layout in layouts)
 
@@ -549,6 +555,51 @@ def test_local_correction_needs_only_its_bound_packet(design_case, wrong_base):
     else:
         assert "plan" in json.loads(result.stdout)
         assert scaffold(root).returncode == 0
+
+
+@pytest.mark.parametrize("read_brief", [False, True])
+def test_unparseable_first_response_requires_a_fully_read_complete_correction(design_case, read_brief):
+    root, outline, _, _ = design_case
+    outline["tone"] = "Recover an unparseable first decision"
+    write(root / "outline.json", outline)
+    assert run("design_plan.js", "prepare", "outline.json", cwd=root).returncode == 0
+    decision = {"theme_id": "blue-professional", "slides": [{"layout_id": "cards-grid-v1"}] * 3}
+    first = record_response(root, decision)
+    sessions = Path(os.environ["BOX_AGENT_HOME"]) / "sessions"
+    log = sessions / hashlib.sha256(first.encode()).hexdigest() / "session.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    for row in rows:
+        if row["type"] == "assistant/message":
+            row["data"]["message"]["content"] = "采用蓝色主题，三页均用卡片布局。"
+    log.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    failed = run("design_plan.js", "accept", "design_input.json", cwd=root)
+    assert failed.returncode != 0
+    correction = Path(json.loads(failed.stderr)["correction_file"])
+    packet = json.loads(correction.read_text())
+    assert packet["requires_full_read"] is True
+    assert packet["original_decision"] is None
+
+    second = record_response(root, decision, read_brief=read_brief)
+    log = sessions / hashlib.sha256(second.encode()).hexdigest() / "session.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    for row in rows:
+        if row["type"] == "user/message":
+            row["data"]["content"] = f"Read {correction} and correct the design"
+    count = len(correction.read_text().splitlines())
+    rows.insert(2, {"type": "tool/result", "data": {"result": {"success": True, "rawOutput": {
+        "context_resource": {"resource_id": str(correction), "content_version": hashlib.sha256(correction.read_bytes()).hexdigest(),
+                             "start_line": 1, "end_line": count, "total_lines": count}}}}})
+    log.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    result = run("design_plan.js", "accept", "design_input.json", cwd=root)
+    assert result.returncode == 0, result.stderr
+    accepted = json.loads(result.stdout)
+    if read_brief:
+        assert accepted["attempts"] == 2
+        assert "plan" in accepted
+        assert len(json.loads((root / "design_plan.json").read_text())["slides"]) == 3
+    else:
+        assert accepted["status"] == "degraded"
+        assert "did not read the complete current brief" in accepted["reason"]
 
 
 def test_main_visual_hints_do_not_override_design_or_reset_request(design_case, monkeypatch):

@@ -1,7 +1,15 @@
 """A failed designer cannot erase the content-backed delivery floor."""
 import json
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
-from tests.test_pptx_design_plan import design_case, record_response, run, write, scaffold
+import pytest
+from tests.test_pptx_design_plan import SKILL, design_case, record_response, run, write, scaffold
 
 
 def fresh(root, outline):
@@ -42,6 +50,75 @@ def test_theme_patch_cannot_change_page_count_or_colors(design_case):
     assert scaffold(root).returncode==0
 
 
+def record_correction(root, packet_path, update):
+    sid = record_response(root, {}, read_brief=False)
+    log = Path(os.environ['BOX_AGENT_HOME']) / 'sessions' / hashlib.sha256(sid.encode()).hexdigest() / 'session.jsonl'
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    for row in rows:
+        if row['type'] == 'user/message':
+            row['data']['content'] = f'Read {packet_path} and correct the reported fields'
+        if row['type'] == 'assistant/message':
+            row['data']['message']['content'] = json.dumps(update)
+    count = len(packet_path.read_text().splitlines())
+    rows.insert(2, {'type': 'tool/result', 'data': {'result': {'success': True, 'rawOutput': {
+        'context_resource': {'resource_id': str(packet_path),
+                             'content_version': hashlib.sha256(packet_path.read_bytes()).hexdigest(),
+                             'start_line': 1, 'end_line': count, 'total_lines': count}}}}})
+    log.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+
+
+@pytest.mark.parametrize('field,invalid,corrected', [
+    ('visual_profile', {'typography': ['handwritten-title', 'serif-body']},
+     {'typography': {'title': 'handwritten', 'body': 'serif'}}),
+    # The current catalog has no registered brand profiles; this optional field
+    # must be clearable without replacing the rest of the original decision.
+    ('profile_id', 'not-registered', None),
+])
+@pytest.mark.parametrize('response_kind', ['full_read', 'local', 'json_patch', 'still_invalid'])
+def test_profile_correction_preserves_other_choices_and_revalidates(
+    design_case, field, invalid, corrected, response_kind,
+):
+    root, outline, _, plan = design_case
+    fresh(root, outline)
+    original = {key: plan[key] for key in ['theme_id', 'palette', 'visual_requirements', 'reason']}
+    original['slides'] = [{key: slide[key] for key in ['layout_id', 'visual_options']} for slide in plan['slides']]
+    original[field] = invalid
+    record_response(root, original)
+    first = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert first.returncode != 0
+    packet_path = Path(json.loads(first.stderr)['correction_file'])
+    packet = json.loads(packet_path.read_text())
+    assert packet['editable_fields'] == [field]
+    assert packet['requires_full_read'] is False
+    # Extra, otherwise valid changes in a correction must not replace choices
+    # that passed validation, including page count and font requirements.
+    update = {field: invalid if response_kind == 'still_invalid' else corrected,
+              'theme_id': 'scatterbrain', 'slides': original['slides'] * 2,
+              'palette': {**original['palette'], 'background': '#FFFFFF'},
+              'visual_requirements': {**original['visual_requirements'], 'body_font': 'serif'},
+              'reason': 'Unrelated replacement'}
+    if response_kind == 'full_read':
+        record_response(root, update)
+    else:
+        if response_kind == 'json_patch':
+            update = [{'op': 'replace', 'path': '/' + key, 'value': value} for key, value in update.items()]
+        record_correction(root, packet_path, update)
+    result = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    if response_kind == 'still_invalid':
+        assert report['status'] == 'degraded' and report['terminal'] is True
+        assert f'design_plan.{field}' in report['reason']
+        return
+    assert report['attempts'] == 2 and 'plan' in report
+    accepted = json.loads((root / 'design_plan.json').read_text())
+    assert accepted.get(field) == corrected
+    expected = {**plan, 'input_hash': json.loads((root / 'design_input.json').read_text())['input_hash']}
+    assert {key: value for key, value in accepted.items() if key != field} == expected
+    assert json.loads((root / 'qa/design_delivery.json').read_text())['correction_fields'] == [field]
+    assert scaffold(root).returncode == 0
+
+
 def test_failed_correction_delivers_extra_pages_without_inventing_facts(design_case):
     root, outline, _, _ = design_case
     fresh(root,outline)
@@ -70,6 +147,46 @@ def test_missing_response_delivers_fallback_and_preserves_existing_html(design_c
     assert json.loads(result.stdout)['status']=='degraded'
     assert (root/'index.html').read_text()=='<html>User edited</html>'
     assert (root/'fallback.html').exists()
+
+
+def test_degraded_html_exports_required_pptx_without_reauthoring(design_case):
+    root, outline, _, _ = design_case
+    # Keep a user's saved deck while exporting the separate recovery artifact.
+    saved = (root / 'index.html').read_text().replace('Topic A', 'User edited Topic A')
+    (root / 'index.html').write_text(saved)
+    fresh(root, outline)
+    record_response(root, decision(4))
+    first = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert first.returncode != 0
+    record_response(root, {'theme_id': 'not-registered', 'slides': [{}] * 4})
+    accepted = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert accepted.returncode == 0, accepted.stderr
+    report = json.loads(accepted.stdout)
+    assert report['status'] == 'degraded' and report['terminal'] is True
+    primary = Path(report['primary_artifact'])
+    html_before = primary.read_bytes()
+    assert primary != root / 'index.html'
+    preflight = run('check_html_export_env.js', cwd=root)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    pptx = root / 'recovery.pptx'
+    exported = run('html_to_editable_pptx.js', primary, pptx, cwd=root)
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    validated = subprocess.run(
+        [sys.executable, str(SKILL / 'scripts/validate_pptx_package.py'), str(pptx)],
+        capture_output=True, text=True,
+    )
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        slides = [ET.fromstring(archive.read(name)) for name in archive.namelist()
+                  if re.fullmatch(r'ppt/slides/slide\d+\.xml', name)]
+    assert len(slides) == report['actual_pages']
+    texts = '\n'.join(node.text or '' for slide in slides for node in slide.iter()
+                      if node.tag.endswith('}t'))
+    for page in outline['slides']:
+        for bullet in page['bullets']:
+            assert bullet in texts
+    assert primary.read_bytes() == html_before
+    assert (root / 'index.html').read_text() == saved
 
 
 def test_outline_validation_failure_still_produces_an_artifact(design_case):
