@@ -8,12 +8,12 @@
 | 设计模式：静态 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-standard` | 静态 HTML 和 PPTX |
 | 设计模式：动态 | `sn-ppt-entry` → `sn-ppt-story` → `sn-ppt-dazzle` | 带动效的 HTML，不是原生 PowerPoint 动画 |
 
-Tools 和 Doctor 为设计模式提供共用工具和检查。未集成旧 Web、Creative 图片整页、
-Workbench 或 Edit；Standard 自带静态页面与 PPTX exporter，保留源代码模块结构及字体许可。
-设计模式的 PPTX 是文件导出，不宣传或承诺编辑能力。`sn-ppt-edit` 未打包，也不是此导出器的依赖。
+Tools 和 Doctor 为设计模式提供共用工具和检查。Standard 自带静态页面与 PPTX exporter，
+保留源代码模块结构及字体许可。
+设计模式的 PPTX 是文件导出，不宣传或承诺编辑能力。
 静态字段为 `static_html` / `standard` / `static_postprocess`；默认要求 HTML 和 PPTX
-同时交付，仅用户明确只要 HTML 时省略 PPTX。旧静态任务恢复时由 Entry 迁移对应字段，
-保留绝对任务目录、原材料、大纲、页面及后处理选择。
+同时交付，仅用户明确只要 HTML 时省略 PPTX。续作时保留绝对任务目录、原材料、大纲、
+页面及已确认的输出选择。
 
 静态整册入口固定为同一任务目录的 `present.html`。父级先执行 Standard 的 `deck.py build`
 与 `deck.py audit`，核对页面覆盖、资源和播放器，再完成最终像素检查及所需 PPTX 导出；
@@ -26,7 +26,7 @@ Workbench 或 Edit；Standard 自带静态页面与 PPTX exporter，保留源代
 OfficeV3 直接发送用户需求，不做 PPT 正则分类或发送前的模式拦截。Box-Agent 原有通用
 Skill 发现将匹配的入口放入目录，模型需调用 `get_skill` 读取完整指引；显式选择则由宿主
 直接提供 Skill reference。当前 ACP 不按 PPT 关键词自动预载正文。用户在 prompt 中明确选择
-“快速模式”或“设计模式”作为制作方式，或同一任务已有用户亲自作出的模式选择时，直接路由。
+“快速模式”或“设计模式”作为制作方式，或同一任务已有用户点击／宿主超时提交的模式选择时，直接路由。
 “帮我设计一下 PPT”或“介绍软件设计模式的 PPT”不构成选择；对模式的提问、比较、引用和
 否定同样不算。明确要求制作动态 PPT、动态演示或带动效幻灯片时，也直接进入设计模式，设置
 `dynamic_html` / `dazzle`，仍通过 Entry → Story → Dazzle，不再弹模式选择卡。
@@ -34,7 +34,9 @@ Skill 发现将匹配的入口放入目录，模型需调用 `get_skill` 读取�
 本轮明确改做动态演示优先于历史模式；本轮同时指定快速模式与动态演示时先澄清冲突。其余
 请求均调用 `request_user_decision`，使用 `presentation_mode` 分类和 `fast`/`design`
 选项。套模板、自由设计、静态、文件格式或模型已写入的默认模式不能代替用户选择。
-模式名称含糊或要求冲突时同样通过选择卡澄清，说明待确认的点，选项只包含当前可执行路线。
+普通模式卡由模型推荐 `fast` 或 `design`，传入默认项、30 秒及低风险可逆声明；
+宿主收到点击或超时后提交选择；超时采用推荐项不表述为用户主动选择。
+模式名称含糊或要求冲突时通过无默认项、无倒计时的选择卡澄清，说明待确认的点，选项只包含当前可执行路线。
 这仍是 Skill 的执行指引，不增加前端正则判断。
 
 system 的通用 Skill 指引要求匹配任务先读取 Skill，且 Skill 要求人工选择时必须调用
@@ -47,7 +49,8 @@ system 的通用 Skill 指引要求匹配任务先读取 Skill，且 Skill 要�
 若模型用正文请求用户选择却没有调用工具，现有通用结束检查会结合本步真实提供的工具，
 识别未完成的结构化交互并要求补调。仅解释选项差异、用户明确只要文字选项、工具不可用
 且正文已给出完整选择时，不因此补卡。检查沿用当前主请求的思考开关及绑定 client 的
-参数映射，不强制关闭思考。恢复保留人工选择要求，不擅自设置默认值或倒计时；仍受
+参数映射，不强制关闭思考。恢复沿用原交互的选择要求：普通模式卡使用入口声明的
+推荐项和 30 秒超时，手动澄清卡不擅自增加默认值或倒计时；仍受
 原有两次恢复上限、剩余轮数和取消机制约束。判断依赖模型，不保证每次都能纠正漏调用；
 先前已流式显示的正文可能仍可见，实际卡片随后出现。
 
@@ -60,19 +63,16 @@ system 的通用 Skill 指引要求匹配任务先读取 Skill，且 Skill 要�
 既有 `[HOST_USER_DECISION_RESPONSE]` 用户消息；不增加 PPT 专用 RPC、状态文件或内核
 策略。重复加载入口、补充材料和恢复会话沿用已有选择。取消卡片不自动选择任何模式。
 
-## 名称和资源兼容
+## 名称和资源
 
-- 设计模式的选项 ID 为 `design`。旧会话在 `decision_kind="presentation_mode"` 下返回的
-  `selected_option_id="creative"`，以及历史中已明确选择的旧外层“创意模式”，兼容为
-  `design`；SN 内部的 `ppt_mode="creative"` / `choices.output="creative"` 不参与这个映射。
-  新请求只说“创意模式”且无法区分旧入口与整页生图时先澄清，不据此调用未打包的出口。
+- 制作模式的选项 ID 为 `fast` / `design`。未明确选择模式时通过选择卡确认，名称含糊时澄清。
+- `html-templates` 只提供视觉样式；新建 PPT/PPTX 或 HTML 幻灯片先读 `pptx`，
+  确定模式后再应用模板。自动选择视觉模板不能代替制作模式选择。
 - 原 `pptx` 注册名改为 `ppt-fast`；物理目录 `document-skills/pptx/` 保留，避免移动原有
   导出器、受信同步脚本和打包资源路径。新入口位于 `skills/pptx/SKILL.md`。
 - 公共入口与后端设置 `metadata.allow_override=false`，避免旧用户安装覆盖该套件。
   后端另设 `metadata.user_visible=false`；它们不参与普通目录推荐，但允许精确读取。
   显式禁用、任务作用域和 Connector 授权限制仍生效。
-- `ppt-router` 是旧演示入口；新内置目录不注册该名称。旧分支和用户安装不在迁移中删除。
-- 保存过旧 Skill 注册名的任务可能需要新建任务；本改动不改写历史会话或用户禁用设置。
 
 ## 视觉检查
 

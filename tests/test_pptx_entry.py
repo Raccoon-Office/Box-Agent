@@ -31,7 +31,25 @@ async def test_reading_public_entry_does_not_require_or_deliver_a_backend(loader
 
 
 @pytest.mark.asyncio
-async def test_entry_choice_payload_preserves_both_descriptions_and_waits_for_user(loader):
+async def test_entry_exposes_current_modes_without_retired_aliases(loader):
+    result = await GetSkillTool(loader).invoke({"skill_name": "pptx"})
+    assert result.success
+    for retired in ("兼容名称", "旧选择卡", "web_html", "web_postprocess", "sn-ppt-creative", "sn-ppt-web"):
+        assert retired not in result.content
+    assert 'trigger="timeout"' in result.content
+    assert "任务已开始" in result.content
+
+
+@pytest.mark.asyncio
+async def test_visual_style_reference_routes_unstarted_decks_through_ppt_entry(loader):
+    result = await GetSkillTool(loader).invoke({"skill_name": "html-templates"})
+    assert result.success
+    assert 'get_skill(skill_name="pptx")' in result.content
+    assert "only to visual-profile selection" in result.content
+
+
+@pytest.mark.asyncio
+async def test_entry_choice_payload_offers_both_modes_with_a_30_second_default(loader):
     example = re.search(r"```json\s*(.*?)\s*```", loader.get_skill("pptx").content, re.S)
     arguments = json.loads(example.group(1))
     result = await RequestUserDecisionTool().invoke(arguments)
@@ -41,8 +59,31 @@ async def test_entry_choice_payload_preserves_both_descriptions_and_waits_for_us
         "fast": "快速模式", "design": "设计模式",
     }
     assert all(option["description"].strip() for option in result.raw_output["options"])
-    assert result.raw_output["autoSubmit"]["allowed"] is False
-    assert "defaultOptionId" not in result.raw_output
+    assert result.raw_output["defaultOptionId"] in {"fast", "design"}
+    assert result.raw_output["options"][0]["id"] == result.raw_output["defaultOptionId"]
+    assert result.raw_output["autoSubmit"] == {
+        "allowed": True,
+        "requestedSeconds": 30,
+        "effectiveSeconds": 30,
+        "behavior": "submit_default",
+    }
+    assert result.raw_output["resumeBehavior"] == "continue_existing_task"
+    assert RequestUserDecisionTool().ends_turn_on_success is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recommended_mode", ["fast", "design"])
+async def test_entry_timeout_preserves_either_model_recommended_mode(loader, recommended_mode):
+    example = re.search(r"```json\s*(.*?)\s*```", loader.get_skill("pptx").content, re.S)
+    arguments = json.loads(example.group(1))
+    arguments["default_option_id"] = recommended_mode
+    result = await RequestUserDecisionTool().invoke(arguments)
+
+    assert result.success, result.error
+    assert result.raw_output["defaultOptionId"] == recommended_mode
+    assert result.raw_output["autoSubmit"]["allowed"] is True
+    assert result.raw_output["autoSubmit"]["effectiveSeconds"] == 30
+    assert result.raw_output["resumeBehavior"] == "continue_existing_task"
 
 
 @pytest.mark.asyncio

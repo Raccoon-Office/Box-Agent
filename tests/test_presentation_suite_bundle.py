@@ -30,6 +30,8 @@ def test_six_internal_methods_keep_independent_roots_and_no_unused_backends():
 
 def test_entry_routes_static_and_dynamic_without_missing_methods():
     entry = (SUITE / "skills/sn-ppt-entry/SKILL.md").read_text()
+    for retired in ("web_html", "web_postprocess", "旧 `creative`", "恢复旧静态任务"):
+        assert retired not in entry
     task_example = json.loads(re.findall(r"```json\n(.*?)\n```", entry, re.S)[0])
     assert task_example["choices"]["output"] == "static_html"
     assert task_example["ppt_mode"] == "standard"
