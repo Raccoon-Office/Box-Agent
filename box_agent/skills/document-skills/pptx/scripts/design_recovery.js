@@ -6,7 +6,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 
 function correction(base, update, error) {
   const fields = [...new Set([...String(error).matchAll(/design_plan\.([a-z_]+)/g)].map(m => m[1]))]
-    .filter(key => ["theme_id", "palette", "visual_requirements", "slides", "reason"].includes(key));
+    .filter(key => ["theme_id", "profile_id", "visual_profile", "palette", "visual_requirements", "slides", "reason"].includes(key));
   const merged = clone(base);
   for (const field of fields) if (update && Object.hasOwn(update, field)) merged[field] = clone(update[field]);
   return { decision: merged, fields };
