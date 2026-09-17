@@ -1,7 +1,8 @@
 """C1 characterization of the pre-Engine setup and Agent tool contract.
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
-descriptions, PPT entry contracts and connector search apply before exact comparisons.
+descriptions, PPT entry contracts, tool handoffs and connector search apply
+before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -62,7 +63,6 @@ _PLAN = {"plan_read", "plan_write"}
 _MEMORY = {"memory_read", "memory_write", "memory_search"}
 _SANDBOX = {"execute_code", "sandbox_status"}
 _GOALS = {"goal_read", "goal_write"}
-_CHILD_DEFAULT_READS = {"query_jsonl", "read_file", "search_files"}
 _FLAGS_OFF = {
     "enable_file_tools": False,
     "enable_bash": False,
@@ -81,6 +81,9 @@ _CWD_SCHEMA_CHANGES = json.loads(
 )
 _PPTX_ENTRY_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/pptx_entry_schema_changes.json").read_text()
+)
+_TOOL_HANDOFF_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/tool_handoff_schema_changes.json").read_text()
 )
 _CONNECTOR_SEARCH_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
@@ -237,7 +240,7 @@ def _normalized_schema(schema, profile):
     return json.loads(serialized.replace(str(profile), "<PROFILE>"))
 
 
-def _assert_schema_contract(tools, profile, *, child_read_tools=()):
+def _assert_schema_contract(tools, profile):
     expected = json.loads(_SCHEMA_FIXTURE.read_text(encoding="utf-8"))["tools"]
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
     expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
@@ -271,22 +274,19 @@ def _assert_schema_contract(tools, profile, *, child_read_tools=()):
         for change in (
             *_CWD_SCHEMA_CHANGES.get(tool.name, ()),
             *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
+            *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
         ):
             target = entry["schema"]
             *parents, field = change["path"]
             for key in parents:
                 target = target[key]
             assert target[field] == change["before"], (tool.name, change["path"])
-            target[field] = change["after"]
+            if change.get("remove"):
+                del target[field]
+            else:
+                target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
-        if tool.name == "sub_agent":
-            # This default is the one capability-dependent schema field. The
-            # caller supplies the independently expected read set, never a set
-            # inferred from the actual tool's live provider or parameter schema.
-            entry["schema"]["input_schema"]["properties"]["required_tools"]["default"] = (
-                sorted(child_read_tools)
-            )
         assert list(tool.aliases) == entry["aliases"], tool.name
         assert _normalized_schema(tool.to_schema(), profile) == entry["schema"], tool.name
         schema = entry["schema"]
@@ -367,7 +367,6 @@ async def test_setup_capability_matrix_preserves_exact_tools_and_schemas(
     assert all(agent.tools[name] is tool for name, tool in assembled_by_name.items())
     _assert_schema_contract(
         list(agent.tools.values()), isolated_setup.profile,
-        child_read_tools=expected & _CHILD_DEFAULT_READS,
     )
 
 
