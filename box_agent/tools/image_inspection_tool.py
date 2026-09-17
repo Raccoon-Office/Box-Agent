@@ -81,9 +81,10 @@ class ImageInspectionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Inspect 1-6 local PNG/JPEG images with the configured vision-capable "
-            "model and answer the supplied instruction using relevant visual evidence. "
-            "Reads image files and performs an LLM request; never modifies files."
+            "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's "
+            "written analysis; native shows image pixels to you in your next request, "
+            "so you must record your findings before reading another batch. "
+            "Never modifies files."
         )
 
     @property
@@ -175,11 +176,23 @@ class ImageInspectionTool(Tool):
                 images,
                 instruction=normalized_instruction,
             )
+            blocks[0]["text"] = (
+                "Native image inspection: the labeled images below are visible to "
+                "you in this request only. Inspect their pixels yourself; no separate "
+                "vision-model answer will follow. In your next assistant response, "
+                "record concise findings for each filename in ordinary assistant text, "
+                "including anything unreadable or uncertain, before requesting another "
+                "image batch. These written findings remain after the image pixels "
+                "leave the context. You may record findings and call inspect_images "
+                "for the next requested batch in the same response; another user turn "
+                "is not required. Match each finding to the label immediately before "
+                "its image.\n\n" + blocks[0]["text"]
+            )
             image_metadata = self._image_metadata(images, detailed=True)
             receipt = (
-                f"Attached {len(images)} image(s) transiently to the active main "
-                "model for direct inspection. The raw image payload is request-only "
-                "and is not retained in conversation history."
+                f"Loaded {len(images)} image(s) for native inspection. Their pixels "
+                "and filename labels accompany your next request. This receipt is "
+                "not a visual assessment; inspect the attached images yourself."
             )
             return ToolResult(
                 success=True,
