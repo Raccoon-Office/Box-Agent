@@ -815,8 +815,24 @@ class Agent:
                 "estimated_tokens": estimated, "token_budget": _ACTIVE_SKILL_TOKEN_BUDGET,
                 "budget_exceeded": estimated > _ACTIVE_SKILL_TOKEN_BUDGET}
 
+    def _restore_session_surface_after_replay_failure(self) -> None:
+        """Restore committed history before accepting input or starting a turn."""
+        if self._session_surface_replay_failed:
+            try:
+                replay = getattr(self.session_log, "replay", None)
+                projection = replay() if callable(replay) else None
+                if projection is None:
+                    raise RuntimeError("session log is not configured")
+                self.messages[:] = [self.messages[0], *projection.messages]
+                self._session_surface_replay_failed = False
+            except Exception as exc:
+                raise SessionLogReplayError(
+                    "the previous compact commit could not be replayed; refusing to continue"
+                ) from exc
+
     def add_user_message(self, content: str) -> None:
         """Add a user message and materialize selected Skills beside it."""
+        self._restore_session_surface_after_replay_failure()
         if self.goal is not None and self.goal.status == "active":
             content = self._apply_goal_context(content)
         # Explicit slash/host selection is resolved at the message boundary.
@@ -1123,18 +1139,7 @@ class Agent:
         if callable(set_child_negotiator):
             set_child_negotiator(effective_options.permission_negotiator)
 
-        if self._session_surface_replay_failed:
-            try:
-                replay = getattr(self.session_log, "replay", None)
-                projection = replay() if callable(replay) else None
-                if projection is None:
-                    raise RuntimeError("session log is not configured")
-                self.messages[:] = [self.messages[0], *projection.messages]
-                self._session_surface_replay_failed = False
-            except Exception as exc:
-                raise SessionLogReplayError(
-                    "the previous compact commit could not be replayed; refusing to continue"
-                ) from exc
+        self._restore_session_surface_after_replay_failure()
 
         session_turn: int | None = None
         session_step: int | None = None

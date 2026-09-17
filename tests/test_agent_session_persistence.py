@@ -616,6 +616,54 @@ async def test_compaction_replay_failure_does_not_close_turn_with_old_live_surfa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("select_skill", [False, True])
+@pytest.mark.parametrize("still_unavailable", [False, True])
+async def test_replay_recovery_preserves_next_user_input_without_restoring_stale_history(
+    tmp_path, select_skill, still_unavailable,
+):
+    log = SessionLog.create(tmp_path / "sessions", session_id="replay-retry", cwd=tmp_path)
+    store = _ReplayFailureStore(log)
+    llm = _PostCompactionLLM(log.path)
+    agent = Agent(
+        llm_client=llm, system_prompt="system",
+        tools=[GetSkillTool(_make_reference_loader(tmp_path))],
+        workspace_dir=str(tmp_path), token_limit=8_000,
+        deferred_mcp_loading_enabled=False, session_log=store,
+    )
+    for index in range(24):
+        agent.messages.append(Message(
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"old-{index}:" + "x" * 2_000,
+        ))
+    agent.add_user_message("original request")
+    options = replace(agent.default_run_options(), summary_llm=_SummaryCheckpointLLM(log.path))
+    try:
+        with pytest.raises(SessionLogReplayError, match="committed"):
+            _ = [event async for event in agent.run_events(options=options)]
+        if select_skill:
+            agent.skill_runtime.select(["review"])
+        new_input = "Stop the original task and explain the results first."
+        if still_unavailable:
+            durable_before = log.path.read_bytes()
+            with pytest.raises(SessionLogReplayError, match="refusing to continue"):
+                agent.add_user_message(new_input)
+            assert log.path.read_bytes() == durable_before
+            assert all(message.content != new_input for message in agent.messages)
+        store.after_replace = False
+        agent.add_user_message(new_input)
+        _ = [event async for event in agent.run_events(options=options)]
+        for messages in (llm.normal_messages, log.replay().messages):
+            assert sum(message.content == new_input for message in messages) == 1
+            assert any("durable compacted history" in str(message.content) for message in messages)
+            assert all("old-0:" not in str(message.content) for message in messages)
+        if select_skill:
+            assert any("EXACT-REVIEW-METHOD" in str(message.content)
+                       for message in llm.normal_messages)
+    finally:
+        log.close()
+
+
+@pytest.mark.asyncio
 async def test_compaction_without_native_replay_keeps_in_memory_surface(tmp_path):
     """SessionStorePort compatibility: a third-party Store that only implements
     the minimal contract (no native ``replay``) must still compact. The kernel
