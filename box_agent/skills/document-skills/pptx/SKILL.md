@@ -167,11 +167,17 @@ If outline/research validation fails, it returns degraded delivery with unverifi
 content clearly reported; do not repeat research or validator debugging indefinitely. This is the delivery
 floor, not a completed visual review. Keep it until the normal deck is rendered.
 If `can_retry: true`, send the same brief path and `correction_file` to the designer
-once with budget {"max_steps": 16, "max_tool_calls": 24}. Tell this fresh role to
-read correction_file, which includes the original decision and legal layout enums.
-If requires_full_read is false, that file is sufficient; do not reread all packets.
-Request only the named fields as a JSON patch; the program preserves every
-other field. The correction must not reread the full catalog or recreate the deck.
+once with budget {"max_steps": 16, "max_tool_calls": 24}. This is a fresh role;
+read `correction_file` and follow its `requires_full_read` value:
+
+- `true`: read `brief_file` and its required packets using the design role's
+  reading procedure, then return a complete decision object. The previous
+  response is not a usable decision to patch; do not replace these reads with
+  main-agent choices copied into the task.
+- `false`: the correction file is sufficient. Return only its named fields as a
+  JSON patch; the program preserves the rest. Do not reread all packets or the
+  full catalog, or recreate the deck.
+
 Run accept again. On `status: degraded`, stop PPT authoring immediately: do not
 call `inspect_deck_contract`, `apply_deck_patch`, `finalize_controlled_deck`, edit
 `deck.json`, delete slides, or start another design call. Deliver `primary_artifact` and explain the

@@ -176,8 +176,11 @@ The example colors illustrate the schema, not a default color choice.
 Do not output schema versions, hashes, page numbers,
 content_bindings, media filenames, coordinates, CSS, rewritten text or data.
 The program supplies those mechanical bindings. Do not wrap the JSON in Markdown.
-On a correction, read correction.json and return ONLY its named fields as a JSON
-patch (for example {"theme_id":"plain-neutral"}). Do not include palette or slides
-when only theme_id is named. The program merges it into the original response.
+On a correction, read correction.json and follow `requires_full_read`:
+- `true`: follow the normal reading procedure and return the complete decision
+  object above. There is no usable original decision to patch.
+- `false`: return ONLY its named fields as a JSON patch (for example
+  {"theme_id":"plain-neutral"}). Do not include palette or slides when only
+  theme_id is named. The program merges it into the original response.
 Use the matching candidates already supplied; do not reread the entire catalog. Do not claim to have reviewed finished
 slides; this is a design proposal, not a final visual inspection.
