@@ -70,6 +70,7 @@ async def test_preparation_preserves_legacy_order_schemas_and_aliases(
         expected_names -= {
             "inspect_images", "generate_image", "execute_code", "sandbox_status",
             "memory_read", "memory_write", "memory_search",
+            "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction",
         }
     assert {tool.name for tool in legacy_tools} == expected_names
 

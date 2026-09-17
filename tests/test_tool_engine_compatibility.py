@@ -60,7 +60,7 @@ _FILES = {
 _BASH = {"bash", "bash_output", "bash_kill"}
 _TODO = {"todo_read", "todo_write"}
 _PLAN = {"plan_read", "plan_write"}
-_MEMORY = {"memory_read", "memory_write", "memory_search"}
+_MEMORY = {"memory_read", "memory_write", "memory_search", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction"}
 _SANDBOX = {"execute_code", "sandbox_status"}
 _GOALS = {"goal_read", "goal_write"}
 _FLAGS_OFF = {
@@ -94,7 +94,7 @@ _C5_DISCOVERABLE = {
     "append_file", "query_jsonl", "bash_output", "bash_kill", "sandbox_status",
     "mcp_config", "report_execution_result",
     "plan_read", "plan_write", "todo_read", "todo_write", "goal_read", "goal_write",
-    "memory_read", "memory_search", "memory_write", "obsidian_create_note",
+    "memory_read", "memory_search", "memory_write", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction", "obsidian_create_note",
     "obsidian_update_note", "obsidian_daily_note", "search_skillhub", "install_skillhub_skill",
 }
 

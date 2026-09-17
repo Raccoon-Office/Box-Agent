@@ -275,3 +275,33 @@ mgr.write_manual_memory("- 用户偏好中文")
 mgr.read_all()
 mgr.write_all("- 用户偏好中文")
 ```
+
+
+---
+
+## 9. Correction memory
+
+Correction memory stores durable failure lessons ("remember this pitfall / forget it") so the agent can avoid repeating the same mistake. It is a side path next to core and context memory.
+
+| Aspect | Behavior |
+|--------|----------|
+| **Purpose** | Remember actionable pitfalls; supersede or delete when fixed or obsolete |
+| **Path** | `~/.box-agent/memory/v2/experiences/corrections.md` (topic `corrections`) |
+| **Startup** | Not injected into `MEMORY.md` / recall core block |
+| **Retrieval** | Searchable via `memory_search` when `status=active`; non-active corrections are skipped by default |
+| **Vectors / TTL** | No vectors; no 24h TTL |
+
+### Tools
+
+| Tool | Role |
+|------|------|
+| `memory_list_corrections` | List corrections (active-only by default) |
+| `memory_write_correction` | Explicit write: creates a **draft**, then `confirm=true` + `draft_id` promotes to **active**. Refuses preference and secret content. |
+| `memory_supersede_correction` | Invalidate a correction (`status=superseded`) |
+| `memory_delete_correction` | Soft-delete (`status=deleted`) |
+
+### Auto-curation
+
+When the same `error_fingerprint` + `subject` fails repeatedly inside a time window (default: 2 failures within 6 hours), `CorrectionCurator.observe_failure` may emit a draft that the runtime writes as an active correction. One-shot environment fixes (for example a missing font downloaded successfully once) are never stored.
+
+`subject.kind` is one of: `skill` | `tool` | `path_pattern` | `env` | `workflow`.

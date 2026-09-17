@@ -56,6 +56,7 @@ class ToolResultPipelineInput:
     parallel: bool = False
     commit_result: Callable[[Message, ToolCallResult, int], None] | None = None
     hook_text_modified: bool = False
+    correction_observer: Callable[[str, ToolResult, str | None], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,18 @@ def process_tool_result(
     result = pipeline_input.result
     visible_content = pipeline_input.visible_content
     visible_error = pipeline_input.visible_error
+    if (
+        not result.success
+        and pipeline_input.correction_observer is not None
+    ):
+        try:
+            pipeline_input.correction_observer(
+                pipeline_input.tool_name,
+                result,
+                visible_error,
+            )
+        except Exception:
+            pass
     new_count = 0
     duplicate_count = 0
     new_labels: list[str] = []

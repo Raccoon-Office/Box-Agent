@@ -340,3 +340,85 @@ def test_normalize_error_fingerprint_strips_noise():
     assert a == b
     assert "/home" not in a
     assert "2026" not in a
+
+
+# ── Runtime hook: observe_failure via tool-result path ───────
+
+
+def test_runtime_hook_two_failures_writes_correction(mgr: MemoryManager):
+    from box_agent.correction import notify_tool_failure_for_correction
+
+    err = "PermissionError: [Errno 13] Permission denied: '/tmp/out.txt'"
+    notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
+    assert mgr.list_corrections() == []
+
+    notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
+    listed = mgr.list_corrections()
+    assert len(listed) == 1
+    assert listed[0].status == "active"
+    assert listed[0].subject_kind == "tool"
+    assert listed[0].subject_name == "bash"
+    assert listed[0].source == "auto"
+
+
+def test_runtime_hook_one_failure_no_write(mgr: MemoryManager):
+    from box_agent.correction import notify_tool_failure_for_correction
+
+    notify_tool_failure_for_correction(
+        mgr,
+        tool_name="bash",
+        raw_error="OSError: broken pipe on write",
+    )
+    assert mgr.list_corrections() == []
+
+
+def test_runtime_hook_one_shot_env_fix_never_writes(mgr: MemoryManager):
+    from box_agent.correction import notify_tool_failure_for_correction
+
+    msg = "Missing font NotoSansCJK; downloaded font successfully and retry ok"
+    notify_tool_failure_for_correction(mgr, tool_name="pptx_export", raw_error=msg)
+    notify_tool_failure_for_correction(mgr, tool_name="pptx_export", raw_error=msg)
+    assert mgr.list_corrections() == []
+
+
+def test_process_tool_result_invokes_correction_observer(mgr: MemoryManager, tmp_path: Path):
+    from box_agent.correction import notify_tool_failure_for_correction
+    from box_agent.schema import Message
+    from box_agent.tool_result_storage import ToolResultStorage
+    from box_agent.tools.base import ToolResult
+    from box_agent.tools.engine.results import ToolResultPipelineInput, process_tool_result
+
+    def observer(tool_name, result, visible_error):
+        notify_tool_failure_for_correction(
+            mgr,
+            tool_name=tool_name,
+            raw_error=str(visible_error or result.error or ""),
+            content=str(result.content or ""),
+        )
+
+    storage = ToolResultStorage(str(tmp_path / "results"))
+    err = "RuntimeError: repeated widget failure xyz"
+    for _ in range(2):
+        process_tool_result(
+            ToolResultPipelineInput(
+                messages=[],
+                tool_call_id="c1",
+                tool_name="widget",
+                arguments={},
+                result=ToolResult(success=False, content="", error=err),
+                visible_content="",
+                visible_error=err,
+                result_storage=storage,
+                correction_observer=observer,
+            )
+        )
+    listed = mgr.list_corrections()
+    assert len(listed) == 1
+    assert listed[0].subject_name == "widget"
+
+
+def test_memory_manager_lazy_correction_curator(mgr: MemoryManager):
+    first = mgr.correction_curator
+    second = mgr.correction_curator
+    assert first is second
+    assert first.memory_manager is mgr

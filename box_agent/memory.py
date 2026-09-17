@@ -595,6 +595,7 @@ class MemoryManager:
         self._ensure_v2_state()
         self._topic_store.ensure_index()
         self.refresh_memory_summary()
+        self._correction_curator = None
 
     @contextmanager
     def context_transaction(self) -> Iterator[None]:
@@ -608,6 +609,16 @@ class MemoryManager:
             yield
 
     # ── File paths ──────────────────────────────────────────────
+
+
+    @property
+    def correction_curator(self):
+        """Lazy shared CorrectionCurator for auto-curation of tool failures."""
+        if self._correction_curator is None:
+            from box_agent.correction import CorrectionCurator
+
+            self._correction_curator = CorrectionCurator(self)
+        return self._correction_curator
 
     @property
     def memory_file(self) -> Path:

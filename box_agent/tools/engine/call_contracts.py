@@ -60,6 +60,7 @@ class ToolRunContext:
     hook_dispatch: HookDispatchPort | None = None
     hook_context: HookContext | None = None
     skill_reader: Callable[..., ToolResult] | None = None
+    correction_observer: Callable[[str, ToolResult, str | None], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)

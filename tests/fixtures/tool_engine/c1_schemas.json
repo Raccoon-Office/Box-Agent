@@ -556,6 +556,122 @@
         }
       }
     },
+    "memory_list_corrections": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_list_corrections",
+        "description": "List correction-memory entries (durable failure lessons). By default returns active corrections only. Does not touch MEMORY.md.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "superseded",
+                "draft",
+                "deleted"
+              ],
+              "description": "Optional status filter. Omit for active-only."
+            },
+            "include_inactive": {
+              "type": "boolean",
+              "description": "If true and status is omitted, include non-active corrections."
+            }
+          }
+        }
+      }
+    },
+    "memory_write_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_write_correction",
+        "description": "Write a durable correction (failure lesson) to corrections memory. Creates a draft first; pass confirm=true with draft_id to activate. Refuses preference and secret content. Does not write MEMORY.md.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "lesson": {
+              "type": "string",
+              "description": "One actionable lesson (required when creating a draft)."
+            },
+            "symptom": {
+              "type": "string",
+              "description": "Short symptom summary (no long stacks)."
+            },
+            "error_fingerprint": {
+              "type": "string",
+              "description": "Normalized error fingerprint (or raw error to normalize)."
+            },
+            "subject_kind": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "tool",
+                "path_pattern",
+                "env",
+                "workflow"
+              ]
+            },
+            "subject_name": {
+              "type": "string"
+            },
+            "subject_version": {
+              "type": "string"
+            },
+            "confirm": {
+              "type": "boolean",
+              "description": "If true with draft_id, promote that draft to active."
+            },
+            "draft_id": {
+              "type": "string",
+              "description": "Draft entry id to confirm."
+            }
+          }
+        }
+      }
+    },
+    "memory_supersede_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_supersede_correction",
+        "description": "Supersede (invalidate) a correction by id. Superseded corrections are hidden from default memory_search.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "description": "Correction entry id to supersede."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Optional reason (e.g. 'fixed', 'obsolete')."
+            }
+          },
+          "required": [
+            "entry_id"
+          ]
+        }
+      }
+    },
+    "memory_delete_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_delete_correction",
+        "description": "Soft-delete a correction by id (status=deleted). Deleted corrections are hidden from default memory_search.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "description": "Correction entry id to delete."
+            }
+          },
+          "required": [
+            "entry_id"
+          ]
+        }
+      }
+    },
     "obsidian_create_note": {
       "aliases": [],
       "schema": {

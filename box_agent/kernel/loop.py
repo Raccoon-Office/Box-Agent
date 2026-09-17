@@ -976,6 +976,23 @@ async def _run_agent_loop_impl(
             context_engine.reserve_followup(blocks)
         return accepted, blocks, tokens
 
+    def _correction_observer(tool_name, result, visible_error):
+        from box_agent.correction import notify_tool_failure_for_correction
+
+        raw = ""
+        if visible_error:
+            raw = str(visible_error)
+        elif getattr(result, "error", None):
+            raw = str(result.error)
+        elif getattr(result, "content", None):
+            raw = str(result.content)
+        notify_tool_failure_for_correction(
+            memory_lookup,
+            tool_name=tool_name,
+            raw_error=raw,
+            content=str(getattr(result, "content", "") or ""),
+        )
+
     tool_engine.configure_run(
         ToolRunContext(
             messages=messages, hooks=hook_mgr, result_storage=result_storage,
@@ -990,6 +1007,7 @@ async def _run_agent_loop_impl(
             permission_negotiator=permission_negotiator, logger=logger,
             resource_ledger=resource_ledger, activate_skill=active_skill_activator,
             skill_reader=context_engine.tool_reader if context_engine is not None else None,
+            correction_observer=_correction_observer if memory_lookup else None,
         ),
         ToolExecutionOptions(
             tool_call_limits=tool_call_limits, max_tool_calls=max_tool_calls,

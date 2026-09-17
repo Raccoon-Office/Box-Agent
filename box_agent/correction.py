@@ -204,3 +204,56 @@ class CorrectionCurator:
             raise CorrectionReject("lesson is required")
         if not (draft.error_fingerprint or "").strip():
             raise CorrectionReject("error_fingerprint is required")
+
+
+_ONE_SHOT_ENV_FIX_RE = re.compile(
+    r"(?is)\b("
+    r"(?:font|typeface).{0,80}(?:download(?:ed)?|install(?:ed)?).{0,40}(?:success|ok|complete|done)|"
+    r"(?:download(?:ed)?|install(?:ed)?).{0,80}(?:font|typeface).{0,40}(?:success|ok|complete|done)|"
+    r"one[_ -]?shot[_ -]?env[_ -]?fix|"
+    r"missing\s+font.{0,60}(?:download(?:ed)?|install(?:ed)?)"
+    r")\b"
+)
+
+
+def looks_like_one_shot_env_fix(*parts: str) -> bool:
+    """Heuristic for one-time environment repairs that must never be stored."""
+    blob = "\n".join(p for p in parts if p)
+    if not blob.strip():
+        return False
+    return bool(_ONE_SHOT_ENV_FIX_RE.search(blob))
+
+
+def notify_tool_failure_for_correction(
+    memory_manager: "MemoryManager | None",
+    *,
+    tool_name: str,
+    raw_error: str,
+    content: str = "",
+) -> None:
+    """Soft side-effect: observe a failed tool call and maybe write a correction.
+
+    Never raises into the tool pipeline. Auto-curation writes ``active`` when the
+    repeat threshold is met (explicit remembers still go draft→confirm via tools).
+    """
+    if memory_manager is None:
+        return
+    name = (tool_name or "").strip()
+    if not name:
+        return
+    try:
+        curator = getattr(memory_manager, "correction_curator", None)
+        if curator is None:
+            curator = CorrectionCurator(memory_manager)
+        one_shot = looks_like_one_shot_env_fix(raw_error, content)
+        subject = CorrectionSubject(kind="tool", name=name)
+        draft = curator.observe_failure(
+            subject=subject,
+            raw_error=raw_error or content or "",
+            one_shot_env_fix=one_shot,
+        )
+        if draft is None:
+            return
+        memory_manager.write_correction(draft, status="active")
+    except Exception:
+        return
