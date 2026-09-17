@@ -291,9 +291,10 @@ def test_export_directory_refresh_does_not_bless_unrecorded_local_edits(tmp_path
     target = bundle / relative
     target.parent.mkdir(parents=True)
     target.write_bytes(original + b"unrecorded local edit\n")
+    export_index = namespace["OVERLAYS"].index("source-relative-pptx-page-directories")
     record = {
         "name": namespace["BUNDLE_NAME"], "revision": namespace["PINNED_REVISION"],
-        "overlays": namespace["OVERLAYS"][:-1],
+        "overlays": namespace["OVERLAYS"][:export_index],
         "files": {relative: {"sha256": hashlib.sha256(original).hexdigest()}},
     }
     marker = bundle / "source.json"

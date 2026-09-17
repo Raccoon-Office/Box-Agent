@@ -76,8 +76,10 @@ def _old_bundle(tmp_path):
     content = b'\ndef render(pg, out):\n        pg.screenshot(path=out)\n'
     target.write_bytes(content)
     digest = hashlib.sha256(content).hexdigest()
+    # Model the bundle before publication markers, even when later overlays exist.
+    publication_index = sync["OVERLAYS"].index("intermediate-render-artifacts")
     record = {"name": sync["BUNDLE_NAME"], "revision": sync["PINNED_REVISION"],
-              "overlays": sync["OVERLAYS"][:-1],
+              "overlays": sync["OVERLAYS"][:publication_index],
               "files": {relative: {"source_sha256": digest, "sha256": digest}}}
     (path / "source.json").write_text(json.dumps(record))
     return sync, path, target, digest
