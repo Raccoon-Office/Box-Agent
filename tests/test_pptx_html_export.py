@@ -575,6 +575,124 @@ def test_unmarked_inline_svg_keeps_existing_background_capture_behavior(
         assert center[0] > 200 and center[1] < 120 and center[2] < 150
 
 
+def _export_svg_background(tmp_path: Path, markup: str) -> Image.Image:
+    html = tmp_path / "svg.html"
+    html.write_text(
+        '<!doctype html><html><head><meta charset="utf-8"><style>'
+        'html,body{margin:0}.slide{width:1920px;height:1080px;position:relative;'
+        'overflow:hidden;background:white}.graphic{position:absolute;left:100px;'
+        'top:160px;width:400px;height:240px}.graphic svg{width:100%;height:100%}'
+        'h1{position:absolute;left:100px;top:20px;margin:0;font:40px Arial}'
+        '</style></head><body><section class="slide">'
+        '<h1>EDITABLE_SENTINEL</h1>' + markup + '</section></body></html>',
+        encoding="utf-8",
+    )
+    pptx = tmp_path / "svg.pptx"
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx),
+                       "--out", str(tmp_path / "previews"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        backgrounds, vectors = _slide_picture_targets(archive)
+        # Ordinary SVGs retain the existing single-background representation.
+        assert len(backgrounds) == 1
+        assert vectors == []
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        texts = slide.findall(
+            ".//{http://schemas.openxmlformats.org/drawingml/2006/main}t"
+        )
+        assert "EDITABLE_SENTINEL" in [node.text for node in texts]
+        background = Image.open(io.BytesIO(archive.read(backgrounds[0]))).convert("RGB")
+        # The managed browser may capture at a higher device pixel ratio.
+        background = background.resize((1920, 1080), Image.Resampling.NEAREST)
+        # HTML text is still native; it must not also be baked into the bitmap.
+        assert background.crop((100, 20, 700, 70)).getextrema() == ((255, 255),) * 3
+        return background
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("labelled", [False, True])
+def test_background_capture_preserves_svg_graphics_and_labels(
+    tmp_path: Path, nested: bool, labelled: bool,
+) -> None:
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240">'
+        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="6" markerHeight="6" orient="auto">'
+        '<path d="M0,0 L10,5 L0,10 Z" fill="#ff0000"/></marker></defs>'
+        '<rect x="20" y="20" width="80" height="60" fill="#00cc00"/>'
+        '<line x1="40" y1="140" x2="300" y2="140" stroke="#ff0000" '
+        'stroke-width="6" marker-end="url(#arrow)"/>'
+        + ('<text x="130" y="65" font-family="Arial" font-size="48" '
+           'fill="#0000ff">NODE</text>' if labelled else '') + '</svg>'
+    )
+    if nested:
+        # An ordinary content ancestor is hidden only while capturing backgrounds.
+        markup = '<div><p>Native sibling</p><div class="graphic">' + svg + '</div></div>'
+    else:
+        markup = svg.replace('<svg ', '<svg class="graphic" ', 1)
+    background = _export_svg_background(tmp_path, markup)
+    assert background.getpixel((150, 200)) == (0, 204, 0), "SVG node was lost"
+    assert background.getpixel((280, 300)) == (255, 0, 0), "SVG edge was lost"
+    red, green, blue = background.getpixel((377, 311))
+    assert red > 240 and green < 32 and blue < 32, "SVG arrowhead was lost"
+    if labelled:
+        colors = background.crop((220, 180, 390, 230)).getcolors(10000)
+        assert sum(count for count, (r, g, b) in colors
+                   if b > 200 and r < 50 and g < 50) > 300, (
+            "SVG node label was erased"
+        )
+
+
+def test_background_capture_preserves_authored_svg_visibility_and_clipping(
+    tmp_path: Path,
+) -> None:
+    markup = '''<div><p>Native sibling</p><div class="graphic">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240">
+      <defs><clipPath id="clip"><rect x="260" y="20" width="20" height="60"/></clipPath></defs>
+      <g visibility="hidden"><rect x="20" y="20" width="40" height="60" fill="#ff00ff"/>
+        <rect x="80" y="20" width="40" height="60" fill="#ffff00" visibility="visible"/></g>
+      <g opacity="0"><rect x="140" y="20" width="40" height="60" fill="#ff00ff"/></g>
+      <g display="none"><rect x="200" y="20" width="40" height="60" fill="#ff00ff"/></g>
+      <rect x="260" y="20" width="60" height="60" fill="#00ffff" clip-path="url(#clip)"/>
+      <rect x="340" y="20" width="40" height="60" fill="#000000" opacity="0.5"/>
+    </svg></div></div>'''
+    background = _export_svg_background(tmp_path, markup)
+    for x in (140, 260, 320, 400):
+        assert background.getpixel((x, 200)) == (255, 255, 255)
+    assert background.getpixel((200, 200)) == (255, 255, 0)
+    assert background.getpixel((370, 200)) == (0, 255, 255)
+    assert all(125 <= c <= 130 for c in background.getpixel((460, 200)))
+
+
+@pytest.mark.parametrize("stale_decoration", [False, True])
+def test_background_capture_keeps_svg_chart_preview_out_of_native_chart(
+    tmp_path: Path, stale_decoration: bool,
+) -> None:
+    spec = json.dumps({"type": "column", "categories": ["A", "B"],
+                       "series": [{"name": "Revenue", "values": [7, 13]}]})
+    markup = (
+        '<div class="graphic" data-pptx-chart data-native-chart="true" '
+        "data-chart-spec='" + spec + "'>"
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240">'
+        '<rect width="400" height="240" fill="#ff00ff"/>'
+        '<text x="20" y="50">CHART_PREVIEW</text></svg></div>'
+    )
+    if stale_decoration:
+        for tag in ("svg", "rect", "text"):
+            markup = markup.replace(f'<{tag} ', f'<{tag} data-pptx-decoration ', 1)
+    background = _export_svg_background(tmp_path, markup)
+    assert background.getpixel((200, 200)) == (255, 255, 255)
+    with zipfile.ZipFile(tmp_path / "svg.pptx") as archive:
+        charts = [name for name in archive.namelist()
+                  if name.startswith("ppt/charts/chart") and name.endswith(".xml")]
+        assert len(charts) == 1
+        chart = ET.fromstring(archive.read(charts[0]))
+        values = chart.findall(".//{http://schemas.openxmlformats.org/drawingml/2006/chart}v")
+        assert {"Revenue", "A", "B", "7", "13"}.issubset({node.text for node in values})
+        assert any(name.startswith("ppt/embeddings/") and name.endswith(".xlsx")
+                   for name in archive.namelist())
+
+
 def test_expressive_export_keeps_text_native_and_resolves_missing_font(tmp_path: Path) -> None:
     html_path = tmp_path / "index.html"
     html_path.write_text('''<!doctype html><html><head><meta charset="utf-8"><style>
