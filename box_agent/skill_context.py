@@ -377,7 +377,26 @@ class SkillReferenceContext:
             elif (name not in self.runtime.selected_names and name not in self.runtime.restoring_names
                   and not visible_ranges(messages, name=name, revision=previous.revision,
                                          lines=previous.prompt.splitlines(keepends=True))):
-                diagnostics.append(f"Previously read Skill '{name}' ({previous.revision[:16]}) is outside the current input. Use get_skill to read it again when needed.")
+                # The Skill Root Directory is the only durable, non-derivable
+                # locator for a skill's on-disk files, and it lives solely
+                # inside the get_skill body that compaction summarizes away.
+                # Re-state it here in the get_skill body's own plain wording so
+                # the model still knows where the skill's files live after the
+                # full reference drops out of the window, instead of guessing a
+                # source-root path nested above the real root. Caller-provided
+                # reference skills carry no on-disk path (skill_path is None);
+                # emit only the plain notice rather than a misleading root.
+                head = f"Previously read Skill '{name}' ({previous.revision[:16]}) is outside the current input. "
+                tail = "Use get_skill to read it again when needed."
+                if skill.skill_path:
+                    skill_root = str(skill.skill_path.parent)
+                    diagnostics.append(
+                        f"{head}"
+                        f"Its Skill Root Directory is `{skill_root}`; all files and references in the skill are relative to this directory. "
+                        f"{tail}"
+                    )
+                else:
+                    diagnostics.append(f"{head}{tail}")
         if user_index is not None:
             selected = tuple(dict.fromkeys((*self.runtime.selected_names, *self.runtime.restoring_names)))
             prefix = ("Host-provided Skill reference for this turn. "
