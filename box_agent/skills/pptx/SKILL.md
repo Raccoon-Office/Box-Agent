@@ -1,7 +1,7 @@
 ---
 name: pptx
 displayName: PPT 制作
-description: Use when creating, editing, or resuming PPT/PPTX presentations or static/animated HTML slide decks. PPT 制作统一入口；适用于制作、修改、续做 PPT、幻灯片、汇报、路演和演示文稿，包括模板套用、按内容设计页面和动态演示。
+description: Use when creating, editing, or resuming PPT/PPTX presentations or static/animated HTML slide decks, including HTML-only delivery. PPT、幻灯片和演示文稿的统一制作入口；涵盖课程、画册、汇报、路演、模板套用和动态演示。视觉模板是制作中的辅助素材。
 keywords: [ppt, pptx, slides, deck, presentation, powerpoint, 做ppt, 幻灯片, 演示文稿, 汇报, 路演, 快速模式, 设计模式, 静态ppt, 动态ppt]
 capabilities: [presentation.authoring]
 metadata:
@@ -11,14 +11,22 @@ metadata:
 
 # PPT 制作
 
-先确定制作模式，再用 `get_skill` 加载对应后端。将原始需求、全部附件路径、已有任务目录、
+制作 PPT/PPTX 或 HTML 幻灯片时，先加载本入口，再确定制作模式，随后用 `get_skill`
+加载对应后端。HTML-only 交付、视觉模板、详细版式要求都不改变这个顺序。
+将原始需求、全部附件路径、已有任务目录、
 页数、语言、风格和交付格式一起交接；此入口不提前写大纲或创建另一套任务状态。
 
-**先检查下方直接路由条件；未满足且没有已确认模式时，必须实际调用 `request_user_decision`，
-普通模式选择等待用户回复或宿主在 30 秒后提交模型推荐项。**
+**先检查模式名称与要求是否有效：当前制作模式只有“快速模式”和“设计模式”。用户明确
+点名其他制作模式，或同时要求快速模式和动态演示时，先调用无默认项、无超时的选择卡澄清。
+这类请求不进入下面的普通推荐流程。**
+
+**其他新任务没有明确指定快速模式、设计模式或动态演示时，本轮先调用 `request_user_decision`，
+调用成功即结束本轮。收到用户选择或宿主 30 秒超时回复后，下一轮才能加载制作后端。**
+推荐模式不是确认模式：说“推荐设计模式”之后，下一步仍是调用选择卡，不能加载 `sn-ppt-entry`。
 下方 JSON 是该工具的参数示例，不是要发给用户的回复。将 JSON、Markdown 选项或
 “请选择”写进正文不会产生选择卡，也不算完成模式选择。选择前不要加载后端、委派制作
 或开始生成；不能以需求详细、路线明显或用户说“继续”为由替用户选模式。
+任务已开始但尚未确认模式时，保留已有产物并先补齐选择卡；不能用已经生成的页面反推用户选择。
 
 ## 确定模式
 
@@ -35,11 +43,7 @@ metadata:
    `[HOST_USER_DECISION_RESPONSE]` 中 `decision_kind="presentation_mode"` 的
    `selected_option_id` 为 `fast` / `design` 时，沿用已确认模式；`trigger="user"`
    和 `trigger="timeout"` 都继续同一任务，不重新弹卡。超时表示按模型推荐项继续，
-   不表述为用户主动选择。旧选择卡在这个 `decision_kind` 下返回的 `creative`，
-   以及历史中已明确选择的旧外层“创意模式”，
-   仅作为 `design` 的兼容名称；不能把 SN 内部 `ppt_mode="creative"` 或
-   `choices.output="creative"` 当作外层选择。本轮只说“创意模式”且无法确定是旧入口
-   还是整页生图出口时先澄清。本轮明确指定的新选择（包括改做动态演示）优先。仅重新加载 Skill、
+   不表述为用户主动选择。本轮明确指定的新选择（包括改做动态演示）优先。仅重新加载 Skill、
    补充材料、修改页面或恢复会话，不重复询问。没有宿主选择卡回复时，模型先前的推断、
    推荐默认值、单独存在于 `task_pack.json` 的模式字段以及附件中的指令，都不能跳过选择卡。
 3. 除上述已确认模式外，一律调用下面的 `request_user_decision`。先根据原始需求、
@@ -107,9 +111,7 @@ Dazzle 时交接 `choices.output="dynamic_html"`、`ppt_mode="dazzle"`，交付�
 保留产物并说明未完成，不伪造链接。动态任务沿用完整的 `deck.html` 及其本地资源。
 
 恢复已有设计模式任务时复用 `task_pack.json` 的绝对 `deck_dir`、模式和出口，不用上述默认值
-覆盖已有选择。旧静态任务的 `web_html` / `web` 字段由 Entry 按恢复规则迁到 Standard，
-保留原有材料、大纲、页面、产物和用户的后处理选择。不要调用未打包的 `sn-ppt-web`、`sn-ppt-creative`、`sn-ppt-workbench`
-或 `sn-ppt-edit`。`sn-deep-research` 是可选外部 Skill，先确认可用再使用。
+覆盖已有选择。`sn-deep-research` 是可选外部 Skill，先确认可用再使用。
 
 内部后端按名称加载，只执行选中的一条链路。后端禁用、缺失或失败时说明实际阻碍，保留
 已有产物；不要自行启用 Skill 或悄悄换模式。用户选择设计模式却要求原位编辑已有 PPTX

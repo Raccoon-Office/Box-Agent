@@ -31,6 +31,24 @@ async def test_reading_public_entry_does_not_require_or_deliver_a_backend(loader
 
 
 @pytest.mark.asyncio
+async def test_entry_exposes_current_modes_without_retired_aliases(loader):
+    result = await GetSkillTool(loader).invoke({"skill_name": "pptx"})
+    assert result.success
+    for retired in ("兼容名称", "旧选择卡", "web_html", "web_postprocess", "sn-ppt-creative", "sn-ppt-web"):
+        assert retired not in result.content
+    assert 'trigger="timeout"' in result.content
+    assert "任务已开始" in result.content
+
+
+@pytest.mark.asyncio
+async def test_visual_style_reference_routes_unstarted_decks_through_ppt_entry(loader):
+    result = await GetSkillTool(loader).invoke({"skill_name": "html-templates"})
+    assert result.success
+    assert 'get_skill(skill_name="pptx")' in result.content
+    assert "only to visual-profile selection" in result.content
+
+
+@pytest.mark.asyncio
 async def test_entry_choice_payload_offers_both_modes_with_a_30_second_default(loader):
     example = re.search(r"```json\s*(.*?)\s*```", loader.get_skill("pptx").content, re.S)
     arguments = json.loads(example.group(1))

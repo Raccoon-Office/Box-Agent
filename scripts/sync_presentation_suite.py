@@ -27,7 +27,7 @@ BUNDLE_NAME = "sensenova-presentation-suite"
 MODULES = ("dazzle", "doctor", "entry", "standard", "story", "tools")
 OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "entry-two-outputs", "story-two-outputs", "doctor-shipped-backends",
-            "remove-image-only-output-policy", "legacy-static-task-resume",
+            "remove-image-only-output-policy", "current-task-resume",
             "dazzle-box-native-tools", "bundle-third-party-notices",
             "static-player-delivery-gate", "design-mode-delivery-wording",
             "owned-renderer-lifecycle", "original-uploaded-font-family",
@@ -152,6 +152,14 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
         text = _replace_once(text,
             "`sn-ppt-standard`、`sn-ppt-dazzle` 或 `sn-ppt-creative`。",
             "`sn-ppt-standard` 或 `sn-ppt-dazzle`。")
+        text = _replace_once(text, "# sn-ppt-entry\n", """# sn-ppt-entry
+
+执行前，必须已有用户明确要求设计模式或无冲突的动态演示，或公共 `pptx` 入口已收到
+`presentation_mode` 选择卡的 `design` 回复（用户点击或宿主超时均可）。
+若只是模型推荐了设计模式，先返回 `get_skill(skill_name="pptx")` 完成模式选择，
+不要建立任务目录、写任务包或开始研究。加载本 Skill 本身不表示模式已经确认。
+已确认模式的同一任务续作不重复选择。
+""")
         text = _replace_section(text, "### 输出格式\n", "### 设计丰富度\n", """### 输出格式
 
 本套件是公共 `pptx` 入口下的设计模式，保留两个表达出口：
@@ -164,12 +172,6 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
 已有 PPTX 的原位编辑、模板填充与已选设计模式冲突时，保留原始需求、附件和交付格式，
 先向用户澄清是否改用快速模式；只有用户明确同意后才加载 `ppt-fast`，不得自动切换。
 已有 SN HTML 任务继续使用其任务目录与输出选择。
-恢复旧静态任务的 `web_html` / `web` 字段时，先读取原任务包，保留相同绝对 `deck_dir`、
-材料、大纲、页面和已交付产物，仅将 `choices.output` 改为 `static_html`、`ppt_mode` 改为
-`standard`，把原 `web_postprocess`（包括用户明确的 `[]`）迁到 `static_postprocess`，
-再移除旧字段；两种后处理字段已有冲突时先澄清，不覆盖已有选择。该迁移不改变用户已选的
-设计模式；字段迁移本身不重做 Research 或 Story，本轮标题等内容修改按下方恢复规则
-局部更新 Story。旧 `creative` 图片整页出口未提供，保留产物并说明。
 
 """)
         text = _replace_section(text, '当 `choices.output` 是 `static_html` 时，',
