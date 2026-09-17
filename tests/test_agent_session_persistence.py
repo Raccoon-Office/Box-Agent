@@ -284,6 +284,106 @@ async def test_flush_failure_prevents_provider_call(tmp_path, monkeypatch):
     log.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["kernel", "agent"])
+@pytest.mark.parametrize("nudge", ["near_limit", "no_progress"])
+@pytest.mark.parametrize("interrupt_during", ["provider", "summary"])
+async def test_runtime_wrapup_survives_interruption_before_model_response(
+    tmp_path, entrypoint, nudge, interrupt_during,
+):
+    from box_agent.core import run_agent_loop
+
+    class Interrupted(BaseException):
+        pass
+
+    root = tmp_path / "sessions"
+    log = SessionLog.create(root, session_id="wrapup-checkpoint", cwd=tmp_path)
+    marker = "步数预算即将用尽" if nudge == "near_limit" else "没有取得有效进展"
+    recovered = []
+    expected = []
+
+    def interrupt(messages, phase):
+        assert phase == interrupt_during
+        expected.extend(message.content for message in messages if marker in str(message.content))
+        assert len(expected) == 1
+        if phase == "summary":
+            assert _read_durable_events(log.path)[-1]["type"] == "compaction/start"
+        # Open the on-disk checkpoint before unwinding/closing the active log:
+        # cleanup must not make an unflushed message look crash-safe.
+        snapshot_root = tmp_path / "recovery"
+        snapshot = snapshot_root / log.path.relative_to(root)
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_bytes(log.path.read_bytes())
+        reopened = SessionLog.open(snapshot_root, session_id="wrapup-checkpoint", cwd=tmp_path)
+        try:
+            recovered.extend(message.content for message in reopened.replay().messages
+                             if marker in str(message.content))
+        finally:
+            reopened.close()
+        raise Interrupted
+
+    class FailingTool(Tool):
+        name = "failing_probe"
+        description = "Return an unsuccessful result."
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self):
+            return ToolResult(success=False, content="No useful result", error="unavailable")
+
+    class Provider:
+        model = "test-model"
+        max_output_tokens = 1024
+
+        async def generate_stream(self, *, messages, **kwargs):
+            if any(marker in str(message.content) for message in messages):
+                interrupt(messages, "provider")
+            if interrupt_during == "summary":
+                # Grow history after the first request so compaction and the
+                # wrap-up injection both happen on the next step.
+                history.extend(Message(role="user" if index % 2 == 0 else "assistant",
+                                       content=f"history-{index}:" + "x" * 2000)
+                               for index in range(24))
+            yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                ToolCall(id="failed-call", type="function", function=FunctionCall(
+                    name="failing_probe", arguments={},
+                )),
+            ])
+
+    class Summary:
+        async def generate(self, *, messages, **kwargs):
+            interrupt(messages, "summary")
+
+        async def generate_stream(self, *, messages, **kwargs):
+            interrupt(messages, "summary")
+            yield  # Keep the streaming interface without producing a response.
+
+    agent = Agent(
+        llm_client=Provider(), tools=[FailingTool()], system_prompt="system",
+        workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False,
+        session_log=log, max_steps=11 if nudge == "near_limit" else 300,
+        token_limit=8000 if interrupt_during == "summary" else 100000,
+    )
+    agent.add_user_message("Complete the task")
+    history = agent.messages
+    options = replace(agent.default_run_options(), summary_llm=Summary(),
+                      no_progress_limit=1 if nudge == "no_progress" else None)
+    events = (agent.run_events(options=options) if entrypoint == "agent" else run_agent_loop(
+        llm=agent.llm, tools=agent.tools, messages=history,
+        max_steps=agent.max_steps, token_limit=agent.token_limit,
+        session_log=log, session_turn=1, workspace_dir=str(tmp_path),
+        no_progress_limit=options.no_progress_limit, summary_llm=options.summary_llm,
+    ))
+    try:
+        with pytest.raises(Interrupted):
+            async for _ in events:
+                pass
+    finally:
+        await events.aclose()
+        log.close()
+    assert recovered == expected
+    assert len(recovered) == 1
+
+
 class _SummaryCheckpointLLM:
     def __init__(self, path: Path) -> None:
         self.path = path

@@ -1325,16 +1325,6 @@ async def _run_agent_loop_impl(
             yield await cancellation_done_event()
             return
 
-        # Commit the canonical live surface after step hooks and runtime
-        # injections, before preparing request-only overlays.  The compact
-        # checkpoint above also persists this surface before replacing it.
-        if session_log is not None and session_turn is not None:
-            session_log.append_unlogged_messages(
-                session_log_messages(messages),
-                turn=session_turn,
-                step=step + 1,
-            )
-            session_log.flush()
         context_compacted = False
 
         # ── Near-limit wrap-up nudge (one-shot) ─────────────
@@ -1380,6 +1370,17 @@ async def _run_agent_loop_impl(
         if cancelled():
             yield await cancellation_done_event()
             return
+
+        # Commit the canonical live surface after step hooks and runtime
+        # injections, including wrap-up nudges. Persist before either request
+        # projection or compaction, even for callers without an Agent wrapper.
+        if session_log is not None and session_turn is not None:
+            session_log.append_unlogged_messages(
+                session_log_messages(messages),
+                turn=session_turn,
+                step=step + 1,
+            )
+            session_log.flush()
 
         # ── LLM call (streaming) ──────────────────────────────
         request_overlay_tokens = pending_transient_followup_tokens if transient_message is not None else 0
