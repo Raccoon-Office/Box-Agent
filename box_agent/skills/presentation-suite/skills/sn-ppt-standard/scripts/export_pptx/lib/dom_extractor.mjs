@@ -569,7 +569,8 @@ underline: cs.getPropertyValue('text-decoration-line').includes('underline'),
 
     // IMG: 提取 src 和自然尺寸
     if (tag === 'IMG') {
-      node.src = el.getAttribute('src') || undefined;
+      // 浏览器按当前 HTML 的位置解析资源地址，避免构建器猜测 pages/ 目录。
+      node.src = el.getAttribute('src') ? el.src : undefined;
       node.naturalWidth = el.naturalWidth;
       node.naturalHeight = el.naturalHeight;
       return node;

@@ -8,7 +8,8 @@ import {
 import { echartsOptionToPptx } from './echarts_to_pptx.mjs';
 import { createGradientHandler } from './postprocess_pptx.mjs';
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Module-level: chart options captured from the current IR. Set by
 // buildSlideFromIR before flattening, read by flattenIRToElements when it
@@ -1274,10 +1275,11 @@ export function buildImageElement(node, deckDir) {
   // 解析图片路径
   let imgPath = node.src;
   if (imgPath.startsWith('file://')) {
-    imgPath = imgPath.slice(7);
+    imgPath = fileURLToPath(imgPath);
+  } else {
+    try { imgPath = decodeURIComponent(imgPath); } catch { /* keep as-is */ }
   }
-  try { imgPath = decodeURIComponent(imgPath); } catch { /* keep as-is */ }
-  if (!imgPath.startsWith('/')) {
+  if (!isAbsolute(imgPath)) {
     imgPath = resolve(deckDir, 'pages', imgPath);
   }
 
