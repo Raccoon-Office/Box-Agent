@@ -105,7 +105,7 @@ function makeInput(outline, title, sourceText = "") {
     protocol_version: 2,
     palette_contract_version: 2,
     visual_contract_version: 1,
-    input_hash: hash({ protocol_version: 2, brief_version: 7, outline: contentOutline, source_text: sourceText, title, constraints, catalog_hash: catalogHash }),
+    input_hash: hash({ protocol_version: 2, brief_version: 8, outline: contentOutline, source_text: sourceText, title, constraints, catalog_hash: catalogHash }),
     catalog_hash: catalogHash,
     title, outline: clone(outline), user_constraints: constraints,
     source_text: sourceText, layout_hints_only: layoutHintsOnly,

@@ -73,13 +73,20 @@ colored elements legible; do not infer an official brand standard from this
 creative preference. Explicit fixed user palettes still take precedence.
 Include the identity basis in the existing short `reason`, without adding fields.
 
-Before selecting a theme, return `visual_requirements` with canvas, heading,
-display_font, body_font and shadow from the brief's allowed values. Use `any`
-only when that feature is genuinely unconstrained. Derive these requirements
-from the user request, audience and product context, not from a favorite theme.
+Before selecting a theme, preserve explicit user visual constraints as hard
+filters in `visual_requirements`: canvas, heading, display_font, body_font and
+shadow, using the brief's allowed values. Audience and inferred aesthetic
+preferences help compare candidates; they do not make your own font choices
+user constraints. Use `any` for font categories the user did not constrain.
+For example, a travel scrapbook or a fixed sand-gold/indigo palette does not by
+itself require cursive headings and serif body text. An explicit handwritten,
+serif or sans-serif requirement must still be preserved in the relevant fields;
+do not mechanically replace all requirements with `any`.
 Set allow_plain_fallback=false when the user explicitly requires visual features;
 otherwise true permits a plain neutral fallback if the catalog has no match.
-Compare all requirements against the catalog's visual_traits. Original palette
+Before returning, check all five requirements against the chosen theme's complete
+visual_traits in its details, including both font categories. Select the theme's
+existing font combination; do not change its font definitions. Original palette
 similarity is not a selection criterion: the fixed role colors replace theme
 colors. A monochrome palette does not imply editorial fonts or paper texture.
 For a clean product showcase, solid canvas, standard sans-serif headings/body

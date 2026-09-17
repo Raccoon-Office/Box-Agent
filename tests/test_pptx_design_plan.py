@@ -490,6 +490,12 @@ def test_brief_is_bounded_and_details_are_loaded_only_when_needed(design_case):
     layouts = [item for file in brief["layout_index_files"] for item in json.loads(Path(file).read_text())]
     assert len(themes) == len(data["catalog"]["themes"])
     assert len(layouts) == len(data["catalog"]["layouts"])
+    details = {theme["id"]: theme for theme in data["catalog"]["themes"]}
+    for theme in themes:
+        assert theme["traits"] == {
+            key: details[theme["id"]]["visual_traits"][key]
+            for key in ("canvas", "heading", "shadow", "display_font", "body_font")
+        }
     assert all("presets" not in theme for theme in themes)
     assert all("fields" not in layout for layout in layouts)
 

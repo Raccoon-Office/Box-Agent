@@ -1,7 +1,12 @@
 """A failed designer cannot erase the content-backed delivery floor."""
 import json
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
-from tests.test_pptx_design_plan import design_case, record_response, run, write, scaffold
+from tests.test_pptx_design_plan import SKILL, design_case, record_response, run, write, scaffold
 
 
 def fresh(root, outline):
@@ -70,6 +75,46 @@ def test_missing_response_delivers_fallback_and_preserves_existing_html(design_c
     assert json.loads(result.stdout)['status']=='degraded'
     assert (root/'index.html').read_text()=='<html>User edited</html>'
     assert (root/'fallback.html').exists()
+
+
+def test_degraded_html_exports_required_pptx_without_reauthoring(design_case):
+    root, outline, _, _ = design_case
+    # Keep a user's saved deck while exporting the separate recovery artifact.
+    saved = (root / 'index.html').read_text().replace('Topic A', 'User edited Topic A')
+    (root / 'index.html').write_text(saved)
+    fresh(root, outline)
+    record_response(root, decision(4))
+    first = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert first.returncode != 0
+    record_response(root, {'theme_id': 'not-registered', 'slides': [{}] * 4})
+    accepted = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert accepted.returncode == 0, accepted.stderr
+    report = json.loads(accepted.stdout)
+    assert report['status'] == 'degraded' and report['terminal'] is True
+    primary = Path(report['primary_artifact'])
+    html_before = primary.read_bytes()
+    assert primary != root / 'index.html'
+    preflight = run('check_html_export_env.js', cwd=root)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    pptx = root / 'recovery.pptx'
+    exported = run('html_to_editable_pptx.js', primary, pptx, cwd=root)
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    validated = subprocess.run(
+        [sys.executable, str(SKILL / 'scripts/validate_pptx_package.py'), str(pptx)],
+        capture_output=True, text=True,
+    )
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        slides = [ET.fromstring(archive.read(name)) for name in archive.namelist()
+                  if re.fullmatch(r'ppt/slides/slide\d+\.xml', name)]
+    assert len(slides) == report['actual_pages']
+    texts = '\n'.join(node.text or '' for slide in slides for node in slide.iter()
+                      if node.tag.endswith('}t'))
+    for page in outline['slides']:
+        for bullet in page['bullets']:
+            assert bullet in texts
+    assert primary.read_bytes() == html_before
+    assert (root / 'index.html').read_text() == saved
 
 
 def test_outline_validation_failure_still_produces_an_artifact(design_case):

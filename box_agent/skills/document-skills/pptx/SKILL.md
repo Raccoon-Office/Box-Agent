@@ -178,19 +178,45 @@ read `correction_file` and follow its `requires_full_read` value:
   JSON patch; the program preserves the rest. Do not reread all packets or the
   full catalog, or recreate the deck.
 
-Run accept again. On `status: degraded`, stop PPT authoring immediately: do not
+Run accept again. On `status: degraded`, design authoring is finished: do not
 call `inspect_deck_contract`, `apply_deck_patch`, `finalize_controlled_deck`, edit
-`deck.json`, delete slides, or start another design call. Deliver `primary_artifact` and explain the
-limitations from `qa/design_delivery.json`; skip design/scaffold retries. Missing,
+`deck.json`, delete slides, or start another design call. Continue the requested
+format delivery from `primary_artifact` as described below. Missing,
 malformed or still-invalid designer output must not leave the user without a deck.
 Recovery uses plain-neutral with registered cover/cards/closing layouts and the
 normal deck schema, renderer, playback, layout editor, save and export controls.
 Never substitute a separate text-only HTML implementation.
 Extra pages are tolerated in the fallback by splitting existing outline content;
 never invent content or facts to fill them. Do not start a third design call or
-alter input just to reset the attempt count. If later compilation fails, deliver
-the existing fallback HTML with its report rather than leaving only intermediate
-JSON files. Images or unavailable vision must never prevent that delivery.
+alter input just to reset the attempt count. If later compilation fails, use the
+existing fallback HTML with its report. Images or unavailable vision must never
+prevent delivery of the files already available.
+
+#### Finish delivery after design failure
+
+`degraded` / `terminal` ends design retries, not outstanding format delivery.
+Read `qa/design_delivery.json`; keep its actual `primary_artifact` HTML unchanged.
+For HTML-only requests, deliver that file with the report. When PPTX is required,
+run the existing exporter on that same file, using its absolute path in place of
+`<PRIMARY_ARTIFACT>`:
+
+```bash
+${BOX_AGENT_NODE:-node} scripts/check_html_export_env.js
+${BOX_AGENT_NODE:-node} scripts/html_to_editable_pptx.js '<PRIMARY_ARTIFACT>' output.pptx
+${BOX_AGENT_PYTHON:-python} scripts/validate_pptx_package.py output.pptx
+```
+
+Then extract text and check actual page count/order, required content and picture
+objects. Explain the design/content limitations and any page-count difference
+from the request; fallback pagination can add pages to retain supplied content.
+Claim independently replaceable images only for actual picture objects, not
+shapes or artwork baked into a page background. Package validity alone does not
+prove those content/editability requirements.
+
+An actual export error should be repaired within the existing dependency/export
+rules and retried. If it remains blocked, deliver the existing HTML and report
+the missing PPTX as incomplete. Failed design validation does not authorize a
+fresh HTML implementation, a new python-pptx deck or a switch to the escape route.
 
 ### 4. Scaffold the validated plan once
 
@@ -339,7 +365,9 @@ validate the package, and inspect visually only when requested or needed. Read
 `references/ooxml-editing.md`. Native PptxGenJS or legacy/custom HTML is an explicit
 escape route when controlled layouts cannot express the requirement and the user
 accepts the tradeoff. Read `references/pptxgenjs.md` or `references/html-first.md`
-then; do not change route for convenience. Direct PPTX line geometry must use
+then. This authorization applies to the requested alternative, not to a failed
+design acceptance; use the existing HTML delivery procedure above for that case.
+Do not change route for convenience. Direct PPTX line geometry must use
 nonnegative width/height.
 
 For optional Archify diagrams, read `references/archify-diagrams.md`; use its

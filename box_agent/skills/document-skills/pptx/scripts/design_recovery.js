@@ -183,7 +183,7 @@ function fallback(input, root, reason, proposedCount = 0, publish = true) {
     deck:deckPath,html_hash:digest(html),reason,outline_pages:input.outline.slides.length,
     proposed_pages:proposedCount || null,actual_pages:deck.slides.length,
     warnings:["Registered neutral design; normal editor retained. Content and visual quality remain unverified.",...warnings],
-    next:"Deliver the normal editable presentation and degradation report; do not repeat design retries."};
+    next:"Design retries are finished. Keep primary_artifact as the HTML source. If PPTX delivery is required, run check_html_export_env.js, export primary_artifact with html_to_editable_pptx.js, then validate_pptx_package.py and check actual pages, text and picture objects. Deliver existing files with the degradation report; report any missing format honestly. Do not restart authoring or change production route."};
   fs.mkdirSync(path.dirname(reportFile),{recursive:true});
   fs.writeFileSync(reportFile,JSON.stringify(report,null,2)+"\n");
   return report;
