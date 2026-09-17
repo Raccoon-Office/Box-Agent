@@ -77,7 +77,7 @@ def _old_bundle(tmp_path):
     target.write_bytes(content)
     digest = hashlib.sha256(content).hexdigest()
     record = {"name": sync["BUNDLE_NAME"], "revision": sync["PINNED_REVISION"],
-              "overlays": sync["OVERLAYS"][:-1],
+              "overlays": sync["OVERLAYS"][:sync["OVERLAYS"].index("intermediate-render-artifacts")],
               "files": {relative: {"source_sha256": digest, "sha256": digest}}}
     (path / "source.json").write_text(json.dumps(record))
     return sync, path, target, digest

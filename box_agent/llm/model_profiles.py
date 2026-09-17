@@ -117,6 +117,9 @@ def _validate_model_profile(revision: str, profile: Mapping[str, Any]) -> dict[s
     disabled_effort = profile.get("reasoningEffortWhenDisabled")
     if disabled_effort not in (None, "none", "low"):
         raise ModelProfileUnavailable("model profile reasoningEffortWhenDisabled is invalid")
+    request_body_limit = profile.get("maxRequestBodyBytes")
+    if request_body_limit is not None:
+        request_body_limit = _positive_int(request_body_limit, field="maxRequestBodyBytes")
 
     return {
         "profileId": profile_id,
@@ -133,6 +136,7 @@ def _validate_model_profile(revision: str, profile: Mapping[str, Any]) -> dict[s
             profile.get("maxTokens"), field="maxTokens", default=63_999
         ),
         "timeout": float(profile.get("timeout") or 1200.0),
+        "maxRequestBodyBytes": request_body_limit,
         **({"reasoningEffortWhenDisabled": disabled_effort} if disabled_effort is not None else {}),
     }
 
@@ -162,6 +166,7 @@ def client_for_model_profile(
         model=model,
         retry_config=getattr(fallback_client, "retry_config", None),
         max_output_tokens=max_output_tokens,
+        max_request_body_bytes=profile["maxRequestBodyBytes"],
         auth_file=profile["authFile"],
         timeout=profile["timeout"],
         **(

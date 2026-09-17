@@ -1,5 +1,6 @@
 """OpenAI LLM client implementation."""
 
+import asyncio
 import inspect
 import json
 import logging
@@ -21,6 +22,9 @@ from ..tools.argument_limits import (
 )
 from ..tools.base import tool_call_name_variants
 from .base import LLMClientBase
+from .image_payload import HOSTED_MAX_REQUEST_BODY_BYTES, RequestBodyTooLargeError, prepare_image_request
+from ..client_info import should_attach_client_headers
+from ..session_trace import emit_session_trace
 from .error_messages import is_retryable_llm_error
 from .debug_logging import (
     log_llm_error_meta,
@@ -494,6 +498,7 @@ class OpenAIClient(LLMClientBase):
         auth_file: str = "",
         timeout: float = 600.0,
         reasoning_effort_when_disabled: str | None = None,
+        max_request_body_bytes: int | None = None,
     ):
         """Initialize OpenAI client.
 
@@ -509,11 +514,18 @@ class OpenAIClient(LLMClientBase):
             reasoning_effort_when_disabled: Endpoint override for dialects that
                 normally send "none" when thinking is disabled. "low" reduces
                 reasoning; it does not guarantee that reasoning is disabled.
+            max_request_body_bytes: Endpoint body limit with 5% headroom. None
+                defaults to 10 MB for the hosted gateway and no cap elsewhere.
         """
         super().__init__(
             api_key, api_base, model, retry_config,
             auth_token=auth_token, auth_file=auth_file, timeout=timeout,
         )
+        if max_request_body_bytes is not None and (type(max_request_body_bytes) is not int or max_request_body_bytes <= 0):
+            raise ValueError("max_request_body_bytes must be a positive integer or null")
+        self.max_request_body_bytes = (max_request_body_bytes if max_request_body_bytes is not None
+                                       else HOSTED_MAX_REQUEST_BODY_BYTES if should_attach_client_headers(api_base)
+                                       else None)
         self.max_output_tokens = max_output_tokens
         # One-shot override applied to the next request only. The agent loop
         # sets this before retrying a truncated turn so the model has more
@@ -530,6 +542,21 @@ class OpenAIClient(LLMClientBase):
             base_url=api_base,
             timeout=timeout,
         )
+
+    async def _bound_request_body(self, params: dict[str, Any], *, turn_id: str) -> dict[str, Any]:
+        limit = getattr(self, "max_request_body_bytes", None)
+        if limit is None:
+            return params
+        try:
+            prepared, metrics = await asyncio.to_thread(prepare_image_request, params, limit)
+        except RequestBodyTooLargeError as exc:
+            emit_session_trace("llm.request_payload", turn_id=turn_id,
+                               data={"provider": "openai", "model": self.model,
+                                     **getattr(exc, "metrics", {}), **exc.details()})
+            raise
+        emit_session_trace("llm.request_payload", turn_id=turn_id,
+                           data={"provider": "openai", "model": self.model, **metrics})
+        return prepared
 
     def set_ephemeral_max_output_tokens(self, value: int | None) -> None:
         """Override ``max_tokens`` for the very next request.
@@ -596,6 +623,7 @@ class OpenAIClient(LLMClientBase):
         if auth_headers:
             params["extra_headers"] = auth_headers
 
+        params = await self._bound_request_body(params, turn_id=turn_id)
         log_llm_request(provider="openai", mode="completion", api_base=self.api_base, params=params)
 
         try:
@@ -977,6 +1005,7 @@ class OpenAIClient(LLMClientBase):
         if auth_headers:
             params["extra_headers"] = auth_headers
 
+        params = await self._bound_request_body(params, turn_id=turn_id)
         log_llm_request(provider="openai", mode="stream", api_base=self.api_base, params=params)
 
         # Accumulators

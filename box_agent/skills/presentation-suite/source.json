@@ -342,7 +342,7 @@
       "source_sha256": "568e6c5249c360de868395eaf64bd7b19e2d91cd0722092abb0c59813224314c"
     },
     "skills/sn-ppt-standard/references/box-agent-tool-contract.md": {
-      "sha256": "47239f9b93f23233fb3985ec6507d1a3db140c8ca18bf5749708159a5a67a3d3",
+      "sha256": "edc857e2540291ba80a209fa24f33c466144daa692ffd0145010d3215d84a37c",
       "source_path": "skills/sn-ppt-standard/references/box-agent-tool-contract.md",
       "source_sha256": "47239f9b93f23233fb3985ec6507d1a3db140c8ca18bf5749708159a5a67a3d3"
     },
@@ -621,7 +621,8 @@
     "design-mode-delivery-wording",
     "owned-renderer-lifecycle",
     "original-uploaded-font-family",
-    "intermediate-render-artifacts"
+    "intermediate-render-artifacts",
+    "sequential-ppt-image-inspection"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "e187295633eb4cb201e6a2a5a206a419eb79990a",

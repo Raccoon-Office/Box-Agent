@@ -5421,6 +5421,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 exponential_base=rcfg.exponential_base,
             ),
             max_output_tokens=config.llm.max_output_tokens,
+            max_request_body_bytes=config.llm.max_request_body_bytes,
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,
             reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
