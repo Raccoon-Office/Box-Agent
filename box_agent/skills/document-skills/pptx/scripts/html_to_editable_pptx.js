@@ -469,6 +469,7 @@ async function main() {
 
   await browser.close();
 
+  require("./artifact_delivery.js").publishArtifact(pptxPath);
   console.log(
     JSON.stringify(
       {

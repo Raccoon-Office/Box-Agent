@@ -52,6 +52,29 @@ explicitly requests a screenshot as a deliverable, set its sidecar to
 `{"type":"artifact"}` and reference the file in tool output, or return a structured
 `type: "artifact"` result. Markers do not retract previously published messages.
 
+## Producer-declared delivery scopes
+
+A workflow can create `.artifact-delivery.json` in its work directory with
+`{"schema_version":1,"default":"intermediate"}`. This declares a directory
+boundary, not a filename heuristic or a session-global mode. Both structured
+tool results and automatic file discovery treat files within that scope as
+working files until the producer writes a per-file sidecar with `type: artifact`.
+These explicit registrations form the delivery list. Directory discovery stops
+at the session workspace boundary; other workspaces are unaffected.
+
+Fast PPT preparation and SN preparation declare their own directories. Completed
+HTML/PPTX builders register their output after success. Standard's `build` also
+registers the whole-deck overview; `asset-contact` never registers review sheets.
+Fast `make_contact_sheet.js --publish-artifact` registers a requested final overview.
+For explicit extra deliveries use `artifact_delivery.js publish FILE...` (Fast),
+or `deck.py publish ROOT --path FILE` (SN, repeat `--path` for multiple files).
+
+Within a scope, `generate_image` defaults to intermediate when `publish_artifact`
+is omitted. Explicit `true` registers a requested standalone image; outside a
+scope the default remains standalone publication. Already published chat messages
+are not removed. Workflows that bypass preparation must declare their scope before
+creating assets. Changed-content derivatives within the scope remain intermediate.
+
 ## Wire format
 
 `session/update` → `tool_call_update` → `rawOutput`:

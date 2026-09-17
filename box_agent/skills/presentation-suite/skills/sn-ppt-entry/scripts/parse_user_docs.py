@@ -33,6 +33,37 @@ from pathlib import Path
 from docx.opc.exceptions import PackageNotFoundError
 from pypdf.errors import PdfReadError
 
+def _write_delivery_record(target, content):
+    import os
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                     prefix=".delivery-", suffix=".tmp", delete=False) as stream:
+        temporary = stream.name
+        stream.write(content)
+    try:
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _declare_delivery_scope(root):
+    from pathlib import Path
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    _write_delivery_record(root / ".artifact-delivery.json",
+        '{"schema_version":1,"default":"intermediate"}\n')
+
+
+def _publish_delivery_file(filename):
+    from pathlib import Path
+    target = Path(filename)
+    if not target.is_file():
+        raise ValueError(f"Delivery file does not exist: {target}")
+    _write_delivery_record(target.with_name(f".{target.name}.artifact.json"),
+        '{"type":"artifact"}\n')
+
+
 def _asset_output_dir(path: Path, asset_root: Path | None) -> Path:
     if asset_root is None:
         return path.parent / f"{path.stem}_inherited"
@@ -280,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if args.output:
+        _declare_delivery_scope(Path(args.output).expanduser().resolve().parent)
     asset_root = Path(args.asset_dir).expanduser().resolve() if args.asset_dir else None
     if asset_root is not None:
         asset_root.mkdir(parents=True, exist_ok=True)

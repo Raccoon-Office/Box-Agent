@@ -29,6 +29,11 @@ def test_prepare_already_produces_editable_content(design_case):
     assert 'contenteditable="true"' in html
     assert outline['slides'][0]['bullets'][0] in html
     assert (root/'index.html').exists()
+    from box_agent.artifact_publication import delivery_scope
+    from box_agent.tools.engine.artifact_results import _detect_tool_artifacts, _snapshot_workspace_signatures
+    assert delivery_scope(root/'index.html', root) == root
+    assert _detect_tool_artifacts('prepare', 'bash', '[index.html]', None, {},
+                                  _snapshot_workspace_signatures(str(root)), str(root)) == []
 
 
 def test_theme_patch_cannot_change_page_count_or_colors(design_case):

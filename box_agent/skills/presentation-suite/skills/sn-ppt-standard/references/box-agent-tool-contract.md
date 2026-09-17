@@ -103,3 +103,8 @@ python "<SKILL_ROOT>/scripts/render.py" --batch "$DECK_DIR" --pages 2,7
 不要用 `| tail` 或后接 `echo` 覆盖渲染退出码，也不要原样重复渲染未修复的质量失败页。导出成功后，按 stdout JSON 的精确 `output` 路径检查文件；不要执行 `ls "$DECK_DIR/*.pptx"`（星号被引用不会展开）并因此重导出。导出失败不能自行把用户要求的 PPTX 改称 HTML 已交付。字体 manifest 的源字体映射用于 PPTX 文本；接收机器仍需安装源字体，浏览器 WOFF2 并未嵌入 PPTX。
 
 工具名或权限失败先按本契约修正一次；相同失败再次出现就保存原始错误、调用参数和产物状态，返回 `blocked`，不得搜索或修改 Box-Agent 源码。
+
+
+## Artifact delivery boundary
+
+`deck.py prepare` declares the task directory as a working-file scope. Images generated there default to intermediate, even when `publish_artifact` is omitted. Do not set it to true for PPT illustrations. `asset-contact` sheets are internal QA files. `deck.py build` registers only the finished `present.html` and whole-deck overview; the PPTX exporter registers the finished PPTX. For extra files explicitly requested by the user, run `deck.py publish "$DECK_DIR" --path <relative-file>` after generating them. Do not publish individual assets or review sheets as a routine final step.

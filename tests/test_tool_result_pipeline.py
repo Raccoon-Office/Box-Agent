@@ -67,6 +67,35 @@ class _EchoTool(Tool):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_safe", [False, True])
+async def test_declared_delivery_scope_guards_raw_results_and_discovery(tmp_path, parallel_safe):
+    from box_agent.artifact_publication import write_metadata
+
+    (tmp_path / ".artifact-delivery.json").write_text('{"schema_version":1,"default":"intermediate"}')
+
+    class RenderTool(_EchoTool):
+        async def execute(self):
+            for name in ("hero.png", "slide.png", "asset-contact.png", "deck.html", "deck.pptx", "overview.png"):
+                (tmp_path / name).write_bytes(name.encode())
+            for name in ("deck.html", "deck.pptx", "overview.png"):
+                write_metadata(tmp_path / name, {"type": "artifact"})
+            return ToolResult(success=True, content="[hero.png] [asset-contact.png] [deck.html]",
+                              raw_output={"type": "artifact", "path": str(tmp_path / "hero.png"), "kind": "image"})
+
+    tool = RenderTool(parallel_safe=parallel_safe)
+    events = [event async for event in run_agent_loop(
+        llm=_OneToolCallLLM(tool.name), messages=[Message(role="user", content="Make a deck")],
+        tools={tool.name: tool}, max_steps=2, workspace_dir=str(tmp_path))]
+    results = [event for event in events if isinstance(event, ToolCallResult)]
+    assert results[0].raw_output["type"] == "intermediate_asset"
+    assert {event.filename for event in events if isinstance(event, ArtifactEvent)} == {"deck.html", "deck.pptx", "overview.png"}
+    assert (tmp_path / "hero.png").is_file()
+    # This path bypassed the diff due to its structured result; it still needs
+    # durable intermediate identity when moved outside the scoped directory.
+    assert (tmp_path / ".hero.png.artifact.json").is_file()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("parallel_safe", [False, True], ids=["serial", "parallel"])
 @pytest.mark.parametrize("success", [False, True], ids=["partial-failure", "success"])
 async def test_render_images_stay_on_disk_but_only_overview_is_published(

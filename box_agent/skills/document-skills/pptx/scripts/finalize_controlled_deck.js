@@ -57,6 +57,7 @@ function hashJson(value) {
 
 function refreshDeckContractReport(deckPath, reportPath, deckSpecReport) {
   const artifactRoot = path.dirname(deckPath);
+  require("./artifact_delivery.js").declareScope(artifactRoot);
   const outlinePath = path.join(artifactRoot, "outline.json");
   let previous = {};
   try {
@@ -533,6 +534,9 @@ function main() {
   const deliveryStatus = exportError ? "partial" : blockingImageIssues.length > 0
     ? "incomplete"
     : degraded ? "degraded" : "complete";
+  const { publishArtifact } = require("./artifact_delivery.js");
+  publishArtifact(outputPath);
+  if (pptxPath && !exportError) publishArtifact(pptxPath);
   console.log(
     JSON.stringify({
       ok: !exportError,

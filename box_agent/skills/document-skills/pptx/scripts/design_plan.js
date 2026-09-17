@@ -166,6 +166,7 @@ function main() {
   const targetPath = core.resolveArtifactPath(target);
   if (action === "prepare") {
     const root = path.dirname(targetPath);
+    require("./artifact_delivery.js").declareScope(root);
     const outline = JSON.parse(fs.readFileSync(targetPath, "utf8"));
     const baseline = { title: opts.title || outline.deck_goal || "Presentation", outline,
       user_constraints: require("./design_contract_core.js").inferDesignContract({ source_text: core.runtimeSourceBinding().source_text }, []) };
@@ -175,8 +176,10 @@ function main() {
     if (opts["research-handoff"]) checkArgs.push("--research-handoff", core.resolveArtifactPath(opts["research-handoff"]));
     const check = spawnSync(process.execPath, checkArgs, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
     if (check.status !== 0) {
-      console.log(JSON.stringify(require("./design_recovery.js").fallback(baseline, root,
-        `Outline validation incomplete; inspect ${report}. Content is not verified.`)));
+      const delivery = require("./design_recovery.js").fallback(baseline, root,
+        `Outline validation incomplete; inspect ${report}. Content is not verified.`);
+      require("./artifact_delivery.js").publishArtifact(delivery.primary_artifact);
+      console.log(JSON.stringify(delivery));
       return;
     }
     const input = plans.makeInput(outline, opts.title || outline.deck_goal, core.runtimeSourceBinding().source_text);
@@ -210,6 +213,7 @@ function main() {
   }
   if (action === "accept") {
     const result = accept(targetPath, core.resolveArtifactPath(opts.plan || path.join(path.dirname(targetPath), "design_plan.json")));
+    if (result?.primary_artifact) require("./artifact_delivery.js").publishArtifact(result.primary_artifact);
     if (result) console.log(JSON.stringify(result));
     return;
   }

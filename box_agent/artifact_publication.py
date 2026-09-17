@@ -93,12 +93,23 @@ def intermediate_fingerprints(metadata_files: Iterable[Path]) -> dict[int, set[s
     return result
 
 
-def is_intermediate(path: Path, fingerprints: dict[int, set[str]]) -> bool:
+def is_intermediate(path: Path, fingerprints: dict[int, set[str]], workspace: str | None = None) -> bool:
     value = read_metadata(metadata_path(path))
     if value.get("type") == "intermediate_asset":
         return True
     if value.get("type") == "artifact":
         return False  # Explicit publication of this path overrides inherited suppression.
+    if workspace:
+        if delivery_scope(path, workspace) is not None:
+            fingerprint = content_fingerprint(path)
+            metadata = {"type": "intermediate_asset"}
+            if fingerprint:
+                metadata.update(size_bytes=fingerprint[0], sha256=fingerprint[1])
+            try:
+                write_metadata(path, metadata)
+            except OSError:
+                pass
+            return True
     try:
         if path.stat().st_size not in fingerprints:
             return False
@@ -113,3 +124,48 @@ def is_intermediate(path: Path, fingerprints: dict[int, set[str]]) -> bool:
     except OSError:
         pass
     return True
+
+
+SCOPE_FILE = ".artifact-delivery.json"
+
+
+def delivery_scope(path: Path, workspace: str | Path) -> Path | None:
+    """Find a declared scope without inferring intent from directory names."""
+    try:
+        root = Path(workspace).resolve()
+        target = path.resolve()
+        target.relative_to(root)
+        if target == root:
+            return None
+        for parent in target.parents:
+            declaration = read_metadata(parent / SCOPE_FILE)
+            if declaration.get("schema_version") == 1 and declaration.get("default") == "intermediate":
+                return parent
+            if parent == root:
+                break
+    except (OSError, ValueError, RuntimeError):
+        pass
+    return None
+
+
+def is_unpublished_scoped_file(path: Path, workspace: str | Path) -> bool:
+    if delivery_scope(path, workspace) is None:
+        return False
+    return read_metadata(metadata_path(path)).get("type") != "artifact"
+
+
+def apply_delivery_policy(raw_output: dict | None, workspace: str | None) -> dict | None:
+    """Guard structured tool outputs as well as the file-discovery channel."""
+    if not workspace or not raw_output or raw_output.get("type") != "artifact":
+        return raw_output
+    value = raw_output.get("abs_path") or raw_output.get("absolute_path") or raw_output.get("path")
+    if not isinstance(value, str) or not value.strip():
+        return raw_output
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(workspace) / path
+    if is_unpublished_scoped_file(path, workspace):
+        if path.is_file():
+            is_intermediate(path, {}, workspace)  # Persist identity before a later move out of scope.
+        return {**raw_output, "type": "intermediate_asset"}
+    return raw_output

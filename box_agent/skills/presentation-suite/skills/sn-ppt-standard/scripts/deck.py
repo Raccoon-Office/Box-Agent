@@ -48,6 +48,37 @@ from font_bundle import (
 )
 
 
+def _write_delivery_record(target, content):
+    import os
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                     prefix=".delivery-", suffix=".tmp", delete=False) as stream:
+        temporary = stream.name
+        stream.write(content)
+    try:
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _declare_delivery_scope(root):
+    from pathlib import Path
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    _write_delivery_record(root / ".artifact-delivery.json",
+        '{"schema_version":1,"default":"intermediate"}\n')
+
+
+def _publish_delivery_file(filename):
+    from pathlib import Path
+    target = Path(filename)
+    if not target.is_file():
+        raise ValueError(f"Delivery file does not exist: {target}")
+    _write_delivery_record(target.with_name(f".{target.name}.artifact.json"),
+        '{"type":"artifact"}\n')
+
+
 def _mark_intermediate_artifact(filename):
     """Mark this exact QA output for Box-Agent automatic artifact discovery."""
     from pathlib import Path
@@ -1210,7 +1241,7 @@ def main(argv=None):
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in (
         "sync", "prepare", "contact", "build", "audit", "asset-register",
-        "asset-assign", "asset-contact", "asset-review", "material-figure",
+        "asset-assign", "asset-contact", "asset-review", "material-figure", "publish",
     ):
         command = subparsers.add_parser(name, aliases=["figure-crop"] if name == "material-figure" else [])
         command.add_argument("root", nargs="?", default=".")
@@ -1218,6 +1249,8 @@ def main(argv=None):
             command.add_argument("--expected", type=int)
         if name == "contact":
             command.add_argument("--focus", help="comma-separated pages or ranges, e.g. 3,7,12-14")
+        if name == "publish":
+            command.add_argument("--path", action="append", required=True)
         if name == "asset-register":
             command.add_argument("--path", required=True)
             command.add_argument("--origin", required=True, choices=sorted(ASSET_ORIGINS))
@@ -1251,8 +1284,18 @@ def main(argv=None):
             command.add_argument("--rejected")
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
+    _declare_delivery_scope(root)
     try:
-        if args.command == "sync":
+        if args.command == "publish":
+            files = [(root / value).resolve() for value in args.path]
+            for file in files:
+                file.relative_to(root)
+                if not file.is_file():
+                    raise ValueError(f"Delivery file does not exist: {file}")
+            for file in files:
+                _publish_delivery_file(file)
+                print(f"[{file}]")
+        elif args.command == "sync":
             _sync_speech(root, args.expected)
         elif args.command == "prepare":
             _prepare_workspace(root, args.expected)
@@ -1292,6 +1335,8 @@ def main(argv=None):
                 return 1
             _validate_runtime_dependencies(root, args.expected)
             _build_contact(root, args.expected)
+            _publish_delivery_file(root / "present.html")
+            _publish_delivery_file(root / "renders/contact-sheet.png")
         else:
             _validate_no_pictographs(root, args.expected, include_html=True)
             _validate_image_presentations(root, args.expected)

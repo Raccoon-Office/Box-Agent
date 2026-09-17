@@ -97,6 +97,13 @@ def test_finalizer_delivers_the_requested_format(tmp_path: Path, require_pptx: b
     else:
         assert not pptx_path.exists()
 
+    from box_agent.tools.engine.artifact_results import _detect_tool_artifacts, _snapshot_workspace_signatures
+    deliveries = _detect_tool_artifacts("finalize", "bash", result.stdout, None, {},
+                                        _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path))
+    assert {event.filename for event in deliveries} == (
+        {"index.html", "index.pptx"} if require_pptx else {"index.html"}
+    )
+
 
 @pytest.mark.parametrize("export_failure", ["exit", "missing", "invalid"])
 def test_finalizer_preserves_html_and_previous_pptx_when_export_fails(

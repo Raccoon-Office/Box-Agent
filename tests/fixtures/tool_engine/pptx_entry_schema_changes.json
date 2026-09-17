@@ -56,5 +56,17 @@
       "before": "Read a Skill's method and resource paths. Follow next_offset with the returned revision when paged. Read required_skills before their steps; related_skills are optional. Skill guidance does not grant tools or permission. Use list_skills for names and availability. When using a Skill, follow its applicable workflow, required reference files and verification, consistent with the user request and permissions. If a required step is blocked, use an available permitted recovery or report it as incomplete; do not treat required steps as optional.",
       "after": "Read a Skill's method and resource paths. Follow next_offset with the returned revision when paged. Read required_skills before their steps; related_skills are optional. Skill guidance does not grant tools or permission. Use list_skills for names and availability. When the user names a Skill or the task clearly matches an available Skill, read its full instructions with get_skill before planning, delegating, or authoring. A complete Skill reference already supplied in context counts as read; catalog metadata alone does not. When several Skills cover a task and the user has not selected one, read the workflow entry before its backend methods and let it route the task. When using a Skill, follow its applicable workflow, required reference files and verification, consistent with the user request and permissions. If a required step is blocked, use an available permitted recovery or report it as incomplete; do not treat required steps as optional. If a Skill requires a manual user choice, call request_user_decision and wait for the response before executing a branch. Do not substitute prose or a JSON code block for the tool call, or infer a default or timeout from general progress guidance."
     }
+  ],
+  "generate_image": [
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "publish_artifact",
+        "description"
+      ],
+      "before": "Publish the image as a standalone user deliverable (default true). Set false for intermediate assets embedded in a larger deliverable, as instructed by the PPTX skill. The saved file remains available.",
+      "after": "Publish the image as a standalone user deliverable. When omitted, defaults to false in a producer-declared delivery scope, true elsewhere. Set false for intermediate assets embedded in a larger deliverable, as instructed by the PPTX skill. The saved file remains available."
+    }
   ]
 }

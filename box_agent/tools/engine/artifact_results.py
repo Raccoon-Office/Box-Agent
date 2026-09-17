@@ -75,7 +75,7 @@ def _detect_artifacts(
             candidate.relative_to(out)
             if candidate in seen_paths or not candidate.is_file():
                 continue
-            if is_intermediate(candidate, fingerprints):
+            if is_intermediate(candidate, fingerprints, workspace_dir):
                 continue
             artifact = _make_artifact(tool_call_id, candidate, ws)
         except (OSError, RuntimeError, UnicodeError, ValueError):
@@ -251,7 +251,7 @@ def _detect_new_files(
             continue
         if str(fpath.resolve()) in already_emitted:
             continue
-        if is_intermediate(fpath, fingerprints):
+        if is_intermediate(fpath, fingerprints, workspace_dir):
             continue
         artifacts.append(_make_artifact(tool_call_id, fpath, ws))
 
@@ -288,7 +288,7 @@ def _detect_changed_files(
             continue
         if str(file_path.resolve()) in already_emitted:
             continue
-        if is_intermediate(file_path, fingerprints):
+        if is_intermediate(file_path, fingerprints, workspace_dir):
             continue
         artifacts.append(_make_artifact(tool_call_id, file_path, ws))
     return artifacts

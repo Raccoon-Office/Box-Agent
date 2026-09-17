@@ -1534,6 +1534,24 @@ async def test_intermediate_image_stays_available_without_artifact_publication(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scoped,publish,expected", [
+    (True, None, "intermediate_asset"), (True, False, "intermediate_asset"),
+    (True, True, "artifact"), (False, None, "artifact"),
+])
+async def test_image_publication_defaults_to_workspace_contract(tmp_path, monkeypatch, scoped, publish, expected):
+    patch_async_client(monkeypatch, lambda request: httpx.Response(
+        200, json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]}))
+    if scoped:
+        (tmp_path / ".artifact-delivery.json").write_text('{"schema_version":1,"default":"intermediate"}')
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint="https://image.example.test/v1/images/generations")
+    kwargs = {} if publish is None else {"publish_artifact": publish}
+    result = await tool.execute(prompt="illustration", output_path="assets/hero.png", watermark=False, **kwargs)
+    assert result.success, result.error
+    assert result.raw_output["type"] == expected
+    assert (tmp_path / "assets/hero.png").read_bytes() == PNG_BYTES
+
+
+@pytest.mark.asyncio
 async def test_intermediate_image_failure_does_not_publish_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

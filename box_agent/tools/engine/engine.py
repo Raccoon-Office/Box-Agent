@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any
 
 from ...events import AgentEvent, LLMActivityEvent, ToolCallResult, ToolCallStart
+from ...artifact_publication import apply_delivery_policy
 from ...kernel.hook_types import HookContext, ResultText, copy_data
 from ...loop_guards import (
     FINAL_SUMMARY_EXCLUDED_TOOLS, delegated_tool_call_budget_wrapup_text,
@@ -353,6 +354,9 @@ class DefaultToolEngine:
             result = control.result_transform(call.name, result)
         result = _persist_browser_snapshot_output(result, call.snapshot_target)
         result = _persist_browser_screenshot_output(result, call.screenshot_target)
+        published_output = apply_delivery_policy(result.raw_output, context.workspace_dir)
+        if published_output is not result.raw_output:
+            result = result.model_copy(update={"raw_output": published_output})
         # Skill text remains an ordinary tool result. The reader has already
         # applied its shared request budget; no system activation is performed.
         result, blocks, tokens = context.validate_followup(

@@ -68,6 +68,37 @@ MOTION_CELL_EPS = 4            # 格子灰度差 >= 此值算"变化格"（容�
 MOTION_MIN_CELLS = 5           # 变化格数 < 此值（/4096）视为无运动
 
 
+def _write_delivery_record(target, content):
+    import os
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                     prefix=".delivery-", suffix=".tmp", delete=False) as stream:
+        temporary = stream.name
+        stream.write(content)
+    try:
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _declare_delivery_scope(root):
+    from pathlib import Path
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    _write_delivery_record(root / ".artifact-delivery.json",
+        '{"schema_version":1,"default":"intermediate"}\n')
+
+
+def _publish_delivery_file(filename):
+    from pathlib import Path
+    target = Path(filename)
+    if not target.is_file():
+        raise ValueError(f"Delivery file does not exist: {target}")
+    _write_delivery_record(target.with_name(f".{target.name}.artifact.json"),
+        '{"type":"artifact"}\n')
+
+
 def _mark_intermediate_artifact(filename):
     """Mark this exact QA output for Box-Agent automatic artifact discovery."""
     from pathlib import Path
@@ -538,6 +569,7 @@ def main() -> int:
     if args.page is not None and args.page < 1:
         print(f"--page 必须 >= 1，收到 {args.page}", file=sys.stderr)
         return 2
+    _declare_delivery_scope(html_path.resolve().parent)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -568,6 +600,10 @@ def main() -> int:
                   f"live_cells={p['live_cells']} — 本页无可见动态（若是有意的静帧设计可忽略）")
         if p.get("blank"):
             print(f"[blank] page {p['page']}: 近纯色/空白页")
+    if args.all:
+        _publish_delivery_file(html_path)
+        if (out_dir / "contact_sheet.png").is_file():
+            _publish_delivery_file(out_dir / "contact_sheet.png")
     for p in paths:
         print(p)
     return 0

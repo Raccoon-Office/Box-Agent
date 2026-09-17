@@ -162,6 +162,7 @@ async function main() {
 
   // 成功输出（stdout）
   const sizeKB = (fileSize / 1024).toFixed(1);
+  if (result.failCount === 0) writeFileSync(resolve(dirname(outputPath), `.${basename(outputPath)}.artifact.json`), '{"type":"artifact"}\n');
   console.log(JSON.stringify({
     success: result.failCount === 0,
     output: outputPath,

@@ -57,7 +57,9 @@ function parseArgs(argv) {
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
     const value = argv[i + 1];
-    if (arg === "--out" && value) {
+    if (arg === "--publish-artifact") {
+      opts.publishArtifact = true;
+    } else if (arg === "--out" && value) {
       opts.out = value;
       i += 1;
     } else if (arg === "--cols" && value) {
@@ -165,6 +167,7 @@ async function main() {
       "",
     ].join("\n")
   );
+  if (opts.publishArtifact) require("./artifact_delivery.js").publishArtifact(outPath);
   console.log(
     JSON.stringify(
       {

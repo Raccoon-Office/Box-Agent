@@ -527,6 +527,12 @@ manifest references for deck rendering and editing. For PPT assets call
 artifact publication without suppressing generation or insertion. A requested
 individual-image deliverable may use `publish_artifact: true`.
 
+The preparation script declares the presentation directory as an intermediate
+workspace. Only explicitly registered deliveries appear in chat. Finalization
+and PPTX export register their finished outputs automatically. For the final
+whole-deck overview, pass `--publish-artifact` to `make_contact_sheet.js`;
+omit it for internal review sheets. Keep user-requested standalone images explicit.
+
 Present information in this priority order:
 
 1. Start with one plain-language completion sentence using the matching
