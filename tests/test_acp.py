@@ -2256,6 +2256,53 @@ async def test_acp_skill_catalog_tracks_session_profile_and_explicit_selection(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["fast", "standard", "deep"])
+@pytest.mark.parametrize("selection", ["host", "slash"])
+async def test_acp_research_prompt_catalog_and_reader_follow_current_turn_policy(
+    tmp_path, profile, selection,
+):
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    folder = tmp_path / "skills" / "research-synthesis"
+    folder.mkdir(parents=True)
+    folder.joinpath("SKILL.md").write_text(
+        "---\nname: research-synthesis\ndescription: Research evidence\n"
+        "keywords: [research]\n---\nResearch method\n"
+    )
+    loader = SkillLoader(folder.parent)
+    loader.discover_skills()
+    llm = CaptureMessagesLLM()
+    adapter = BoxACPAgent(DummyConn(), Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_todo=False),
+    ), llm, [GetSkillTool(loader), ListSkillsTool(loader)],
+        f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
+    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={
+        "session_mode": "general", "execution_profile": profile,
+    }))
+    state = adapter._sessions[session.sessionId]
+    for selected in (False, True, False):
+        text = "/research-synthesis research" if selected and selection == "slash" else "research"
+        meta = {"selected_skill_names": ["research-synthesis"]} if selected and selection == "host" else {}
+        await adapter.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": text}], field_meta=meta,
+        ))
+        available = profile != "fast" or selected
+        system = "\n".join(str(content) for role, content in llm.calls[-1] if role == "system")
+        assert ("research-synthesis" in system) is available
+        assert ("Research evidence" in system) is available
+        assert ("research-synthesis" in state.skill_selector.matched_skill_names) is available
+        catalog = state.agent.tools["list_skills"]
+        browse = await catalog.execute()
+        assert bool(browse.raw_output["skills"]) is available
+        exact = await catalog.execute(query="research-synthesis")
+        assert exact.raw_output["skills"][0]["available"] is available
+        assert (state.agent.tools["get_skill"].check_access("research-synthesis") is None) is available
+
+
+@pytest.mark.asyncio
 async def test_acp_expert_selection_respects_global_disabled_catalog_and_reads(tmp_path):
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
     from box_agent.tools.skill_tool import GetSkillTool

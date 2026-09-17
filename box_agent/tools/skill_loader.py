@@ -12,6 +12,7 @@ Supports:
 """
 
 import json
+from collections.abc import Collection
 from hashlib import sha256
 import os
 import re
@@ -23,6 +24,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
 import yaml
 
+from box_agent.execution_profile import is_skill_blocked
 from box_agent.user_paths import state_path
 
 SkillSource = Literal["builtin", "connector", "user"]
@@ -1195,7 +1197,7 @@ class SkillSelector:
 
     Cumulative semantics: each call to ``update`` appends the new user
     input to the running query string. Filtered skill set grows
-    monotonically across turns — once a skill is matched, it stays.
+    across turns, but execution-policy blocks always override prior matches.
     Returns ``None`` when nothing changed so the caller can preserve
     cache-friendly prompt stability.
     """
@@ -1208,10 +1210,14 @@ class SkillSelector:
         *,
         include_disabled: bool = False,
         skill_filter: Callable[[Skill], bool] | None = None,
+        blocked_skill_names: Collection[str] = frozenset(),
+        explicitly_allowed_skill_names: Collection[str] | None = None,
     ) -> None:
         self._loader = skill_loader
         self._include_disabled = include_disabled
         self._skill_filter = skill_filter
+        self._blocked_skill_names = blocked_skill_names
+        self._explicitly_allowed_skill_names = explicitly_allowed_skill_names
         self._prefix: Optional[str] = None
         self._suffix: Optional[str] = None
         self._cumulative: List[str] = []
@@ -1270,6 +1276,10 @@ class SkillSelector:
             matched_names: Tuple[str, ...] = ()
         else:
             def visible(skill: Skill) -> bool:
+                if is_skill_blocked(
+                    skill.name, self._blocked_skill_names, self._explicitly_allowed_skill_names
+                ):
+                    return False
                 return skill.name in self._sticky_skill_names or (
                     self._skill_filter is None or self._skill_filter(skill)
                 )

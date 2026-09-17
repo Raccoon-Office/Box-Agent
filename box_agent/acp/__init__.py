@@ -2616,39 +2616,6 @@ class BoxACPAgent:
             except Exception as exc:
                 log.warn("skills/reload_error", session_id=session_id, message=str(exc))
 
-        # Per-turn skill metadata filter.
-        if state.skill_selector is not None:
-            try:
-                from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
-                current_system = state.agent.messages[0].content
-                if SKILL_SLOT_SENTINEL in current_system:
-                    state.skill_selector.bind(current_system)
-                new_prompt = state.skill_selector.update(skill_selection_text)
-                if new_prompt is not None:
-                    self._set_agent_system_prompt(state.agent, new_prompt)
-                    log.info(
-                        "skills/filtered",
-                        session_id=session_id,
-                        matched=",".join(state.skill_selector.matched_skill_names),
-                        query_chars=len(state.skill_selector.cumulative_query),
-                        prompt_chars=len(new_prompt),
-                    )
-                self._sync_cache_fingerprint_context(state)
-            except Exception as exc:
-                log.warn("skills/filter_error", session_id=session_id, message=str(exc))
-
-        matched_skill_names = (
-            state.skill_selector.matched_skill_names
-            if state.skill_selector is not None
-            else ()
-        )
-        if state.skill_loader is not None:
-            for skill_name in matched_skill_names:
-                skill = state.skill_loader.get_skill(skill_name)
-                if skill is not None and _connector_skill_is_available(
-                    skill, state.selected_connector_ids
-                ):
-                    state.connector_skill_grants.add(skill.name)
         explicit_skill = resolve_explicit_skill_invocation(
             state.skill_loader,
             plan_detection_text,
@@ -2694,6 +2661,40 @@ class BoxACPAgent:
                 session_id=session_id,
                 skills=",".join(host_selected_skill_names),
             )
+
+        # Resolve current-turn selection before applying execution-policy visibility.
+        if state.skill_selector is not None:
+            try:
+                from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
+                current_system = state.agent.messages[0].content
+                if SKILL_SLOT_SENTINEL in current_system:
+                    state.skill_selector.bind(current_system)
+                new_prompt = state.skill_selector.update(skill_selection_text)
+                if new_prompt is not None:
+                    self._set_agent_system_prompt(state.agent, new_prompt)
+                    log.info(
+                        "skills/filtered",
+                        session_id=session_id,
+                        matched=",".join(state.skill_selector.matched_skill_names),
+                        query_chars=len(state.skill_selector.cumulative_query),
+                        prompt_chars=len(new_prompt),
+                    )
+                self._sync_cache_fingerprint_context(state)
+            except Exception as exc:
+                log.warn("skills/filter_error", session_id=session_id, message=str(exc))
+
+        matched_skill_names = (
+            state.skill_selector.matched_skill_names
+            if state.skill_selector is not None
+            else ()
+        )
+        if state.skill_loader is not None:
+            for skill_name in matched_skill_names:
+                skill = state.skill_loader.get_skill(skill_name)
+                if skill is not None and _connector_skill_is_available(
+                    skill, state.selected_connector_ids
+                ):
+                    state.connector_skill_grants.add(skill.name)
 
         if state.agent.skill_runtime is not None:
             state.agent.skill_runtime.select(explicitly_selected_skill_names)

@@ -6,6 +6,7 @@ import json
 from typing import Any
 from types import SimpleNamespace
 
+from ..execution_profile import is_skill_blocked
 from .base import Tool, ToolResult
 from .schema_validation import validate_tool_arguments
 from .skill_loader import Skill, SkillLoader
@@ -74,9 +75,8 @@ class ListSkillsTool(Tool):
             reason = f"Skill is malformed: {skill.broken_reason or 'invalid SKILL.md'}"
         elif self.skill_access_filter is not None and not self.skill_access_filter(skill):
             reason = "Skill is not enabled for this conversation."
-        elif skill.name in self.blocked_skill_names and (
-            self.explicitly_allowed_skill_names is None
-            or skill.name not in self.explicitly_allowed_skill_names
+        elif is_skill_blocked(
+            skill.name, self.blocked_skill_names, self.explicitly_allowed_skill_names
         ):
             reason = "Skill is blocked by the execution profile unless explicitly selected."
         return {

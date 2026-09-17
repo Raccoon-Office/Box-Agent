@@ -2219,8 +2219,8 @@ async def run_agent(
                 if not agent_session.config.tools.mcp.deferred_loading_enabled:
                     register_mcp_tools(agent.tools, loaded_mcp_tools)
                 await _refresh_mcp_after_auth_change()
-                _apply_skill_filter(task)
                 _select_cli_skills(task)
+                _apply_skill_filter(task)
                 agent_session.source_text = bind_user_source_text(
                     agent.tools, agent_session.source_text, task,
                 )
@@ -2569,8 +2569,8 @@ async def run_agent(
                         f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
                         f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
                     )
-                    _apply_skill_filter(user_input)
                     _select_cli_skills(user_input)
+                    _apply_skill_filter(user_input)
                     agent_session.source_text = bind_user_source_text(
                         agent.tools, agent_session.source_text, user_input
                     )
