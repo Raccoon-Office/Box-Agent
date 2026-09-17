@@ -86,6 +86,15 @@ class ContextEntry:
     # core promotion so the cooldown skips noisy candidates.
     core_status: str = "none"  # "none" | "rejected"
     last_proposed: str = ""  # ISO-8601 UTC or empty if never proposed
+    # Correction-memory fields (R2+R3). Empty defaults keep legacy entries working.
+    entry_type: str = ""  # "" | "correction" ("" treated as ordinary context)
+    status: str = ""  # "" | "active" | "superseded" | "draft" | "deleted"
+    error_fingerprint: str = ""
+    subject_kind: str = ""  # skill|tool|path_pattern|env|workflow
+    subject_name: str = ""
+    subject_version: str = ""
+    lesson: str = ""
+    symptom: str = ""
 
 
 _ENTRY_HEADER_RE = re.compile(r"^\s*<!--\s*ctx\s+(.+?)\s*-->\s*$")
@@ -131,6 +140,26 @@ def _new_entry(content: str, *, source: str = "tool", confidence: float = 1.0,
     )
 
 
+_CORRECTIONS_TOPIC = "corrections"
+
+
+def _is_inactive_correction(entry: ContextEntry) -> bool:
+    """True when *entry* is a correction that should be hidden from default search."""
+    if (entry.entry_type or "") != "correction":
+        return False
+    return (entry.status or "") != "active"
+
+
+def _correction_content(lesson: str, symptom: str = "") -> str:
+    """Build the searchable markdown body for a correction entry."""
+    lesson = (lesson or "").strip()
+    symptom = (symptom or "").strip()
+    lines = [f"- lesson: {lesson}" if lesson else "- lesson:"]
+    if symptom:
+        lines.append(f"- symptom: {symptom}")
+    return "\n".join(lines)
+
+
 def _format_entry_header(e: ContextEntry) -> str:
     parts = [
         f"id={e.id}",
@@ -151,6 +180,22 @@ def _format_entry_header(e: ContextEntry) -> str:
         parts.append(f"core_status={e.core_status}")
     if e.last_proposed:
         parts.append(f"last_proposed={e.last_proposed}")
+    if e.entry_type:
+        parts.append(f"entry_type={_header_value(e.entry_type)}")
+    if e.status:
+        parts.append(f"status={_header_value(e.status)}")
+    if e.error_fingerprint:
+        parts.append(f"error_fingerprint={_header_value(e.error_fingerprint)}")
+    if e.subject_kind:
+        parts.append(f"subject_kind={_header_value(e.subject_kind)}")
+    if e.subject_name:
+        parts.append(f"subject_name={_header_value(e.subject_name)}")
+    if e.subject_version:
+        parts.append(f"subject_version={_header_value(e.subject_version)}")
+    if e.lesson:
+        parts.append(f"lesson={_header_value(e.lesson)}")
+    if e.symptom:
+        parts.append(f"symptom={_header_value(e.symptom)}")
     return "<!-- ctx " + " ".join(parts) + " -->"
 
 
@@ -218,6 +263,14 @@ def _parse_context_text(text: str) -> list[ContextEntry]:
                 trigger=meta.get("trigger") or "",
                 core_status=meta.get("core_status") or "none",
                 last_proposed=meta.get("last_proposed") or "",
+                entry_type=meta.get("entry_type") or "",
+                status=meta.get("status") or "",
+                error_fingerprint=meta.get("error_fingerprint") or "",
+                subject_kind=meta.get("subject_kind") or "",
+                subject_name=meta.get("subject_name") or "",
+                subject_version=meta.get("subject_version") or "",
+                lesson=meta.get("lesson") or "",
+                symptom=meta.get("symptom") or "",
             ))
         except (ValueError, TypeError):
             logger.warning("Bad ContextEntry metadata, using defaults: %s", meta)
@@ -941,13 +994,225 @@ class MemoryManager:
 
     # ── Search ──────────────────────────────────────────────────
 
+
+    # ── Correction memory (R2+R3) ─────────────────────────────
+
     @_serialized_context
-    def search(self, query: str, *, limit: int = 5, topic: str | None = None) -> list[str]:
+    def write_correction(self, draft, *, status: str = "active") -> ContextEntry:
+        """Persist a correction under topic ``corrections``.
+
+        Idempotent for active entries: same fingerprint + subject updates the
+        existing active row (lesson/hits) instead of duplicating.
+        """
+        from box_agent.correction import CorrectionDraft, CorrectionSubject
+
+        if not isinstance(draft, CorrectionDraft):
+            raise TypeError("write_correction expects a CorrectionDraft")
+
+        subject: CorrectionSubject = draft.subject
+        fingerprint = _header_value(draft.error_fingerprint or "")
+        lesson = (draft.lesson or "").strip()
+        symptom = (draft.symptom or "").strip()
+        if not fingerprint:
+            raise ValueError("error_fingerprint is required")
+        if not lesson:
+            raise ValueError("lesson is required")
+        if not subject.name:
+            raise ValueError("subject.name is required")
+
+        status = (status or "active").strip() or "active"
+        topic = _CORRECTIONS_TOPIC
+        kind = _header_value(subject.kind)
+        name = _header_value(subject.name)
+        version = _header_value(subject.version)
+        entries = self._topic_store.read_topic(topic)
+
+        if status == "active":
+            for existing in entries:
+                if (
+                    existing.entry_type == "correction"
+                    and existing.status == "active"
+                    and existing.error_fingerprint == fingerprint
+                    and existing.subject_kind == kind
+                    and existing.subject_name == name
+                    and (existing.subject_version or "") == version
+                ):
+                    existing.lesson = _header_value(lesson)
+                    existing.symptom = _header_value(symptom)
+                    existing.content = _correction_content(lesson, symptom)
+                    existing.hits += 1
+                    existing.last_used = _now_iso()
+                    existing.source = draft.source or existing.source
+                    self._write_context_topic_entries(entries)
+                    return existing
+
+        now = _now_iso()
+        entry = ContextEntry(
+            id=_new_entry_id(),
+            content=_correction_content(lesson, symptom),
+            created=now,
+            last_used=now,
+            hits=0,
+            source=draft.source or "explicit",
+            confidence=1.0,
+            topic=topic,
+            entry_type="correction",
+            status=status,
+            error_fingerprint=fingerprint,
+            subject_kind=kind,
+            subject_name=name,
+            subject_version=version,
+            lesson=_header_value(lesson),
+            symptom=_header_value(symptom),
+        )
+        entries.append(entry)
+        self._write_context_topic_entries(entries)
+        return entry
+
+    @_serialized_context
+    def list_corrections(
+        self,
+        *,
+        status: str | None = None,
+        include_inactive: bool = False,
+    ) -> list[ContextEntry]:
+        """List correction entries from the ``corrections`` topic.
+
+        When *status* is set, only that status is returned. Otherwise active
+        corrections are returned unless *include_inactive* is True.
+        """
+        entries = [
+            e
+            for e in self._topic_store.read_topic(_CORRECTIONS_TOPIC)
+            if (e.entry_type or "") == "correction"
+        ]
+        if status is not None:
+            return [e for e in entries if (e.status or "") == status]
+        if include_inactive:
+            return entries
+        return [e for e in entries if (e.status or "") == "active"]
+
+    @_serialized_context
+    def supersede_correction(self, entry_id: str, *, reason: str = "fixed") -> ContextEntry:
+        """Mark a correction as superseded (hidden from default search)."""
+        del reason  # reserved for future audit metadata
+        return self._set_correction_status(entry_id, "superseded")
+
+    @_serialized_context
+    def delete_correction(self, entry_id: str) -> ContextEntry:
+        """Soft-delete a correction (status=deleted; hidden from default search)."""
+        return self._set_correction_status(entry_id, "deleted")
+
+    def _set_correction_status(self, entry_id: str, status: str) -> ContextEntry:
+        entries = self._topic_store.read_topic(_CORRECTIONS_TOPIC)
+        for entry in entries:
+            if entry.id == entry_id and (entry.entry_type or "") == "correction":
+                entry.status = status
+                entry.last_used = _now_iso()
+                self._write_context_topic_entries(entries)
+                return entry
+        raise KeyError(f"correction not found: {entry_id}")
+
+    @_serialized_context
+    def supersede_by_subject_upgrade(self, subject, *, fingerprint: str | None = None) -> int:
+        """Supersede active corrections for *subject* when its version upgrades.
+
+        Matches on kind+name; if *fingerprint* is provided, only that fingerprint
+        is superseded. Entries already at the new version are left alone.
+        """
+        from box_agent.correction import CorrectionSubject
+
+        if not isinstance(subject, CorrectionSubject):
+            raise TypeError("supersede_by_subject_upgrade expects a CorrectionSubject")
+
+        entries = self._topic_store.read_topic(_CORRECTIONS_TOPIC)
+        changed = 0
+        now = _now_iso()
+        kind = _header_value(subject.kind)
+        name = _header_value(subject.name)
+        new_version = _header_value(subject.version)
+        fp = _header_value(fingerprint) if fingerprint is not None else None
+        for entry in entries:
+            if (entry.entry_type or "") != "correction":
+                continue
+            if (entry.status or "") != "active":
+                continue
+            if entry.subject_kind != kind or entry.subject_name != name:
+                continue
+            if fp is not None and entry.error_fingerprint != fp:
+                continue
+            # Leave entries already at the new version alone.
+            if new_version and (entry.subject_version or "") == new_version:
+                continue
+            entry.status = "superseded"
+            entry.last_used = now
+            changed += 1
+        if changed:
+            self._write_context_topic_entries(entries)
+        return changed
+
+    @_serialized_context
+    def confirm_correction_draft(self, entry_id: str) -> ContextEntry:
+        """Promote a draft correction to active (idempotent if already active)."""
+        entries = self._topic_store.read_topic(_CORRECTIONS_TOPIC)
+        draft_entry = None
+        for entry in entries:
+            if entry.id == entry_id and (entry.entry_type or "") == "correction":
+                draft_entry = entry
+                break
+        if draft_entry is None:
+            raise KeyError(f"correction not found: {entry_id}")
+        if draft_entry.status == "active":
+            return draft_entry
+        if draft_entry.status != "draft":
+            raise ValueError(
+                f"correction {entry_id} is not a draft (status={draft_entry.status})"
+            )
+
+        fingerprint = draft_entry.error_fingerprint
+        for existing in entries:
+            if existing.id == draft_entry.id:
+                continue
+            if (
+                existing.entry_type == "correction"
+                and existing.status == "active"
+                and existing.error_fingerprint == fingerprint
+                and existing.subject_kind == draft_entry.subject_kind
+                and existing.subject_name == draft_entry.subject_name
+                and (existing.subject_version or "") == (draft_entry.subject_version or "")
+            ):
+                existing.content = draft_entry.content
+                existing.lesson = draft_entry.lesson
+                existing.symptom = draft_entry.symptom
+                existing.hits += 1
+                existing.last_used = _now_iso()
+                draft_entry.status = "superseded"
+                draft_entry.last_used = existing.last_used
+                self._write_context_topic_entries(entries)
+                return existing
+
+        draft_entry.status = "active"
+        draft_entry.last_used = _now_iso()
+        self._write_context_topic_entries(entries)
+        return draft_entry
+
+    @_serialized_context
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        topic: str | None = None,
+        include_inactive_corrections: bool = False,
+    ) -> list[str]:
         """Keyword search across v2 experiences, then legacy fallback.
 
         Returns entry contents (deduped across multi-line entries) ranked by
         exact occurrence and query-term overlap, with historical ``hits`` as a
         tiebreak.  Capped at ``limit`` so noisy keywords cannot flood the model.
+
+        Correction entries with status other than ``active`` are skipped unless
+        ``include_inactive_corrections`` is True. Ordinary context is unchanged.
 
         Side effect: v2 matches increment ``hits`` and refresh ``last_used``.
         Legacy fallback matches are read-only and never become promotion
@@ -957,18 +1222,42 @@ class MemoryManager:
             return []
         query_lower = query.lower().strip()
         entries, routed_topics, explicit_topic = self._entries_for_query(query, topic=topic)
-        results = self._search_entries(query_lower, entries, limit, routed_topics)
+        results = self._search_entries(
+            query_lower,
+            entries,
+            limit,
+            routed_topics,
+            include_inactive_corrections=include_inactive_corrections,
+        )
 
         if not results and routed_topics is not None and not explicit_topic:
             entries = self._read_context_entries()
-            results = self._search_entries(query_lower, entries, limit, None)
+            results = self._search_entries(
+                query_lower,
+                entries,
+                limit,
+                None,
+                include_inactive_corrections=include_inactive_corrections,
+            )
 
         if not results:
-            results = self._search_legacy_context(query_lower, limit=limit, topic=topic)
+            results = self._search_legacy_context(
+                query_lower,
+                limit=limit,
+                topic=topic,
+                include_inactive_corrections=include_inactive_corrections,
+            )
 
         return results
 
-    def _search_legacy_context(self, query_lower: str, *, limit: int, topic: str | None = None) -> list[str]:
+    def _search_legacy_context(
+        self,
+        query_lower: str,
+        *,
+        limit: int,
+        topic: str | None = None,
+        include_inactive_corrections: bool = False,
+    ) -> list[str]:
         """Read-only search over pre-v2 context."""
         if topic:
             entries = self._legacy_topic_store.read_topic(topic)
@@ -976,7 +1265,14 @@ class MemoryManager:
                 entries.extend(parse_context_file(self.legacy_context_file))
         else:
             entries = self._read_legacy_context_entries()
-        return self._search_entries(query_lower, entries, limit, None, update_usage=False)
+        return self._search_entries(
+            query_lower,
+            entries,
+            limit,
+            None,
+            update_usage=False,
+            include_inactive_corrections=include_inactive_corrections,
+        )
 
     @_serialized_context
     def auto_match_context(self, query: str, *, limit: int = 3) -> list[dict[str, str]]:
@@ -1060,6 +1356,7 @@ class MemoryManager:
         routed_topics: list[str] | None,
         *,
         update_usage: bool = True,
+        include_inactive_corrections: bool = False,
     ) -> list[str]:
         if not entries:
             return []
@@ -1070,6 +1367,8 @@ class MemoryManager:
         now = _now_iso()
 
         for entry in entries:
+            if not include_inactive_corrections and _is_inactive_correction(entry):
+                continue
             content_lower = entry.content.lower()
             score, occurrences = _score_memory_search(query_lower, query_terms, content_lower)
             if score <= 0:
@@ -1105,6 +1404,8 @@ class MemoryManager:
         scored: list[tuple[float, int, str, int]] = []
         line_no = 0
         for entry_idx, entry in enumerate(entries):
+            if _is_inactive_correction(entry):
+                continue
             for raw_line in entry.content.splitlines():
                 line_no += 1
                 text = raw_line.strip()

@@ -46,7 +46,15 @@ from box_agent.tools.mcp_loader import (
 )
 from box_agent.tools.mcp_bootstrap import bootstrap_managed_mcp_config
 from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
-from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
+from box_agent.tools.memory_tool import (
+    MemoryDeleteCorrectionTool,
+    MemoryListCorrectionsTool,
+    MemoryReadTool,
+    MemorySearchTool,
+    MemorySupersedeCorrectionTool,
+    MemoryWriteCorrectionTool,
+    MemoryWriteTool,
+)
 from box_agent.tools.obsidian_tool import create_obsidian_tools
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
@@ -284,7 +292,17 @@ async def initialize_base_tools(
         tools.append(MemoryReadTool(memory_manager))
         tools.append(MemoryWriteTool(memory_manager, llm=llm))
         tools.append(MemorySearchTool(memory_manager))
-        _out(f"{Colors.GREEN}✅ Loaded memory tools (memory_read, memory_write, memory_search){Colors.RESET}")
+        tools.append(MemoryListCorrectionsTool(memory_manager))
+        tools.append(MemoryWriteCorrectionTool(memory_manager))
+        tools.append(MemorySupersedeCorrectionTool(memory_manager))
+        tools.append(MemoryDeleteCorrectionTool(memory_manager))
+        _out(
+            f"{Colors.GREEN}✅ Loaded memory tools "
+            f"(memory_read, memory_write, memory_search, "
+            f"memory_list_corrections, memory_write_correction, "
+            f"memory_supersede_correction, memory_delete_correction)"
+            f"{Colors.RESET}"
+        )
 
     # 1. Bash auxiliary tools (output monitoring and kill)
     # Note: BashTool itself is created in add_workspace_tools() with workspace_dir as cwd

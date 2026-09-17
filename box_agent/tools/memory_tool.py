@@ -249,3 +249,328 @@ class MemorySearchTool(Tool):
             )
         except Exception as e:
             return ToolResult(success=False, content="", error=f"Failed to search memory: {e}")
+
+
+# ── Correction memory tools (side path; does not extend memory_write) ──
+
+
+def _reject_preference_or_secret(lesson: str, symptom: str = "") -> str | None:
+    from box_agent.correction import classify_forbidden_content
+
+    return classify_forbidden_content(f"{lesson}\n{symptom}")
+
+
+class MemoryListCorrectionsTool(Tool):
+    """List stored correction-memory entries."""
+
+    def __init__(self, memory_manager):
+        from box_agent.memory import MemoryManager
+
+        self._mgr: MemoryManager = memory_manager
+
+    @property
+    def name(self) -> str:
+        return "memory_list_corrections"
+
+    @property
+    def description(self) -> str:
+        return (
+            "List correction-memory entries (durable failure lessons). "
+            "By default returns active corrections only. Does not touch MEMORY.md."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "superseded", "draft", "deleted"],
+                    "description": "Optional status filter. Omit for active-only.",
+                },
+                "include_inactive": {
+                    "type": "boolean",
+                    "description": "If true and status is omitted, include non-active corrections.",
+                },
+            },
+        }
+
+    async def execute(
+        self,
+        status: str | None = None,
+        include_inactive: bool = False,
+    ) -> ToolResult:
+        try:
+            entries = await asyncio.to_thread(
+                self._mgr.list_corrections,
+                status=status,
+                include_inactive=include_inactive,
+            )
+            if not entries:
+                return ToolResult(success=True, content="No corrections found.")
+            lines = []
+            for e in entries:
+                lines.append(
+                    f"- id={e.id} status={e.status} "
+                    f"subject={e.subject_kind}:{e.subject_name}"
+                    f"{('@' + e.subject_version) if e.subject_version else ''} "
+                    f"fp={e.error_fingerprint}\n  {e.content}"
+                )
+            return ToolResult(
+                success=True,
+                content=f"Found {len(entries)} correction(s):\n" + "\n".join(lines),
+                raw_output={
+                    "type": "memory_list_corrections",
+                    "corrections": [
+                        {
+                            "id": e.id,
+                            "status": e.status,
+                            "subject_kind": e.subject_kind,
+                            "subject_name": e.subject_name,
+                            "subject_version": e.subject_version,
+                            "error_fingerprint": e.error_fingerprint,
+                            "content": e.content,
+                        }
+                        for e in entries
+                    ],
+                },
+            )
+        except Exception as e:
+            return ToolResult(success=False, content="", error=f"Failed to list corrections: {e}")
+
+
+class MemoryWriteCorrectionTool(Tool):
+    """Explicit correction write with draft → confirm semantics."""
+
+    def __init__(self, memory_manager):
+        from box_agent.memory import MemoryManager
+
+        self._mgr: MemoryManager = memory_manager
+
+    @property
+    def name(self) -> str:
+        return "memory_write_correction"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Write a durable correction (failure lesson) to corrections memory. "
+            "Creates a draft first; pass confirm=true with draft_id to activate. "
+            "Refuses preference and secret content. Does not write MEMORY.md."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "lesson": {
+                    "type": "string",
+                    "description": "One actionable lesson (required when creating a draft).",
+                },
+                "symptom": {
+                    "type": "string",
+                    "description": "Short symptom summary (no long stacks).",
+                },
+                "error_fingerprint": {
+                    "type": "string",
+                    "description": "Normalized error fingerprint (or raw error to normalize).",
+                },
+                "subject_kind": {
+                    "type": "string",
+                    "enum": ["skill", "tool", "path_pattern", "env", "workflow"],
+                },
+                "subject_name": {"type": "string"},
+                "subject_version": {"type": "string"},
+                "confirm": {
+                    "type": "boolean",
+                    "description": "If true with draft_id, promote that draft to active.",
+                },
+                "draft_id": {
+                    "type": "string",
+                    "description": "Draft entry id to confirm.",
+                },
+            },
+        }
+
+    async def execute(
+        self,
+        lesson: str = "",
+        symptom: str = "",
+        error_fingerprint: str = "",
+        subject_kind: str = "tool",
+        subject_name: str = "",
+        subject_version: str = "",
+        confirm: bool = False,
+        draft_id: str = "",
+    ) -> ToolResult:
+        try:
+            if confirm and draft_id:
+                entry = await asyncio.to_thread(self._mgr.confirm_correction_draft, draft_id)
+                return ToolResult(
+                    success=True,
+                    content=f"Correction confirmed active: id={entry.id}\n{entry.content}",
+                    raw_output={"type": "memory_write_correction", "id": entry.id, "status": entry.status},
+                )
+
+            forbidden = _reject_preference_or_secret(lesson, symptom)
+            if forbidden:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=f"Refused to store {forbidden} content in correction memory.",
+                )
+
+            from box_agent.correction import (
+                CorrectionDraft,
+                CorrectionReject,
+                CorrectionSubject,
+                normalize_error_fingerprint,
+            )
+
+            if not lesson.strip():
+                return ToolResult(success=False, content="", error="lesson is required")
+            if not subject_name.strip():
+                return ToolResult(success=False, content="", error="subject_name is required")
+            if not error_fingerprint.strip():
+                return ToolResult(success=False, content="", error="error_fingerprint is required")
+
+            subject = CorrectionSubject(
+                kind=subject_kind,  # type: ignore[arg-type]
+                name=subject_name.strip(),
+                version=subject_version or "",
+            )
+            draft = CorrectionDraft(
+                lesson=lesson.strip(),
+                symptom=(symptom or "").strip(),
+                subject=subject,
+                error_fingerprint=normalize_error_fingerprint(error_fingerprint),
+                source="explicit",
+            )
+            try:
+                from box_agent.correction import CorrectionCurator
+
+                CorrectionCurator().reject_if_forbidden(draft)
+            except CorrectionReject as exc:
+                return ToolResult(success=False, content="", error=str(exc))
+
+            entry = await asyncio.to_thread(
+                self._mgr.write_correction,
+                draft,
+                status="draft",
+            )
+            return ToolResult(
+                success=True,
+                content=(
+                    f"Correction draft created: id={entry.id}. "
+                    f"Call again with confirm=true and draft_id={entry.id} to activate."
+                ),
+                raw_output={
+                    "type": "memory_write_correction",
+                    "id": entry.id,
+                    "status": entry.status,
+                },
+            )
+        except Exception as e:
+            return ToolResult(success=False, content="", error=f"Failed to write correction: {e}")
+
+
+class MemorySupersedeCorrectionTool(Tool):
+    """Invalidate/supersede a correction so default search skips it."""
+
+    def __init__(self, memory_manager):
+        from box_agent.memory import MemoryManager
+
+        self._mgr: MemoryManager = memory_manager
+
+    @property
+    def name(self) -> str:
+        return "memory_supersede_correction"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Supersede (invalidate) a correction by id. Superseded corrections "
+            "are hidden from default memory_search."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "entry_id": {
+                    "type": "string",
+                    "description": "Correction entry id to supersede.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional reason (e.g. 'fixed', 'obsolete').",
+                },
+            },
+            "required": ["entry_id"],
+        }
+
+    async def execute(self, entry_id: str, reason: str = "fixed") -> ToolResult:
+        try:
+            entry = await asyncio.to_thread(
+                self._mgr.supersede_correction,
+                entry_id,
+                reason=reason,
+            )
+            return ToolResult(
+                success=True,
+                content=f"Correction superseded: id={entry.id} status={entry.status}",
+                raw_output={"type": "memory_supersede_correction", "id": entry.id, "status": entry.status},
+            )
+        except KeyError:
+            return ToolResult(success=False, content="", error=f"Correction not found: {entry_id}")
+        except Exception as e:
+            return ToolResult(success=False, content="", error=f"Failed to supersede correction: {e}")
+
+
+class MemoryDeleteCorrectionTool(Tool):
+    """Soft-delete a correction (status=deleted)."""
+
+    def __init__(self, memory_manager):
+        from box_agent.memory import MemoryManager
+
+        self._mgr: MemoryManager = memory_manager
+
+    @property
+    def name(self) -> str:
+        return "memory_delete_correction"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Soft-delete a correction by id (status=deleted). Deleted corrections "
+            "are hidden from default memory_search."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "entry_id": {
+                    "type": "string",
+                    "description": "Correction entry id to delete.",
+                },
+            },
+            "required": ["entry_id"],
+        }
+
+    async def execute(self, entry_id: str) -> ToolResult:
+        try:
+            entry = await asyncio.to_thread(self._mgr.delete_correction, entry_id)
+            return ToolResult(
+                success=True,
+                content=f"Correction deleted: id={entry.id} status={entry.status}",
+                raw_output={"type": "memory_delete_correction", "id": entry.id, "status": entry.status},
+            )
+        except KeyError:
+            return ToolResult(success=False, content="", error=f"Correction not found: {entry_id}")
+        except Exception as e:
+            return ToolResult(success=False, content="", error=f"Failed to delete correction: {e}")
