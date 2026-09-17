@@ -29,6 +29,7 @@ SELF_CHECK_SCRIPT_PATH = SCRIPTS_DIR / "html_self_check.js"
 INSPECT_SCRIPT_PATH = SCRIPTS_DIR / "inspect_deck_contract.js"
 RENDER_SCRIPT_PATH = SCRIPTS_DIR / "render_deck_html.js"
 PROBE_SCRIPT_PATH = SCRIPTS_DIR / "probe_deck_runtime.js"
+FINALIZE_SCRIPT_PATH = SCRIPTS_DIR / "finalize_controlled_deck.js"
 NODE = os.environ.get("BOX_AGENT_NODE") or shutil.which("node")
 
 
@@ -68,6 +69,91 @@ def _last_json_object(output: str) -> dict:
     start = output.rfind("\n{")
     payload = output[start + 1 :] if start >= 0 else output
     return json.loads(payload)
+
+
+@pytest.mark.parametrize("require_pptx", [False, True])
+def test_finalizer_delivers_the_requested_format(tmp_path: Path, require_pptx: bool) -> None:
+    deck = json.loads((SCRIPTS_DIR.parent / "examples/controlled-deck/deck.json").read_text())
+    deck["slides"] = deck["slides"][:2]
+    deck_path = tmp_path / "deck.json"
+    deck_path.write_text(json.dumps(deck), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    result = _run_node(
+        FINALIZE_SCRIPT_PATH, str(deck_path), "--out", str(html_path),
+        *(["--require-pptx"] if require_pptx else []),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert html_path.is_file()
+    pptx_path = html_path.with_suffix(".pptx")
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    if require_pptx:
+        assert pptx_path.is_file(), receipt
+        assert receipt["pptx"] == str(pptx_path)
+        with zipfile.ZipFile(pptx_path) as package:
+            assert package.testzip() is None
+            presentation = ET.fromstring(package.read("ppt/presentation.xml"))
+            ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+            assert len(presentation.findall("p:sldIdLst/p:sldId", ns)) == 2
+    else:
+        assert not pptx_path.exists()
+
+
+@pytest.mark.parametrize("export_failure", ["exit", "missing", "invalid"])
+def test_finalizer_preserves_html_and_previous_pptx_when_export_fails(
+    tmp_path: Path, export_failure: str,
+) -> None:
+    deck = json.loads((SCRIPTS_DIR.parent / "examples/controlled-deck/deck.json").read_text())
+    deck["slides"] = deck["slides"][:1]
+    deck_path = tmp_path / "deck.json"
+    deck_path.write_text(json.dumps(deck), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    pptx_path = tmp_path / "requested.pptx"
+    pptx_path.write_bytes(b"previous delivery must survive a failed export")
+    preload = tmp_path / "export-failure.cjs"
+    preload.write_text("""
+const cp = require('child_process');
+const run = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  if (require('path').basename(args[0]) === 'html_to_editable_pptx.js') {
+    if (process.env.TEST_EXPORT_FAILURE === 'invalid') require('fs').writeFileSync(args[2], 'not a pptx');
+    return {status: process.env.TEST_EXPORT_FAILURE === 'exit' ? 7 : 0,
+            stdout: '', stderr: 'simulated export failure'};
+  }
+  return run(command, args, options);
+};
+""", encoding="utf-8")
+    if NODE is None:
+        pytest.skip("Node.js is required for HTML/PPTX export tests")
+    result = subprocess.run(
+        [str(NODE), str(FINALIZE_SCRIPT_PATH), str(deck_path), "--out", str(html_path),
+         "--require-pptx", "--pptx", str(pptx_path)],
+        capture_output=True, text=True,
+        env={**os.environ, "NODE_OPTIONS": f"--require={preload}", "TEST_EXPORT_FAILURE": export_failure},
+    )
+    skip_unavailable_pptx_runtime(result)
+    assert result.returncode != 0
+    assert html_path.is_file(), result.stdout + result.stderr
+    assert pptx_path.read_bytes() == b"previous delivery must survive a failed export"
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert receipt["ok"] is False
+    assert receipt["delivery_status"] == "partial"
+    assert receipt["pptx"] is None
+    assert receipt["blocking_issues"]
+    assert not list(tmp_path.glob(".pptx-export-*"))
+
+
+@pytest.mark.parametrize("target", ["deck.json", "index.html"])
+def test_finalizer_rejects_export_overwriting_its_inputs(tmp_path: Path, target: str) -> None:
+    deck_path = tmp_path / "deck.json"
+    html_path = tmp_path / "index.html"
+    deck_path.write_text('{"slides": []}', encoding="utf-8")
+    html_path.write_text("existing HTML", encoding="utf-8")
+    result = _run_node(FINALIZE_SCRIPT_PATH, str(deck_path), "--out", str(html_path),
+                       "--require-pptx", "--pptx", str(tmp_path / target))
+    assert result.returncode != 0
+    assert "PPTX output must differ" in result.stderr
+    assert deck_path.read_text() == '{"slides": []}'
+    assert html_path.read_text() == "existing HTML"
 
 
 def _diagram_html(*, marked: bool) -> str:

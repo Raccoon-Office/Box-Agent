@@ -89,7 +89,6 @@ async def test_preparation_preserves_legacy_order_schemas_and_aliases(
     }
     _assert_schema_contract(
         [tool for tool in legacy_tools if tool is not schedule], isolated_setup.profile,
-        child_read_tools={"query_jsonl", "read_file", "search_files"},
     )
 
     prepared = DefaultToolEngine(

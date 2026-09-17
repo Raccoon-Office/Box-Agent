@@ -1,7 +1,7 @@
 ---
 name: ppt-fast
 displayName: 快速模式
-description: Create, inspect, edit, validate, render, and QA presentation decks. Use when the user mentions PowerPoint, PPT, PPTX, HTML deck, slide deck, presentation, template slides, speaker notes, slide images, or asks to read, generate, create, make, design, or modify a presentation artifact. New decks default to controlled, editable HTML delivery; PPTX is an explicit optional export.
+description: Create, inspect, edit, validate, render, and QA presentation decks. Use when the user mentions PowerPoint, PPT, PPTX, HTML deck, slide deck, presentation, template slides, speaker notes, slide images, or asks to read, generate, create, make, design, or modify a presentation artifact. New decks use controlled, editable HTML; PPT/PowerPoint requests also receive a PPTX file unless the user requests HTML only.
 keywords: [ppt, pptx, slide, slides, deck, presentation, powerpoint, pitch deck, speaker notes, ppt制作, 做ppt, 可编辑ppt, 幻灯片, 演示文稿, 投影片, 演示, 宣讲, 汇报材料, 路演, 路演材料, 融资路演, 商业计划书, BP, 提案, 讲稿, 模板页, 路演ppt]
 capabilities: [presentation.authoring]
 related_skills: [html-templates]
@@ -12,9 +12,11 @@ metadata:
 
 # PPT Fast Skill
 
-Create controlled, editable HTML presentations. Export `.pptx` only when explicitly
-requested. A request for a finished PPT includes pages, not just an outline, unless
-it explicitly says “只要大纲/内容方案” or “不要生成页面”. Existing PPTX/template edits
+Create controlled, editable HTML presentations. A request to make a PPT/PowerPoint
+requires a `.pptx` file alongside the HTML; the user need not separately ask to
+“export”. Carry that format request through mode selection and task continuation.
+Explicit HTML-only or outline-only requests need no PPTX. A request for a finished PPT includes
+pages, not just an outline, unless it says “只要大纲/内容方案” or “不要生成页面”. Existing PPTX/template edits
 preserve the original file structure; `python-pptx` must not create a new deck.
 
 ## Responsibilities
@@ -167,11 +169,17 @@ If outline/research validation fails, it returns degraded delivery with unverifi
 content clearly reported; do not repeat research or validator debugging indefinitely. This is the delivery
 floor, not a completed visual review. Keep it until the normal deck is rendered.
 If `can_retry: true`, send the same brief path and `correction_file` to the designer
-once with budget {"max_steps": 16, "max_tool_calls": 24}. Tell this fresh role to
-read correction_file, which includes the original decision and legal layout enums.
-If requires_full_read is false, that file is sufficient; do not reread all packets.
-Request only the named fields as a JSON patch; the program preserves every
-other field. The correction must not reread the full catalog or recreate the deck.
+once with budget {"max_steps": 16, "max_tool_calls": 24}. This is a fresh role;
+read `correction_file` and follow its `requires_full_read` value:
+
+- `true`: read `brief_file` and its required packets using the design role's
+  reading procedure, then return a complete decision object. The previous
+  response is not a usable decision to patch; do not replace these reads with
+  main-agent choices copied into the task.
+- `false`: the correction file is sufficient. Return only its named fields as a
+  JSON patch; the program preserves the rest. Do not reread all packets or the
+  full catalog, or recreate the deck.
+
 Run accept again. On `status: degraded`, stop PPT authoring immediately: do not
 call `inspect_deck_contract`, `apply_deck_patch`, `finalize_controlled_deck`, edit
 `deck.json`, delete slides, or start another design call. Deliver `primary_artifact` and explain the
@@ -185,6 +193,11 @@ never invent content or facts to fill them. Do not start a third design call or
 alter input just to reset the attempt count. If later compilation fails, deliver
 the existing fallback HTML with its report rather than leaving only intermediate
 JSON files. Images or unavailable vision must never prevent that delivery.
+
+Stopping authoring still permits exporting the existing `primary_artifact`.
+If PPTX was requested, use the existing-HTML export command below without
+rerunning finalization or changing the deck. Deliver the available files and
+explain the limitations from `qa/design_delivery.json`.
 
 ### 4. Scaffold the validated plan once
 
@@ -312,6 +325,11 @@ does not block this deterministic color check or ordinary delivery.
 `ok: true` does not imply warning-free. Never describe degraded output as clean.
 A design-plan deck does not require a second semantic reviewer; the report records
 that post-content model review was not performed. Program QA still runs normally.
+For a requested PPT/PPTX, add `--require-pptx --pptx output.pptx` to this command.
+It exports and checks the current deck before reporting the PPTX path. Without
+these flags it delivers HTML only. An export failure keeps the HTML, returns a
+nonzero exit status and reports `delivery_status: partial`; it is not a completed
+PPTX delivery, even if a previous `.pptx` exists.
 
 When the image manifest has a background `layout_contract`, run
 `scripts/validate_image_layout_contract.js` after finalization and preserve its
@@ -368,9 +386,12 @@ decode and geometry checks remain program checks, independent of model vision.
 
 ## Export and runtime
 
-Default HTML generation needs no export-host preflight. Only explicit PPTX export
-uses `scripts/check_html_export_env.js`, then `scripts/html_to_editable_pptx.js
-index.html output.pptx`. Read `references/runtime-office-raccoon.md`,
+HTML-only generation needs no export-host preflight. Normal PPTX delivery uses
+the finalization command above. For an existing or degraded HTML draft, run
+`scripts/check_html_export_env.js`, then `scripts/html_to_editable_pptx.js
+<primary_artifact> output.pptx`; verify the created file with
+`scripts/validate_pptx_package.py output.pptx`. Do not ask the user to request
+PPTX again, or restart authoring to export a usable draft. Read `references/runtime-office-raccoon.md`,
 `references/dependency-policy.md`, and `references/shell-safety.md` when needed.
 Use managed `BOX_AGENT_NODE`, `BOX_AGENT_PYTHON`, `BOX_AGENT_NPM` executables and
 managed package resolution, not bare require.resolve probes or system installs.
@@ -538,8 +559,8 @@ Translate internal outcomes into user impact:
 Format-specific QA is explicit: HTML delivery treats chart recoverability and
 dom-to-pptx compatibility findings as advisories; a requested native PPTX run
 must invoke `finalize_controlled_deck.js ... --require-pptx`, which promotes
-those findings to blocking export checks while preserving the HTML artifact for
-diagnosis.
+those findings to blocking export checks and creates the PPTX while preserving
+the HTML artifact. For degraded HTML, use the existing-HTML export route above.
 
 If a blocking structural, HTML, runtime, explicitly required image, or export
 step is blocked, explain the user-visible consequence in the active response

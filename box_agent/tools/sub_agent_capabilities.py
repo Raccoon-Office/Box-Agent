@@ -28,6 +28,8 @@ BATCH_AGGREGATE_MAX_CHARS = 200_000
 
 _BATCH_FILES_ALLOWED_TOOLS = frozenset({"read_file"})
 DEFAULT_SAFE_TOOL_NAMES = frozenset({"query_jsonl", "read_file", "search_files"})
+DEFAULT_READ_TOOL_NAMES = DEFAULT_SAFE_TOOL_NAMES | frozenset({"web_extract", "web_search"})
+SKILL_READ_TOOL_NAMES = frozenset({"get_skill", "list_skills"})
 PATH_SCOPED_WRITE_TOOLS = frozenset({"append_file", "edit_file", "write_file"})
 TRUSTED_NETWORK_TOOL_NAMES = frozenset(
     {"generate_image", "inspect_images", "web_extract", "web_search"}
@@ -201,13 +203,29 @@ class CapabilityFailure:
                 field == "write_scope" or field.startswith("write_scope[")
                 for field in self.invalid_fields
             ):
-                field_corrections["write_scope"] = {
-                    "message": (
-                        "Path-based write tools require an exact, non-empty output "
-                        "scope for this child. Parallel children need disjoint scopes."
-                    ),
-                    "example": ["research/dim01.md"],
-                }
+                if (self.details or {}).get("write_scope_reason") == "missing_write_tool":
+                    field_corrections["write_scope"] = {
+                        "message": (
+                            "write_scope declares outputs, but explicit required_tools "
+                            "contains no file-write tool. For a write task, include "
+                            "write_file, edit_file, or append_file in required_tools, "
+                            "or omit required_tools to use scoped file-tool defaults. "
+                            "For a read-only task, remove write_scope."
+                        ),
+                    }
+                    payload["minimal_valid_example"] = {
+                        "task": "Read the inputs and write the assigned output.",
+                        "required_tools": ["read_file", "write_file"],
+                        "write_scope": ["research/dim01.md"],
+                    }
+                else:
+                    field_corrections["write_scope"] = {
+                        "message": (
+                            "Path-based write tools require an exact, non-empty output "
+                            "scope for this child. Parallel children need disjoint scopes."
+                        ),
+                        "example": ["research/dim01.md"],
+                    }
             if field_corrections:
                 payload["field_corrections"] = field_corrections
         elif self.code == "CAPABILITY_CONSTRAINT_CONFLICT" and self.details:
@@ -331,34 +349,6 @@ def parse_delegation_spec(
             invalid_fields.append("files")
         if len(normalized_files) > BATCH_FILES_MAX_FILES:
             invalid_fields.append("files")
-    if required_tools is None:
-        normalized_required_tools = (
-            ("read_file",)
-            if normalized_files
-            else tuple(
-                sorted(set(default_required_tools) & DEFAULT_SAFE_TOOL_NAMES)
-            )
-        )
-        defaults_applied.append("required_tools")
-    else:
-        normalized_required_tools = _normalized_string_list(
-            required_tools,
-            field_name="required_tools",
-            invalid_fields=invalid_fields,
-        )
-    # ``files`` is neutral task input for both execution paths. Keep the
-    # bounded one-shot optimization only for file-only reads; any additional
-    # capability requires the ordinary child agent loop.
-    strategy = (
-        "batch_files"
-        if normalized_files and set(normalized_required_tools) == {"read_file"}
-        else "general_loop"
-    )
-    if "sub_agent" in normalized_required_tools:
-        invalid_fields.append("required_tools")
-    if strategy == "batch_files" and set(normalized_required_tools) != {"read_file"}:
-        invalid_fields.append("required_tools")
-
     if write_scope is None:
         normalized_write_scope = None
     elif isinstance(write_scope, str):
@@ -378,12 +368,66 @@ def parse_delegation_spec(
         invalid_fields.append("write_scope")
         normalized_write_scope = None
 
+    if budget is None:
+        budget = {}
+    if not isinstance(budget, dict):
+        invalid_fields.append("budget")
+        budget = {}
+    else:
+        invalid_fields.extend(
+            _unknown_fields(budget, {"max_steps", "max_tool_calls"}, "budget")
+        )
+    if "max_steps" not in budget:
+        defaults_applied.append("budget.max_steps")
+    raw_steps = budget.get("max_steps", general_max_steps)
+    if not isinstance(raw_steps, int) or isinstance(raw_steps, bool) or raw_steps < 1:
+        invalid_fields.append("budget.max_steps")
+        raw_steps = general_max_steps
+
+    if required_tools is None:
+        default_names = DEFAULT_READ_TOOL_NAMES
+        if skill_names:
+            default_names |= SKILL_READ_TOOL_NAMES
+        if normalized_write_scope:
+            default_names |= PATH_SCOPED_WRITE_TOOLS
+        selected_defaults = set(default_required_tools) & default_names
+        if normalized_files:
+            # Files require an actual reader; the resolver reports a missing
+            # parent read_file instead of starting a child unable to read inputs.
+            selected_defaults.add("read_file")
+            if not normalized_write_scope and min(raw_steps, general_max_steps) == 1:
+                # Preserve old one-call file summaries within their stated budget.
+                selected_defaults = {"read_file"}
+        normalized_required_tools = tuple(sorted(selected_defaults))
+        defaults_applied.append("required_tools")
+    else:
+        normalized_required_tools = _normalized_string_list(
+            required_tools,
+            field_name="required_tools",
+            invalid_fields=invalid_fields,
+        )
+    # Preserve the bounded batch path for file-only reads. Declared outputs
+    # need the ordinary loop, even when the caller leaves tool selection to us.
+    strategy = (
+        "batch_files"
+        if normalized_files
+        and not normalized_write_scope
+        and set(normalized_required_tools) == {"read_file"}
+        else "general_loop"
+    )
+    if "sub_agent" in normalized_required_tools:
+        invalid_fields.append("required_tools")
+
     requested_path_writes = set(normalized_required_tools) & PATH_SCOPED_WRITE_TOOLS
+    missing_default_writers = bool(
+        required_tools is None and normalized_write_scope and not requested_path_writes
+    )
+    scope_conflict = bool(
+        required_tools is not None and normalized_write_scope and not requested_path_writes
+    )
     if requested_path_writes and not normalized_write_scope:
         invalid_fields.append("write_scope")
-    if normalized_write_scope and not requested_path_writes:
-        invalid_fields.append("write_scope")
-    if strategy == "batch_files" and normalized_write_scope:
+    if scope_conflict:
         invalid_fields.append("write_scope")
 
     parsed_constraints = DelegationConstraints(
@@ -404,23 +448,7 @@ def parse_delegation_spec(
         external_side_effect=False,
     )
 
-    if budget is None:
-        budget = {}
-    if not isinstance(budget, dict):
-        invalid_fields.append("budget")
-        budget = {}
-    else:
-        invalid_fields.extend(
-            _unknown_fields(budget, {"max_steps", "max_tool_calls"}, "budget")
-        )
-
     if strategy == "batch_files":
-        if "max_steps" not in budget:
-            defaults_applied.append("budget.max_steps")
-        raw_steps = budget.get("max_steps", BATCH_FILES_MAX_STEPS)
-        if not isinstance(raw_steps, int) or isinstance(raw_steps, bool) or raw_steps < 1:
-            invalid_fields.append("budget.max_steps")
-            raw_steps = BATCH_FILES_MAX_STEPS
         max_steps = min(raw_steps, BATCH_FILES_MAX_STEPS)
 
         if "max_tool_calls" not in budget:
@@ -439,12 +467,6 @@ def parse_delegation_spec(
             BATCH_FILES_MAX_FILES,
         )
     else:
-        if "max_steps" not in budget:
-            defaults_applied.append("budget.max_steps")
-        raw_steps = budget.get("max_steps", general_max_steps)
-        if not isinstance(raw_steps, int) or isinstance(raw_steps, bool) or raw_steps < 1:
-            invalid_fields.append("budget.max_steps")
-            raw_steps = general_max_steps
         max_steps = min(raw_steps, general_max_steps)
 
         if "max_tool_calls" not in budget:
@@ -466,6 +488,16 @@ def parse_delegation_spec(
             retryable=True,
             invalid_fields=tuple(sorted(set(invalid_fields))),
             defaults_applied=tuple(sorted(set(defaults_applied))),
+            details={"write_scope_reason": "missing_write_tool"} if scope_conflict else None,
+        )
+
+    if missing_default_writers:
+        return CapabilityFailure(
+            code="REQUIRED_TOOL_NOT_FOUND",
+            message="A write_scope was provided, but the parent session has no available file-write tools.",
+            retryable=False,
+            defaults_applied=tuple(sorted(set(defaults_applied))),
+            details={"required_any_of": sorted(PATH_SCOPED_WRITE_TOOLS)},
         )
 
     return DelegationSpec(

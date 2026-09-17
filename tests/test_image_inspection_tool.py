@@ -155,6 +155,10 @@ async def test_inspect_images_native_returns_request_only_canonical_blocks(
     assert image_block["media_type"] == "image/png"
     assert base64.b64decode(image_block["data"]) == _ONE_PIXEL_PNG
     assert "untrusted visual evidence" in result.transient_followup_content[0]["text"]
+    native_instruction = result.transient_followup_content[0]["text"]
+    assert "Check readability." in native_instruction
+    assert result.content == result.model_context
+    assert result.model_context != native_instruction
     assert "transient_followup_content" not in result.model_dump()
     assert set(tmp_path.iterdir()) == {image}
 
