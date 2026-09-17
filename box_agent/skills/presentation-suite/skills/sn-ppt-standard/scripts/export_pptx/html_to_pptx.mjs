@@ -78,6 +78,7 @@ function parseArgs(args) {
 async function main() {
   if (process.argv.slice(2).some(arg => arg === '--help' || arg === '-h')) {
     console.log('Usage: node html_to_pptx.mjs --deck-dir <path> [--pages-dir <path>] [--output <filename>] [--output-dir <path>] [--force] [--batch] [--debug]');
+    console.log('Without --pages-dir, use the single populated pages/ or slides/ directory; if both contain pages, choose explicitly. Legacy root page_*.html files are also supported.');
     return;
   }
   const args = parseArgs(process.argv.slice(2));
@@ -102,16 +103,16 @@ async function main() {
     return;
   }
 
-  // 先下载远程图片并规范化 deck 结构
-  if (args.deckDir && !args.batch) {
-    await downloadRemoteImages(args.deckDir);
-  }
-
   const { htmlFiles } = ensureDeckPreconditions(args.deckDir, {
     force: args.force,
     batch: args.batch,
     pagesDir: args.pagesDir,
   });
+
+  // 下载与导出使用同一组页面，资源路径相对于各自 HTML 所在目录。
+  if (!args.batch) {
+    await downloadRemoteImages(args.deckDir, htmlFiles);
+  }
 
   const { extractPages } = await import('./lib/dom_extractor.mjs');
   const { buildPptx } = await import('./lib/pptx_builder.mjs');

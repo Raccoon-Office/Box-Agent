@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve, basename, extname } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve, basename, dirname, extname, isAbsolute, relative, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { get } from 'node:https';
 import { get as httpGet } from 'node:http';
 
@@ -48,18 +49,13 @@ function fetchBuffer(url) {
   });
 }
 
-export async function downloadRemoteImages(deckDir) {
-  const pagesDir = resolve(deckDir, 'pages');
-  if (!existsSync(pagesDir)) return;
-
-  const htmlFiles = readdirSync(pagesDir).filter(f => /^page_\d+\.html$/.test(f));
+export async function downloadRemoteImages(deckDir, htmlFiles) {
   if (htmlFiles.length === 0) return;
 
   const imagesDir = resolve(deckDir, 'images');
   mkdirSync(imagesDir, { recursive: true });
 
-  for (const file of htmlFiles) {
-    const htmlPath = resolve(pagesDir, file);
+  for (const htmlPath of htmlFiles) {
     let content = readFileSync(htmlPath, 'utf-8');
 
     // Collect image URLs from both <img src=...http...> and CSS url(http...).
@@ -83,7 +79,12 @@ export async function downloadRemoteImages(deckDir) {
       try {
         const buf = await fetchBuffer(url);
         writeFileSync(localPath, buf);
-        const rel = `../images/${basename(localPath)}`;
+        const relativePath = relative(dirname(htmlPath), localPath);
+        // Windows 跨盘路径不能写成相对 URL；同时转义 HTML 引号和 CSS url() 括号。
+        const imageUrl = isAbsolute(relativePath)
+          ? pathToFileURL(localPath).href
+          : relativePath.split(sep).map(encodeURIComponent).join('/');
+        const rel = imageUrl.replace(/['()]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
         seen.set(url, rel);
       } catch (e) {
         process.stderr.write(`[WARN] 下载远程图片失败 ${url}: ${e.message}\n`);

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, renameSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 function readJsonIfExists(filePath) {
@@ -390,54 +390,40 @@ function ensureDecorativeMarkers(deckDir, htmlFiles) {
   }
 }
 
-/**
- * 规范化 deck 目录结构：确保 page_*.html 位于 pages/ 子目录下。
- * 如果 HTML 文件直接在 deckDir 下，则创建 pages/ 并移动文件，
- * 同时重写文件内的相对资源路径（src / url(...)）。
- */
-function normalizeDeckPages(deckDir) {
-  const pagesDir = resolve(deckDir, 'pages');
-  if (existsSync(pagesDir)) {
-    return;
+function listPageFiles(pagesDir, pattern = /^(?:page|slide)_\d+\.html$/) {
+  if (!existsSync(pagesDir) || !statSync(pagesDir).isDirectory()) return [];
+  return readdirSync(pagesDir)
+    .filter(name => pattern.test(name) && statSync(resolve(pagesDir, name)).isFile())
+    .sort()
+    .map(name => resolve(pagesDir, name));
+}
+
+function selectDeckPages(deckDir, explicitDir) {
+  if (explicitDir) {
+    const pagesDir = resolve(explicitDir);
+    if (!existsSync(pagesDir) || !statSync(pagesDir).isDirectory()) {
+      throw new Error(`页面目录不存在或不是目录: ${pagesDir}`);
+    }
+    const htmlFiles = listPageFiles(pagesDir);
+    if (htmlFiles.length === 0) {
+      throw new Error(`页面目录中没有 page_*.html 或 slide_*.html 文件: ${pagesDir}`);
+    }
+    return { pagesDir, htmlFiles };
   }
 
-  const files = readdirSync(deckDir).filter(f => /^page_\d+\.html$/.test(f));
-  if (files.length === 0) {
-    return;
+  const candidates = ['pages', 'slides'].map(name => {
+    const pagesDir = resolve(deckDir, name);
+    return { pagesDir, htmlFiles: listPageFiles(pagesDir) };
+  }).filter(candidate => candidate.htmlFiles.length > 0);
+  if (candidates.length > 1) {
+    throw new Error('pages/ 和 slides/ 均包含页面，请用 --pages-dir 明确选择一个目录');
   }
+  if (candidates.length === 1) return candidates[0];
 
-  mkdirSync(pagesDir, { recursive: true });
-
-  for (const file of files) {
-    const srcPath = resolve(deckDir, file);
-    const destPath = resolve(pagesDir, file);
-    let content = readFileSync(srcPath, 'utf-8');
-
-    // 将相对资源路径提升一级（因为文件从 deckDir 移到了 pages/）
-    const attrPattern = /(src|href)\s*=\s*["']([^"']+)["']/g;
-    const urlPattern = /url\((["']?)([^"')]+)\1\)/g;
-
-    const rewrite = (match, p1, p2) => {
-      const val = p2;
-      if (
-        val.startsWith('http://') ||
-        val.startsWith('https://') ||
-        val.startsWith('/') ||
-        val.startsWith('data:') ||
-        val.startsWith('#') ||
-        val.startsWith('../')
-      ) {
-        return match;
-      }
-      return match.replace(val, `../${val}`);
-    };
-
-    content = content.replace(attrPattern, rewrite);
-    content = content.replace(urlPattern, rewrite);
-
-    writeFileSync(destPath, content, 'utf-8');
-    // 不删除原文件，避免破坏其他引用
-  }
+  // 兼容旧版根目录 page_*.html；就地读取，避免复制页面后破坏相对资源路径。
+  const htmlFiles = listPageFiles(deckDir, /^page_\d+\.html$/);
+  if (htmlFiles.length > 0) return { pagesDir: resolve(deckDir), htmlFiles };
+  throw new Error(`未找到页面: ${deckDir} 的 pages/、slides/ 中没有 page_*.html 或 slide_*.html，根目录也没有 page_*.html；可用 --pages-dir 指定页面目录`);
 }
 
 export function ensureDeckPreconditions(deckDir, opts = {}) {
@@ -452,26 +438,7 @@ export function ensureDeckPreconditions(deckDir, opts = {}) {
     ensureReviewArtifact(deckDir, opts);
   }
 
-  let pagesDir;
-  if (opts.pagesDir) {
-    pagesDir = opts.pagesDir;
-  } else {
-    normalizeDeckPages(deckDir);
-    pagesDir = resolve(deckDir, 'pages');
-  }
-
-  if (!existsSync(pagesDir)) {
-    throw new Error(`pages 目录不存在: ${pagesDir}`);
-  }
-
-  const htmlFiles = readdirSync(pagesDir)
-    .filter(f => /^(?:page|slide)_\d+\.html$/.test(f))
-    .sort()
-    .map(f => resolve(pagesDir, f));
-
-  if (htmlFiles.length === 0) {
-    throw new Error(`页面目录中没有 page_*.html 或 slide_*.html 文件: ${pagesDir}`);
-  }
+  const { pagesDir, htmlFiles } = selectDeckPages(deckDir, opts.pagesDir);
 
   if (!opts.batch) {
     ensureDecorativeMarkers(deckDir, htmlFiles);

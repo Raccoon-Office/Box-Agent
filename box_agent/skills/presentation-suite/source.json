@@ -392,7 +392,7 @@
       "source_sha256": "016cbafe55c5430c3723e25f9de34a8d13a1f3072a9cf010362d9beaf6be9dbf"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs": {
-      "sha256": "9b9b77355a12c6134be4950f90553da3e2a6bbba54fb204237756ff2faf7d880",
+      "sha256": "4712a1a2c44ae74451b54c523d9bb7f9c3cf7e559dd1897397f370bf04de152a",
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs",
       "source_sha256": "9b9b77355a12c6134be4950f90553da3e2a6bbba54fb204237756ff2faf7d880"
     },
@@ -402,12 +402,12 @@
       "source_sha256": "59107279a2029d8d5551043d9213e8168c1eb523cc6bf5bad59c4d3a35184845"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/lib/cli_guards.mjs": {
-      "sha256": "5275ab8d4580d475f18af8df2972279b0590b41dd21130924e9e46fc8ce3930e",
+      "sha256": "048a4dae192b56d1f7a38a546344a01d8165cc852196b7b67e55975497fea089",
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/cli_guards.mjs",
       "source_sha256": "5275ab8d4580d475f18af8df2972279b0590b41dd21130924e9e46fc8ce3930e"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/lib/dom_extractor.mjs": {
-      "sha256": "6068aa230ab7fd3cc88df61e340f8354dbe5324241f45d9960045170bbb89408",
+      "sha256": "bafc831f0f1f854e6561bce0db4a67e34bb3596e953e638e5b1f600a0b71ceaf",
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/dom_extractor.mjs",
       "source_sha256": "6068aa230ab7fd3cc88df61e340f8354dbe5324241f45d9960045170bbb89408"
     },
@@ -422,7 +422,7 @@
       "source_sha256": "01276717c4513d994bff6cc554d34246a68ba3d7858c764bc238da65cfb7bed4"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/lib/image_downloader.mjs": {
-      "sha256": "955cd8b7184bd95dc2b292b3d58d52809f69605c057a07bdffb4fb45fa7d1b0a",
+      "sha256": "1f1be06dcc2d8d49e96fcc8f17d4eef931c5efbccb45f4dc3c853c52e1ddaa62",
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/image_downloader.mjs",
       "source_sha256": "955cd8b7184bd95dc2b292b3d58d52809f69605c057a07bdffb4fb45fa7d1b0a"
     },
@@ -432,7 +432,7 @@
       "source_sha256": "1945ca3bedc1355760f11a73d05767f6f261ff3056249c62a81a5cf2c08bddfd"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/lib/pptx_builder.mjs": {
-      "sha256": "d479692d768638934a26430cd5f6db044109443b0fb677f2db655f5f1a12dfbd",
+      "sha256": "483a2e51af62525437b22392dad1b3d9a664921142d131c84fa6261212b51be5",
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/pptx_builder.mjs",
       "source_sha256": "0323483cc487a9327573faa164b5d88a7d93ff15d30bf7dc4b39d63456681d73"
     },
@@ -492,7 +492,7 @@
       "source_sha256": "81fea96386c9bb1307e4c26ed2a878d65637016e1ac20f5f132efe12ce0e7218"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/test/test_export_contract_regression.mjs": {
-      "sha256": "339eb644642fb7e66151b737f9cf79f12cca1615afffb2c04d84ae8aec575e0e",
+      "sha256": "81bd2b1b9a4e037bd19b193a9315f2f873010b325ac831173a7decf5b50985a2",
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_export_contract_regression.mjs",
       "source_sha256": "339eb644642fb7e66151b737f9cf79f12cca1615afffb2c04d84ae8aec575e0e"
     },
@@ -621,7 +621,8 @@
     "design-mode-delivery-wording",
     "owned-renderer-lifecycle",
     "original-uploaded-font-family",
-    "intermediate-render-artifacts"
+    "intermediate-render-artifacts",
+    "source-relative-pptx-page-directories"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "e187295633eb4cb201e6a2a5a206a419eb79990a",

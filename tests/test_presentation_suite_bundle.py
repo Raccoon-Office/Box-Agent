@@ -248,3 +248,57 @@ def test_static_runtime_upgrade_requires_matching_license_review():
     assert overlay(relative, data) == data
     with pytest.raises(ValueError, match="ECharts runtime version needs review"):
         overlay(relative, data.replace(b'5.5.0', b'5.6.0'))
+
+
+def test_completed_export_directory_refresh_is_idempotent(tmp_path):
+    namespace = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
+    source = json.loads((SUITE / "source.json").read_text())
+    paths = ("skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs",
+             "skills/sn-ppt-standard/references/box-agent-tool-contract.md")
+    source["files"] = {relative: source["files"][relative] for relative in paths}
+    bundle = tmp_path / "bundle"
+    for relative in paths:
+        target = bundle / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((SUITE / relative).read_bytes())
+    marker = bundle / "source.json"
+    marker.write_text(json.dumps(source))
+    before = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+    first = namespace["refresh_host_overlays"](bundle)
+    second = namespace["refresh_host_overlays"](bundle)
+    after = {p.relative_to(bundle): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+    assert first == second == source
+    assert before == after
+
+
+@pytest.mark.parametrize("relative", (
+    "html_to_pptx.mjs", "lib/cli_guards.mjs", "lib/dom_extractor.mjs",
+    "lib/image_downloader.mjs", "lib/pptx_builder.mjs",
+    "test/test_export_contract_regression.mjs",
+))
+def test_export_directory_overlay_requires_review_on_upstream_drift(relative):
+    namespace = runpy.run_path(str(REPO / "scripts/presentation_suite_overlays/export_page_directories.py"))
+    path = "skills/sn-ppt-standard/scripts/export_pptx/" + relative
+    with pytest.raises(ValueError, match="export page directory overlay needs review"):
+        namespace["apply"](path, b"changed upstream source\n")
+
+
+def test_export_directory_refresh_does_not_bless_unrecorded_local_edits(tmp_path):
+    namespace = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
+    relative = "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs"
+    original = b"reviewed input\n"
+    bundle = tmp_path / "bundle"
+    target = bundle / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(original + b"unrecorded local edit\n")
+    record = {
+        "name": namespace["BUNDLE_NAME"], "revision": namespace["PINNED_REVISION"],
+        "overlays": namespace["OVERLAYS"][:-1],
+        "files": {relative: {"sha256": hashlib.sha256(original).hexdigest()}},
+    }
+    marker = bundle / "source.json"
+    marker.write_text(json.dumps(record))
+    before = marker.read_bytes(), target.read_bytes()
+    with pytest.raises(ValueError, match="differs from its provenance"):
+        namespace["refresh_host_overlays"](bundle)
+    assert (marker.read_bytes(), target.read_bytes()) == before
