@@ -169,17 +169,21 @@ If outline/research validation fails, it returns degraded delivery with unverifi
 content clearly reported; do not repeat research or validator debugging indefinitely. This is the delivery
 floor, not a completed visual review. Keep it until the normal deck is rendered.
 If `can_retry: true`, send the same brief path and `correction_file` to the designer
-once with budget {"max_steps": 16, "max_tool_calls": 24}. Tell this fresh role to
-read correction_file, which includes the original decision and legal layout enums.
-If requires_full_read is false, that file is sufficient; do not reread all packets.
-Request only the named fields as a JSON patch; the program preserves every
-other field. The correction must not reread the full catalog or recreate the deck.
-Run accept again. On `status: degraded`, stop design/scaffold retries: do not
+once with budget {"max_steps": 16, "max_tool_calls": 24}. This is a fresh role;
+read `correction_file` and follow its `requires_full_read` value:
+
+- `true`: read `brief_file` and its required packets using the design role's
+  reading procedure, then return a complete decision object. The previous
+  response is not a usable decision to patch; do not replace these reads with
+  main-agent choices copied into the task.
+- `false`: the correction file is sufficient. Return only its named fields as a
+  JSON patch; the program preserves the rest. Do not reread all packets or the
+  full catalog, or recreate the deck.
+
+Run accept again. On `status: degraded`, stop PPT authoring immediately: do not
 call `inspect_deck_contract`, `apply_deck_patch`, `finalize_controlled_deck`, edit
-`deck.json`, delete slides, or start another design call. Use `primary_artifact` as
-the finished HTML draft; if PPTX was requested, export that existing HTML through
-the export command below without rerunning finalization. Deliver the available
-files and explain the limitations from `qa/design_delivery.json`. Missing,
+`deck.json`, delete slides, or start another design call. Deliver `primary_artifact` and explain the
+limitations from `qa/design_delivery.json`; skip design/scaffold retries. Missing,
 malformed or still-invalid designer output must not leave the user without a deck.
 Recovery uses plain-neutral with registered cover/cards/closing layouts and the
 normal deck schema, renderer, playback, layout editor, save and export controls.
@@ -189,6 +193,11 @@ never invent content or facts to fill them. Do not start a third design call or
 alter input just to reset the attempt count. If later compilation fails, deliver
 the existing fallback HTML with its report rather than leaving only intermediate
 JSON files. Images or unavailable vision must never prevent that delivery.
+
+Stopping authoring still permits exporting the existing `primary_artifact`.
+If PPTX was requested, use the existing-HTML export command below without
+rerunning finalization or changing the deck. Deliver the available files and
+explain the limitations from `qa/design_delivery.json`.
 
 ### 4. Scaffold the validated plan once
 
