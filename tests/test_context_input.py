@@ -8,6 +8,7 @@ import pytest
 
 from box_agent.context_input import DefaultContextEngine
 from box_agent.schema import Message
+from box_agent.session_projection import SessionProjection
 from box_agent.skill_context import SkillReferenceContext
 from box_agent.skill_runtime import SkillRuntime
 from box_agent.tools.engine.preparation import prepare_tools
@@ -63,6 +64,9 @@ def test_context_uses_the_exact_prepared_tool_snapshot_without_filtering(runtime
 
 def test_custom_session_store_receives_bounded_inline_reference_metadata(runtime):
     class Store:
+        def replay(self):
+            return SessionProjection([], None, None, [], [])
+
         def append(self, *args, **kwargs):
             pass
 
@@ -196,6 +200,9 @@ async def test_custom_session_store_persists_inline_snapshot_before_provider(run
         def __init__(self):
             self.records = []
             self.flushed = False
+
+        def replay(self):
+            return SessionProjection([], None, None, [], [])
 
         def append(self, kind, payload, **kwargs):
             self.records.append((kind, payload))

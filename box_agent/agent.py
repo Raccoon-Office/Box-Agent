@@ -46,7 +46,7 @@ from .logger import AgentLogger
 from .kernel.ports import KernelServices
 from .runtime import run_agent_loop
 from .schema import Message
-from .session_log import SessionLog
+from .session_log import SessionLog, SessionLogReplayError
 from .tools.base import Tool, ToolResult, build_tool_name_index
 from .tools.local_tool_exposure import LocalToolExposurePolicy
 from .tools.mcp_tool_catalog import MCPToolCatalog, get_mcp_tool_catalog
@@ -611,9 +611,16 @@ class Agent:
         self._pending_skill_restore: list[dict[str, Any]] = []
         self._skill_persistence_pending = False
         self._persisted_active_skill_records: list[dict[str, Any]] = []
+        self._session_surface_replay_failed = False
         self.session_id = session_id.strip()
-        if self.session_log is not None:
-            projection = self.session_log.replay()
+        # ``replay`` is an optional native SessionStorePort capability. A
+        # third-party Store that only implements the minimal contract
+        # (append / append_unlogged_messages / replace_surface / flush) has
+        # nothing to restore here; the caller supplies the live surface
+        # directly. Feature-detect so such a Store does not crash construction.
+        _replay = getattr(self.session_log, "replay", None)
+        if self.session_log is not None and callable(_replay):
+            projection = _replay()
             self.messages.extend(projection.messages)
             self.restore_goal(projection.goal)
             plan_tool = self.tools.get("plan_write")
@@ -808,8 +815,24 @@ class Agent:
                 "estimated_tokens": estimated, "token_budget": _ACTIVE_SKILL_TOKEN_BUDGET,
                 "budget_exceeded": estimated > _ACTIVE_SKILL_TOKEN_BUDGET}
 
+    def _restore_session_surface_after_replay_failure(self) -> None:
+        """Restore committed history before accepting input or starting a turn."""
+        if self._session_surface_replay_failed:
+            try:
+                replay = getattr(self.session_log, "replay", None)
+                projection = replay() if callable(replay) else None
+                if projection is None:
+                    raise RuntimeError("session log is not configured")
+                self.messages[:] = [self.messages[0], *projection.messages]
+                self._session_surface_replay_failed = False
+            except Exception as exc:
+                raise SessionLogReplayError(
+                    "the previous compact commit could not be replayed; refusing to continue"
+                ) from exc
+
     def add_user_message(self, content: str) -> None:
         """Add a user message and materialize selected Skills beside it."""
+        self._restore_session_surface_after_replay_failure()
         if self.goal is not None and self.goal.status == "active":
             content = self._apply_goal_context(content)
         # Explicit slash/host selection is resolved at the message boundary.
@@ -1116,6 +1139,8 @@ class Agent:
         if callable(set_child_negotiator):
             set_child_negotiator(effective_options.permission_negotiator)
 
+        self._restore_session_surface_after_replay_failure()
+
         session_turn: int | None = None
         session_step: int | None = None
         session_turn_open = False
@@ -1297,6 +1322,13 @@ class Agent:
                                 discarded,
                             )
                 yield event
+        except SessionLogReplayError:
+            # The compact replacement is durable, but this Agent's in-memory
+            # surface is no longer trustworthy.  Do not let the interruption
+            # finalizer append the stale surface as a completed turn.
+            session_turn_open = False
+            self._session_surface_replay_failed = True
+            raise
         finally:
             try:
                 close = getattr(events, "aclose", None)

@@ -70,6 +70,10 @@ class SessionLogWorkspaceMismatch(ValueError):
     """The requested cwd does not own this immutable Session."""
 
 
+class SessionLogReplayError(RuntimeError):
+    """A committed surface could not be reconstructed for live execution."""
+
+
 @dataclass(frozen=True, slots=True)
 class SessionOpenResult:
     """Result of opening or creating one logical Session."""

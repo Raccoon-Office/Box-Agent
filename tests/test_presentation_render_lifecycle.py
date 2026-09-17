@@ -100,8 +100,10 @@ def test_supervised_worker_returns_output_and_releases_its_slot(runtime, tmp_pat
     monkeypatch.setenv("RENDER_GLOBAL_LIMIT", "1")
     monkeypatch.setenv("RENDER_LOCK_DIR", str(tmp_path / "slots"))
     renderer = _fake_renderer(tmp_path, "print('delivered')")
-    first = runtime.run_renderer(renderer, [], timeout=5)
-    second = runtime.run_renderer(renderer, [], timeout=5)
+    # This checks output and slot release, not startup latency. Reserve enough
+    # budget for worker admission on a busy CI host; timeouts are tested below.
+    first = runtime.run_renderer(renderer, [], timeout=20)
+    second = runtime.run_renderer(renderer, [], timeout=20)
     assert first.returncode == second.returncode == 0, (first, second)
     assert first.stdout == second.stdout == "delivered\n"
 

@@ -76,6 +76,7 @@ from .tool_messages import (
     _sanitize_dangling_tool_calls,
 )
 from ..logger import AgentLogger
+from ..session_log import SessionLogReplayError
 from ..llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from ..loop_guards import (
     EMPTY_ARGS_LIMIT,
@@ -1038,10 +1039,11 @@ async def _run_agent_loop_impl(
         from .context_types import CompactionInput
 
         def before_summary(estimated: int) -> None:
+            # The canonical live surface is already committed at the step
+            # boundary (before prepare_request), and nothing durable is added
+            # between that commit and compaction, so there is nothing new to
+            # persist here — only record the compaction start marker.
             if session_log is not None and session_turn is not None:
-                session_log.append_unlogged_messages(
-                    effective_messages[1:], turn=session_turn, step=step + 1,
-                )
                 session_log.append("compaction/start", {
                     "turn": session_turn, "step": step + 1,
                     "estimatedBefore": estimated, "tokenLimit": history_token_limit,
@@ -1119,8 +1121,25 @@ async def _run_agent_loop_impl(
                     },
                 )
                 session_log.flush()
-            messages.clear()
-            messages.extend(new_msgs)
+                replay = getattr(session_log, "replay", None)
+                if callable(replay):
+                    try:
+                        projection = replay()
+                        restored_messages = [messages[0], *projection.messages]
+                    except Exception as exc:
+                        raise SessionLogReplayError(
+                            "compaction committed but the live surface could not be replayed"
+                        ) from exc
+                    messages[:] = restored_messages
+                else:
+                    # Third-party SessionStorePort without native replay: the
+                    # durable surface was already committed via replace_surface +
+                    # flush above. Keep the validated post-compaction in-memory
+                    # surface (docs/design/skill-engine.md §6) instead of forcing
+                    # the Store to implement replay().
+                    messages[:] = new_msgs
+            else:
+                messages[:] = new_msgs
             if resource_ledger is not None:
                 resource_ledger.rotate_epoch()
                 _log.info(
@@ -1305,6 +1324,7 @@ async def _run_agent_loop_impl(
         if cancelled():
             yield await cancellation_done_event()
             return
+
         context_compacted = False
 
         # ── Near-limit wrap-up nudge (one-shot) ─────────────
@@ -1350,6 +1370,17 @@ async def _run_agent_loop_impl(
         if cancelled():
             yield await cancellation_done_event()
             return
+
+        # Commit the canonical live surface after step hooks and runtime
+        # injections, including wrap-up nudges. Persist before either request
+        # projection or compaction, even for callers without an Agent wrapper.
+        if session_log is not None and session_turn is not None:
+            session_log.append_unlogged_messages(
+                session_log_messages(messages),
+                turn=session_turn,
+                step=step + 1,
+            )
+            session_log.flush()
 
         # ── LLM call (streaming) ──────────────────────────────
         request_overlay_tokens = pending_transient_followup_tokens if transient_message is not None else 0
@@ -1482,11 +1513,6 @@ async def _run_agent_loop_impl(
             request_max_output = getattr(llm, "max_output_tokens", None)
             if not isinstance(request_max_output, int):
                 request_max_output = None
-            session_log.append_unlogged_messages(
-                session_log_messages(messages),
-                turn=session_turn,
-                step=step + 1,
-            )
             session_log.append(
                 "request/header",
                 {
