@@ -4354,6 +4354,9 @@ async def test_acp_general_mode_keeps_cwd_and_injects_directory_policy(tmp_path)
     assert "## General Task Directory Organization" in state.agent.system_prompt
     assert "保持当前会话工作目录（cwd）不变" in state.agent.system_prompt
     assert "不要使用固定文件数量阈值" in state.agent.system_prompt
+    assert "不得因“重复、旧版、目录整洁”移动、归档或删除归属不明的文件" in state.agent.system_prompt
+    assert "其他会话即使需求完全相同，其文件也不能自动认作自己的旧版本" in state.agent.system_prompt
+    assert "修改、补充、继续执行，沿用当前会话已明确操作的文件" in state.agent.system_prompt
     # Exercise the complete prompt: an empty cwd remains the default even
     # when a presentation will produce several related files.
     assert state.agent.system_prompt.count("只有较多无关文件时才建语义化任务目录") == 1
