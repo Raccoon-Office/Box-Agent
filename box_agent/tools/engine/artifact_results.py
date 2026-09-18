@@ -305,8 +305,7 @@ def _detect_regex_artifacts(
 
     Returns the regex-detected artifacts plus the set of absolute paths that
     should be excluded from the later diff layer (those already surfaced here,
-    or carried on an artifact/intermediate-asset ``raw_output``). Intermediate
-    assets are also excluded from regex publication while remaining on disk.
+    or carried on an artifact/intermediate-asset ``raw_output``).
     """
     regex_artifacts = _detect_artifacts(
         tool_call_id,
@@ -315,15 +314,58 @@ def _detect_regex_artifacts(
         workspace_dir,
     )
     already = {a.abs_path for a in regex_artifacts}
-    if isinstance(raw_output, dict) and raw_output.get("type") in ("artifact", "intermediate_asset"):
-        raw_paths: set[str] = set()
-        for key in ("abs_path", "absolute_path"):
-            raw_path = raw_output.get(key)
-            if isinstance(raw_path, str) and raw_path.strip():
-                raw_paths.add(str(Path(raw_path).expanduser().resolve()))
-        already.update(raw_paths)
-        if raw_output.get("type") == "intermediate_asset":
-            regex_artifacts = [a for a in regex_artifacts if a.abs_path not in raw_paths]
+    if isinstance(raw_output, dict) and raw_output.get("type") in (
+        "artifact",
+        "intermediate_asset",
+    ):
+        raw_type = raw_output["type"]
+        workspace_root = Path(workspace_dir).resolve()
+        raw_path: str | None = None
+        for key in ("abs_path", "absolute_path", "path"):
+            value = raw_output.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                candidate = Path(value).expanduser()
+                if key != "path" and not candidate.is_absolute():
+                    continue
+                if not candidate.is_absolute():
+                    candidate = (workspace_root / candidate).resolve()
+                else:
+                    candidate = candidate.resolve()
+                candidate.relative_to(workspace_root)
+                if candidate.is_file():
+                    raw_path = str(candidate)
+                    break
+            except (OSError, RuntimeError, ValueError):
+                continue
+        if raw_path:
+            already.add(raw_path)
+            if raw_type == "intermediate_asset" or is_intermediate(
+                Path(raw_path), _publication_fingerprints(workspace_dir), workspace_dir
+            ):
+                regex_artifacts = [
+                    artifact for artifact in regex_artifacts if artifact.abs_path != raw_path
+                ]
+                return regex_artifacts, already
+        raw_description = raw_output.get("description") or raw_output.get("alt_text")
+        description = raw_description if isinstance(raw_description, str) else None
+        if raw_path:
+            try:
+                normalized_artifact = _make_artifact(
+                    tool_call_id,
+                    Path(raw_path),
+                    workspace_root,
+                    description=description,
+                )
+            except (OSError, RuntimeError, ValueError):
+                return regex_artifacts, already
+            regex_artifacts = [
+                artifact
+                for artifact in regex_artifacts
+                if artifact.abs_path != normalized_artifact.abs_path
+            ]
+            regex_artifacts.append(normalized_artifact)
     return regex_artifacts, already
 
 

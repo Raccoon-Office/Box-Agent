@@ -8,6 +8,7 @@ without importing ``box_agent.core``.
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import re
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from .roadmap_artifacts import roadmap_metadata_for_html_artifact
 __all__ = [
     "artifact_scan_root",
     "avoid_collision",
+    "is_intermediate_artifact",
     "make_artifact",
     "safe_output_name",
 ]
@@ -124,6 +126,7 @@ _EXT_MIME_OVERRIDES = {
     ".key": "application/vnd.apple.keynote",
 }
 _SAFE_NAME_RE = re.compile(r"[^a-z0-9._-]+")
+_ARTIFACT_METADATA_MAX_BYTES = 4096
 
 
 def _classify_kind(filename: str, mime: str | None) -> str:
@@ -169,10 +172,33 @@ def avoid_collision(directory: Path, filename: str) -> Path:
         index += 1
 
 
+def _artifact_metadata(path: Path) -> tuple[bool, str]:
+    """Read producer-owned display metadata for one artifact path."""
+    metadata_path = path.with_name(f".{path.name}.artifact.json")
+    try:
+        if metadata_path.stat().st_size > _ARTIFACT_METADATA_MAX_BYTES:
+            return False, ""
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, ""
+    if not isinstance(value, dict):
+        return False, ""
+    is_intermediate = value.get("type") == "intermediate_asset"
+    description = value.get("description")
+    return is_intermediate, description.strip() if isinstance(description, str) else ""
+
+
+def is_intermediate_artifact(path: Path) -> bool:
+    """Whether a producer marked this file as internal to its workflow."""
+    return _artifact_metadata(path)[0]
+
+
 def make_artifact(
     tool_call_id: str,
     abs_file: Path,
     workspace_root: Path,
+    *,
+    description: str | None = None,
 ) -> ArtifactEvent:
     """Build an :class:`ArtifactEvent` from a real on-disk file."""
     abs_resolved = abs_file.resolve()
@@ -202,6 +228,10 @@ def make_artifact(
         pass
 
     layout_id, edit_mode = roadmap_metadata_for_html_artifact(abs_resolved, size)
+    _, metadata_description = _artifact_metadata(abs_resolved)
+    resolved_description = (
+        description.strip() if isinstance(description, str) else metadata_description
+    )
 
     return ArtifactEvent(
         tool_call_id=tool_call_id,
@@ -216,4 +246,5 @@ def make_artifact(
         produced_at=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         layout_id=layout_id,
         edit_mode=edit_mode,
+        description=resolved_description,
     )

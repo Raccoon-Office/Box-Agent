@@ -63,6 +63,7 @@ from pydantic import field_validator
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
+from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
@@ -106,6 +107,7 @@ from box_agent.tools.bash_tool import (
     BashTool,
 )
 from box_agent.tools.file_tools import WriteTool
+from box_agent.tools.publish_artifact_tool import PublishArtifactTool, PublishedArtifact
 from box_agent.tools.skill_scratch import (
     SkillScratchDirectory,
     cleanup_skill_scratch_dir,
@@ -286,6 +288,8 @@ def _artifact_envelope(
         "produced_at": art.produced_at,
         "tool_call_id": art.tool_call_id,
     }
+    if art.description:
+        payload["description"] = art.description
     if art.layout_id:
         payload["layout_id"] = art.layout_id
     if art.edit_mode:
@@ -307,6 +311,36 @@ def _artifact_envelope(
         payload["sha256"] = lineage.sha256
         payload["manifest_path"] = lineage.manifest_path
     return payload
+
+
+def _artifact_delivery_envelope(
+    published: list[PublishedArtifact],
+    *,
+    lineages: list[ArtifactLineage | None] | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    turn_id: str | None = None,
+) -> dict[str, Any]:
+    """Serialize the model's explicit delivery selection, including an empty one."""
+    return {
+        "type": "artifact_delivery",
+        "session_id": session_id,
+        "task_id": task_id,
+        "turn_id": turn_id,
+        "artifacts": [
+            {
+                **_artifact_envelope(
+                    item.artifact,
+                    session_id=session_id,
+                    task_id=task_id,
+                    turn_id=turn_id,
+                    lineage=lineages[index] if lineages and index < len(lineages) else None,
+                ),
+                "placement": item.placement,
+            }
+            for index, item in enumerate(published)
+        ],
+    }
 
 
 def _inject_item_text(item: Any) -> str:
@@ -920,10 +954,26 @@ def _tool_result_raw_output(
     session_id: str | None = None,
     task_id: str | None = None,
     turn_id: str | None = None,
+    workspace_dir: str | None = None,
 ) -> Any:
     if isinstance(raw_output, dict):
         payload = dict(raw_output)
         if payload.get("type") == "artifact":
+            for key in ("abs_path", "absolute_path", "path"):
+                value = payload.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                try:
+                    candidate = Path(value).expanduser()
+                    if not candidate.is_absolute():
+                        if workspace_dir is None:
+                            continue
+                        candidate = Path(workspace_dir) / candidate
+                    if is_intermediate_artifact(candidate.resolve()):
+                        payload["type"] = "intermediate_asset"
+                    break
+                except (OSError, RuntimeError, ValueError):
+                    continue
             if session_id:
                 payload.setdefault("session_id", session_id)
                 payload.setdefault("sessionId", session_id)
@@ -3905,6 +3955,9 @@ class BoxACPAgent:
                 turn_id=fallback_turn_id,
             )
         agent = state.agent
+        publication_tool = agent.tools.get("publish_artifact")
+        if isinstance(publication_tool, PublishArtifactTool):
+            publication_tool.clear()
         run_handle = state.run_handle
         state.last_error = None
         state.last_error_code = None
@@ -4623,6 +4676,7 @@ class BoxACPAgent:
                                 session_id=state.upstream_session_id,
                                 task_id=task_context.task_id,
                                 turn_id=task_context.turn_id,
+                                workspace_dir=state.agent.workspace_dir,
                             )
                             await self._send(
                                 session_id,
@@ -4726,6 +4780,26 @@ class BoxACPAgent:
 
                         case DoneEvent(stop_reason=reason, final_content=final_content):
                             log.debug("done", session_id=session_id, stop_reason=reason.value)
+                            if reason == StopReason.END_TURN and isinstance(publication_tool, PublishArtifactTool):
+                                delivery_call_id = f"artifact-delivery-{uuid4().hex[:8]}"
+                                published = publication_tool.finalize(delivery_call_id)
+                                lineages = [
+                                    artifact_observer.observe(item.artifact).lineage
+                                    for item in published
+                                ]
+                                await self._send(
+                                    session_id,
+                                    update_tool_call(
+                                        delivery_call_id,
+                                        raw_output=_artifact_delivery_envelope(
+                                            published,
+                                            lineages=lineages,
+                                            session_id=state.upstream_session_id,
+                                            task_id=task_context.task_id,
+                                            turn_id=task_context.turn_id,
+                                        ),
+                                    ),
+                                )
                             observer.trace(
                                 "turn.output",
                                 data={

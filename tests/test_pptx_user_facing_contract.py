@@ -76,6 +76,7 @@ def test_pptx_keeps_intermediate_images_private_and_overview_optional():
     images = " ".join((PPTX_SKILL_ROOT / "references/image-assets.md").read_text().split())
     assert "`publish_artifact: false`" in text
     assert "`publish_artifact: false`" in images
+    assert "`publish_artifact(path)`" in text
     assert "Do not embed them in progress messages or the final reply" in text
     assert "Never block delivery on this preview" in text
     assert "Do not install dependencies just for this optional preview" in text

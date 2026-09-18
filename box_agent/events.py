@@ -205,6 +205,7 @@ class ArtifactEvent:
         layout_id: Optional controlled artifact layout identifier.
         edit_mode: ``"editable"`` for the current trusted runtime or
             ``"read_only"`` for a recognizable Roadmap with another runtime.
+        description: Optional producer-supplied explanation shown by hosts.
     """
 
     tool_call_id: str
@@ -219,6 +220,7 @@ class ArtifactEvent:
     produced_at: str = ""
     layout_id: str = ""
     edit_mode: str = ""
+    description: str = ""
 
 
 # ── Summarization ───────────────────────────────────────────────

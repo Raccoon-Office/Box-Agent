@@ -57,6 +57,7 @@ from box_agent.tools.memory_tool import (
 )
 from box_agent.tools.obsidian_tool import create_obsidian_tools
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
+from box_agent.tools.publish_artifact_tool import PublishArtifactTool
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.request_user_input_tool import RequestUserInputTool
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
@@ -185,8 +186,12 @@ def build_file_delivery_prompt() -> str:
         "`search_files`，以 `File Access Context` 中的 `Current workspace` 为 `path`、"
         "原文件名为 `pattern`、`target=\"files\"` 精确定位。将搜索 `path` 与返回的相对路径"
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。\n"
-        "- **桌面交付**：完成后说明文件名和工作目录内相对位置即可。"
-        "宿主会根据结构化 ArtifactEvent 渲染可验证的文件入口。\n"
+        "- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，"
+        "最终回复前只对用户要直接使用的独立交付结果调用 `publish_artifact`；可登记多个。"
+        "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
+        "也不调用 `publish_artifact`；保留文件并说明位置。若用户将其中某个文件作为另一项"
+        "独立交付结果，则也应登记。"
+        "完成后说明文件名和工作目录内相对位置即可；宿主以结构化交付清单渲染入口。\n"
         "- **多文件交付**：用户需要单一下载包时才将多文件打包为 ZIP，"
         "例如 `zip -r bundle.zip 文件1 文件2`。"
         + preview_guidance
@@ -649,6 +654,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
     relative_root = workspace_dir
+    tools.append(PublishArtifactTool(workspace_dir))
 
     # Relative tool paths always use the stable session cwd.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
