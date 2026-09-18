@@ -59,7 +59,12 @@ send `X-Org-Code` when `auth.json` contains a safe, non-personal ASCII
 `office_identity` team code. The header is omitted for missing or personal team
 identity and for custom API keys, third-party hosts, personal servers, and IP
 addresses. Standard SDK headers and provider authentication
-remain in place; the existing hosted-login authentication rules are unchanged.
+remain in place. For a hosted-login placeholder, Box-Agent verifies the hosted
+login before sending the model request. Missing usable login information fails
+locally with a login prompt rather than sending an unauthenticated request;
+a refresh response of 401 instead asks the user to log in again. Neither case
+is retried automatically. A user-configured API key and non-hosted endpoint do
+not use this hosted-login preflight.
 
 Hosts may supply `_meta.client_info` during ACP initialize, session creation,
 or a lightweight LLM prompt. Supported fields are `name`, `platform`, `version`, `os_version`
