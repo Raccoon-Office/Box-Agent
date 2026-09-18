@@ -274,3 +274,16 @@ Already published files need no extra call: presentation builders and
 `generate_image(publish_artifact=True)` retain their publication behavior.
 There is no end-of-turn manifest overriding these outputs. Artifact envelopes
 may also include an optional producer-supplied `description`.
+
+### Delivery placement
+
+Every normalized artifact event carries `placement`: `primary` when the producer
+explicitly registered the file with a `type: artifact` sidecar (including
+`publish_artifact` and final builder outputs), otherwise `supporting`. Merely
+writing or discovering a file does not declare it a final deliverable. CLI and
+ACP share this classification; ACP forwards it unchanged.
+
+Hosts collect all primary paths for delivery, keep the latest revision per path,
+and choose a default preview separately. Final-answer mentions and filenames
+must not override an explicit placement. No turn-end delivery manifest is
+required, and this change does not migrate historical tasks.

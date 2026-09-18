@@ -172,20 +172,24 @@ def avoid_collision(directory: Path, filename: str) -> Path:
         index += 1
 
 
-def _artifact_metadata(path: Path) -> tuple[bool, str]:
+def _artifact_metadata(path: Path) -> tuple[bool, str, str]:
     """Read producer-owned display metadata for one artifact path."""
     metadata_path = path.with_name(f".{path.name}.artifact.json")
     try:
         if metadata_path.stat().st_size > _ARTIFACT_METADATA_MAX_BYTES:
-            return False, ""
+            return False, "", "supporting"
         value = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False, ""
+        return False, "", "supporting"
     if not isinstance(value, dict):
-        return False, ""
+        return False, "", "supporting"
     is_intermediate = value.get("type") == "intermediate_asset"
     description = value.get("description")
-    return is_intermediate, description.strip() if isinstance(description, str) else ""
+    return (
+        is_intermediate,
+        description.strip() if isinstance(description, str) else "",
+        "primary" if value.get("type") == "artifact" else "supporting",
+    )
 
 
 def is_intermediate_artifact(path: Path) -> bool:
@@ -228,7 +232,7 @@ def make_artifact(
         pass
 
     layout_id, edit_mode = roadmap_metadata_for_html_artifact(abs_resolved, size)
-    _, metadata_description = _artifact_metadata(abs_resolved)
+    _, metadata_description, placement = _artifact_metadata(abs_resolved)
     resolved_description = (
         description.strip() if isinstance(description, str) else metadata_description
     )
@@ -247,4 +251,5 @@ def make_artifact(
         layout_id=layout_id,
         edit_mode=edit_mode,
         description=resolved_description,
+        placement=placement,
     )

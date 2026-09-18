@@ -206,6 +206,7 @@ class ArtifactEvent:
         edit_mode: ``"editable"`` for the current trusted runtime or
             ``"read_only"`` for a recognizable Roadmap with another runtime.
         description: Optional producer-supplied explanation shown by hosts.
+        placement: ``primary`` for explicitly published deliverables, otherwise ``supporting``.
     """
 
     tool_call_id: str
@@ -221,6 +222,7 @@ class ArtifactEvent:
     layout_id: str = ""
     edit_mode: str = ""
     description: str = ""
+    placement: str = "supporting"
 
 
 # ── Summarization ───────────────────────────────────────────────

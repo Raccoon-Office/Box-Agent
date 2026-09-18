@@ -277,6 +277,7 @@ def _artifact_envelope(
     payload: dict[str, Any] = {
         "type": "artifact",
         "kind": art.kind,
+        "placement": art.placement,
         "filename": art.filename,
         "rel_path": art.rel_path,
         "abs_path": art.abs_path,

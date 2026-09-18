@@ -22,7 +22,8 @@ class PublishArtifactTool(Tool):
     def description(self) -> str:
         return (
             "After creating and checking a main user-facing file, declare it as "
-            "a user-facing artifact. Already published builder outputs and images "
+            "a primary user-facing artifact. Call once for each requested deliverable. "
+            "Already published builder outputs and images "
             "do not need this call. Use it to promote selected intermediate files."
         )
 
@@ -61,5 +62,5 @@ class PublishArtifactTool(Tool):
         return ToolResult(
             success=True,
             content=f"Published {file.relative_to(self.workspace_dir).as_posix()}.",
-            raw_output={"type": "artifact", "abs_path": str(file)},
+            raw_output={"type": "artifact", "abs_path": str(file), "placement": "primary"},
         )
