@@ -385,3 +385,48 @@ async def test_learn_then_next_task_recalls_without_user_approval_step(manager, 
         messages=[Message(role="system", content="system"), Message(role="user", content="Make another artifact")],
         memory_manager=loaded, workspace_dir=str(tmp_path))]
     assert "Use fixed mode" in requests[0]
+
+
+def _synthetic_authentication_samples():
+    # Generate inert credential-shaped data at test time; never commit literal
+    # credential strings or use real account material in negative tests.
+    import base64
+    import json
+    from uuid import uuid4
+    nonce = uuid4().hex
+    def encoded(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+    return [
+        "Authorization: Basic " + base64.b64encode(f"synthetic:{nonce}".encode()).decode(),
+        f'Authorization: Digest username="synthetic", response="{nonce}"',
+        f"Cookie: session={nonce}",
+        json.dumps({"token": nonce}),
+        "https://" + f"synthetic:{nonce}" + "@example.invalid/api",
+        "-----BEGIN RSA PRIVATE KEY-----\nSYNTHETIC\n-----END RSA PRIVATE KEY-----",
+        ".".join([encoded({"alg": "none"}), encoded({"sub": "synthetic-test"}), nonce]),
+    ]
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", _synthetic_authentication_samples(),
+                         ids=["basic", "digest", "cookie", "token", "url-userinfo", "private-key", "jwt"])
+async def test_authentication_material_cannot_enter_evidence_or_durable_memory(manager, value):
+    from box_agent.correction import classify_forbidden_content
+    assert classify_forbidden_content(value) == "secret"
+    receipt = observed_repair(manager)
+    before = manager.list_corrections(include_inactive=True)
+    result = await MemoryWriteCorrectionTool(manager).execute(
+        lesson="Supply " + value + " for this request.", error_fingerprint="unsupported layout",
+        subject_name="export_probe", subject_version="v1", verification_id=receipt.verification_id)
+    assert not result.success
+    assert result.error == "这条不算可复用纠错（偏好/敏感/一次性），没记下。"
+    assert manager.list_corrections(include_inactive=True) == before
+    subject = CorrectionSubject("tool", "auth_probe")
+    for number in range(2):
+        assert manager.correction_curator.observe_result(
+            scope="auth", subject=subject, call_id=f"auth-{number}", arguments={"mode": "broken"},
+            success=False, error=value) is None
+    assert manager.correction_curator.observe_result(
+        scope="auth", subject=subject, call_id="auth-success", arguments={"mode": "fixed"}, success=True) is None
+    assert not any(value in path.read_text() for path in manager.memory_dir.rglob("*.md"))

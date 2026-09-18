@@ -48,6 +48,12 @@ _SECRET_RE = re.compile(
     # Modern provider token forms: allow hyphens after sk- (sk-proj-/sk-ant-),
     # GitHub fine-grained PATs, and AWS AKIA-style access key ids.
     # No trailing \\b on these so a longer glued synthetic/real token still matches.
+    # Reject structured authentication material before fingerprint normalization.
+    r"\b(?:authorization|proxy-authorization|cookie|set-cookie)[\"']?\s*[:=]|"
+    r"\b(?:token|credential)[\"']?\s*[:=]\s*[\"']?[^\s,}]{8,}|"
+    r"\b[a-z][a-z0-9+.-]*://[^/\s@]+:[^/\s@]+@|"
+    r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----|"
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{10,}|"
     r"\bsk-[a-z0-9-]{10,}|"
     r"\bgithub_pat_[a-z0-9_]{20,}|"
     r"\bAKIA[0-9A-Z]{16}|"
