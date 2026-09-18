@@ -1524,14 +1524,7 @@ async def test_intermediate_image_is_skipped_until_primary_publication(
     else:
         assert str(target) not in artifact_paths
 
-
-def test_image_tool_explains_that_final_delivery_needs_publish_artifact(tmp_path: Path) -> None:
-    tool = GenerateImageTool(workspace_dir=str(tmp_path))
-    description = tool.parameters["properties"]["publish_artifact"]["description"]
-    assert "publish_artifact(path)" in description
-
-    # A later shell call renames the image without moving its sidecar (the
-    # Dunhuang regression). Discovery is reconstructed from disk, not a cache.
+    # A later shell call renames the image without moving its sidecar.
     before_rename = _snapshot_workspace_signatures(str(tmp_path))
     renamed = target.with_name("slide-02-image.png")
     target.rename(renamed)
@@ -1540,6 +1533,12 @@ def test_image_tool_explains_that_final_delivery_needs_publish_artifact(tmp_path
         before_rename, _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
     )
     assert (str(renamed) in {event.abs_path for event in events}) == publish_artifact
+
+
+def test_image_tool_preserves_standalone_publication_contract(tmp_path: Path) -> None:
+    tool = GenerateImageTool(workspace_dir=str(tmp_path))
+    description = tool.parameters["properties"]["publish_artifact"]["description"]
+    assert "standalone user deliverable" in description
 
 
 @pytest.mark.asyncio

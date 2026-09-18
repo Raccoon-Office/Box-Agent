@@ -1,19 +1,11 @@
-"""Model-declared user-facing files for one agent turn."""
+"""Explicit publication using the shared file-owned artifact contract."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
-from box_agent.artifacts import make_artifact
-from box_agent.events import ArtifactEvent
+from box_agent.artifact_publication import metadata_path, read_metadata, write_metadata
 from box_agent.tools.base import Tool, ToolResult
-
-
-@dataclass(frozen=True)
-class PublishedArtifact:
-    artifact: ArtifactEvent
-    placement: str
 
 
 class PublishArtifactTool(Tool):
@@ -21,7 +13,6 @@ class PublishArtifactTool(Tool):
 
     def __init__(self, workspace_dir: str | Path):
         self.workspace_dir = Path(workspace_dir).resolve()
-        self._declared: list[Path] = []
 
     @property
     def name(self) -> str:
@@ -31,9 +22,8 @@ class PublishArtifactTool(Tool):
     def description(self) -> str:
         return (
             "After creating and checking a main user-facing file, declare it as "
-            "a primary artifact. Call once for each main file the user intends "
-            "to receive; multiple primary artifacts are allowed. Other files "
-            "remain process files. Call before the final answer."
+            "a user-facing artifact. Already published builder outputs and images "
+            "do not need this call. Use it to promote selected intermediate files."
         )
 
     @property
@@ -64,25 +54,12 @@ class PublishArtifactTool(Tool):
         file = self._file(path)
         if file is None:
             return ToolResult(success=False, error="File is missing or outside the workspace")
-        if file not in self._declared:
-            self._declared.append(file)
+        try:
+            write_metadata(file, {**read_metadata(metadata_path(file)), "type": "artifact"})
+        except OSError as exc:
+            return ToolResult(success=False, error=f"Could not publish artifact: {exc}")
         return ToolResult(
             success=True,
-            content=f"Declared {file.relative_to(self.workspace_dir).as_posix()} as primary.",
-            raw_output={"type": "artifact_publication", "placement": "primary"},
+            content=f"Published {file.relative_to(self.workspace_dir).as_posix()}.",
+            raw_output={"type": "artifact", "abs_path": str(file)},
         )
-
-    def finalize(self, tool_call_id: str = "publish_artifact") -> list[PublishedArtifact]:
-        return [
-            PublishedArtifact(
-                artifact=make_artifact(
-                    tool_call_id, file, self.workspace_dir,
-                ),
-                placement="primary",
-            )
-            for declared in self._declared
-            if (file := self._file(str(declared))) is not None
-        ]
-
-    def clear(self) -> None:
-        self._declared.clear()

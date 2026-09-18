@@ -13,12 +13,9 @@ subdirectory when cwd contains many unrelated files. Multiple related outputs
 alone do not require a new directory. Honor an explicit user destination.
 This is file organization, not workspace state. Artifact discovery scans the
 original cwd and also consumes explicit paths returned by tools. Box-Agent sends one
-`tool_call_update` per observed file, with `rawOutput.type == "artifact"` as the
-discriminator. The model calls `publish_artifact` for each validated main file it
-wants to deliver. A successful turn ends with a separate `artifact_delivery`
-update that lists the selected files as `primary`. Markdown links inside
-`agent_message_chunk` text are decoration only; new hosts should use the delivery
-manifest to select user-facing files.
+`tool_call_update` per artifact, with `rawOutput.type == "artifact"` as the
+discriminator. Markdown links inside `agent_message_chunk` text are decoration
+only—do not parse them as the source of truth for files.
 
 Changed-file discovery requires complete snapshots both before and after tool
 execution. If either scan exceeds its file/time limit or encounters a filesystem
@@ -28,15 +25,13 @@ available even when diff-based discovery is skipped.
 
 ### Intermediate files produced by scripts
 
-Producers can mark internal files that should be omitted from the artifact list. Before
-writing `slide-01.png`, write the adjacent hidden sidecar
+Producers can keep an output available on disk without automatically publishing
+it to the host. Before writing `slide-01.png`, write the adjacent hidden sidecar
 `.slide-01.png.artifact.json` containing `{"type":"intermediate_asset"}`.
-The marker applies to that exact file, including later revisions. Output-text
-reference detection, structured result normalization, and workspace-diff detection
-honor it; none guesses from directory names or extensions. Missing, malformed, or
-oversized (>4 KiB) metadata does not suppress discovery. Sidecars themselves are
-excluded from directory scans. A sidecar may also contain a string `description`,
-used if that file is explicitly published later.
+The marker applies to that exact file, including later revisions. Both output-text
+reference detection and workspace-diff detection honor it; neither guesses from
+directory names or extensions. Missing, malformed, or oversized (>4 KiB) metadata
+does not suppress publication. Sidecars themselves are excluded from publication.
 
 `generate_image` persists this metadata before returning, including `sha256` and
 `size_bytes`. Discovery enriches script-produced markers with these fields while
@@ -52,24 +47,10 @@ mark them explicitly. Independent image delivery remains supported.
 The bundled HTML/PPTX exporter, PPTX QA renderers (Poppler, pdf.js, and Quick Look),
 and SN renderers mark single-page screenshots and SN partial/focus review sheets
 this way, including partial images left by failed rendering. They leave the
-whole-deck overview and final HTML/PPTX unmarked. Tools can still read marked
-images for QA. If the user explicitly requests a screenshot as a deliverable,
-call `publish_artifact` for that file after validation. The delivery manifest
-selects it even if an intermediate sidecar remains. Producers that need automatic
-discovery can instead mark the file `{"type":"artifact"}`. Markers do not retract
-previously published messages.
-
-The turn's authoritative selection is the `artifact_delivery` manifest: every
-listed `placement: "primary"` file is a main deliverable. Other observed files
-remain process files. An empty manifest means this turn delivered no files.
-
-Structured tool results with `type: "artifact"` and a real file path are
-normalized into a process ArtifactEvent, even without a Markdown link, unless
-the file is marked intermediate. `type: "intermediate_asset"` results are skipped.
-For legacy producers, `abs_path` and `absolute_path` take precedence over `path`;
-these fields are aliases for one file, not a file list. Relative `path` values
-resolve inside the session cwd and cannot escape it. An optional `description`
-(or image-generation `alt_text`) is forwarded for display.
+whole-deck overview and final HTML/PPTX unmarked. Tools can still read marked images for QA. If the user
+explicitly requests a screenshot as a deliverable, set its sidecar to
+`{"type":"artifact"}` and reference the file in tool output, or return a structured
+`type: "artifact"` result. Markers do not retract previously published messages.
 
 ## Producer-declared delivery scopes
 
@@ -110,8 +91,7 @@ creating assets. Changed-content derivatives within the scope remain intermediat
   "size": 12480,
   "sha256": "a1b2c3d4e5f60718",
   "produced_at": "2026-05-14T09:41:40+08:00",
-  "tool_call_id": "call_xxx",
-  "description": "Sales chart awaiting publication"
+  "tool_call_id": "call_xxx"
 }
 ```
 
@@ -129,41 +109,9 @@ creating assets. Changed-content derivatives within the scope remain intermediat
 | `size`         | integer        | Byte size. `-1` if unavailable. |
 | `sha256`       | string         | First 16 hex chars of SHA-256. Stable cache/dedup key — same content ⇒ same hash. Empty when the file is too large to hash (>64 MB). |
 | `produced_at`  | string (ISO-8601) | Timezone-aware timestamp of detection. |
-| `tool_call_id` | string         | Update that reports the artifact. For discovered files this is the producing tool call; for delivery manifest items this is the manifest update id. |
-| `description`  | string, optional | Producer-supplied display description. Omitted when empty. |
+| `tool_call_id` | string         | Tool call that produced the artifact. The same id appears on the `tool_call_update`, so the host already knows which call to attach this to. |
 | `layout_id`    | string, optional | Controlled layout identifier. Present only for recognized artifacts such as `roadmap-swimlane-v1`. |
 | `edit_mode`    | enum, optional | `editable` means the host may enable the trusted editor after its own artifact-identity checks. `read_only` means the host must keep editing and persistence disabled. Missing is read-only. |
-
-### Turn delivery manifest
-
-Before the final reply, the model calls `publish_artifact(path)` once for each
-main file required by the user's request. The tool checks that each file exists
-inside the session cwd and deduplicates repeated paths. At successful turn
-completion, Box-Agent rechecks the files and sends:
-
-```json
-{
-  "type": "artifact_delivery",
-  "session_id": "session-1",
-  "task_id": "task-1",
-  "turn_id": "turn-1",
-  "artifacts": [
-    {
-      "type": "artifact",
-      "rel_path": "sales-analysis/sales-q3.png",
-      "placement": "primary"
-    }
-  ]
-}
-```
-
-Each manifest item contains the other artifact fields listed above. The update is
-sent as `session/update` → `tool_call_update` → `rawOutput`; the host should
-persist the manifest, including an empty `artifacts` array. It should use the
-manifest for new turns and reserve final-answer path matching for old turns that
-have no manifest. All `primary` items are deliverables; other observed files are
-process files. When revision registration succeeds, manifest items also carry
-`artifact_id`, `artifact_revision_id`, and `manifest_path` for later operations.
 
 ### Kinds → suggested renderers
 
@@ -192,7 +140,6 @@ function handleToolCallUpdate(update: ToolCallUpdate) {
 
   switch (ro.type) {
     case "artifact":      return upsertArtifact(update.toolCallId, ro);
-    case "artifact_delivery": return setTurnDelivery(ro);
     case "web_search":    return upsertWebSearch(update.toolCallId, ro);
     case "memory_search": return upsertMemorySearch(update.toolCallId, ro);
     case "sub_agent_progress": return appendSubAgentProgress(update.toolCallId, ro);
@@ -294,18 +241,16 @@ Box-Agent sends:
 
 1. `tool_call` (start) — `tool_call_id=call_42`, `tool_name=execute_code`.
 2. `tool_call_update` — `status=completed`, `content=[…stdout…]`.
-3. `tool_call_update` — `rawOutput.type="artifact"` for this discovered file.
-4. The model calls `publish_artifact("sales-analysis/sales-q3.png")`.
-5. `agent_message_chunk` — `Here's the chart: ![sales-q3](sales-analysis/sales-q3.png)`.
-6. At successful turn completion, `tool_call_update` —
-   `rawOutput.type="artifact_delivery"`, with the selected file in `artifacts`.
+3. `tool_call_update` — `rawOutput.type="artifact"`, with the envelope shown
+   above.
+4. `agent_message_chunk` — `Here's the chart: ![sales-q3](sales-analysis/sales-q3.png)`.
 
 The host's reducer:
 
 - Step 2 closes the tool call status.
-- Step 3 appends `sales-q3.png` (kind=`image`) to the session's inspectable
-  files. Step 6 selects it as the primary deliverable.
-- Step 5 renders the markdown image inline. The `<img>` `src` resolves the
+- Step 3 appends `sales-q3.png` (kind=`image`) to the session's artifact
+  panel; the chip shows `12.4 KB · sales-analysis/sales-q3.png`.
+- Step 4 renders the markdown image inline. The `<img>` `src` resolves the
   same file (host is free to substitute its own download URL for the relative
   path).
 
@@ -315,3 +260,17 @@ The schema is versioned by Box-Agent's PyPI release. Treat additive fields
 (new `kind` values, new optional keys) as backwards-compatible; treat
 renames or removals as breaking, in which case Box-Agent ships a major bump
 and this document is updated in the same commit.
+
+## Explicit publication tool
+
+`publish_artifact(path)` promotes an existing workspace file by writing its
+`type: artifact` sidecar and returning a structured artifact result. The shared
+engine emits the same `ArtifactEvent` consumed by CLI and ACP. Files previously
+marked intermediate can be promoted without changing their bytes. Missing or
+outside-workspace paths (including symlinks) are rejected; sidecar write failures
+return a failed tool result.
+
+Already published files need no extra call: presentation builders and
+`generate_image(publish_artifact=True)` retain their publication behavior.
+There is no end-of-turn manifest overriding these outputs. Artifact envelopes
+may also include an optional producer-supplied `description`.

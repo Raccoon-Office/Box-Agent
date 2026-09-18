@@ -4551,7 +4551,7 @@ def test_acp_skips_sidecar_marked_structured_artifact(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_sends_declared_delivery_before_turn_completes(tmp_path, monkeypatch):
+async def test_acp_sends_published_artifacts_without_final_selection(tmp_path, monkeypatch):
     from box_agent.agent import Agent
 
     file = tmp_path / "report.xlsx"
@@ -4560,10 +4560,15 @@ async def test_acp_sends_declared_delivery_before_turn_completes(tmp_path, monke
     second.write_bytes(b"summary")
 
     async def run_with_publication(self, **_kwargs):
-        result = await self.tools["publish_artifact"].execute("report.xlsx")
-        assert result.success
-        result = await self.tools["publish_artifact"].execute("summary.pdf")
-        assert result.success
+        from box_agent.tools.engine.artifact_results import _detect_tool_artifacts
+        for name in ("report.xlsx", "summary.pdf"):
+            result = await self.tools["publish_artifact"].execute(name)
+            assert result.success
+            for event in _detect_tool_artifacts(
+                name, "publish_artifact", result.content, result.raw_output,
+                {}, {}, str(tmp_path),
+            ):
+                yield event
         yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="done")
 
     monkeypatch.setattr(Agent, "run_events", run_with_publication)
@@ -4587,14 +4592,13 @@ async def test_acp_sends_declared_delivery_before_turn_completes(tmp_path, monke
         for update in conn.updates
         if getattr(update.update, "sessionUpdate", None) == "tool_call_update"
         and isinstance(getattr(update.update, "rawOutput", None), dict)
-        and update.update.rawOutput.get("type") == "artifact_delivery"
+        and update.update.rawOutput.get("type") == "artifact"
     ]
-    assert len(deliveries) == 1
-    assert [item["rel_path"] for item in deliveries[0]["artifacts"]] == [
+    assert len(deliveries) == 2
+    assert [item["rel_path"] for item in deliveries] == [
         "report.xlsx", "summary.pdf",
     ]
-    assert all(item["placement"] == "primary" for item in deliveries[0]["artifacts"])
-    assert deliveries[0]["artifacts"][0]["tool_call_id"] == next(
+    assert deliveries[0]["tool_call_id"] == next(
         update.update.toolCallId
         for update in conn.updates
         if getattr(update.update, "rawOutput", None) is deliveries[0]

@@ -509,11 +509,10 @@ class GenerateImageTool(Tool):
                 "publish_artifact": {
                     "type": "boolean",
                     "description": (
-                        "Expose the saved image as an observable file. When omitted, "
+                        "Publish the image as a standalone user deliverable. When omitted, "
                         "defaults to false in a producer-declared delivery scope, true elsewhere. "
                         "Set false for intermediate assets embedded in a larger deliverable, "
-                        "as instructed by the PPTX skill. To deliver the image as a main "
-                        "artifact, also call publish_artifact(path) after validating it."
+                        "as instructed by the PPTX skill. The saved file remains available."
                     ),
                 },
                 "watermark_text": {

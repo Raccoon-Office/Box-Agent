@@ -80,9 +80,8 @@ _PUBLISH_ARTIFACT_SCHEMA = {
         "name": "publish_artifact",
         "description": (
             "After creating and checking a main user-facing file, declare it as "
-            "a primary artifact. Call once for each main file the user intends "
-            "to receive; multiple primary artifacts are allowed. Other files "
-            "remain process files. Call before the final answer."
+            "a user-facing artifact. Already published builder outputs and images "
+            "do not need this call. Use it to promote selected intermediate files."
         ),
         "input_schema": {
             "type": "object",

@@ -524,7 +524,7 @@ messages or the final reply, or list them as standalone deliverables, unless
 the user explicitly requests the individual images. Keep their local files and
 manifest references for deck rendering and editing. For PPT assets call
 `generate_image` with `publish_artifact: false`; this suppresses artifact
-observation without suppressing generation or insertion. For a requested
+publication without suppressing generation or insertion. For a requested
 individual-image deliverable, call `publish_artifact(path)` on the validated
 image after generation.
 
