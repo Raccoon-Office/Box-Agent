@@ -199,11 +199,14 @@ async def refresh_hosted_auth_token_if_needed(
     *,
     now: int | None = None,
     http_client: httpx.AsyncClient | None = None,
+    force: bool = False,
 ) -> str:
     """Refresh a near-expiry xiaohuanxiong.com login token and return it.
 
     Opaque tokens remain backward-compatible: only a missing token or a JWT with
     an ``exp`` inside the five-minute refresh window activates the refresh flow.
+    Pass ``force=True`` to refresh even when the local JWT has not expired yet
+    (e.g. after the provider rejected the token with 401 / 200003).
     """
     refresh_url = _xiaohuanxiong_refresh_url(api_base)
     path, state = _read_auth_state(auth_file)
@@ -213,8 +216,10 @@ async def refresh_hosted_auth_token_if_needed(
 
     current_time = int(time.time()) if now is None else int(now)
     expiry = _jwt_expiry(current_token)
-    if current_token and (
-        expiry is None or current_time + AUTH_REFRESH_WINDOW_SECONDS < expiry
+    if (
+        not force
+        and current_token
+        and (expiry is None or current_time + AUTH_REFRESH_WINDOW_SECONDS < expiry)
     ):
         return current_token
 
@@ -224,13 +229,17 @@ async def refresh_hosted_auth_token_if_needed(
         current_token = _auth_token_from_state(state)
         expiry = _jwt_expiry(current_token)
         current_time = int(time.time()) if now is None else int(now)
-        if current_token and (
-            expiry is None or current_time + AUTH_REFRESH_WINDOW_SECONDS < expiry
+        if (
+            not force
+            and current_token
+            and (expiry is None or current_time + AUTH_REFRESH_WINDOW_SECONDS < expiry)
         ):
             return current_token
 
         refresh_token = _coerce_token(state.get("refresh_token"))
         if not refresh_token:
+            if force:
+                raise HostedAuthRequiredError("登录态已过期，请重新登录")
             return current_token
 
         owns_client = http_client is None
@@ -242,6 +251,8 @@ async def refresh_hosted_auth_token_if_needed(
                 json={"refresh_token": refresh_token},
             )
         except httpx.HTTPError as exc:
+            if force:
+                raise HostedAuthRequiredError("登录态已过期，请重新登录") from exc
             if expiry is not None and current_time < expiry:
                 return current_token
             raise HostedAuthRefreshError(f"登录态刷新失败：{exc}") from exc
@@ -252,6 +263,8 @@ async def refresh_hosted_auth_token_if_needed(
         if response.status_code == 401:
             raise HostedAuthRequiredError("登录态已过期，请重新登录")
         if not response.is_success:
+            if force:
+                raise HostedAuthRequiredError("登录态已过期，请重新登录")
             if expiry is not None and current_time < expiry:
                 return current_token
             raise HostedAuthRefreshError(

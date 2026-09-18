@@ -856,3 +856,113 @@ async def test_generate_requires_login_without_retry_or_upstream_request(
         assert refresh_request.await_count == int(expired)
     finally:
         await client.client.close()
+
+
+@pytest.mark.asyncio
+async def test_generate_force_refreshes_on_unexpired_jwt_provider_401(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auth.json + placeholder key + unexpired JWT + provider 401/200003 → force refresh → expired."""
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": _jwt_with_exp(int(time.time()) + 3600),
+                "refresh_token": "refresh-one",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    refresh_calls: list[dict] = []
+
+    async def fake_refresh(api_base, auth_file, *, now=None, http_client=None, force=False):
+        refresh_calls.append({"force": force})
+        raise HostedAuthRefreshError("登录态已过期，请重新登录")
+
+    monkeypatch.setattr(
+        "box_agent.llm.base.refresh_hosted_auth_token_if_needed",
+        fake_refresh,
+    )
+
+    class ProviderAuthError(Exception):
+        status_code = 401
+        code = 200003
+        body = {"code": 200003, "message": "authorization_verify_error"}
+
+        def __init__(self) -> None:
+            super().__init__("Error code: 401 - authorization_verify_error 200003")
+
+    client = OpenAIClient(
+        api_key="box-agent-auth-json",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model",
+        auth_file=str(auth_file),
+        retry_config=RetryConfig(initial_delay=0),
+    )
+    upstream = AsyncMock(side_effect=ProviderAuthError())
+    raw = type("Raw", (), {"create": upstream})()
+    monkeypatch.setattr(client.client.chat.completions, "with_raw_response", raw)
+    monkeypatch.setattr(client.client.chat.completions, "create", upstream)
+
+    try:
+        with pytest.raises(HostedAuthRefreshError, match="^登录态已过期，请重新登录$"):
+            await client.generate([Message(role="user", content="hello")])
+        assert refresh_calls and refresh_calls[0]["force"] is True
+        assert upstream.await_count >= 1
+    finally:
+        await client.client.close()
+
+
+@pytest.mark.asyncio
+async def test_generate_real_api_key_skips_force_refresh_on_401(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real api_key path must not force-refresh or rewrite as login-expired."""
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": _jwt_with_exp(int(time.time()) + 3600),
+                "refresh_token": "refresh-one",
+            }
+        ),
+        encoding="utf-8",
+    )
+    refresh_calls: list = []
+
+    async def fake_refresh(*args, **kwargs):
+        refresh_calls.append(kwargs)
+        raise AssertionError("refresh must not run for real api_key")
+
+    monkeypatch.setattr(
+        "box_agent.llm.base.refresh_hosted_auth_token_if_needed",
+        fake_refresh,
+    )
+
+    class ProviderAuthError(Exception):
+        status_code = 401
+
+        def __init__(self) -> None:
+            super().__init__("Error code: 401 - invalid_api_key")
+
+    client = OpenAIClient(
+        api_key="sk-real-provider-key",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model",
+        auth_file=str(auth_file),
+        retry_config=RetryConfig(initial_delay=0),
+    )
+    upstream = AsyncMock(side_effect=ProviderAuthError())
+    raw = type("Raw", (), {"create": upstream})()
+    monkeypatch.setattr(client.client.chat.completions, "with_raw_response", raw)
+    monkeypatch.setattr(client.client.chat.completions, "create", upstream)
+
+    try:
+        with pytest.raises(ProviderAuthError):
+            await client.generate([Message(role="user", content="hello")])
+        assert refresh_calls == []
+    finally:
+        await client.client.close()
