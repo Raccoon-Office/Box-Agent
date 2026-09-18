@@ -80,7 +80,8 @@ _PUBLISH_ARTIFACT_SCHEMA = {
         "name": "publish_artifact",
         "description": (
             "After creating and checking a main user-facing file, declare it as "
-            "a user-facing artifact. Already published builder outputs and images "
+            "a primary user-facing artifact. Call once for each requested deliverable. "
+            "Already published builder outputs and images "
             "do not need this call. Use it to promote selected intermediate files."
         ),
         "input_schema": {

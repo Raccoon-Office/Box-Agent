@@ -8,13 +8,16 @@ import json
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from box_agent.auth import (
+    AUTH_TOKEN_ENV_VARS,
     HostedAuthRefreshError,
     bearer_auth_headers,
+    ensure_hosted_auth_ready,
     read_auth_token_file,
     refresh_hosted_auth_token_if_needed,
     resolve_auth_token,
@@ -22,6 +25,8 @@ from box_agent.auth import (
 )
 from box_agent.config import Config, LLMConfig, derive_context_token_limit
 from box_agent.llm import AnthropicClient, OpenAIClient
+from box_agent.retry import RetryConfig
+from box_agent.schema import Message
 from box_agent.tools import mcp_loader
 
 
@@ -263,6 +268,154 @@ async def test_refresh_hosted_auth_token_reports_expired_refresh_login(
             )
 
     assert read_auth_token_file(auth_file) == old_access_token
+
+
+@pytest.mark.asyncio
+async def test_ensure_hosted_auth_ready_fails_fast_without_login(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    assert not auth_file.exists()
+
+    with pytest.raises(
+        HostedAuthRefreshError,
+        match="^未登录，请通过客户端登录后再试$",
+    ) as exc_info:
+        await ensure_hosted_auth_ready(
+            "https://xiaohuanxiong.com/api/web/llm/v2",
+            auth_file,
+        )
+
+    assert str(exc_info.value) == "未登录，请通过客户端登录后再试"
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_fail_fast_without_hosted_login(tmp_path: Path) -> None:
+    auth_file = tmp_path / "missing-auth.json"
+    client = OpenAIClient(
+        api_key="box-agent-auth-json",
+        api_base="https://code-test.xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model",
+        auth_file=str(auth_file),
+    )
+    try:
+        with pytest.raises(
+            HostedAuthRefreshError,
+            match="^未登录，请通过客户端登录后再试$",
+        ) as exc_info:
+            await client._auth_headers()
+        assert str(exc_info.value) == "未登录，请通过客户端登录后再试"
+    finally:
+        await client.client.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_hosted_auth_ready_reports_expired_refresh_login(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": _jwt_with_exp(now - 1),
+                "refresh_token": "refresh-one",
+            }
+        ),
+        encoding="utf-8",
+    )
+    refresh_requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        refresh_requests.append(request)
+        return httpx.Response(401)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(
+            HostedAuthRefreshError,
+            match="^登录态已过期，请重新登录$",
+        ) as exc_info:
+            await ensure_hosted_auth_ready(
+                "https://xiaohuanxiong.com/api/web/llm/v2",
+                auth_file,
+                now=now,
+                http_client=http_client,
+            )
+        assert str(exc_info.value) == "登录态已过期，请重新登录"
+
+    assert len(refresh_requests) == 1
+    assert str(refresh_requests[0].url).endswith("/api/web/auth/v1/refresh")
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_propagates_expired_refresh_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": _jwt_with_exp(int(time.time()) - 1),
+                "refresh_token": "refresh-one",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def boom(*_args, **_kwargs):
+        raise HostedAuthRefreshError("登录态已过期，请重新登录")
+
+    monkeypatch.setattr("box_agent.llm.base.ensure_hosted_auth_ready", boom)
+
+    client = OpenAIClient(
+        api_key="box-agent-no-auth",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model",
+        auth_file=str(auth_file),
+    )
+    try:
+        with pytest.raises(
+            HostedAuthRefreshError,
+            match="^登录态已过期，请重新登录$",
+        ) as exc_info:
+            await client._auth_headers()
+        assert str(exc_info.value) == "登录态已过期，请重新登录"
+    finally:
+        await client.client.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_hosted_auth_ready_skips_non_hosted_and_real_api_key(
+    tmp_path: Path,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    # Missing auth.json must not fail-fast off the xiaohuanxiong family.
+    resolved = await ensure_hosted_auth_ready(
+        "https://llm.example.com/v1",
+        auth_file,
+    )
+    assert resolved == ""
+
+    client = OpenAIClient(
+        api_key="provider-key",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model",
+        auth_file=str(auth_file),
+    )
+    try:
+        headers = await client._auth_headers()
+        assert "Authorization" not in headers
+    finally:
+        await client.client.close()
+
+    # Explicit in-memory token also skips the missing-file fail-fast.
+    token = await ensure_hosted_auth_ready(
+        "https://xiaohuanxiong.com/api/web/llm/v2",
+        auth_file,
+        explicit_token=" memory-token ",
+    )
+    assert token == "memory-token"
 
 
 def test_bearer_auth_headers_preserves_existing_authorization() -> None:
@@ -641,3 +794,65 @@ async def test_mcp_loader_does_not_override_configured_auth_header(
             Path(f.name).unlink()
 
     assert captured == [{"Authorization": "Bearer mcp-token"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_name", AUTH_TOKEN_ENV_VARS)
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_hosted_auth_environment_token_respects_profile_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_name: str, isolated: bool,
+) -> None:
+    for name in AUTH_TOKEN_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(env_name, "environment-token")
+    if isolated:
+        monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    else:
+        monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
+    client = OpenAIClient(
+        api_key="box-agent-auth-json",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model", auth_file=str(tmp_path / "auth.json"),
+    )
+    try:
+        if isolated:
+            with pytest.raises(HostedAuthRefreshError, match="未登录"):
+                await client._auth_headers()
+        else:
+            assert (await client._auth_headers())["Authorization"] == "Bearer environment-token"
+    finally:
+        await client.client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True])
+async def test_generate_requires_login_without_retry_or_upstream_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expired: bool,
+) -> None:
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    auth_file = tmp_path / "auth.json"
+    refresh_request = AsyncMock(return_value=httpx.Response(401))
+    monkeypatch.setattr(httpx.AsyncClient, "post", refresh_request)
+    if expired:
+        auth_file.write_text(json.dumps({
+            "access_token": _jwt_with_exp(int(time.time()) - 1),
+            "refresh_token": "refresh-one",
+        }))
+    client = OpenAIClient(
+        api_key="box-agent-auth-json",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model", auth_file=str(auth_file),
+        retry_config=RetryConfig(initial_delay=0),
+    )
+    upstream = AsyncMock()
+    monkeypatch.setattr(client.client.chat.completions, "create", upstream)
+    retries = []
+    client.retry_callback = lambda *args: retries.append(args)
+    try:
+        with pytest.raises(HostedAuthRefreshError, match="登录态已过期" if expired else "未登录"):
+            await client.generate([Message(role="user", content="hello")])
+        assert retries == []
+        upstream.assert_not_awaited()
+        assert refresh_request.await_count == int(expired)
+    finally:
+        await client.client.close()

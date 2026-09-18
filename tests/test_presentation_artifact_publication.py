@@ -80,7 +80,16 @@ def _old_bundle(tmp_path):
     relative = "skills/sn-ppt-standard/scripts/render.py"
     target = path / relative
     target.parent.mkdir(parents=True)
-    content = b'\ndef render(pg, out):\n        pg.screenshot(path=out)\n'
+    content = (
+        "\ndef _ensure_browser_available(p):\n"
+        '    override = os.environ.get("PPT_SKILL_BROWSER_EXE")\n'
+        "    if override:\n"
+        "        override = os.path.abspath(os.path.expanduser(override))\n"
+        "        if not os.path.isfile(override):\n"
+        '            raise BrowserUnavailable(f"PPT_SKILL_BROWSER_EXE 不存在: {override}")\n'
+        "\ndef render(pg, out):\n"
+        "        pg.screenshot(path=out)\n"
+    ).encode()
     target.write_bytes(content)
     digest = hashlib.sha256(content).hexdigest()
     # Model the bundle before publication markers, even when later overlays exist.

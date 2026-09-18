@@ -109,3 +109,10 @@ def test_5xx_status_retries_even_with_deterministic_message():
     exc = _StatusError("500: downstream said invalid api key", 500)
     assert is_retryable_llm_error(exc) is True
 
+
+
+@pytest.mark.parametrize("message", ["登录态刷新失败（HTTP 503）", "登录态刷新失败：timeout"])
+def test_transient_hosted_auth_refresh_failure_remains_retryable(message):
+    from box_agent.auth import HostedAuthRefreshError
+
+    assert is_retryable_llm_error(HostedAuthRefreshError(message)) is True
