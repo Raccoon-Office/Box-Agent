@@ -309,7 +309,7 @@ is a storage implementation detail, not a user-facing workflow.
 
 - Runtime observation requires actually executed tool calls. Denied calls and fabricated
   model statements cannot issue evidence.
-- Two distinct failures for the same fingerprint and subject within one run, followed by
+- One failure for the same fingerprint and subject within one run, followed by
   a successful call with changed arguments or an observed file repair, can issue an opaque `verification_id`.
   Observations and receipts are bounded in-memory data with a six-hour validation window.
 - Success must match the original tool/version and operation identity. File/URL targets

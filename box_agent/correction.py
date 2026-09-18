@@ -48,6 +48,12 @@ _SECRET_RE = re.compile(
     # Modern provider token forms: allow hyphens after sk- (sk-proj-/sk-ant-),
     # GitHub fine-grained PATs, and AWS AKIA-style access key ids.
     # No trailing \\b on these so a longer glued synthetic/real token still matches.
+    # Reject structured authentication material before fingerprint normalization.
+    r"\b(?:authorization|proxy-authorization|cookie|set-cookie)[\"']?\s*[:=]|"
+    r"\b(?:token|credential)[\"']?\s*[:=]\s*[\"']?[^\s,}]{8,}|"
+    r"\b[a-z][a-z0-9+.-]*://[^/\s@]+:[^/\s@]+@|"
+    r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----|"
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{10,}|"
     r"\bsk-[a-z0-9-]{10,}|"
     r"\bgithub_pat_[a-z0-9_]{20,}|"
     r"\bAKIA[0-9A-Z]{16}|"
@@ -199,14 +205,14 @@ def _operation_key(subject: CorrectionSubject, arguments: dict, workspace: str =
 class CorrectionCurator:
     """Windowed auto-curation for repeated failures.
 
-    Only emits a draft when the same fingerprint + subject fails at least
-    ``repeat_count`` times inside ``repeat_window``. One-shot env fixes never
+    Issues evidence after the same fingerprint + subject has one observed
+    failure inside ``repeat_window`` and a matching repair succeeds. One-shot env fixes never
     write. Counters live in memory (not a correction TTL).
     """
 
     memory_manager: "MemoryManager | None" = None
     repeat_window: timedelta = field(default_factory=lambda: timedelta(hours=6))
-    repeat_count: int = 2
+    repeat_count: int = 1
     _observations: dict[tuple[str, tuple[str, str, str]], list[datetime]] = field(
         default_factory=lambda: defaultdict(list),
         init=False,
@@ -220,7 +226,7 @@ class CorrectionCurator:
     def observe_result(self, *, scope: str, subject: CorrectionSubject, call_id: str,
                        arguments: dict, success: bool, error: str = "", content: str = "",
                        skill_subjects: tuple[CorrectionSubject, ...] = (), workspace: str = "") -> CorrectionNotice | None:
-        """Offer bounded evidence after repeated failure and a changed call succeeds.
+        """Offer bounded evidence after a failure and a changed call succeeds.
 
         A successful call is evidence for a candidate, not proof of a general
         remedy. A concrete scoped lesson is required before automatic activation.
