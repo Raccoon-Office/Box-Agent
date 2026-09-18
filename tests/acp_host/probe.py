@@ -11,9 +11,14 @@ from pathlib import Path
 from typing import Any
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class RpcError(Exception):
-    """JSON-RPC error or transport failure surfaced to the host probe."""
+    """JSON-RPC error or transport failure surfaced to the host probe.
+
+    ``eq=False`` keeps Exception identity/equality semantics. ``__post_init__``
+    wires ``Exception.args`` so raise/catch works on CPython 3.10–3.12 with a
+    frozen dataclass (setting attrs via Exception.__init__ must happen there).
+    """
 
     code: int | str
     message: str
@@ -26,7 +31,7 @@ class RpcError(Exception):
         return base
 
     def __post_init__(self) -> None:
-        Exception.__init__(self, str(self))
+        Exception.__init__(self, f"RpcError({self.code!r}): {self.message}")
 
 
 @dataclass(frozen=True)
@@ -353,8 +358,26 @@ class AcpHostProbe:
                 try:
                     msg = json.loads(text)
                 except json.JSONDecodeError as exc:
-                    self._stderr_chunks.append(f"\n[probe bad JSON on stdout: {text[:200]} ({exc})]\n")
-                    continue
+                    self._fail_all_pending(
+                        RpcError(
+                            code="protocol_error",
+                            message=(
+                                "Non-JSON line on ACP stdout "
+                                f"(protocol NDJSON required): {text[:200]!r}"
+                            ),
+                            data={"line": text[:500], "error": str(exc), "stderr_tail": self.stderr_text[-2000:]},
+                        )
+                    )
+                    break
+                if not isinstance(msg, dict):
+                    self._fail_all_pending(
+                        RpcError(
+                            code="protocol_error",
+                            message=f"ACP stdout JSON must be an object, got {type(msg).__name__}",
+                            data={"value": msg},
+                        )
+                    )
+                    break
                 await self._dispatch_message(msg)
         except asyncio.CancelledError:
             raise
