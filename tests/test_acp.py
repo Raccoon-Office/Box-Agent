@@ -1001,6 +1001,16 @@ def test_file_delivery_prompt_has_one_cwd_rooted_policy():
     assert "不重命名或覆盖无关文件" in prompt
 
 
+def test_file_delivery_prompt_distinguishes_companion_source_from_primary():
+    prompt = build_file_delivery_prompt()
+
+    assert "按文件在任务中的交付用途" in prompt
+    assert "配套文件即使要求保留或在最终回复中提及" in prompt
+    assert "不调用 `publish_artifact`" in prompt
+    assert "独立交付结果" in prompt
+    assert "deck.json" not in prompt
+
+
 def test_acp_plan_approval_text_accepts_short_confirmations():
     assert _looks_like_plan_approval_text("好的")
     assert _looks_like_plan_approval_text("可以")
@@ -4519,7 +4529,80 @@ def test_acp_artifact_raw_output_gets_session_metadata():
 
     assert output["session_id"] == "office-session-a"
     assert output["sessionId"] == "office-session-a"
+    assert "artifact_role" not in output
     assert "output_dir" not in output
+
+
+def test_acp_skips_sidecar_marked_structured_artifact(tmp_path):
+    file = tmp_path / "review.png"
+    file.write_bytes(b"image")
+    file.with_name(f".{file.name}.artifact.json").write_text(
+        '{"type":"intermediate_asset"}', encoding="utf-8",
+    )
+
+    output = _tool_result_raw_output(
+        {"type": "artifact", "path": "review.png"},
+        "[OK] done",
+        None,
+        workspace_dir=str(tmp_path),
+    )
+
+    assert output["type"] == "intermediate_asset"
+
+
+@pytest.mark.asyncio
+async def test_acp_sends_published_artifacts_without_final_selection(tmp_path, monkeypatch):
+    from box_agent.agent import Agent
+
+    file = tmp_path / "report.xlsx"
+    file.write_bytes(b"report")
+    second = tmp_path / "summary.pdf"
+    second.write_bytes(b"summary")
+
+    async def run_with_publication(self, **_kwargs):
+        from box_agent.tools.engine.artifact_results import _detect_tool_artifacts
+        for name in ("report.xlsx", "summary.pdf"):
+            result = await self.tools["publish_artifact"].execute(name)
+            assert result.success
+            for event in _detect_tool_artifacts(
+                name, "publish_artifact", result.content, result.raw_output,
+                {}, {}, str(tmp_path),
+            ):
+                yield event
+        yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="done")
+
+    monkeypatch.setattr(Agent, "run_events", run_with_publication)
+    conn = DummyConn()
+    agent = BoxACPAgent(
+        conn,
+        Config(
+            llm=LLMConfig(api_key="test-key"),
+            agent=AgentConfig(workspace_dir=str(tmp_path)),
+            tools=ToolsConfig(enable_sub_agent=False),
+        ),
+        DoneLLM(), [], "system",
+    )
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    )
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "report"}]))
+
+    deliveries = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "sessionUpdate", None) == "tool_call_update"
+        and isinstance(getattr(update.update, "rawOutput", None), dict)
+        and update.update.rawOutput.get("type") == "artifact"
+    ]
+    assert len(deliveries) == 2
+    assert [item["rel_path"] for item in deliveries] == [
+        "report.xlsx", "summary.pdf",
+    ]
+    assert deliveries[0]["tool_call_id"] == next(
+        update.update.toolCallId
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None) is deliveries[0]
+    )
 
 
 @pytest.mark.asyncio

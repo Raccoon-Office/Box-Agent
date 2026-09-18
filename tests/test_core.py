@@ -6063,6 +6063,25 @@ def test_artifact_envelope_shape(tmp_path):
     assert "sandbox_workspace" not in env
 
 
+def test_artifact_envelope_includes_description_without_role(tmp_path):
+    from box_agent.acp import _artifact_envelope
+    from box_agent.core import _make_artifact
+
+    image = tmp_path / "review-sheet.png"
+    image.write_bytes(b"review")
+    artifact = _make_artifact(
+        "tc-process",
+        image,
+        tmp_path,
+        description="版式检查图",
+    )
+
+    envelope = _artifact_envelope(artifact)
+
+    assert "artifact_role" not in envelope
+    assert envelope["description"] == "版式检查图"
+
+
 def test_roadmap_artifact_envelope_includes_controlled_metadata(tmp_path):
     from box_agent.acp import _artifact_envelope
     from box_agent.core import _make_artifact

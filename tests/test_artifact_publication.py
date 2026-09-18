@@ -59,6 +59,20 @@ def test_explicit_publication_overrides_inherited_content_identity(tmp_path):
     assert [event.filename for event in events] == ["requested.png"]
 
 
+def test_structured_artifact_does_not_publish_renamed_intermediate(tmp_path):
+    original = tmp_path / "working.png"
+    original.write_bytes(b"image")
+    write_metadata(original, {"type": "intermediate_asset"})
+    _detect_regex_artifacts("create", "bash", "[working.png]", None, str(tmp_path))
+    renamed = tmp_path / "renamed.png"
+    original.rename(renamed)
+
+    events, _ = _detect_regex_artifacts(
+        "rename", "bash", "", {"type": "artifact", "abs_path": str(renamed)}, str(tmp_path)
+    )
+    assert events == []
+
+
 def test_other_workspace_and_same_size_different_content_are_not_suppressed(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir(); b.mkdir()

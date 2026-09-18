@@ -53,6 +53,7 @@ _LIST_SKILLS_SCHEMA = {
 _ALWAYS_WORKSPACE = {
     "request_user_input", "request_user_decision", "report_execution_result",
     "obsidian_create_note", "obsidian_update_note", "obsidian_daily_note",
+    "publish_artifact",
 }
 _FILES = {
     "read_file", "query_jsonl", "search_files", "write_file", "append_file", "edit_file",
@@ -73,6 +74,25 @@ _FLAGS_OFF = {
     "enable_mcp": False,
 }
 _SCHEMA_FIXTURE = Path(__file__).parent / "fixtures/tool_engine/c1_schemas.json"
+_PUBLISH_ARTIFACT_SCHEMA = {
+    "aliases": [],
+    "schema": {
+        "name": "publish_artifact",
+        "description": (
+            "After creating and checking a main user-facing file, declare it as "
+            "a user-facing artifact. Already published builder outputs and images "
+            "do not need this call. Use it to promote selected intermediate files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path inside the session workspace."},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+}
 _C5_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/c5_schema_changes.json").read_text()
 )
@@ -244,6 +264,7 @@ def _assert_schema_contract(tools, profile):
     expected = json.loads(_SCHEMA_FIXTURE.read_text(encoding="utf-8"))["tools"]
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
     expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
+    expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
     expected["get_skill"]["schema"]["description"] = (
         "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
         "when paged. Read required_skills before their steps; related_skills are optional. "

@@ -260,3 +260,17 @@ The schema is versioned by Box-Agent's PyPI release. Treat additive fields
 (new `kind` values, new optional keys) as backwards-compatible; treat
 renames or removals as breaking, in which case Box-Agent ships a major bump
 and this document is updated in the same commit.
+
+## Explicit publication tool
+
+`publish_artifact(path)` promotes an existing workspace file by writing its
+`type: artifact` sidecar and returning a structured artifact result. The shared
+engine emits the same `ArtifactEvent` consumed by CLI and ACP. Files previously
+marked intermediate can be promoted without changing their bytes. Missing or
+outside-workspace paths (including symlinks) are rejected; sidecar write failures
+return a failed tool result.
+
+Already published files need no extra call: presentation builders and
+`generate_image(publish_artifact=True)` retain their publication behavior.
+There is no end-of-turn manifest overriding these outputs. Artifact envelopes
+may also include an optional producer-supplied `description`.

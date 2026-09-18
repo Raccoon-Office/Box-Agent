@@ -10,7 +10,10 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from box_agent.tools.engine.artifact_results import _detect_tool_artifacts, _snapshot_workspace_signatures
+from box_agent.tools.engine.artifact_results import (
+    _detect_tool_artifacts,
+    _snapshot_workspace_signatures,
+)
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -18,7 +21,9 @@ STANDARD = REPO / "box_agent/skills/presentation-suite/skills/sn-ppt-standard/sc
 
 
 @pytest.mark.parametrize("all_pages", [False, True], ids=["single-page", "whole-deck"])
-def test_dynamic_renderer_keeps_pages_private_and_publishes_contact_sheet(tmp_path, monkeypatch, all_pages):
+def test_dynamic_renderer_skips_marked_pages_and_observes_contact_sheet(
+    tmp_path, monkeypatch, all_pages
+):
     namespace = runpy.run_path(str(STANDARD.parents[1] / "sn-ppt-dazzle/scripts/render_deck.py"))
     renderer = namespace["DeckRenderer"](tmp_path / "deck.html", tmp_path)
     buffer = io.BytesIO()
@@ -38,13 +43,15 @@ def test_dynamic_renderer_keeps_pages_private_and_publishes_contact_sheet(tmp_pa
         "render", "bash", "[page_01.png]", None, {},
         _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
     )
-    assert {event.filename for event in events if event.kind == "image"} == (
-        {"contact_sheet.png"} if all_pages else set()
+    assert [event.filename for event in events if event.kind == "image"] == (
+        ["contact_sheet.png"] if all_pages else []
     )
     assert (tmp_path / "page_01.png").read_bytes() == sample["png"]
 
 
-def test_review_contact_publishes_only_whole_deck_overview(tmp_path, monkeypatch):
+def test_review_contact_delivers_overview_and_marks_review_images_as_process(
+    tmp_path, monkeypatch
+):
     monkeypatch.syspath_prepend(str(STANDARD))
     deck = runpy.run_path(str(STANDARD / "deck.py"))
     renderer = runpy.run_path(str(STANDARD / "render.py"))
@@ -60,7 +67,7 @@ def test_review_contact_publishes_only_whole_deck_overview(tmp_path, monkeypatch
         "render", "bash", "[renders/slide_01.png] [renders/contact-sheet-review-01.png]",
         None, {}, _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
     )
-    assert {event.filename for event in events if event.kind == "image"} == {"contact-sheet.png"}
+    assert [event.filename for event in events if event.kind == "image"] == ["contact-sheet.png"]
     assert len(list(renders.glob("slide_*.png"))) == 8
     assert (renders / "contact-sheet-review-01.png").is_file()
     assert (renders / "contact-sheet-focus.png").is_file()

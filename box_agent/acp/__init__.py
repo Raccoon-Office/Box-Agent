@@ -63,6 +63,7 @@ from pydantic import field_validator
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
+from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
@@ -286,6 +287,8 @@ def _artifact_envelope(
         "produced_at": art.produced_at,
         "tool_call_id": art.tool_call_id,
     }
+    if art.description:
+        payload["description"] = art.description
     if art.layout_id:
         payload["layout_id"] = art.layout_id
     if art.edit_mode:
@@ -920,10 +923,26 @@ def _tool_result_raw_output(
     session_id: str | None = None,
     task_id: str | None = None,
     turn_id: str | None = None,
+    workspace_dir: str | None = None,
 ) -> Any:
     if isinstance(raw_output, dict):
         payload = dict(raw_output)
         if payload.get("type") == "artifact":
+            for key in ("abs_path", "absolute_path", "path"):
+                value = payload.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                try:
+                    candidate = Path(value).expanduser()
+                    if not candidate.is_absolute():
+                        if workspace_dir is None:
+                            continue
+                        candidate = Path(workspace_dir) / candidate
+                    if is_intermediate_artifact(candidate.resolve()):
+                        payload["type"] = "intermediate_asset"
+                    break
+                except (OSError, RuntimeError, ValueError):
+                    continue
             if session_id:
                 payload.setdefault("session_id", session_id)
                 payload.setdefault("sessionId", session_id)
@@ -4623,6 +4642,7 @@ class BoxACPAgent:
                                 session_id=state.upstream_session_id,
                                 task_id=task_context.task_id,
                                 turn_id=task_context.turn_id,
+                                workspace_dir=state.agent.workspace_dir,
                             )
                             await self._send(
                                 session_id,

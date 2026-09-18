@@ -523,9 +523,10 @@ individual screenshots as intermediate assets. Do not embed them in progress
 messages or the final reply, or list them as standalone deliverables, unless
 the user explicitly requests the individual images. Keep their local files and
 manifest references for deck rendering and editing. For PPT assets call
-`generate_image` with `publish_artifact: false`; this suppresses standalone
-artifact publication without suppressing generation or insertion. A requested
-individual-image deliverable may use `publish_artifact: true`.
+`generate_image` with `publish_artifact: false`; this suppresses artifact
+publication without suppressing generation or insertion. For a requested
+individual-image deliverable, call `publish_artifact(path)` on the validated
+image after generation.
 
 The preparation script declares the presentation directory as an intermediate
 workspace. Only explicitly registered deliveries appear in chat. Finalization

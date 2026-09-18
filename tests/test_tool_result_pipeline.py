@@ -98,7 +98,7 @@ async def test_declared_delivery_scope_guards_raw_results_and_discovery(tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parallel_safe", [False, True], ids=["serial", "parallel"])
 @pytest.mark.parametrize("success", [False, True], ids=["partial-failure", "success"])
-async def test_render_images_stay_on_disk_but_only_overview_is_published(
+async def test_render_images_skip_marked_intermediates(
     tmp_path, parallel_safe, success,
 ) -> None:
     class RenderTool(_EchoTool):
@@ -121,8 +121,8 @@ async def test_render_images_stay_on_disk_but_only_overview_is_published(
         tools={tool.name: tool}, max_steps=2, workspace_dir=str(tmp_path),
     )]
     # Preserve the existing serial-failure behavior (no artifact publication).
-    expected = {"deck-overview.png"} if success or parallel_safe else set()
-    assert {event.filename for event in events if isinstance(event, ArtifactEvent)} == expected
+    expected = ["deck-overview.png"] if success or parallel_safe else []
+    assert [event.filename for event in events if isinstance(event, ArtifactEvent)] == expected
     assert (tmp_path / "slide-01.png").read_bytes() == b"rendered image"
 
 
@@ -139,7 +139,7 @@ def test_standalone_image_names_are_not_hidden_without_intermediate_metadata(tmp
     assert [event.filename for event in events] == [image.name]
 
 
-def test_modified_intermediate_image_is_not_republished_by_later_tools(tmp_path):
+def test_modified_intermediate_image_is_not_published(tmp_path):
     image = tmp_path / "任意名称.png"
     image.write_bytes(b"first")
     image.with_name(f".{image.name}.artifact.json").write_text('{"type":"intermediate_asset"}')
@@ -150,6 +150,171 @@ def test_modified_intermediate_image_is_not_republished_by_later_tools(tmp_path)
         artifact_results._snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
     )
     assert events == []
+
+
+def test_structured_intermediate_output_is_not_published_without_text_link(
+    tmp_path,
+):
+    image = tmp_path / "generated-reference.png"
+    image.write_bytes(b"generated image")
+
+    events, emitted_paths = artifact_results._detect_regex_artifacts(
+        "image-call",
+        "image_generation",
+        "Intermediate image saved; use model_context for its path.",
+        {
+            "type": "intermediate_asset",
+            "abs_path": str(image),
+            "alt_text": "构图参考图",
+        },
+        str(tmp_path),
+    )
+
+    assert events == []
+    assert emitted_paths == {str(image.resolve())}
+
+
+def test_structured_artifact_output_remains_process_until_primary_publication(
+    tmp_path,
+):
+    image = tmp_path / "final-cover.png"
+    image.write_bytes(b"final image")
+
+    events, emitted_paths = artifact_results._detect_regex_artifacts(
+        "image-call",
+        "image_generation",
+        "Image generation complete.",
+        {
+            "type": "artifact",
+            "abs_path": str(image),
+            "alt_text": "最终封面图",
+        },
+        str(tmp_path),
+    )
+
+    assert [
+        (event.filename, event.description)
+        for event in events
+    ] == [(image.name, "最终封面图")]
+    assert emitted_paths == {str(image.resolve())}
+
+
+def test_write_file_artifact_output_is_observed_before_explicit_publication(tmp_path):
+    report = tmp_path / "outline.json"
+    report.write_text("{}")
+    events, _ = artifact_results._detect_regex_artifacts(
+        "write-call", "write_file", "Successfully wrote outline.json",
+        {"type": "artifact", "path": str(report)}, str(tmp_path),
+    )
+    assert [event.filename for event in events] == ["outline.json"]
+
+
+def test_sidecar_suppresses_discovery_even_with_structured_artifact_result(tmp_path):
+    image = tmp_path / "review-sheet.png"
+    image.write_bytes(b"review image")
+    image.with_name(f".{image.name}.artifact.json").write_text(
+        '{"type":"intermediate_asset"}', encoding="utf-8"
+    )
+
+    process_events = artifact_results._detect_artifacts(
+        "render-call", "bash", f"[{image.name}]", str(tmp_path)
+    )
+    deliverable_events, _ = artifact_results._detect_regex_artifacts(
+        "publish-call",
+        "image_generation",
+        "Published the selected review sheet.",
+        {"type": "artifact", "abs_path": str(image)},
+        str(tmp_path),
+    )
+
+    assert process_events == []
+    assert deliverable_events == []
+
+
+def test_structured_write_path_keeps_intermediate_file_unpublished(tmp_path):
+    report = tmp_path / "report.md"
+    report.write_text("Final report", encoding="utf-8")
+    report.with_name(f".{report.name}.artifact.json").write_text(
+        '{"type":"intermediate_asset"}', encoding="utf-8"
+    )
+
+    events = artifact_results._detect_tool_artifacts(
+        "write-call", "write_file", "Successfully wrote report.md.",
+        {"type": "artifact", "path": str(report)}, {},
+        artifact_results._snapshot_workspace_signatures(str(tmp_path)),
+        str(tmp_path),
+    )
+
+    assert events == []
+
+
+def test_invalid_structured_path_does_not_interrupt_artifact_discovery(tmp_path):
+    report = tmp_path / "report.md"
+    report.write_text("Final report", encoding="utf-8")
+
+    events, emitted_paths = artifact_results._detect_regex_artifacts(
+        "write-call", "write_file", "Saved [report.md]",
+        {
+            "type": "artifact",
+            "abs_path": "~user_that_does_not_exist_12345/bad.png",
+            "path": str(report),
+        },
+        str(tmp_path),
+    )
+
+    assert [event.filename for event in events] == ["report.md"]
+    assert emitted_paths == {str(report.resolve())}
+
+
+def test_relative_structured_path_cannot_escape_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "private.txt"
+    outside.write_text("private", encoding="utf-8")
+
+    events, emitted_paths = artifact_results._detect_regex_artifacts(
+        "write-call", "write_file", "done",
+        {"type": "artifact", "path": "../private.txt"}, str(workspace),
+    )
+
+    assert events == []
+    assert emitted_paths == set()
+
+
+@pytest.mark.parametrize("field", ["abs_path", "absolute_path", "path"])
+def test_absolute_structured_path_cannot_escape_workspace(tmp_path, field):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "private.txt"
+    outside.write_text("private", encoding="utf-8")
+
+    events, emitted_paths = artifact_results._detect_regex_artifacts(
+        "write-call", "write_file", "done",
+        {"type": "artifact", field: str(outside)}, str(workspace),
+    )
+
+    assert events == []
+    assert emitted_paths == set()
+
+
+def test_structured_path_aliases_emit_only_the_absolute_path(tmp_path):
+    intended = tmp_path / "report.md"
+    intended.write_text("report", encoding="utf-8")
+    other = tmp_path / "other.md"
+    other.write_text("other", encoding="utf-8")
+
+    events, emitted_paths = artifact_results._detect_regex_artifacts(
+        "write-call", "write_file", "done",
+        {
+            "type": "artifact",
+            "abs_path": str(intended),
+            "path": str(other),
+        },
+        str(tmp_path),
+    )
+
+    assert [event.abs_path for event in events] == [str(intended)]
+    assert emitted_paths == {str(intended)}
 
 
 def test_pipeline_appends_tool_message_before_returning_result_events(tmp_path) -> None:

@@ -224,7 +224,7 @@ def _export_fixture(tmp_path: Path, *, marked: bool) -> tuple[dict, Path]:
     return _last_json_object(result.stdout), pptx_path
 
 
-def test_export_keeps_page_previews_without_publishing_them(tmp_path: Path) -> None:
+def test_export_skips_page_previews_and_observes_pptx_as_process(tmp_path: Path) -> None:
     from box_agent.tools.engine.artifact_results import (
         _detect_tool_artifacts, _snapshot_workspace_signatures,
     )
@@ -237,9 +237,9 @@ def test_export_keeps_page_previews_without_publishing_them(tmp_path: Path) -> N
         "export", "bash", f"[{preview.relative_to(tmp_path).as_posix()}]", None, {},
         _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
     )
-    published = {event.abs_path for event in events}
-    assert str(pptx) in published
-    assert str(preview) not in published
+    artifact_paths = {event.abs_path for event in events}
+    assert str(pptx) in artifact_paths
+    assert str(preview) not in artifact_paths
 
 
 def _slide_picture_targets(
