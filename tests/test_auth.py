@@ -8,11 +8,13 @@ import json
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from box_agent.auth import (
+    AUTH_TOKEN_ENV_VARS,
     HostedAuthRefreshError,
     bearer_auth_headers,
     ensure_hosted_auth_ready,
@@ -23,6 +25,8 @@ from box_agent.auth import (
 )
 from box_agent.config import Config, LLMConfig, derive_context_token_limit
 from box_agent.llm import AnthropicClient, OpenAIClient
+from box_agent.retry import RetryConfig
+from box_agent.schema import Message
 from box_agent.tools import mcp_loader
 
 
@@ -790,3 +794,65 @@ async def test_mcp_loader_does_not_override_configured_auth_header(
             Path(f.name).unlink()
 
     assert captured == [{"Authorization": "Bearer mcp-token"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_name", AUTH_TOKEN_ENV_VARS)
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_hosted_auth_environment_token_respects_profile_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_name: str, isolated: bool,
+) -> None:
+    for name in AUTH_TOKEN_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(env_name, "environment-token")
+    if isolated:
+        monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    else:
+        monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
+    client = OpenAIClient(
+        api_key="box-agent-auth-json",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model", auth_file=str(tmp_path / "auth.json"),
+    )
+    try:
+        if isolated:
+            with pytest.raises(HostedAuthRefreshError, match="未登录"):
+                await client._auth_headers()
+        else:
+            assert (await client._auth_headers())["Authorization"] == "Bearer environment-token"
+    finally:
+        await client.client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True])
+async def test_generate_requires_login_without_retry_or_upstream_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expired: bool,
+) -> None:
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    auth_file = tmp_path / "auth.json"
+    refresh_request = AsyncMock(return_value=httpx.Response(401))
+    monkeypatch.setattr(httpx.AsyncClient, "post", refresh_request)
+    if expired:
+        auth_file.write_text(json.dumps({
+            "access_token": _jwt_with_exp(int(time.time()) - 1),
+            "refresh_token": "refresh-one",
+        }))
+    client = OpenAIClient(
+        api_key="box-agent-auth-json",
+        api_base="https://xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model", auth_file=str(auth_file),
+        retry_config=RetryConfig(initial_delay=0),
+    )
+    upstream = AsyncMock()
+    monkeypatch.setattr(client.client.chat.completions, "create", upstream)
+    retries = []
+    client.retry_callback = lambda *args: retries.append(args)
+    try:
+        with pytest.raises(HostedAuthRefreshError, match="登录态已过期" if expired else "未登录"):
+            await client.generate([Message(role="user", content="hello")])
+        assert retries == []
+        upstream.assert_not_awaited()
+        assert refresh_request.await_count == int(expired)
+    finally:
+        await client.client.close()

@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from typing import NamedTuple
 
+from ..auth import HostedAuthRequiredError
+
 
 class FriendlyError(NamedTuple):
     """A humanized error.
@@ -373,6 +375,9 @@ def is_retryable_llm_error(exc: BaseException) -> bool:
         root = _unwrap(exc)
     except Exception:
         root = exc
+
+    if isinstance(root, HostedAuthRequiredError):
+        return False
 
     # HTTP status is the most precise signal, so check it FIRST. A structured
     # 4xx must fail fast even when its message happens to contain a
