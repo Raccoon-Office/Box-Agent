@@ -126,7 +126,7 @@ function loadBrowser() {
       : process.platform === "win32" ? path.join(process.env.APPDATA || os.homedir(), "office-raccoon") : path.join(os.homedir(), ".config/office-raccoon"));
   process.env.NODE_PATH = [path.join(prefix, "node_modules"), process.env.NODE_PATH].filter(Boolean).join(path.delimiter);
   Module._initPaths();
-  const { chromium } = require("playwright");
+  const { chromium } = host.loadPlaywright();
   return chromium.launch(host.chromiumLaunchOptions(chromium, { headless: true }).options);
 }
 

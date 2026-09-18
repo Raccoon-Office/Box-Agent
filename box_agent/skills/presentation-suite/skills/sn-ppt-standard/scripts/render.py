@@ -162,11 +162,15 @@ def _ensure_browser_available(p):
       3. 回退扫描本地缓存中已有的 chromium 版本 (最接近期望版本的)
       4. 所有方式都失败才报错
     """
-    override = os.environ.get("PPT_SKILL_BROWSER_EXE")
+    override = (
+        os.environ.get("BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+        or os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+        or os.environ.get("PPT_SKILL_BROWSER_EXE")
+    )
     if override:
         override = os.path.abspath(os.path.expanduser(override))
         if not os.path.isfile(override):
-            raise BrowserUnavailable(f"PPT_SKILL_BROWSER_EXE 不存在: {override}")
+            raise BrowserUnavailable(f"Configured Playwright browser is unavailable: {override}")
         return override
 
     # ② 让 Playwright 算出期望路径

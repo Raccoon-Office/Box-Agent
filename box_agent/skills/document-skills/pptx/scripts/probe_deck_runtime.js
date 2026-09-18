@@ -8,6 +8,7 @@ const path = require("path");
 const { pathToFileURL } = require("url");
 const {
   chromiumLaunchOptions,
+  loadPlaywright: loadHostPlaywright,
   ensurePlaywrightBrowsersPath,
 } = require("./playwright_host");
 const { resolveArtifactPath } = require("./deck_spec_core.js");
@@ -163,7 +164,7 @@ function loadPlaywright() {
     ? `${managedNodeModules}${path.delimiter}${process.env.NODE_PATH}`
     : managedNodeModules;
   Module._initPaths();
-  return require("playwright");
+  return loadHostPlaywright();
 }
 
 async function readEditorState(page, viewport) {

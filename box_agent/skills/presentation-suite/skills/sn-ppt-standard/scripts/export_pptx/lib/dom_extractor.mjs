@@ -4,8 +4,7 @@
  * 将 HTML 幻灯片页面解析为中间表示（IR），供 PPTX builder 使用。
  */
 
-import { chromium } from 'playwright';
-import { pickBrowserExe } from './browser_picker.mjs';
+import { chromium, pickBrowserExe } from './browser_picker.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';

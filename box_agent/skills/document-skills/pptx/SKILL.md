@@ -21,6 +21,13 @@ preserve the original file structure; `python-pptx` must not create a new deck.
 
 ## Responsibilities
 
+Use the host's Playwright runtime for rendering. When `BOX_AGENT_PLAYWRIGHT_MODULE_PATH`
+is supplied, load that exact Node module and pass
+`BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` as `executablePath`; do not install a
+second SDK/browser or use a bare `require('playwright')` that can select an old
+workspace dependency. Prefer the bundled rendering/export scripts, which implement
+this contract. A missing host runtime must be reported for repair in the client.
+
 The main agent owns research, factual content, the outline, content filling, media
 acquisition and delivery. An isolated design role owns the registered theme preset,
 complete role-based palette, structured visual requirements, slide layouts and their visual options. Programs validate and

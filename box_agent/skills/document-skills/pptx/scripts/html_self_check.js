@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const {
   chromiumLaunchOptions,
+  loadPlaywright,
   ensurePlaywrightBrowsersPath,
   officeRaccoonBrowserHostPath,
 } = require("./playwright_host");
@@ -109,7 +110,7 @@ function parseArgs(argv) {
 
 function requireModule(name, installHint) {
   try {
-    return require(name);
+    return name === "playwright" ? loadPlaywright() : require(name);
   } catch (error) {
     if (error && error.code === "MODULE_NOT_FOUND") {
       console.error(`Missing dependency: ${name}`);

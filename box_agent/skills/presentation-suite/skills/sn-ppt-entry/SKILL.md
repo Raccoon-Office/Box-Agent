@@ -33,6 +33,12 @@ Deep 先完成完整 Research，**下一步必须调用 `sn-ppt-story` 生成公
 
 ## Box-Agent 兼容入口
 
+渲染复用宿主已提供的 Playwright。宿主设置 `BOX_AGENT_PLAYWRIGHT_MODULE_PATH` 时，
+Node 脚本必须加载该绝对模块路径，并把 `BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`
+传给 `chromium.launch` 的 `executablePath`。优先调用整包正式渲染脚本，不另装 SDK 或
+浏览器，不用裸 `require('playwright')` 选择工作区中的旧副本。宿主文件缺失时报告客户端修复，
+不要改用其他浏览器版本继续。
+
 在 Box-Agent 中，从本次加载的 Skill 提示取得 Entry 的绝对 Skill Root，记为
 `<ENTRY_SKILL_ROOT>`。Entry 的所有确定性脚本都必须使用
 `python "<ENTRY_SKILL_ROOT>/scripts/<name>.py"` 调用；禁止使用 `$SKILL_DIR`、当前工作目录

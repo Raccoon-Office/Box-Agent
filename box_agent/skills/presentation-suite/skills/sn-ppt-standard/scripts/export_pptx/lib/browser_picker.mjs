@@ -9,7 +9,10 @@
 import { existsSync, accessSync, constants, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { chromium } from 'playwright';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+export const { chromium } = require(process.env.BOX_AGENT_PLAYWRIGHT_MODULE_PATH || 'playwright');
 
 function isExecutable(p) {
   if (!existsSync(p)) return false;
@@ -129,6 +132,13 @@ function scanLocal(expectedExe) {
 }
 
 export function pickBrowserExe() {
+  const host = process.env.BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+    || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+  if (host) {
+    const p = resolve(expandHome(host));
+    if (!isExecutable(p)) throw new Error(`Host Playwright browser is unavailable: ${p}`);
+    return p;
+  }
   // ① 环境变量覆盖（与 render.py 同一变量，box-agent 运行脚本已导出）
   const override = process.env.PPT_SKILL_BROWSER_EXE;
   if (override) {

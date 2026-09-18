@@ -4,6 +4,7 @@ const Module = require("module");
 const os = require("os");
 const path = require("path");
 const {
+  loadPlaywright,
   ensurePlaywrightBrowsersPath,
   officeRaccoonBrowserHostPath,
   resolveChromiumExecutablePath,
@@ -36,7 +37,7 @@ function addManagedNodePath(prefix) {
 
 function checkPlaywright() {
   try {
-    const playwright = require("playwright");
+    const playwright = loadPlaywright();
     return { ok: true, playwright };
   } catch (error) {
     if (error && error.code === "MODULE_NOT_FOUND") {

@@ -2,6 +2,12 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+function loadPlaywright() {
+  // A hosted SDK is authoritative. Do not fall back to a stale user/workspace
+  // package when that entry is missing or broken.
+  return require(process.env.BOX_AGENT_PLAYWRIGHT_MODULE_PATH || "playwright");
+}
+
 function officeRaccoonBrowserHostPath() {
   return path.join(os.homedir(), ".box-agent", "browsers");
 }
@@ -128,6 +134,17 @@ function registryPathExists(expectedPath) {
 function resolveChromiumExecutablePath(playwright) {
   ensurePlaywrightBrowsersPath();
 
+  const hostPath = process.env.BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+  if (hostPath) {
+    return {
+      ok: isUsableFile(hostPath),
+      path: isUsableFile(hostPath) ? hostPath : null,
+      source: "env",
+      expectedPath: hostPath,
+      browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH,
+    };
+  }
+
   const configured = configuredExecutablePath();
   if (configured) {
     return {
@@ -188,6 +205,9 @@ function resolveChromiumExecutablePath(playwright) {
 
 function chromiumLaunchOptions(playwright, options = {}) {
   const resolved = resolveChromiumExecutablePath(playwright);
+  if (!resolved.ok && process.env.BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
+    throw new Error(`Host Playwright browser is unavailable: ${resolved.expectedPath}`);
+  }
   return {
     resolved,
     options: resolved.path ? { ...options, executablePath: resolved.path } : options,
@@ -195,6 +215,7 @@ function chromiumLaunchOptions(playwright, options = {}) {
 }
 
 module.exports = {
+  loadPlaywright,
   chromiumLaunchOptions,
   ensurePlaywrightBrowsersPath,
   officeRaccoonBrowserHostPath,

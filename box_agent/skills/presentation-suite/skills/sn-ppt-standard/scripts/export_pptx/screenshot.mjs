@@ -17,8 +17,7 @@
  * Stdout on failure:  {"status":"failed","error":...} (also exit code 1)
  */
 
-import { chromium } from 'playwright';
-import { pickBrowserExe } from './lib/browser_picker.mjs';
+import { chromium, pickBrowserExe } from './lib/browser_picker.mjs';
 import { resolve } from 'path';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname } from 'path';

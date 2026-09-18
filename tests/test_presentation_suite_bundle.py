@@ -154,6 +154,7 @@ def source_repo(tmp_path, monkeypatch):
     # Isolate git pinning/publication from the separately tested real content overlays.
     sync = _sync_function()
     monkeypatch.setitem(sync.__globals__, "_apply_integration_overlay", lambda _, data: data)
+    monkeypatch.setitem(sync.__globals__, "_host_playwright_overlay", lambda _, data: data)
     repo = tmp_path / "upstream"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
