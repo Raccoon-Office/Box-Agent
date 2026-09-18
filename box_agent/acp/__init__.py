@@ -2369,6 +2369,20 @@ class BoxACPAgent:
             )
         # Host-only language guidance must not influence semantic skill routing.
         skill_selection_text = user_text
+        if (
+            user_decision_response is not None
+            and user_decision_response["decision_kind"] == "presentation_mode"
+            and user_decision_response["selected_option_id"] in {"fast", "design"}
+        ):
+            user_text = (
+                "[Host presentation progress guidance: The choice card already displays the "
+                "selected mode. Continue the existing task with the next concrete action; "
+                "do not announce or reconfirm the mode in progress text before or after loading "
+                "a Skill. Report new work, results, blockers or required decisions, rather than "
+                "rephrasing the previous update. Keep meaningful long-running progress updates. "
+                "Explain the choice if the user asks; a timeout must not be described as a user click.]\n\n"
+                f"{user_text}"
+            )
         ui_language = _meta_string(prompt_meta, "ui_language", "uiLanguage").lower()
         if ui_language in {"en", "ja", "zh"}:
             display_language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[ui_language]

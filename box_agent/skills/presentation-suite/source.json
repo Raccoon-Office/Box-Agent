@@ -276,7 +276,7 @@
       "source_sha256": "81c8cbb6cb3914342f0e09a47001a1522492c3b94cbd82774b2c803d762c8a1c"
     },
     "skills/sn-ppt-entry/SKILL.md": {
-      "sha256": "24acd87f50651e6ec9e8c8c6f2126226d840f0b089a46cb6ae7d996eb93be18d",
+      "sha256": "2f2868840700085346a397c81489b16cbc33a838f8ac8cf1fe401fadb1827331",
       "source_path": "skills/sn-ppt-entry/SKILL.md",
       "source_sha256": "4de3bbe6127e2e30c8068400159c141059f27a6d1e57fee7aae29b8e6e9b21d6"
     },
@@ -624,7 +624,8 @@
     "intermediate-render-artifacts",
     "sequential-ppt-image-inspection",
     "source-relative-pptx-page-directories",
-    "explicit-delivery-scopes"
+    "explicit-delivery-scopes",
+    "presentation-progress-without-reconfirmation"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "e187295633eb4cb201e6a2a5a206a419eb79990a",

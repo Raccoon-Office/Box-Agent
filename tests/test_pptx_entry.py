@@ -41,6 +41,17 @@ async def test_entry_exposes_current_modes_without_retired_aliases(loader):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["pptx", "sn-ppt-entry"])
+async def test_mode_entry_progress_does_not_repeat_the_confirmed_choice(loader, name):
+    result = await GetSkillTool(loader).invoke({"skill_name": name})
+    assert result.success, result.error
+    assert "选择卡已展示" in result.content
+    assert "下一步具体动作" in result.content
+    assert "不换一种说法重复上一条进度" in result.content
+    assert "用户询问选择原因时正常解释" in result.content
+
+
+@pytest.mark.asyncio
 async def test_visual_style_reference_routes_unstarted_decks_through_ppt_entry(loader):
     result = await GetSkillTool(loader).invoke({"skill_name": "html-templates"})
     assert result.success

@@ -4997,6 +4997,38 @@ async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["user", "timeout"])
+@pytest.mark.parametrize("kind,option,has_guidance", [
+    ("presentation_mode", "fast", True),
+    ("presentation_mode", "design", True),
+    ("presentation_mode", "custom", False),
+    ("outline_approval", "approve", False),
+])
+async def test_presentation_resume_reports_actions_without_reconfirming_mode(tmp_path, trigger, kind, option, has_guidance):
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)), tools=ToolsConfig())
+    llm = CaptureMessagesLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    response = {"request_id": "choice-1", "decision_kind": kind,
+                "selected_option_id": option, "selected_option_label": "所选选项", "trigger": trigger}
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId,
+        prompt=[{"text": "请按选择继续原任务"}], field_meta={"userDecision": response, "ui_language": "zh"}))
+    assert len(llm.calls) == 1
+    user_messages = [content for role, content in llm.calls[0] if role == "user"]
+    assert len(user_messages) == 1
+    text = user_messages[0]
+    assert ("Host presentation progress guidance:" in text) == has_guidance
+    if has_guidance:
+        assert "next concrete action" in text
+        assert "Keep meaningful long-running progress updates" in text
+    payload = text.split("[HOST_USER_DECISION_RESPONSE]\n", 1)[1].split("\n[/HOST_USER_DECISION_RESPONSE]", 1)[0]
+    assert json.loads(payload) == {**response, "custom_text": ""}
+    assert "请按选择继续原任务" in text
+    assert "Host UI language: Chinese" in text
+
+
+@pytest.mark.asyncio
 async def test_acp_skill_filter_ignores_host_ui_language_instruction(tmp_path):
     skills_dir = tmp_path / "skills"
     skill_names = ("research-synthesis", "pptx", "docx", "pdf", "xlsx")
