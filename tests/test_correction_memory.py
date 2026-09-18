@@ -11,6 +11,7 @@ Also: header parse/format round-trip for new correction fields.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -53,6 +54,18 @@ def mgr(memory_dir: Path) -> MemoryManager:
 
 def _subject(name: str = "pptx_export", kind: str = "skill", version: str = "1.0") -> CorrectionSubject:
     return CorrectionSubject(kind=kind, name=name, version=version)  # type: ignore[arg-type]
+
+
+def _receipt(mgr, name, error):
+    curator = mgr.correction_curator
+    subject = CorrectionSubject("tool", name)
+    for number in range(2):
+        assert curator.observe_result(scope="test", subject=subject, call_id=f"fail-{number}",
+            arguments={"mode": "broken"}, success=False, error=error) is None
+    notice = curator.observe_result(scope="test", subject=subject, call_id="success",
+        arguments={"mode": "fixed"}, success=True)
+    assert notice is not None
+    return notice.verification_id
 
 
 # ── Header round-trip ────────────────────────────────────────
@@ -143,7 +156,7 @@ def test_font_one_shot_env_fix_not_stored(mgr: MemoryManager):
 # ── Scenario 2: repeated failure → can store ─────────────────
 
 
-def test_repeated_failure_same_fingerprint_can_store(mgr: MemoryManager):
+def test_repeated_failure_creates_only_an_unverified_draft(mgr: MemoryManager):
     curator = CorrectionCurator(mgr, repeat_window=timedelta(hours=6), repeat_count=2)
     subject = _subject(kind="tool", name="bash", version="")
     err = "PermissionError: [Errno 13] Permission denied: '/tmp/abc123/out.txt' at 2026-09-17T12:00:00"
@@ -168,17 +181,10 @@ def test_repeated_failure_same_fingerprint_can_store(mgr: MemoryManager):
 
     entry = mgr.write_correction(second)
     assert entry.entry_type == "correction"
-    assert entry.status == "active"
-    assert entry.topic == "corrections"
-    path = mgr.context_dir / "corrections.md"
-    assert path.exists()
-    raw = path.read_text(encoding="utf-8")
-    assert "entry_type=correction" in raw
-    assert "chmod the output directory" in raw.lower() or "lesson:" in raw
-
-    listed = mgr.list_corrections()
-    assert len(listed) == 1
-    assert listed[0].id == entry.id
+    assert entry.status == "draft"
+    assert mgr.list_corrections() == []
+    with pytest.raises(ValueError, match="verification|evidence"):
+        mgr.confirm_correction_draft(entry.id)
 
     # Non-skill subjects (tool/path/env/workflow) are supported
     for kind in ("path_pattern", "env", "workflow"):
@@ -202,9 +208,9 @@ def test_superseded_and_deleted_skipped_by_default_search(mgr: MemoryManager):
         symptom="npm ERESOLVE unable to resolve dependency tree",
         subject=_subject(name="npm_install", kind="workflow"),
         error_fingerprint=normalize_error_fingerprint("npm ERR! ERESOLVE unable to resolve dependency tree"),
-        source="explicit",
+        source="explicit", verification="tool=fixture;call=validated;result=success",
     )
-    entry = mgr.write_correction(draft)
+    entry = mgr.write_correction(draft, status="active")
     hits = mgr.search("ERESOLVE")
     assert any("legacy-peer-deps" in h for h in hits)
 
@@ -220,8 +226,8 @@ def test_superseded_and_deleted_skipped_by_default_search(mgr: MemoryManager):
             symptom="npm ERESOLVE again",
             subject=_subject(name="npm_install", kind="workflow", version="2"),
             error_fingerprint=normalize_error_fingerprint("npm ERR! code ERESOLVE cache"),
-            source="explicit",
-        )
+            source="explicit", verification="tool=fixture;call=validated;result=success",
+        ), status="active",
     )
     assert any("clear npm cache" in h for h in mgr.search("ERESOLVE"))
     mgr.delete_correction(entry2.id)
@@ -239,8 +245,8 @@ def test_supersede_by_subject_upgrade(mgr: MemoryManager):
             symptom="crash",
             subject=_subject(name="pptx_export", kind="skill", version="1.0"),
             error_fingerprint=normalize_error_fingerprint("KeyError: slide_layout"),
-            source="explicit",
-        )
+            source="explicit", verification="tool=fixture;call=validated;result=success",
+        ), status="active",
     )
     assert old.status == "active"
     n = mgr.supersede_by_subject_upgrade(
@@ -378,7 +384,7 @@ def test_auto_notify_refuses_modern_credentials_no_disk(
 
 
 @pytest.mark.asyncio
-async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr: MemoryManager):
+async def test_write_correction_tool_validates_evidence_and_activates_without_user_staging(mgr: MemoryManager):
     tool = MemoryWriteCorrectionTool(mgr)
     empty = await MemoryListCorrectionsTool(mgr).execute()
     assert empty.content == "还没有可复用的纠错记忆。"
@@ -393,33 +399,26 @@ async def test_write_correction_tool_refuses_secrets_and_uses_draft_confirm(mgr:
     assert bad.success is False
     assert bad.error == "这条不算可复用纠错（偏好/敏感/一次性），没记下。"
 
+    receipt = _receipt(mgr, "pip", "ERROR: Failed building wheel for cryptography")
     ok = await tool.execute(
         lesson="pin cryptography==42.0.0 when wheel build fails on musl",
         symptom="wheel build failed",
         error_fingerprint="ERROR: Failed building wheel for cryptography",
-        subject_kind="env",
-        subject_name="pip",
+        subject_kind="tool",
+        subject_name="pip", verification_id=receipt,
     )
     assert ok.success is True
-    assert ok.content.startswith("纠错记忆草稿已创建：")
+    assert ok.content.startswith("已记住这个解决办法")
     draft_id = ok.raw_output["id"]
 
-    listed = await MemoryListCorrectionsTool(mgr).execute(status="draft")
-    assert listed.success is True
-    assert draft_id in listed.content
-
-    # Draft not visible to default search
-    assert mgr.search("cryptography") == []
-
-    confirmed = await tool.execute(confirm=True, draft_id=draft_id)
-    assert confirmed.success is True
-    assert confirmed.content.startswith("纠错记忆已确认并生效：")
-    assert confirmed.raw_output["status"] == "active"
-    assert any("cryptography" in h.lower() for h in mgr.search("cryptography"))
+    listed = await MemoryListCorrectionsTool(mgr).execute()
+    assert listed.success is True and draft_id in listed.model_context
+    assert ok.raw_output["status"] == "active"
+    assert any("cryptography" in hit.lower() for hit in mgr.search("cryptography"))
 
     superseded = await MemorySupersedeCorrectionTool(mgr).execute(entry_id=draft_id)
     assert superseded.success is True
-    assert superseded.content.startswith("纠错记忆已作废：")
+    assert superseded.content == "这条解决办法已标记为不再适用。"
     assert mgr.search("cryptography") == []
 
 
@@ -438,25 +437,12 @@ def test_normalize_error_fingerprint_strips_noise():
 # ── Runtime hook: observe_failure via tool-result path ───────
 
 
-def test_runtime_hook_two_failures_writes_correction(mgr: MemoryManager):
+def test_runtime_hook_two_failures_do_not_publish_a_fake_remedy(mgr: MemoryManager):
     from box_agent.correction import notify_tool_failure_for_correction
-
-    err = "PermissionError: [Errno 13] Permission denied: '/tmp/out.txt'"
-    first_tip = notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
-    assert first_tip is None
-    assert mgr.list_corrections() == []
-
-    second_tip = notify_tool_failure_for_correction(mgr, tool_name="bash", raw_error=err)
-    listed = mgr.list_corrections()
-    assert len(listed) == 1
-    assert listed[0].status == "active"
-    assert listed[0].subject_kind == "tool"
-    assert listed[0].subject_name == "bash"
-    assert listed[0].source == "auto"
-    assert isinstance(second_tip, CorrectionNotice)
-    assert second_tip.lesson.startswith("When seeing '")
-    assert second_tip.subject_kind == "tool"
-    assert second_tip.subject_name == "bash"
+    for _ in range(2):
+        assert notify_tool_failure_for_correction(
+            mgr, tool_name="bash", raw_error="PermissionError: permission denied") is None
+    assert mgr.list_corrections(include_inactive=True) == []
 
 
 def test_runtime_hook_one_failure_no_write(mgr: MemoryManager):
@@ -486,53 +472,33 @@ def test_runtime_hook_one_shot_env_fix_never_writes(mgr: MemoryManager):
     assert mgr.list_corrections() == []
 
 
-def test_process_tool_result_invokes_correction_observer(mgr: MemoryManager, tmp_path: Path):
-    from box_agent.correction import notify_tool_failure_for_correction
+def test_tool_pipeline_offers_evidence_only_after_a_successful_changed_retry(mgr, tmp_path):
     from box_agent.events import ProgressEvent
-    from box_agent.schema import Message
     from box_agent.tool_result_storage import ToolResultStorage
     from box_agent.tools.base import ToolResult
     from box_agent.tools.engine.results import ToolResultPipelineInput, process_tool_result
 
-    def observer(tool_name, result, visible_error):
-        return notify_tool_failure_for_correction(
-            mgr,
-            tool_name=tool_name,
-            raw_error=str(visible_error or result.error or ""),
-            content=str(result.content or ""),
-        )
+    def observer(name, result, error, call_id, arguments, executed):
+        assert executed
+        return mgr.correction_curator.observe_result(
+            scope="run", subject=CorrectionSubject("tool", name), call_id=call_id,
+            arguments=arguments, success=result.success, error=error or "")
 
-    storage = ToolResultStorage(str(tmp_path / "results"))
-    err = "RuntimeError: repeated widget failure xyz"
+    messages = []
     outcomes = []
-    for _ in range(2):
-        outcomes.append(
-            process_tool_result(
-                ToolResultPipelineInput(
-                    messages=[],
-                    tool_call_id="c1",
-                    tool_name="widget",
-                    arguments={},
-                    result=ToolResult(success=False, content="", error=err),
-                    visible_content="",
-                    visible_error=err,
-                    result_storage=storage,
-                    correction_observer=observer,
-                    step=7,
-                )
-            )
-        )
-    listed = mgr.list_corrections()
-    assert len(listed) == 1
-    assert listed[0].subject_name == "widget"
-    assert not any(isinstance(event, ProgressEvent) for event in outcomes[0].events)
-    progress = [event for event in outcomes[1].events if isinstance(event, ProgressEvent)]
-    assert len(progress) == 1
-    assert progress[0].step == 7
-    assert progress[0].content.startswith("已记下纠错：")
-    assert progress[0].content.endswith(
-        " · tool:widget\n说「已修好」可作废；说「我的纠错记忆」可查看。"
-    )
+    for number, success in enumerate((False, False, True)):
+        outcomes.append(process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"call-{number}", tool_name="widget",
+            arguments={"mode": "fixed" if success else "broken"},
+            result=ToolResult(success=success, content="done" if success else "", error=None if success else "widget failed"),
+            visible_content="done" if success else "", visible_error=None if success else "widget failed",
+            result_storage=ToolResultStorage(str(tmp_path / "results")),
+            correction_observer=observer, executed=True, step=7,
+        )))
+    assert not any(isinstance(event, ProgressEvent) for out in outcomes[:2] for event in out.events)
+    assert not any(isinstance(event, ProgressEvent) for event in outcomes[2].events)
+    assert "verification_id" in messages[-1].content
+    assert mgr.list_corrections(include_inactive=True) == []
 
 
 def test_memory_manager_lazy_correction_curator(mgr: MemoryManager):

@@ -12,7 +12,6 @@ from ...correction import CorrectionNotice
 from ...events import (
     AgentEvent,
     PermissionRequestEvent,
-    ProgressEvent,
     ToolCallResult,
     WebSearchEvent,
 )
@@ -63,7 +62,8 @@ class ToolResultPipelineInput:
     parallel: bool = False
     commit_result: Callable[[Message, ToolCallResult, int], None] | None = None
     hook_text_modified: bool = False
-    correction_observer: Callable[[str, ToolResult, str | None], CorrectionNotice | None] | None = None
+    executed: bool = False
+    correction_observer: Callable[[str, ToolResult, str | None, str, dict, bool], CorrectionNotice | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,18 +90,6 @@ def process_tool_result(
     visible_content = pipeline_input.visible_content
     visible_error = pipeline_input.visible_error
     correction_notice: CorrectionNotice | None = None
-    if (
-        not result.success
-        and pipeline_input.correction_observer is not None
-    ):
-        try:
-            correction_notice = pipeline_input.correction_observer(
-                pipeline_input.tool_name,
-                result,
-                visible_error,
-            )
-        except Exception:
-            pass
     new_count = 0
     duplicate_count = 0
     new_labels: list[str] = []
@@ -198,6 +186,14 @@ def process_tool_result(
         pipeline_input.messages.append(tool_message)
     else:
         pipeline_input.commit_result(tool_message, result_event, pipeline_input.step)
+    if pipeline_input.correction_observer is not None:
+        try:
+            correction_notice = pipeline_input.correction_observer(
+                pipeline_input.tool_name, result, visible_error,
+                pipeline_input.tool_call_id, pipeline_input.arguments, pipeline_input.executed,
+            )
+        except Exception:
+            pass  # Memory observation must not change the executed tool's outcome.
     _record_context_resource_history(
         tool_call_id=pipeline_input.tool_call_id,
         decision=resource_decision,
@@ -236,19 +232,19 @@ def process_tool_result(
 
     events: list[AgentEvent] = [result_event]
     if correction_notice is not None:
-        lesson = " ".join(correction_notice.lesson.split())
-        if len(lesson) > 80:
-            lesson = lesson[:79].rstrip() + "…"
-        events.append(
-            ProgressEvent(
-                step=pipeline_input.step,
-                content=(
-                    f"已记下纠错：{lesson} · "
-                    f"{correction_notice.subject_kind}:{correction_notice.subject_name}\n"
-                    "说「已修好」可作废；说「我的纠错记忆」可查看。"
-                ),
-            )
-        )
+        import json
+        evidence = json.dumps({"verification_id": correction_notice.verification_id,
+                               "subject_kind": correction_notice.subject_kind,
+                               "subject_name": correction_notice.subject_name,
+                               "error_fingerprint": correction_notice.error_fingerprint}, ensure_ascii=False)
+        pipeline_input.messages.append(Message(
+            role="user", source="runtime",
+            content=("A matching tool operation succeeded after a recorded change and repeated failures. This is candidate evidence, "
+                     "not proof of a general remedy. If the repair is reusable, propose its specific "
+                     "steps and applicability with memory_write_correction and this verification_id. "
+                     "Do not invent a fix, store secrets, or save one-time setup repairs. "
+                     "The memory tool validates this evidence before activation; no user draft approval is needed. Evidence data: " + evidence),
+        ))
     if result.success and pipeline_input.user_visible:
         web_search_payload = _extract_web_search_payload(
             pipeline_input.tool_name,

@@ -976,21 +976,28 @@ async def _run_agent_loop_impl(
             context_engine.reserve_followup(blocks)
         return accepted, blocks, tokens
 
-    def _correction_observer(tool_name, result, visible_error):
-        from box_agent.correction import notify_tool_failure_for_correction
+    from uuid import uuid4
+    correction_scope = uuid4().hex
 
-        raw = ""
-        if visible_error:
-            raw = str(visible_error)
-        elif getattr(result, "error", None):
-            raw = str(result.error)
-        elif getattr(result, "content", None):
-            raw = str(result.content)
-        return notify_tool_failure_for_correction(
-            memory_lookup,
-            tool_name=tool_name,
-            raw_error=raw,
-            content=str(getattr(result, "content", "") or ""),
+    def _correction_observer(tool_name, result, visible_error, call_id, arguments, executed):
+        from box_agent.correction import current_correction_subjects
+
+        curator = getattr(memory_lookup, "correction_curator", None)
+        if curator is None or not executed:
+            return None
+        if tool_name == "write_file" and result.success:
+            raw = result.raw_output or {}
+            if not isinstance(raw, dict) or raw.get("transaction_state") != "committed":
+                return None
+            arguments = {**arguments, "path": raw.get("path", arguments.get("path"))}
+        subjects = current_correction_subjects(
+            {tool_name: tools.get(tool_name)}, _services.skill_engine,
+        )
+        return curator.observe_result(
+            scope=correction_scope, subject=subjects[0], call_id=call_id,
+            arguments=arguments, success=result.success,
+            error=str(visible_error or result.error or ""), content=str(result.content or ""),
+            skill_subjects=tuple(s for s in subjects if s.kind == "skill"), workspace=workspace_dir or "",
         )
 
     tool_engine.configure_run(

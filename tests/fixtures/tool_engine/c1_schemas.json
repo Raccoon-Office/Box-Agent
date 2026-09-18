@@ -586,13 +586,17 @@
       "aliases": [],
       "schema": {
         "name": "memory_write_correction",
-        "description": "Write a durable correction (failure lesson) to corrections memory. Creates a draft first; pass confirm=true with draft_id to activate. Refuses preference and secret content. Does not write MEMORY.md.",
+        "description": "Write a durable correction (failure lesson) to corrections memory. Requires verification_id from a real successful retry and a specific reusable remedy. Validated remedies become available automatically; never ask the user to manage draft states. Refuses preference and secret content. Does not write MEMORY.md.",
         "input_schema": {
           "type": "object",
           "properties": {
+            "verification_id": {
+              "type": "string",
+              "description": "Runtime-issued evidence id from a matching successful retry after changed arguments or a recorded file repair; required before storing a remedy."
+            },
             "lesson": {
               "type": "string",
-              "description": "One actionable lesson (required when creating a draft)."
+              "description": "Specific repair steps and their applicability; not a generic suggestion to retry."
             },
             "symptom": {
               "type": "string",
@@ -606,10 +610,7 @@
               "type": "string",
               "enum": [
                 "skill",
-                "tool",
-                "path_pattern",
-                "env",
-                "workflow"
+                "tool"
               ]
             },
             "subject_name": {
@@ -617,16 +618,14 @@
             },
             "subject_version": {
               "type": "string"
-            },
-            "confirm": {
-              "type": "boolean",
-              "description": "If true with draft_id, promote that draft to active."
-            },
-            "draft_id": {
-              "type": "string",
-              "description": "Draft entry id to confirm."
             }
-          }
+          },
+          "required": [
+            "lesson",
+            "error_fingerprint",
+            "subject_name",
+            "verification_id"
+          ]
         }
       }
     },

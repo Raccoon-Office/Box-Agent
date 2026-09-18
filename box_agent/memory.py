@@ -95,6 +95,7 @@ class ContextEntry:
     subject_version: str = ""
     lesson: str = ""
     symptom: str = ""
+    verification: str = ""  # Successful execution evidence; absent on legacy/unverified records.
 
 
 _ENTRY_HEADER_RE = re.compile(r"^\s*<!--\s*ctx\s+(.+?)\s*-->\s*$")
@@ -147,16 +148,20 @@ def _is_inactive_correction(entry: ContextEntry) -> bool:
     """True when *entry* is a correction that should be hidden from default search."""
     if (entry.entry_type or "") != "correction":
         return False
-    return (entry.status or "") != "active"
+    return (entry.status or "") != "active" or not entry.verification
 
 
-def _correction_content(lesson: str, symptom: str = "") -> str:
+def _correction_content(lesson: str, symptom: str = "", fingerprint: str = "", subject=None) -> str:
     """Build the searchable markdown body for a correction entry."""
     lesson = (lesson or "").strip()
     symptom = (symptom or "").strip()
     lines = [f"- lesson: {lesson}" if lesson else "- lesson:"]
     if symptom:
         lines.append(f"- symptom: {symptom}")
+    if fingerprint:
+        lines.append(f"- error: {fingerprint}")
+    if subject is not None:
+        lines.append(f"- scope: {subject.kind}:{subject.name}@{subject.version or 'unversioned'}")
     return "\n".join(lines)
 
 
@@ -196,6 +201,8 @@ def _format_entry_header(e: ContextEntry) -> str:
         parts.append(f"lesson={_header_value(e.lesson)}")
     if e.symptom:
         parts.append(f"symptom={_header_value(e.symptom)}")
+    if e.verification:
+        parts.append(f"verification={_header_value(e.verification, max_len=512)}")
     return "<!-- ctx " + " ".join(parts) + " -->"
 
 
@@ -271,6 +278,7 @@ def _parse_context_text(text: str) -> list[ContextEntry]:
                 subject_version=meta.get("subject_version") or "",
                 lesson=meta.get("lesson") or "",
                 symptom=meta.get("symptom") or "",
+                verification=meta.get("verification") or "",
             ))
         except (ValueError, TypeError):
             logger.warning("Bad ContextEntry metadata, using defaults: %s", meta)
@@ -531,6 +539,8 @@ class TopicStore:
     def _index_record(slug: str, group: list[ContextEntry]) -> dict[str, Any]:
         terms: set[str] = set(_extract_match_terms(slug.replace("-", " ")))
         for entry in group:
+            if _is_inactive_correction(entry):
+                continue
             terms.update(_extract_match_terms(entry.content.lower()))
         return {
             "count": len(group),
@@ -733,7 +743,7 @@ class MemoryManager:
         entries = self._read_context_entries() + self._read_legacy_context_entries()
         if not entries:
             return ""
-        return "\n".join(e.content for e in entries).strip()
+        return "\n".join(e.content for e in entries if e.entry_type != "correction").strip()
 
     @_serialized_context
     def write_context(self, content: str, *, topic: str = "general") -> None:
@@ -745,6 +755,8 @@ class MemoryManager:
         use ``append_context`` / ``apply_context_operations``.
         """
         slug = _slugify_topic(topic)
+        if slug == _CORRECTIONS_TOPIC:
+            raise ValueError("Use correction tools to manage the reserved corrections topic")
         replacement = [
             _new_entry(line, source="tool", topic=slug)
             for line in content.splitlines()
@@ -770,6 +782,8 @@ class MemoryManager:
         entries' metadata (hits, created, etc., and original topic) is preserved
         on fuzzy match.
         """
+        if _slugify_topic(topic) == _CORRECTIONS_TOPIC:
+            raise ValueError("Use correction tools to manage the reserved corrections topic")
         existing = self.read_context()
         filtered = self._dedupe_context_lines(content, existing_context=existing)
 
@@ -778,7 +792,7 @@ class MemoryManager:
 
         existing_entries = self._read_context_entries()
         threshold = self.dedup_jaccard_threshold
-        entry_tokens = [tokens(e.content) for e in existing_entries]
+        entry_tokens = [tokens(e.content) if e.entry_type != "correction" else set() for e in existing_entries]
         topic_slug = _slugify_topic(topic)
 
         new_entries: list[ContextEntry] = []
@@ -1009,11 +1023,11 @@ class MemoryManager:
     # ── Correction memory (R2+R3) ─────────────────────────────
 
     @_serialized_context
-    def write_correction(self, draft, *, status: str = "active") -> ContextEntry:
+    def write_correction(self, draft, *, status: str = "draft") -> ContextEntry:
         """Persist a correction under topic ``corrections``.
 
-        Idempotent for active entries: same fingerprint + subject updates the
-        existing active row (lesson/hits) instead of duplicating.
+        New proposals are drafts by default. Direct active writes never overwrite
+        an existing remedy; evidenced replacement goes through the activation path.
         """
         from box_agent.correction import CorrectionDraft, CorrectionSubject
 
@@ -1031,7 +1045,13 @@ class MemoryManager:
         if not subject.name:
             raise ValueError("subject.name is required")
 
-        status = (status or "active").strip() or "active"
+        from box_agent.correction import CorrectionCurator
+        CorrectionCurator().reject_if_forbidden(draft)
+        status = (status or "draft").strip() or "draft"
+        if status not in {"draft", "active", "superseded", "deleted"}:
+            raise ValueError("invalid correction status")
+        if status == "active" and not draft.verification:
+            raise ValueError("verified execution evidence is required before activation")
         topic = _CORRECTIONS_TOPIC
         kind = _header_value(subject.kind)
         name = _header_value(subject.name)
@@ -1040,27 +1060,16 @@ class MemoryManager:
 
         if status == "active":
             for existing in entries:
-                if (
-                    existing.entry_type == "correction"
-                    and existing.status == "active"
-                    and existing.error_fingerprint == fingerprint
-                    and existing.subject_kind == kind
-                    and existing.subject_name == name
-                    and (existing.subject_version or "") == version
-                ):
-                    existing.lesson = _header_value(lesson)
-                    existing.symptom = _header_value(symptom)
-                    existing.content = _correction_content(lesson, symptom)
-                    existing.hits += 1
-                    existing.last_used = _now_iso()
-                    existing.source = draft.source or existing.source
-                    self._write_context_topic_entries(entries)
+                if (existing.entry_type == "correction" and existing.status == "active"
+                        and existing.error_fingerprint == fingerprint
+                        and (existing.subject_kind, existing.subject_name, existing.subject_version or "")
+                        == (kind, name, version)):
                     return existing
 
         now = _now_iso()
         entry = ContextEntry(
             id=_new_entry_id(),
-            content=_correction_content(lesson, symptom),
+            content=_correction_content(lesson, symptom, draft.error_fingerprint, subject),
             created=now,
             last_used=now,
             hits=0,
@@ -1075,6 +1084,7 @@ class MemoryManager:
             subject_version=version,
             lesson=_header_value(lesson),
             symptom=_header_value(symptom),
+            verification=draft.verification,
         )
         entries.append(entry)
         self._write_context_topic_entries(entries)
@@ -1101,7 +1111,35 @@ class MemoryManager:
             return [e for e in entries if (e.status or "") == status]
         if include_inactive:
             return entries
-        return [e for e in entries if (e.status or "") == "active"]
+        return [e for e in entries if not _is_inactive_correction(e)]
+
+    @_serialized_context
+    def recall_corrections(self, subjects, *, query: str = "", limit: int = 3,
+                           max_chars: int = 1800) -> list[dict[str, str]]:
+        """Return verified remedies for exact, currently known subject versions."""
+        keys = {(_header_value(s.kind), _header_value(s.name), _header_value(s.version))
+                for s in subjects}
+        candidates = []
+        terms = _extract_match_terms(query.lower())
+        for entry in self.list_corrections():
+            if (entry.subject_kind, entry.subject_name, entry.subject_version or "") not in keys:
+                continue
+            score = _score_memory_match(query.lower(), terms, entry.content.lower()) if terms else 0
+            candidates.append((score, entry.last_used, entry))
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected = []
+        remaining = max(0, max_chars)
+        for _, _, entry in candidates:
+            # JSON makes record boundaries explicit; memory remains non-authoritative data.
+            text = json.dumps({"id": entry.id, "subject": f"{entry.subject_kind}:{entry.subject_name}",
+                               "version": entry.subject_version, "remedy": entry.content}, ensure_ascii=False)
+            if len(text) > remaining:
+                continue  # Never truncate a remedy into a different instruction.
+            selected.append({"id": entry.id, "text": text})
+            remaining -= len(text)
+            if len(selected) >= min(3, max(0, limit)):
+                break
+        return selected if limit > 0 else []
 
     @_serialized_context
     def supersede_correction(self, entry_id: str, *, reason: str = "fixed") -> ContextEntry:
@@ -1163,6 +1201,25 @@ class MemoryManager:
         return changed
 
     @_serialized_context
+    def remember_verified_correction(self, draft) -> ContextEntry:
+        """Publish evidenced input atomically without exposing staging to users."""
+        if not draft.verification:
+            raise ValueError("verified execution evidence is required before activation")
+        for existing in self.list_corrections(include_inactive=True):
+            if (existing.verification == draft.verification
+                    and existing.error_fingerprint == _header_value(draft.error_fingerprint)
+                    and (existing.subject_kind, existing.subject_name, existing.subject_version or "")
+                    == (_header_value(draft.subject.kind), _header_value(draft.subject.name),
+                        _header_value(draft.subject.version))):
+                if existing.status != "active":
+                    raise ValueError("Revoked evidence cannot reactivate a remedy; validate it again")
+                if existing.content == _correction_content(draft.lesson, draft.symptom, draft.error_fingerprint, draft.subject):
+                    return existing
+                raise ValueError("A different remedy needs fresh verification evidence")
+        entry = self.write_correction(draft, status="draft")
+        return self.confirm_correction_draft(entry.id)
+
+    @_serialized_context
     def confirm_correction_draft(self, entry_id: str) -> ContextEntry:
         """Promote a draft correction to active (idempotent if already active)."""
         entries = self._topic_store.read_topic(_CORRECTIONS_TOPIC)
@@ -1173,6 +1230,8 @@ class MemoryManager:
                 break
         if draft_entry is None:
             raise KeyError(f"correction not found: {entry_id}")
+        if not draft_entry.verification:
+            raise ValueError("verified execution evidence is required before activation")
         if draft_entry.status == "active":
             return draft_entry
         if draft_entry.status != "draft":
@@ -1180,27 +1239,15 @@ class MemoryManager:
                 f"correction {entry_id} is not a draft (status={draft_entry.status})"
             )
 
-        fingerprint = draft_entry.error_fingerprint
+        # Preserve the old record and evidence. Only validated activation can
+        # supersede a currently active remedy for the same identity.
         for existing in entries:
-            if existing.id == draft_entry.id:
-                continue
-            if (
-                existing.entry_type == "correction"
-                and existing.status == "active"
-                and existing.error_fingerprint == fingerprint
-                and existing.subject_kind == draft_entry.subject_kind
-                and existing.subject_name == draft_entry.subject_name
-                and (existing.subject_version or "") == (draft_entry.subject_version or "")
-            ):
-                existing.content = draft_entry.content
-                existing.lesson = draft_entry.lesson
-                existing.symptom = draft_entry.symptom
-                existing.hits += 1
-                existing.last_used = _now_iso()
-                draft_entry.status = "superseded"
-                draft_entry.last_used = existing.last_used
-                self._write_context_topic_entries(entries)
-                return existing
+            if (existing.id != draft_entry.id and existing.entry_type == "correction"
+                    and existing.status == "active"
+                    and existing.error_fingerprint == draft_entry.error_fingerprint
+                    and (existing.subject_kind, existing.subject_name, existing.subject_version)
+                    == (draft_entry.subject_kind, draft_entry.subject_name, draft_entry.subject_version)):
+                existing.status = "superseded"
 
         draft_entry.status = "active"
         draft_entry.last_used = _now_iso()
@@ -1415,7 +1462,7 @@ class MemoryManager:
         scored: list[tuple[float, int, str, int]] = []
         line_no = 0
         for entry_idx, entry in enumerate(entries):
-            if _is_inactive_correction(entry):
+            if entry.entry_type == "correction":
                 continue
             for raw_line in entry.content.splitlines():
                 line_no += 1
@@ -1676,7 +1723,7 @@ class MemoryManager:
                 new = str(op.get("new", "")).strip()
                 if not old or not new:
                     continue
-                indices = [i for i, e in enumerate(entries) if e.content.strip() == old]
+                indices = [i for i, e in enumerate(entries) if e.entry_type != "correction" and e.content.strip() == old]
                 if len(indices) != 1:
                     if len(indices) > 1:
                         logger.warning("Ambiguous context memory replace skipped (%d matches): %s", len(indices), old[:80])
@@ -1699,7 +1746,7 @@ class MemoryManager:
                 content = str(op.get("content", "")).strip()
                 if not content:
                     continue
-                indices = [i for i, e in enumerate(entries) if e.content.strip() == content]
+                indices = [i for i, e in enumerate(entries) if e.entry_type != "correction" and e.content.strip() == content]
                 if len(indices) != 1:
                     if len(indices) > 1:
                         logger.warning("Ambiguous context memory drop skipped (%d matches): %s", len(indices), content[:80])
@@ -1712,6 +1759,8 @@ class MemoryManager:
                 if not content:
                     continue
                 op_topic = _slugify_topic(str(op.get("topic", "") or "general"))
+                if op_topic == _CORRECTIONS_TOPIC:
+                    continue
                 op_source = _header_value(op.get("source") or "tool")
                 op_session_id = _header_value(op.get("session_id") or op.get("sessionId"))
                 op_turn_id = _header_value(op.get("turn_id") or op.get("turnId"))
@@ -1768,6 +1817,8 @@ class MemoryManager:
         cooldown = timedelta(days=max(cooldown_days, 0))
         candidates: list[ContextEntry] = []
         for e in entries:
+            if e.entry_type == "correction":
+                continue
             if e.hits < hit_threshold:
                 continue
             if e.core_status == "rejected":

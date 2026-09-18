@@ -407,7 +407,7 @@ class DefaultToolEngine:
             turn_id=context.turn_id, step=control.step, started_at=call.started_at,
             parallel=call.parallel, commit_result=context.commit_result,
             hook_text_modified=hook_text_modified,
-            correction_observer=context.correction_observer,
+            correction_observer=context.correction_observer, executed=call.executed,
         ))
         self._search.record_result(outcome, search)
         if context.hook_dispatch is not None and not context.is_cancelled():

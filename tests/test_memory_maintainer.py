@@ -754,7 +754,7 @@ async def test_compact_isolates_corrections_preserves_metadata(memory_dir):
             symptom="ERESOLVE peer dependency",
             subject=CorrectionSubject(kind="tool", name="npm"),
             error_fingerprint="eresolve peer dependency",
-            source="explicit",
+            source="explicit", verification="tool=fixture;call=validated;result=success",
         ),
         status="active",
     )
@@ -764,7 +764,7 @@ async def test_compact_isolates_corrections_preserves_metadata(memory_dir):
             symptom=canary,
             subject=CorrectionSubject(kind="tool", name="npm-deleted"),
             error_fingerprint=f"deleted-fp-{canary}",
-            source="explicit",
+            source="explicit", verification="tool=fixture;call=validated;result=success",
         ),
         status="active",
     )

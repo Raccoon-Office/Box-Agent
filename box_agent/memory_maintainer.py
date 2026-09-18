@@ -197,7 +197,7 @@ class MemoryMaintainer:
         active: list[ContextEntry] = []
         to_archive: list[ContextEntry] = []
         for e in entries:
-            if e.hits == 0 and _parse_iso_utc(e.last_used) < threshold:
+            if e.entry_type != "correction" and e.hits == 0 and _parse_iso_utc(e.last_used) < threshold:
                 to_archive.append(e)
             else:
                 active.append(e)
@@ -229,7 +229,7 @@ class MemoryMaintainer:
         keep: list[ContextEntry] = []
         purge: list[ContextEntry] = []
         for e in entries:
-            if _parse_iso_utc(e.last_used) < threshold:
+            if e.entry_type != "correction" and _parse_iso_utc(e.last_used) < threshold:
                 purge.append(e)
             else:
                 keep.append(e)
@@ -263,7 +263,7 @@ class MemoryMaintainer:
         # Priority key: (hits desc, created asc) — most-used + oldest wins.
         token_cache: list[set[str]] = [_tokens(e.content) for e in entries]
         indices = sorted(
-            range(len(entries)),
+            (i for i, entry in enumerate(entries) if entry.entry_type != "correction"),
             key=lambda i: (-entries[i].hits, entries[i].created),
         )
 
@@ -639,7 +639,8 @@ class MemoryMaintainer_Conflict:  # placeholder — bound onto MemoryMaintainer 
         if not self._cfg.memory_conflict_resolution_enabled or self._llm is None:
             return
 
-        entries = await asyncio.to_thread(self._mgr.read_all_context_entries)
+        entries = [entry for entry in await asyncio.to_thread(self._mgr.read_all_context_entries)
+                   if entry.entry_type != "correction"]
         if len(entries) < 2:
             return
 
