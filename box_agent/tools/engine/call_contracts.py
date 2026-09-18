@@ -12,6 +12,7 @@ from ..base import Tool, ToolResult
 
 if TYPE_CHECKING:
     from ...context_resources import ContextResourceLedger
+    from ...correction import CorrectionNotice
     from ...events import ToolCallResult
     from ...kernel.ports import HookBusPort, HookDispatchPort
     from ...kernel.hook_types import HookContext
@@ -60,6 +61,7 @@ class ToolRunContext:
     hook_dispatch: HookDispatchPort | None = None
     hook_context: HookContext | None = None
     skill_reader: Callable[..., ToolResult] | None = None
+    correction_observer: Callable[[str, ToolResult, str | None, str, dict, bool], CorrectionNotice | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)

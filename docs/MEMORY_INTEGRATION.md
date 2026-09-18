@@ -275,3 +275,100 @@ mgr.write_manual_memory("- 用户偏好中文")
 mgr.read_all()
 mgr.write_all("- 用户偏好中文")
 ```
+
+
+---
+
+## 9. Verified correction memory
+
+Correction memory learns concrete repairs and supplies relevant guidance **before**
+the model selects its next operation. It is separate from always-injected core memory.
+
+```mermaid
+flowchart LR
+    A[Repeated failures] --> B[Changed operation succeeds]
+    B --> C[Runtime evidence receipt]
+    C --> D[Specific remedy and applicability]
+    D --> E[Validate and remember automatically]
+    E --> F[Match current tools and Skill revisions]
+    F --> G[Bounded guidance before the next model request]
+```
+
+### What users see
+
+There is no draft approval task for the user. Once a specific reusable remedy is
+saved with matching runtime evidence, the tool reports:
+
+> 已记住这个解决办法，下次遇到相同情况会提前提醒。
+
+Users may say “忘掉这条” or “这个办法不适用了”; the agent uses the existing delete or
+supersede tool. A failure by itself never produces a “saved” message. Internal staging
+is a storage implementation detail, not a user-facing workflow.
+
+### Learning and evidence
+
+- Runtime observation requires actually executed tool calls. Denied calls and fabricated
+  model statements cannot issue evidence.
+- Two distinct failures for the same fingerprint and subject within one run, followed by
+  a successful call with changed arguments or an observed file repair, can issue an opaque `verification_id`.
+  Observations and receipts are bounded in-memory data with a six-hour validation window.
+- Success must match the original tool/version and operation identity. File/URL targets
+  must agree. Simple shell calls must retain their executable/script/subcommand identity;
+  unrelated successful commands and help/version/dry-run calls do not verify a repair.
+  `uv run` and `npm run` retain the actual script identity. An unchanged command may
+  verify a repair only after an executed edit/append or committed write to its script/input
+  in the same run. Compound or dynamic shell/code
+  calls conservatively receive no receipt.
+- A successful call proves an observed execution outcome, **not universal correctness**.
+  The model must still provide specific repair steps, the failure they address, and their
+  applicability. It must not infer “a known fix” merely from repeated failures.
+- `memory_write_correction` requires the receipt, `lesson`, `error_fingerprint`, and
+  `subject_name`. It verifies identity and evidence before saving and activating the
+  remedy in one call. No `confirm` or `draft_id` round-trip is exposed by the tool.
+- Receipts bind the tool and source-validated active Skills at execution time. A Skill
+  remedy is stored against that exact source revision. The tool supports `tool` and
+  `skill` subjects; other historic subject kinds remain readable through the storage API
+  but are not automatically inferred from arbitrary model claims.
+- Failure strings, lessons, and scope metadata pass the preference/credential checks.
+  Raw commands and tool output are not copied into durable evidence; its record contains
+  the executed call identifier and an argument digest. One-shot setup repairs must not
+  be proposed as reusable lessons.
+
+### Using remembered repairs
+
+When memory is enabled, the default Context engine checks current offered tools and
+selected/read, source-valid Skills **on every request preparation**, including the first
+request. Matching uses exact subject identity and version/revision, with task text used
+only to rank matching records. A versioned record is not used when the current version
+is unknown or different.
+
+At most three complete records and 1,800 characters are supplied, further bounded by
+available request budget. Oversize records are omitted, never truncated into a different
+instruction. Guidance is request-only reference data; it does not change durable history,
+tool arguments, permissions, or user instructions. Revoked records disappear from the
+next prepared request. Custom Context implementations may opt into `bind_memory`; their
+existing contracts remain unchanged.
+
+General user-text auto-match excludes corrections so it cannot bypass subject/version
+checks. Explicit `memory_search` still finds verified active corrections, including their
+error fingerprint even when `symptom` was omitted. No vector database or full correction
+file injection into the system prompt is introduced.
+
+### Storage, maintenance, and compatibility
+
+- Records remain in `~/.box-agent/memory/v2/experiences/corrections.md` with their existing
+  lifecycle and a new `verification` evidence field.
+- Unverified and legacy active records without evidence stay inspectable, but are excluded
+  from default search and automatic recall. Revalidate and save them with fresh evidence;
+  do not silently bless old template lessons.
+- Generic decay, deduplication, conflict arbitration and compaction do not alter correction
+  records. Generic context overwrite/add/replace/drop cannot mutate their reserved topic
+  or records. Corrections are also excluded from promotion into always-injected core memory.
+- An evidenced replacement supersedes the previous record and retains its history. Used
+  receipts cannot reactivate deleted/superseded records or authorize different remedies. Repeated
+  failures and direct active writes cannot overwrite an existing concrete remedy with a template.
+- Receipt expiry is not a TTL on remembered repairs. Active records remain until superseded,
+  deleted, or excluded by subject/version applicability.
+- The development PR's former `confirm`/`draft_id` tool schema is replaced by the one-call
+  evidence contract. Hosts must rebuild/install the runtime and restart to adopt it. Source
+  tests do not prove that an installed desktop client is using these changes.

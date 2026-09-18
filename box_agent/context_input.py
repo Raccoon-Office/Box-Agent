@@ -44,6 +44,7 @@ class DefaultContextEngine:
         [str, str | tuple[str, ...]], str,
     ] = effective_system_prompt) -> None:
         self._system_prompt_projector = system_prompt_projector
+        self._memory_lookup = None
         self.references: SkillReferenceContext | None = None
         self.prepared_tools: PreparedTools | None = None
         self._history: list[Message] = []
@@ -60,6 +61,10 @@ class DefaultContextEngine:
                            if skill_engine is not None else None)
         self.prepared_tools = None
         self._history = []
+
+    def bind_memory(self, memory_lookup: Any) -> None:
+        """Bind optional memory after run capabilities have been resolved."""
+        self._memory_lookup = memory_lookup
 
     def bind_history(self, messages: list[Message]) -> None:
         """Observe exact tool history before Kernel may compact it; never edit it."""
@@ -122,6 +127,18 @@ class DefaultContextEngine:
         self.bind_history(messages)
         self._pending_followup_blocks = []
         self.prepared_tools = prepared_tools
+        from .correction import prepare_correction_context
+        available = skill_reference_budget_chars(
+            self.project_history([*messages, *extra_messages, *((transient_message,) if transient_message else ())]),
+            prepared_tools.definitions, max(0, token_limit - max(0, transient_tokens)), output_tokens,
+        )
+        correction_context = prepare_correction_context(
+            self._memory_lookup, prepared_tools.targets,
+            self.references.runtime if self.references is not None else None, messages,
+            budget_chars=min(1800, max(0, available)),
+        )
+        if correction_context is not None:
+            extra_messages = (*extra_messages, correction_context)
         self._extra_messages = (*extra_messages, *((transient_message,) if transient_message is not None else ()))
         self._token_limit, self._output_tokens = token_limit, output_tokens
         self._transient_tokens = (max(transient_tokens, _fallback_context_estimate([transient_message], {}))

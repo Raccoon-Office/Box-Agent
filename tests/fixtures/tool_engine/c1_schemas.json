@@ -556,6 +556,121 @@
         }
       }
     },
+    "memory_list_corrections": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_list_corrections",
+        "description": "List correction-memory entries (durable failure lessons). By default returns active corrections only. Does not touch MEMORY.md.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "superseded",
+                "draft",
+                "deleted"
+              ],
+              "description": "Optional status filter. Omit for active-only."
+            },
+            "include_inactive": {
+              "type": "boolean",
+              "description": "If true and status is omitted, include non-active corrections."
+            }
+          }
+        }
+      }
+    },
+    "memory_write_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_write_correction",
+        "description": "Write a durable correction (failure lesson) to corrections memory. Requires verification_id from a real successful retry and a specific reusable remedy. Validated remedies become available automatically; never ask the user to manage draft states. Refuses preference and secret content. Does not write MEMORY.md.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "verification_id": {
+              "type": "string",
+              "description": "Runtime-issued evidence id from a matching successful retry after changed arguments or a recorded file repair; required before storing a remedy."
+            },
+            "lesson": {
+              "type": "string",
+              "description": "Specific repair steps and their applicability; not a generic suggestion to retry."
+            },
+            "symptom": {
+              "type": "string",
+              "description": "Short symptom summary (no long stacks)."
+            },
+            "error_fingerprint": {
+              "type": "string",
+              "description": "Normalized error fingerprint (or raw error to normalize)."
+            },
+            "subject_kind": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "tool"
+              ]
+            },
+            "subject_name": {
+              "type": "string"
+            },
+            "subject_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "lesson",
+            "error_fingerprint",
+            "subject_name",
+            "verification_id"
+          ]
+        }
+      }
+    },
+    "memory_supersede_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_supersede_correction",
+        "description": "Supersede (invalidate) a correction by id. Superseded corrections are hidden from default memory_search.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "description": "Correction entry id to supersede."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Optional reason (e.g. 'fixed', 'obsolete')."
+            }
+          },
+          "required": [
+            "entry_id"
+          ]
+        }
+      }
+    },
+    "memory_delete_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_delete_correction",
+        "description": "Soft-delete a correction by id (status=deleted). Deleted corrections are hidden from default memory_search.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "description": "Correction entry id to delete."
+            }
+          },
+          "required": [
+            "entry_id"
+          ]
+        }
+      }
+    },
     "obsidian_create_note": {
       "aliases": [],
       "schema": {
