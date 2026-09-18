@@ -29,6 +29,7 @@ import asyncio
 import logging
 import sys
 import time
+from weakref import WeakValueDictionary
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -160,10 +161,16 @@ class PlaywrightSessionPool:
         idle_timeout: float = 1800.0,
         wait_timeout: float = 5.0,
         time_fn: Callable[[], float] = time.monotonic,
+        default_mode: str = "headless",
+        mode_factory: Callable[[AsyncExitStack, str], Awaitable[Any]] | None = None,
     ):
         if max_clients < 1:
             raise ValueError("max_clients must be >= 1")
         self._factory = session_factory
+        self._default_mode = default_mode
+        self._mode_factory = mode_factory
+        self._modes: dict[str, str] = {}
+        self._session_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._max_clients = max_clients
         self._idle_timeout = idle_timeout
         self._wait_timeout = wait_timeout
@@ -189,6 +196,63 @@ class PlaywrightSessionPool:
 
     def active_keys(self) -> list[str]:
         return [key for key, client in self._clients.items() if not client.closing]
+
+    def browser_status(self, key: str | None = None) -> dict[str, Any]:
+        key = key or self._resolve_key()
+        client = self._live(key)
+        return {
+            "mode": self._modes.get(key, self._default_mode),
+            "scope": "session",
+            "switch_supported": self._mode_factory is not None,
+            "browser_started": bool(client and client.extra.get("browser_started")),
+            "isolated": True,
+        }
+
+    def _session_lock(self, key: str) -> asyncio.Lock:
+        return self._session_locks.setdefault(key, asyncio.Lock())
+
+    async def set_browser_mode(self, mode: str) -> dict[str, Any]:
+        """Restart only this session; never migrate cookies, forms or page refs."""
+        if mode not in {"headed", "headless"}:
+            raise ValueError("mode must be headed or headless")
+        if self._mode_factory is None:
+            raise RuntimeError("Session browser switching is unavailable")
+        key = self._resolve_key()
+        async with self._session_lock(key):
+            if self._closed:
+                raise RuntimeError("PlaywrightSessionPool is closed")
+            changed = mode != self._modes.get(key, self._default_mode)
+            needs_page = changed or self._live(key) is None
+            reset = False
+            if changed:
+                async with self._sync():
+                    client = self._clients.get(key)
+                    if client is not None:
+                        reset = client.calls > 0
+                        await self._close_client(client, reason="window-mode-changed")
+                    self._modes[key] = mode
+            # Verify browser launch, not merely MCP initialize/list_tools.
+            try:
+                async with self._lease(key) as session:
+                    result = await asyncio.wait_for(
+                        session.call_tool(
+                            "browser_navigate" if needs_page else "browser_tabs",
+                            arguments={"url": "about:blank"} if needs_page else {"action": "list"},
+                        ),
+                        timeout=_WARM_UP_TIMEOUT,
+                    )
+                    if getattr(result, "isError", False):
+                        raise RuntimeError("Browser launch failed; requested mode is not verified")
+                    self._clients[key].extra["browser_started"] = True
+            except BaseException:
+                await self._close_session(key)
+                raise
+            return {
+                **self.browser_status(key),
+                "changed": changed,
+                "state_reset": reset,
+                "note": "After state_reset, navigate again and obtain fresh refs. Login and form state are not restored.",
+            }
 
     def snapshot(self) -> dict[str, Any]:
         now = self._time()
@@ -288,8 +352,13 @@ class PlaywrightSessionPool:
             loop = asyncio.get_running_loop()
             ready: asyncio.Future[Any] = loop.create_future()
             close_requested = asyncio.Event()
+            mode = self._modes.get(key, self._default_mode)
+            factory = self._factory
+            if mode != self._default_mode and self._mode_factory is not None:
+                async def factory(stack: AsyncExitStack) -> Any:
+                    return await self._mode_factory(stack, mode)
             runner = asyncio.create_task(
-                _run_client(self._factory, ready, close_requested),
+                _run_client(factory, ready, close_requested),
                 name=f"playwright-session-client-{key}",
             )
             try:
@@ -400,10 +469,11 @@ class PlaywrightSessionPool:
             client.in_use += 1
             client.calls += 1
             try:
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     client.session.call_tool("browser_tabs", arguments={"action": "list"}),
                     timeout=_WARM_UP_TIMEOUT,
                 )
+                client.extra["browser_started"] = not getattr(result, "isError", False)
             except Exception as error:  # noqa: BLE001
                 sys.stderr.write(
                     f"[browser] warm-up for session {client.key!r} failed: {error}\n"
@@ -442,6 +512,13 @@ class PlaywrightSessionPool:
 
     @asynccontextmanager
     async def lease(self, key: str | None = None) -> AsyncIterator[Any]:
+        key = key or self._resolve_key()
+        async with self._session_lock(key):
+            async with self._lease(key) as session:
+                yield session
+
+    @asynccontextmanager
+    async def _lease(self, key: str) -> AsyncIterator[Any]:
         """Yield the session for the current browser session key, counting it in-use."""
         if self._closed:
             raise RuntimeError("PlaywrightSessionPool is closed")
@@ -466,6 +543,11 @@ class PlaywrightSessionPool:
                     self._condition.notify_all()
 
     async def close(self, key: str) -> bool:
+        async with self._session_lock(key):
+            self._modes.pop(key, None)
+            return await self._close_session(key)
+
+    async def _close_session(self, key: str) -> bool:
         """Close the client for ``key`` if present. Returns True when one was closed."""
         client = self._clients.get(key)
         if client is None or client.closing:
@@ -497,6 +579,7 @@ class PlaywrightSessionPool:
                 for client in list(self._clients.values()):
                     await self._close_client(client, reason="pool-shutdown")
             self._generation += 1
+            self._modes.clear()
 
         cleanup = asyncio.create_task(finish_close())
         try:

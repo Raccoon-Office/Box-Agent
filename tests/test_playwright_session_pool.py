@@ -64,6 +64,106 @@ class Clock:
         return self.now
 
 
+async def test_window_switch_rebuilds_only_current_session_and_preserves_other_client():
+    default = FakeFactory()
+    visible = FakeFactory()
+
+    async def mode_factory(stack, mode):
+        assert mode == "headed"
+        return await visible(stack)
+
+    pool = PlaywrightSessionPool(default, mode_factory=mode_factory, idle_timeout=0)
+    token = set_browser_session_key("A")
+    try:
+        async with pool.lease() as original:
+            pass
+        other = await pool.resolve("B")
+        result = await pool.set_browser_mode("headed")
+        assert result["state_reset"] is True
+        assert result["browser_started"] is True
+        assert original.closed
+        assert await pool.resolve("B") is other
+        assert not other.closed
+        async with pool.lease() as current:
+            assert current is visible.created[0]
+        assert (await pool.set_browser_mode("headed"))["changed"] is False
+        assert len(visible.created) == 1
+        await pool.set_browser_mode("headless")
+        assert visible.created[0].closed
+        assert pool.browser_status()["mode"] == "headless"
+        assert await pool.resolve("B") is other
+    finally:
+        reset_browser_session_key(token)
+        await pool.close_all(final=True)
+
+
+async def test_window_switch_waits_for_inflight_call_in_same_session():
+    factory = FakeFactory()
+    pool = PlaywrightSessionPool(factory, mode_factory=lambda stack, mode: factory(stack), idle_timeout=0)
+    token = set_browser_session_key("A")
+    try:
+        async with pool.lease() as original:
+            switch = asyncio.create_task(pool.set_browser_mode("headed"))
+            await asyncio.sleep(0)
+            assert not switch.done()
+            assert not original.closed
+        await switch
+        assert original.closed
+    finally:
+        reset_browser_session_key(token)
+        await pool.close_all(final=True)
+
+
+async def test_failed_window_launch_is_not_reported_as_started():
+    factory = FakeFactory()
+
+    async def broken(stack, mode):
+        raise RuntimeError("browser unavailable")
+
+    pool = PlaywrightSessionPool(factory, mode_factory=broken, idle_timeout=0)
+    try:
+        with pytest.raises(RuntimeError, match="browser unavailable"):
+            await pool.set_browser_mode("headed")
+        assert pool.browser_status()["browser_started"] is False
+        assert pool.active_keys() == []
+        with pytest.raises(ValueError):
+            await pool.set_browser_mode("invalid")
+    finally:
+        await pool.close_all(final=True)
+
+
+async def test_cancelled_window_launch_closes_new_client_and_can_retry():
+    factory = FakeFactory()
+    started = asyncio.Event()
+
+    async def mode_factory(stack, mode):
+        session = await factory(stack)
+        original = session.call_tool
+
+        async def call(name, arguments=None):
+            if name == "browser_navigate":
+                started.set()
+                await asyncio.Event().wait()
+            return await original(name, arguments)
+
+        session.call_tool = call
+        return session
+
+    pool = PlaywrightSessionPool(factory, mode_factory=mode_factory, idle_timeout=0)
+    try:
+        task = asyncio.create_task(pool.set_browser_mode("headed"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert factory.created[0].closed
+        assert pool.active_keys() == []
+        assert not pool.browser_status()["browser_started"]
+        assert (await pool.set_browser_mode("headless"))["browser_started"]
+    finally:
+        await pool.close_all(final=True)
+
+
 async def test_distinct_session_keys_get_distinct_clients_and_same_key_reuses():
     factory = FakeFactory()
     pool = PlaywrightSessionPool(factory, max_clients=4)

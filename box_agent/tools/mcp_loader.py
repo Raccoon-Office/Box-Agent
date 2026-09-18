@@ -1510,10 +1510,37 @@ class MCPServerConnection:
                 await session.initialize()
             return session
 
+        async def _mode_factory(exit_stack: AsyncExitStack, mode: str) -> ClientSession:
+            # An alternate window mode owns a separate process for this client.
+            # Never restart the shared discovery/default server or another session.
+            args = [arg for arg in self.args if arg != "--headless"]
+            if mode == "headless":
+                args.append("--headless")
+            env = dict(self._build_stdio_env() or {})
+            env["PLAYWRIGHT_MCP_HEADLESS"] = "1" if mode == "headless" else ""
+            process = ManagedHttpServerProcess(
+                name=self.name, command=self.command or "", args=args, env=env,
+            )
+            exit_stack.push_async_callback(process.stop)
+            async with _timeout(connect_timeout):
+                await process.start(connect_timeout)
+                read_stream, write_stream = await _open_streamable_http(
+                    exit_stack, url=process.url, headers=self.headers, auth=self.auth,
+                    connect_timeout=connect_timeout,
+                    sse_read_timeout=self._get_sse_read_timeout(),
+                )
+                session = await exit_stack.enter_async_context(
+                    ClientSession(read_stream, write_stream)
+                )
+                await session.initialize()
+            return session
+
         return PlaywrightSessionPool(
             _session_factory,
             max_clients=isolation.max_clients,
             idle_timeout=isolation.idle_timeout,
+            default_mode="headless" if "--headless" in self.args or self.env.get("PLAYWRIGHT_MCP_HEADLESS") else "headed",
+            mode_factory=_mode_factory,
         )
 
     async def _shutdown_multiplexed_server(self) -> None:
@@ -1665,6 +1692,20 @@ def get_playwright_session_pool() -> PlaywrightSessionPool | None:
     """Return the live per-session Playwright client pool, if multiplexing is active."""
     conn = next((c for c in _mcp_connections if c.name == PLAYWRIGHT_SERVER_NAME), None)
     return conn.session_pool if conn is not None else None
+
+
+def inspect_live_browser() -> dict | None:
+    """Report the connected runtime instead of the user-writable config file."""
+    conn = next((c for c in _mcp_connections if c.name == PLAYWRIGHT_SERVER_NAME), None)
+    if conn is None:
+        return None
+    if conn.session_pool is not None:
+        return {"source": "runtime", "enabled": True, **conn.session_pool.browser_status()}
+    return {
+        "source": "runtime", "enabled": True, "mode": "unknown",
+        "scope": "shared", "switch_supported": False,
+        "note": "This connection has no owned per-session browser; do not change global config to switch one task.",
+    }
 
 
 def get_browser_isolation_status() -> dict | None:

@@ -79,8 +79,9 @@ def test_browser_intent_preloads_full_builtin_instructions() -> None:
     assert rendered.loaded_names == ("browser-use",)
     assert "managed browser automation" in rendered.system_prompt
     assert "visible real browser" in rendered.system_prompt
-    assert 'mcp_config(action="update", name="playwright"' in rendered.system_prompt
-    assert "Never add duplicate instances such as `playwright-headed`" in rendered.system_prompt
+    assert 'mcp_config(action="set_browser_mode", mode="headed")' in rendered.system_prompt
+    assert 'mcp_config(action="update", name="playwright"' not in rendered.system_prompt
+    assert "does not modify global configuration or restart other sessions" in rendered.system_prompt
     assert 'mcp_config(action="inspect_browser")' in rendered.system_prompt
     assert "fixed headless by default" not in rendered.system_prompt
     assert "Treat headed/headless only as the managed browser's window visibility" in rendered.system_prompt
@@ -91,10 +92,10 @@ def test_browser_intent_preloads_full_builtin_instructions() -> None:
     assert "Use the user's real browser directly when the task depends on the current page" in rendered.system_prompt
     assert "infer the mode from the most recent successful browser interaction" in rendered.system_prompt
     assert "Explicit mode selection in the latest user message overrides earlier context" in rendered.system_prompt
-    assert "Treat the managed Playwright MCP as headless by default" in rendered.system_prompt
+    assert "Background retrieval, scraping, screenshots and testing default to headless" in rendered.system_prompt
     assert "Recover from headless-only failures" in rendered.system_prompt
-    assert "disconnect/terminate the old Playwright MCP connection" in rendered.system_prompt
-    assert "Never reuse snapshots, element refs, tabs, or session identifiers" in rendered.system_prompt
+    assert "This rebuilds only the current session" in rendered.system_prompt
+    assert "Login and form state from the previous instance are not restored" in rendered.system_prompt
     assert "Retry the blocked step once in headed mode" in rendered.system_prompt
     assert "Do not solve, outsource, or circumvent the verification" in rendered.system_prompt
     assert "Switch between browser modes" in rendered.system_prompt

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
@@ -192,15 +193,16 @@ class McpConfigTool(Tool):
         return (
             "Read or modify the MCP server configuration (mcp.json). "
             "Actions: list — show current servers; "
-            "inspect_browser — safely report the configured Playwright browser mode "
+            "inspect_browser — report the live session's Playwright browser mode (config fallback when disconnected) "
             "without exposing unrelated MCP credentials; "
+            "set_browser_mode — launch headed/headless for the current managed browser session only; "
             "update — patch an existing server while preserving unspecified settings; "
             "add — add or replace a server entry; "
             "remove — delete a server entry; "
             "enable / disable — toggle a server without deleting it. "
             "The list action reports configuration entries, not connected tools or "
             "callable schemas; use tool_search for capability discovery. "
-            "This tool only confirms the configuration write, not a live connection. "
+            "Configuration writes do not confirm a live connection; set_browser_mode verifies browser startup. "
             "The host watches mcp.json and applies hot reload automatically; when "
             "registration finishes during an active turn, the runtime supplies an "
             "internal connection-state update (or load after box-agent restart)."
@@ -216,6 +218,7 @@ class McpConfigTool(Tool):
                     "enum": [
                         "list",
                         "inspect_browser",
+                        "set_browser_mode",
                         "update",
                         "add",
                         "remove",
@@ -227,6 +230,11 @@ class McpConfigTool(Tool):
                 "name": {
                     "type": "string",
                     "description": "Server name key in mcpServers (required for add/remove/enable/disable).",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["headed", "headless"],
+                    "description": "Required for set_browser_mode. Switching resets this session's tabs, login and form state; other sessions are unaffected.",
                 },
                 "config": {
                     "type": "object",
@@ -249,7 +257,24 @@ class McpConfigTool(Tool):
         action: str,
         name: str = "",
         config: dict | None = None,
+        mode: str = "",
     ) -> ToolResult:
+        if action in {"inspect_browser", "set_browser_mode"}:
+            from .mcp_loader import get_playwright_session_pool, inspect_live_browser
+
+            if action == "set_browser_mode":
+                pool = get_playwright_session_pool()
+                if pool is None:
+                    return ToolResult(success=False, content="", error="Session browser switching requires a connected, owned isolated Playwright runtime. Global config was not changed.")
+                try:
+                    result = await asyncio.wait_for(pool.set_browser_mode(mode), timeout=90)
+                except Exception as error:
+                    return ToolResult(success=False, content="", error=f"Browser mode switch failed: {error}")
+                return ToolResult(success=True, content=json.dumps(result))
+            live = inspect_live_browser()
+            if live is not None:
+                return ToolResult(success=True, content=json.dumps(live))
+
         target = _resolve_write_target()
 
         if target.exists():

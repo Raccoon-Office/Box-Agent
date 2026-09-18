@@ -44,6 +44,53 @@ def _pw(args: list[str]) -> dict:
     return {"command": "npx", "args": ["@playwright/mcp@latest", *args]}
 
 
+async def test_alternate_window_process_preserves_launch_contract_and_cleans_up(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    processes = []
+
+    class Process:
+        def __init__(self, **kwargs):
+            self.config = kwargs
+            self.url = "http://127.0.0.1:1234/mcp"
+            self.start = AsyncMock()
+            self.stop = AsyncMock()
+            processes.append(self)
+
+    class Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def initialize(self):
+            pass
+        def __init__(self, *args):
+            pass
+        async def call_tool(self, *args, **kwargs):
+            return SimpleNamespace(isError=False)
+
+    monkeypatch.setattr(mcp_loader, "ManagedHttpServerProcess", Process)
+    monkeypatch.setattr(mcp_loader, "ClientSession", Session)
+    monkeypatch.setattr(mcp_loader, "_open_streamable_http", AsyncMock(return_value=(None, None)))
+    conn = MCPServerConnection(
+        "playwright", connection_type="stdio_http", command="electron",
+        args=["bootstrap.js", "mcp.js", "--headless", "--isolated", "--executable-path", "chromium", "--timeout-navigation", "30000"],
+        env={"ELECTRON_RUN_AS_NODE": "1", "PLAYWRIGHT_MCP_HEADLESS": "1"},
+    )
+    pool = conn._build_session_pool()
+    try:
+        assert (await pool.set_browser_mode("headed"))["browser_started"]
+        process = processes[0]
+        assert process.config["args"] == [a for a in conn.args if a != "--headless"]
+        assert process.config["env"]["PLAYWRIGHT_MCP_HEADLESS"] == ""
+        assert process.config["env"]["ELECTRON_RUN_AS_NODE"] == "1"
+        assert "--headless" in conn.args
+        assert conn.env["PLAYWRIGHT_MCP_HEADLESS"] == "1"
+    finally:
+        await pool.close_all(final=True)
+    processes[0].stop.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # mcp.json gate
 # ---------------------------------------------------------------------------

@@ -7,6 +7,36 @@ import pytest
 from box_agent.tools.mcp_config_tool import McpConfigTool
 
 
+async def test_browser_inspection_prefers_runtime_over_unrelated_user_file(monkeypatch):
+    monkeypatch.setattr("box_agent.tools.mcp_loader.inspect_live_browser", lambda: {
+        "source": "runtime", "enabled": True, "mode": "headed", "scope": "session",
+    })
+    def unexpected_read():
+        raise AssertionError("must not read user MCP config")
+    monkeypatch.setattr("box_agent.tools.mcp_config_tool._resolve_write_target", unexpected_read)
+    result = await McpConfigTool().execute(action="inspect_browser")
+    assert result.success
+    assert json.loads(result.content)["mode"] == "headed"
+
+
+async def test_browser_mode_action_is_session_local_and_does_not_write_config(monkeypatch):
+    from box_agent.tools.playwright_session_pool import PlaywrightSessionPool
+    from unittest.mock import AsyncMock
+    pool = AsyncMock(spec=PlaywrightSessionPool)
+    pool.set_browser_mode.return_value = {"mode": "headed", "browser_started": True}
+    monkeypatch.setattr("box_agent.tools.mcp_loader.get_playwright_session_pool", lambda: pool)
+    def unexpected_write():
+        raise AssertionError("must not write global MCP config")
+    monkeypatch.setattr("box_agent.tools.mcp_config_tool._resolve_write_target", unexpected_write)
+    result = await McpConfigTool().execute(action="set_browser_mode", mode="headed")
+    assert result.success
+    pool.set_browser_mode.assert_awaited_once_with("headed")
+    pool.set_browser_mode.side_effect = RuntimeError("launch failed")
+    assert not (await McpConfigTool().execute(action="set_browser_mode", mode="headed")).success
+    monkeypatch.setattr("box_agent.tools.mcp_loader.get_playwright_session_pool", lambda: None)
+    assert not (await McpConfigTool().execute(action="set_browser_mode", mode="headed")).success
+
+
 @pytest.mark.asyncio
 async def test_list_is_config_only_and_does_not_expose_connection_secrets(
     tmp_path,
