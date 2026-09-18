@@ -531,8 +531,11 @@ image after generation.
 The preparation script declares the presentation directory as an intermediate
 workspace. Only explicitly registered deliveries appear in chat. Finalization
 and PPTX export register their finished outputs automatically. For the final
-whole-deck overview, pass `--publish-artifact` to `make_contact_sheet.js`;
-omit it for internal review sheets. Keep user-requested standalone images explicit.
+whole-deck overview, keep it as preview metadata rather than an extra deliverable.
+Use `--publish-artifact` only when the user requests the overview as a separate
+file. Omit it for internal review sheets. Default PPT delivery includes both
+PPTX and HTML; register useful supporting files with `publish_artifact(path,
+role="process")`. Keep user-requested standalone images explicit.
 
 Present information in this priority order:
 

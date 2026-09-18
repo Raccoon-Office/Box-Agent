@@ -286,6 +286,7 @@ def _artifact_envelope(
         "sha256": art.sha256,
         "produced_at": art.produced_at,
         "tool_call_id": art.tool_call_id,
+        "artifact_role": art.artifact_role,
     }
     if art.description:
         payload["description"] = art.description

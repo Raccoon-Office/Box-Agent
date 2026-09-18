@@ -79,14 +79,20 @@ _PUBLISH_ARTIFACT_SCHEMA = {
     "schema": {
         "name": "publish_artifact",
         "description": (
-            "After creating and checking a main user-facing file, declare it as "
-            "a user-facing artifact. Already published builder outputs and images "
-            "do not need this call. Use it to promote selected intermediate files."
+            "Register an existing, validated task output as deliverable or process. "
+            "Deliverable directly satisfies this task; process is a useful intermediate "
+            "such as cleaned data or analysis code. Never register inputs merely read, "
+            "caches, thumbnails or internal files. Do not create files for text-only answers. "
+            "Already registered builder outputs and standalone images need no extra call."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path inside the session workspace."},
+                "role": {
+                    "type": "string", "enum": ["deliverable", "process"],
+                    "description": "Task output role; defaults to deliverable.",
+                },
             },
             "required": ["path"],
             "additionalProperties": False,

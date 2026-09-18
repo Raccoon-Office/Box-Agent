@@ -1005,7 +1005,7 @@ def test_file_delivery_prompt_distinguishes_companion_source_from_primary():
     prompt = build_file_delivery_prompt()
 
     assert "按文件在任务中的交付用途" in prompt
-    assert "配套文件即使要求保留或在最终回复中提及" in prompt
+    assert 'role="process"' in prompt
     assert "不调用 `publish_artifact`" in prompt
     assert "独立交付结果" in prompt
     assert "deck.json" not in prompt

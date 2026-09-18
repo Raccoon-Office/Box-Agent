@@ -11,6 +11,12 @@ metadata:
 
 # PPT 制作
 
+默认交付 PPTX 和 HTML 两份正式产物，并将这项要求传给所选后端；用户明确只要
+HTML、只要大纲或其他格式时遵循用户要求。动态效果由 HTML 承载，PPTX 作为静态版本。
+只登记已保存且验证可访问的文件；任一格式导出失败时保留可用文件并明确部分完成。
+缩略图、总览图和预览转换副本不自动增加正式卡片；有复用价值的中间文件显式
+登记为 process，内部素材继续遵守 sidecar/scope 抑制。
+
 制作 PPT/PPTX 或 HTML 幻灯片时，先加载本入口，再确定制作模式，随后用 `get_skill`
 加载对应后端。HTML-only 交付、视觉模板、详细版式要求都不改变这个顺序。
 将原始需求、全部附件路径、已有任务目录、
@@ -68,8 +74,8 @@ metadata:
      "question": "这份 PPT 想用哪种制作模式？",
      "decision_kind": "presentation_mode",
      "options": [
-       {"id": "fast", "label": "快速模式", "description": "AI 基于现有主题和版式完成整份 PPT，也支持沿用或修改已有 PPTX。适合常规汇报和需要保持原有风格的任务，可按需导出可编辑 PPTX。"},
-       {"id": "design", "label": "设计模式", "description": "AI 根据内容组织叙事、设计页面，完成整份演示。适合希望对页面布局和视觉表达做更多设计的任务，支持简洁商务风格及动态演示，通常需要更多设计与检查。静态交付 HTML 和 PPTX，动态交付可播放的 HTML。"}
+       {"id": "fast", "label": "快速模式", "description": "AI 基于现有主题和版式完成整份 PPT，也支持沿用或修改已有 PPTX。适合常规汇报和需要保持原有风格的任务，默认交付 HTML 和可编辑 PPTX。"},
+       {"id": "design", "label": "设计模式", "description": "AI 根据内容组织叙事、设计页面，完成整份演示。适合希望对页面布局和视觉表达做更多设计的任务，支持简洁商务风格及动态演示，通常需要更多设计与检查。默认交付 HTML 和 PPTX，动态效果在 HTML 中播放。"}
      ],
      "default_option_id": "fast",
      "requested_auto_submit_seconds": 30,

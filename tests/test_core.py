@@ -6063,7 +6063,7 @@ def test_artifact_envelope_shape(tmp_path):
     assert "sandbox_workspace" not in env
 
 
-def test_artifact_envelope_includes_description_without_role(tmp_path):
+def test_artifact_envelope_includes_description_and_observation_role(tmp_path):
     from box_agent.acp import _artifact_envelope
     from box_agent.core import _make_artifact
 
@@ -6078,7 +6078,7 @@ def test_artifact_envelope_includes_description_without_role(tmp_path):
 
     envelope = _artifact_envelope(artifact)
 
-    assert "artifact_role" not in envelope
+    assert envelope["artifact_role"] == "observed"
     assert envelope["description"] == "版式检查图"
 
 

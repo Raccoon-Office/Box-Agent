@@ -92,7 +92,7 @@ def test_standard_prepare_declares_scope_and_build_registers_final_deliveries(tm
     monkeypatch.setitem(state, "_build_player", build)
     monkeypatch.setitem(state, "_build_contact", contact)
     assert main(["build", str(tmp_path)]) == 0
-    assert published(tmp_path) == {"present.html", "contact-sheet.png"}
+    assert published(tmp_path) == {"present.html"}
 
 
 def test_standard_failed_build_does_not_publish_partial_html(tmp_path, monkeypatch):

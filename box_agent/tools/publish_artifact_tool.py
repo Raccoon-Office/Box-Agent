@@ -21,9 +21,11 @@ class PublishArtifactTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "After creating and checking a main user-facing file, declare it as "
-            "a user-facing artifact. Already published builder outputs and images "
-            "do not need this call. Use it to promote selected intermediate files."
+            "Register an existing, validated task output as deliverable or process. "
+            "Deliverable directly satisfies this task; process is a useful intermediate "
+            "such as cleaned data or analysis code. Never register inputs merely read, "
+            "caches, thumbnails or internal files. Do not create files for text-only answers. "
+            "Already registered builder outputs and standalone images need no extra call."
         )
 
     @property
@@ -32,6 +34,11 @@ class PublishArtifactTool(Tool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path inside the session workspace."},
+                "role": {
+                    "type": "string",
+                    "enum": ["deliverable", "process"],
+                    "description": "Task output role; defaults to deliverable.",
+                },
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -50,16 +57,23 @@ class PublishArtifactTool(Tool):
         except (OSError, RuntimeError, ValueError):
             return None
 
-    async def execute(self, path: str) -> ToolResult:
+    async def execute(self, path: str, role: str = "deliverable") -> ToolResult:
+        if role not in {"deliverable", "process"}:
+            return ToolResult(success=False, error="Invalid artifact role")
         file = self._file(path)
         if file is None:
             return ToolResult(success=False, error="File is missing or outside the workspace")
         try:
-            write_metadata(file, {**read_metadata(metadata_path(file)), "type": "artifact"})
+            with file.open("rb"):
+                pass
+            write_metadata(file, {
+                **read_metadata(metadata_path(file)),
+                "type": "artifact", "artifact_role": role,
+            })
         except OSError as exc:
             return ToolResult(success=False, error=f"Could not publish artifact: {exc}")
         return ToolResult(
             success=True,
             content=f"Published {file.relative_to(self.workspace_dir).as_posix()}.",
-            raw_output={"type": "artifact", "abs_path": str(file)},
+            raw_output={"type": "artifact", "abs_path": str(file), "artifact_role": role},
         )

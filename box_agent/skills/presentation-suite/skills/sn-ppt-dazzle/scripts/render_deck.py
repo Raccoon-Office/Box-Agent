@@ -603,7 +603,7 @@ def main() -> int:
     if args.all:
         _publish_delivery_file(html_path)
         if (out_dir / "contact_sheet.png").is_file():
-            _publish_delivery_file(out_dir / "contact_sheet.png")
+            _mark_intermediate_artifact(out_dir / "contact_sheet.png")
     for p in paths:
         print(p)
     return 0

@@ -1336,7 +1336,7 @@ def main(argv=None):
             _validate_runtime_dependencies(root, args.expected)
             _build_contact(root, args.expected)
             _publish_delivery_file(root / "present.html")
-            _publish_delivery_file(root / "renders/contact-sheet.png")
+            _mark_intermediate_artifact(root / "renders/contact-sheet.png")
         else:
             _validate_no_pictographs(root, args.expected, include_html=True)
             _validate_image_presentations(root, args.expected)

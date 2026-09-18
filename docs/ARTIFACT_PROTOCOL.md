@@ -263,6 +263,24 @@ and this document is updated in the same commit.
 
 ## Explicit publication tool
 
+### Task output roles
+
+Every normalized ArtifactEvent carries `artifact_role`: `deliverable`,
+`process`, or `observed`. Producers with an explicit `type: artifact`
+sidecar default to deliverable; a valid sidecar role overrides this default.
+Unregistered discoveries are observed, never implicitly useful process files.
+The event's existing task/turn identity determines ownership; consumers retain
+historical events and apply later roles only within the owning task.
+
+`publish_artifact(path, role="process")` registers useful generated intermediate
+files. The default role is deliverable. Promotion reuses the existing path,
+checks readability, and emits immediately, including during partially completed
+tasks. Inputs merely read, caches, preview thumbnails, and internal files must
+not be registered. Plain answers and organization-only tasks need no new files.
+PPT requests default to PPTX and HTML; automatic overviews are internal previews.
+Hosts show all deliverables once per path and useful process files in a collapsed
+list, without inferring roles from final-answer text or creating extra copies.
+
 `publish_artifact(path)` promotes an existing workspace file by writing its
 `type: artifact` sidecar and returning a structured artifact result. The shared
 engine emits the same `ArtifactEvent` consumed by CLI and ACP. Files previously

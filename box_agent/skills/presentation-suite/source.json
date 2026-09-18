@@ -251,7 +251,7 @@
       "source_sha256": "61723cf249ce70e93df2ea23da926194af9df86b9b622ca6604337f494a747fb"
     },
     "skills/sn-ppt-dazzle/scripts/render_deck.py": {
-      "sha256": "bd0f5eb02bbb6d06f3666561264f8163937246dcdc04699a731ab230c84684e7",
+      "sha256": "9166acfee0e537b3c24448d1d96064da8133b7aada9f06b6ac2774c984beb655",
       "source_path": "skills/sn-ppt-dazzle/scripts/render_deck.py",
       "source_sha256": "a9da9f17d15dc067724b64677ace0f9cd7bf0073954a820735c31b99667cea60"
     },
@@ -387,7 +387,7 @@
       "source_sha256": "37892c704c3043c862673255a10ce6584e7a8378d2c7fcb28d6a206bdf393085"
     },
     "skills/sn-ppt-standard/scripts/deck.py": {
-      "sha256": "f6fb5ee4ef32eca9d579df1e0ccdd08a9259e442a6b39a57f2521aacfb49775c",
+      "sha256": "52a90c6c9bbf0dab02e7c376dc0dff9bf59e67c2d72016ea922aa664b0ccfdfa",
       "source_path": "skills/sn-ppt-standard/scripts/deck.py",
       "source_sha256": "016cbafe55c5430c3723e25f9de34a8d13a1f3072a9cf010362d9beaf6be9dbf"
     },
@@ -624,7 +624,8 @@
     "intermediate-render-artifacts",
     "sequential-ppt-image-inspection",
     "source-relative-pptx-page-directories",
-    "explicit-delivery-scopes"
+    "explicit-delivery-scopes",
+    "task-artifact-roles"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "e187295633eb4cb201e6a2a5a206a419eb79990a",

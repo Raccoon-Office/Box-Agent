@@ -32,7 +32,7 @@ OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "static-player-delivery-gate", "design-mode-delivery-wording",
             "owned-renderer-lifecycle", "original-uploaded-font-family",
             "intermediate-render-artifacts", "sequential-ppt-image-inspection",
-            "source-relative-pptx-page-directories", "explicit-delivery-scopes"]
+            "source-relative-pptx-page-directories", "explicit-delivery-scopes", "task-artifact-roles"]
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite"
 LICENSE_INPUT_PATH = "scripts/presentation_suite_licenses/echarts-5.5.0"
 LICENSE_INPUT_DIR = Path(__file__).resolve().parents[1] / LICENSE_INPUT_PATH
@@ -50,6 +50,7 @@ _font_source_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "font_source.py"))
 _artifact_publication_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "artifact_publication.py"))["apply"]
 _export_page_directories_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "export_page_directories.py"))["apply"]
 _delivery_scope_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "delivery_scope.py"))["apply"]
+_task_artifact_roles_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "task_artifact_roles.py"))["apply"]
 
 
 def _apply_host_metadata(data: bytes) -> bytes:
@@ -128,6 +129,7 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
     data = _image_inspection_batch_overlay(relative, data)
     data = _export_page_directories_overlay(relative, data)
     data = _delivery_scope_overlay(relative, data)
+    data = _task_artifact_roles_overlay(relative, data)
     if relative == "skills/sn-ppt-standard/assets/vendor/echarts.min.js":
         if not re.search(rb'\.version=["\']5\.5\.0["\']', data):
             raise ValueError("ECharts runtime version needs review against pinned license inputs")
@@ -403,7 +405,8 @@ def refresh_host_overlays(output_dir: Path) -> dict:
     incremental = {"intermediate-render-artifacts": _artifact_publication_overlay,
                    "sequential-ppt-image-inspection": _image_inspection_batch_overlay,
                    "source-relative-pptx-page-directories": _export_page_directories_overlay,
-                   "explicit-delivery-scopes": _delivery_scope_overlay}
+                   "explicit-delivery-scopes": _delivery_scope_overlay,
+                   "task-artifact-roles": _task_artifact_roles_overlay}
     pending = OVERLAYS[len(applied):]
     if (provenance.get("name") != BUNDLE_NAME
             or provenance.get("revision") != PINNED_REVISION

@@ -221,6 +221,7 @@ class ArtifactEvent:
     layout_id: str = ""
     edit_mode: str = ""
     description: str = ""
+    artifact_role: str = "observed"
 
 
 # ── Summarization ───────────────────────────────────────────────

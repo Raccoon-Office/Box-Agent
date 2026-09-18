@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Final
 
 from .events import ArtifactEvent
+from .artifact_publication import metadata_path, read_metadata
 from .roadmap_artifacts import roadmap_metadata_for_html_artifact
 
 __all__ = [
@@ -229,6 +230,10 @@ def make_artifact(
 
     layout_id, edit_mode = roadmap_metadata_for_html_artifact(abs_resolved, size)
     _, metadata_description = _artifact_metadata(abs_resolved)
+    metadata = read_metadata(metadata_path(abs_resolved))
+    role = metadata.get("artifact_role")
+    if role not in {"deliverable", "process", "observed"}:
+        role = "deliverable" if metadata.get("type") == "artifact" else "observed"
     resolved_description = (
         description.strip() if isinstance(description, str) else metadata_description
     )
@@ -247,4 +252,5 @@ def make_artifact(
         layout_id=layout_id,
         edit_mode=edit_mode,
         description=resolved_description,
+        artifact_role=role,
     )
