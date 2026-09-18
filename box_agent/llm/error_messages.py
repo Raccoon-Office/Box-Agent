@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import NamedTuple
 
-from ..auth import HostedAuthRequiredError
+from ..auth import HostedAuthRefreshError, HostedAuthRequiredError
 
 
 class FriendlyError(NamedTuple):
@@ -147,6 +147,14 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
         root = _unwrap(exc)
     except Exception:
         root = exc
+
+    if isinstance(root, (HostedAuthRequiredError, HostedAuthRefreshError)):
+        try:
+            msg = (_safe_str(root) or "").strip()
+        except Exception:
+            msg = ""
+        if msg:
+            return FriendlyError(message=msg, category="hosted_auth")
 
     try:
         haystack = _build_haystack(root).lower()
@@ -357,6 +365,32 @@ def _safe_http_status_code(exc: BaseException) -> int | None:
     except Exception:
         return None
 
+
+
+
+def is_hosted_provider_auth_rejection(exc: BaseException) -> bool:
+    """True when the provider rejected the request as unauthorized (401 / 200003)."""
+    try:
+        root = _unwrap(exc)
+    except Exception:
+        root = exc
+    try:
+        status = _http_status_code(root)
+    except Exception:
+        status = None
+    if status == 401:
+        return True
+    try:
+        code = extract_llm_error_code(exc)
+    except Exception:
+        code = None
+    if code == 200003 or code == "200003":
+        return True
+    try:
+        haystack = _build_haystack(root).lower()
+    except Exception:
+        haystack = ""
+    return "200003" in haystack or "authorization_verify_error" in haystack
 
 def is_retryable_llm_error(exc: BaseException) -> bool:
     """Whether a (non-streaming) LLM call error is worth retrying.

@@ -4,7 +4,14 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ..auth import ensure_hosted_auth_ready, read_auth_org_code, request_auth_headers
+from ..auth import (
+    HostedAuthRefreshError,
+    HostedAuthRequiredError,
+    ensure_hosted_auth_ready,
+    read_auth_org_code,
+    refresh_hosted_auth_token_if_needed,
+    request_auth_headers,
+)
 from ..client_info import current_client_headers, should_attach_client_headers
 from ..retry import RetryConfig
 from ..schema import LLMResponse, Message, StreamEvent
@@ -82,6 +89,43 @@ class LLMClientBase(ABC):
             existing=headers,
             url=self.api_base,
         )
+
+
+    def _uses_hosted_auth_json(self) -> bool:
+        """True when this client authenticates via hosted auth.json placeholders."""
+        return bool(self.auth_file) and self.api_key.strip() in HOSTED_AUTH_API_KEY_PLACEHOLDERS
+
+    async def _force_refresh_hosted_auth_after_provider_rejection(self) -> None:
+        """Force-refresh hosted login after the provider rejected the current token."""
+        try:
+            await refresh_hosted_auth_token_if_needed(
+                self.api_base,
+                self.auth_file,
+                force=True,
+            )
+        except HostedAuthRequiredError:
+            raise
+        except HostedAuthRefreshError as exc:
+            raise HostedAuthRequiredError("登录态已过期，请重新登录") from exc
+
+    async def _call_with_hosted_auth_retry(self, operation):
+        """Run ``operation``; on hosted 401/200003 force-refresh and retry once."""
+        try:
+            return await operation()
+        except Exception as first:
+            if not self._uses_hosted_auth_json():
+                raise
+            from .error_messages import is_hosted_provider_auth_rejection
+
+            if not is_hosted_provider_auth_rejection(first):
+                raise
+            await self._force_refresh_hosted_auth_after_provider_rejection()
+            try:
+                return await operation()
+            except Exception as second:
+                if is_hosted_provider_auth_rejection(second):
+                    raise HostedAuthRequiredError("登录态已过期，请重新登录") from second
+                raise
 
     @staticmethod
     def _agent_headers(
