@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import llm_config_available, skip_if_llm_env_failure
+from .conftest import skip_if_llm_env_failure
 from .issue_draft import to_issue_draft
 from .probe import (
     AcpHostProbe,
@@ -22,7 +22,7 @@ from .probe import (
 
 @pytest.mark.asyncio
 async def test_t2_01_session_prompt_one_round(tmp_path: Path, require_llm: str) -> None:
-    """T2-01: session/prompt one round has reply/updates."""
+    """T2-01: session/prompt one round has reply/updates (live opt-in)."""
     probe = AcpHostProbe(command=default_acp_command(), cwd=tmp_path, timeout_s=120.0)
     logs: list[str] = []
     try:
@@ -53,6 +53,7 @@ async def test_t2_01_session_prompt_one_round(tmp_path: Path, require_llm: str) 
             actual=f"stopReason={stop!r} updates={len(updates)} text={text[:300]!r}",
             logs="\n".join(logs) + "\n" + probe.stderr_text[-3000:],
             repro_steps=[
+                "BOX_AGENT_ACP_HOST_LIVE=1",
                 "start box_agent.acp.server",
                 "initialize + session/new",
                 "session/prompt with a short greeting",
@@ -166,42 +167,33 @@ async def test_t2_02_session_cancel_mid_stream(tmp_path: Path, require_llm: str)
 
 
 @pytest.mark.asyncio
-async def test_t2_03_kill_process_is_clear_failure(tmp_path: Path) -> None:
-    """T2-03: kill stdin/process → clear failure, not false success."""
-    # No LLM required: kill during initialize wait against a hanging peer, or
-    # kill right after start while a request is in flight.
-    probe = AcpHostProbe(
-        command=default_acp_command(),
-        cwd=tmp_path,
-        timeout_s=60.0,
-    )
+async def test_t2_03_kill_process_is_clear_failure(make_acp_probe, tmp_path: Path) -> None:
+    """T2-03: kill stdin/process → clear failure, not false success.
+
+    No LLM: after initialize/session_new, park a deterministic pending future
+    (without session/prompt → provider) then kill the real ACP subprocess.
+    """
+    probe = make_acp_probe(cwd=tmp_path / "ws", timeout_s=60.0)
     logs: list[str] = []
     await probe.start()
     try:
         await probe.initialize()
-        session_id = await probe.session_new(cwd=str(tmp_path))
+        session_id = await probe.session_new(cwd=str(tmp_path / "ws"))
         logs.append(f"sessionId={session_id}")
 
-        async def _long_request() -> object:
-            # Use list_skills which does not need LLM but still is a real RPC.
-            # Kill while a subsequent prompt is in flight if LLM exists; else
-            # close stdin / kill during a pending request.
-            ok_llm, _ = llm_config_available()
-            if ok_llm:
-                return await probe.session_prompt(
-                    session_id,
-                    "Count slowly from 1 to 1000 in words.",
-                )
-            # Keep the reader busy by waiting on a method that won't return if we kill.
-            return await probe.request("session/prompt", {
-                "sessionId": session_id,
-                "prompt": [{"type": "text", "text": "hi"}],
-            })
+        loop = asyncio.get_running_loop()
+        pending: asyncio.Future[object] = loop.create_future()
+        # Deterministic in-flight request without invoking the LLM provider.
+        probe._pending["t2-03-sentinel"] = pending
 
-        task = asyncio.create_task(_long_request())
-        await asyncio.sleep(0.5)
+        async def _await_pending() -> object:
+            return await pending
+
+        task = asyncio.create_task(_await_pending())
+        await asyncio.sleep(0)  # let the task schedule
+        assert "t2-03-sentinel" in probe._pending
         await probe.kill()
-        logs.append("killed ACP subprocess")
+        logs.append("killed ACP subprocess with sentinel pending (no LLM)")
 
         with pytest.raises(RpcError) as ei:
             await task
@@ -210,20 +202,6 @@ async def test_t2_03_kill_process_is_clear_failure(tmp_path: Path) -> None:
         assert "success" not in err.message.lower() or err.code != "ok"
         # Must not look like a successful PromptResponse
         assert not (isinstance(err.data, dict) and err.data.get("stopReason") == "end_turn")
-
         assert err.code != "ok"
-        # If we somehow observed a false success path, emit IssueDraft (unreachable on pass).
-        if err.code == "ok":  # pragma: no cover
-            draft = to_issue_draft(
-                CaseResult(
-                    case_id="T2-03",
-                    ok=False,
-                    expected="Killing the ACP process must surface RpcError (clear failure)",
-                    actual="false success",
-                    logs="\n".join(logs),
-                    repro_steps=["kill mid-request", "must not succeed"],
-                )
-            )
-            pytest.fail(draft["body"])
     finally:
         await probe.stop()

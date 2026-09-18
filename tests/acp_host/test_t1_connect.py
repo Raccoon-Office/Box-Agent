@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
+from .conftest import isolated_probe_env, provision_isolated_box_agent_home
 from .issue_draft import to_issue_draft
 from .probe import AcpHostProbe, CaseResult, RpcError, default_acp_command
 
 
 @pytest.mark.asyncio
-async def test_t1_01_initialize_and_session_new(tmp_path: Path) -> None:
+async def test_t1_01_initialize_and_session_new(make_acp_probe, tmp_path: Path) -> None:
     """T1-01: initialize + session/new succeed and return sessionId."""
-    probe = AcpHostProbe(command=default_acp_command(), cwd=tmp_path, timeout_s=60.0)
+    probe = make_acp_probe(cwd=tmp_path / "ws", timeout_s=60.0)
     logs: list[str] = []
     try:
         await probe.start()
@@ -23,7 +25,7 @@ async def test_t1_01_initialize_and_session_new(tmp_path: Path) -> None:
         assert isinstance(init, dict), f"initialize result not dict: {init!r}"
         assert init.get("protocolVersion") is not None
 
-        session_id = await probe.session_new(cwd=str(tmp_path))
+        session_id = await probe.session_new(cwd=str(tmp_path / "ws"))
         logs.append(f"sessionId={session_id}")
         result = CaseResult(
             case_id="T1-01",
@@ -56,6 +58,42 @@ async def test_t1_01_initialize_and_session_new(tmp_path: Path) -> None:
             )
         )
         pytest.fail(f"T1-01 failed; IssueDraft title={draft['title']!r}\n{draft['body']}")
+    finally:
+        await probe.stop()
+
+
+@pytest.mark.asyncio
+async def test_t1_01_isolated_home_without_real_user_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: clean HOME / no real ~/.box-agent still passes T1-01.
+
+    Subprocess gets only an isolated BOX_AGENT_HOME with the harness minimal
+    config — must not EOF from placeholder Config.load() writing real home.
+    """
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
+    # Ensure parent process cannot see a real user profile via HOME.
+    assert not (fake_home / ".box-agent" / "config" / "config.yaml").exists()
+
+    profile = provision_isolated_box_agent_home(tmp_path / "profile-root")
+    env = isolated_probe_env(profile)
+    probe = AcpHostProbe(
+        command=default_acp_command(),
+        cwd=tmp_path / "ws",
+        env=env,
+        timeout_s=60.0,
+    )
+    try:
+        await probe.start()
+        init = await probe.initialize()
+        assert isinstance(init, dict)
+        session_id = await probe.session_new(cwd=str(tmp_path / "ws"))
+        assert session_id.startswith("sess-")
+        # Must not have bootstrapped a placeholder into the fake HOME.
+        assert not (fake_home / ".box-agent").exists()
     finally:
         await probe.stop()
 
@@ -100,7 +138,7 @@ async def test_t1_02_bad_command_yields_readable_error(tmp_path: Path) -> None:
 
     # Case B: timeout against a process that never speaks ACP
     sleeper = AcpHostProbe(
-        command=["python", "-c", "import time; time.sleep(30)"],
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
         cwd=tmp_path,
         timeout_s=2.0,
     )

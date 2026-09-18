@@ -38,15 +38,72 @@ def _fail_case(case: CaseResult) -> None:
     pytest.fail(f"{case.case_id} failed; IssueDraft:\n{draft['title']}\n{draft['body']}")
 
 
+def _tool_failure_visible(tool_events: list[dict], updates: list[dict]) -> bool:
+    """True when a failed tool status (or error content) is visible — not rawInput."""
+    for ev in tool_events:
+        status = str(ev.get("status") or "").lower()
+        if status in {"failed", "error"}:
+            return True
+        # Inspect result / content fields only (exclude rawInput filename matches).
+        for key in ("content", "result", "error", "message", "text"):
+            val = ev.get(key)
+            if val is None:
+                continue
+            blob = json.dumps(val, ensure_ascii=False).lower() if not isinstance(val, str) else val.lower()
+            if any(
+                m in blob
+                for m in (
+                    "not found",
+                    "no such file",
+                    "does not exist",
+                    "errno",
+                    "error",
+                    "fail",
+                    "unable",
+                    "cannot",
+                    "can't",
+                )
+            ):
+                return True
+
+    # Agent message chunks may report the error without a failed tool status.
+    for update in updates:
+        kind = str(update.get("sessionUpdate") or update.get("kind") or "")
+        if kind not in {"agent_message_chunk", "agent_message"}:
+            continue
+        content = update.get("content")
+        text = ""
+        if isinstance(content, dict):
+            text = str(content.get("text") or "")
+        elif isinstance(content, str):
+            text = content
+        lowered = text.lower()
+        if any(
+            m in lowered
+            for m in (
+                "not found",
+                "no such file",
+                "does not exist",
+                "error",
+                "fail",
+                "unable",
+                "cannot",
+                "can't",
+            )
+        ):
+            return True
+    return False
+
+
 @pytest.mark.asyncio
-async def test_t3_01_tool_catalog_non_empty_with_name_schema(tmp_path: Path) -> None:
+async def test_t3_01_tool_catalog_non_empty_with_name_schema(make_acp_probe, tmp_path: Path) -> None:
     """T3-01: host-visible catalog non-empty with name/schema-like fields.
 
     ACP does not expose a dedicated tools/list RPC for agent tools. Hosts
     discover the capability catalog via ``session/new`` ``_meta.skills`` and
     ``_list_skills``. Each entry must have ``name`` plus structured fields.
     """
-    probe = AcpHostProbe(command=default_acp_command(), cwd=tmp_path, timeout_s=60.0)
+    probe = make_acp_probe(cwd=tmp_path / "ws", timeout_s=60.0)
     logs: list[str] = []
     try:
         await probe.start()
@@ -55,7 +112,7 @@ async def test_t3_01_tool_catalog_non_empty_with_name_schema(tmp_path: Path) -> 
 
         session_result = await probe.request(
             "session/new",
-            {"cwd": str(tmp_path), "mcpServers": []},
+            {"cwd": str(tmp_path / "ws"), "mcpServers": []},
         )
         assert isinstance(session_result, dict)
         session_id = session_result.get("sessionId")
@@ -126,15 +183,13 @@ async def test_t3_02_readonly_tool_succeeds_via_acp(tmp_path: Path, require_llm:
     target = tmp_path / "probe_readonly.txt"
     target.write_text("ACP_HOST_PROBE_READONLY_OK\n", encoding="utf-8")
 
+    # Workspace-scoped default permissions (probe auto-approves); no full_access.
     probe = AcpHostProbe(command=default_acp_command(), cwd=tmp_path, timeout_s=180.0)
     logs: list[str] = [f"llm={require_llm}", f"target={target}"]
     try:
         await probe.start()
         await probe.initialize()
-        session_id = await probe.session_new(
-            cwd=str(tmp_path),
-            meta={"permission_mode": "full_access"},
-        )
+        session_id = await probe.session_new(cwd=str(tmp_path))
         probe.drain_notifications()
 
         prompt = (
@@ -198,15 +253,13 @@ async def test_t3_03_intentional_failing_call_error_visible(tmp_path: Path, requ
     if missing.exists():
         missing.unlink()
 
+    # Workspace-scoped default permissions (probe auto-approves); no full_access.
     probe = AcpHostProbe(command=default_acp_command(), cwd=tmp_path, timeout_s=180.0)
     logs: list[str] = [f"llm={require_llm}", f"missing={missing}"]
     try:
         await probe.start()
         await probe.initialize()
-        session_id = await probe.session_new(
-            cwd=str(tmp_path),
-            meta={"permission_mode": "full_access"},
-        )
+        session_id = await probe.session_new(cwd=str(tmp_path))
         probe.drain_notifications()
 
         prompt = (
@@ -219,36 +272,18 @@ async def test_t3_03_intentional_failing_call_error_visible(tmp_path: Path, requ
         notes = probe.drain_notifications()
         updates = collect_session_updates(notes)
         tool_events = tool_events_from_updates(updates)
-        blob = json.dumps(
-            {"result": result, "updates": updates, "tools": tool_events},
-            ensure_ascii=False,
-        ).lower()
         logs.append(f"tool_events={len(tool_events)}")
         logs.append(f"stop={result.get('stopReason') if isinstance(result, dict) else None}")
 
-        error_markers = (
-            "error",
-            "fail",
-            "not found",
-            "no such file",
-            "does not exist",
-            "errno",
-            "missing",
-            "unable",
-            "cannot",
-            "can't",
-        )
-        visible = any(m in blob for m in error_markers)
-        for ev in tool_events:
-            status = str(ev.get("status") or "").lower()
-            if status in {"failed", "error"}:
-                visible = True
-
+        visible = _tool_failure_visible(tool_events, updates)
         case = CaseResult(
             case_id="T3-03",
             ok=visible,
-            expected="Failing read_file error is visible via ACP tool updates or agent message",
-            actual=f"visible={visible} tool_events={len(tool_events)} blob_tail={blob[-400:]!r}",
+            expected="Failing read_file error is visible via ACP tool status/content (not rawInput)",
+            actual=(
+                f"visible={visible} tool_events={len(tool_events)} "
+                f"statuses={[ev.get('status') for ev in tool_events]!r}"
+            ),
             logs="\n".join(logs) + "\n" + probe.stderr_text[-4000:],
             repro_steps=[
                 "session/prompt asking read_file on a nonexistent path",

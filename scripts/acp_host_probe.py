@@ -9,6 +9,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import shlex
 import asyncio
 import json
 import sys
@@ -32,7 +33,7 @@ async def _run(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd) if args.cwd else Path(tempfile.mkdtemp(prefix="acp-host-probe-"))
     cwd.mkdir(parents=True, exist_ok=True)
     probe = AcpHostProbe(
-        command=args.command.split() if args.command else default_acp_command(),
+        command=shlex.split(args.command) if args.command else default_acp_command(),
         cwd=cwd,
         timeout_s=args.timeout,
     )
