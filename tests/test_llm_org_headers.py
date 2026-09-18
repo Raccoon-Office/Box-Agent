@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from box_agent.auth import HostedAuthRefreshError
 from box_agent.llm import OpenAIClient
 from box_agent.schema import Message
 
@@ -85,6 +86,10 @@ async def test_llm_org_header_tracks_team_switch_and_personal_identity(tmp_path)
             assert headers.get("X-Org-Code") == expected
             assert headers["Authorization"] == "Bearer login-token"
         auth_file.unlink()
-        assert "X-Org-Code" not in await client._auth_headers()
+        with pytest.raises(
+            HostedAuthRefreshError,
+            match="^未登录，请通过客户端登录后再试$",
+        ):
+            await client._auth_headers()
     finally:
         await client.client.close()

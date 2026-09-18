@@ -147,6 +147,44 @@ def read_auth_org_code(auth_file: str | Path | None) -> str:
     return identity
 
 
+async def ensure_hosted_auth_ready(
+    api_base: str,
+    auth_file: str | Path | None,
+    *,
+    explicit_token: str = "",
+    now: int | None = None,
+    http_client: httpx.AsyncClient | None = None,
+) -> str:
+    """Fail fast when a hosted xiaohuanxiong request has nothing to authenticate with.
+
+    Non-xiaohuanxiong bases are left unchanged. An explicit in-memory token is
+    accepted as-is. When auth.json has neither a readable access token nor a
+    refresh_token, raise ``HostedAuthRefreshError`` with the locked「未登录…」
+    copy so callers never send a bare upstream request. Otherwise delegate to
+    ``refresh_hosted_auth_token_if_needed`` (including refresh-401「登录态已过期…」).
+    """
+    token = _coerce_token(explicit_token)
+    if token:
+        return token
+
+    if not _xiaohuanxiong_refresh_url(api_base):
+        _, state = _read_auth_state(auth_file)
+        return _auth_token_from_state(state)
+
+    _, state = _read_auth_state(auth_file)
+    current_token = _auth_token_from_state(state)
+    refresh_token = _coerce_token(state.get("refresh_token"))
+    if not current_token and not refresh_token:
+        raise HostedAuthRefreshError("未登录，请通过客户端登录后再试")
+
+    return await refresh_hosted_auth_token_if_needed(
+        api_base,
+        auth_file,
+        now=now,
+        http_client=http_client,
+    )
+
+
 async def refresh_hosted_auth_token_if_needed(
     api_base: str,
     auth_file: str | Path | None,

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ..auth import read_auth_org_code, refresh_hosted_auth_token_if_needed, request_auth_headers
+from ..auth import ensure_hosted_auth_ready, read_auth_org_code, request_auth_headers
 from ..client_info import current_client_headers, should_attach_client_headers
 from ..retry import RetryConfig
 from ..schema import LLMResponse, Message, StreamEvent
@@ -65,8 +65,11 @@ class LLMClientBase(ABC):
         if self.api_key.strip() not in HOSTED_AUTH_API_KEY_PLACEHOLDERS:
             return headers
 
-        if not self.auth_token.strip():
-            await refresh_hosted_auth_token_if_needed(self.api_base, self.auth_file)
+        await ensure_hosted_auth_ready(
+            self.api_base,
+            self.auth_file,
+            explicit_token=self.auth_token,
+        )
 
         if should_attach_client_headers(self.api_base):
             org_code = read_auth_org_code(self.auth_file)
