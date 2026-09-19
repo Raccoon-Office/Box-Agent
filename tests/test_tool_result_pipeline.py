@@ -79,7 +79,7 @@ async def test_declared_delivery_scope_guards_raw_results_and_discovery(tmp_path
                 (tmp_path / name).write_bytes(name.encode())
             for name in ("deck.html", "deck.pptx", "overview.png"):
                 write_metadata(tmp_path / name, {"type": "artifact"})
-            return ToolResult(success=True, content="[hero.png] [asset-contact.png] [deck.html]",
+            return ToolResult(success=True, content="[hero.png] [asset-contact.png] [deck.html] [deck.pptx] [overview.png]",
                               raw_output={"type": "artifact", "path": str(tmp_path / "hero.png"), "kind": "image"})
 
     tool = RenderTool(parallel_safe=parallel_safe)

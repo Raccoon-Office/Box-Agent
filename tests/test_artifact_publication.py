@@ -83,6 +83,37 @@ def test_other_workspace_and_same_size_different_content_are_not_suppressed(tmp_
     (a / "different.png").write_bytes(b"public!")
     (b / "same.png").write_bytes(b"private")
     for root, expected in [(a, "different.png"), (b, "same.png")]:
-        events = _detect_tool_artifacts("bash", "bash", "", None, {},
+        events = _detect_tool_artifacts("bash", "bash", f"[{expected}]", None, {},
                                         _snapshot_workspace_signatures(str(root)), str(root))
         assert [event.filename for event in events] == [expected]
+
+
+@pytest.mark.parametrize("output", ["done", "other/report.html.bak", "report.html", "other/"])
+def test_workspace_changes_and_publication_marker_do_not_establish_ownership(tmp_path, output):
+    report = tmp_path / "other/report.html"
+    report.parent.mkdir()
+    report.write_text("another task's report")
+    write_metadata(report, {"type": "artifact"})
+    events = _detect_tool_artifacts(
+        "wait", "bash", output, None, {},
+        _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
+    )
+    assert events == []
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_script_returned_path_selects_only_its_own_changed_artifact(tmp_path, absolute):
+    own = tmp_path / "own/报告 with spaces.html"
+    other = tmp_path / "other/报告 with spaces.html"
+    for path in [own, other]:
+        path.parent.mkdir()
+        path.write_text("report")
+        write_metadata(path, {"type": "artifact"})
+    returned = str(own) if absolute else own.relative_to(tmp_path).as_posix()
+    events = _detect_tool_artifacts(
+        "build", "bash", f'wrote "{returned}"', None, {},
+        _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
+    )
+    assert [(e.rel_path, e.placement) for e in events] == [
+        (own.relative_to(tmp_path).as_posix(), "primary"),
+    ]

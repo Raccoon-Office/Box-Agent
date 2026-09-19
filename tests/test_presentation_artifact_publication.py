@@ -40,7 +40,7 @@ def test_dynamic_renderer_skips_marked_pages_and_observes_contact_sheet(
     else:
         renderer.render_page(1)
     events = _detect_tool_artifacts(
-        "render", "bash", "[page_01.png]", None, {},
+        "render", "bash", "[page_01.png]" + (" [contact_sheet.png]" if all_pages else ""), None, {},
         _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
     )
     assert [event.filename for event in events if event.kind == "image"] == (
@@ -50,7 +50,7 @@ def test_dynamic_renderer_skips_marked_pages_and_observes_contact_sheet(
 
 
 def test_review_contact_delivers_overview_and_marks_review_images_as_process(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     monkeypatch.syspath_prepend(str(STANDARD))
     deck = runpy.run_path(str(STANDARD / "deck.py"))
@@ -64,7 +64,7 @@ def test_review_contact_delivers_overview_and_marks_review_images_as_process(
     deck["_build_contact"](tmp_path, expected=8)
     deck["_build_contact"](tmp_path, expected=8, focus="5")
     events = _detect_tool_artifacts(
-        "render", "bash", "[renders/slide_01.png] [renders/contact-sheet-review-01.png]",
+        "render", "bash", capsys.readouterr().out,
         None, {}, _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
     )
     assert [event.filename for event in events if event.kind == "image"] == ["contact-sheet.png"]

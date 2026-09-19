@@ -11,17 +11,25 @@ The shared system prompt selects task directories: use cwd when it is empty,
 contains few files, or holds only this task's files; create an ordinary task
 subdirectory when cwd contains many unrelated files. Multiple related outputs
 alone do not require a new directory. Honor an explicit user destination.
-This is file organization, not workspace state. Artifact discovery scans the
-original cwd and also consumes explicit paths returned by tools. Box-Agent sends one
+This is file organization, not workspace state. Artifact discovery consumes
+paths returned by the current tool. Box-Agent sends one
 `tool_call_update` per artifact, with `rawOutput.type == "artifact"` as the
 discriminator. Markdown links inside `agent_message_chunk` text are decoration
 only—do not parse them as the source of truth for files.
 
-Changed-file discovery requires complete snapshots both before and after tool
-execution. If either scan exceeds its file/time limit or encounters a filesystem
-access error, Box-Agent skips that diff instead of treating the failed scan as an
-empty directory. Explicit file references and structured tool outputs remain
-available even when diff-based discovery is skipped.
+Workspace changes alone never establish task ownership: concurrent tasks may
+share the same cwd. A publication sidecar describes a file's delivery placement,
+not which task produced it. Changed-file discovery requires both complete
+pre/post snapshots and an exact absolute or workspace-relative path in the
+current tool result. A directory or a nested file's basename is insufficient.
+Parallel results are attributed to their own tool call, never to the first call
+in the batch. Files only changed by another task are not emitted or registered.
+
+Structured artifact outputs and bracketed file references remain available
+without snapshots. Scripts that do not return output paths must explicitly
+publish their deliverables with `publish_artifact`; silent workspace writes do
+not become task artifacts. This changes discovery only, not cwd or directory
+allocation. It does not repair already misattributed historical task records.
 
 ### Intermediate files produced by scripts
 

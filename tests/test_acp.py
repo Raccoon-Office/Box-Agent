@@ -753,7 +753,7 @@ class EmitProjectArtifactTool(Tool):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         artifact = self.output_dir / "roadmap-v1.html"
         artifact.write_text("<html><body>roadmap</body></html>", encoding="utf-8")
-        return ToolResult(success=True, content="Saved [roadmap-v1.html]")
+        return ToolResult(success=True, content=f"Saved [{artifact}]")
 
 
 class CorrelationCaptureLLM:

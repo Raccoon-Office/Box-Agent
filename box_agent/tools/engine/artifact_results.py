@@ -1,4 +1,4 @@
-"""Existing tool-output and workspace-diff artifact detection."""
+"""Tool-output artifact detection with workspace changes as corroboration only."""
 
 from __future__ import annotations
 
@@ -264,9 +264,16 @@ def _detect_changed_files(
     post_files: dict[Path, tuple[int, int]] | None,
     already_emitted: set[str],
     workspace_dir: str,
+    *,
+    content: str = "",
 ) -> list[ArtifactEvent]:
-    """Create ArtifactEvents for files that appeared or changed."""
-    if pre_files is None or post_files is None:
+    """Report changed files only when this tool returned their exact paths.
+
+    A shared-workspace diff is not evidence of who produced a file. Require
+    the current result to name the absolute or workspace-relative path; never
+    infer ownership from a directory, a nested basename, or a sidecar alone.
+    """
+    if not content or pre_files is None or post_files is None:
         return []
     changed_files = {
         path
@@ -280,6 +287,16 @@ def _detect_changed_files(
     fingerprints = _publication_fingerprints(workspace_dir)
     artifacts: list[ArtifactEvent] = []
     for file_path in sorted(changed_files):
+        try:
+            relative = file_path.resolve().relative_to(ws).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        paths = {str(file_path.resolve()), relative}
+        if not any(
+            re.search(r"(?<![\w./\\-])" + re.escape(path) + r"(?![\w./\\-])", content)
+            for path in paths
+        ):
+            continue
         if (
             file_path.name.startswith(".")
             or file_path.name.startswith("~")
@@ -378,19 +395,17 @@ def _detect_tool_artifacts(
     post_files: dict[Path, tuple[int, int]] | None,
     workspace_dir: str,
 ) -> list[ArtifactEvent]:
-    """Two-layer artifact detection for a single tool result (sequential path).
+    """Discover only files identified by the current tool result.
 
     Layer 1 (regex): scan ``content`` for ``[filename.ext]`` references that
-    resolve under the session cwd. Layer 2 (diff): catch files created or
-    modified by the tool that weren't referenced in the output text, using a
-    per-tool pre/post signature snapshot. The parallel branch can't take per-tool snapshots under
-    concurrency, so it composes :func:`_detect_regex_artifacts` per result with
-    a single diff pass instead (see the parallel block in ``run_agent_loop``).
+    resolve under the session cwd. Layer 2 accepts other exact output paths
+    corroborated by a pre/post signature change. Workspace changes alone never
+    establish task ownership, including files with publication sidecars.
     """
     regex_artifacts, already = _detect_regex_artifacts(
         tool_call_id, tool_name, content, raw_output, workspace_dir
     )
     diff_artifacts = _detect_changed_files(
-        tool_call_id, pre_files, post_files, already, workspace_dir
+        tool_call_id, pre_files, post_files, already, workspace_dir, content=content
     )
     return [*regex_artifacts, *diff_artifacts]

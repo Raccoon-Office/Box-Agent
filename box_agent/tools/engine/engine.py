@@ -516,6 +516,7 @@ class DefaultToolEngine:
                     else:
                         yield self._event(record, control.step)
             emitted = set()
+            artifact_results = {}
             # The first parallel batch finishes before the permission UI opens;
             # follow-up permission chains retain input order and no batch timer.
             for call in parallel:
@@ -526,11 +527,17 @@ class DefaultToolEngine:
                     async for event in events:
                         if isinstance(event, ToolCallResult):
                             outcomes[call.call_id] = event.success
+                            if call.user_visible:
+                                artifact_results[call.call_id] = event.content
                         yield event
             if self._options.artifact_detection_enabled and context.workspace_dir:
                 after = _snapshot_workspace_signatures(context.workspace_dir)
-                for artifact in _detect_changed_files(parallel[0].call_id, before, after, emitted, context.workspace_dir):
-                    yield artifact
+                for call_id, content in artifact_results.items():
+                    for artifact in _detect_changed_files(
+                        call_id, before, after, emitted, context.workspace_dir, content=content,
+                    ):
+                        emitted.add(artifact.abs_path)
+                        yield artifact
             if context.is_cancelled():
                 return
         for duplicate, source in duplicates:

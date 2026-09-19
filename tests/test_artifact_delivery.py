@@ -15,8 +15,12 @@ STANDARD = REPO / "box_agent/skills/presentation-suite/skills/sn-ppt-standard/sc
 
 
 def published(root):
+    # Exercise publication policy for explicitly returned paths, not ownership
+    # inference from every file currently present in the workspace.
+    content = " ".join(f"[{path.relative_to(root).as_posix()}]"
+                       for path in root.rglob("*") if path.is_file() and not path.name.startswith("."))
     return {event.filename for event in _detect_tool_artifacts(
-        "call", "bash", "", None, {}, _snapshot_workspace_signatures(str(root)), str(root))}
+        "call", "bash", content, None, {}, _snapshot_workspace_signatures(str(root)), str(root))}
 
 
 def test_scope_is_explicit_local_and_has_exact_delivery_membership(tmp_path):
