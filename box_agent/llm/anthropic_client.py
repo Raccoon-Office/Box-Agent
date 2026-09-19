@@ -111,51 +111,55 @@ class AnthropicClient(LLMClientBase):
         Raises:
             Exception: API call failed
         """
-        params: dict[str, Any] = {
-            "max_tokens": self.max_output_tokens,
-            "messages": api_messages,
-        }
-        if self.model:
-            params["model"] = self.model
 
-        if system_message:
-            params["system"] = system_message
+        async def _once():
+            params: dict[str, Any] = {
+                "max_tokens": self.max_output_tokens,
+                "messages": api_messages,
+            }
+            if self.model:
+                params["model"] = self.model
 
-        if tools:
-            params["tools"] = self._convert_tools(tools)
+            if system_message:
+                params["system"] = system_message
 
-        if thinking_enabled:
-            params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
+            if tools:
+                params["tools"] = self._convert_tools(tools)
 
-        auth_headers = await self._auth_headers(
-            self._request_headers(session_id, turn_id, title, call_kind)
-        )
-        if auth_headers:
-            params["extra_headers"] = auth_headers
+            if thinking_enabled:
+                params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
 
-        log_llm_request(provider="anthropic", mode="completion", api_base=self.api_base, params=params)
-
-        try:
-            raw_response = await _await_if_needed(
-                self.client.messages.with_raw_response.create(**params)
+            auth_headers = await self._auth_headers(
+                self._request_headers(session_id, turn_id, title, call_kind)
             )
-            log_llm_response_meta(
-                provider="anthropic",
-                mode="completion",
-                request_id=getattr(raw_response, "request_id", None),
-                headers=getattr(raw_response, "headers", None),
-            )
-            response = await _await_if_needed(raw_response.parse())
-        except AttributeError:
-            # Test doubles and older SDK-compatible clients may not expose
-            # ``with_raw_response``. Keep the request log and fall back to the
-            # existing behavior, but request-id metadata will be unavailable.
-            response = await _await_if_needed(self.client.messages.create(**params))
-        except Exception as exc:
-            log_llm_error_meta(provider="anthropic", mode="completion", exc=exc)
-            raise
+            if auth_headers:
+                params["extra_headers"] = auth_headers
 
-        return response
+            log_llm_request(provider="anthropic", mode="completion", api_base=self.api_base, params=params)
+
+            try:
+                raw_response = await _await_if_needed(
+                    self.client.messages.with_raw_response.create(**params)
+                )
+                log_llm_response_meta(
+                    provider="anthropic",
+                    mode="completion",
+                    request_id=getattr(raw_response, "request_id", None),
+                    headers=getattr(raw_response, "headers", None),
+                )
+                response = await _await_if_needed(raw_response.parse())
+            except AttributeError:
+                # Test doubles and older SDK-compatible clients may not expose
+                # ``with_raw_response``. Keep the request log and fall back to the
+                # existing behavior, but request-id metadata will be unavailable.
+                response = await _await_if_needed(self.client.messages.create(**params))
+            except Exception as exc:
+                log_llm_error_meta(provider="anthropic", mode="completion", exc=exc)
+                raise
+
+            return response
+        return await self._call_with_hosted_auth_retry(_once)
+
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         """Convert tools to Anthropic format.
@@ -538,7 +542,15 @@ class AnthropicClient(LLMClientBase):
             last_provider_activity_at: float | None = None
 
             try:
-                stream_context = self.client.messages.stream(**params)
+                async def _open_once():
+                    auth_headers = await self._auth_headers(
+                        self._request_headers(session_id, turn_id, title, call_kind)
+                    )
+                    if auth_headers:
+                        params["extra_headers"] = auth_headers
+                    return self.client.messages.stream(**params)
+
+                stream_context = await self._call_with_hosted_auth_retry(_open_once)
             except Exception as exc:
                 log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
                 # Detect third-party API event order compatibility issues
