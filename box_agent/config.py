@@ -291,7 +291,7 @@ class MCPConfig(BaseModel):
 
     deferred_loading_enabled: bool = True
     connect_timeout: float = 60.0  # Connection timeout (seconds)
-    execute_timeout: float = 120.0  # Tool execution timeout (seconds)
+    execute_timeout: float = 300.0  # Tool execution timeout (seconds)
     sse_read_timeout: float = 180.0  # SSE read timeout (seconds)
 
     # Managed browser (Playwright MCP) isolation. When enabled and the

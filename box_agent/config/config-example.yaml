@@ -152,7 +152,7 @@ tools:
     # Hide ordinary MCP schemas until tool_search activates them for a session.
     deferred_loading_enabled: true
     connect_timeout: 60.0 # Connection timeout in seconds (default: 60)
-    execute_timeout: 120.0 # Tool execution timeout in seconds (default: 120)
+    execute_timeout: 300.0 # Tool execution timeout in seconds (default: 300)
     sse_read_timeout: 180.0 # SSE read timeout in seconds (default: 180)
     # Managed browser isolation: run the playwright MCP server in HTTP mode and
     # give every agent session (and each sub_agent run) its own MCP client /

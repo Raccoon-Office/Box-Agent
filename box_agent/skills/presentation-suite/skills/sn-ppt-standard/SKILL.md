@@ -231,7 +231,7 @@ mode=final_review
 
 1. **完整诊断：**先看 overview，再按 `review-contact.json` 分批看完全部联系表和必要单页；每批将覆盖页码与发现记入同一 `_trace/review-issues.md`。全册覆盖并冻结账本前禁止修改或渲染；不因 Deck 页数较长而跳过后续批次。
 2. **内容保真核验：**任务含附件或使用了 Research 时，在像素修改前把每页屏显事实与 `grounded-knowledge.md` 对照；有附件时沿 `info_pack.raw_documents` 核对原始解析内容、表格和页图，已有 Material 摘要或 coverage ledger 仅作辅证，并写 `_trace/content-fidelity.md`。数字、名称、日期、单位、产品身份、原话或关系无法追溯、自相矛盾时修正或 blocked。生成图只能承担概念/氛围表达；若用于具名真实产品、人物或案例识别，页面必须明确标“概念示意”，不能作为事实证据。仅当既无附件、又无 Research 和高风险外部事实时，`content_fidelity` 才可为 `not-applicable`。
-   Review 停滞收口时允许补齐或更新的正式产物只有 `_trace/review-issues.md` 与 `_trace/content-fidelity.md`；运行时不得禁止写入最终验收合同明确要求的这两份文件，也不得在收口阶段允许继续修改页面。
+   Review 停滞收口时允许补齐或更新的正式产物只有 `_trace/review-issues.md` 与 `_trace/content-fidelity.md`；运行时不得禁止写入最终验收合同明确要求的这两份文件，也不得在收口阶段允许继续修改页面。`inspect_images` 超时按工具契约只重试一次降采样批次；再次失败立即记为 `visual_unverified`，转入确定性 QA 和带 warning 的降级交付，不继续消耗整轮任务预算。
 3. **集中修复：**Review 既诊断也直接修复本次边界内可安全解决的问题；当前文件与已有素材能解决的问题不得只上报给 Orchestrator。按共同根因先全局、后局部，全部修改结束后才统一批量渲染。这一整批“修改 → 批量渲染 → focus 复验”记为 Review 的 1 轮 refine。任何 HTML/`base.css` 修改都会使旧 PNG 失效，重渲前禁止再次调用 Vision；Canvas/SVG/HTML 叠加页必须同步修正 CSS 尺寸、Canvas 属性、SVG `viewBox`、JS 坐标与节点锚点，不能只放大外容器。机检中的 `boxoverflow`、bbox 相交和装饰相交仅为定位候选；若新鲜像素没有真实遮挡、裁切或不可读，不得为清除告警缩字、压缩主体或删除有构图作用的元素。
 4. 改过 base.css/字体时全册 batch；只改局部时 page batch。该批渲染用于确认修复没有退化，不是最终交付证据。
 5. 生成一次 focus 联系表确认变化页。单个 Review 只做 1 轮 refine；仍有可见硬伤时返回 `blocked`，由 Orchestrator 将有证据的硬伤交回原页组。原页组保留最后验证版、做一次合并修复并重渲复看；新版退化或仍未解决时恢复验证版。修复后启动新的 Review 复验，最多形成 3 次 Review，不新增审美目标。

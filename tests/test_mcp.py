@@ -1056,7 +1056,7 @@ class TestMCPTimeoutConfig:
         """Test default timeout configuration values."""
         config = MCPTimeoutConfig()
         assert config.connect_timeout == 60.0
-        assert config.execute_timeout == 120.0
+        assert config.execute_timeout == 300.0
         assert config.sse_read_timeout == 180.0
 
     def test_custom_timeout_config(self):
@@ -1079,10 +1079,10 @@ class TestMCPTimeoutConfig:
 
         try:
             # Set new values
-            set_mcp_timeout_config(connect_timeout=20.0, execute_timeout=120.0)
+            set_mcp_timeout_config(connect_timeout=20.0, execute_timeout=300.0)
             config = get_mcp_timeout_config()
             assert config.connect_timeout == 20.0
-            assert config.execute_timeout == 120.0
+            assert config.execute_timeout == 300.0
         finally:
             # Restore original values
             set_mcp_timeout_config(

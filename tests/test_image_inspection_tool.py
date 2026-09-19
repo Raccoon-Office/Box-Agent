@@ -458,7 +458,72 @@ async def test_inspect_images_timeout_is_not_cached(tmp_path: Path, monkeypatch)
 
     assert first.raw_output["code"] == "IMAGE_REQUEST_FAILED"
     assert second.raw_output["code"] == "IMAGE_REQUEST_FAILED"
+    # Each invocation gets one bounded retry; timeout state is not cached.
+    assert llm.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_inspect_images_retries_timeout_with_smaller_view(tmp_path: Path, monkeypatch):
+    import box_agent.tools.image_inspection_tool as module
+
+    monkeypatch.setattr(module, "_IMAGE_INSPECTION_TIMEOUT", 0.01)
+    image = tmp_path / "large.png"
+    from PIL import Image
+
+    Image.new("RGB", (2000, 1200), "white").save(image)
+
+    class RetryLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.widths = []
+
+        async def generate(self, messages, **_kwargs):
+            self.calls += 1
+            block = next(item for item in messages[1].content if item.get("type") == "input_image")
+            self.widths.append(block["width"])
+            if self.calls == 1:
+                await asyncio.sleep(1)
+            return LLMResponse(content="Retry succeeded.", finish_reason="stop")
+
+    llm = RetryLLM()
+    result = await _tool(tmp_path, llm).invoke(
+        {"image_paths": ["large.png"], "instruction": "Review it."}
+    )
+    assert result.success
     assert llm.calls == 2
+    assert llm.widths[1] < llm.widths[0]
+
+
+@pytest.mark.asyncio
+async def test_inspect_images_retries_provider_timeout_with_smaller_view(tmp_path: Path, monkeypatch):
+    import box_agent.tools.image_inspection_tool as module
+
+    monkeypatch.setattr(module, "_IMAGE_INSPECTION_TIMEOUT", 1.0)
+    image = tmp_path / "large.png"
+    from PIL import Image
+
+    Image.new("RGB", (2000, 1200), "white").save(image)
+
+    class ProviderTimeoutLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.widths = []
+
+        async def generate(self, messages, **_kwargs):
+            self.calls += 1
+            block = next(item for item in messages[1].content if item.get("type") == "input_image")
+            self.widths.append(block["width"])
+            if self.calls == 1:
+                raise TimeoutError("provider read timeout")
+            return LLMResponse(content="Retry succeeded.", finish_reason="stop")
+
+    llm = ProviderTimeoutLLM()
+    result = await _tool(tmp_path, llm).invoke(
+        {"image_paths": ["large.png"], "instruction": "Review it."}
+    )
+    assert result.success
+    assert llm.calls == 2
+    assert llm.widths[1] < llm.widths[0]
 
 
 class ToolConfig:

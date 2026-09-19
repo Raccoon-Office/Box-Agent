@@ -25,6 +25,8 @@ _MAX_TOTAL_IMAGE_BYTES = 60 * 1024 * 1024
 _MAX_IMAGE_PIXELS = 40_000_000
 _MAX_TOTAL_IMAGE_PIXELS = 80_000_000
 _MAX_LONG_EDGE_PX = 1568
+_RETRY_LONG_EDGE_PX = 1024
+_IMAGE_TIMEOUT_RETRIES = 1
 _MAX_IMAGES = 6
 _JPEG_QUALITY = 85
 _IMAGE_INSPECTION_TIMEOUT = 120.0
@@ -211,40 +213,68 @@ class ImageInspectionTool(Tool):
         if self._unsupported_error is not None:
             return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
 
-        messages = [
-            Message(role="system", content=self._system_prompt()),
-            Message(
-                role="user",
-                content=self._content_blocks(
-                    images,
-                    instruction=normalized_instruction,
+        response = None
+        last_timeout: asyncio.TimeoutError | None = None
+        candidate_images = images
+        for attempt in range(_IMAGE_TIMEOUT_RETRIES + 1):
+            messages = [
+                Message(role="system", content=self._system_prompt()),
+                Message(
+                    role="user",
+                    content=self._content_blocks(
+                        candidate_images,
+                        instruction=normalized_instruction,
+                    ),
+                    trace_redact_content=True,
                 ),
-                trace_redact_content=True,
-            ),
-        ]
-        try:
-            response = await asyncio.wait_for(
-                self.llm.generate(
-                    messages=messages,
-                    tools=None,
-                    thinking_enabled=self._thinking_enabled,
-                    call_kind="utility",
-                ),
-                timeout=_IMAGE_INSPECTION_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            return self._provider_error(TimeoutError(
-                f"image inspection timed out after {_IMAGE_INSPECTION_TIMEOUT:.0f}s"))
-        except RequestBodyTooLargeError as exc:
-            return ToolResult(success=False, error=str(exc),
-                              raw_output={"tool": self.name, **exc.details()})
-        except Exception as exc:  # pragma: no cover - provider exceptions vary
-            if self._is_unsupported_image_input_error(str(exc)):
-                self._unsupported_error = (
-                    "the configured model or provider does not support image input"
+            ]
+            try:
+                response = await asyncio.wait_for(
+                    self.llm.generate(
+                        messages=messages,
+                        tools=None,
+                        thinking_enabled=self._thinking_enabled,
+                        call_kind="utility",
+                    ),
+                    timeout=_IMAGE_INSPECTION_TIMEOUT,
                 )
-                return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
-            return self._provider_error(exc)
+                break
+            except asyncio.TimeoutError as exc:
+                last_timeout = exc
+                if attempt >= _IMAGE_TIMEOUT_RETRIES:
+                    return self._provider_error(TimeoutError(
+                        f"image inspection timed out after {_IMAGE_INSPECTION_TIMEOUT:.0f}s"))
+                try:
+                    candidate_images = self._load_images(
+                        image_paths,
+                        max_long_edge=_RETRY_LONG_EDGE_PX,
+                    )
+                except ValueError:
+                    return self._provider_error(exc)
+            except RequestBodyTooLargeError as exc:
+                return ToolResult(success=False, error=str(exc),
+                                  raw_output={"tool": self.name, **exc.details()})
+            except Exception as exc:  # pragma: no cover - provider exceptions vary
+                from box_agent.llm.error_messages import structured_llm_error
+
+                details = structured_llm_error(exc)
+                if details.get("category") == "timeout" and attempt < _IMAGE_TIMEOUT_RETRIES:
+                    try:
+                        candidate_images = self._load_images(
+                            image_paths,
+                            max_long_edge=_RETRY_LONG_EDGE_PX,
+                        )
+                    except ValueError:
+                        return self._provider_error(exc)
+                    continue
+                if self._is_unsupported_image_input_error(str(exc)):
+                    self._unsupported_error = (
+                        "the configured model or provider does not support image input"
+                    )
+                    return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
+                return self._provider_error(exc)
+        if response is None:
+            return self._provider_error(last_timeout or TimeoutError("image inspection timed out"))
 
         content = response.content or ""
         if not content.strip():
@@ -255,7 +285,7 @@ class ImageInspectionTool(Tool):
         raw_output = {
             "type": "image_inspection",
             "schema_version": 1,
-            "images": self._image_metadata(images),
+            "images": self._image_metadata(candidate_images),
             "instruction": normalized_instruction,
             "model_output": content,
         }
@@ -282,7 +312,12 @@ class ImageInspectionTool(Tool):
         tail_chars = available - head_chars
         return f"{content[:head_chars]}{marker}{content[-tail_chars:]}"
 
-    def _load_images(self, image_paths: list[str]) -> list[dict[str, Any]]:
+    def _load_images(
+        self,
+        image_paths: list[str],
+        *,
+        max_long_edge: int = _MAX_LONG_EDGE_PX,
+    ) -> list[dict[str, Any]]:
         images: list[dict[str, Any]] = []
         total_bytes = 0
         total_pixels = 0
@@ -291,6 +326,7 @@ class ImageInspectionTool(Tool):
                 path,
                 index=index,
                 remaining_bytes=_MAX_TOTAL_IMAGE_BYTES - total_bytes,
+                max_long_edge=max_long_edge,
             )
             total_bytes += image["source_bytes"]
             total_pixels += image["source_pixels"]
@@ -309,6 +345,7 @@ class ImageInspectionTool(Tool):
         *,
         index: int,
         remaining_bytes: int,
+        max_long_edge: int = _MAX_LONG_EDGE_PX,
     ) -> dict[str, Any]:
         file_path = self._resolve_readable_path(path)
         if not file_path.exists():
@@ -353,13 +390,14 @@ class ImageInspectionTool(Tool):
                 opened.load()
                 normalized = ImageOps.exif_transpose(opened)
                 mime_type = "image/png" if image_format == "PNG" else "image/jpeg"
-                if max(normalized.size) <= _MAX_LONG_EDGE_PX and orientation == 1:
+                if max(normalized.size) <= max_long_edge and orientation == 1:
                     encoded = raw
                     encoded_width, encoded_height = normalized.size
                 else:
                     encoded, encoded_width, encoded_height = self._resize_and_encode(
                         normalized,
                         mime_type,
+                        max_long_edge=max_long_edge,
                     )
         except ValueError:
             raise
@@ -380,12 +418,17 @@ class ImageInspectionTool(Tool):
         }
 
     @staticmethod
-    def _resize_and_encode(image: Any, mime_type: str) -> tuple[bytes, int, int]:
+    def _resize_and_encode(
+        image: Any,
+        mime_type: str,
+        *,
+        max_long_edge: int = _MAX_LONG_EDGE_PX,
+    ) -> tuple[bytes, int, int]:
         from PIL import Image
 
         long_edge = max(image.size)
-        if long_edge > _MAX_LONG_EDGE_PX:
-            scale = _MAX_LONG_EDGE_PX / long_edge
+        if long_edge > max_long_edge:
+            scale = max_long_edge / long_edge
             size = (
                 max(1, round(image.width * scale)),
                 max(1, round(image.height * scale)),
