@@ -1,0 +1,21 @@
+# Minimal non-network profile for ACP host-probe handshake / catalog cases.
+# Loaded only under an isolated BOX_AGENT_HOME (never written to ~/.box-agent).
+# api_key is a fixture placeholder accepted by Config.load; api_base is
+# non-routable so initialize/session/new/list_skills never need a live provider.
+api_key: acp-host-probe-fixture-key
+api_base: https://example.invalid/v1
+provider: openai
+model: acp-host-probe-fixture
+enable_memory: false
+enable_memory_extraction: false
+memory_maintainer_enabled: false
+hooks: []
+tools:
+  enable_file_tools: true
+  enable_bash: false
+  enable_todo: false
+  enable_plan: false
+  enable_sub_agent: false
+  enable_skills: true
+  enable_mcp: false
+  allow_full_access: false
