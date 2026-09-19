@@ -773,6 +773,11 @@ class WriteTool(Tool):
                         "small file; use false until the last chunk of a large file."
                     ),
                 },
+                "temporary": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "On the final chunk, explicitly mark a new disposable file for later approval-free exact rm. Does not grant cleanup rights over existing files or published deliverables.",
+                },
             },
             "required": ["path", "content"],
             "additionalProperties": False,
@@ -1039,7 +1044,7 @@ class WriteTool(Tool):
         state.size_bytes += len(data)
         return None
 
-    def _commit(self, state: _PendingTextWrite) -> ToolResult:
+    def _commit(self, state: _PendingTextWrite, *, temporary: bool = False) -> ToolResult:
         if error := self._permission_error(state.target):
             return self._active_result(state, error)
         try:
@@ -1068,7 +1073,17 @@ class WriteTool(Tool):
             )
         digest = self._sha256_file(state.temporary)
         backup_path = backup_file(state.target)
-        os.replace(state.temporary, state.target)
+        created = False
+        try:
+            # Exclusive creation distinguishes our new file from a concurrent
+            # task's existing target. Unsupported hard links fall back to the
+            # normal atomic replacement without granting cleanup ownership.
+            os.link(state.temporary, state.target)
+        except OSError:
+            os.replace(state.temporary, state.target)
+        else:
+            state.temporary.unlink()
+            created = True
         self._pending.pop(state.target, None)
         result = ToolResult(
             success=True,
@@ -1080,6 +1095,8 @@ class WriteTool(Tool):
                 "type": "artifact",
                 "path": str(state.target),
                 "transaction_state": "committed",
+                "created": created,
+                "temporary": temporary,
                 "size_bytes": state.size_bytes,
                 "sha256": digest,
                 "chunks": state.next_index,
@@ -1154,6 +1171,7 @@ class WriteTool(Tool):
         content: str,
         chunk_index: int = 0,
         final: bool = True,
+        temporary: bool = False,
     ) -> ToolResult:
         """Write one complete file or advance a path-keyed chunk transaction."""
         state: _PendingTextWrite | None = None
@@ -1211,7 +1229,7 @@ class WriteTool(Tool):
                     )
                 return append_result
             if final:
-                return self._commit(state)
+                return self._commit(state, temporary=temporary)
             return ToolResult(
                 success=True,
                 content=(

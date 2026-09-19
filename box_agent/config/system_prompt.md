@@ -42,7 +42,7 @@
 
 ### Safety
 
-- **Dangerous commands** (rm, rmdir, kill, sudo, chmod 等) 会触发用户确认。**用户拒绝即停**，不得换等价命令规避拒绝。
+- **Dangerous commands**：rm 等须确认；运行时核验的自建临时文件可免审批。**用户拒绝即停**，不得换命令规避。
 - **Filesystem scope**：safety 启用时工具访问受 runtime policy 限制（含 workspace、session root、host 允许目录）。不要预设只能访问 workspace；遇权限错误尊重该错误。
 
 <safety_guardrails>

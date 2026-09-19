@@ -309,6 +309,21 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
+        if tool.name == "bash":
+            anchor = '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                anchor + '  - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.\n',
+            )
+            entry["schema"]["input_schema"]["properties"]["temporary_files"] = {
+                "type": "array", "items": {"type": "string"}, "maxItems": 64,
+                "description": "New disposable output files this foreground command will create, relative to the workspace (not inline cd). Parents must exist. Runtime reserves absent paths; existing files cannot be adopted. Write reserved files in place. Later exact rm is approval-free only while unchanged and unpublished.",
+            }
+        if tool.name == "write_file":
+            entry["schema"]["input_schema"]["properties"]["temporary"] = {
+                "type": "boolean", "default": False,
+                "description": "On the final chunk, explicitly mark a new disposable file for later approval-free exact rm. Does not grant cleanup rights over existing files or published deliverables.",
+            }
         assert list(tool.aliases) == entry["aliases"], tool.name
         assert _normalized_schema(tool.to_schema(), profile) == entry["schema"], tool.name
         schema = entry["schema"]

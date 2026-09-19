@@ -23,6 +23,8 @@ from ...schema import Message, ToolCall
 from ...session_log import SessionLogDurabilityError
 from ...session_trace import emit_session_trace
 from ..base import Tool, ToolResult, ToolInvocationContext
+from ..bash_tool import BashTool
+from ..file_tools import WriteTool
 from ..browser_result_adapter import (
     _prepare_browser_snapshot_output, _prepare_browser_screenshot_output,
     _persist_browser_snapshot_output, _persist_browser_screenshot_output,
@@ -346,6 +348,12 @@ class DefaultToolEngine:
         # Keep the actual execution outcome apart from adaptations and Hook
         # display changes. Large result payloads are referenced, not recopied.
         call.execution_result = result
+        if isinstance(call.target, WriteTool) and result.success:
+            raw = result.raw_output or {}
+            if raw.get("created") is True and raw.get("temporary") is True and raw.get("sha256") and raw.get("path"):
+                bash = self._tools.get("bash")
+                if isinstance(bash, BashTool):
+                    bash.owned_file_cleanup.record(raw["path"], sha256=raw["sha256"])
         call.executed = bool(
             call.invoked and not result.permission_request
             and (result.raw_output or {}).get("code") not in {"INVALID_TOOL_SCHEMA", "INVALID_TOOL_ARGUMENTS"}

@@ -118,6 +118,8 @@ _RUNTIME_EXECUTABLE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "BOX_AGENT_SOFFICE": ("soffice", "libreoffice"),
     "BOX_AGENT_SANDBOX_PYTHON": ("python3",),
     "BOX_AGENT_BUNDLED_PYTHON": ("python3",),
+    "HYPERFRAMES_BROWSER_PATH": (),
+    "PRODUCER_HEADLESS_SHELL_PATH": (),
 }
 _SHELL_ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_VARIABLE_NAME_RE = re.compile(
