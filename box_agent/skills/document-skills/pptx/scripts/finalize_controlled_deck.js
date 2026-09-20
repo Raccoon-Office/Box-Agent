@@ -12,14 +12,14 @@ const { reconcileReadyManifestMedia } = require("./apply_deck_patch.js");
 function usage() {
   console.error(
     "Usage: finalize_controlled_deck.js deck.json --out index.html " +
-    "[--manifest assets/generated/manifest.json]"
+    "[--manifest assets/generated/manifest.json] [--require-pptx [--pptx output.pptx]]"
   );
   process.exit(2);
 }
 
 function parseArgs(argv) {
   if (!argv[0] || argv[0] === "--help" || argv[0] === "-h") usage();
-  const opts = { deck: argv[0], out: null, manifest: null };
+  const opts = { deck: argv[0], out: null, manifest: null, requirePptx: false, pptx: null };
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = argv[index + 1];
@@ -29,11 +29,16 @@ function parseArgs(argv) {
     } else if (arg === "--manifest" && value) {
       opts.manifest = value;
       index += 1;
+    } else if (arg === "--require-pptx") {
+      opts.requirePptx = true;
+    } else if (arg === "--pptx" && value) {
+      opts.pptx = value;
+      index += 1;
     } else {
       usage();
     }
   }
-  if (!opts.out) usage();
+  if (!opts.out || (opts.pptx && !opts.requirePptx)) usage();
   return opts;
 }
 
@@ -52,6 +57,7 @@ function hashJson(value) {
 
 function refreshDeckContractReport(deckPath, reportPath, deckSpecReport) {
   const artifactRoot = path.dirname(deckPath);
+  require("./artifact_delivery.js").declareScope(artifactRoot);
   const outlinePath = path.join(artifactRoot, "outline.json");
   let previous = {};
   try {
@@ -300,7 +306,7 @@ function runAdvisoryStage(stage, scriptName, args, reportPath) {
   return normalized;
 }
 
-function runPostRenderStage(stage, scriptName, args, reportPath) {
+function runPostRenderStage(stage, scriptName, args, reportPath, strict = false) {
   let previousMtime = null;
   try {
     previousMtime = fs.statSync(reportPath).mtimeMs;
@@ -330,6 +336,11 @@ function runPostRenderStage(stage, scriptName, args, reportPath) {
     console.log(`FINALIZE_PASS stage=${stage} warnings=${summary.warnings.length}`);
     return report;
   }
+  if (strict) fail(stage, result, reportPath);
+  if (reportIsFresh && report?.editor?.paletteCompliance?.enforced
+    && report.editor.paletteCompliance.failures.length) {
+    fail("palette_contract", { status: 1, stdout: "", stderr: JSON.stringify(report.editor.paletteCompliance.failures.slice(0, 12)) });
+  }
 
   const diagnostic = tail(
     result.error
@@ -358,10 +369,54 @@ function runPostRenderStage(stage, scriptName, args, reportPath) {
   return normalized;
 }
 
+function exportRequiredPptx(htmlPath, pptxPath, slideCount, reportDir) {
+  let temporaryDir;
+  try {
+    fs.mkdirSync(path.dirname(pptxPath), { recursive: true });
+    temporaryDir = fs.mkdtempSync(path.join(path.dirname(pptxPath), ".pptx-export-"));
+    const candidate = path.join(temporaryDir, "deck.pptx");
+    const result = spawnSync(
+      process.execPath,
+      [path.join(__dirname, "html_to_editable_pptx.js"), htmlPath, candidate,
+        "--out", path.join(reportDir, "export-previews")],
+      { cwd: process.cwd(), encoding: "utf8", env: process.env, maxBuffer: 16 * 1024 * 1024 }
+    );
+    if (result.error || result.status !== 0) {
+      throw new Error(result.error?.message || tail(result.stderr || result.stdout) || `Exporter exited ${result.status}`);
+    }
+    if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile() || fs.statSync(candidate).size === 0) {
+      throw new Error("Exporter did not create a nonempty PPTX file");
+    }
+    const receipt = JSON.parse(result.stdout.slice(result.stdout.lastIndexOf("\n{") + 1));
+    if (receipt.pptx !== candidate || receipt.bytes !== fs.statSync(candidate).size || receipt.slideCount !== slideCount) {
+      throw new Error("Exported PPTX file size or page count does not match the current deck");
+    }
+    // Export into a fresh sibling directory: an old delivery is never mistaken
+    // for this run's output, and stays intact if conversion or validation fails.
+    fs.renameSync(candidate, pptxPath);
+    if (result.stderr) console.error(result.stderr.trim());
+    console.log(`FINALIZE_PASS stage=pptx file=${pptxPath} slides=${receipt.slideCount}`);
+    return null;
+  } catch (error) {
+    const message = error.message || String(error);
+    console.error(`FINALIZE_STOP stage=pptx ${message}`);
+    return message;
+  } finally {
+    if (temporaryDir) fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const deckPath = resolveArtifactPath(opts.deck);
   const outputPath = resolveArtifactPath(opts.out);
+  const pptxPath = opts.requirePptx
+    ? resolveArtifactPath(opts.pptx || path.join(path.dirname(outputPath), `${path.parse(outputPath).name}.pptx`))
+    : null;
+  const canonicalPath = file => fs.existsSync(file) ? fs.realpathSync(file) : path.resolve(file);
+  if (pptxPath && [deckPath, outputPath].some(file => canonicalPath(file) === canonicalPath(pptxPath))) {
+    throw new Error("PPTX output must differ from the source deck and HTML output");
+  }
   const artifactRoot = path.dirname(deckPath);
   const manifestPath = opts.manifest
     ? resolveArtifactPath(opts.manifest)
@@ -376,6 +431,8 @@ function main() {
     html: path.join(reportDir, "html_self_check.json"),
     runtime: path.join(reportDir, "runtime_probe.json"),
   };
+  const researchAudit = path.join(reportDir, "research_handoff_check.json");
+  if (fs.existsSync(researchAudit)) reports.research = researchAudit;
   fs.mkdirSync(reportDir, { recursive: true });
 
   // Assets can finish after the content patch. Bind them in this same compile
@@ -438,7 +495,8 @@ function main() {
       "--report",
       reports.html,
     ],
-    reports.html
+    reports.html,
+    opts.requirePptx
   );
   runAdvisoryStage(
     "truth",
@@ -453,6 +511,9 @@ function main() {
     reports.runtime
   );
 
+  const exportError = pptxPath
+    ? exportRequiredPptx(outputPath, pptxPath, deck.slides.length, reportDir)
+    : null;
   const warningCount = Object.values(reports)
     .map(reportSummary)
     .filter(Boolean)
@@ -466,20 +527,33 @@ function main() {
       || (runtimeReport.editor?.componentContrast?.failures?.length || 0) > 0
       ? "runtime_probe" : null,
   ].filter(Boolean);
+  const blockingImageIssues = Array.isArray(imageReport.blockingIssues)
+    ? imageReport.blockingIssues
+    : [];
   const degraded = degradedStages.length > 0;
+  const deliveryStatus = exportError ? "partial" : blockingImageIssues.length > 0
+    ? "incomplete"
+    : degraded ? "degraded" : "complete";
+  const { publishArtifact } = require("./artifact_delivery.js");
+  publishArtifact(outputPath);
+  if (pptxPath && !exportError) publishArtifact(pptxPath);
   console.log(
     JSON.stringify({
-      ok: true,
+      ok: !exportError,
       deck: deckPath,
       html: outputPath,
+      pptx: exportError ? null : pptxPath,
+      requested_format: opts.requirePptx ? "pptx" : "html",
       media_bindings: mediaBindings,
       qa_reports: Object.values(reports),
       warnings: warningCount,
       degraded,
       degraded_stages: degradedStages,
-      delivery_status: degraded ? "degraded" : "complete",
+      blocking_issues: [...blockingImageIssues, ...(exportError ? [`PPTX export failed: ${exportError}`] : [])],
+      delivery_status: deliveryStatus,
     })
   );
+  if (exportError) process.exitCode = 1;
 }
 
 try {

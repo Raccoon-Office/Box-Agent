@@ -94,6 +94,15 @@ function main() {
   const reportPath = opts.report
     ? resolveArtifactPath(opts.report)
     : path.join(artifactRoot, "qa", "design_review_check.json");
+  if (deck.design_plan) {
+    // A pre-content design proposal is not a post-content semantic review.
+    const report = { ok: true, issues: [], warnings: [], required: false,
+      review_performed: false, policy: "independent_design_then_program_qa",
+      plan_hash: deck.design_plan.plan_hash };
+    writeJson(reportPath, report);
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
   const warnings = [];
   const reviewRequired = Boolean(
     deck.design_contract

@@ -98,7 +98,18 @@ def test_acp_uses_agent_event_api_and_shared_permission_runtime() -> None:
         and node.func.attr == "run_events"
         and any(keyword.arg == "options" for keyword in node.keywords)
     ]
-    assert len(run_events_calls) == 1
+    assert len(run_events_calls) == 0
+    service_start_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "start"
+        and isinstance(node.func.value, ast.Call)
+        and isinstance(node.func.value.func, ast.Name)
+        and node.func.value.func.id == "AgentService"
+    ]
+    assert len(service_start_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -742,7 +753,7 @@ class EmitProjectArtifactTool(Tool):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         artifact = self.output_dir / "roadmap-v1.html"
         artifact.write_text("<html><body>roadmap</body></html>", encoding="utf-8")
-        return ToolResult(success=True, content="Saved [roadmap-v1.html]")
+        return ToolResult(success=True, content=f"Saved [{artifact}]")
 
 
 class CorrelationCaptureLLM:
@@ -988,6 +999,16 @@ def test_file_delivery_prompt_has_one_cwd_rooted_policy():
     assert "\n- **多文件交付**" in prompt
     assert "用户需要单一下载包时才" in prompt
     assert "不重命名或覆盖无关文件" in prompt
+
+
+def test_file_delivery_prompt_distinguishes_companion_source_from_primary():
+    prompt = build_file_delivery_prompt()
+
+    assert "按文件在任务中的交付用途" in prompt
+    assert "配套文件即使要求保留或在最终回复中提及" in prompt
+    assert "不调用 `publish_artifact`" in prompt
+    assert "独立交付结果" in prompt
+    assert "deck.json" not in prompt
 
 
 def test_acp_plan_approval_text_accepts_short_confirmations():
@@ -2083,10 +2104,13 @@ async def test_acp_skill_selection_is_ordinary_reference_not_automatic_system_bo
     assert len(supplied) == (1 if selection else 0)
     if supplied:
         assert supplied[0][0] == "user"
-        assert "Host-provided Skill reference" in str(supplied[0][1])
+        assert "[Skill reference]" in str(supplied[0][1])
+        assert '"kind": "runtime_skill_instructions"' in str(supplied[0][1])
     state = adapter._sessions[session.sessionId]
     assert ("get_skill" in state.agent.tools) is with_skill_tool
-    assert [m.content for m in state.agent.messages if m.role == "user"] == [original + _EMPTY_CONNECTOR_CONTEXT]
+    user_messages = [m for m in state.agent.messages if m.role == "user"]
+    assert user_messages[0].content == original + _EMPTY_CONNECTOR_CONTEXT
+    assert all(message.source != "runtime" for message in user_messages[1:]) is (selection is None)
     usage = [u.update.rawOutput for u in conn.updates
              if isinstance(getattr(u.update, "rawOutput", None), dict)
              and u.update.rawOutput.get("type") == "turn_usage"]
@@ -2096,7 +2120,9 @@ async def test_acp_skill_selection_is_ordinary_reference_not_automatic_system_bo
         assert usage[-1]["skillInvocations"][0]["usageRole"] == "primary"
     conn.updates.clear()
     await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}]))
-    assert all("UNIQUE_SKILL_REFERENCE_BODY" not in str(content) for _, content in llm.calls[-1])
+    for role, content in llm.calls[-1]:
+        if role in ("system", "developer"):
+            assert "UNIQUE_SKILL_REFERENCE_BODY" not in str(content)
     assert state.preloaded_skill_names == []
 
 
@@ -2200,6 +2226,12 @@ async def test_acp_explicit_missing_required_diagnostic_does_not_report_successf
     session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
     await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "/parent proceed"}]))
     assert llm.calls and all("NEVER_DELIVER_PARENT_BODY" not in str(c) for _, c in llm.calls[0])
+    diagnostic_contents = [
+        str(content)
+        for role, content in llm.calls[0]
+        if role == "user" and "runtime_skill_diagnostic" in str(content)
+    ]
+    assert diagnostic_contents and '"code": "SKILL_NOT_FOUND"' in diagnostic_contents[0]
     payloads = [u.update.rawOutput for u in conn.updates if isinstance(getattr(u.update, "rawOutput", None), dict)]
     assert not any(p.get("type") == "skills_usage" for p in payloads)
     assert all(p.get("skillInvocations", []) == [] for p in payloads if p.get("type") == "turn_usage")
@@ -2231,6 +2263,53 @@ async def test_acp_skill_catalog_tracks_session_profile_and_explicit_selection(t
     assert (await fast_tool.execute(query="research-synthesis")).raw_output["skills"][0]["available"]
     await adapter.prompt(SimpleNamespace(sessionId=fast.sessionId, prompt=[{"text": "hello"}]))
     assert not (await fast_tool.execute(query="research-synthesis")).raw_output["skills"][0]["available"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["fast", "standard", "deep"])
+@pytest.mark.parametrize("selection", ["host", "slash"])
+async def test_acp_research_prompt_catalog_and_reader_follow_current_turn_policy(
+    tmp_path, profile, selection,
+):
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    folder = tmp_path / "skills" / "research-synthesis"
+    folder.mkdir(parents=True)
+    folder.joinpath("SKILL.md").write_text(
+        "---\nname: research-synthesis\ndescription: Research evidence\n"
+        "keywords: [research]\n---\nResearch method\n"
+    )
+    loader = SkillLoader(folder.parent)
+    loader.discover_skills()
+    llm = CaptureMessagesLLM()
+    adapter = BoxACPAgent(DummyConn(), Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_todo=False),
+    ), llm, [GetSkillTool(loader), ListSkillsTool(loader)],
+        f"system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader)
+    session = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={
+        "session_mode": "general", "execution_profile": profile,
+    }))
+    state = adapter._sessions[session.sessionId]
+    for selected in (False, True, False):
+        text = "/research-synthesis research" if selected and selection == "slash" else "research"
+        meta = {"selected_skill_names": ["research-synthesis"]} if selected and selection == "host" else {}
+        await adapter.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": text}], field_meta=meta,
+        ))
+        available = profile != "fast" or selected
+        system = "\n".join(str(content) for role, content in llm.calls[-1] if role == "system")
+        assert ("research-synthesis" in system) is available
+        assert ("Research evidence" in system) is available
+        assert ("research-synthesis" in state.skill_selector.matched_skill_names) is available
+        catalog = state.agent.tools["list_skills"]
+        browse = await catalog.execute()
+        assert bool(browse.raw_output["skills"]) is available
+        exact = await catalog.execute(query="research-synthesis")
+        assert exact.raw_output["skills"][0]["available"] is available
+        assert (state.agent.tools["get_skill"].check_access("research-synthesis") is None) is available
 
 
 @pytest.mark.asyncio
@@ -4275,6 +4354,9 @@ async def test_acp_general_mode_keeps_cwd_and_injects_directory_policy(tmp_path)
     assert "## General Task Directory Organization" in state.agent.system_prompt
     assert "保持当前会话工作目录（cwd）不变" in state.agent.system_prompt
     assert "不要使用固定文件数量阈值" in state.agent.system_prompt
+    assert "不得因“重复、旧版、目录整洁”移动、归档或删除归属不明的文件" in state.agent.system_prompt
+    assert "其他会话即使需求完全相同，其文件也不能自动认作自己的旧版本" in state.agent.system_prompt
+    assert "修改、补充、继续执行，沿用当前会话已明确操作的文件" in state.agent.system_prompt
     # Exercise the complete prompt: an empty cwd remains the default even
     # when a presentation will produce several related files.
     assert state.agent.system_prompt.count("只有较多无关文件时才建语义化任务目录") == 1
@@ -4450,7 +4532,80 @@ def test_acp_artifact_raw_output_gets_session_metadata():
 
     assert output["session_id"] == "office-session-a"
     assert output["sessionId"] == "office-session-a"
+    assert "artifact_role" not in output
     assert "output_dir" not in output
+
+
+def test_acp_skips_sidecar_marked_structured_artifact(tmp_path):
+    file = tmp_path / "review.png"
+    file.write_bytes(b"image")
+    file.with_name(f".{file.name}.artifact.json").write_text(
+        '{"type":"intermediate_asset"}', encoding="utf-8",
+    )
+
+    output = _tool_result_raw_output(
+        {"type": "artifact", "path": "review.png"},
+        "[OK] done",
+        None,
+        workspace_dir=str(tmp_path),
+    )
+
+    assert output["type"] == "intermediate_asset"
+
+
+@pytest.mark.asyncio
+async def test_acp_sends_published_artifacts_without_final_selection(tmp_path, monkeypatch):
+    from box_agent.agent import Agent
+
+    file = tmp_path / "report.xlsx"
+    file.write_bytes(b"report")
+    second = tmp_path / "summary.pdf"
+    second.write_bytes(b"summary")
+
+    async def run_with_publication(self, **_kwargs):
+        from box_agent.tools.engine.artifact_results import _detect_tool_artifacts
+        for name in ("report.xlsx", "summary.pdf"):
+            result = await self.tools["publish_artifact"].execute(name)
+            assert result.success
+            for event in _detect_tool_artifacts(
+                name, "publish_artifact", result.content, result.raw_output,
+                {}, {}, str(tmp_path),
+            ):
+                yield event
+        yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="done")
+
+    monkeypatch.setattr(Agent, "run_events", run_with_publication)
+    conn = DummyConn()
+    agent = BoxACPAgent(
+        conn,
+        Config(
+            llm=LLMConfig(api_key="test-key"),
+            agent=AgentConfig(workspace_dir=str(tmp_path)),
+            tools=ToolsConfig(enable_sub_agent=False),
+        ),
+        DoneLLM(), [], "system",
+    )
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    )
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "report"}]))
+
+    deliveries = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "sessionUpdate", None) == "tool_call_update"
+        and isinstance(getattr(update.update, "rawOutput", None), dict)
+        and update.update.rawOutput.get("type") == "artifact"
+    ]
+    assert len(deliveries) == 2
+    assert [item["rel_path"] for item in deliveries] == [
+        "report.xlsx", "summary.pdf",
+    ]
+    assert deliveries[0]["tool_call_id"] == next(
+        update.update.toolCallId
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None) is deliveries[0]
+    )
 
 
 @pytest.mark.asyncio
@@ -4842,6 +4997,38 @@ async def test_acp_waiting_turn_resumes_only_from_real_user_messages(tmp_path):
     rendered = "\n".join(str(update) for update in conn.updates)
     assert "已根据补充数据继续完成 HTML" in rendered
     assert "尚未满足完成条件" not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["user", "timeout"])
+@pytest.mark.parametrize("kind,option,has_guidance", [
+    ("presentation_mode", "fast", True),
+    ("presentation_mode", "design", True),
+    ("presentation_mode", "custom", False),
+    ("outline_approval", "approve", False),
+])
+async def test_presentation_resume_reports_actions_without_reconfirming_mode(tmp_path, trigger, kind, option, has_guidance):
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)), tools=ToolsConfig())
+    llm = CaptureMessagesLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    response = {"request_id": "choice-1", "decision_kind": kind,
+                "selected_option_id": option, "selected_option_label": "所选选项", "trigger": trigger}
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId,
+        prompt=[{"text": "请按选择继续原任务"}], field_meta={"userDecision": response, "ui_language": "zh"}))
+    assert len(llm.calls) == 1
+    user_messages = [content for role, content in llm.calls[0] if role == "user"]
+    assert len(user_messages) == 1
+    text = user_messages[0]
+    assert ("Host presentation progress guidance:" in text) == has_guidance
+    if has_guidance:
+        assert "next concrete action" in text
+        assert "Keep meaningful long-running progress updates" in text
+    payload = text.split("[HOST_USER_DECISION_RESPONSE]\n", 1)[1].split("\n[/HOST_USER_DECISION_RESPONSE]", 1)[0]
+    assert json.loads(payload) == {**response, "custom_text": ""}
+    assert "请按选择继续原任务" in text
+    assert "Host UI language: Chinese" in text
 
 
 @pytest.mark.asyncio
@@ -7321,3 +7508,81 @@ async def test_acp_streams_short_model_preface_before_tool(tmp_path):
     tool_index = _first_tool_call_index(conn.updates)
     assert tool_index != -1
     assert preface_index < tool_index
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_binds_browser_session_key_to_session_id(tmp_path, monkeypatch):
+    """Every Playwright call inside a turn resolves to the ACP session's own client."""
+    from box_agent.tools.browser_runtime_scope import current_browser_session_key
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False, enable_skills=False),
+    )
+    observed: list[str | None] = []
+    real_loop = runtime_module._run_agent_loop
+
+    def observing_loop(**kwargs):
+        observed.append(current_browser_session_key())
+        return real_loop(**kwargs)
+
+    monkeypatch.setattr(runtime_module, "_run_agent_loop", observing_loop)
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    assert current_browser_session_key() is None
+    await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+    )
+
+    assert observed == [session.sessionId]
+    assert current_browser_session_key() is None  # reset after the turn
+
+
+@pytest.mark.asyncio
+async def test_acp_rebind_closes_retired_handles_browser_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    closed: list[str] = []
+
+    async def fake_close(session_key: str) -> bool:
+        closed.append(session_key)
+        return True
+
+    monkeypatch.setattr(acp_module, "close_browser_session", fake_close)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "office-rebind"})
+
+    first = await agent.newSession(request)
+    assert closed == []
+    second = await agent.newSession(request)
+
+    assert second.sessionId != first.sessionId
+    assert closed == [first.sessionId]
+    assert first.sessionId not in agent._sessions
+    agent._sessions[second.sessionId].agent.session_log.close()
+
+
+@pytest.mark.asyncio
+async def test_acp_mcp_status_reports_browser_isolation_mode(tmp_path, monkeypatch):
+    from box_agent.tools import mcp_loader
+
+    snapshot = {"mode": "per_session_context", "activeClients": 2, "maxClients": 4}
+    monkeypatch.setattr(mcp_loader, "get_browser_isolation_status", lambda: snapshot)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+
+    result = await agent.extMethod("mcp/status", {})
+
+    assert result["browser"] == snapshot

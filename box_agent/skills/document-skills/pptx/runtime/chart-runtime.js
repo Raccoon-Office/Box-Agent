@@ -183,6 +183,8 @@
       primary,
       text,
       background,
+      band: element.ownerDocument?.body?.getAttribute("data-deck-palette-version") === "2"
+        ? normalizeHex(style.getPropertyValue("--deck-primary-soft"), background) : null,
       muted: normalizeHex(style.getPropertyValue("--deck-muted"), "#6B6B6B"),
       border: normalizeHex(style.getPropertyValue("--deck-border"), "#D1D2C8"),
       display: style.getPropertyValue("--deck-display").trim() || "Arial",
@@ -309,7 +311,7 @@
           axisName: { color: tokens.text, fontFamily: tokens.body, fontSize: 17 },
           axisLine: { lineStyle: { color: tokens.border } },
           splitLine: { lineStyle: { color: tokens.border } },
-          splitArea: { areaStyle: { color: ["transparent", mixHex(tokens.primary, tokens.background, 0.93)] } },
+          splitArea: { areaStyle: { color: ["transparent", tokens.band || mixHex(tokens.primary, tokens.background, 0.93)] } },
           indicator: spec.categories.map((name, index) => ({ name, max: maximum[index] })),
         },
         series: [{

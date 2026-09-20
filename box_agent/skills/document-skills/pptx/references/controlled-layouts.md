@@ -1,87 +1,51 @@
 # Controlled HTML Decks
 
-The controlled route separates semantic content from layout geometry:
+The main agent owns facts, near-final copy, outline, media acquisition and tool
+execution. An isolated designer chooses a registered theme preset and each page's
+layout, visual options and source bindings. Ordinary authoring follows:
 
 ```text
-outline.json -> deck.json -> deterministic finalize -> index.html -> optional PPTX
+outline.json -> design_plan.js prepare -> design_input.json
+-> isolated references/design-role.md -> child response in Session Log
+-> design_plan.js accept -> design_plan.json -> inspect_deck_contract.js --design-plan
+-> deck.json -> content patch -> finalize_controlled_deck.js -> index.html
 ```
 
-During generation, `deck.json` is the editable source of truth. `index.html` is
-a deterministic, offline-capable view and editor. After a user saves inside the
-HTML editor, the embedded `#deck-document` becomes the source of truth for that
-edited HTML artifact; the editor does not silently rewrite a sibling
-`deck.json`. A layout renderer owns DOM, CSS, geometry,
-content capacity, and PPTX-safe behavior; the model only chooses a registered
-`layout_id` and fills its declared `props`.
+`prepare` runs outline validation and returns compact file paths/reuse status;
+a compact brief/index is read by the isolated role; theme/layout details are
+separate small files. The program imports the actual completed child response
+from Session Log, supplies version/hashes/page numbers and default content
+bindings, and rejects hand-written replacements. Plan input and catalog
+hashes prevent stale reuse. A content-only correction that fits existing fields
+uses the existing deck directly; it does not request another aesthetic choice.
 
-The visual system has four independently resolved layers:
+When the real user request is available, outline layout/visual are planning
+hints. Verbatim per-page `hard_requirements` and actual user colors remain hard;
+changing only planning hints does not reset the request or correction budget.
+Model image inspection remains optional and never gates this workflow.
 
-- `layout_id` is the semantic contract: which fields exist and remain editable.
-- `design.family + design.variant` changes how those fields are composed.
-- `theme_id` supplies a preset for typography, shape, surface grammar, and a
-  fallback palette.
-- `design_contract.palette` is an optional semantic color-token overlay for
-  explicit user colors; it overrides theme color tokens without changing the
-  theme's typography or page grammar.
+The plan uses `theme_id` for either a base theme or a registered complete preset
+such as `blue-professional@rail-grid`. Presets bind a compatible family and a named
+whole-deck variant. New documents persist `design: {version: 2, family, variant}`
+without a seed. Every original family/variant remains available to maintenance
+and the composition gallery. Legacy version-1 documents preserve their saved
+variant during migration; legacy seed resolution is used only if it is absent.
 
-Five composition directions sit above those layers as a discovery and routing
-view, not as a fourth persisted visual layer. A direction groups compatible
-families in language a user can choose; the concrete family remains the runtime
-decision stored in `design`.
+The main agent receives only selected content-field contracts. It cannot change
+visual enum fields through an ordinary content patch. Explicit redesign uses
+`design_plan.js apply`; users may still change any supported layout/option/page
+inside the HTML editor. User edits invalidate AI-plan reuse without being blocked
+or overwritten by the proposal.
 
-`deck.json` is the document model that binds those layers to content. It stores
-the theme selection, persisted design seed/family/variant, and each slide's
-`layout_id + props + outline_intent`. It also stores `design_contract` when the
-source contains explicit palette, geometry, direction, relationship, or item
-count requirements; it is not another visual layer. The
-persisted intent copies the bound outline page's title, message, layout, and
-visual direction so semantic fit remains testable after patching or editor
-saves. `render_deck_html.js`
-validates that model, renders layout-owned semantic DOM, wraps it with the
-selected composition HTML, applies theme variables, and embeds the normalized
-document plus the layout/editor runtimes into the final `index.html`.
+`finalize_controlled_deck.js` binds available media, checks the core schema,
+renders HTML and runs deterministic QA. Core schema/design and rendering failures
+block. Outline-binding drift blocks unless the explicit degraded-outline switch
+is enabled. Images, post-render HTML/runtime and truth findings preserve usable
+HTML as advisories. A pre-content design proposal does not imply a post-content
+model review; no second routine reviewer is required for plan-owned decks.
 
-Before scaffolding, expose `composition.directions` if the user wants a
-composition choice. Resolve the chosen or inferred direction through its nested
-family ids and the matching `composition.families[].selection_signals`, then
-choose only from the selected theme's
-`composition.allowed_families`; otherwise keep `composition.default_family`.
-Pass the concrete choice with `--family`. The scaffold creates `design.seed`
-once and derives a variant inside that family. A new scaffold normally receives
-a new seed, so another production of the same brief may use a different variant
-and, when the content decision differs, a different compatible family. Never
-mutate the family or seed through a content patch while editing, rerendering,
-reopening, or exporting an existing deck; the same artifact must stay visually
-stable. An explicit user-requested recomposition uses the separate controlled
-redesign command and records the new design/layout plan.
-`--design-seed` exists only for tests or an intentionally reproducible fresh
-scaffold. Legacy decks without `design` receive a deterministic
-title/theme-derived default composition at render time.
-
-Normal generation finalizes with one command:
-
-```bash
-${BOX_AGENT_NODE:-node} scripts/finalize_controlled_deck.js deck.json --out index.html
-```
-
-The patch compiler reconciles every existing manifest asset to its exact
-slide id and `prop_path`. Finalization reuses the same binding function before
-validation/rendering to fill missing or editor-placeholder media when files
-arrive after the content patch. It honors `--manifest`, preserves already chosen
-media, and never adds a model turn or subprocess stage. The helper validates the core deck schema as a hard prerequisite,
-records image-manifest findings as a delivery advisory, renders `index.html`,
-runs HTML self-check and the 1440x900 runtime probe, then records source/truth
-findings as another non-blocking advisory. It stops only when a structural or
-render failure prevents a trustworthy HTML artifact from being written. HTML,
-runtime, image, source, URL, and private-fact findings discovered after render
-are preserved as advisories; they never start another model or repair round.
-Those findings never prevent an already rendered, structurally valid HTML artifact from being written;
-unmet required images make that artifact degraded rather than complete. Exact
-outline title/message binding drift is also preserved as degraded semantic QA
-when the core deck schema still passes.
-Do not split a successful finalization into separate model-directed commands;
-after a focused blocking repair, rerun the finalizer so every downstream report
-is refreshed together.
+The remaining sections describe compiler/editor capabilities and maintenance,
+not additional main-agent design decisions. Follow SKILL.md for normal authoring.
 
 ## Output bundle
 
@@ -93,6 +57,8 @@ automatic nested `output/` directory.
 <PRESENTATION_DIR>/
 ├── index.html
 ├── outline.json
+├── design_input.json
+├── design_plan.json
 ├── deck.json
 ├── assets/
 │   ├── generated/
@@ -136,26 +102,17 @@ they never block the HTML or require a repair pass.
 
 ## Layout selection contract
 
-1. Query by role, density, and media count.
-2. Choose the ordered layout id for every slide, including repeats, then
-   scaffold once with `scripts/inspect_deck_contract.js <LAYOUT_ID...>
-   --theme auto [--family <ALLOWED_FAMILY_ID>] --outline outline.json
-   --out deck.json`. The stdout
-   deduplicates layout descriptions and returns the bound outline pages; the
-   written deck preserves full slide order, `source_outline_page`, and the
-   page's immutable `outline_intent`. Strong semantic mismatches are normalized
-   before authoring (generic matrix→table, 2×2/quadrant→quadrant matrix, tagged text cover→editorial
-   cover), and the report records each normalization.
-3. Keep the scaffolded top-level `design` object unchanged during normal content
-   patches. It controls only composition and does not change any layout's field
-   contract.
-4. Fill only `layouts[].fields`; start from `deck_skeleton` or
-   `layouts[].editor.defaultProps`. There is no `.props` or `.required_fields`
-   contract path.
-5. Validate blocking copy budgets, array capacities, and media object shapes.
-6. Reconcile existing manifest assets deterministically, record unresolved media
-   paths as a delivery advisory, render after structural validation passes, and
-   run source/truth review afterward as another advisory.
+For a plan-owned deck the isolated designer chooses registered layouts from the
+prepared catalog. `design_plan.js validate` performs a dry scaffold check;
+`inspect_deck_contract.js --design-plan` writes the ordered skeleton and selected
+content contracts. A semantic mismatch returns a field error to the designer;
+no layout promotion, automatic split or aesthetic fallback changes its choices.
+
+Legacy CLI callers may still use positional layout IDs and `--theme`/`--family`;
+that compatibility path retains its old semantic normalization. It is not the
+normal main-agent workflow. Both routes share field/capacity checks, media
+binding, rendering and the HTML editor. After validation, preserve the returned
+schema and fill actual content rather than copying illustrative defaults.
 
 High-frequency professional visuals have dedicated editable contracts. Use
 `factory-process-line-v1` for production stations and quality metrics,
@@ -174,12 +131,11 @@ afterward. Do not regenerate the other slides, and do not grep
 structural validator lists registered themes and allowed fields in each
 relevant error.
 
-A wording/data correction uses `apply_deck_patch.js`. A request such as “做一版
-汇报用的”, “换版式/构图”, or “重新设计” is different: author one
-`deck.redesign.json` and run `apply_deck_redesign.js`. That command may change a
-registered theme, layout, and/or a compatible composition family, retains the previous
-props in `layout_drafts`, restores legacy bound intent, and refuses to write if
-the result contradicts the outline visual or its explicit item count.
+A wording/data correction uses `apply_deck_patch.js`. A plan-owned deck rejects
+visual enum changes in that command and rejects direct `apply_deck_redesign.js`
+invocation. An explicit design change uses a validated revised plan with
+`design_plan.js apply`, sharing the existing layout migration and outline checks.
+Previous props remain in `layout_drafts`; user HTML actions stay unrestricted.
 
 The manifest is generated from `layouts/registry.js`. Never hand-edit
 `layouts/manifest.json`; update the registry and rebuild the manifest.
@@ -282,20 +238,20 @@ The controlled compiler owns a versioned theme catalog under `themes/`.
 `layouts/manifest.json` and `scripts/inspect_deck_contract.js` expose
 `default_theme_id` plus every theme's selection signals, palette, typography,
 shape tokens, compatible composition families, and finite visual-style axes.
-Normal authoring calls `--design-catalog`, then uses `--theme auto` and asks the active model to choose from
-the complete registered catalog. The model also supplies one allowed
-composition family and a structured exact-hex palette with separate background,
-text, primary, accent, and optional secondary roles. After content authoring,
-exactly one isolated semantic model review sees the final chart styles and may
-accept or revise the identity/theme/family/palette proposal once; an unavailable
-review is recorded and never retried. The compiler validates the final review
-receipt as an advisory and validates executability: registered ids, family
-compatibility, color syntax, and text/background contrast. Identity colors are
-not rejected solely because primary/background contrast is low. It does not rank themes or override
-a valid aesthetic choice with keyword rules. Legacy callers that omit a model
-choice retain compatibility inference, but this is not the normal authoring
-route.
-Use `--theme <THEME_ID> --lock-theme` only for an exact user-selected id.
+Normal authoring calls `design_plan.js prepare`; only the isolated design role
+reads the resulting catalog. It chooses a base theme or complete named preset,
+with a complete exact-hex palette (background, text, primary, accent, secondary,
+accent_usage; optional heading). User-given role colors are locked; missing roles
+are supplied by the designer. Both paths produce `design_contract.palette.version=2`
+with per-role provenance and frozen derived tokens. The program rejects invalid selections and
+returns field errors without fallback. User-selected themes and explicit colors
+win. Plan-owned decks do not require a second post-content semantic reviewer;
+program QA still runs, and never claims an unperformed model review.
+Legacy `--design-catalog` / `--theme-model-choice` calls remain available for
+compatibility and maintenance, but are not main-agent design responsibilities.
+Existing HTML and legacy decks remain readable. Previously accepted design inputs
+must run prepare again to adopt the new palette contract; this does not overwrite
+saved user-edited HTML.
 The catalog includes at least one
 executable theme for every bundled Visual DNA id, plus explicitly curated
 variants such as `block-frame-mono-blue`. It ships with the `pptx` skill and is
@@ -307,9 +263,8 @@ real x/y relationship evidence; four parallel labels fall back to cards. A
 timeline needs at least two ordered time or phase signals; parallel policies
 fall back to cards. Composition compatibility also participates in
 normalization: `editorial-spread` does not keep a split statement when the
-title/message is long or the page carries three parallel proof points. These
-normalizations are advisory authoring corrections and never suppress an
-otherwise renderable artifact.
+title/message is long or the page carries three parallel proof points. For plan-owned decks an incompatible choice is returned to the designer before
+scaffolding; the legacy CLI retains normalization for compatibility.
 
 ### Scenario theme and layout pairings
 
@@ -448,7 +403,7 @@ cinema, exhibit, or schematic. They emit
 different semantic tags, nesting, and composition anchors around the same
 layout-owned editable fields. `layout_id` still defines meaning and capacity;
 the HTML composition template defines the larger page grammar; the theme and
-seeded variant define tokens and finite geometry choices. The editor must pass
+saved variant define tokens and finite geometry choices. The editor must pass
 the persisted `design` object whenever it re-renders a page so the structure is
 stable across edits and saves.
 
@@ -475,10 +430,10 @@ themes receive their default from `THEME_COMPOSITION_FAMILY`; a theme file may
 declare `composition.default_family` and `composition.allowed_families`
 directly. Multiple themes may share a family. AI/user selection is accepted
 only inside the allowlist, and a compatible persisted `design.family` is kept.
-`design.seed` selects a deterministic variant inside the selected family:
+`design.variant` directly names a registered variant inside the selected family:
 
 ```text
-theme -> compatible directions/families -> content-selected family -> seeded variant
+theme -> compatible directions/families -> theme preset -> saved family/variant
 ```
 
 For example:
@@ -497,7 +452,7 @@ For example:
 The default preserves existing output. An unknown family is rejected; an
 incompatible family is rejected during scaffold selection, while a legacy
 persisted mismatch is normalized back to the theme default. Persisted compatible
-decks retain their selected family and seed across editing, reopening, and
+decks retain their selected family and variant across editing, reopening, and
 export.
 
 ### Extension matrix

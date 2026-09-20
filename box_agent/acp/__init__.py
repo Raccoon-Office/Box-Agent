@@ -63,6 +63,7 @@ from pydantic import field_validator
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
+from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
@@ -76,6 +77,7 @@ from box_agent.agent_runtime import (
     build_permission_engine,
 )
 from box_agent.agent_run import AgentRunHandle
+from box_agent.api import RunRequest
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
 from box_agent.acp.content_safety import safe_acp_reply_for_user_text
 from box_agent.agent import (
@@ -122,10 +124,13 @@ from box_agent.tools.skillhub_install_tool import (
     SKILLHUB_INSTALL_METHOD,
     SkillHubInstallTool,
 )
+from box_agent.tools.mcp_loader import close_browser_session
 from box_agent.tools.browser_runtime_scope import (
     release_browser_runtime,
     reset_browser_runtime_owner,
+    reset_browser_session_key,
     set_browser_runtime_owner,
+    set_browser_session_key,
 )
 from box_agent.config import Config, derive_context_token_limit
 from box_agent.turn_policy import (
@@ -164,7 +169,10 @@ from box_agent.llm.model_routing import normalize_auto_routing, resolve_model_cl
 from box_agent.llm.model_profiles import client_for_model_profile
 from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
 from box_agent.runtime import invoke_tool_with_permissions
-from box_agent.session_trace import SessionTraceWriter, scoped_session_trace
+from box_agent.session_trace import (
+    SessionTraceWriter, reset_session_trace_writer, scoped_session_trace,
+    set_session_trace_writer,
+)
 from box_agent.session_log import SessionLog
 from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import parse_session_continuation
@@ -270,6 +278,7 @@ def _artifact_envelope(
     payload: dict[str, Any] = {
         "type": "artifact",
         "kind": art.kind,
+        "placement": art.placement,
         "filename": art.filename,
         "rel_path": art.rel_path,
         "abs_path": art.abs_path,
@@ -280,6 +289,8 @@ def _artifact_envelope(
         "produced_at": art.produced_at,
         "tool_call_id": art.tool_call_id,
     }
+    if art.description:
+        payload["description"] = art.description
     if art.layout_id:
         payload["layout_id"] = art.layout_id
     if art.edit_mode:
@@ -914,10 +925,26 @@ def _tool_result_raw_output(
     session_id: str | None = None,
     task_id: str | None = None,
     turn_id: str | None = None,
+    workspace_dir: str | None = None,
 ) -> Any:
     if isinstance(raw_output, dict):
         payload = dict(raw_output)
         if payload.get("type") == "artifact":
+            for key in ("abs_path", "absolute_path", "path"):
+                value = payload.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                try:
+                    candidate = Path(value).expanduser()
+                    if not candidate.is_absolute():
+                        if workspace_dir is None:
+                            continue
+                        candidate = Path(workspace_dir) / candidate
+                    if is_intermediate_artifact(candidate.resolve()):
+                        payload["type"] = "intermediate_asset"
+                    break
+                except (OSError, RuntimeError, ValueError):
+                    continue
             if session_id:
                 payload.setdefault("session_id", session_id)
                 payload.setdefault("sessionId", session_id)
@@ -1902,6 +1929,17 @@ class BoxACPAgent:
                 if existing_log is not None:
                     existing_log.close()
                 del self._sessions[existing_handle]
+                # The retired handle owned a managed BrowserContext (if it ever
+                # used the browser); release it so it does not linger until
+                # the idle reaper or count against the session cap.
+                try:
+                    await close_browser_session(existing_handle)
+                except Exception as browser_error:  # noqa: BLE001
+                    log.error(
+                        "browser/session_close_failed",
+                        session_id=existing_handle,
+                        error=str(browser_error),
+                    )
             session_root = state_path('sessions')
             try:
                 session_log = SessionLog.open(
@@ -2337,6 +2375,20 @@ class BoxACPAgent:
             )
         # Host-only language guidance must not influence semantic skill routing.
         skill_selection_text = user_text
+        if (
+            user_decision_response is not None
+            and user_decision_response["decision_kind"] == "presentation_mode"
+            and user_decision_response["selected_option_id"] in {"fast", "design"}
+        ):
+            user_text = (
+                "[Host presentation progress guidance: The choice card already displays the "
+                "selected mode. Continue the existing task with the next concrete action; "
+                "do not announce or reconfirm the mode in progress text before or after loading "
+                "a Skill. Report new work, results, blockers or required decisions, rather than "
+                "rephrasing the previous update. Keep meaningful long-running progress updates. "
+                "Explain the choice if the user asks; a timeout must not be described as a user click.]\n\n"
+                f"{user_text}"
+            )
         ui_language = _meta_string(prompt_meta, "ui_language", "uiLanguage").lower()
         if ui_language in {"en", "ja", "zh"}:
             display_language = {"en": "English", "ja": "Japanese", "zh": "Chinese"}[ui_language]
@@ -2603,39 +2655,6 @@ class BoxACPAgent:
             except Exception as exc:
                 log.warn("skills/reload_error", session_id=session_id, message=str(exc))
 
-        # Per-turn skill metadata filter.
-        if state.skill_selector is not None:
-            try:
-                from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
-                current_system = state.agent.messages[0].content
-                if SKILL_SLOT_SENTINEL in current_system:
-                    state.skill_selector.bind(current_system)
-                new_prompt = state.skill_selector.update(skill_selection_text)
-                if new_prompt is not None:
-                    self._set_agent_system_prompt(state.agent, new_prompt)
-                    log.info(
-                        "skills/filtered",
-                        session_id=session_id,
-                        matched=",".join(state.skill_selector.matched_skill_names),
-                        query_chars=len(state.skill_selector.cumulative_query),
-                        prompt_chars=len(new_prompt),
-                    )
-                self._sync_cache_fingerprint_context(state)
-            except Exception as exc:
-                log.warn("skills/filter_error", session_id=session_id, message=str(exc))
-
-        matched_skill_names = (
-            state.skill_selector.matched_skill_names
-            if state.skill_selector is not None
-            else ()
-        )
-        if state.skill_loader is not None:
-            for skill_name in matched_skill_names:
-                skill = state.skill_loader.get_skill(skill_name)
-                if skill is not None and _connector_skill_is_available(
-                    skill, state.selected_connector_ids
-                ):
-                    state.connector_skill_grants.add(skill.name)
         explicit_skill = resolve_explicit_skill_invocation(
             state.skill_loader,
             plan_detection_text,
@@ -2682,6 +2701,40 @@ class BoxACPAgent:
                 skills=",".join(host_selected_skill_names),
             )
 
+        # Resolve current-turn selection before applying execution-policy visibility.
+        if state.skill_selector is not None:
+            try:
+                from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
+                current_system = state.agent.messages[0].content
+                if SKILL_SLOT_SENTINEL in current_system:
+                    state.skill_selector.bind(current_system)
+                new_prompt = state.skill_selector.update(skill_selection_text)
+                if new_prompt is not None:
+                    self._set_agent_system_prompt(state.agent, new_prompt)
+                    log.info(
+                        "skills/filtered",
+                        session_id=session_id,
+                        matched=",".join(state.skill_selector.matched_skill_names),
+                        query_chars=len(state.skill_selector.cumulative_query),
+                        prompt_chars=len(new_prompt),
+                    )
+                self._sync_cache_fingerprint_context(state)
+            except Exception as exc:
+                log.warn("skills/filter_error", session_id=session_id, message=str(exc))
+
+        matched_skill_names = (
+            state.skill_selector.matched_skill_names
+            if state.skill_selector is not None
+            else ()
+        )
+        if state.skill_loader is not None:
+            for skill_name in matched_skill_names:
+                skill = state.skill_loader.get_skill(skill_name)
+                if skill is not None and _connector_skill_is_available(
+                    skill, state.selected_connector_ids
+                ):
+                    state.connector_skill_grants.add(skill.name)
+
         if state.agent.skill_runtime is not None:
             state.agent.skill_runtime.select(explicitly_selected_skill_names)
         # Compatibility views describe only successful delivery in this turn;
@@ -2712,6 +2765,10 @@ class BoxACPAgent:
             turn_meter.merge(attachment_meter)
         browser_owner = f"{session_id}:{turn_id}"
         browser_owner_token = set_browser_runtime_owner(browser_owner)
+        # Per-session BrowserContext routing: every Playwright call made by
+        # this turn (including nested sub-agent runs after they rebind the key)
+        # starts from the MCP client owned by this session.
+        browser_session_token = set_browser_session_key(session_id)
         auto_enabled = (
             state.config.agent.goal_autopilot_enabled
             and state.config.agent.goal_autopilot_max_turns > 0
@@ -2860,6 +2917,7 @@ class BoxACPAgent:
                 )
             finally:
                 reset_browser_runtime_owner(browser_owner_token)
+                reset_browser_session_key(browser_session_token)
             turn_meter = get_token_meter()
             reset_token_meter(meter_token)
         waiting_for_user = stop_reason == StopReason.WAITING_FOR_USER.value
@@ -3218,6 +3276,7 @@ class BoxACPAgent:
                 return {"error": str(exc)}
         if method == "mcp/status":
             from box_agent.tools.mcp_loader import (
+                get_browser_isolation_status,
                 get_mcp_config_path,
                 get_mcp_config_paths,
                 get_mcp_status,
@@ -3225,13 +3284,17 @@ class BoxACPAgent:
             )
             servers = get_mcp_status()
             loading = is_mcp_loading()
+            browser = get_browser_isolation_status()
             log.info("mcp/status", count=len(servers), loading=loading)
-            return {
+            response = {
                 "servers": servers,
                 "loading": loading,
                 "configPath": get_mcp_config_path(),
                 "configPaths": get_mcp_config_paths(),
             }
+            if browser is not None:
+                response["browser"] = browser
+            return response
         if method == "mcp/credential/set":
             credential_ref = params.get("credentialRef", "")
             headers = params.get("headers", {})
@@ -4356,7 +4419,26 @@ class BoxACPAgent:
             ),
             current_turn_text=plan_start_text,
         )
-        events = state.run_events(options=run_options)
+        # start() creates the producer task. Bind its trace before task creation;
+        # wrapping only the event consumer cannot propagate ContextVars to it.
+        trace_token = (
+            set_session_trace_writer(observer.trace_writer, turn_id=turn_id)
+            if observer.trace_writer is not None else None
+        )
+        try:
+            protocol_handle = await AgentService().start(
+                RunRequest(
+                    run_id=turn_id or state.current_turn_id or f"acp-run-{uuid4().hex}",
+                    session_id=session_id,
+                ),
+                session=state,
+                options=run_options,
+            )
+        finally:
+            if trace_token is not None:
+                reset_session_trace_writer(trace_token)
+        run_handle = protocol_handle
+        events = protocol_handle.events()
         if observer.trace_writer is not None:
             events = scoped_session_trace(
                 events,
@@ -4364,7 +4446,8 @@ class BoxACPAgent:
                 turn_id=turn_id,
             )
         async with aclosing(events):
-            async for event in events:
+            async for envelope in events:
+                event = envelope.payload
                 try:
                     await _sync_explicit_skill_deliveries()
                     match event:
@@ -4579,6 +4662,7 @@ class BoxACPAgent:
                                 session_id=state.upstream_session_id,
                                 task_id=task_context.task_id,
                                 turn_id=task_context.turn_id,
+                                workspace_dir=state.agent.workspace_dir,
                             )
                             await self._send(
                                 session_id,
@@ -5127,45 +5211,17 @@ class _PermissionNegotiator:
                     requested_scope=requested_scope,
                 )
                 return False
-            grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId, "prompt")
-            if is_safety_request:
-                log.info(
-                    "permission/granted",
-                    scope=scope,
-                    requested_scope=requested_scope,
-                    grant_scope="one_shot",
-                )
-                return True
-            if scope == "filesystem" and path_hint:
-                # Record at directory granularity. Use the path itself when it
-                # is already a directory; otherwise fall back to its parent.
-                # Spec section 4: only open the requested directory, never the
-                # entire user_home, on a "allow once" / "always allow" choice.
-                grant_dir = self._derive_grant_dir(path_hint)
-                if grant_dir is not None:
-                    self._store.add_filesystem_dir_grant(grant_dir, grant_scope)
-                    log.info(
-                        "permission/granted",
-                        scope=scope,
-                        directory=str(grant_dir),
-                        grant_scope=grant_scope,
-                    )
-                    return True
-                log.warn(
-                    "permission/grant_path_invalid",
-                    scope=scope,
-                    path=path_hint,
-                    message="Could not derive grant directory from path; rejecting",
-                )
+            grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId)
+            if grant_scope is None:
                 return False
-            self._store.add_grant(scope, requested_scope, grant_scope)
+            granted = self._store.apply_permission_grant(permission_request, grant_scope)
             log.info(
-                "permission/granted",
+                "permission/granted" if granted else "permission/denied",
                 scope=scope,
                 requested_scope=requested_scope,
-                grant_scope=grant_scope,
+                grant_scope="one_shot" if is_safety_request else grant_scope,
             )
-            return True
+            return granted
 
         log.info(
             "permission/denied",
@@ -5174,21 +5230,6 @@ class _PermissionNegotiator:
         )
         return False
 
-    @staticmethod
-    def _derive_grant_dir(path: str) -> Path | None:
-        """Resolve *path* and return its directory.
-
-        For an existing directory, returns the directory itself. For an
-        existing file or a non-existent target, returns the parent. ``None``
-        means the path could not be resolved.
-        """
-        try:
-            resolved = Path(path).expanduser().resolve()
-        except (OSError, RuntimeError):
-            return None
-        if resolved.is_dir():
-            return resolved
-        return resolved.parent
 
 
 class _MemoryProposalNegotiator:
@@ -5421,6 +5462,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 exponential_base=rcfg.exponential_base,
             ),
             max_output_tokens=config.llm.max_output_tokens,
+            max_request_body_bytes=config.llm.max_request_body_bytes,
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,
             reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,

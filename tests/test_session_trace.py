@@ -473,6 +473,7 @@ async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
 
     class DoneLLM:
         async def generate_stream(self, messages, tools=None, **kwargs):
+            emit_session_trace("test.producer_started")
             yield StreamEvent(type="text", delta="answer")
             yield StreamEvent(
                 type="finish",
@@ -516,6 +517,11 @@ async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
         "turn.input",
         "turn.output",
         "turn.end",
+        "test.producer_started",
     }
     turn_records = [record for record in records if record["event"].startswith("turn.")]
     assert all(record["turn_id"] == "turn-current" for record in turn_records)
+    producer = next(record for record in records if record["event"] == "test.producer_started")
+    assert producer["turn_id"] == "turn-current"
+    emit_session_trace("test.after_prompt")
+    assert "test.after_prompt" not in {record["event"] for record in _records(agent._sessions[session.sessionId].trace_writer)}

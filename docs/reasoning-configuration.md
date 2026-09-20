@@ -26,7 +26,7 @@ runtime, edit the configuration under its own `BOX_AGENT_HOME`.
 
 | Value | Effect when the model dialect normally sends `none` |
 | --- | --- |
-| omitted or `null` | Preserve the existing provider behavior: send `none`. |
+| omitted or `null` | Use the provider default: `low` for the exact deployed model noted below, otherwise `none`. |
 | `none` | Explicitly retain `none`. |
 | `low` | Send `low` instead. This reduces reasoning; it does **not** guarantee reasoning is disabled. |
 
@@ -35,6 +35,13 @@ SenseNova and eligible Gemini `none` mappings. It does not force a reasoning
 field onto other models or alter their native thinking controls. Requests with
 thinking enabled retain the existing mapping, including `high` for SenseNova.
 Anthropic requests are unchanged.
+
+`SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp` rejects `none`, so its
+default when thinking is disabled is `low`. This also applies to summaries and
+other auxiliary requests through the same adapter; it does not enable session
+thinking or make auxiliary calls inherit `high`. Explicit endpoint overrides
+still take precedence: configuring `none` for this deployment will still be
+rejected by its server. Other SenseNova models keep their existing defaults.
 
 The CLI can update and inspect the same setting:
 

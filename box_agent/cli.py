@@ -35,6 +35,8 @@ import yaml
 
 from box_agent import LLMClient, __version__
 from box_agent.agent_session import AgentSession
+from box_agent.agent_service import AgentService
+from box_agent.api import RunRequest
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.cli_renderer import render_agent_events
 from box_agent.agent_runtime import (
@@ -65,6 +67,7 @@ from box_agent.llm.model_routing import resolve_model_client
 from box_agent.schema import LLMProvider, Message
 from box_agent.session_trace import SessionTraceWriter, traced_session_turn
 from box_agent.tools.base import Tool
+from box_agent.tools.browser_runtime_scope import set_browser_session_key
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from box_agent.tools.mcp_loader import (
     cleanup_mcp_connections,
@@ -220,6 +223,7 @@ MAIN_LLM_KEYS = {
     "auth_file",
     "context_window",
     "max_output_tokens",
+    "max_request_body_bytes",
     "timeout",
     "reasoning_effort_when_disabled",
 }
@@ -324,6 +328,7 @@ def _config_summary(config: Config, config_path: Path, show_secrets: bool = Fals
             "auth_file": config.llm.auth_file,
             "context_window": config.llm.context_window,
             "max_output_tokens": config.llm.max_output_tokens,
+            "max_request_body_bytes": config.llm.max_request_body_bytes,
             "timeout": config.llm.timeout,
             "reasoning_effort_when_disabled": config.llm.reasoning_effort_when_disabled,
             "retry": {
@@ -342,6 +347,7 @@ def _config_summary(config: Config, config_path: Path, show_secrets: bool = Fals
             "api_key": lite_api_key,
             "auth_file": config.lite_llm.auth_file,
             "max_output_tokens": config.lite_llm.max_output_tokens,
+            "max_request_body_bytes": config.lite_llm.max_request_body_bytes,
             "timeout": config.lite_llm.timeout,
             "reasoning_effort_when_disabled": config.lite_llm.reasoning_effort_when_disabled,
         },
@@ -1496,6 +1502,7 @@ async def _doctor_api_status(config: Config | None) -> dict[str, Any]:
             model=config.llm.model,
             retry_config=no_retry,
             max_output_tokens=config.llm.max_output_tokens,
+            max_request_body_bytes=config.llm.max_request_body_bytes,
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,
             reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
@@ -1799,12 +1806,25 @@ async def _quiet_cleanup():
 
 
 async def _run_session_turn(session: AgentSession, **overrides: Any) -> str:
-    """Render the shared session event stream with the existing CLI behavior."""
+    """Render a protocol-neutral run with the existing CLI behavior."""
 
-    return await render_agent_events(
-        session.agent,
-        session.run_events(options=session.build_run_options(**overrides)),
+    user_message = overrides.pop("user_message")
+    session_id = overrides.pop("session_id")
+    run_id = f"run-{uuid4().hex}"
+    turn_id = overrides.pop("turn_id", run_id)
+    handle = await AgentService().start(
+        RunRequest(run_id, session_id, user_message),
+        session=session,
+        options=session.build_run_options(
+            session_id=session_id, turn_id=turn_id, **overrides,
+        ),
     )
+    async with handle:
+        await render_agent_events(
+            session.agent,
+            (envelope.payload async for envelope in handle.events()),
+        )
+        return (await handle.result()).final_content
 
 
 async def run_agent(
@@ -1835,6 +1855,9 @@ async def run_agent(
         session_id: Optional logical session ID, supplied by keyword
     """
     session_start = datetime.now()
+    # One CLI process is one agent session → one managed BrowserContext.
+    # (ACP binds the key per session in ``_prompt``; CLI is a single session.)
+    set_browser_session_key("cli")
 
     # 1. Load configuration from package directory
     config_path = Config.get_default_config_path()
@@ -1921,6 +1944,7 @@ async def run_agent(
             model=config.llm.model,
             retry_config=retry_config if config.llm.retry.enabled else None,
             max_output_tokens=config.llm.max_output_tokens,
+            max_request_body_bytes=config.llm.max_request_body_bytes,
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,
             reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
@@ -1945,6 +1969,7 @@ async def run_agent(
                     model=config.llm.model,
                     retry_config=VerifyRetryConfig(enabled=False),
                     max_output_tokens=config.llm.max_output_tokens,
+                    max_request_body_bytes=config.llm.max_request_body_bytes,
                     auth_file=config.llm.auth_file,
                     timeout=config.llm.timeout,
                     reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
@@ -1984,6 +2009,7 @@ async def run_agent(
                                 model=config.llm.model,
                                 retry_config=retry_config if config.llm.retry.enabled else None,
                                 max_output_tokens=config.llm.max_output_tokens,
+                                max_request_body_bytes=config.llm.max_request_body_bytes,
                                 auth_file=config.llm.auth_file,
                                 timeout=config.llm.timeout,
                                 reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
@@ -1999,6 +2025,7 @@ async def run_agent(
                                 model=config.llm.model,
                                 retry_config=VerifyRetryConfig(enabled=False),
                                 max_output_tokens=config.llm.max_output_tokens,
+                                max_request_body_bytes=config.llm.max_request_body_bytes,
                                 auth_file=config.llm.auth_file,
                                 timeout=config.llm.timeout,
                                 reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
@@ -2192,12 +2219,11 @@ async def run_agent(
                 if not agent_session.config.tools.mcp.deferred_loading_enabled:
                     register_mcp_tools(agent.tools, loaded_mcp_tools)
                 await _refresh_mcp_after_auth_change()
-                _apply_skill_filter(task)
                 _select_cli_skills(task)
+                _apply_skill_filter(task)
                 agent_session.source_text = bind_user_source_text(
                     agent.tools, agent_session.source_text, task,
                 )
-                agent.add_user_message(task)
                 ok = True
                 error: str | None = None
                 final_content = ""
@@ -2217,6 +2243,9 @@ async def run_agent(
                     with traced_session_turn(trace_writer, content=task) as traced_turn:
                         final_content = await _run_session_turn(
                             agent_session,
+                            user_message=task,
+                            session_id=logical_session_id,
+                            turn_id=traced_turn.turn_id,
                             force_plan_start=agent_session.force_plan_start,
                             current_turn_text=task,
                         )
@@ -2230,15 +2259,17 @@ async def run_agent(
                                 f"\n{Colors.DIM}Goal autopilot continuing "
                                 f"{autopilot.continuations}/{agent_session.config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
                             )
-                            agent.add_user_message(
-                                goal_autopilot_prompt(
-                                    agent.goal,
-                                    autopilot.continuations,
-                                    agent_session.config.agent.goal_autopilot_max_turns,
-                                )
+                            continuation = goal_autopilot_prompt(
+                                agent.goal,
+                                autopilot.continuations,
+                                agent_session.config.agent.goal_autopilot_max_turns,
                             )
                             before_signature = goal_autopilot_progress_signature(agent.goal)
-                            final_content = await _run_session_turn(agent_session)
+                            final_content = await _run_session_turn(
+                                agent_session, user_message=continuation,
+                                session_id=logical_session_id,
+                                turn_id=traced_turn.turn_id,
+                            )
                             after_signature = goal_autopilot_progress_signature(agent.goal)
                             if should_continue_goal_autopilot(agent, agent.last_stop_reason):
                                 if autopilot.record_progress(before_signature, after_signature):
@@ -2514,7 +2545,7 @@ async def run_agent(
                                 print(f"{Colors.DIM}用法: /memory review — 审阅可升级到核心记忆的候选条目{Colors.RESET}\n")
                             continue
 
-                        else:
+                        elif resolve_explicit_skill_invocation(agent_session.skill_loader, user_input) is None:
                             print(f"{Colors.RED}❌ Unknown command: {user_input}{Colors.RESET}")
                             print(f"{Colors.DIM}Type /help to see available commands{Colors.RESET}\n")
                             continue
@@ -2538,12 +2569,11 @@ async def run_agent(
                         f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
                         f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
                     )
-                    _apply_skill_filter(user_input)
                     _select_cli_skills(user_input)
+                    _apply_skill_filter(user_input)
                     agent_session.source_text = bind_user_source_text(
                         agent.tools, agent_session.source_text, user_input
                     )
-                    agent.add_user_message(user_input)
 
                     # Reset the shared session cancellation flag for this user turn.
                     agent_session.cancelled = False
@@ -2563,7 +2593,6 @@ async def run_agent(
                                         if char == b"\x1b":  # Esc
                                             print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                             esc_cancelled[0] = True
-                                            agent_session.request_cancel()
                                             break
                                     esc_listener_stop.wait(0.05)
                             except Exception:
@@ -2588,7 +2617,6 @@ async def run_agent(
                                         if char == "\x1b":  # Esc
                                             print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                             esc_cancelled[0] = True
-                                            agent_session.request_cancel()
                                             break
                             finally:
                                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -2603,6 +2631,9 @@ async def run_agent(
                             agent_task = asyncio.create_task(
                                 _run_session_turn(
                                     agent_session,
+                                    user_message=user_input,
+                                    session_id=logical_session_id,
+                                    turn_id=traced_turn.turn_id,
                                     force_plan_start=agent_session.force_plan_start,
                                     current_turn_text=user_input,
                                 )
@@ -2611,8 +2642,8 @@ async def run_agent(
                                 agent_session.force_plan_start = False
 
                                 while not agent_task.done():
-                                    if esc_cancelled[0]:
-                                        agent_session.request_cancel()
+                                    if esc_cancelled[0] and agent_session.run_handle.is_active:
+                                        await agent_session.run_handle.cancel()
                                     await asyncio.sleep(0.1)
 
                                 traced_turn.content = agent_task.result()

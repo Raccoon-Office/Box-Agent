@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 import httpx
 
 from box_agent.auth import request_auth_headers
+from box_agent.artifact_publication import delivery_scope, write_metadata
 from box_agent.llm.debug_logging import (
     log_image_generation_error_meta,
     log_image_generation_request,
@@ -508,7 +509,8 @@ class GenerateImageTool(Tool):
                 "publish_artifact": {
                     "type": "boolean",
                     "description": (
-                        "Publish the image as a standalone user deliverable (default true). "
+                        "Publish the image as a standalone user deliverable. When omitted, "
+                        "defaults to false in a producer-declared delivery scope, true elsewhere. "
                         "Set false for intermediate assets embedded in a larger deliverable, "
                         "as instructed by the PPTX skill. The saved file remains available."
                     ),
@@ -539,7 +541,7 @@ class GenerateImageTool(Tool):
         metadata: dict[str, Any] | None = None,
         watermark: bool = True,
         watermark_text: str | None = None,
-        publish_artifact: bool = True,
+        publish_artifact: bool | None = None,
     ) -> ToolResult:
         if not self.endpoint:
             return ToolResult(
@@ -615,6 +617,8 @@ class GenerateImageTool(Tool):
                 )
 
             target = self._ensure_extension(target, mime_type)
+            if publish_artifact is None:
+                publish_artifact = delivery_scope(target, self.workspace_dir) is None
             permission_error = self._check_write_permission(target)
             if permission_error:
                 return permission_error
@@ -631,6 +635,13 @@ class GenerateImageTool(Tool):
                 }
 
             target.parent.mkdir(parents=True, exist_ok=True)
+            # Persist before the image becomes discoverable. The digest survives
+            # arbitrary shell renames/copies and later tool calls or restarts.
+            write_metadata(target, {
+                "type": "artifact" if publish_artifact else "intermediate_asset",
+                "size_bytes": len(image_bytes),
+                "sha256": hashlib.sha256(image_bytes).hexdigest(),
+            })
             target.write_bytes(image_bytes)
 
             rel_path = self._display_path(target)

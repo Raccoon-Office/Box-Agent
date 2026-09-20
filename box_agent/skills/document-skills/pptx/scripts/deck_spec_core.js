@@ -763,6 +763,7 @@ function validateAndNormalizeDeck(spec) {
     "title",
     "theme_id",
     "design",
+    "design_plan",
     "design_contract",
     "truth_contract",
     "slides",
@@ -802,6 +803,7 @@ function validateAndNormalizeDeck(spec) {
   const normalizedDesign = theme
     ? validateAndNormalizeDeckDesign(spec.design, theme, issues, warnings)
     : null;
+  const normalizedDesignPlan = require("./design_plan_core.js").validateBinding(spec.design_plan, issues);
   const normalizedDesignContract = validateAndNormalizeDesignContract(
     spec.design_contract,
     issues
@@ -979,6 +981,7 @@ function validateAndNormalizeDeck(spec) {
     title: typeof spec.title === "string" ? spec.title.trim() : "",
     theme_id: typeof spec.theme_id === "string" ? spec.theme_id : "",
     ...(normalizedDesign ? { design: normalizedDesign } : {}),
+    ...(normalizedDesignPlan ? { design_plan: normalizedDesignPlan } : {}),
     ...(normalizedDesignContract ? { design_contract: normalizedDesignContract } : {}),
     ...(normalizedTruthContract ? { truth_contract: normalizedTruthContract } : {}),
     slides: normalizedSlides,

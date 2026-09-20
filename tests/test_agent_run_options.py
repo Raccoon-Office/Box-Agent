@@ -28,6 +28,10 @@ class ReferenceCapturingLLM:
         self.requests = []
 
     async def generate_stream(self, *, messages, **kwargs):
+        if kwargs.get("call_kind") == "context_summary":
+            yield StreamEvent(type="text", delta="<summary>bounded history</summary>")
+            yield StreamEvent(type="finish", finish_reason="stop")
+            return
         self.requests.append([message.model_copy(deep=True) for message in messages])
         yield StreamEvent(type="text", delta="done")
         yield StreamEvent(type="finish", finish_reason="stop")
@@ -354,9 +358,10 @@ async def test_agent_preserves_deduplicated_references_across_prompt_updates(
     assert "Old instructions." not in agent.system_prompt
     assert str(llm.requests[0]).count("Old instructions.") == 1
     assert llm.requests[0][-1].role == "user"
-    assert "Host-provided Skill reference" in str(llm.requests[0][-1].content)
-    assert "Old instructions." not in str(agent.messages)
+    assert "Host-provided method material" in str(llm.requests[0][-1].content)
+    assert str(agent.messages).count("Old instructions.") == 1
     assert agent.messages[1].content == "first input"
+    assert agent.messages[2].source == "runtime"
 
     base_prompt = agent.system_prompt.replace("system", "updated", 1)
     agent.set_system_prompt(base_prompt)
@@ -368,14 +373,15 @@ async def test_agent_preserves_deduplicated_references_across_prompt_updates(
     assert agent.system_prompt.startswith("updated")
     assert "Old instructions." not in agent.system_prompt
     assert "New instructions." not in agent.system_prompt
-    assert "Old instructions." not in str(llm.requests[-1])
+    assert str(llm.requests[-1]).count("Old instructions.") == 1
     assert str(llm.requests[-1]).count("New instructions.") == 1
     assert llm.requests[-1][-1].role == "user"
-    assert agent.messages[-2].content == "second input"
-    assert "New instructions." not in str(agent.messages)
+    assert agent.messages[-3].content == "second input"
+    assert agent.messages[-2].source == "runtime"
+    assert str(agent.messages).count("New instructions.") == 1
 
 
-async def test_agent_reports_reference_budget_without_truncating_source_and_can_clear(
+async def test_agent_reports_reference_size_preserves_sources_and_can_clear(
     tmp_path: Path,
 ) -> None:
     llm = ReferenceCapturingLLM()
@@ -400,15 +406,15 @@ async def test_agent_reports_reference_budget_without_truncating_source_and_can_
     assert "SECOND_REQUIRED_RULE" not in agent.system_prompt
     agent.add_user_message("bounded input")
     events = [event async for event in agent.run_events()]
-    assert llm.requests == []
-    assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR for event in events)
-    # One bounded recovery can append compaction metadata. The original user
-    # text and full Skill sources survive; no truncated method is delivered.
-    assert sum(isinstance(event, SummarizationEvent) for event in events) == 1
+    assert len(llm.requests) == 1
+    assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.END_TURN for event in events)
+    request_text = str(llm.requests[0])
+    assert "FIRST_REQUIRED_RULE" in request_text
+    assert "SECOND_REQUIRED_RULE" in request_text
     assert any(message.role == "user" and message.content == "bounded input"
                for message in agent.messages)
-    assert "FIRST_REQUIRED_RULE" not in str(agent.messages)
-    assert "SECOND_REQUIRED_RULE" not in str(agent.messages)
+    assert str(agent.messages).count("FIRST_REQUIRED_RULE") == 1
+    assert str(agent.messages).count("SECOND_REQUIRED_RULE") == 1
     assert agent.skill_runtime.state.reads["first"].prompt == first
     assert agent.skill_runtime.state.reads["second"].prompt == second
 

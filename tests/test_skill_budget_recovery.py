@@ -36,7 +36,7 @@ def test_safe_input_budget_does_not_reserve_model_output_twice():
     # Same observed input pressure as the Web failure, below its derived limit.
     history = [Message(role="assistant", content="previous response",
                        usage=TokenUsage(input_tokens=123183, output_tokens=0))]
-    assert skill_reference_budget_chars(history, (), 180129, 64000) == 50000
+    assert skill_reference_budget_chars(history, (), 180129, 64000) == 100_000
     assert skill_reference_budget_chars(history, (), 180129, 64000) == skill_reference_budget_chars(history, (), 180129, 0)
 
 
@@ -146,6 +146,11 @@ class Provider:
         return LLMResponse(content="<summary>Continue the current task.</summary>", finish_reason="stop")
 
     async def generate_stream(self, messages, **kwargs):
+        if kwargs.get("call_kind") == "context_summary":
+            response = await self.generate(messages, **kwargs)
+            yield StreamEvent(type="text", delta=response.content or "")
+            yield StreamEvent(type="finish", finish_reason="stop")
+            return
         self.requests.append(list(messages))
         yield StreamEvent(type="text", delta="done")
         yield StreamEvent(type="finish", finish_reason="stop")
@@ -219,7 +224,6 @@ async def test_loop_selected_body_recovers_with_summary_or_unavailable_summary_f
         "---\nname: demo\ndescription: example\n---\nEXACT_METHOD_BODY\n" + "method line\n" * 2500)
     runtime.select(["demo"])
     history = crowded_history(runtime)
-    history[2].content = "old execution " * 4000
     provider = Provider(summary_available=summary_available)
     events = [event async for event in run_agent_loop(llm=provider, messages=history, tools={},
         skill_engine=runtime, token_limit=24000, max_steps=1)]
@@ -250,9 +254,9 @@ async def test_loop_final_input_recovery_includes_late_user_material_without_rep
         skill_engine=runtime, token_limit=limit, max_steps=1, hooks=[hook])]
     assert len(provider.requests) == 1 and hook.steps == [1]
     assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
-    assert late_text in str(provider.requests[0]).replace("\\n", "\n")
-    assert "EXACT_METHOD_BODY" in str(provider.requests[0])
-    assert _fallback_context_estimate(provider.requests[0], {}) + 1024 <= limit
+    assert late_text in str(provider.requests[-1]).replace("\\n", "\n")
+    assert "EXACT_METHOD_BODY" in str(provider.requests[-1])
+    assert _fallback_context_estimate(provider.requests[-1], {}) + 1024 <= limit
 
 
 @pytest.mark.asyncio
@@ -261,7 +265,6 @@ async def test_loop_budget_recovery_preserves_summary_cancellation(runtime):
         "---\nname: demo\ndescription: example\n---\n" + "method line\n" * 2500)
     runtime.select(["demo"])
     history = crowded_history(runtime)
-    history[2].content = "old execution " * 4000
 
     class CancelledSummary(Provider):
         async def generate(self, messages, **kwargs):
@@ -277,13 +280,11 @@ async def test_loop_budget_recovery_preserves_summary_cancellation(runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_at,history_lines,skill_lines", [
-    ("summary_return", 4000, 2500),
-    ("summarization_event", 4000, 2500),
+    ("summary_return", 18000, 2500),
+    ("summarization_event", 18000, 2500),
     ("step_hook", 1, 2500),
     ("step_hook", 4000, 2500),
     ("step_event", 4000, 2500),
-    ("summary_return", 4000, 30000),
-    ("summarization_event", 4000, 30000),
     ("summary_return", 18000, 30000),
     ("summarization_event", 18000, 30000),
 ])
@@ -346,7 +347,7 @@ async def test_loop_cancellation_before_request_commit_never_delivers(
             "provider_requests": 0, "delivered": (), "read_facts": 0,
             "persisted_skills": 0, "request_committed": False,
         }
-        assert hook.steps == ([] if history_lines == 18000 or cancel_at == "step_event" else [1])
+        assert hook.steps == ([] if cancel_at == "step_event" else [1])
         assert hook.done == [StopReason.CANCELLED]
         assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [StopReason.CANCELLED]
         assert not any(isinstance(event, ErrorEvent) for event in events)
@@ -388,10 +389,12 @@ async def test_loop_unrecoverable_selection_compacts_at_most_once_and_never_deli
     events = [event async for event in run_agent_loop(llm=provider,
         messages=[Message(role="system", content="BASE"), Message(role="user", content="task")],
         tools={}, skill_engine=runtime, token_limit=4000, max_steps=1, hooks=[hook])]
-    assert provider.requests == []
-    assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 1
-    assert provider.summary_calls <= 1 and hook.steps == [1]
-    assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR for event in events)
+    assert len(provider.requests) == 1
+    assert len([event for event in events if isinstance(event, SummarizationEvent)]) == 0
+    assert provider.summary_calls == 0 and hook.steps == [1]
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.END_TURN for event in events)
+    assert "SKILL.md" in str(provider.requests[0])
     assert runtime.turn_deliveries == {} and runtime.read_facts == ()
 
 

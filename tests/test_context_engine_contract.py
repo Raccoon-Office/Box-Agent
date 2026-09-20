@@ -8,6 +8,8 @@ from box_agent.kernel.compact_engine import DefaultCompactEngine
 from box_agent.kernel.context_types import CompactionInput, CompactionOutcome
 from box_agent.kernel.ports import CompactEnginePort
 from box_agent.schema import Message
+from box_agent.schema import StreamEvent
+from box_agent.kernel.context_engine import _create_summary
 from box_agent.session_projection import SessionProjection
 from tests.test_managed_kernel_services import DeterministicLLM, managed_services
 
@@ -102,3 +104,21 @@ async def test_compact_engine_propagates_commit_failure_before_requesting_a_summ
     )
     with pytest.raises(OSError, match="compaction start failed"):
         await DefaultCompactEngine().compact_if_needed(inputs)
+
+
+@pytest.mark.asyncio
+async def test_context_summary_collects_text_from_streaming_llm():
+    class StreamingProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def generate_stream(self, **kwargs):
+            self.calls.append(kwargs)
+            yield StreamEvent(type="text", delta="<sum")
+            yield StreamEvent(type="text", delta="mary>kept</summary>")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    provider = StreamingProvider()
+    summary = await _create_summary(provider, [Message(role="user", content="request")], 1)
+    assert summary == "kept"
+    assert provider.calls[0]["call_kind"] == "context_summary"

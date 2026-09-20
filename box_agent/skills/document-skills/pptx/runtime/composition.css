@@ -1475,9 +1475,28 @@ body[data-deck-composition="playful-collage"][data-deck-composition-variant="sta
   margin-top: 36px;
 }
 
-body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .content-card:first-child:where(:not(.expressive-slide, .expressive-slide *)),
-body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .kpi-card:first-child:where(:not(.expressive-slide, .expressive-slide *)) {
-  min-height: 390px;
+body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .layout-cards.cards-featured .content-card:first-child:where(:not(.expressive-slide, .expressive-slide *)),
+body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .layout-kpis.kpis-hero .kpi-card:first-child:where(:not(.expressive-slide, .expressive-slide *)) {
+  min-height: 220px;
+}
+
+/* The mosaic featured lead card has a bounded lead height. Let the remaining
+   rows size from the available slide space instead of shrinking tracks and
+   placing the next row on top of it. */
+body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .layout-cards.cards-featured .cards-grid:where(:not(.expressive-slide, .expressive-slide *)),
+body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .layout-kpis.kpis-hero .kpi-grid:where(:not(.expressive-slide, .expressive-slide *)) {
+  grid-auto-rows: auto;
+  align-content: start;
+}
+
+body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .layout-cards.cards-featured.cards-count-5 .content-card:not(:first-child):where(:not(.expressive-slide, .expressive-slide *)) {
+  padding: 16px 20px;
+}
+
+body[data-deck-composition="playful-collage"][data-deck-composition-variant="mosaic"] .layout-cards.cards-featured.cards-count-5 .content-card:not(:first-child) .card-body:where(:not(.expressive-slide, .expressive-slide *)) {
+  margin-top: 8px;
+  font-size: 16px;
+  line-height: 1.28;
 }
 
 body[data-deck-composition="playful-collage"][data-deck-composition-variant="capsule"] .cards-grid:where(:not(.expressive-slide, .expressive-slide *)),

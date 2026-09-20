@@ -6,6 +6,7 @@ import json
 from typing import Any
 from types import SimpleNamespace
 
+from ..execution_profile import is_skill_blocked
 from .base import Tool, ToolResult
 from .schema_validation import validate_tool_arguments
 from .skill_loader import Skill, SkillLoader
@@ -43,8 +44,9 @@ class ListSkillsTool(Tool):
     def description(self) -> str:
         return (
             "List or search locally installed Skill names, descriptions and availability. "
-            "Use an empty query to browse all available Skills, or an exact name to "
-            "diagnose an unavailable Skill. This does not load instructions or access "
+            "Use an empty query to browse public Skills, or an exact name to "
+            "inspect an internal method or diagnose an unavailable Skill. "
+            "This does not load instructions or access "
             "SkillHub. Follow next_offset for more results; if revision changes, restart "
             "from offset 0. Use get_skill to read a chosen Skill."
         )
@@ -73,9 +75,8 @@ class ListSkillsTool(Tool):
             reason = f"Skill is malformed: {skill.broken_reason or 'invalid SKILL.md'}"
         elif self.skill_access_filter is not None and not self.skill_access_filter(skill):
             reason = "Skill is not enabled for this conversation."
-        elif skill.name in self.blocked_skill_names and (
-            self.explicitly_allowed_skill_names is None
-            or skill.name not in self.explicitly_allowed_skill_names
+        elif is_skill_blocked(
+            skill.name, self.blocked_skill_names, self.explicitly_allowed_skill_names
         ):
             reason = "Skill is blocked by the execution profile unless explicitly selected."
         return {
@@ -124,13 +125,15 @@ class ListSkillsTool(Tool):
             revision_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")).hexdigest()
         exact = catalog.get(query)
-        if exact is not None and not exact["available"]:
+        if exact is not None and (
+            not exact["available"] or exact.get("user_visible") is False
+        ):
             matches = [exact]
         else:
             matches = [
                 catalog[skill.name]
                 for skill in self.skill_loader.search_skills(query, include_disabled=True)
-                if skill.name in catalog and (
+                if skill.user_visible and skill.name in catalog and (
                     catalog[skill.name]["available"]
                     or (self.include_disabled and self.skill_loader.get_skill(skill.name) is None)
                 )

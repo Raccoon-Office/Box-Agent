@@ -355,7 +355,7 @@ def test_config_mcp_connect_timeout_defaults_and_overrides(tmp_path: Path) -> No
     _write_config(default_path)
     defaults = cli.Config.from_yaml(default_path).tools.mcp
     assert defaults.connect_timeout == 60.0
-    assert defaults.execute_timeout == 120.0
+    assert defaults.execute_timeout == 300.0
     assert defaults.sse_read_timeout == 180.0
 
     override_path = tmp_path / "override.yaml"

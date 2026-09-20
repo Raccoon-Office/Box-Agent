@@ -50,7 +50,9 @@ class RequestUserDecisionTool(Tool):
             "only when it preserves the user's stated intent, is low-risk, and is reversible. "
             "Prefer progress over waiting: when one option safely continues the user's explicit "
             "request, put that recommended option first, set it as the default, and request a "
-            "30 second timeout. Every call must supply the default, timeout, risk, reversibility, "
+            "30 second timeout. When the user's preference is unknown and must be chosen by "
+            "the user, omit the default and timeout to wait for a manual response. Calls that "
+            "request a timeout must supply the default, risk, reversibility, "
             "and intent-preservation declarations; the runtime will deny automatic submission "
             "for sensitive or unsafe choices. If the model can "
             "choose a safe path without changing the user-visible outcome, do not call this tool. "
@@ -111,7 +113,8 @@ class RequestUserDecisionTool(Tool):
                     "maximum": _MAX_AUTO_SUBMIT_SECONDS,
                     "default": 30,
                     "description": (
-                        "Requested timeout. The runtime may remove it. Requires a default "
+                        "Optional timeout; omit to wait for the user without automatic selection. "
+                        "The runtime may remove it. Requires a default "
                         "option plus low risk, reversible, and intent-preserving declarations. "
                         "Request 30 seconds when those conditions hold."
                     ),
@@ -142,11 +145,6 @@ class RequestUserDecisionTool(Tool):
                 "question",
                 "decision_kind",
                 "options",
-                "default_option_id",
-                "requested_auto_submit_seconds",
-                "risk_level",
-                "reversible",
-                "preserves_user_intent",
             ],
             "additionalProperties": False,
         }
@@ -217,17 +215,18 @@ class RequestUserDecisionTool(Tool):
             normalized_options.append(normalized_option)
 
         normalized_default = str(default_option_id).strip()
-        if not normalized_default:
+        auto_requested = requested_auto_submit_seconds is not None
+        if auto_requested and not normalized_default:
             return ToolResult(
                 success=False,
-                error="default_option_id is required for every user decision",
+                error="default_option_id is required when requesting automatic submission",
             )
         if normalized_default and normalized_default not in option_ids:
             return ToolResult(
                 success=False,
                 error="default_option_id must match one of the supplied option ids",
             )
-        if (
+        if auto_requested and (
             isinstance(requested_auto_submit_seconds, bool)
             or not isinstance(requested_auto_submit_seconds, int)
             or not (
@@ -241,14 +240,18 @@ class RequestUserDecisionTool(Tool):
                 error="requested_auto_submit_seconds must contain an integer from 10 to 120",
             )
         normalized_risk = str(risk_level or "").strip().lower()
-        if normalized_risk not in {"low", "medium", "high"}:
+        if (auto_requested or risk_level is not None) and normalized_risk not in {
+            "low", "medium", "high"
+        }:
             return ToolResult(
                 success=False,
                 error="risk_level is required and must be low, medium, or high",
             )
-        if not isinstance(reversible, bool):
+        if (auto_requested or reversible is not None) and not isinstance(reversible, bool):
             return ToolResult(success=False, error="reversible must be explicitly declared")
-        if not isinstance(preserves_user_intent, bool):
+        if (auto_requested or preserves_user_intent is not None) and not isinstance(
+            preserves_user_intent, bool
+        ):
             return ToolResult(
                 success=False,
                 error="preserves_user_intent must be explicitly declared",
@@ -261,8 +264,8 @@ class RequestUserDecisionTool(Tool):
             default_option_id=normalized_default,
             requested_seconds=requested_auto_submit_seconds,
             risk_level=normalized_risk,
-            reversible=reversible,
-            preserves_user_intent=preserves_user_intent,
+            reversible=reversible is True,
+            preserves_user_intent=preserves_user_intent is True,
         )
         request_id = f"decision_{uuid4().hex}"
         payload: dict[str, Any] = {

@@ -108,6 +108,10 @@ class ReportExecutionResultTool(Tool):
                                 "minLength": 1,
                                 "maxLength": 2000,
                             },
+                            "advisory": {
+                                "type": "boolean",
+                                "description": "True when this check is informative and does not block delivery.",
+                            },
                         },
                         "required": ["name", "status", "summary"],
                         "additionalProperties": False,
@@ -264,9 +268,14 @@ class ReportExecutionResultTool(Tool):
                 success=False,
                 error="Completed execution results require at least one change.",
             )
-        if normalized_outcome == "completed" and (
-            not normalized_checks
-            or any(check.get("status") != "passed" for check in normalized_checks)
+        if normalized_outcome == "completed" and not normalized_checks:
+            return ToolResult(
+                success=False,
+                error="Completed execution results require all checks to pass.",
+            )
+        if normalized_outcome == "completed" and any(
+            check.get("status") != "passed" and check.get("advisory") is not True
+            for check in normalized_checks
         ):
             return ToolResult(
                 success=False,

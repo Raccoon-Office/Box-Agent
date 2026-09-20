@@ -34,6 +34,7 @@
             "args": [
                 "-y",
                 "@playwright/mcp@latest",
+                "--isolated",
                 "--timeout-navigation",
                 "30000"
             ],

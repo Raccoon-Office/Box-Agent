@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "purpose": "从用户提供的主色补全可读、克制的演示文稿配色",
+  "roles": ["background", "text", "primary", "accent", "secondary"],
+  "rules": [
+    "保留用户主色为 primary，不擅自替换",
+    "浅色主色使用 #F7F5EF 作为默认背景，深色主色使用 #101418",
+    "根据背景与文字的对比度选择 #111111 或 #FFFFFF，目标至少 4.5:1",
+    "accent 使用主色色相约 +32° 的中等饱和色，作为少量点缀",
+    "secondary 使用主色色相约 +190° 的中等饱和色，避免与主色混淆",
+    "默认 accent_usage 为 sparse；只有用户明确要求丰富多彩时才使用 balanced 或 dominant",
+    "如果用户提供背景色或文字色，优先锁定用户值，再调整未锁定角色"
+  ],
+  "examples": [
+    {
+      "primary": "#F2C94C",
+      "background": "#F7F5EF",
+      "text": "#111111",
+      "accent": "#9DD317",
+      "secondary": "#2833AE"
+    }
+  ]
+}

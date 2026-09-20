@@ -186,6 +186,46 @@ def test_invalid_skill_log_rejected_before_restore_replaces_state(tmp_path, bad_
         log.close()
 
 
+@pytest.mark.parametrize('junk', [None, 'legacy-name', 1, True, {}])
+def test_non_object_skill_log_entries_are_skipped_without_blocking_valid_restore(tmp_path, junk):
+    loader = loader_at(tmp_path / 'skills')
+    runtime = SkillRuntime(loader)
+    prompt = loader.get_skill('demo').to_prompt()
+    valid = {'name': 'demo', 'sha256': sha256(prompt.encode()).hexdigest(), 'loadOrder': 1}
+    log = SessionLog.create(tmp_path / 'sessions', session_id='junk-skill', cwd=tmp_path)
+    log.append('skill/change', {'skills': [junk, valid]})
+    log.flush()
+    log.close()
+    log = SessionLog.open(tmp_path / 'sessions', session_id='junk-skill', cwd=tmp_path)
+    before_log = log.path.read_bytes()
+    try:
+        agent = Agent(llm_client=CapturingProvider(), system_prompt='BASE',
+                      tools=[GetSkillTool(loader)], skill_runtime=runtime, session_log=log,
+                      workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False)
+        assert agent.restored_skills == [valid]
+        assert runtime.state.reads['demo'].revision == valid['sha256']
+        assert log.path.read_bytes() == before_log
+    finally:
+        log.close()
+
+
+def test_materialize_selected_messages_skips_restore_pending_references():
+    runtime = SkillRuntime(None)
+    trusted = 'trusted skill prompt'
+    runtime.restore_records([{
+        'name': 'review',
+        'prompt': trusted,
+        'sha256': sha256(trusted.encode()).hexdigest(),
+        'loadOrder': 1,
+    }])
+    runtime.register_reference('review', trusted, persist=False)
+    runtime.register_reference('another-skill', 'another prompt', persist=False)
+    materialized = runtime.materialize_selected_messages([])
+    assert [name for name, _ in materialized] == ['another-skill']
+    assert 'another prompt' in materialized[0][1]
+    assert trusted not in materialized[0][1]
+
+
 def test_valid_legacy_skill_log_can_be_restored_and_read(tmp_path):
     loader = loader_at(tmp_path / 'skills')
     runtime = SkillRuntime(loader)

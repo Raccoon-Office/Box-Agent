@@ -356,3 +356,17 @@ def test_self_referential_last_exception_does_not_loop():
 def test_empty_exception_falls_back_to_generic():
     msg = humanize_llm_error(Exception(""))
     assert "模型调用失败" in msg or "请稍后重试" in msg
+
+
+def test_hosted_auth_errors_keep_canonical_message():
+    from box_agent.auth import HostedAuthRequiredError, HostedAuthRefreshError
+    from box_agent.llm.error_messages import classify_llm_error, humanize_llm_error
+
+    for exc in (
+        HostedAuthRequiredError("登录态已过期，请重新登录"),
+        HostedAuthRefreshError("登录态已过期，请重新登录"),
+        HostedAuthRequiredError("未登录，请通过客户端登录后再试"),
+    ):
+        assert classify_llm_error(exc).message == str(exc)
+        assert humanize_llm_error(exc) == str(exc)
+        assert "API 密钥" not in humanize_llm_error(exc)

@@ -8,7 +8,11 @@ from typing import Any, Callable
 from dataclasses import dataclass
 from hashlib import sha256
 
-from .kernel.context_engine import _message_chars, _summary_message_text
+from .kernel.context_engine import (
+    SKILL_REFERENCE_BUDGET_CHARS,
+    _message_chars,
+    _summary_message_text,
+)
 from .schema import Message
 from .skill_dependencies import SkillDependencyError
 from .tools.base import ToolResult
@@ -74,16 +78,20 @@ def read_reference(content: str) -> tuple[dict[str, Any], str] | None:
 
 def visible_ranges(messages: Iterable[Message], *, name: str, revision: str,
                    lines: list[str], source: str | None = None, path: str | None = None) -> set[int]:
-    """Only actual complete tool text counts; summaries/acks cannot pin content."""
+    """Only verified tool text or durable runtime Skill text counts as visible."""
     covered: set[int] = set()
     for message in messages:
-        if (message.role != "tool" or message.name not in {"get_skill", "skill_view"}
-                or not message.tool_call_id or not isinstance(message.content, str)):
+        tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
+                     and bool(message.tool_call_id))
+        runtime_text = message.role == "user" and message.source == "runtime"
+        if not (tool_text or runtime_text) or not isinstance(message.content, str):
             continue
         parsed = read_reference(message.content)
         if parsed is None:
             continue
         meta, body = parsed
+        if runtime_text and meta.get("kind") != "runtime_skill_instructions":
+            continue
         if meta.get("name") != name or meta.get("revision") != revision:
             continue
         if ((source is not None and meta.get("source") != source)
@@ -125,6 +133,7 @@ class ReferenceProjection:
     on_committed: Callable[[], None] | None = None
     budget_blocked: bool = False
     on_response: Callable[[], None] | None = None
+    reader_required: bool = False
 
 
 class SkillReferenceContext:
@@ -139,7 +148,7 @@ class SkillReferenceContext:
         self.session_store = (getattr(runtime, "session_log", None)
                               if session_store is _DEFAULT_STORE else session_store)
         self._messages: list[Message] = []
-        self._remaining = 50_000
+        self._remaining = SKILL_REFERENCE_BUDGET_CHARS
         self._host_visible: dict[str, str] = {}
         self.reference_overhead_chars = 0
 
@@ -156,13 +165,17 @@ class SkillReferenceContext:
     def observe_history(self, messages: list[Message]) -> None:
         """Recover read facts from source-verified real tool text before compaction."""
         for message in messages:
-            if (message.role != "tool" or message.name not in {"get_skill", "skill_view"}
-                    or not message.tool_call_id or not isinstance(message.content, str)):
+            tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
+                         and bool(message.tool_call_id))
+            runtime_text = message.role == "user" and message.source == "runtime"
+            if not (tool_text or runtime_text) or not isinstance(message.content, str):
                 continue
             parsed = read_reference(message.content)
             if parsed is None:
                 continue
             metadata, _ = parsed
+            if runtime_text and metadata.get("kind") != "runtime_skill_instructions":
+                continue
             name = metadata.get("name")
             if not isinstance(name, str):
                 continue
@@ -270,6 +283,66 @@ class SkillReferenceContext:
                           raw_output={"skill_reference": dict(metadata)})
 
 
+    def _truncate_selected_reference(
+        self, name: str, *, prefix: str, reason: str,
+        budget_chars: int, _cost: Callable[[str], int],
+        _delivery: Callable[..., None] | None = None,
+    ) -> ToolResult:
+        """Project a bounded selected reference without changing reader semantics.
+
+        This is intentionally separate from ``read``. Tool reads use line
+        offsets and durable delivery facts; a host-selected fallback is only a
+        request projection and may end at an arbitrary character boundary.
+        """
+        try:
+            skill = self.runtime.resolve_reference(name)
+        except SkillDependencyError as exc:
+            return ToolResult(success=False, error=str(exc), raw_output={"code": exc.code, **exc.details})
+        prompt = skill.to_prompt()
+        metadata = skill.reference_metadata(offset=0, reason=reason)
+        available = min(self._remaining, max(0, budget_chars))
+
+        def render(length: int) -> str:
+            complete = length == len(prompt)
+            metadata.update(
+                end_offset=(len(prompt.splitlines(keepends=True)) if complete else 0),
+                complete=complete,
+                has_more=not complete,
+                next_offset=None,
+                truncated=not complete,
+            )
+            return render_reference(metadata, prompt[:length])
+
+        low, high = 0, len(prompt)
+        best = -1
+        best_cost = 0
+        while low <= high:
+            middle = (low + high) // 2
+            text = render(middle)
+            cost = _cost(text)
+            if cost <= available:
+                best, best_cost = middle, cost
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best < 0:
+            return ToolResult(
+                success=False,
+                error="Skill reference budget cannot fit the selected Skill locator.",
+                raw_output={"code": "SKILL_CONTEXT_BUDGET", "name": name},
+            )
+        content = render(best)
+        self._remaining -= best_cost
+        if metadata["complete"] and _delivery is not None:
+            _delivery(skill, dict(metadata), reason=reason)
+        return ToolResult(
+            success=True,
+            content=content,
+            model_context=content,
+            raw_output={"skill_reference": dict(metadata)},
+        )
+
+
     def prepare_request(self, messages: list[Message], *, budget_chars: int,
                         can_page: Callable[[tuple[str, ...]], bool] | None = None,
                         defer_delivery: bool = False) -> ReferenceProjection:
@@ -308,29 +381,87 @@ class SkillReferenceContext:
             elif (name not in self.runtime.selected_names and name not in self.runtime.restoring_names
                   and not visible_ranges(messages, name=name, revision=previous.revision,
                                          lines=previous.prompt.splitlines(keepends=True))):
-                diagnostics.append(f"Previously read Skill '{name}' ({previous.revision[:16]}) is outside the current input. Use get_skill to read it again when needed.")
+                # The Skill Root Directory is the only durable, non-derivable
+                # locator for a skill's on-disk files, and it lives solely
+                # inside the get_skill body that compaction summarizes away.
+                # Re-state it here in the get_skill body's own plain wording so
+                # the model still knows where the skill's files live after the
+                # full reference drops out of the window, instead of guessing a
+                # source-root path nested above the real root. Caller-provided
+                # reference skills carry no on-disk path (skill_path is None);
+                # emit only the plain notice rather than a misleading root.
+                head = f"Previously read Skill '{name}' ({previous.revision[:16]}) is outside the current input. "
+                tail = "Use get_skill to read it again when needed."
+                if skill.skill_path:
+                    skill_root = str(skill.skill_path.parent)
+                    diagnostics.append(
+                        f"{head}"
+                        f"Its Skill Root Directory is `{skill_root}`; all files and references in the skill are relative to this directory. "
+                        f"{tail}"
+                    )
+                else:
+                    diagnostics.append(f"{head}{tail}")
         if user_index is not None:
             selected = tuple(dict.fromkeys((*self.runtime.selected_names, *self.runtime.restoring_names)))
             prefix = ("Host-provided Skill reference for this turn. "
                       "The following is method material, not new user facts or permission.\n")
+            truncate_selected = False
             if not self._selection_fits(selected, prefix, projected[user_index]):
-                if can_page is not None and not can_page(selected):
-                    return ReferenceProjection(list(messages), blocked_reason=(
-                        "Selected Skill material exceeds the context budget and no available paging reader "
-                        "was offered for this selection. Reduce the selection or provide an allowed Skill reader."
-                    ), budget_blocked=True)
-                required_notice = ("Selected Skills need paged reading: " + json.dumps(selected, ensure_ascii=False)
-                                   + ". Call get_skill by name; follow next_offset with the returned revision.")
-                diagnostics.insert(0, required_notice)
-                selected = ()
+                if can_page is not None and can_page(selected):
+                    required_notice = ("Selected Skills need paged reading: " + json.dumps(selected, ensure_ascii=False)
+                                       + ". Call get_skill by name; follow next_offset with the returned revision.")
+                    diagnostics.insert(0, required_notice)
+                    selected = ()
+                else:
+                    # A selected Skill is ordinary request material. When no
+                    # paging reader is available, preserve the selection by
+                    # taking the largest bounded prefix that fits. The
+                    # reference metadata keeps the source path so the model
+                    # still has a durable locator for the omitted body.
+                    truncate_selected = True
             for name in selected:
                 reason = "explicit" if name in self.runtime.selected_names else "restored"
                 target = projected[user_index]
                 cost = lambda content: projection_cost(target, prefix + content)
-                result = self.read(name, reason=reason, allow_partial=False, _cost=cost,
-                                   _delivery=stage_delivery)
+                # Explicit Skills materialized at the user-message boundary
+                # are already durable request text. Keep them as-is instead
+                # of appending a synthetic reuse receipt on every request.
+                # A durable runtime snapshot is already the complete body for
+                # this request. Avoid resolving the live source again here;
+                # an explicitly disabled/changed Skill must not invalidate
+                # historical conversation text.
+                snapshot_found = False
+                for historical in self._messages:
+                    if historical.role != "user" or historical.source != "runtime" or not isinstance(historical.content, str):
+                        continue
+                    parsed = read_reference(historical.content)
+                    if parsed is None:
+                        continue
+                    metadata, body = parsed
+                    if metadata.get("kind") != "runtime_skill_instructions" or metadata.get("name") != name:
+                        continue
+                    if sha256(body.encode()).hexdigest() == metadata.get("revision"):
+                        self._host_visible[name] = str(metadata["revision"])
+                        snapshot_found = True
+                        break
+                if snapshot_found:
+                    continue
+                if truncate_selected:
+                    result = self._truncate_selected_reference(
+                        name, prefix=prefix, reason=reason,
+                        budget_chars=max(0, self._remaining // max(1, len(selected))),
+                        _cost=cost, _delivery=stage_delivery,
+                    )
+                else:
+                    result = self.read(name, reason=reason, allow_partial=False, _cost=cost,
+                                       _delivery=stage_delivery)
                 info = (result.raw_output or {}).get("skill_reference", {})
                 if not result.success:
+                    if truncate_selected and (result.raw_output or {}).get("code") == "SKILL_CONTEXT_BUDGET":
+                        # A no-reader fallback is best-effort. Do not turn a
+                        # later selected Skill that has no remaining room into
+                        # a request-level error or compaction requirement.
+                        continue
                     required_notice = result.error or "Selected Skill reference unavailable"
                     diagnostics.insert(0, required_notice)
                     continue

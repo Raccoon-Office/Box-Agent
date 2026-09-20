@@ -8,6 +8,7 @@ const path = require("path");
 const { pathToFileURL } = require("url");
 const {
   chromiumLaunchOptions,
+  loadPlaywright: loadHostPlaywright,
   ensurePlaywrightBrowsersPath,
 } = require("./playwright_host");
 const { resolveArtifactPath } = require("./deck_spec_core.js");
@@ -163,7 +164,7 @@ function loadPlaywright() {
     ? `${managedNodeModules}${path.delimiter}${process.env.NODE_PATH}`
     : managedNodeModules;
   Module._initPaths();
-  return require("playwright");
+  return loadHostPlaywright();
 }
 
 async function readEditorState(page, viewport) {
@@ -213,12 +214,31 @@ async function readEditorState(page, viewport) {
       let current = element;
       while (current) {
         const style = getComputedStyle(current);
+        const imageLayer = current.matches(".slide") && current.querySelector(":scope > .slide-background");
+        if (imageLayer) {
+          const wash = getComputedStyle(imageLayer, "::after");
+          const washColor = rgba(wash.backgroundColor);
+          if (wash.display === "none" || !washColor || wash.backgroundImage !== "none") return null;
+          const overlay = [...washColor];
+          overlay[3] *= Number(wash.opacity);
+          // Bound the backing image by black/white; no image model is required.
+          // Include intermediate values so text inside the luminance interval
+          // cannot accidentally pass on two contrasting endpoints.
+          const foreground = getComputedStyle(element).color;
+          const candidates = Array.from({ length: 17 }, (_, index) => {
+            const shade = index * 255 / 16;
+            const base = composite(overlay, [shade, shade, shade, 1]);
+            const color = [...layers].reverse().reduce((back, front) => composite(front, back), base);
+            return `rgb(${color.slice(0, 3).map(Math.round).join(", ")})`;
+          });
+          return candidates.sort((a, b) => contrast(foreground, a) - contrast(foreground, b))[0];
+        }
         const background = rgba(style.backgroundColor);
         if (background && background[3] > 0) layers.push(background);
-        if (background && background[3] === 1) break;
         // A transparent gradient/image has no single known backing color.
         // Report it as unmeasured instead of interpreting transparency as black.
         if (style.backgroundImage !== "none") return null;
+        if (background && background[3] === 1) break;
         current = current.parentElement;
       }
       const color = layers.reverse().reduce((back, front) => composite(front, back), [255, 255, 255, 1]);
@@ -242,6 +262,10 @@ async function readEditorState(page, viewport) {
       const rootRect = root.getBoundingClientRect();
       const headerRect = header?.getBoundingClientRect();
       const scale = slideRect ? slideRect.width / 1920 : 1;
+      const labelSizes = Array.from(root.querySelectorAll('[data-diagram-text="label"]')).map(text => {
+        const matrix = text.getScreenCTM();
+        return matrix ? parseFloat(getComputedStyle(text).fontSize) * Math.hypot(matrix.a, matrix.b) / scale : 0;
+      });
       const nodeRects = Array.from(root.querySelectorAll("[data-diagram-node-id]"))
         .map(node => node.getBoundingClientRect());
       const renderedNodeIds = Array.from(root.querySelectorAll("[data-diagram-node-id]"))
@@ -287,6 +311,7 @@ async function readEditorState(page, viewport) {
         labelNodeOverlapCount,
         labelLabelOverlapCount,
         nodeSpread,
+        minimumLabelSize: labelSizes.length ? Math.min(...labelSizes) : null,
         box: slideRect ? {
           top: (rootRect.top - slideRect.top) / scale,
           bottom: (rootRect.bottom - slideRect.top) / scale,
@@ -341,7 +366,77 @@ async function readEditorState(page, viewport) {
     const componentContrastFailures = contrastSamples
       .filter(sample => sample.ratio < 4.5)
       .sort((left, right) => left.ratio - right.ratio);
+    const documentData = JSON.parse(document.querySelector("#deck-document")?.textContent || "{}");
+    const fixedPalette = documentData.design_contract?.palette;
+    const paletteCompliance = { enforced: fixedPalette?.version === 2, sampled: 0, failures: [] };
+    if (paletteCompliance.enforced) {
+      const allowed = Object.values(fixedPalette.tokens).flat().filter(value => typeof value === "string").map(rgba).filter(Boolean);
+      const permitted = value => {
+        // Canvas premultiplication quantizes RGB at low alpha. Compare the
+        // declared channels directly rather than rejecting a valid faint tint.
+        const isSrgb = /^color\(srgb\s/.test(value);
+        const components = /^rgba?\([\d.,\s/]+\)$/.test(value) || isSrgb ? value.match(/[\d.]+/g)?.map(Number) : null;
+        if (isSrgb && components) components.splice(0, 3, ...components.slice(0, 3).map(channel => channel * 255));
+        const color = components?.length >= 3 ? [...components.slice(0, 3), components[3] ?? 1] : rgba(value);
+        return !color || color[3] === 0 || allowed.some(candidate => color.slice(0, 3).every((channel, i) => Math.round(channel) === Math.round(candidate[i])));
+      };
+      document.querySelectorAll("#deck-root > .slide").forEach((slide, index) => {
+        for (const element of [slide, ...slide.querySelectorAll("*")]) {
+          if (element.closest(".slide-background") || ["SCRIPT", "STYLE", "IMG"].includes(element.tagName)) continue;
+          const rect = element.getBoundingClientRect();
+          if (element.namespaceURI === "http://www.w3.org/2000/svg") {
+            const tag = element.tagName.toLowerCase();
+            if (!/^(path|rect|circle|ellipse|line|polygon|polyline|text|tspan|stop)$/.test(tag) || element.closest("clipPath, mask")) continue;
+            if (tag !== "stop" && rect.width < 1 && rect.height < 1) continue;
+            const style = getComputedStyle(element);
+            if (parseFloat(style.opacity) === 0) continue;
+            const properties = tag === "stop" ? ["stopColor"] : tag === "line" ? ["stroke"] : ["fill", "stroke"];
+            for (const property of properties) {
+              if (property === "fill" && (rect.width === 0 || rect.height === 0 || style.fill === "none" || parseFloat(style.fillOpacity) === 0)) continue;
+              if (property === "stroke" && (style.stroke === "none" || parseFloat(style.strokeWidth) === 0 || parseFloat(style.strokeOpacity) === 0)) continue;
+              if (property === "stopColor" && parseFloat(style.stopOpacity) === 0) continue;
+              paletteCompliance.sampled += 1;
+              if (!permitted(style[property])) paletteCompliance.failures.push({ slide: index + 1,
+                element: element.getAttribute("data-diagram-node-id") || tag, property, color: style[property] });
+            }
+            continue;
+          }
+          if (rect.width < 1 || rect.height < 1) continue;
+          const style = getComputedStyle(element);
+          for (const property of ["color", "backgroundColor", "borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor"]) {
+            if (property.startsWith("border") && parseFloat(style[property.replace("Color", "Width")]) === 0) continue;
+            paletteCompliance.sampled += 1;
+            if (!permitted(style[property])) paletteCompliance.failures.push({ slide: index + 1,
+              element: element.getAttribute("data-prop-path") || element.className || element.tagName,
+              property, color: style[property] });
+          }
+          const role = element.getAttribute("data-deck-text-role");
+          const expectedInk = /^(H1|H2)$/.test(element.tagName) ? fixedPalette.tokens.heading
+            : ["body", "lead"].includes(role) ? style.getPropertyValue("--deck-content-text").trim() || fixedPalette.tokens.text : null;
+          if (expectedInk && rgba(style.color)?.join() !== rgba(expectedInk)?.join()) {
+            paletteCompliance.failures.push({ slide: index + 1, element: element.getAttribute("data-prop-path") || element.tagName,
+              property: "color", color: style.color, expected: expectedInk, role: /^(H1|H2)$/.test(element.tagName) ? "heading" : role });
+          }
+          for (const pseudo of ["", "::before", "::after"]) {
+            const extra = pseudo ? getComputedStyle(element, pseudo) : style;
+            if (pseudo && ["none", "normal"].includes(extra.content)) continue;
+            const properties = pseudo ? ["color", "backgroundColor", "borderColor", "backgroundImage", "boxShadow", "textShadow"] : ["backgroundImage", "boxShadow", "textShadow"];
+            for (const property of properties) {
+              for (const color of extra[property].match(/rgba?\([^)]*\)/g) || []) {
+                paletteCompliance.sampled += 1;
+                if (!permitted(color)) paletteCompliance.failures.push({ slide: index + 1,
+                  element: `${element.className || element.tagName}${pseudo}`, property, color });
+              }
+            }
+          }
+        }
+        if (rgba(getComputedStyle(slide).backgroundColor)?.slice(0, 3).join() !== rgba(fixedPalette.tokens.background)?.slice(0, 3).join()) {
+          paletteCompliance.failures.push({ slide: index + 1, property: "backgroundColor", expected: fixedPalette.tokens.background });
+        }
+      });
+    }
     return {
+      paletteCompliance,
       viewport: { width, height },
       bodyOverflowX: getComputedStyle(document.body).overflowX,
       thumbnailsVisible: document.body.classList.contains("deck-thumbnails-visible"),
@@ -409,6 +504,10 @@ async function probeToolbarMenuTrajectory(page, menuName) {
   await page.mouse.move(8, 8);
   await page.waitForTimeout(220);
   await trigger.hover();
+  // Sample the resting menu bounds, not its animated opening position.
+  await menu.evaluate(async element => {
+    await Promise.all(element.getAnimations().map(animation => animation.finished));
+  });
   const triggerBox = await trigger.boundingBox();
   const menuBox = await menu.boundingBox();
   if (!triggerBox || !menuBox) {
@@ -549,6 +648,9 @@ async function main() {
       issues.push("Technical diagram runtime did not produce one ready inline SVG graph");
     }
     (editor.diagrams || []).forEach((diagram, index) => {
+      if (diagram.minimumLabelSize !== null && diagram.minimumLabelSize < 24) {
+        warnings.push(`Technical diagram ${index + 1} labels render at ${diagram.minimumLabelSize.toFixed(1)}px on the 1920px canvas; use fewer nodes or a roomier layout.`);
+      }
       if (diagram.nodes !== diagram.specNodes || diagram.uniqueNodeIds !== diagram.nodes) {
         issues.push(
           `Technical diagram ${index + 1} rendered ${diagram.nodes} nodes (${diagram.uniqueNodeIds} unique) for ${diagram.specNodes} DiagramSpec nodes`
@@ -572,6 +674,11 @@ async function main() {
 
     if (editor.componentContrast.unresolvedCount) {
       warnings.push(`${editor.componentContrast.unresolvedCount} text contrast sample(s) need visual inspection: transparent gradient/image background.`);
+    }
+    if (editor.paletteCompliance?.failures.length) {
+      editor.paletteCompliance.failures.slice(0, 12).forEach(failure => issues.push(
+        `Frozen palette mismatch on slide ${failure.slide}: ${failure.element || "slide"}.${failure.property} ${failure.color || ""}`
+      ));
     }
     const report = { ok: issues.length === 0, issues, warnings, editor, export: exported };
     const output = `${JSON.stringify(report, null, 2)}\n`;

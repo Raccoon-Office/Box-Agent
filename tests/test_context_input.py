@@ -8,6 +8,7 @@ import pytest
 
 from box_agent.context_input import DefaultContextEngine
 from box_agent.schema import Message
+from box_agent.session_projection import SessionProjection
 from box_agent.skill_context import SkillReferenceContext
 from box_agent.skill_runtime import SkillRuntime
 from box_agent.tools.engine.preparation import prepare_tools
@@ -63,6 +64,9 @@ def test_context_uses_the_exact_prepared_tool_snapshot_without_filtering(runtime
 
 def test_custom_session_store_receives_bounded_inline_reference_metadata(runtime):
     class Store:
+        def replay(self):
+            return SessionProjection([], None, None, [], [])
+
         def append(self, *args, **kwargs):
             pass
 
@@ -96,15 +100,14 @@ def test_host_projection_charges_serialized_blocks_and_original_user_escaping(ru
     assert "get_skill" in str(request.messages) or "[Skill reference]" in str(request.messages)
 
 
-def test_selected_material_blocks_request_when_even_reading_hint_cannot_fit(runtime):
+def test_selected_material_without_reader_is_bounded_when_no_body_fits(runtime):
     runtime.select(["demo"])
     engine = DefaultContextEngine()
     engine.configure_run(skill_engine=runtime)
     request = engine.prepare_request([Message(role="user", content="task")],
                                      prepared_tools=prepare_tools([]), token_limit=1024)
 
-    assert request.blocked_reason
-    assert "budget" in request.blocked_reason.lower()
+    assert request.blocked_reason is None
     assert runtime.read_facts == ()
     assert runtime.turn_deliveries == {}
 
@@ -181,7 +184,7 @@ async def test_context_budget_rejection_stops_kernel_before_provider(runtime):
 
     runtime.select(["demo"])
     events = [event async for event in run_agent_loop(
-        llm=Provider(), messages=[Message(role="system", content="BASE"), Message(role="user", content="task")],
+        llm=Provider(), messages=[Message(role="system", content="BASE " * 6000), Message(role="user", content="task")],
         tools={}, skill_engine=runtime, token_limit=1024, max_steps=1)]
     assert any(isinstance(event, ErrorEvent) and "budget" in event.message for event in events)
     assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR for event in events)
@@ -197,6 +200,9 @@ async def test_custom_session_store_persists_inline_snapshot_before_provider(run
         def __init__(self):
             self.records = []
             self.flushed = False
+
+        def replay(self):
+            return SessionProjection([], None, None, [], [])
 
         def append(self, kind, payload, **kwargs):
             self.records.append((kind, payload))
@@ -235,6 +241,7 @@ async def test_custom_session_store_persists_inline_snapshot_before_provider(run
 
 def test_new_transient_from_current_batch_is_reserved_before_following_skill_read(runtime):
     from box_agent.kernel.context_engine import _fallback_context_estimate
+    from box_agent.schema import FunctionCall, ToolCall
 
     runtime.loader.get_skill("demo").skill_path.write_text(
         '---\nname: demo\ndescription: example\n---\n' + ("METHOD " * 20 + "\n") * 200)
@@ -243,6 +250,10 @@ def test_new_transient_from_current_batch_is_reserved_before_following_skill_rea
     engine.configure_run(skill_engine=runtime)
     messages = [Message(role="user", content="task")]
     engine.prepare_request(messages, prepared_tools=prepare_tools([tool]), token_limit=8000)
+    # The kernel commits tool calls before execution, letting the reader reserve
+    # the pending tool-result envelope as well as the request-only followup.
+    messages.append(Message(role="assistant", content="", tool_calls=[ToolCall(id="read-1", type="function",
+        function=FunctionCall(name="get_skill", arguments={"skill_name": "demo"}))]))
     blocks = [{"type": "text", "text": "x" * 6000}]
     engine.reserve_followup(blocks)
     result = engine.tool_reader("demo")
@@ -263,7 +274,9 @@ def test_paging_requires_reader_access_to_selected_skills(runtime):
     engine.configure_run(skill_engine=runtime)
     messages = [Message(role="user", content="use the selected method")]
     denied = engine.prepare_request(messages, prepared_tools=prepare_tools([tool]), token_limit=5000)
-    assert denied.blocked_reason
+    assert denied.blocked_reason is None
+    assert "METHOD_BODY" in str(denied.messages)
+    assert str(runtime.loader.get_skill("demo").skill_path) in str(denied.messages)
     assert runtime.read_facts == ()
     allowed.add("demo")
     permitted = engine.prepare_request(messages, prepared_tools=prepare_tools([tool]), token_limit=5000)

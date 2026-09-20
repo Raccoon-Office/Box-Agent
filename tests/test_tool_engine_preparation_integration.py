@@ -66,10 +66,12 @@ async def test_preparation_preserves_legacy_order_schemas_and_aliases(
     expected_names = _c5_names(set(baseline)) - _C5_DISCOVERABLE - {"obsidian_daily_note"}
     expected_names.add("list_skills")
     expected_names.add("query_jsonl")  # The existing file configuration supplies JSONL directly.
+    expected_names.add("publish_artifact")
     if not all_capabilities:
         expected_names -= {
             "inspect_images", "generate_image", "execute_code", "sandbox_status",
             "memory_read", "memory_write", "memory_search",
+            "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction",
         }
     assert {tool.name for tool in legacy_tools} == expected_names
 
@@ -89,7 +91,6 @@ async def test_preparation_preserves_legacy_order_schemas_and_aliases(
     }
     _assert_schema_contract(
         [tool for tool in legacy_tools if tool is not schedule], isolated_setup.profile,
-        child_read_tools={"query_jsonl", "read_file", "search_files"},
     )
 
     prepared = DefaultToolEngine(

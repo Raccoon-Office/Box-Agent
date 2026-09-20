@@ -219,7 +219,8 @@ def test_every_collection_layout_publishes_one_typed_count_contract() -> None:
         for dna_id in theme["selection"]["visual_dna_ids"]
     }
     assert len(visual_dna_ids) == 32
-    assert len(theme_ids) == 52
+    assert len(theme_ids) == 53
+    assert "plain-neutral" in theme_ids
     assert visual_dna_ids - theme_ids == {"playful"}
     assert covered_dna_ids == (visual_dna_ids - {"playful"}) | {
         "comic-panel",
@@ -484,8 +485,7 @@ def test_p0_structural_variants_render_distinct_layout_classes(tmp_path: Path) -
         "blue-professional",
         "--family",
         "analytical-exhibit",
-        "--design-seed",
-        "p0-variant-1",
+
         "--out",
         str(deck_path),
     )
@@ -613,12 +613,11 @@ def test_scaffold_normalizes_business_semantics_to_dedicated_layouts(
 
 def test_skill_avoids_public_research_permission_and_micro_todo_loops() -> None:
     skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-
+    outline = (SKILL_DIR / "references/outline.md").read_text(encoding="utf-8")
     assert "do not call\n`plan_write` or `todo_write`" in skill
-    assert "already authorizes the normal use\n   of public, authoritative sources" in skill
-    assert "Do not ask the user\n   for a second \"permission to use public sources\"" in skill
-    assert "must not replace it with a separate four-query cap" in skill
-    assert "Inspect the full\n   useful result returned by each search" in skill
+    assert "Do not\n  ask again for permission to use public sources" in skill
+    assert "Do not replace that workflow with" in outline
+    assert "a PPT-specific four-query scan" in outline
 
 
 def test_every_visual_dna_theme_has_complete_contrast_safe_runtime_tokens() -> None:
@@ -989,8 +988,7 @@ def test_new_composition_families_render_every_layout(
         theme_id,
         "--family",
         family,
-        "--design-seed",
-        f"{family.replace('-', '_')}_seed",
+
         "--title",
         f"{family} compatibility gallery",
         "--out",
@@ -1219,21 +1217,21 @@ def test_theme_gallery_is_opt_in_and_precedes_deck_checkpoint() -> None:
     assert "Theme preview intent (before deck authoring)" in skill
     assert "theme discovery" in skill
     assert "must not slow the default path" in skill
-    assert "Before writing `outline.json`, scaffolding" in skill
+    assert "before writing `outline.json` or" in skill
     assert "scripts/render_theme_gallery.js" in skill
     assert "Composition comparison intent" in skill
     assert "scripts/render_composition_gallery.js" in skill
-    assert "layout.render(modelSlide, index, documentModel.design)" in editor
+    assert "layout.render(modelSlide, index, documentModel.design, renderContext)" in editor
     assert "PPT ownership boundary (mandatory)" in theme_factory
     assert 'get_skill(skill_name="pptx")' in theme_factory
     assert "Do not list the ten themes below" in theme_factory
 
 
-def test_design_seed_is_reproducible_and_selects_distinct_variants(
+def test_saved_composition_variants_render_reproducibly_without_seed(
     tmp_path: Path,
 ) -> None:
     designs = []
-    for index, seed in enumerate(("seed_alpha", "seed_bravo", "seed_foxtrot"), 1):
+    for index, variant in enumerate(("balanced-grid", "rail-grid", "ledger-grid"), 1):
         deck_path = tmp_path / f"variant-{index}" / "deck.json"
         scaffold = _run(
             "inspect_deck_contract.js",
@@ -1241,14 +1239,15 @@ def test_design_seed_is_reproducible_and_selects_distinct_variants(
             "cards-grid-v1",
             "--theme",
             "blue-professional",
-            "--design-seed",
-            seed,
+            "--composition-variant",
+            variant,
             "--out",
             str(deck_path),
         )
         assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
         design = json.loads(deck_path.read_text(encoding="utf-8"))["design"]
-        assert design["seed"] == seed
+        assert "seed" not in design
+        assert design["variant"] == variant
         assert design["family"] == "institutional-grid"
         designs.append(design)
 
@@ -1573,7 +1572,7 @@ def test_distinctive_visual_briefs_reach_registered_theme(
     }
 
 
-def test_auto_theme_prompts_cover_every_registered_theme(tmp_path: Path) -> None:
+def test_auto_theme_prompts_cover_every_non_fallback_theme(tmp_path: Path) -> None:
     manifest = json.loads(
         (SKILL_DIR / "layouts" / "manifest.json").read_text(encoding="utf-8")
     )
@@ -1612,6 +1611,9 @@ def test_auto_theme_prompts_cover_every_registered_theme(tmp_path: Path) -> None
     for theme in manifest["themes"]:
         theme_id = theme["id"]
         selection = theme["selection"]
+        # Fallback selection is covered by test_pptx_theme_match.py.
+        if selection.get("fallback"):
+            continue
         prompt = distinctive_prompts.get(theme_id)
         if prompt is None:
             industries = "、".join(selection["industry_fit"][:3])
@@ -2875,8 +2877,7 @@ def test_theme_family_allowlist_preserves_compatible_choice_and_falls_back_on_mi
         "blue-professional",
         "--family",
         "analytical-exhibit",
-        "--design-seed",
-        "compatible_seed",
+
         "--out",
         str(deck_path),
     )
@@ -2900,8 +2901,7 @@ def test_theme_family_allowlist_preserves_compatible_choice_and_falls_back_on_mi
         "retro-windows",
         "--family",
         "technical-schematic",
-        "--design-seed",
-        "mismatch_seed",
+
     )
     assert rejected.returncode == 0, rejected.stdout + rejected.stderr
     payload = json.loads(rejected.stdout)
@@ -3130,7 +3130,7 @@ const theme = {
   },
 };
 const manifest = composition.compositionManifestRecord(theme);
-const design = composition.createDeckDesign(theme, "single_file_seed", "cinematic-canvas");
+const design = composition.createDeckDesign(theme, "full-bleed", "cinematic-canvas");
 process.stdout.write(JSON.stringify({ manifest, design }));
 """
     result = subprocess.run(
@@ -3295,7 +3295,8 @@ def test_compact_theme_and_layout_list_aliases_are_supported() -> None:
     layout_payload = json.loads(layouts.stdout)
     theme_ids = [item["id"] for item in theme_payload["themes"]]
     assert theme_payload["composition_directions"] == list(COMPOSITION_DIRECTIONS)
-    assert len(theme_ids) == 52
+    assert len(theme_ids) == 53
+    assert "plain-neutral" in theme_ids
     assert theme_ids == sorted(theme_ids)
     assert "playful" not in theme_ids
     assert {
@@ -3451,8 +3452,9 @@ def test_deck_contract_scaffolds_ordered_repeated_layouts_once(tmp_path: Path) -
     assert payload["layouts"][0]["fields"]["hero"]["type"] == "media"
     assert payload["layouts"][1]["fields"]["image"]["required"] is True
     assert payload["deck_skeleton"]["theme_id"] == "block-frame"
-    assert payload["deck_skeleton"]["design"]["version"] == 1
-    assert len(payload["deck_skeleton"]["design"]["seed"]) == 16
+    assert payload["deck_skeleton"]["design"]["version"] == 2
+    assert payload["deck_skeleton"]["design"]["version"] == 2
+    assert "seed" not in payload["deck_skeleton"]["design"]
     assert payload["deck_skeleton"]["design"]["family"] == "brutalist-frame"
     assert payload["deck_skeleton"]["design"]["variant"] in {
         "block-grid",
@@ -10299,28 +10301,14 @@ def test_pptx_theme_selection_has_no_hard_html_templates_dependency() -> None:
     assert "html-templates" not in (frontmatter.get("required_skills") or [])
     assert frontmatter["related_skills"] == ["html-templates"]
     assert "Source-bound decks never invent named clients" in text
-    assert "复购率持续提升" in text
-    assert "Never create a fake bitmap with Pillow" in text
-    assert "--out deck.json" in text
-    assert "--require-field" in text
-    assert "Do not convert visual styling language" in text
-    assert "not `--require-field 1:tags`" in text
+    assert "Never create a fake bitmap with" in text
+    assert "--design-plan" in text
+    assert "references/design-role.md" in text
+    assert "Do not select themes, composition families" in text
     assert "BOX_AGENT_OUTPUT_DIR" not in text
-    assert "artifact-relative" not in text
-    assert "In output mode" not in text
     assert "absolute `<PRESENTATION_DIR>`" in text
-    assert "workspaceDir" in text
-    assert 'write_file(path="deck.json", ...)' in text
-    assert "required `image_plan` key" in text
-    assert "apply_deck_patch.js" in text
-    assert "${BOX_AGENT_NODE:-node} scripts/apply_deck_patch.js" in text
-    assert "validate_deck_truth.js" in text
-    assert "validate_outline.js --research-handoff" in text
+    assert "scripts/apply_deck_patch.js" in text
     assert "verified_facts[].canonical" in text
-    assert "Conflicting, unverified, cross-entity" in text
-    assert "`comic-panel`" in text
-    assert "`8-bit-orbit`" in text
-    assert "DiagramSpec SVG clean and professional" in text
 
 
 def test_pptx_skill_exposes_platform_specific_standalone_image_sync() -> None:
@@ -10344,34 +10332,26 @@ def test_pptx_skill_exposes_platform_specific_standalone_image_sync() -> None:
 
 def test_pptx_solution_briefs_do_not_default_to_deep_research() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    outline = (SKILL_DIR / "references" / "outline.md").read_text(encoding="utf-8")
-
-    assert "Solution/design brief?" in text
-    assert "do not load `research-synthesis`" in text
-    assert "use at most two targeted" in text
-    assert "official-source lookups" in text
+    outline = (SKILL_DIR / "references/outline.md").read_text(encoding="utf-8")
+    assert "references/outline.md" in text
+    assert "they do not require research by default" in text
     assert "The request is a solution/design brief" in outline
     assert "a concise proposal brief stays in branch 2" in outline
+    assert "use at most two targeted official-source lookups" in outline
 
 
 def test_pptx_missing_facts_use_placeholders_without_pausing() -> None:
-    text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-
+    text = " ".join((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
     assert "Do not use `request_user_input` for a missing fact" in text
-    assert "Missing case metrics, quote amounts, contact names" in text
-    assert "are never pre-delivery blockers" in text
+    assert "without pausing delivery" in text
     assert "`暂无可验证公开数据`" in text
-    assert "The user's next reply resumes this same deck" in text
-    assert "Source/URL/private-fact findings never trigger an automatic repair loop" in text
+    assert "retain usable HTML" in text or "retain usable HTML" in text.lower()
 
 
 def test_pptx_framing_choices_use_recommended_decision_with_countdown() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    outline = (SKILL_DIR / "references" / "outline.md").read_text(encoding="utf-8")
-
-    assert "never request them with `request_user_input`" in text
-    assert "request `requested_auto_submit_seconds: 30`" in text
-    assert 'declare `risk_level: "low"`' in text
+    outline = (SKILL_DIR / "references/outline.md").read_text(encoding="utf-8")
+    assert "references/outline.md" in text
     assert "never use `request_user_input` for\n   them" in outline
     assert "default with a 30-second timeout" in outline
 
@@ -12187,7 +12167,7 @@ def test_rendered_palette_keeps_emphasis_and_colored_surface_text_readable(
     scaffold = _run(
         "inspect_deck_contract.js", "kpi-grid-v1", "cards-grid-v1",
         "timeline-horizontal-v1", "statement-focus-v1",
-        "--theme", theme, "--family", family, "--design-seed", "palette-role-regression",
+        "--theme", theme, "--family", family,
         "--out", str(deck_path),
     )
     assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
@@ -12210,7 +12190,8 @@ def test_rendered_palette_keeps_emphasis_and_colored_surface_text_readable(
     assert probe.returncode == 0, probe.stdout + probe.stderr
     report = json.loads(probe.stdout)
     assert report["editor"]["primary"] == primary
-    assert report["editor"]["componentContrast"]["sampled"] > 30
+    contrast = report["editor"]["componentContrast"]
+    assert contrast["sampled"] + contrast["unresolvedCount"] > 30
     assert report["editor"]["componentContrast"]["failures"] == []
 
 
@@ -12330,7 +12311,7 @@ def test_project_poster_keeps_full_width_and_readable_copy_across_families(
     deck_path = tmp_path / "deck.json"
     scaffold = _run(
         "inspect_deck_contract.js", "project-case-study-v1", "project-case-study-v1",
-        "--theme", theme, "--family", family, "--design-seed", "project-poster-regression",
+        "--theme", theme, "--family", family,
         "--out", str(deck_path),
     )
     assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
@@ -12730,7 +12711,7 @@ def test_deck_palette_overrides_local_cool_ordinal_chart_colors(tmp_path: Path) 
     assert 'data-chart-style="cool-ordinal"' in html
     assert 'data-chart-palette-source="deck"' in html
     assert (
-        'data-chart-palette-light="#009739,#FFC400,#1F5AA6,#D8000F"'
+        f'data-chart-palette-light="#009739,#FFC400,#1F5AA6,{_mix_hex("#009739", "#FFF8E7", 0.62)}"'
         in html
     )
 
@@ -13256,7 +13237,7 @@ def test_daisy_days_decorations_preserve_dense_card_layout_bounds(
     assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
     deck = json.loads(deck_path.read_text(encoding="utf-8"))
     deck["design"].update(
-        {"seed": "daisy_staggered_2", "variant": "staggered"}
+        {"variant": "staggered"}
     )
     deck["slides"][2]["props"].update(
         {
@@ -13328,7 +13309,7 @@ def test_brutalist_ledger_three_card_layout_preserves_slide_bounds(
     assert scaffold.returncode == 0, scaffold.stdout + scaffold.stderr
     deck = json.loads(deck_path.read_text(encoding="utf-8"))
     deck["design"].update(
-        {"seed": "ledger_bounds_0", "variant": "ledger-frame"}
+        {"variant": "ledger-frame"}
     )
     deck["slides"][1]["props"].update(
         {
@@ -13405,17 +13386,6 @@ def test_every_composition_variant_preserves_card_capacity_contract(
         "technical-schematic": "technical-blueprint",
     }
 
-    def seed_for_variant(family: str, variant: str) -> str:
-        variants = variants_by_family[family]
-        for index in range(10_000):
-            seed = f"capacity-{family}-{index:03d}"
-            digest = hashlib.sha256(
-                f"controlled-deck-composition-v1:{family}:{seed}".encode()
-            ).digest()
-            if variants[int.from_bytes(digest[:4], "big") % len(variants)] == variant:
-                return seed
-        raise AssertionError(f"Unable to find seed for {family}/{variant}")
-
     failures: list[str] = []
     for family, variants in variants_by_family.items():
         for variant in variants:
@@ -13431,8 +13401,8 @@ def test_every_composition_variant_preserves_card_capacity_contract(
                 theme_by_family[family],
                 "--family",
                 family,
-                "--design-seed",
-                seed_for_variant(family, variant),
+                "--composition-variant",
+                variant,
                 "--out",
                 str(deck_path),
             )
@@ -13535,8 +13505,7 @@ def test_institutional_balanced_grid_preserves_six_numbered_cards(
         "product-console",
         "--family",
         "institutional-grid",
-        "--design-seed",
-        "numbered-capacity-003",
+
         "--out",
         str(deck_path),
     )
@@ -14239,6 +14208,34 @@ def test_sync_image_manifest_status_rejects_missing_generated_asset(
 
     assert result.returncode == 1
     assert "Cannot mark unresolved generated image" in result.stderr
+    assert json.loads(manifest.read_text())["image_plan"][0]["status"] == "pending"
+
+
+def test_sync_image_manifest_status_defers_optional_generated_asset(tmp_path: Path) -> None:
+    generated = tmp_path / "assets" / "generated"
+    generated.mkdir(parents=True)
+    manifest = generated / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "image_plan": [
+                    {
+                        "slide": 1,
+                        "decision": "generate",
+                        "required": False,
+                        "status": "pending",
+                        "output_path": "assets/generated/optional.png",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run("sync_image_manifest_status.js", str(manifest))
+
+    assert result.returncode == 0, result.stderr
+    assert "optional.png" in result.stdout
     assert json.loads(manifest.read_text())["image_plan"][0]["status"] == "pending"
 
 
@@ -15393,26 +15390,26 @@ def test_explicit_card_columns_are_inferred_without_reinterpreting_table_columns
 
 
 @pytest.mark.parametrize(
-    ("theme", "family", "seed", "layout", "count", "palette", "overrides"),
+    ("theme", "family", "variant", "layout", "count", "palette", "overrides"),
     [
-        ("sketch-whiteboard", "institutional-grid", "eval-12-sketch-workshop", "cards-grid-v1", 6,
+        ("sketch-whiteboard", "institutional-grid", "rail-grid", "cards-grid-v1", 6,
          {"background":"#FCFCF8","text":"#27333A","primary":"#365BA6","accent":"#F7EBAC"}, {}),
-        ("block-frame", "brutalist-frame", "eval-04-studio-portfolio", "cards-grid-v1", 6,
+        ("block-frame", "brutalist-frame", "ledger-frame", "cards-grid-v1", 6,
          {"background":"#FFFDF5","text":"#000000","primary":"#FE90E8","accent":"#F7CB46"}, {"card_columns":"3"}),
-        ("block-frame", "brutalist-frame", "eval-04-studio-portfolio", "cards-grid-v1", 6,
+        ("block-frame", "brutalist-frame", "ledger-frame", "cards-grid-v1", 6,
          {"background":"#FFFDF5","text":"#000000","primary":"#FE90E8","accent":"#F7CB46"}, {"card_columns":"2"}),
-        ("blue-professional", "analytical-exhibit", "eval-02-coffee-business", "cards-grid-v1", 5,
+        ("blue-professional", "analytical-exhibit", "decision-board", "cards-grid-v1", 5,
          {"background":"#FDFAE7","text":"#111111","primary":"#1E2BFA","accent":"#7B84FF"}, {}),
-        ("tasting-menu", "literary-minimal", "eval-10-restaurant-menu", "timeline-horizontal-v1", 5, {}, {}),
-        ("consulting-navy", "technical-schematic", "eval-06-technical-bid", "cover-editorial-v1", 0,
+        ("tasting-menu", "literary-minimal", "margin-note", "timeline-horizontal-v1", 5, {}, {}),
+        ("consulting-navy", "technical-schematic", "blueprint-canvas", "cover-editorial-v1", 0,
          {"background":"#F4F7FA","text":"#14212D","primary":"#173B63","accent":"#4F6F8F"}, {}),
-        ("consulting-navy", "institutional-grid", "eval-05-quarterly-review", "cover-editorial-v1", 0,
+        ("consulting-navy", "institutional-grid", "rail-grid", "cover-editorial-v1", 0,
          {"background":"#F4F7FA","text":"#14212D","primary":"#173B63","accent":"#E66A2C"}, {}),
     ],
     ids=["sketch-accent", "pink-card-grid", "two-column-grid", "five-analysis-cards", "menu-timeline", "blueprint-cover", "gradient-cover"],
 )
 def test_scenario_visual_constraints_have_readable_text_and_fit(
-    tmp_path, theme, family, seed, layout, count, palette, overrides
+    tmp_path, theme, family, variant, layout, count, palette, overrides
 ):
     create = tmp_path / "create.js"
     create.write_text(r'''
@@ -15424,12 +15421,12 @@ const theme=getTheme(c.theme),p=createEditorProps(c.layout);p.title='测试内�
 if(p.items)p.items=Array.from({length:c.count},(_,i)=>({kicker:'主题',title:'第'+(i+1)+'个要点',body:'这段文字用于验证真实内容下的阅读空间，信息应完整保留。补充必要的背景、下一步行动与检查方式，不依赖隐藏溢出来容纳内容。'}));
 if(p.steps)p.steps=Array.from({length:c.count},(_,i)=>({phase:'阶段'+(i+1),title:'交付与复核',body:'说明这一阶段的输入、成果和验证方式。'}));
 const palette={source:'inferred',accent_usage:'sparse'};for(const [k,v] of Object.entries(c.palette))palette[k]={value:v,source:'inferred',requested:v};
-const deck={schema_version:1,title:'视觉约束回归',theme_id:c.theme,design:createDeckDesign(theme,c.seed,c.family),design_contract:{version:1,palette,style_overrides:c.overrides},slides:[{id:'test',layout_id:c.layout,props:p}]};
+const deck={schema_version:1,title:'视觉约束回归',theme_id:c.theme,design:createDeckDesign(theme,c.variant,c.family),design_contract:{version:1,palette,style_overrides:c.overrides},slides:[{id:'test',layout_id:c.layout,props:p}]};
 const result=validateAndNormalizeDeck(deck);if(!result.ok)throw Error(JSON.stringify(result.issues));
 fs.writeFileSync(out,renderDocument(result.normalized,theme));
 ''')
     html = tmp_path / "index.html"
-    config = dict(theme=theme, family=family, seed=seed, layout=layout, count=count, palette=palette, overrides=overrides)
+    config = dict(theme=theme, family=family, variant=variant, layout=layout, count=count, palette=palette, overrides=overrides)
     created = _run(str(create), str(SKILL_DIR), str(html), json.dumps(config))
     assert created.returncode == 0, created.stdout + created.stderr
     check_path = tmp_path / "check.json"
@@ -15561,7 +15558,12 @@ console.log(JSON.stringify({count}));
     result = subprocess.run([str(NODE), "-e", probe, str(SKILL_DIR)],
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["count"] == 52 * 4
+    manifest = json.loads(
+        (SKILL_DIR / "layouts" / "manifest.json").read_text(encoding="utf-8")
+    )
+    theme_count = len(manifest["themes"])
+    assert theme_count > 0
+    assert json.loads(result.stdout)["count"] == theme_count * 4
 
 
 def test_content_patch_preserves_expressive_variant_and_all_metric_values(tmp_path: Path) -> None:

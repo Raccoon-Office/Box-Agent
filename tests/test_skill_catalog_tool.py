@@ -43,6 +43,75 @@ async def payload(tool, **arguments):
     return data
 
 
+@pytest.fixture
+def internal_catalog(tmp_path):
+    root = tmp_path / "skills"
+    write_skill(root, "router", "shared topic")
+    path = write_skill(root, "internal-engine", "shared topic")
+    path.write_text(path.read_text().replace(
+        "description: shared topic\n", "description: shared topic\nmetadata:\n  user_visible: false\n"
+    ))
+    loader = SkillLoader(sources=[(root, "user")],
+                         skill_settings_path=tmp_path / "settings.json")
+    loader.discover_skills()
+    return loader
+
+
+async def test_internal_skills_are_hidden_from_browse_and_search_but_named_lookup_works(internal_catalog):
+    tool = make_tool(internal_catalog)
+    for query in ("", "shared", "internal"):
+        data = await payload(tool, query=query)
+        assert "internal-engine" not in [row["name"] for row in data["skills"]]
+    exact = await payload(tool, query="internal-engine")
+    assert [row["name"] for row in exact["skills"]] == ["internal-engine"]
+    assert exact["skills"][0]["available"] is True
+    assert exact["skills"][0]["user_visible"] is False
+
+
+async def test_hidden_required_chain_remains_readable_by_name(internal_catalog):
+    from box_agent.skill_dependencies import resolve_required_skills
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    internal_catalog.get_skill("router").required_skills = ["internal-engine"]
+    resolved = resolve_required_skills(internal_catalog, ["router"])
+    assert [skill.name for skill in resolved] == ["internal-engine", "router"]
+    read = await GetSkillTool(internal_catalog).invoke({"skill_name": "internal-engine"})
+    assert read.success
+    assert "SECRET_BODY_SENTINEL" in read.content
+
+
+@pytest.mark.parametrize("restriction", ["disabled", "blocked", "scope", "connector", "filter"])
+async def test_internal_named_lookup_preserves_availability_and_scope(internal_catalog, tmp_path, restriction):
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    kwargs = {}
+    if restriction == "disabled":
+        (tmp_path / "settings.json").write_text('{"disabledSkillNames":["internal-engine"]}')
+    elif restriction == "blocked":
+        kwargs["blocked_skill_names"] = {"internal-engine"}
+    elif restriction == "scope":
+        kwargs["allowed_skill_names"] = {"router"}
+    elif restriction == "connector":
+        internal_catalog.get_skill("internal-engine").source = "connector"
+        kwargs["skill_access_filter"] = lambda skill: skill.source != "connector"
+    else:
+        kwargs["skill_filter"] = lambda skill: skill.name != "internal-engine"
+
+    tool = make_tool(internal_catalog, **kwargs)
+    assert not any(row["name"] == "internal-engine" for row in (await payload(tool))["skills"])
+    exact = await payload(tool, query="internal-engine")
+    if restriction in {"scope", "filter"}:
+        assert all(row["name"] != "internal-engine" for row in exact["skills"])
+    else:
+        assert [row["name"] for row in exact["skills"]] == ["internal-engine"]
+        assert exact["skills"][0]["available"] is False
+        assert exact["skills"][0]["unavailable_reason"]
+    if restriction != "filter":
+        read = await GetSkillTool(internal_catalog, **kwargs).invoke({"skill_name": "internal-engine"})
+        assert not read.success
+        assert "SECRET_BODY_SENTINEL" not in (read.model_context or "")
+
+
 async def test_default_list_and_later_pages_cover_complete_catalog(catalog):
     tool = make_tool(catalog)
     first = await payload(tool)

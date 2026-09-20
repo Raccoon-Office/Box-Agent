@@ -117,6 +117,12 @@ class ScriptedProvider:
         return LLMResponse(content='<summary>Earlier task.</summary>', finish_reason='stop')
 
     async def generate_stream(self, messages, **kwargs):
+        if kwargs.get("call_kind") == "context_summary":
+            yield StreamEvent(
+                type="text", delta="<summary>Earlier task.</summary>"
+            )
+            yield StreamEvent(type="finish", finish_reason="stop")
+            return
         self.requests.append([message.model_copy(deep=True) for message in messages])
         for event in self.scripts[len(self.requests) - 1]:
             yield event

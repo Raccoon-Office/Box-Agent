@@ -29,6 +29,7 @@ SELF_CHECK_SCRIPT_PATH = SCRIPTS_DIR / "html_self_check.js"
 INSPECT_SCRIPT_PATH = SCRIPTS_DIR / "inspect_deck_contract.js"
 RENDER_SCRIPT_PATH = SCRIPTS_DIR / "render_deck_html.js"
 PROBE_SCRIPT_PATH = SCRIPTS_DIR / "probe_deck_runtime.js"
+FINALIZE_SCRIPT_PATH = SCRIPTS_DIR / "finalize_controlled_deck.js"
 NODE = os.environ.get("BOX_AGENT_NODE") or shutil.which("node")
 
 
@@ -68,6 +69,98 @@ def _last_json_object(output: str) -> dict:
     start = output.rfind("\n{")
     payload = output[start + 1 :] if start >= 0 else output
     return json.loads(payload)
+
+
+@pytest.mark.parametrize("require_pptx", [False, True])
+def test_finalizer_delivers_the_requested_format(tmp_path: Path, require_pptx: bool) -> None:
+    deck = json.loads((SCRIPTS_DIR.parent / "examples/controlled-deck/deck.json").read_text())
+    deck["slides"] = deck["slides"][:2]
+    deck_path = tmp_path / "deck.json"
+    deck_path.write_text(json.dumps(deck), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    result = _run_node(
+        FINALIZE_SCRIPT_PATH, str(deck_path), "--out", str(html_path),
+        *(["--require-pptx"] if require_pptx else []),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert html_path.is_file()
+    pptx_path = html_path.with_suffix(".pptx")
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    if require_pptx:
+        assert pptx_path.is_file(), receipt
+        assert receipt["pptx"] == str(pptx_path)
+        with zipfile.ZipFile(pptx_path) as package:
+            assert package.testzip() is None
+            presentation = ET.fromstring(package.read("ppt/presentation.xml"))
+            ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+            assert len(presentation.findall("p:sldIdLst/p:sldId", ns)) == 2
+    else:
+        assert not pptx_path.exists()
+
+    from box_agent.tools.engine.artifact_results import _detect_tool_artifacts, _snapshot_workspace_signatures
+    deliveries = _detect_tool_artifacts("finalize", "bash", result.stdout, None, {},
+                                        _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path))
+    assert {event.filename for event in deliveries} == (
+        {"index.html", "index.pptx"} if require_pptx else {"index.html"}
+    )
+
+
+@pytest.mark.parametrize("export_failure", ["exit", "missing", "invalid"])
+def test_finalizer_preserves_html_and_previous_pptx_when_export_fails(
+    tmp_path: Path, export_failure: str,
+) -> None:
+    deck = json.loads((SCRIPTS_DIR.parent / "examples/controlled-deck/deck.json").read_text())
+    deck["slides"] = deck["slides"][:1]
+    deck_path = tmp_path / "deck.json"
+    deck_path.write_text(json.dumps(deck), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    pptx_path = tmp_path / "requested.pptx"
+    pptx_path.write_bytes(b"previous delivery must survive a failed export")
+    preload = tmp_path / "export-failure.cjs"
+    preload.write_text("""
+const cp = require('child_process');
+const run = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  if (require('path').basename(args[0]) === 'html_to_editable_pptx.js') {
+    if (process.env.TEST_EXPORT_FAILURE === 'invalid') require('fs').writeFileSync(args[2], 'not a pptx');
+    return {status: process.env.TEST_EXPORT_FAILURE === 'exit' ? 7 : 0,
+            stdout: '', stderr: 'simulated export failure'};
+  }
+  return run(command, args, options);
+};
+""", encoding="utf-8")
+    if NODE is None:
+        pytest.skip("Node.js is required for HTML/PPTX export tests")
+    result = subprocess.run(
+        [str(NODE), str(FINALIZE_SCRIPT_PATH), str(deck_path), "--out", str(html_path),
+         "--require-pptx", "--pptx", str(pptx_path)],
+        capture_output=True, text=True,
+        env={**os.environ, "NODE_OPTIONS": f"--require={preload}", "TEST_EXPORT_FAILURE": export_failure},
+    )
+    skip_unavailable_pptx_runtime(result)
+    assert result.returncode != 0
+    assert html_path.is_file(), result.stdout + result.stderr
+    assert pptx_path.read_bytes() == b"previous delivery must survive a failed export"
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert receipt["ok"] is False
+    assert receipt["delivery_status"] == "partial"
+    assert receipt["pptx"] is None
+    assert receipt["blocking_issues"]
+    assert not list(tmp_path.glob(".pptx-export-*"))
+
+
+@pytest.mark.parametrize("target", ["deck.json", "index.html"])
+def test_finalizer_rejects_export_overwriting_its_inputs(tmp_path: Path, target: str) -> None:
+    deck_path = tmp_path / "deck.json"
+    html_path = tmp_path / "index.html"
+    deck_path.write_text('{"slides": []}', encoding="utf-8")
+    html_path.write_text("existing HTML", encoding="utf-8")
+    result = _run_node(FINALIZE_SCRIPT_PATH, str(deck_path), "--out", str(html_path),
+                       "--require-pptx", "--pptx", str(tmp_path / target))
+    assert result.returncode != 0
+    assert "PPTX output must differ" in result.stderr
+    assert deck_path.read_text() == '{"slides": []}'
+    assert html_path.read_text() == "existing HTML"
 
 
 def _diagram_html(*, marked: bool) -> str:
@@ -129,6 +222,24 @@ def _export_fixture(tmp_path: Path, *, marked: bool) -> tuple[dict, Path]:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return _last_json_object(result.stdout), pptx_path
+
+
+def test_export_skips_page_previews_and_observes_pptx_as_process(tmp_path: Path) -> None:
+    from box_agent.tools.engine.artifact_results import (
+        _detect_tool_artifacts, _snapshot_workspace_signatures,
+    )
+
+    result, pptx = _export_fixture(tmp_path, marked=False)
+    preview = pptx.parent / "slides/slide-01.png"
+    assert preview.is_file()
+    assert result["slideCount"] == 1
+    events = _detect_tool_artifacts(
+        "export", "bash", f"[{preview.relative_to(tmp_path).as_posix()}]", None, {},
+        _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
+    )
+    artifact_paths = {event.abs_path for event in events}
+    assert str(pptx) in artifact_paths
+    assert str(preview) not in artifact_paths
 
 
 def _slide_picture_targets(
@@ -555,6 +666,124 @@ def test_unmarked_inline_svg_keeps_existing_background_capture_behavior(
         )
         center = background.getpixel((background.width // 2, background.height // 2))
         assert center[0] > 200 and center[1] < 120 and center[2] < 150
+
+
+def _export_svg_background(tmp_path: Path, markup: str) -> Image.Image:
+    html = tmp_path / "svg.html"
+    html.write_text(
+        '<!doctype html><html><head><meta charset="utf-8"><style>'
+        'html,body{margin:0}.slide{width:1920px;height:1080px;position:relative;'
+        'overflow:hidden;background:white}.graphic{position:absolute;left:100px;'
+        'top:160px;width:400px;height:240px}.graphic svg{width:100%;height:100%}'
+        'h1{position:absolute;left:100px;top:20px;margin:0;font:40px Arial}'
+        '</style></head><body><section class="slide">'
+        '<h1>EDITABLE_SENTINEL</h1>' + markup + '</section></body></html>',
+        encoding="utf-8",
+    )
+    pptx = tmp_path / "svg.pptx"
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx),
+                       "--out", str(tmp_path / "previews"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        backgrounds, vectors = _slide_picture_targets(archive)
+        # Ordinary SVGs retain the existing single-background representation.
+        assert len(backgrounds) == 1
+        assert vectors == []
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        texts = slide.findall(
+            ".//{http://schemas.openxmlformats.org/drawingml/2006/main}t"
+        )
+        assert "EDITABLE_SENTINEL" in [node.text for node in texts]
+        background = Image.open(io.BytesIO(archive.read(backgrounds[0]))).convert("RGB")
+        # The managed browser may capture at a higher device pixel ratio.
+        background = background.resize((1920, 1080), Image.Resampling.NEAREST)
+        # HTML text is still native; it must not also be baked into the bitmap.
+        assert background.crop((100, 20, 700, 70)).getextrema() == ((255, 255),) * 3
+        return background
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("labelled", [False, True])
+def test_background_capture_preserves_svg_graphics_and_labels(
+    tmp_path: Path, nested: bool, labelled: bool,
+) -> None:
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240">'
+        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="6" markerHeight="6" orient="auto">'
+        '<path d="M0,0 L10,5 L0,10 Z" fill="#ff0000"/></marker></defs>'
+        '<rect x="20" y="20" width="80" height="60" fill="#00cc00"/>'
+        '<line x1="40" y1="140" x2="300" y2="140" stroke="#ff0000" '
+        'stroke-width="6" marker-end="url(#arrow)"/>'
+        + ('<text x="130" y="65" font-family="Arial" font-size="48" '
+           'fill="#0000ff">NODE</text>' if labelled else '') + '</svg>'
+    )
+    if nested:
+        # An ordinary content ancestor is hidden only while capturing backgrounds.
+        markup = '<div><p>Native sibling</p><div class="graphic">' + svg + '</div></div>'
+    else:
+        markup = svg.replace('<svg ', '<svg class="graphic" ', 1)
+    background = _export_svg_background(tmp_path, markup)
+    assert background.getpixel((150, 200)) == (0, 204, 0), "SVG node was lost"
+    assert background.getpixel((280, 300)) == (255, 0, 0), "SVG edge was lost"
+    red, green, blue = background.getpixel((377, 311))
+    assert red > 240 and green < 32 and blue < 32, "SVG arrowhead was lost"
+    if labelled:
+        colors = background.crop((220, 180, 390, 230)).getcolors(10000)
+        assert sum(count for count, (r, g, b) in colors
+                   if b > 200 and r < 50 and g < 50) > 300, (
+            "SVG node label was erased"
+        )
+
+
+def test_background_capture_preserves_authored_svg_visibility_and_clipping(
+    tmp_path: Path,
+) -> None:
+    markup = '''<div><p>Native sibling</p><div class="graphic">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240">
+      <defs><clipPath id="clip"><rect x="260" y="20" width="20" height="60"/></clipPath></defs>
+      <g visibility="hidden"><rect x="20" y="20" width="40" height="60" fill="#ff00ff"/>
+        <rect x="80" y="20" width="40" height="60" fill="#ffff00" visibility="visible"/></g>
+      <g opacity="0"><rect x="140" y="20" width="40" height="60" fill="#ff00ff"/></g>
+      <g display="none"><rect x="200" y="20" width="40" height="60" fill="#ff00ff"/></g>
+      <rect x="260" y="20" width="60" height="60" fill="#00ffff" clip-path="url(#clip)"/>
+      <rect x="340" y="20" width="40" height="60" fill="#000000" opacity="0.5"/>
+    </svg></div></div>'''
+    background = _export_svg_background(tmp_path, markup)
+    for x in (140, 260, 320, 400):
+        assert background.getpixel((x, 200)) == (255, 255, 255)
+    assert background.getpixel((200, 200)) == (255, 255, 0)
+    assert background.getpixel((370, 200)) == (0, 255, 255)
+    assert all(125 <= c <= 130 for c in background.getpixel((460, 200)))
+
+
+@pytest.mark.parametrize("stale_decoration", [False, True])
+def test_background_capture_keeps_svg_chart_preview_out_of_native_chart(
+    tmp_path: Path, stale_decoration: bool,
+) -> None:
+    spec = json.dumps({"type": "column", "categories": ["A", "B"],
+                       "series": [{"name": "Revenue", "values": [7, 13]}]})
+    markup = (
+        '<div class="graphic" data-pptx-chart data-native-chart="true" '
+        "data-chart-spec='" + spec + "'>"
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240">'
+        '<rect width="400" height="240" fill="#ff00ff"/>'
+        '<text x="20" y="50">CHART_PREVIEW</text></svg></div>'
+    )
+    if stale_decoration:
+        for tag in ("svg", "rect", "text"):
+            markup = markup.replace(f'<{tag} ', f'<{tag} data-pptx-decoration ', 1)
+    background = _export_svg_background(tmp_path, markup)
+    assert background.getpixel((200, 200)) == (255, 255, 255)
+    with zipfile.ZipFile(tmp_path / "svg.pptx") as archive:
+        charts = [name for name in archive.namelist()
+                  if name.startswith("ppt/charts/chart") and name.endswith(".xml")]
+        assert len(charts) == 1
+        chart = ET.fromstring(archive.read(charts[0]))
+        values = chart.findall(".//{http://schemas.openxmlformats.org/drawingml/2006/chart}v")
+        assert {"Revenue", "A", "B", "7", "13"}.issubset({node.text for node in values})
+        assert any(name.startswith("ppt/embeddings/") and name.endswith(".xlsx")
+                   for name in archive.namelist())
 
 
 def test_expressive_export_keeps_text_native_and_resolves_missing_font(tmp_path: Path) -> None:

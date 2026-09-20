@@ -1,5 +1,14 @@
 # Controlled HTML PPTX Architecture
 
+## Independent design role and seed-free documents
+
+`design_plan.js prepare` validates the outline and writes a designer-only input/catalog. The main agent receives paths and reuse status. An isolated role follows `references/design-role.md` and returns only visual choices. `design_plan.js accept` imports its completed Session Log response and generates metadata, page numbers and content bindings into `design_plan.json`. The brief contains compact indices with small linked details; no full catalog read is required. `inspect_deck_contract.js --design-plan` validates/scaffolds without silent aesthetic fallback; ordinary patches cannot overwrite visual enums. Facts, near-final copy, media acquisition and delivery remain main-agent responsibilities.
+
+Base theme IDs or `theme-id@variant-id` select complete presets using existing resources. New `design.version=2` stores family/variant directly with no seed. Version-1 reads preserve a valid saved variant, falling back to legacy seed resolution only when needed. Pre-design documents retain their historical default appearance. Page-local variants/composition and all HTML editor controls remain available.
+
+Matching input/catalog fingerprints allow plan reuse. Human HTML edits supersede the proposal and invalidate automatic reuse; saving never rolls them back. Plan-owned decks do not require another routine model reviewer and explicitly record that post-content model review was not performed. Program QA remains active. Unsupported model image inspection is non-blocking. Actual user constraints remain hard; outline visual hints do not override the designer or reset the retry budget. Source checks do not establish packaged OfficeV3 behavior; build/install/restart/live-task verification remain separate.
+
+
 The controlled PPTX route compiles a structured `DeckDocument` into a
 self-contained, editable HTML deck. The default artifact is `index.html`;
 `deck.json` remains the reproducible generation model, and editable PPTX is an
@@ -17,11 +26,14 @@ and supplies the four layers used by the compiler:
 
 ```mermaid
 flowchart TD
-    O["User request / outline.json"] --> D["deck.json<br/>generation source of truth"]
+    O["User request / outline.json"] --> PREP["Validate outline / prepare design input"]
+    PREP --> ROLE["Independent design role"]
+    ROLE --> PLAN["Validated design_plan.json"]
+    PLAN --> D["deck.json<br/>generation source of truth"]
     D --> V["validateAndNormalizeDeck"]
 
     D --> T["theme_id"]
-    D --> G["design.seed / family / variant"]
+    D --> G["design.family / variant"]
     D --> S["slides[]"]
     S --> L["layout_id"]
     S --> P["props / background"]
@@ -122,6 +134,8 @@ biennale-yellow    -> editorial-spread
 retro-windows      -> retro-interface
 ```
 
+The following describes internal capabilities and legacy CLI compatibility. Normal authoring selects a complete theme preset through the isolated role; the main agent does not select a direction, family or whole-deck variant.
+
 The rules are:
 
 - the default family preserves existing output when no explicit choice exists;
@@ -135,12 +149,12 @@ The rules are:
   export;
 - an unknown family is an error, while a legacy incompatible persisted value
   is normalized to the default;
-- `design.seed` selects a deterministic variant inside the final family.
+- New documents persist `design.variant` directly without a seed; legacy documents retain their saved variant.
 
 The current relationship is therefore:
 
 ```text
-theme -> compatible families -> available directions -> selected family -> seeded variant
+theme -> compatible families -> available directions -> theme preset -> saved family / variant
 ```
 
 This provides more creative range without allowing arbitrary theme x family
@@ -199,14 +213,14 @@ Implementation and validation are deliberately separated:
 | Composition family | HTML wrapper, anchors, CSS, variants | Every registered layout |
 
 The target is additive implementation with cross-product testing, not one
-implementation per combination. With 15 layouts and 11 composition families,
+implementation per combination. With 33 layouts and 11 composition families,
 the system should contain 26 primary implementations and 165 automated
-compatibility checks, not 165 separate renderers.
+compatibility checks, not 363 separate renderers.
 
 ## Key implementation files
 
 - `scripts/deck_spec_core.js`: DeckDocument validation and normalization.
-- `scripts/composition_core.js`: five directions, eleven families, allowlists, and seeded variants.
+- `scripts/composition_core.js`: five directions, eleven families, allowlists, and persisted variants.
 - `layouts/registry.js`: layout contracts and composition HTML wrappers.
 - `scripts/finalize_controlled_deck.js`: one dependency-ordered spec/truth/media validation, HTML compilation, self-check, and runtime-probe pass that stops at the first actionable failure.
 - `scripts/render_deck_html.js`: full HTML assembly.

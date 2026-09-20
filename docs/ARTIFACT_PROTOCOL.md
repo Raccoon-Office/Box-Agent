@@ -11,17 +11,77 @@ The shared system prompt selects task directories: use cwd when it is empty,
 contains few files, or holds only this task's files; create an ordinary task
 subdirectory when cwd contains many unrelated files. Multiple related outputs
 alone do not require a new directory. Honor an explicit user destination.
-This is file organization, not workspace state. Artifact discovery scans the
-original cwd and also consumes explicit paths returned by tools. Box-Agent sends one
+This is file organization, not workspace state. Artifact discovery consumes
+paths returned by the current tool. Box-Agent sends one
 `tool_call_update` per artifact, with `rawOutput.type == "artifact"` as the
 discriminator. Markdown links inside `agent_message_chunk` text are decoration
 only—do not parse them as the source of truth for files.
 
-Changed-file discovery requires complete snapshots both before and after tool
-execution. If either scan exceeds its file/time limit or encounters a filesystem
-access error, Box-Agent skips that diff instead of treating the failed scan as an
-empty directory. Explicit file references and structured tool outputs remain
-available even when diff-based discovery is skipped.
+Workspace changes alone never establish task ownership: concurrent tasks may
+share the same cwd. A publication sidecar describes a file's delivery placement,
+not which task produced it. Changed-file discovery requires both complete
+pre/post snapshots and an exact absolute or workspace-relative path in the
+current tool result. A directory or a nested file's basename is insufficient.
+Parallel results are attributed to their own tool call, never to the first call
+in the batch. Files only changed by another task are not emitted or registered.
+
+Structured artifact outputs and bracketed file references remain available
+without snapshots. Scripts that do not return output paths must explicitly
+publish their deliverables with `publish_artifact`; silent workspace writes do
+not become task artifacts. This changes discovery only, not cwd or directory
+allocation. It does not repair already misattributed historical task records.
+
+### Intermediate files produced by scripts
+
+Producers can keep an output available on disk without automatically publishing
+it to the host. Before writing `slide-01.png`, write the adjacent hidden sidecar
+`.slide-01.png.artifact.json` containing `{"type":"intermediate_asset"}`.
+The marker applies to that exact file, including later revisions. Both output-text
+reference detection and workspace-diff detection honor it; neither guesses from
+directory names or extensions. Missing, malformed, or oversized (>4 KiB) metadata
+does not suppress publication. Sidecars themselves are excluded from publication.
+
+`generate_image` persists this metadata before returning, including `sha256` and
+`size_bytes`. Discovery enriches script-produced markers with these fields while
+the original exists. Within the same workspace, an unmarked byte-identical file
+inherits intermediate status after rename or copy, and receives its own sidecar.
+The old sidecar is retained as file provenance even when its image was moved.
+This uses an index rebuilt per discovery call, not a process-global cache or
+separate session-state database, and works after runtime restart. Content hashing
+is bounded to 64 MiB per file and uses the existing workspace scan limits.
+Changed-content derivatives are not inferred from hashes; their producer must
+mark them explicitly. Independent image delivery remains supported.
+
+The bundled HTML/PPTX exporter, PPTX QA renderers (Poppler, pdf.js, and Quick Look),
+and SN renderers mark single-page screenshots and SN partial/focus review sheets
+this way, including partial images left by failed rendering. They leave the
+whole-deck overview and final HTML/PPTX unmarked. Tools can still read marked images for QA. If the user
+explicitly requests a screenshot as a deliverable, set its sidecar to
+`{"type":"artifact"}` and reference the file in tool output, or return a structured
+`type: "artifact"` result. Markers do not retract previously published messages.
+
+## Producer-declared delivery scopes
+
+A workflow can create `.artifact-delivery.json` in its work directory with
+`{"schema_version":1,"default":"intermediate"}`. This declares a directory
+boundary, not a filename heuristic or a session-global mode. Both structured
+tool results and automatic file discovery treat files within that scope as
+working files until the producer writes a per-file sidecar with `type: artifact`.
+These explicit registrations form the delivery list. Directory discovery stops
+at the session workspace boundary; other workspaces are unaffected.
+
+Fast PPT preparation and SN preparation declare their own directories. Completed
+HTML/PPTX builders register their output after success. Standard's `build` also
+registers the whole-deck overview; `asset-contact` never registers review sheets.
+Fast `make_contact_sheet.js --publish-artifact` registers a requested final overview.
+For explicit extra deliveries use `artifact_delivery.js publish FILE...` (Fast),
+or `deck.py publish ROOT --path FILE` (SN, repeat `--path` for multiple files).
+
+Within a scope, `generate_image` defaults to intermediate when `publish_artifact`
+is omitted. Explicit `true` registers a requested standalone image; outside a
+scope the default remains standalone publication. Already published chat messages
+are not removed. Workflows that bypass preparation must declare their scope before
+creating assets. Changed-content derivatives within the scope remain intermediate.
 
 ## Wire format
 
@@ -208,3 +268,30 @@ The schema is versioned by Box-Agent's PyPI release. Treat additive fields
 (new `kind` values, new optional keys) as backwards-compatible; treat
 renames or removals as breaking, in which case Box-Agent ships a major bump
 and this document is updated in the same commit.
+
+## Explicit publication tool
+
+`publish_artifact(path)` promotes an existing workspace file by writing its
+`type: artifact` sidecar and returning a structured artifact result. The shared
+engine emits the same `ArtifactEvent` consumed by CLI and ACP. Files previously
+marked intermediate can be promoted without changing their bytes. Missing or
+outside-workspace paths (including symlinks) are rejected; sidecar write failures
+return a failed tool result.
+
+Already published files need no extra call: presentation builders and
+`generate_image(publish_artifact=True)` retain their publication behavior.
+There is no end-of-turn manifest overriding these outputs. Artifact envelopes
+may also include an optional producer-supplied `description`.
+
+### Delivery placement
+
+Every normalized artifact event carries `placement`: `primary` when the producer
+explicitly registered the file with a `type: artifact` sidecar (including
+`publish_artifact` and final builder outputs), otherwise `supporting`. Merely
+writing or discovering a file does not declare it a final deliverable. CLI and
+ACP share this classification; ACP forwards it unchanged.
+
+Hosts collect all primary paths for delivery, keep the latest revision per path,
+and choose a default preview separately. Final-answer mentions and filenames
+must not override an explicit placement. No turn-end delivery manifest is
+required, and this change does not migrate historical tasks.

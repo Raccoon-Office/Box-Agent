@@ -1,5 +1,14 @@
 # 受控 HTML PPT 开发与扩展手册
 
+## 独立设计角色与无 seed 文档
+
+普通制作入口为 `design_plan.js prepare`：校验大纲并输出简短设计摘要与索引，详情按需读取，主模型只接收路径与复用状态。独立角色按 `references/design-role.md` 只返回主题、逐页布局和必要视觉选项；程序通过 `design_plan.js accept` 从子代理 Session Log 导入结果，生成版本、哈希、页码和固定内容映射，再写入 `design_plan.json`。程序校验后通过 `inspect_deck_contract.js --design-plan` 生成骨架；普通内容补丁不能覆盖视觉枚举字段。事实、近成稿文字和素材获取仍归主模型。
+
+主题预设使用基础主题 ID 或 `主题ID@变体ID`，绑定已有兼容构图家族及命名变体。新 `design.version=2` 直接保存 family/variant，不含 seed；旧 version=1 文档读取时保留合法的已存变体，必要时才使用旧 seed 解析。旧无 design 文档保留历史默认外观。单页 `props.variant`、composition 和全部 HTML 调整控件继续存在。
+
+设计输入与目录指纹相同才复用；用户在 HTML 中主动编辑会使旧 AI 方案失效，保存不会回滚用户修改。新流程不要求第二次常规模型审美复核，记录“未进行事后模型复核”，并继续运行程序 QA。用户原话的硬约束与大纲视觉建议分开处理，修改建议不重置设计预算。主模型不能手写方案替代子代理结果。图片模型无法识图只记录未验证，不阻断后续制作。只有源码与回归测试完成不等于 OfficeV3 已更新；仍需独立打包、安装、重启和真实任务验证。
+
+
 本文面向维护 `box_agent/skills/document-skills/pptx/` 的开发者。它说明怎样在不破坏
 “可编辑、可验证、可导出”契约的前提下扩展受控 HTML PPT。产品和数据模型的全景说明见
 [受控 HTML PPT 架构](PPTX_CONTROLLED_HTML_ARCHITECTURE_CN.md)；运行中的 Agent 指令仍以
@@ -11,7 +20,10 @@
 
 ```mermaid
 flowchart LR
-    A["outline.json\n内容和页面意图"] --> B["inspect_deck_contract\n一次性脚手架"]
+    A["outline.json\n内容和页面意图"] --> PREP["design_plan.js prepare"]
+    PREP --> ROLE["独立设计角色"]
+    ROLE --> PLAN["design_plan.json"]
+    PLAN --> B["inspect_deck_contract\n一次性脚手架"]
     B --> C["deck.json\n结构化、可恢复的源模型"]
     C --> D["apply_deck_patch\n受控内容更新"]
     D --> E["finalize_controlled_deck\n按顺序验证并编译"]
@@ -64,6 +76,24 @@ flowchart LR
 
 ## 3. 三类扩展的标准做法
 
+新设计使用统一配色契约：用户明确指定的颜色按角色锁定，设计角色必须输出
+background/text/primary/accent/secondary 五个明确色值及 accent_usage；heading 可选。
+没有用户颜色时也必须给出完整色值，不能只返回主题名。程序保留每个角色的来源，
+生成 `design_contract.palette.version=2` 和固定 tokens，供初次渲染、图表及 HTML 编辑重绘共同使用。
+用户只给部分颜色时补齐其他角色，默认仅作点缀；锁定的前景/背景对比度冲突应报错，不静默换色。
+页面色值、主题 CSS 中的固定颜色及运行时混色须服从固定色板；图片像素单独处理。
+浏览器探针检查实际组件（含伪元素、渐变与阴影）的色值，契约外颜色会阻止 finalizer 报告成功。
+旧 HTML 与旧 deck 保持可读；已有设计输入需要重新 prepare 才能采用新契约，不能覆盖用户已编辑的 HTML。
+
+五类任务回归要求：默认内容绑定只能引用该版式实际存在的字段；双栏对比允许没有附加要点，
+不能为了满足最小条数重复正文。用户配色同时覆盖组件色板与图表系列，数值类目注明不同单位时
+使用独立坐标。背景 wash 的文字对比与图形在整页上的有效字号由运行时探针检查；没有视觉模型
+也继续交付并保留告警。
+
+内置 Skill 是运行时代码，不是制作任务的可写产物。文件工具和权限引擎拒绝写入内置 Skill，
+包括通过符号链接写入；Bash 另行检查直接覆盖命令与常见内联脚本写法。命令检查不是任意进程的
+操作系统沙箱。开发者在源码仓库修复后再测试、打包，制作模型不得修改校验器绕过错误。
+
 ### 3.1 新增主题
 
 主题文件是可执行的视觉 token 和选择元数据。复制最接近的 `themes/*.json`，不要只改颜色。
@@ -76,7 +106,7 @@ flowchart LR
 5. 重建 manifest，运行主题选择与主题画廊回归。
 
 主题不是布局的 1:1 副本。一个主题可以允许多个兼容构图家族；一个 deck 在 scaffold 后只
-持久化其中一个 `design.family`，再由 `design.seed` 决定 family 内 variant。
+主题预设绑定 `design.family` 与 `design.variant`，新文档直接保存选择，不使用 seed。
 
 ### 3.2 新增布局
 

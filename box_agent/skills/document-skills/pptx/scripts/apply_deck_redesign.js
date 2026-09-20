@@ -96,10 +96,10 @@ function applyTheme(deck, themeId, changes) {
 function applyDesign(deck, designPatch, changes, resetFamily = false) {
   if (designPatch === undefined) return;
   if (!isPlainObject(designPatch)) throw new Error("design redesign must be an object");
-  const unknown = Object.keys(designPatch).filter(key => !["family", "seed"].includes(key));
+  const unknown = Object.keys(designPatch).filter(key => !["family", "variant"].includes(key));
   if (unknown.length) {
     throw new Error(
-      `Unknown design redesign field(s): ${unknown.join(", ")}; use family and/or seed`
+      `Unknown design redesign field(s): ${unknown.join(", ")}; use family and/or variant`
     );
   }
   const theme = getTheme(deck.theme_id);
@@ -107,8 +107,10 @@ function applyDesign(deck, designPatch, changes, resetFamily = false) {
   const family = designPatch.family
     || (!resetFamily && deck.design && deck.design.family)
     || null;
-  const seed = designPatch.seed || (deck.design && deck.design.seed) || null;
-  const nextDesign = createDeckDesign(theme, seed, family);
+  const variant = designPatch.variant
+    || (!resetFamily && (!designPatch.family || designPatch.family === deck.design?.family)
+      && deck.design?.variant) || null;
+  const nextDesign = createDeckDesign(theme, variant, family);
   if (JSON.stringify(nextDesign) !== JSON.stringify(deck.design || null)) {
     changes.push(
       `design: ${deck.design && deck.design.family || "default"} -> ${nextDesign.family} / ` +
@@ -293,13 +295,8 @@ function updateImageManifestDesign(deckPath, deck) {
   writeJsonAtomic(manifestPath, manifest);
 }
 
-function main() {
-  const argv = process.argv.slice(2);
-  if (argv[0] === "--help" || argv[0] === "-h") usage(0);
-  if (argv.length !== 2) usage();
-
-  const deckPath = resolveArtifactPath(argv[0]);
-  const { resolved: redesignPath, value: redesign } = readRedesign(argv[1]);
+function redesignDeck(source, redesign, deckPath) {
+  const deck = clone(source);
   const unknownTopLevel = Object.keys(redesign)
     .filter(key => ![
       "theme_id",
@@ -311,7 +308,7 @@ function main() {
   if (unknownTopLevel.length) {
     throw new Error(`Unknown deck redesign field(s): ${unknownTopLevel.join(", ")}`);
   }
-  const deck = readJson(deckPath);
+
   const changes = [];
   backfillBoundOutlineIntent(deck, deckPath, changes);
   const themeChanged = applyTheme(deck, redesign.theme_id, changes);
@@ -337,6 +334,23 @@ function main() {
     );
   }
 
+  return { deck: validation.normalized, changes, redesignedSlides };
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv[0] === "--help" || argv[0] === "-h") usage(0);
+  if (argv.length !== 2) usage();
+
+  const deckPath = resolveArtifactPath(argv[0]);
+  const { resolved: redesignPath, value: redesign } = readRedesign(argv[1]);
+  const source = readJson(deckPath);
+  if (source.design_plan) {
+    throw new Error("This deck is owned by an independent design plan; use design_plan.js apply for a validated revision");
+  }
+  const result = redesignDeck(source, redesign, deckPath);
+  const validation = { normalized: result.deck };
+  const { changes, redesignedSlides } = result;
   writeJsonAtomic(deckPath, validation.normalized);
   updateContractReport(deckPath, validation.normalized, redesignPath, redesignedSlides);
   updateImageManifestDesign(deckPath, validation.normalized);
@@ -360,3 +374,5 @@ if (require.main === module) {
     process.exit(1);
   }
 }
+
+module.exports = { redesignDeck, updateContractReport, updateImageManifestDesign };

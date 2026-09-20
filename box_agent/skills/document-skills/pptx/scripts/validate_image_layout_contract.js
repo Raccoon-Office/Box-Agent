@@ -4,7 +4,7 @@ const Module = require("module");
 const os = require("os");
 const path = require("path");
 const { pathToFileURL } = require("url");
-const { chromiumLaunchOptions } = require("./playwright_host");
+const { chromiumLaunchOptions, loadPlaywright } = require("./playwright_host");
 const { resolveArtifactPath } = require("./deck_spec_core.js");
 
 function officeRaccoonPrefix() {
@@ -58,7 +58,7 @@ function parseArgs(argv) {
 
 function requireModule(name) {
   try {
-    return require(name);
+    return name === "playwright" ? loadPlaywright() : require(name);
   } catch (error) {
     if (error && error.code === "MODULE_NOT_FOUND") {
       console.error(`Missing dependency: ${name}`);

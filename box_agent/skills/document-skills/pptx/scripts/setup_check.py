@@ -170,7 +170,7 @@ def playwright_registry_executable() -> tuple[Path | None, bool]:
                 "process.env.NODE_PATH = "
                 + repr(merged_node_path)
                 + "; require('module').Module._initPaths(); "
-                "const {chromium}=require('playwright'); "
+                "const {chromium}=require(process.env.BOX_AGENT_PLAYWRIGHT_MODULE_PATH || 'playwright'); "
                 "process.stdout.write(chromium.executablePath());"
             ),
         ],

@@ -25,6 +25,11 @@ Search requirements:
   retry a near-equivalent entity/fact query just because a `site:` or authority-
   ranked variant returned no results; use an exact known first-party URL or mark
   the gap unresolved.
+- Count anti-bot, HTTP 403/429, CAPTCHA/challenge, permission, timeout, and
+  empty-body failures by evidence target. After one materially different
+  recovery attempt also fails, stop that target and report the attempted
+  methods, failure signals, usable evidence, and unresolved gap to the main
+  agent; do not keep issuing variants of the same search.
 
 Output path: [output_dir]/research/[topic]_wide[NN].md
 Output format:
@@ -69,6 +74,9 @@ Source rules:
   unresolved user/source conflicts `conflicting` or `unverified`.
 - For `first_party`, the page hostname must match a declared
   `official_domains` entry for that entity.
+- For one evidence target, stop after two consecutive blocked-source failures.
+  Record the attempted methods and failure signals in `unverified_reason`, and
+  surface the blocked-target note to the main agent so it can notify the user.
 
 Output path: [output_dir]/research/[topic]_dim[NN].md
 Output format:

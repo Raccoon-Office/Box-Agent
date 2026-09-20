@@ -18,6 +18,7 @@ from .composition import (
 )
 from .env_context import EnvContext, build_env_context_prompt
 from .experts import ExpertSessionContext
+from .execution_profile import FAST_OPTIONAL_SKILLS
 from .tools.permissions import CapabilityPolicy
 from .tools.runtime import (
     SkillRuntimeContext, build_skill_runtime_context, build_skill_runtime_prompt,
@@ -75,6 +76,7 @@ async def prepare_model(resources: SessionResources) -> None:
                 retryable_exceptions=(Exception,),
             ) if retry.enabled else None,
             max_output_tokens=llm.max_output_tokens, auth_file=llm.auth_file,
+            max_request_body_bytes=llm.max_request_body_bytes,
             timeout=llm.timeout,
             reasoning_effort_when_disabled=llm.reasoning_effort_when_disabled,
         )
@@ -205,7 +207,6 @@ async def prepare_tools(resources: SessionResources) -> None:
     if resources.skill_loader is not None:
         from .tools.skill_catalog_tool import ListSkillsTool
         from .tools.skill_tool import GetSkillTool
-        from .execution_profile import FAST_OPTIONAL_SKILLS
 
         resources.tools = [
             (ListSkillsTool if isinstance(tool, ListSkillsTool) else GetSkillTool)(
@@ -382,6 +383,11 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
             session_skill_loader,
             include_disabled=False,
             skill_filter=resources.context.host.skill_catalog_filter,
+            blocked_skill_names=(
+                frozenset(getattr(agent.tools.get("get_skill"), "blocked_skill_names", ()))
+                | (FAST_OPTIONAL_SKILLS if resources.state.get("execution_profile") == "fast" else frozenset())
+            ),
+            explicitly_allowed_skill_names=resources.state.setdefault("explicitly_allowed_skill_names", set()),
         )
         selector.bind(agent.messages[0].content)
         if expert_context:

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "warm-stone-navy",
+    "name": "暖石米色 · 深海军蓝",
+    "mood": ["高级感", "克制", "温暖", "商务", "生活方式"],
+    "background": "#E3E3DB",
+    "surface": "#F2E2C6",
+    "text": "#2B303E",
+    "primary": "#2B303E",
+    "accent": "#B86B4B",
+    "secondary": "#8C9A8E",
+    "accent_usage": "sparse"
+  },
+  {
+    "id": "ink-ivory-copper",
+    "name": "墨黑象牙 · 铜色点缀",
+    "mood": ["高级感", "奢华", "产品发布", "精品"],
+    "background": "#F4F0E8",
+    "surface": "#E7E0D4",
+    "text": "#17191C",
+    "primary": "#24272B",
+    "accent": "#B2764A",
+    "secondary": "#8A8F98",
+    "accent_usage": "sparse"
+  },
+  {
+    "id": "charcoal-sage-brass",
+    "name": "炭灰鼠尾草 · 黄铜",
+    "mood": ["高级感", "自然", "科技硬件", "沉稳"],
+    "background": "#20252A",
+    "surface": "#2E3535",
+    "text": "#F2EFE7",
+    "primary": "#D5C6A1",
+    "accent": "#A6B89A",
+    "secondary": "#8D969B",
+    "accent_usage": "sparse"
+  },
+  {
+    "id": "paper-ink-terracotta",
+    "name": "纸张墨色 · 陶土红",
+    "mood": ["高级感", "编辑", "文化", "餐饮", "品牌"],
+    "background": "#F1EDE3",
+    "surface": "#E5DED0",
+    "text": "#262421",
+    "primary": "#6B3E32",
+    "accent": "#C87552",
+    "secondary": "#7D887D",
+    "accent_usage": "balanced"
+  },
+  {
+    "id": "cool-mist-cobalt",
+    "name": "冷雾灰 · 钴蓝",
+    "mood": ["高级感", "现代", "科技", "开发者平台"],
+    "background": "#E7EBEE",
+    "surface": "#F5F7F8",
+    "text": "#1F2937",
+    "primary": "#264A73",
+    "accent": "#2E9B9B",
+    "secondary": "#718096",
+    "accent_usage": "sparse"
+  }
+]

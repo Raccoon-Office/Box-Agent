@@ -87,6 +87,10 @@ Conflict fields:
   `unverified`).
 - A conflicting row must include `conflict_note`.
 - An unverified row must include `unverified_reason`.
+- When retrieval stops because of anti-bot, HTTP 403/429, CAPTCHA/challenge,
+  permission, timeout, or unreadable-content failures, `unverified_reason` must
+  name the failure class, the attempt count, and the attempted source or reading
+  methods. Do not include credentials, cookies, tokens, or other secrets.
 
 Entity/source rules:
 

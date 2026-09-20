@@ -9,7 +9,7 @@ import re
 from typing import Any, Callable, Final
 
 from ..llm.capabilities import image_input_support
-from ..schema import LLMResponse, Message
+from ..schema import Message
 from ..session_log import SessionLog
 from ..tools.base import Tool, ToolResult
 from .context_types import CompactionOutcome
@@ -29,6 +29,8 @@ _RECENT_MESSAGE_CHAR_LIMIT = 20000
 _RUNTIME_STATE_CHAR_LIMIT = 12_000
 # Request serialization/envelope headroom, independent of model output tokens.
 REQUEST_INPUT_HEADROOM_TOKENS = 1_024
+# Shared per-request ceiling for selected / paged Skill reference bodies (~25k tokens).
+SKILL_REFERENCE_BUDGET_CHARS = 100_000
 _SUMMARY_MARKER = (
     "This session is being continued from a previous conversation that ran "
     "out of context. The summary below covers the earlier portion of the "
@@ -153,18 +155,26 @@ async def _create_summary(
 
     if not messages:
         return ""
-    response: LLMResponse = await llm.generate(
-        messages=[*messages, Message(role="user", content=_SUMMARY_REQUEST)],
+    # Stream the summary so the provider can make progress while the
+    # potentially large history is being summarized.  We still collect the
+    # complete text before validating the required summary envelope: a partial
+    # summary must never be committed as compacted history.
+    summary_parts: list[str] = []
+    async for event in llm.generate_stream(
+        messages=[*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)],
         tools=None,
         thinking_enabled=False,
         session_id=session_id,
         turn_id=turn_id,
         title=title,
         call_kind="context_summary",
-    )
+    ):
+        if event.type == "text" and event.delta:
+            summary_parts.append(event.delta)
+    response_content = "".join(summary_parts)
     match = re.fullmatch(
         r"\s*<summary>\s*(.*?)\s*</summary>\s*",
-        response.content,
+        response_content,
         flags=re.DOTALL,
     )
     if match is None:
@@ -187,7 +197,8 @@ def _deterministic_history_fallback(messages: list[Message]) -> str:
         (
             message
             for message in reversed(messages)
-            if message.role == "user" and not _is_compaction_metadata(message)
+            if message.role == "user" and message.source == "user"
+            and not _is_compaction_metadata(message)
         ),
         None,
     )
@@ -501,22 +512,25 @@ def _estimate_context_from_latest_response(
             usage.context_tokens - messages[index].request_only_input_tokens,
         )
         usage_estimate = durable_usage_tokens + added_tokens
-        # Deferred MCP activation can change the next request's tool schemas
-        # after the provider usage boundary. Compare with the complete current
-        # request estimate so newly exposed schemas are never omitted.
-        return max(usage_estimate, _fallback_context_estimate(messages, tools)), "usage"
+        # The provider usage is the authoritative count for the complete
+        # request that was sent (including its tool schemas). Only content
+        # appended after that request needs a local incremental estimate.
+        # Do not compare against a full fallback estimate here: it can count
+        # the same history/tool schemas again and trigger compaction early.
+        return usage_estimate, "usage"
 
     # Backward-compatible low-level callers may still provide a usage total
-    # without response metadata attached to a Message. There is no safe delta
-    # boundary in that case, so compare it with the full char/4 estimate.
+    # without response metadata attached to a Message. Treat that supplied
+    # provider count as authoritative; there is no incremental boundary to
+    # add in this form. Fall back only when no provider usage exists at all.
     provided_usage = (
         api_prompt_tokens
         if api_prompt_tokens is not None and api_prompt_tokens > 0
         else api_total_tokens
     )
-    fallback = _fallback_context_estimate(messages, tools)
     if provided_usage > 0:
-        return max(provided_usage, fallback), "usage"
+        return provided_usage, "usage"
+    fallback = _fallback_context_estimate(messages, tools)
     return fallback, "fallback"
 
 
@@ -610,6 +624,7 @@ async def _restore_runtime_state(
         return None
     return Message(
         role="user",
+        source="runtime",
         content=f"{_RUNTIME_STATE_MARKER}\n\n" + "\n\n".join(sections),
     )
 
@@ -660,6 +675,7 @@ async def _maybe_summarize(
         for index, message in enumerate(messages)
         if index > 0
         and message.role == "user"
+        and message.source == "user"
         and not _is_compaction_metadata(message)
     ]
     if not user_indices or not messages or messages[0].role != "system":
@@ -677,6 +693,17 @@ async def _maybe_summarize(
         retained_indices.add(latest_user_index)
         retained_messages = [messages[index] for index in sorted(retained_indices)]
     retained_messages = _bound_retained_messages(retained_messages)
+    # Provider usage describes the pre-compaction request.  Retaining it would
+    # make the next prepare pass anchor on the old, uncompressed context and
+    # reject the freshly compacted request.  Keep the original objects (and
+    # their usage) in the audit snapshot, but clear the metadata on the new
+    # durable surface so the next request is measured from this surface.
+    retained_messages = [
+        message.model_copy(update={"usage": None, "request_only_input_tokens": 0})
+        if message.usage is not None or message.request_only_input_tokens
+        else message
+        for message in retained_messages
+    ]
     compacted_messages = [
         message
         for index, message in enumerate(messages)
@@ -711,7 +738,7 @@ async def _maybe_summarize(
             raise RuntimeError("LLM summary disabled")
         if (summary_input_token_limit is not None
                 and _fallback_context_estimate(
-                    [*messages, Message(role="user", content=_SUMMARY_REQUEST)], None,
+                    [*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)], None,
                 ) > summary_input_token_limit):
             raise RuntimeError("Summary request exceeds the safe input budget")
         summary_calls = 1
@@ -747,6 +774,7 @@ async def _maybe_summarize(
             messages[0],
             Message(
                 role="user",
+                source="runtime",
                 content=(f"{_SUMMARY_MESSAGE_PREFIX}{summary_text}{_SUMMARY_MESSAGE_SUFFIX}"),
             ),
             *retained_messages,
@@ -756,7 +784,10 @@ async def _maybe_summarize(
         return rebuilt
 
     new_messages = build_compacted_messages(bounded_summary)
-    estimated_after = _fallback_context_estimate(new_messages, budget_tools)
+    # Use the same request estimator as Context.prepare_request.  With the
+    # pre-compaction usage metadata cleared above this deliberately falls back
+    # to measuring the rebuilt messages and offered tool schemas.
+    estimated_after = request_input_tokens(new_messages, budget_tools)
     for summary_limit in (8_000, 4_000, 2_000):
         if estimated_after <= token_limit or len(bounded_summary) <= summary_limit:
             continue
@@ -766,7 +797,7 @@ async def _maybe_summarize(
             label="summary",
         )
         new_messages = build_compacted_messages(bounded_summary)
-        estimated_after = _fallback_context_estimate(new_messages, budget_tools)
+        estimated_after = request_input_tokens(new_messages, budget_tools)
     if estimated_after > token_limit:
         mode = "blocked"
     _log.info(
@@ -834,4 +865,4 @@ def skill_reference_budget_chars(messages: list[Message], tools: Any, token_limi
     """
     estimated = request_input_tokens(messages, tools)
     spare_tokens = max(0, token_limit - estimated - REQUEST_INPUT_HEADROOM_TOKENS)
-    return min(50_000, spare_tokens * 4)
+    return min(SKILL_REFERENCE_BUDGET_CHARS, spare_tokens * 4)

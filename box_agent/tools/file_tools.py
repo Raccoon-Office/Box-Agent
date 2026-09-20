@@ -22,7 +22,7 @@ from .base import EventEmittingTool, Tool, ToolResult
 from .argument_limits import MAX_GENERATED_BODY_CHARS
 from .file.path_candidates import home_relative_path_candidates
 from .pptx_safety import detect_pptx_self_check_bypass
-from .safety import backup_file, validate_path_in_workspace
+from .safety import backup_file, builtin_skill_write_error, validate_path_in_workspace
 
 if TYPE_CHECKING:
     from .permissions import PermissionEngine
@@ -773,6 +773,11 @@ class WriteTool(Tool):
                         "small file; use false until the last chunk of a large file."
                     ),
                 },
+                "temporary": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "On the final chunk, explicitly mark a new disposable file for later approval-free exact rm. Does not grant cleanup rights over existing files or published deliverables.",
+                },
             },
             "required": ["path", "content"],
             "additionalProperties": False,
@@ -786,6 +791,8 @@ class WriteTool(Tool):
         ).resolve(strict=False)
 
     def _permission_error(self, target: Path) -> ToolResult | None:
+        if error := builtin_skill_write_error(target):
+            return ToolResult(success=False, error=error)
         if self._perm:
             decision = self._perm.check(
                 capability="filesystem.write",
@@ -1037,7 +1044,7 @@ class WriteTool(Tool):
         state.size_bytes += len(data)
         return None
 
-    def _commit(self, state: _PendingTextWrite) -> ToolResult:
+    def _commit(self, state: _PendingTextWrite, *, temporary: bool = False) -> ToolResult:
         if error := self._permission_error(state.target):
             return self._active_result(state, error)
         try:
@@ -1066,7 +1073,17 @@ class WriteTool(Tool):
             )
         digest = self._sha256_file(state.temporary)
         backup_path = backup_file(state.target)
-        os.replace(state.temporary, state.target)
+        created = False
+        try:
+            # Exclusive creation distinguishes our new file from a concurrent
+            # task's existing target. Unsupported hard links fall back to the
+            # normal atomic replacement without granting cleanup ownership.
+            os.link(state.temporary, state.target)
+        except OSError:
+            os.replace(state.temporary, state.target)
+        else:
+            state.temporary.unlink()
+            created = True
         self._pending.pop(state.target, None)
         result = ToolResult(
             success=True,
@@ -1078,6 +1095,8 @@ class WriteTool(Tool):
                 "type": "artifact",
                 "path": str(state.target),
                 "transaction_state": "committed",
+                "created": created,
+                "temporary": temporary,
                 "size_bytes": state.size_bytes,
                 "sha256": digest,
                 "chunks": state.next_index,
@@ -1152,6 +1171,7 @@ class WriteTool(Tool):
         content: str,
         chunk_index: int = 0,
         final: bool = True,
+        temporary: bool = False,
     ) -> ToolResult:
         """Write one complete file or advance a path-keyed chunk transaction."""
         state: _PendingTextWrite | None = None
@@ -1209,7 +1229,7 @@ class WriteTool(Tool):
                     )
                 return append_result
             if final:
-                return self._commit(state)
+                return self._commit(state, temporary=temporary)
             return ToolResult(
                 success=True,
                 content=(
@@ -1326,6 +1346,9 @@ class AppendTool(Tool):
                 workspace_dir=self.workspace_dir,
                 relative_root_dir=self.relative_root_dir,
             )
+
+            if error := builtin_skill_write_error(file_path):
+                return ToolResult(success=False, error=error)
 
             if self._perm:
                 decision = self._perm.check(
@@ -1445,6 +1468,8 @@ class EditTool(Tool):
                     file_path = workspace_candidate
 
             # Path validation
+            if error := builtin_skill_write_error(file_path):
+                return ToolResult(success=False, error=error)
             if self._perm:
                 decision = self._perm.check(
                     capability="filesystem.write",

@@ -351,6 +351,7 @@ async def run_agent_loop(
     session_log: SessionLog | None = None,
     session_turn: int | None = None,
     kernel_services: KernelServices | None = None,
+    run_control: Any | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Delegate one run while honoring monkeypatched core timing defaults."""
     run_arguments = dict(locals())

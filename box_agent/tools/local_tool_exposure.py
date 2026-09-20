@@ -14,6 +14,7 @@ DISCOVERABLE_LOCAL_NAMES = frozenset({
     "mcp_config", "report_execution_result",
     "plan_read", "plan_write", "todo_read", "todo_write", "goal_read", "goal_write",
     "memory_read", "memory_search", "memory_write",
+    "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction",
     "obsidian_create_note", "obsidian_update_note", "obsidian_daily_note",
     "search_skillhub", "install_skillhub_skill",
 })
@@ -23,8 +24,8 @@ DISCOVERABLE_LOCAL_NAMES = frozenset({
 SKILL_TOOL_HINTS: Mapping[str, frozenset[str]] = {
     "browser-use": frozenset({"mcp_config"}),
     "mcp-config": frozenset({"mcp_config"}),
-    "memory-guide": frozenset({"memory_read", "memory_search", "memory_write"}),
-    "pptx": frozenset({"append_file", "query_jsonl", "report_execution_result"}),
+    "memory-guide": frozenset({"memory_read", "memory_search", "memory_write", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction"}),
+    "ppt-fast": frozenset({"append_file", "query_jsonl", "report_execution_result"}),
     "docx": frozenset({"append_file", "report_execution_result"}),
     "pdf": frozenset({"append_file", "report_execution_result"}),
     "xlsx": frozenset({"query_jsonl", "report_execution_result"}),

@@ -266,6 +266,9 @@ class AgentSession:
             raise RuntimeError("agent session is closed")
         if self._active_run_task is not None:
             raise RuntimeError("session already has an active run")
+        if (self._run_handle.is_active
+                and self._run_handle._runner_task is not asyncio.current_task()):
+            raise RuntimeError("session already has an active run")
         self._active_run_task = asyncio.current_task()
         finished = asyncio.get_running_loop().create_future()
         self._active_run_finished = finished
@@ -371,6 +374,8 @@ class AgentSession:
             if self._closed:
                 return
             self._closing = True
+            if self._active_run_task is None and self._run_handle.is_active:
+                await self._run_handle.aclose()
             task = self._active_run_task
             if task is not None:
                 self.request_cancel()

@@ -60,7 +60,7 @@ function themeVariables(theme, designContract = null) {
     const value = chart[index];
     return typeof value === "string" && value.trim() ? cssValue(value) : fallback;
   };
-  const chartForeground = index => readableForeground(
+  const chartForeground = index => palette.chart_text?.[index] || readableForeground(
     chartColor(index, cssValue(palette.background)),
     cssValue(palette.text),
   );
@@ -69,9 +69,9 @@ function themeVariables(theme, designContract = null) {
     `  --deck-bg: ${cssValue(palette.background)};`,
     `  --deck-base-bg: ${cssValue(palette.background)};`,
     `  --deck-poster-bg: ${cssValue(posterBackground)};`,
-    `  --deck-poster-text: ${readableForeground(posterBackground, palette.text)};`,
+    `  --deck-poster-text: ${designContract?.palette?.version === 2 ? palette.text : readableForeground(posterBackground, palette.text)};`,
     `  --deck-focus-text: ${cssValue(palette.primary_text)};`,
-    `  --deck-primary-fill-text: ${readableForeground(palette.primary, palette.inverse)};`,
+    `  --deck-primary-fill-text: ${palette.primary_fill_text || readableForeground(palette.primary, palette.inverse)};`,
     `  --deck-surface: ${cssValue(palette.surface)};`,
     `  --deck-surface-strong: ${cssValue(palette.surface_strong)};`,
     `  --deck-primary: ${cssValue(palette.primary)};`,
@@ -85,9 +85,9 @@ function themeVariables(theme, designContract = null) {
     `  --deck-base-text: ${cssValue(palette.text)};`,
     `  --deck-base-emphasis: ${contrastRatio(palette.primary, palette.background) >= 4.5 ? cssValue(palette.primary) : readableForeground(palette.background, palette.text)};`,
     `  --deck-base-muted: ${cssValue(palette.muted)};`,
-    `  --deck-primary-soft-text: ${readableForeground(palette.primary_soft, palette.text)};`,
-    `  --deck-surface-text: ${readableForeground(palette.surface, palette.text)};`,
-    `  --deck-surface-strong-text: ${readableForeground(palette.surface_strong, palette.text)};`,
+    `  --deck-primary-soft-text: ${palette.primary_soft_text || readableForeground(palette.primary_soft, palette.text)};`,
+    `  --deck-surface-text: ${palette.surface_text || readableForeground(palette.surface, palette.text)};`,
+    `  --deck-surface-strong-text: ${palette.surface_strong_text || readableForeground(palette.surface_strong, palette.text)};`,
     `  --deck-border: ${cssValue(palette.border)};`,
     `  --deck-inverse: ${cssValue(palette.inverse)};`,
     `  --deck-alt-bg: ${themeColor(palette, "alt_background", cssValue(palette.surface_strong))};`,
@@ -132,6 +132,43 @@ function styleOverrideAttributes(designContract) {
       ` data-deck-style-${escapeHtml(key.replace(/_/g, "-"))}="${escapeHtml(value)}"`
     ))
     .join("");
+}
+
+function profileAttributes(profile) {
+  if (!profile || typeof profile !== "object") return "";
+  const id = typeof profile.id === "string" ? profile.id : "custom";
+  const motifs = Array.isArray(profile.motifs)
+    ? profile.motifs.filter(item => typeof item === "string").join(" ") : "";
+  return ` data-deck-profile="${escapeHtml(id)}"${motifs ? ` data-deck-profile-motifs="${escapeHtml(motifs)}"` : ""}`;
+}
+
+function paletteComponentCss(designContract) {
+  if (!designContract?.palette) return "";
+  const scope = 'body[data-deck-theme][data-deck-composition][data-deck-palette="custom"] .slide';
+  const sparse = designContract.palette.accent_usage === "sparse";
+  const surfaces = ["surface", "primary-soft", "surface-strong", "surface"];
+  return [1, 2, 3, 4].map(index => `
+${scope} :is(.content-card, .timeline-step):nth-child(4n + ${index}) {
+  --deck-content-text: var(--deck-${sparse ? `${surfaces[index - 1]}-text` : `chart-text-${index}`});
+  background: var(--deck-${sparse ? surfaces[index - 1] : `chart-${index}`});
+  color: var(--deck-${sparse ? `${surfaces[index - 1]}-text` : `chart-text-${index}`});
+}
+
+${scope} :is(.content-card, .timeline-step):nth-child(4n + ${index}) :is(h3, p, .card-index, .timeline-label, .timeline-number, .timeline-marker) {
+  background: transparent;
+  color: inherit;
+}`).join("\n");
+}
+
+function frozenPaletteCss(contract) {
+  if (contract?.palette?.version !== 2) return "";
+  const p = contract.palette.tokens;
+  const scope = 'body[data-deck-palette-version="2"] #deck-root > .slide';
+  return `${scope} { --deck-content-text: ${p.text}; background-color: ${p.background}; color: ${p.text}; }
+${scope} :is(h1,h2) { color: ${p.heading}; }
+${scope} [data-deck-text-role="body"], ${scope} [data-deck-text-role="lead"] { color: var(--deck-content-text); }
+${scope}.has-background .slide-background::after { background: ${p.background}; opacity: .94; }
+`;
 }
 
 function themeStyleAttributes(theme) {
@@ -316,7 +353,7 @@ function renderDocument(deck, theme) {
     && deck.design_contract.palette.accent_usage
     ? ` data-deck-palette-accent-usage="${escapeHtml(deck.design_contract.palette.accent_usage)}"`
     : "";
-  const styleOverrides = styleOverrideAttributes(deck.design_contract);
+  const styleOverrides = styleOverrideAttributes(deck.design_contract) + profileAttributes(deck.visual_profile);
   return [
     "<!doctype html>",
     '<html lang="zh-CN">',
@@ -326,15 +363,18 @@ function renderDocument(deck, theme) {
     `  <title>${escapeHtml(deck.title)}</title>`,
     '  <meta name="generator" content="Box Agent controlled deck v1" />',
     "  <style>",
-    runtimeCss,
-    compositionCss,
-    fs.readFileSync(path.join(SKILL_ROOT, "runtime", "expressive.css"), "utf8"),
-    fs.readFileSync(path.join(SKILL_ROOT, "runtime", "open-layouts.css"), "utf8"),
-    fs.readFileSync(path.join(SKILL_ROOT, "runtime", "presentation-system.css"), "utf8"),
+    require("./palette_css.js").bindPaletteCss([
+      runtimeCss, compositionCss,
+      fs.readFileSync(path.join(SKILL_ROOT, "runtime", "expressive.css"), "utf8"),
+      fs.readFileSync(path.join(SKILL_ROOT, "runtime", "open-layouts.css"), "utf8"),
+      fs.readFileSync(path.join(SKILL_ROOT, "runtime", "presentation-system.css"), "utf8"),
+    ].join("\n"), theme, deck.design_contract),
     themeVariables(theme, deck.design_contract),
+    paletteComponentCss(deck.design_contract),
+    frozenPaletteCss(deck.design_contract),
     "  </style>",
     "</head>",
-    `<body data-deck-schema-version="1" data-deck-presentation="${presentation.version}" data-deck-voice="${presentation.voice}" data-deck-rhythm="${presentation.rhythm}" data-deck-theme="${escapeHtml(visualDnaId)}" data-deck-theme-id="${escapeHtml(theme.id)}" data-deck-composition="${escapeHtml(design.family)}" data-deck-composition-variant="${escapeHtml(design.variant)}" data-deck-design-seed="${escapeHtml(design.seed)}"${paletteAccentUsage}${styleOverrides}${themeStyleAttributes(theme)}>`,
+    `<body data-deck-schema-version="1" data-deck-presentation="${presentation.version}" data-deck-voice="${presentation.voice}" data-deck-rhythm="${presentation.rhythm}" data-deck-theme="${escapeHtml(visualDnaId)}" data-deck-theme-id="${escapeHtml(theme.id)}" data-deck-composition="${escapeHtml(design.family)}" data-deck-composition-variant="${escapeHtml(design.variant)}"${deck.design_contract?.palette ? ' data-deck-palette="custom"' : ""}${deck.design_contract?.palette?.version === 2 ? ' data-deck-palette-version="2"' : ""}${paletteAccentUsage}${styleOverrides}${themeStyleAttributes(theme)}>`,
     '  <main id="deck-root">',
     slideHtml,
     "  </main>",

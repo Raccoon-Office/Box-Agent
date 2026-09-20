@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "box_agent_version": "0.9.8",
-  "generated_at": "2026-09-11T09:35:45Z",
+  "generated_at": "2026-09-20T08:41:57Z",
   "skills": [
     {
       "name": "browser-use",
@@ -20,7 +20,7 @@
       "path": "document-skills/pdf/SKILL.md"
     },
     {
-      "name": "pptx",
+      "name": "ppt-fast",
       "path": "document-skills/pptx/SKILL.md"
     },
     {
@@ -38,6 +38,34 @@
     {
       "name": "memory-guide",
       "path": "memory-guide/SKILL.md"
+    },
+    {
+      "name": "pptx",
+      "path": "pptx/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-dazzle",
+      "path": "presentation-suite/skills/sn-ppt-dazzle/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-doctor",
+      "path": "presentation-suite/skills/sn-ppt-doctor/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-entry",
+      "path": "presentation-suite/skills/sn-ppt-entry/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-standard",
+      "path": "presentation-suite/skills/sn-ppt-standard/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-story",
+      "path": "presentation-suite/skills/sn-ppt-story/SKILL.md"
+    },
+    {
+      "name": "sn-ppt-tools",
+      "path": "presentation-suite/skills/sn-ppt-tools/SKILL.md"
     },
     {
       "name": "research-synthesis",

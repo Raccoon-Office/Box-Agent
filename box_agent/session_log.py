@@ -70,6 +70,10 @@ class SessionLogWorkspaceMismatch(ValueError):
     """The requested cwd does not own this immutable Session."""
 
 
+class SessionLogReplayError(RuntimeError):
+    """A committed surface could not be reconstructed for live execution."""
+
+
 @dataclass(frozen=True, slots=True)
 class SessionOpenResult:
     """Result of opening or creating one logical Session."""
@@ -531,12 +535,14 @@ class SessionLog:
             raise SessionLogCorrupted("Skill reference is not valid UTF-8") from exc
 
     def store_skill_reference(self, content: str) -> dict[str, str]:
-        """Durably publish an immutable snapshot without appending an event.
+        """Prepare an immutable snapshot, falling back to inline request content.
 
         After this succeeds, callers append the returned reference plus its
         request/range metadata to ``request/context`` and flush that event
         before calling the provider. Neither a trace nor the original Skill
         file is needed to reconstruct that request's reference text.
+        Sidecar I/O or integrity failures return inlineContent for the same request/context
+        commit; they must not poison the canonical session log.
         """
 
         if self._closed:
@@ -546,16 +552,19 @@ class SessionLog:
         encoded = content.encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         ref = {"contentRef": f"skill-references/{digest}.txt", "sha256": digest}
-        path = self._skill_reference_path(ref)
         temporary: Path | None = None
         try:
+            path = self._skill_reference_path(ref)
             path.parent.mkdir(mode=0o700, exist_ok=True)
             if path.exists():
                 # Never overwrite a corrupt snapshot or change an existing
                 # inode. Re-sync a valid file before acknowledging reuse.
                 self.read_skill_reference(ref)
-                with path.open("rb") as handle:
-                    os.fsync(handle.fileno())
+                if os.name != "nt":
+                    # Windows cannot fsync a read-only handle. This immutable
+                    # file was already synced before its original publication.
+                    with path.open("rb") as handle:
+                        os.fsync(handle.fileno())
             else:
                 fd, name = tempfile.mkstemp(prefix=".skill-reference-", dir=path.parent)
                 temporary = Path(name)
@@ -569,8 +578,9 @@ class SessionLog:
                     os.link(temporary, path)
                 except FileExistsError:
                     self.read_skill_reference(ref)
-                    with path.open("rb") as handle:
-                        os.fsync(handle.fileno())
+                    if os.name != "nt":
+                        with path.open("rb") as handle:
+                            os.fsync(handle.fileno())
                 temporary.unlink()
                 temporary = None
             if os.name != "nt":
@@ -582,9 +592,12 @@ class SessionLog:
                         os.fsync(directory_fd)
                     finally:
                         os.close(directory_fd)
-        except OSError as exc:
-            self._failed = True
-            raise SessionLogDurabilityError("Skill reference persistence failed") from exc
+        except (OSError, SessionLogCorrupted):
+            _log.warning(
+                "Skill reference snapshot unavailable; using inline request/context content",
+                exc_info=True,
+            )
+            return {"inlineContent": content, "sha256": digest}
         finally:
             if temporary is not None:
                 try:
@@ -644,6 +657,7 @@ class SessionLog:
             live_payloads[len(persisted_payloads) :],
         ):
             if message.role == "user":
+                payload["source"] = message.source
                 appended.append(
                     self.append(
                         "user/message",
@@ -718,6 +732,7 @@ class SessionLog:
     ) -> dict[str, Any]:
         payload = message.model_dump(mode="json", exclude_none=True)
         if message.role == "user":
+            payload["source"] = message.source
             return self.append(
                 "user/message",
                 payload,

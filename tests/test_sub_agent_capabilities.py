@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from box_agent import skill_dependencies
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.skill_loader import SkillLoader
@@ -97,6 +99,140 @@ def test_files_infer_bounded_batch_strategy_and_read_file() -> None:
     assert parsed.files == ("a.md", "b.md")
     assert parsed.required_tools == ("read_file",)
     assert parsed.budget.to_dict() == {"max_steps": 1, "max_tool_calls": 2}
+
+
+@pytest.mark.parametrize("files", [None, ["input.md"]])
+@pytest.mark.parametrize("skills", [None, ["review"]])
+def test_defaults_include_available_search_and_only_assigned_skill_tools(files, skills) -> None:
+    parsed = _parse(
+        files=files,
+        skills=skills,
+        default_required_tools=(
+            "read_file", "search_files", "query_jsonl", "web_search", "web_extract",
+            "get_skill", "list_skills", "write_file", "bash", "execute_code",
+            "inspect_images", "generate_image", "unknown_mcp",
+        ),
+    )
+
+    assert isinstance(parsed, DelegationSpec)
+    expected = {"read_file", "search_files", "query_jsonl", "web_search", "web_extract"}
+    if skills:
+        expected.update({"get_skill", "list_skills"})
+    assert set(parsed.required_tools) == expected
+    assert parsed.strategy == "general_loop"
+    assert parsed.constraints.read_only is True
+    assert parsed.constraints.network is True
+
+
+@pytest.mark.parametrize(
+    "budget,host_steps",
+    [({"max_steps": 1}, 80), (None, 1), ({"max_steps": 5}, 1)],
+)
+def test_one_step_file_summary_keeps_batch_compatibility(budget, host_steps) -> None:
+    parsed = _parse(
+        files=["a.md", "b.md"],
+        budget=budget,
+        general_max_steps=host_steps,
+        default_required_tools=("read_file", "search_files", "web_search"),
+    )
+
+    assert isinstance(parsed, DelegationSpec)
+    assert parsed.strategy == "batch_files"
+    assert parsed.required_tools == ("read_file",)
+    assert parsed.budget.to_dict() == {"max_steps": 1, "max_tool_calls": 2}
+
+
+@pytest.mark.parametrize("steps", [True, 0, -1, "1"])
+def test_invalid_one_step_budget_is_not_a_batch_shortcut(steps) -> None:
+    parsed = _parse(
+        files=["a.md"],
+        budget={"max_steps": steps},
+        default_required_tools=("read_file", "search_files"),
+        general_max_steps=1,
+    )
+    assert isinstance(parsed, CapabilityFailure)
+    assert "budget.max_steps" in parsed.invalid_fields
+
+
+def test_one_step_file_defaults_keep_scope_and_explicit_tools_authoritative() -> None:
+    common = dict(files=["a.md"], budget={"max_steps": 1},
+                  default_required_tools=("read_file", "write_file", "web_search"))
+    writable = _parse(**common, write_scope=["out.md"])
+    explicit = _parse(**common, required_tools=["web_search"])
+    empty = _parse(**common, required_tools=[])
+    insufficient = _parse(files=["a.md", "b.md"],
+                          budget={"max_steps": 1, "max_tool_calls": 1})
+
+    assert isinstance(writable, DelegationSpec)
+    assert writable.strategy == "general_loop"
+    assert "write_file" in writable.required_tools
+    assert isinstance(explicit, DelegationSpec)
+    assert explicit.required_tools == ("web_search",)
+    assert explicit.strategy == "general_loop"
+    assert isinstance(empty, DelegationSpec)
+    assert empty.required_tools == ()
+    assert isinstance(insufficient, CapabilityFailure)
+    assert "budget.max_tool_calls" in insufficient.invalid_fields
+
+
+@pytest.mark.parametrize("files", [None, ["plan.md"]])
+def test_output_scope_defaults_to_available_file_tools(files) -> None:
+    parsed = _parse(
+        files=files,
+        write_scope=["slides/01.html"],
+        default_required_tools=(
+            "read_file", "search_files", "query_jsonl",
+            "write_file", "edit_file", "append_file", "bash", "web_search",
+        ),
+        budget={"max_steps": 7, "max_tool_calls": 9},
+    )
+
+    assert isinstance(parsed, DelegationSpec)
+    assert parsed.required_tools == (
+        "append_file", "edit_file", "query_jsonl", "read_file", "search_files", "web_search", "write_file",
+    )
+    assert parsed.strategy == "general_loop"
+    assert parsed.constraints.read_only is False
+    assert parsed.constraints.network is True
+    assert parsed.constraints.write_scope == ("slides/01.html",)
+    assert parsed.budget.to_dict() == {"max_steps": 7, "max_tool_calls": 9}
+
+
+def test_output_scope_does_not_invent_unavailable_write_tools() -> None:
+    parsed = _parse(
+        write_scope=["result.md"],
+        default_required_tools=("read_file", "edit_file"),
+    )
+
+    assert isinstance(parsed, DelegationSpec)
+    assert parsed.required_tools == ("edit_file", "read_file")
+
+
+@pytest.mark.parametrize("tools", [[], ["read_file"]])
+def test_explicit_readonly_scope_conflict_identifies_tool_selection(tools) -> None:
+    parsed = _parse(
+        required_tools=tools,
+        write_scope=["out.md"],
+        default_required_tools=("read_file", "write_file"),
+    )
+
+    assert isinstance(parsed, CapabilityFailure)
+    assert parsed.code == "INVALID_DELEGATION_SPEC"
+    correction = parsed.to_dict()["field_corrections"]["write_scope"]
+    assert "required_tools" in correction["message"]
+    assert "write_file" in parsed.to_dict()["minimal_valid_example"]["required_tools"]
+
+
+@pytest.mark.parametrize("scope", [[], [" "], [123]])
+def test_invalid_output_scope_is_rejected_with_default_write_tools(scope) -> None:
+    parsed = _parse(
+        write_scope=scope,
+        default_required_tools=("read_file", "write_file"),
+    )
+
+    assert isinstance(parsed, CapabilityFailure)
+    assert parsed.code == "INVALID_DELEGATION_SPEC"
+    assert any(field.startswith("write_scope") for field in parsed.invalid_fields)
 
 
 def test_explicit_lists_are_flat_normalized_and_can_be_empty() -> None:

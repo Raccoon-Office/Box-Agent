@@ -1,12 +1,20 @@
 ---
 name: html-templates
-description: Use when generating HTML pages, slide decks, posters, or reports that should adopt a specific visual style — whether invoked directly by the user OR called by another skill (e.g. pptx, poster, report skills) that has already decided the structure but needs to pick and apply a visual identity. Matches the brief's mood / industry / density against 32 pre-extracted design "Visual DNA" profiles, then injects the chosen profile's color, typography, and decoration rules as hard constraints into the generation prompt. The caller writes HTML inside their own structural conventions; this skill only governs the look.
+description: Use when choosing or applying a visual style to HTML pages, posters, reports, or a slide deck whose authoring workflow is already established. A visual reference library for color, typography and decoration; PPT/PPTX and HTML slide-deck creation starts with the pptx Skill.
 keywords: [html, template, visual, mood, style, identity, 模板, 网页风格, 视觉风格, 网页设计]
 ---
 
 # HTML Templates — Visual DNA Library
 
-A style-constraint library. Match the user's request to one of 32 pre-analyzed design profiles, then write fresh HTML that obeys that profile's color, typography, and decoration rules — inside whatever HTML structure the user has already specified.
+A style-constraint library. Match the user's request to one of 32 pre-analyzed design profiles, then apply its color, typography, and decoration rules inside the caller's HTML structure.
+
+For a request to create a PPT/PPTX or HTML slide deck, first use
+`get_skill(skill_name="pptx")` unless its production mode has already been confirmed by the
+user's explicit fast/design mode request, an explicit dynamic presentation request, or a host
+fast/design mode-card response. A detailed outline or visual brief
+does not confirm a production mode. Complete the entry's mode-selection step before composing slides. Choosing a visual profile does not
+choose a production mode. An established presentation workflow may use this reference without
+repeating mode selection. Ordinary webpages, posters, and reports can use it directly.
 
 ## Asset
 
@@ -20,7 +28,9 @@ A style-constraint library. Match the user's request to one of 32 pre-analyzed d
 
 ## Workflow
 
-Every request maps to exactly one template. Never refuse to match. Never ask the user to choose between candidates — pick the top-1 and proceed.
+Every visual-style request maps to exactly one template. Pick the top-1 without asking the user
+to compare templates. This no-question rule applies only to visual-profile selection;
+the caller's workflow and required choices still apply.
 
 ### 1. Extract
 

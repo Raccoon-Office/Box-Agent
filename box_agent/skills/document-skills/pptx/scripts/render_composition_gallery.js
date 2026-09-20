@@ -9,7 +9,6 @@ const {
   COMPOSITION_FAMILIES,
   compositionDirectionCatalog,
   createDeckDesign,
-  variantFor,
 } = require("./composition_core.js");
 const {
   getTheme,
@@ -130,14 +129,6 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function seedForVariant(family, expectedVariant) {
-  for (let index = 0; index < 10_000; index += 1) {
-    const seed = `gallery-${family}-${String(index).padStart(3, "0")}`;
-    if (variantFor(seed, family) === expectedVariant) return seed;
-  }
-  throw new Error(`Unable to find deterministic gallery seed for ${family}/${expectedVariant}`);
-}
-
 function previewProps(layoutId, familyRecord, variant) {
   const props = createEditorProps(layoutId);
   if (layoutId === "cover-hero-v1") {
@@ -234,10 +225,9 @@ function previewDeck(familyRecord, variant) {
   if (!theme) throw new Error(`Unknown comparison theme: ${familyRecord.themeId}`);
   const layoutId = VARIANT_LAYOUTS[variant];
   if (!layoutId) throw new Error(`No comparison layout registered for variant ${variant}`);
-  const seed = seedForVariant(familyRecord.id, variant);
-  const design = createDeckDesign(theme, seed, familyRecord.id);
+  const design = createDeckDesign(theme, variant, familyRecord.id);
   if (design.variant !== variant) {
-    throw new Error(`Gallery seed resolved ${design.variant}, expected ${variant}`);
+    throw new Error(`Gallery resolved ${design.variant}, expected ${variant}`);
   }
   return {
     theme,
@@ -470,5 +460,4 @@ module.exports = {
   VARIANT_LAYOUTS,
   galleryDocument,
   previewDeck,
-  seedForVariant,
 };

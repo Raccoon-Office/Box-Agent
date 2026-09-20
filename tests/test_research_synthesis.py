@@ -621,6 +621,24 @@ def test_research_instructions_preserve_depth_without_rephrased_query_loops() ->
     assert "verified_evidence" in output_contract
 
 
+def test_research_instructions_stop_blocked_source_loops_and_notify_user() -> None:
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    routes = (SKILL_ROOT / "references" / "routes.md").read_text(encoding="utf-8")
+    prompts = (SKILL_ROOT / "references" / "prompts.md").read_text(encoding="utf-8")
+    output_contract = (
+        SKILL_ROOT / "references" / "output_contract.md"
+    ).read_text(encoding="utf-8")
+
+    assert "After two consecutive blocked-source failures" in skill
+    assert "Promptly tell the user what" in skill
+    assert "do not silently spend the remaining search budget" in skill
+    assert "Count failures by evidence target" in routes
+    assert "Send a concise user-visible status update" in routes
+    assert "do not keep issuing variants of the same search" in prompts
+    assert "surface the blocked-target note to the main agent" in prompts
+    assert "`unverified_reason` must\n  name the failure class" in output_contract
+
+
 def test_research_instructions_use_conversation_selected_absolute_directory() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 

@@ -451,7 +451,7 @@
       "aliases": [],
       "schema": {
         "name": "mcp_config",
-        "description": "Read or modify the MCP server configuration (mcp.json). Actions: list — show current servers; inspect_browser — safely report the configured Playwright browser mode without exposing unrelated MCP credentials; update — patch an existing server while preserving unspecified settings; add — add or replace a server entry; remove — delete a server entry; enable / disable — toggle a server without deleting it. The list action reports configuration entries, not connected tools or callable schemas; use tool_search for capability discovery. This tool only confirms the configuration write, not a live connection. The host watches mcp.json and applies hot reload automatically; when registration finishes during an active turn, the runtime supplies an internal connection-state update (or load after box-agent restart).",
+        "description": "Read or modify the MCP server configuration (mcp.json). Actions: list — show current servers; inspect_browser — report the live session's Playwright browser mode (config fallback when disconnected) without exposing unrelated MCP credentials; set_browser_mode — launch headed/headless for the current managed browser session only; update — patch an existing server while preserving unspecified settings; add — add or replace a server entry; remove — delete a server entry; enable / disable — toggle a server without deleting it. The list action reports configuration entries, not connected tools or callable schemas; use tool_search for capability discovery. Configuration writes do not confirm a live connection; set_browser_mode verifies browser startup. The host watches mcp.json and applies hot reload automatically; when registration finishes during an active turn, the runtime supplies an internal connection-state update (or load after box-agent restart).",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -460,6 +460,7 @@
               "enum": [
                 "list",
                 "inspect_browser",
+                "set_browser_mode",
                 "update",
                 "add",
                 "remove",
@@ -471,6 +472,14 @@
             "name": {
               "type": "string",
               "description": "Server name key in mcpServers (required for add/remove/enable/disable)."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "headed",
+                "headless"
+              ],
+              "description": "Required for set_browser_mode. Switching resets this session's tabs, login and form state; other sessions are unaffected."
             },
             "config": {
               "type": "object",
@@ -552,6 +561,121 @@
           },
           "required": [
             "content"
+          ]
+        }
+      }
+    },
+    "memory_list_corrections": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_list_corrections",
+        "description": "List correction-memory entries (durable failure lessons). By default returns active corrections only. Does not touch MEMORY.md.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "superseded",
+                "draft",
+                "deleted"
+              ],
+              "description": "Optional status filter. Omit for active-only."
+            },
+            "include_inactive": {
+              "type": "boolean",
+              "description": "If true and status is omitted, include non-active corrections."
+            }
+          }
+        }
+      }
+    },
+    "memory_write_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_write_correction",
+        "description": "Write a durable correction (failure lesson) to corrections memory. Requires verification_id from a real successful retry and a specific reusable remedy. Validated remedies become available automatically; never ask the user to manage draft states. Refuses preference and secret content. Does not write MEMORY.md.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "verification_id": {
+              "type": "string",
+              "description": "Runtime-issued evidence id from a matching successful retry after changed arguments or a recorded file repair; required before storing a remedy."
+            },
+            "lesson": {
+              "type": "string",
+              "description": "Specific repair steps and their applicability; not a generic suggestion to retry."
+            },
+            "symptom": {
+              "type": "string",
+              "description": "Short symptom summary (no long stacks)."
+            },
+            "error_fingerprint": {
+              "type": "string",
+              "description": "Normalized error fingerprint (or raw error to normalize)."
+            },
+            "subject_kind": {
+              "type": "string",
+              "enum": [
+                "skill",
+                "tool"
+              ]
+            },
+            "subject_name": {
+              "type": "string"
+            },
+            "subject_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "lesson",
+            "error_fingerprint",
+            "subject_name",
+            "verification_id"
+          ]
+        }
+      }
+    },
+    "memory_supersede_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_supersede_correction",
+        "description": "Supersede (invalidate) a correction by id. Superseded corrections are hidden from default memory_search.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "description": "Correction entry id to supersede."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Optional reason (e.g. 'fixed', 'obsolete')."
+            }
+          },
+          "required": [
+            "entry_id"
+          ]
+        }
+      }
+    },
+    "memory_delete_correction": {
+      "aliases": [],
+      "schema": {
+        "name": "memory_delete_correction",
+        "description": "Soft-delete a correction by id (status=deleted). Deleted corrections are hidden from default memory_search.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "description": "Correction entry id to delete."
+            }
+          },
+          "required": [
+            "entry_id"
           ]
         }
       }
@@ -963,6 +1087,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 2000
+                  },
+                  "advisory": {
+                    "type": "boolean",
+                    "description": "True when this check is informative and does not block delivery."
                   }
                 },
                 "required": [

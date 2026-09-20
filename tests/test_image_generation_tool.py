@@ -1483,7 +1483,7 @@ async def test_generate_image_svg_response_skips_watermark(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("publish_artifact", [True, False])
-async def test_intermediate_image_stays_available_without_artifact_publication(
+async def test_intermediate_image_is_skipped_until_primary_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publish_artifact: bool
 ) -> None:
     from box_agent.core import _detect_tool_artifacts, _snapshot_workspace_signatures
@@ -1508,7 +1508,7 @@ async def test_intermediate_image_stays_available_without_artifact_publication(
     assert target.read_bytes() == PNG_BYTES
     assert json.loads(result.model_context)["absolute_path"] == str(target)
     assert result.raw_output["type"] == ("artifact" if publish_artifact else "intermediate_asset")
-    # An unrelated deliverable must still be discovered in the same batch.
+    # An unrelated file remains inspectable, but is not a declared deliverable.
     other = tmp_path / "deck.html"
     other.write_text("<html></html>")
     events = _detect_tool_artifacts(
@@ -1517,9 +1517,46 @@ async def test_intermediate_image_stays_available_without_artifact_publication(
         result.raw_output, before, _snapshot_workspace_signatures(str(tmp_path)),
         str(tmp_path),
     )
-    paths = {event.abs_path for event in events}
-    assert str(other) in paths
-    assert (str(target) in paths) == publish_artifact
+    artifact_paths = {event.abs_path for event in events}
+    assert str(other) in artifact_paths
+    if publish_artifact:
+        assert str(target) in artifact_paths
+    else:
+        assert str(target) not in artifact_paths
+
+    # A later shell call renames the image without moving its sidecar.
+    before_rename = _snapshot_workspace_signatures(str(tmp_path))
+    renamed = target.with_name("slide-02-image.png")
+    target.rename(renamed)
+    events = _detect_tool_artifacts(
+        "rename-call", "bash", "[assets/generated/slide-02-image.png]", None,
+        before_rename, _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
+    )
+    assert (str(renamed) in {event.abs_path for event in events}) == publish_artifact
+
+
+def test_image_tool_preserves_standalone_publication_contract(tmp_path: Path) -> None:
+    tool = GenerateImageTool(workspace_dir=str(tmp_path))
+    description = tool.parameters["properties"]["publish_artifact"]["description"]
+    assert "standalone user deliverable" in description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scoped,publish,expected", [
+    (True, None, "intermediate_asset"), (True, False, "intermediate_asset"),
+    (True, True, "artifact"), (False, None, "artifact"),
+])
+async def test_image_publication_defaults_to_workspace_contract(tmp_path, monkeypatch, scoped, publish, expected):
+    patch_async_client(monkeypatch, lambda request: httpx.Response(
+        200, json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]}))
+    if scoped:
+        (tmp_path / ".artifact-delivery.json").write_text('{"schema_version":1,"default":"intermediate"}')
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint="https://image.example.test/v1/images/generations")
+    kwargs = {} if publish is None else {"publish_artifact": publish}
+    result = await tool.execute(prompt="illustration", output_path="assets/hero.png", watermark=False, **kwargs)
+    assert result.success, result.error
+    assert result.raw_output["type"] == expected
+    assert (tmp_path / "assets/hero.png").read_bytes() == PNG_BYTES
 
 
 @pytest.mark.asyncio

@@ -64,6 +64,7 @@ decision, read those entries together.
 | MCP deferred loading | `mcp_tool_catalog.py`, `mcp_tool_search.py`, `tool_search` | Ordinary MCP schemas are hidden by default until session-scoped activation; `alwaysLoad` remains eager. | Current; later research hardening may also apply to research paths. | [PR #31](#2026-08-17--deferred-mcp-catalog-and-session-exposure-pr-31), [later hardening](#other-target-branch-changes-after-or-adjacent-to-those-prs) |
 | Sub-agent delegation | `sub_agent_tool.py`, `sub_agent_capabilities.py`, `required_tools`, `write_scope`, `files` | The public request is flat; runtime-derived policy limits implicit tools to trusted local readers, keeps process/external/unknown MCP capabilities fail-closed, and scopes path writes. | Supersedes the caller-authored nested constraint contract while retaining its runtime enforcement goals. | [2026-08-19 flattened contract](#2026-08-19--flattened-sub-agent-contract-with-derived-policy) |
 | Shared live session ownership | `agent_session.py`, `session_assembly.py`, `session_context.py`, `plugins/runtime.py`, `cli.py`, `acp/` | Managed sessions prepare capabilities once, reuse a PluginRuntime and bind fresh run services. Owned resources close after active runs; borrowed host resources retain their owner. | Extends PR #114 with scoped preparation and cleanup; legacy creation, Config identity and Session Log persistence remain compatible. | [2026-09-10 managed lifecycle](#2026-09-10--managed-session-assembly-and-plugin-lifecycle), [2026-09-09 AgentSession](#2026-09-09--shared-agent-session-state-and-configuration) |
+| Unified run API and SDK controls | `box_agent/api/`, `agent_service.py`, `agent_run.py`, `run_control.py`, `sdk.py`, CLI/ACP adapters | Host-neutral Run DTOs and event envelopes provide one lifecycle boundary for SDK, CLI, and ACP. Cooperative pause/resume/cancel, message injection, and permission responses are routed through run-scoped controls. | Additive compatibility layer over `Agent.run_events()` and `AgentRunHandle`; no WorkflowPolicy or Session Log migration. | [2026-09-11 unified Run API](#2026-09-11--unified-run-api-and-sdk-controls) |
 | Session and workflow ownership | `session_log.py`, explicit Skills, `WAITING_FOR_USER`, legacy workflow files | Session Log is the sole durable Agent-session source. Skills/plugins own domain progress and recovery instructions; legacy checkpoint and owner files are ignored but not deleted. | PR #100 supersedes the proposed runtime owner/checkpoint lifecycle while retaining generic Tool safety boundaries. | [PR #100](#2026-09-02--session-log-only-recovery-pr-100), [earlier owner design](#2026-08-20--workflow-owner-precedence-for-third-party-skills) |
 | Native CLI session traces | `box_agent/cli.py`, `box_agent/session_trace.py`, `SessionTraceWriter`, `BOX_AGENT_SESSION_TRACE_ENABLED` | CLI creates best-effort v1 traces by default, with one file per invocation and one scope per user turn; Session Log remains the only durable recovery source. Existing opt-out, redaction and retention apply. | Adds native CLI production of traces; read together with the existing viewer and Session Log contracts, not as a replacement for them. | [2026-09-08 native CLI tracing](#2026-09-08--native-cli-session-tracing) |
 | Agent Trace diagnostics | `box_agent/trace_viewer/`, `box-agent trace-viewer`, `box-agent-session-trace/v1` | The packaged viewer is a read-only v1 trace consumer; static access stays browser-local and the optional directory service is loopback-only, authority-validated, explicit-path, and size-bounded. Flat ledgers stay top-level; comparison roots add exactly one `source / trace` level with input-first, filename-assisted grouping. | The 2026-09-04 comparison extension preserves the original writer, Core, provider, ACP, and flat-ledger contracts. | [2026-09-04 multi-source comparison](#2026-09-04--input-matched-multi-source-agent-trace-comparison), [2026-08-20 trace viewer](#2026-08-20--local-agent-trace-diagnostics) |
@@ -77,6 +78,26 @@ Release, provider API, and ACP compatibility have their own sources under
 [long-lived release and compatibility history](#long-lived-release-and-compatibility-history).
 
 ## Pending material changes
+
+### 2026-09-11 — unified Run API and SDK controls
+
+- **Change:** The run boundary now exposes `RunRequest`, `ControlCommand`,
+  `EventEnvelope`, `RunResult`, and `RunStatus` through `AgentService` and the
+  public SDK. CLI and ACP remain adapters over that shared boundary.
+- **Durable effect:** Consumers can observe ordered run events and send
+  cooperative pause, resume, cancellation, message-injection, and permission
+  response commands. `PermissionBroker` keeps pending requests scoped to one
+  run and releases waiters during cancellation.
+- **Compatibility:** Existing `Agent.run_events()` and legacy
+  `AgentRunHandle` state access remain available. No `WorkflowPolicy` is
+  introduced and Session Log remains the durable session-state source.
+- **Proof anchors:** `tests/test_run_api.py`, `tests/test_run_control.py`,
+  `tests/test_sdk.py`, `tests/test_agent_service.py`, ACP/CLI adapter tests,
+  and the SDK example under `examples/sdk/`.
+- **Runtime and rollback:** This change has source and focused-test proof;
+  packaged-host rebuild, install, restart, and fresh live-task verification
+  remain separate. Revert the shared API and its CLI/ACP adapter wiring
+  together; the legacy run entrypoints remain the compatibility fallback.
 
 ### 2026-09-10 — managed session assembly and plugin lifecycle
 

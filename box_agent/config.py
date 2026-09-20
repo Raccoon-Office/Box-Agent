@@ -80,6 +80,8 @@ class LLMConfig(BaseModel):
     auth_file: str = ""
     context_window: int = 180000
     max_output_tokens: int = USER_CONFIGURED_MAX_OUTPUT_TOKENS
+    # None leaves endpoint-specific request limits to the provider client.
+    max_request_body_bytes: int | None = Field(default=None, gt=0, strict=True)
     # Wall-clock cap (seconds) handed to the underlying provider SDK. For
     # streaming calls this bounds the gap between bytes (connect + per-read),
     # not the total generation, so a long answer is fine as long as tokens keep
@@ -123,6 +125,7 @@ class LiteLLMConfig(BaseModel):
     provider: str = "openai"
     auth_file: str = ""
     max_output_tokens: int = 63999
+    max_request_body_bytes: int | None = Field(default=None, gt=0, strict=True)
     # Lightweight calls keep the SDK's shorter default rather than inheriting
     # the main model's long-running agent allowance.
     timeout: float = 600.0
@@ -288,8 +291,16 @@ class MCPConfig(BaseModel):
 
     deferred_loading_enabled: bool = True
     connect_timeout: float = 60.0  # Connection timeout (seconds)
-    execute_timeout: float = 120.0  # Tool execution timeout (seconds)
+    execute_timeout: float = 300.0  # Tool execution timeout (seconds)
     sse_read_timeout: float = 180.0  # SSE read timeout (seconds)
+
+    # Managed browser (Playwright MCP) isolation. When enabled and the
+    # ``playwright`` entry in mcp.json is a stdio command with ``--isolated``,
+    # box-agent spawns the server in HTTP mode and opens one MCP client per
+    # agent session (and per sub_agent run), so each gets its own BrowserContext.
+    playwright_per_session_context: bool = True
+    playwright_max_session_clients: int = Field(default=8, ge=1, le=64)
+    playwright_session_idle_timeout: float = Field(default=1800.0, ge=0.0)
 
 
 class ToolsConfig(BaseModel):
@@ -486,6 +497,7 @@ class Config(BaseModel):
             auth_file=data.get("auth_file") or str(config_path.parent / "auth.json"),
             context_window=data.get("context_window", 180000),
             max_output_tokens=data.get("max_output_tokens", default_max_output_tokens),
+            max_request_body_bytes=data.get("max_request_body_bytes"),
             timeout=float(data.get("timeout", 1200.0) or 1200.0),
             retry=retry_config,
             reasoning_effort_when_disabled=data.get("reasoning_effort_when_disabled"),
@@ -538,6 +550,7 @@ class Config(BaseModel):
                 provider=str(lite_llm_data.get("provider", "openai")).strip() or "openai",
                 auth_file=lite_llm_data.get("auth_file") or str(config_path.parent / "auth.json"),
                 max_output_tokens=lite_max_output_tokens,
+                max_request_body_bytes=lite_llm_data.get("max_request_body_bytes"),
                 timeout=float(lite_llm_data.get("timeout", 600.0) or 600.0),
                 retry=lite_retry,
                 reasoning_effort_when_disabled=lite_llm_data.get("reasoning_effort_when_disabled"),

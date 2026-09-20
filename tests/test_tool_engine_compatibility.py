@@ -1,13 +1,15 @@
 """C1 characterization of the pre-Engine setup and Agent tool contract.
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
-description changes and the connector search extension are applied before exact comparisons.
+descriptions, PPT entry contracts, tool handoffs and connector search apply
+before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,6 +53,7 @@ _LIST_SKILLS_SCHEMA = {
 _ALWAYS_WORKSPACE = {
     "request_user_input", "request_user_decision", "report_execution_result",
     "obsidian_create_note", "obsidian_update_note", "obsidian_daily_note",
+    "publish_artifact",
 }
 _FILES = {
     "read_file", "query_jsonl", "search_files", "write_file", "append_file", "edit_file",
@@ -58,10 +61,9 @@ _FILES = {
 _BASH = {"bash", "bash_output", "bash_kill"}
 _TODO = {"todo_read", "todo_write"}
 _PLAN = {"plan_read", "plan_write"}
-_MEMORY = {"memory_read", "memory_write", "memory_search"}
+_MEMORY = {"memory_read", "memory_write", "memory_search", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction"}
 _SANDBOX = {"execute_code", "sandbox_status"}
 _GOALS = {"goal_read", "goal_write"}
-_CHILD_DEFAULT_READS = {"query_jsonl", "read_file", "search_files"}
 _FLAGS_OFF = {
     "enable_file_tools": False,
     "enable_bash": False,
@@ -72,11 +74,37 @@ _FLAGS_OFF = {
     "enable_mcp": False,
 }
 _SCHEMA_FIXTURE = Path(__file__).parent / "fixtures/tool_engine/c1_schemas.json"
+_PUBLISH_ARTIFACT_SCHEMA = {
+    "aliases": [],
+    "schema": {
+        "name": "publish_artifact",
+        "description": (
+            "After creating and checking a main user-facing file, declare it as "
+            "a primary user-facing artifact. Call once for each requested deliverable. "
+            "Already published builder outputs and images "
+            "do not need this call. Use it to promote selected intermediate files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path inside the session workspace."},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+}
 _C5_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/c5_schema_changes.json").read_text()
 )
 _CWD_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/session_cwd_schema_changes.json").read_text()
+)
+_PPTX_ENTRY_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/pptx_entry_schema_changes.json").read_text()
+)
+_TOOL_HANDOFF_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/tool_handoff_schema_changes.json").read_text()
 )
 _CONNECTOR_SEARCH_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
@@ -87,7 +115,7 @@ _C5_DISCOVERABLE = {
     "append_file", "query_jsonl", "bash_output", "bash_kill", "sandbox_status",
     "mcp_config", "report_execution_result",
     "plan_read", "plan_write", "todo_read", "todo_write", "goal_read", "goal_write",
-    "memory_read", "memory_search", "memory_write", "obsidian_create_note",
+    "memory_read", "memory_search", "memory_write", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction", "obsidian_create_note",
     "obsidian_update_note", "obsidian_daily_note", "search_skillhub", "install_skillhub_skill",
 }
 
@@ -233,10 +261,11 @@ def _normalized_schema(schema, profile):
     return json.loads(serialized.replace(str(profile), "<PROFILE>"))
 
 
-def _assert_schema_contract(tools, profile, *, child_read_tools=()):
+def _assert_schema_contract(tools, profile):
     expected = json.loads(_SCHEMA_FIXTURE.read_text(encoding="utf-8"))["tools"]
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
-    expected["list_skills"] = _LIST_SKILLS_SCHEMA
+    expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
+    expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
     expected["get_skill"]["schema"]["description"] = (
         "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
         "when paged. Read required_skills before their steps; related_skills are optional. "
@@ -264,22 +293,37 @@ def _assert_schema_contract(tools, profile, *, child_read_tools=()):
             entry["aliases"] = _C5_SCHEMA_CHANGES["aliases"][tool.name]
         if tool.name in _C5_SCHEMA_CHANGES["descriptions"]:
             entry["schema"]["description"] = _C5_SCHEMA_CHANGES["descriptions"][tool.name]
-        for change in _CWD_SCHEMA_CHANGES.get(tool.name, ()):
+        for change in (
+            *_CWD_SCHEMA_CHANGES.get(tool.name, ()),
+            *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
+            *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
+        ):
             target = entry["schema"]
             *parents, field = change["path"]
             for key in parents:
                 target = target[key]
             assert target[field] == change["before"], (tool.name, change["path"])
-            target[field] = change["after"]
+            if change.get("remove"):
+                del target[field]
+            else:
+                target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
-        if tool.name == "sub_agent":
-            # This default is the one capability-dependent schema field. The
-            # caller supplies the independently expected read set, never a set
-            # inferred from the actual tool's live provider or parameter schema.
-            entry["schema"]["input_schema"]["properties"]["required_tools"]["default"] = (
-                sorted(child_read_tools)
+        if tool.name == "bash":
+            anchor = '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                anchor + '  - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.\n',
             )
+            entry["schema"]["input_schema"]["properties"]["temporary_files"] = {
+                "type": "array", "items": {"type": "string"}, "maxItems": 64,
+                "description": "New disposable output files this foreground command will create, relative to the workspace (not inline cd). Parents must exist. Runtime reserves absent paths; existing files cannot be adopted. Write reserved files in place. Later exact rm is approval-free only while unchanged and unpublished.",
+            }
+        if tool.name == "write_file":
+            entry["schema"]["input_schema"]["properties"]["temporary"] = {
+                "type": "boolean", "default": False,
+                "description": "On the final chunk, explicitly mark a new disposable file for later approval-free exact rm. Does not grant cleanup rights over existing files or published deliverables.",
+            }
         assert list(tool.aliases) == entry["aliases"], tool.name
         assert _normalized_schema(tool.to_schema(), profile) == entry["schema"], tool.name
         schema = entry["schema"]
@@ -360,7 +404,6 @@ async def test_setup_capability_matrix_preserves_exact_tools_and_schemas(
     assert all(agent.tools[name] is tool for name, tool in assembled_by_name.items())
     _assert_schema_contract(
         list(agent.tools.values()), isolated_setup.profile,
-        child_read_tools=expected & _CHILD_DEFAULT_READS,
     )
 
 

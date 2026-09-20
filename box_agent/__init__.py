@@ -4,6 +4,17 @@ import sys
 from pathlib import Path
 
 from .agent import Agent, AgentRunOptions
+from .agent_service import AgentService
+from .sdk import AgentClient
+from .run_control import PermissionBroker, RunControl
+from .api import (
+    ControlCommand,
+    ControlCommandKind,
+    EventEnvelope,
+    RunRequest,
+    RunResult,
+    RunStatus,
+)
 from .events import AgentEvent, StopReason
 from .hooks import BaseHook, HookManager, load_hooks
 from .llm import LLMClient
@@ -28,8 +39,13 @@ __version__ = _frozen_runtime_version(__version__)
 
 __all__ = [
     "Agent",
+    "AgentClient",
     "AgentEvent",
     "AgentRunOptions",
+    "AgentService",
+    "ControlCommand",
+    "ControlCommandKind",
+    "EventEnvelope",
     "BaseHook",
     "FunctionCall",
     "HookManager",
@@ -37,6 +53,11 @@ __all__ = [
     "LLMProvider",
     "LLMResponse",
     "Message",
+    "RunRequest",
+    "RunResult",
+    "RunControl",
+    "PermissionBroker",
+    "RunStatus",
     "StopReason",
     "ToolCall",
     "load_hooks",

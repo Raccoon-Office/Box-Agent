@@ -259,8 +259,7 @@ function previewDeck(theme) {
     schema_version: 1,
     title: `${theme.name || theme.id} theme preview`,
     theme_id: theme.id,
-    design: createDeckDesign(theme, theme.id === "sketch-whiteboard"
-      ? "preview-sketch-whiteboard-notes" : `preview-${theme.id}`),
+    design: createDeckDesign(theme),
     slides: [
       { id: "preview-cover", layout_id: "cover-editorial-v1", props: cover },
       middleSlide,

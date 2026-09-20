@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -45,8 +46,10 @@ from .sub_agent_capabilities import (
     BATCH_FILE_MAX_CHARS,
     CapabilityFailure,
     CapabilityResolver,
-    DEFAULT_SAFE_TOOL_NAMES,
+    DEFAULT_READ_TOOL_NAMES,
     DelegationSpec,
+    PATH_SCOPED_WRITE_TOOLS,
+    SKILL_READ_TOOL_NAMES,
     ResolvedCapabilityBundle,
     parse_delegation_spec,
 )
@@ -433,16 +436,22 @@ class SubAgentTool(EventEmittingTool):
             "the startup and merge cost. The parent remains responsible for synthesis, conflicts, "
             "final deliverables, and verification.\n\n"
             "Pass a complete `task` brief. `required_tools` defaults only to available trusted "
-            "local read tools (`read_file`, `query_jsonl`, `search_files`); pass an explicit "
+            "read/search tools (`read_file`, `query_jsonl`, `search_files`, `web_search`, "
+            "`web_extract`). Declaring `skills` also includes available get_skill/list_skills, "
+            "restricted to assigned Skills and dependencies. With an exact "
+            "`write_scope`, omitted tools also include the parent's available write_file, "
+            "edit_file, and append_file, restricted to those outputs; pass an explicit "
             "minimal list for other work or an empty list for a tool-free task. Explicit tools "
             "still pass a fail-closed runtime policy: external side effects and unknown MCP tools "
-            "are not delegated. Known read-only network tools are enabled only when named "
-            "explicitly. `bash` is available only when named explicitly and every delegated "
+            "are not delegated. Image tools require explicit selection. "
+            "`bash` is available only when named explicitly and every delegated "
             "command requires one-shot parent-session approval. Path-based "
             "write tools require an exact `write_scope`, with disjoint scopes for parallel "
             "children.\n\n"
             "For the same read-only operation over known local text files, pass their paths in "
-            "`files`; the runtime uses its bounded completeness-checked batch fast path. Pass "
+            "`files` and `required_tools:[\"read_file\"]` to use the bounded "
+            "completeness-checked batch fast path. Omitted tools with files and a one-step "
+            "budget also retain that path when no write_scope is given. Pass "
             "`budget` as an object such as `{max_steps:12, max_tool_calls:25}`."
         )
 
@@ -484,12 +493,14 @@ class SubAgentTool(EventEmittingTool):
                     "type": "array",
                     "description": (
                         "Exact parent tools requested for this child. When omitted, "
-                        "defaults to the available trusted local read tools only."
+                        "defaults to available local read/search and web_search/web_extract; "
+                        "declared skills add available get_skill/list_skills within their assigned scope. "
+                        "A non-empty "
+                        "write_scope also supplies available write_file, edit_file, and "
+                        "append_file within that scope. Explicit lists, including [], "
+                        "are never expanded."
                     ),
                     "items": {"type": "string"},
-                    "default": sorted(
-                        DEFAULT_SAFE_TOOL_NAMES & set(self._resolve_child_tools())
-                    ),
                     "uniqueItems": True,
                 },
                 "files": {
@@ -508,7 +519,9 @@ class SubAgentTool(EventEmittingTool):
                     "description": (
                         "Exact session-cwd-relative output paths or directories for "
                         "write_file, append_file, or edit_file. Required for those tools; "
-                        "parallel children must use disjoint scopes."
+                        "parallel children must use disjoint scopes. When required_tools "
+                        "is omitted, this scope enables available file-write tools for "
+                        "these outputs, still subject to parent resource permissions."
                     ),
                     "items": {"type": "string"},
                     "minItems": 1,
@@ -1462,7 +1475,10 @@ class SubAgentTool(EventEmittingTool):
             write_scope=write_scope,
             budget=budget,
             default_required_tools=tuple(
-                sorted(DEFAULT_SAFE_TOOL_NAMES & set(live_tools))
+                sorted(
+                    (DEFAULT_READ_TOOL_NAMES | SKILL_READ_TOOL_NAMES | PATH_SCOPED_WRITE_TOOLS)
+                    & set(live_tools)
+                )
             ),
             general_max_steps=self._tool_limits.sub_agent.general_max_steps,
             general_max_tool_calls=(
@@ -1527,17 +1543,40 @@ class SubAgentTool(EventEmittingTool):
                 session_log=child_session_log,
             )
 
-        return await self._run_general_loop(
-            llm=child_llm,
-            messages=messages,
-            child_tools=child_tools,
-            max_steps=parsed.budget.max_steps,
-            max_tool_calls=parsed.budget.max_tool_calls,
-            diagnostic=diagnostic,
-            queue=queue,
-            parent_tool_call_id=parent_tool_call_id,
-            task_preview=task_preview,
-            sub_agent_id=sub_agent_id,
-            title=sub_title,
-            session_log=child_session_log,
+        # Isolate this child's managed browser from siblings in the same
+        # parent session. The pool keys MCP clients by ContextVar, so a
+        # derived key gives the child its own BrowserContext. Close it on
+        # return so headed windows do not linger after the sub-agent ends.
+        from .browser_runtime_scope import (
+            current_browser_session_key,
+            reset_browser_session_key,
+            set_browser_session_key,
         )
+        from .mcp_loader import close_browser_session
+
+        parent_key = current_browser_session_key()
+        child_key = f"{parent_key or '__default__'}:{sub_agent_id}"
+        token = set_browser_session_key(child_key)
+        try:
+            return await self._run_general_loop(
+                llm=child_llm,
+                messages=messages,
+                child_tools=child_tools,
+                max_steps=parsed.budget.max_steps,
+                max_tool_calls=parsed.budget.max_tool_calls,
+                diagnostic=diagnostic,
+                queue=queue,
+                parent_tool_call_id=parent_tool_call_id,
+                task_preview=task_preview,
+                sub_agent_id=sub_agent_id,
+                title=sub_title,
+                session_log=child_session_log,
+            )
+        finally:
+            reset_browser_session_key(token)
+            try:
+                await close_browser_session(child_key)
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    "browser session cleanup failed for %s: %s", child_key, error,
+                )

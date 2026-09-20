@@ -26,6 +26,29 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def run_image_renderer(
+    cmd: list[str], out_dir: Path, pattern: str,
+) -> subprocess.CompletedProcess[str]:
+    """Keep renderer outputs for QA without publishing each page to the host.
+
+    External renderers can leave partial output on failure. Mark changed files
+    in either case, while leaving unrelated/pre-existing images untouched.
+    """
+    before = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in out_dir.glob(pattern)}
+    try:
+        return run(cmd)
+    finally:
+        for image in out_dir.glob(pattern):
+            if not image.is_file():
+                continue
+            stat = image.stat()
+            if before.get(image) == (stat.st_size, stat.st_mtime_ns):
+                continue
+            image.with_name(f".{image.name}.artifact.json").write_text(
+                '{"type":"intermediate_asset"}\n', encoding="utf-8"
+            )
+
+
 def find_binary(candidates: list[str]) -> str | None:
     for candidate in candidates:
         if not candidate:
@@ -203,7 +226,7 @@ def main() -> int:
     if not soffice:
         qlmanage = shutil.which("qlmanage") if platform.system() == "Darwin" else None
         if qlmanage:
-            result = run(
+            result = run_image_renderer(
                 [
                     qlmanage,
                     "-t",
@@ -212,7 +235,7 @@ def main() -> int:
                     "-o",
                     str(args.out),
                     str(args.pptx),
-                ]
+                ], args.out, f"{args.pptx.name}*.png",
             )
             if result.returncode == 0:
                 previews = sorted(args.out.glob(f"{args.pptx.name}*.png"))
@@ -269,7 +292,9 @@ def main() -> int:
             str(pdf_path),
             str(prefix),
         ]
-        image = run(image_cmd)
+        image = run_image_renderer(
+            image_cmd, args.out, f"slide-*.{'png' if args.format == 'png' else 'jpg'}"
+        )
         if image.returncode != 0:
             print(image.stdout, end="")
             print(image.stderr, end="", file=sys.stderr)

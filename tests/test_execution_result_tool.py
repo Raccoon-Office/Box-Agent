@@ -145,6 +145,43 @@ async def test_completed_result_rejects_unpassed_checks(tool, status):
 
 
 @pytest.mark.asyncio
+async def test_completed_result_allows_advisory_check(tool):
+    result = await tool.execute(
+        outcome="completed",
+        summary="The editable artifact is ready with a non-blocking image notice.",
+        changes=[
+            {"kind": "document", "summary": "Generated the editable deck.", "reference": "index.html"}
+        ],
+        checks=[
+            {
+                "name": "optional image sync",
+                "status": "skipped",
+                "summary": "An optional visual was deferred.",
+                "advisory": True,
+            },
+            {
+                "name": "render",
+                "status": "passed",
+                "summary": "The deck renders successfully.",
+            },
+        ],
+        criteria_evaluations=[
+            {
+                "criterion_index": 0,
+                "status": "passed",
+                "summary": "The requested editable deck exists.",
+                "evidence": ["index.html"],
+            }
+        ],
+        known_limitations=["One optional image was deferred."],
+        questions=[],
+    )
+
+    assert result.success
+    assert result.raw_output["checks"][0]["advisory"] is True
+
+
+@pytest.mark.asyncio
 async def test_completed_result_rejects_failed_acceptance_criterion(tool):
     result = await tool.execute(
         outcome="completed",

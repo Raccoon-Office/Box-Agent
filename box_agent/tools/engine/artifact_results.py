@@ -1,4 +1,4 @@
-"""Existing tool-output and workspace-diff artifact detection."""
+"""Tool-output artifact detection with workspace changes as corroboration only."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from ...artifacts import (
     make_artifact as _make_artifact,
 )
 from ...events import ArtifactEvent
+from ...artifact_publication import SUFFIX, intermediate_fingerprints, is_intermediate
 
 _log = logging.getLogger("box_agent.core")
 
@@ -41,6 +42,9 @@ def _detect_artifacts(
     """Scan tool output for file references that resolve under the session cwd."""
     if not workspace_dir or not content:
         return []
+    references = list(_ARTIFACT_REF_RE.finditer(content))
+    if not references:
+        return []
 
     try:
         ws = Path(workspace_dir).resolve()
@@ -56,9 +60,10 @@ def _detect_artifacts(
     except OSError:
         return []
 
+    fingerprints = _publication_fingerprints(workspace_dir)
     artifacts: list[ArtifactEvent] = []
     seen_paths: set[Path] = set()
-    for match in _ARTIFACT_REF_RE.finditer(content):
+    for match in references:
         filename = match.group(1)
         try:
             if len(filename) > _MAX_ARTIFACT_REF_CHARS or any(
@@ -69,6 +74,8 @@ def _detect_artifacts(
             candidate = (out / filename).resolve()
             candidate.relative_to(out)
             if candidate in seen_paths or not candidate.is_file():
+                continue
+            if is_intermediate(candidate, fingerprints, workspace_dir):
                 continue
             artifact = _make_artifact(tool_call_id, candidate, ws)
         except (OSError, RuntimeError, UnicodeError, ValueError):
@@ -135,7 +142,7 @@ def _warn_scan_limit(root: Path, reason: str) -> None:
     )
 
 
-def _snapshot_workspace(workspace_dir: str) -> set[Path] | None:
+def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: bool = False) -> set[Path] | None:
     """Return a bounded recursive file snapshot rooted at the session cwd.
 
     An incomplete walk returns None, distinct from a valid empty snapshot, so
@@ -184,7 +191,8 @@ def _snapshot_workspace(workspace_dir: str) -> set[Path] | None:
                     _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
                     return None
                 entry = current / filename
-                if entry.name.startswith(".") or entry.suffix == ".tmp":
+                is_metadata = entry.name.startswith(".") and entry.name.endswith(SUFFIX) and len(entry.name) > len(SUFFIX) + 1
+                if (entry.name.startswith(".") and not (include_publication_metadata and is_metadata)) or entry.suffix == ".tmp":
                     continue
                 if not entry.is_file():
                     continue
@@ -195,6 +203,13 @@ def _snapshot_workspace(workspace_dir: str) -> set[Path] | None:
     except OSError:
         return None
     return files
+
+
+def _publication_fingerprints(workspace_dir: str) -> dict[int, set[str]]:
+    files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
+    return intermediate_fingerprints(
+        path for path in (files or ()) if path.name.startswith(".") and path.name.endswith(SUFFIX)
+    )
 
 
 def _snapshot_workspace_signatures(
@@ -229,11 +244,14 @@ def _detect_new_files(
         return []
 
     ws = Path(workspace_dir).resolve()
+    fingerprints = _publication_fingerprints(workspace_dir)
     artifacts: list[ArtifactEvent] = []
     for fpath in sorted(new_files):
         if fpath.name.startswith(".") or fpath.name.startswith("~") or fpath.suffix == ".tmp":
             continue
         if str(fpath.resolve()) in already_emitted:
+            continue
+        if is_intermediate(fpath, fingerprints, workspace_dir):
             continue
         artifacts.append(_make_artifact(tool_call_id, fpath, ws))
 
@@ -246,9 +264,16 @@ def _detect_changed_files(
     post_files: dict[Path, tuple[int, int]] | None,
     already_emitted: set[str],
     workspace_dir: str,
+    *,
+    content: str = "",
 ) -> list[ArtifactEvent]:
-    """Create ArtifactEvents for files that appeared or changed."""
-    if pre_files is None or post_files is None:
+    """Report changed files only when this tool returned their exact paths.
+
+    A shared-workspace diff is not evidence of who produced a file. Require
+    the current result to name the absolute or workspace-relative path; never
+    infer ownership from a directory, a nested basename, or a sidecar alone.
+    """
+    if not content or pre_files is None or post_files is None:
         return []
     changed_files = {
         path
@@ -259,8 +284,19 @@ def _detect_changed_files(
         return []
 
     ws = Path(workspace_dir).resolve()
+    fingerprints = _publication_fingerprints(workspace_dir)
     artifacts: list[ArtifactEvent] = []
     for file_path in sorted(changed_files):
+        try:
+            relative = file_path.resolve().relative_to(ws).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        paths = {str(file_path.resolve()), relative}
+        if not any(
+            re.search(r"(?<![\w./\\-])" + re.escape(path) + r"(?![\w./\\-])", content)
+            for path in paths
+        ):
+            continue
         if (
             file_path.name.startswith(".")
             or file_path.name.startswith("~")
@@ -268,6 +304,8 @@ def _detect_changed_files(
         ):
             continue
         if str(file_path.resolve()) in already_emitted:
+            continue
+        if is_intermediate(file_path, fingerprints, workspace_dir):
             continue
         artifacts.append(_make_artifact(tool_call_id, file_path, ws))
     return artifacts
@@ -284,8 +322,7 @@ def _detect_regex_artifacts(
 
     Returns the regex-detected artifacts plus the set of absolute paths that
     should be excluded from the later diff layer (those already surfaced here,
-    or carried on an artifact/intermediate-asset ``raw_output``). Intermediate
-    assets are also excluded from regex publication while remaining on disk.
+    or carried on an artifact/intermediate-asset ``raw_output``).
     """
     regex_artifacts = _detect_artifacts(
         tool_call_id,
@@ -294,15 +331,58 @@ def _detect_regex_artifacts(
         workspace_dir,
     )
     already = {a.abs_path for a in regex_artifacts}
-    if isinstance(raw_output, dict) and raw_output.get("type") in ("artifact", "intermediate_asset"):
-        raw_paths: set[str] = set()
-        for key in ("abs_path", "absolute_path"):
-            raw_path = raw_output.get(key)
-            if isinstance(raw_path, str) and raw_path.strip():
-                raw_paths.add(str(Path(raw_path).expanduser().resolve()))
-        already.update(raw_paths)
-        if raw_output.get("type") == "intermediate_asset":
-            regex_artifacts = [a for a in regex_artifacts if a.abs_path not in raw_paths]
+    if isinstance(raw_output, dict) and raw_output.get("type") in (
+        "artifact",
+        "intermediate_asset",
+    ):
+        raw_type = raw_output["type"]
+        workspace_root = Path(workspace_dir).resolve()
+        raw_path: str | None = None
+        for key in ("abs_path", "absolute_path", "path"):
+            value = raw_output.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                candidate = Path(value).expanduser()
+                if key != "path" and not candidate.is_absolute():
+                    continue
+                if not candidate.is_absolute():
+                    candidate = (workspace_root / candidate).resolve()
+                else:
+                    candidate = candidate.resolve()
+                candidate.relative_to(workspace_root)
+                if candidate.is_file():
+                    raw_path = str(candidate)
+                    break
+            except (OSError, RuntimeError, ValueError):
+                continue
+        if raw_path:
+            already.add(raw_path)
+            if raw_type == "intermediate_asset" or is_intermediate(
+                Path(raw_path), _publication_fingerprints(workspace_dir), workspace_dir
+            ):
+                regex_artifacts = [
+                    artifact for artifact in regex_artifacts if artifact.abs_path != raw_path
+                ]
+                return regex_artifacts, already
+        raw_description = raw_output.get("description") or raw_output.get("alt_text")
+        description = raw_description if isinstance(raw_description, str) else None
+        if raw_path:
+            try:
+                normalized_artifact = _make_artifact(
+                    tool_call_id,
+                    Path(raw_path),
+                    workspace_root,
+                    description=description,
+                )
+            except (OSError, RuntimeError, ValueError):
+                return regex_artifacts, already
+            regex_artifacts = [
+                artifact
+                for artifact in regex_artifacts
+                if artifact.abs_path != normalized_artifact.abs_path
+            ]
+            regex_artifacts.append(normalized_artifact)
     return regex_artifacts, already
 
 
@@ -315,19 +395,17 @@ def _detect_tool_artifacts(
     post_files: dict[Path, tuple[int, int]] | None,
     workspace_dir: str,
 ) -> list[ArtifactEvent]:
-    """Two-layer artifact detection for a single tool result (sequential path).
+    """Discover only files identified by the current tool result.
 
     Layer 1 (regex): scan ``content`` for ``[filename.ext]`` references that
-    resolve under the session cwd. Layer 2 (diff): catch files created or
-    modified by the tool that weren't referenced in the output text, using a
-    per-tool pre/post signature snapshot. The parallel branch can't take per-tool snapshots under
-    concurrency, so it composes :func:`_detect_regex_artifacts` per result with
-    a single diff pass instead (see the parallel block in ``run_agent_loop``).
+    resolve under the session cwd. Layer 2 accepts other exact output paths
+    corroborated by a pre/post signature change. Workspace changes alone never
+    establish task ownership, including files with publication sidecars.
     """
     regex_artifacts, already = _detect_regex_artifacts(
         tool_call_id, tool_name, content, raw_output, workspace_dir
     )
     diff_artifacts = _detect_changed_files(
-        tool_call_id, pre_files, post_files, already, workspace_dir
+        tool_call_id, pre_files, post_files, already, workspace_dir, content=content
     )
     return [*regex_artifacts, *diff_artifacts]

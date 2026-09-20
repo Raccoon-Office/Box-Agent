@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const {
   chromiumLaunchOptions,
+  loadPlaywright,
   ensurePlaywrightBrowsersPath,
   officeRaccoonBrowserHostPath,
 } = require("./playwright_host");
@@ -109,7 +110,7 @@ function parseArgs(argv) {
 
 function requireModule(name, installHint) {
   try {
-    return require(name);
+    return name === "playwright" ? loadPlaywright() : require(name);
   } catch (error) {
     if (error && error.code === "MODULE_NOT_FOUND") {
       console.error(`Missing dependency: ${name}`);
@@ -150,6 +151,11 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
       const issues = [];
       const warnings = [];
       const slideEls = Array.from(document.querySelectorAll(".slide"));
+      const overlapSelectors = [
+        ".content-card", ".comparison-column", ".kpi-card", ".timeline-step",
+        ".text-section", ".proof-stack", ".image-feature-media", ".image-hero-media",
+        ".technical-diagram-stage", ".chart-body", ".data-table-wrap",
+      ].join(",");
       const badTransform = /\b(?:translate|translateX|translateY|translate3d|scale|scaleX|scaleY|scale3d|skew|skewX|skewY|matrix|matrix3d)\s*\(/i;
       const badBackground = /\b(?:radial-gradient|conic-gradient)\s*\(/i;
       const badFilter = /\b(?:brightness|contrast|saturate|hue-rotate|grayscale|sepia|invert|drop-shadow)\s*\(/i;
@@ -316,6 +322,30 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         }
 
         const descendants = Array.from(slide.querySelectorAll("*"));
+        const frames = Array.from(slide.querySelectorAll(overlapSelectors))
+          .filter(el => el.parentElement && isVisible(el, getComputedStyle(el)));
+        for (let leftIndex = 0; leftIndex < frames.length; leftIndex += 1) {
+          const left = frames[leftIndex];
+          const leftRect = left.getBoundingClientRect();
+          const leftArea = Math.max(1, leftRect.width * leftRect.height);
+          for (let rightIndex = leftIndex + 1; rightIndex < frames.length; rightIndex += 1) {
+            const right = frames[rightIndex];
+            if (right.parentElement !== left.parentElement) continue;
+            const rightRect = right.getBoundingClientRect();
+            const overlapWidth = Math.min(leftRect.right, rightRect.right)
+              - Math.max(leftRect.left, rightRect.left);
+            const overlapHeight = Math.min(leftRect.bottom, rightRect.bottom)
+              - Math.max(leftRect.top, rightRect.top);
+            if (overlapWidth <= 8 || overlapHeight <= 8) continue;
+            const overlapArea = overlapWidth * overlapHeight;
+            const rightArea = Math.max(1, rightRect.width * rightRect.height);
+            if (overlapArea / Math.min(leftArea, rightArea) < 0.08) continue;
+            issues.push(
+              `${labelFor(left, slideIndex)} overlaps ${labelFor(right, slideIndex)}; `
+              + "same-level content modules must not intersect."
+            );
+          }
+        }
         const diagramRoots = Array.from(
           slide.querySelectorAll(diagramSelector)
         );

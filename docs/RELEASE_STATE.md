@@ -319,7 +319,7 @@ UX / orchestration:
 
 ### Follow-ups / known gaps
 
-- **P0 (ops, not code):** the incident that triggered this work had MCP `web_search` unavailable for the whole session (401 `authorization_verify_error` + fallback to lite model `raccoon-chat-ml-5-5`). Investigate officev3 MCP config/auth so `web_search` actually loads. The code fix only guarantees parity with whatever the parent has.
+- **P0 (ops, not code):** the incident that triggered this work had MCP `web_search` unavailable for the whole session (401 `authorization_verify_error` + fallback to an obsolete gateway lite model id). Investigate officev3 MCP config/auth so `web_search` actually loads. The code fix only guarantees parity with whatever the parent has.
 - **Runtime artifact:** only `darwin-arm64` built/uploaded. `darwin-x64` / Windows runtimes not built this release.
 - **No-progress breaker limitation:** detects failing/empty tool results; a tool that "succeeds" with useless content (e.g. anti-scraping HTML) is not caught — bounded by `max_steps=40`.
 - **Test hygiene:** full `pytest` shows ~14 env-dependent failures (filesystem permission/symlink scoping + a skill_loader test-pollution case); all pass in isolation and are unrelated to this release. Worth de-flaking later.

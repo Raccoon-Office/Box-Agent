@@ -1767,14 +1767,15 @@ function chartValueUnit(value) {
     .trim();
 }
 
-function chartCategoryUnits(series, categoryCount) {
-  return Array.from({ length: categoryCount }, (_, categoryIndex) => {
+function chartCategoryUnits(series, categories) {
+  return categories.map((category, categoryIndex) => {
     const units = new Set(
       series
         .map(item => chartValueUnit(item.values[categoryIndex]))
         .filter(Boolean)
     );
-    return units.size === 1 ? [...units][0] : "";
+    const labeledUnit = String(category).match(/[（(]\s*(万元|亿元|元|美元|家|人|户|次|个|件|天|小时|分钟|秒|%|ms|kg|USD|users)\s*[)）]\s*$/i);
+    return units.size === 1 ? [...units][0] : units.size === 0 && labeledUnit ? labeledUnit[1].trim() : "";
   });
 }
 
@@ -1875,7 +1876,7 @@ function renderDataChart(slide, index, _design = null, renderContext = null) {
     categories.length,
     presentation
   );
-  const categoryUnits = chartCategoryUnits(series, categories.length);
+  const categoryUnits = chartCategoryUnits(series, categories);
   const distinctUnits = new Set(categoryUnits);
   const independentScales = !p.value_suffix
     && ["bar", "column"].includes(p.chart_type || "column")
@@ -2738,13 +2739,13 @@ const layouts = [
       left: objectField({
         label: textField(24, { role: "label" }),
         title: textField(42, { role: "heading" }),
-        items: arrayField(2, 5, textField(72, { role: "body" })),
+        items: arrayField(0, 5, textField(72, { role: "body" })),
         footer: textField(72, { required: false, role: "caption" }),
       }),
       right: objectField({
         label: textField(24, { role: "label" }),
         title: textField(42, { role: "heading" }),
-        items: arrayField(2, 5, textField(72, { role: "body" })),
+        items: arrayField(0, 5, textField(72, { role: "body" })),
         footer: textField(72, { required: false, role: "caption" }),
       }),
       variant: enumField(["contrast", "symmetric", "stacked"], "contrast"),

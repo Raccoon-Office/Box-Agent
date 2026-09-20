@@ -6,6 +6,7 @@ const path = require("path");
 const { fileURLToPath, pathToFileURL } = require("url");
 const {
   chromiumLaunchOptions,
+  loadPlaywright,
   ensurePlaywrightBrowsersPath,
   officeRaccoonBrowserHostPath,
 } = require("./playwright_host");
@@ -206,7 +207,7 @@ function parseArgs(argv) {
 
 function requireModule(name, installHint) {
   try {
-    return require(name);
+    return name === "playwright" ? loadPlaywright() : require(name);
   } catch (error) {
     if (error && error.code === "MODULE_NOT_FOUND") {
       console.error(`Missing dependency: ${name}`);
@@ -392,6 +393,11 @@ async function main() {
   const previews = [];
   for (let i = 0; i < slideHandles.length; i += 1) {
     const imagePath = path.join(outDir, `slide-${String(i + 1).padStart(2, "0")}.png`);
+    // Source previews are QA inputs, not standalone user deliverables.
+    fs.writeFileSync(
+      path.join(outDir, `.${path.basename(imagePath)}.artifact.json`),
+      '{"type":"intermediate_asset"}\n'
+    );
     await slideHandles[i].screenshot({ path: imagePath });
     previews.push(imagePath);
   }
@@ -464,6 +470,7 @@ async function main() {
 
   await browser.close();
 
+  require("./artifact_delivery.js").publishArtifact(pptxPath);
   console.log(
     JSON.stringify(
       {

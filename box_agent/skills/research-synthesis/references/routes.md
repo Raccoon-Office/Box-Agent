@@ -12,6 +12,27 @@ Before analysis:
 5. Record the route, time check, and search/file constraints in the first
    artifact written for the task.
 
+## Blocked Search and Retrieval
+
+Apply this protocol across Routes A, B, and D:
+
+1. Count failures by evidence target, not merely by query string. Anti-bot
+   responses, HTTP 403/429, CAPTCHA or challenge pages, robots or permission
+   denials, timeouts, and empty or unreadable bodies all count as blocked-source
+   failures.
+2. After the first blocked-source failure, make at most one recovery attempt.
+   It must use a materially different exact URL, source, or available reading
+   backend; do not just rephrase the query or replay the same URL/backend.
+3. If that recovery also fails, stop searching that evidence target for the
+   current turn. Record the target, attempted methods, observed failure signals,
+   usable evidence, and remaining gap in the evidence ledger and
+   cross-verification artifact.
+4. Send a concise user-visible status update when the stop threshold is reached,
+   then continue any independent dimensions. Do not ask the user to wait, claim
+   that retrieval is still running, or consume the remaining budget on
+   near-equivalent attempts. The final handoff must keep the blocked claim
+   `unverified` and state whether the usable result is `partial` or `framework`.
+
 ## Route A: Wide Search
 
 Use for broad, exploratory landscape work.

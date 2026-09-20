@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ntpath
 import os
 import sys
 from collections.abc import Mapping
@@ -105,6 +106,11 @@ def build_skill_execution_env(
         [str(npm_global_modules), *node_path_entries],
         is_windows=is_windows,
     )
+    host_playwright = inherited.get("BOX_AGENT_PLAYWRIGHT_MODULE_PATH")
+    if host_playwright:
+        path_ops = ntpath if is_windows else os.path
+        host_modules = path_ops.dirname(path_ops.dirname(host_playwright))
+        node_path = _dedupe_paths([host_modules, *node_path], is_windows=is_windows)
     python_path = _dedupe_paths(
         [
             str(python_user_site),
@@ -147,6 +153,8 @@ def build_skill_execution_env(
         result["PYTHONIOENCODING"] = "utf-8"
     if node_path:
         result["NODE_PATH"] = separator.join(node_path)
+    if host_playwright:
+        result["BOX_AGENT_PLAYWRIGHT_MODULE_PATH"] = host_playwright
     if browser_executable:
         result["BOX_AGENT_BROWSER_EXECUTABLE_PATH"] = browser_executable
         result["AGENT_BROWSER_EXECUTABLE_PATH"] = browser_executable

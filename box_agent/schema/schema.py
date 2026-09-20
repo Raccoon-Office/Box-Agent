@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -98,6 +98,7 @@ class Message(BaseModel):
     """Chat message."""
 
     role: str  # "system", "user", "assistant", "tool"
+    source: Literal["user", "runtime"] = Field(default="user", exclude=True)
     content: str | list[dict[str, Any]]  # Can be string or list of content blocks
     thinking: str | None = None  # Extended thinking content for assistant messages
     tool_calls: list[ToolCall] | None = None

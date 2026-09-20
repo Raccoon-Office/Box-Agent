@@ -211,6 +211,8 @@ async def test_write_file_commit_failure_reports_authoritative_active_index(
     def fail_replace(source, target):
         raise OSError("simulated replace failure")
 
+    # Exercise the replacement fallback on a filesystem without hard links.
+    monkeypatch.setattr("box_agent.tools.file_tools.os.link", fail_replace)
     monkeypatch.setattr("box_agent.tools.file_tools.os.replace", fail_replace)
     failed = await tool.execute(
         path="a.txt", content="last", chunk_index=1, final=True

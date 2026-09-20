@@ -45,13 +45,16 @@ function main() {
 
   let changed = 0;
   const unresolved = [];
+  const deferred = [];
   imagePlan.forEach(entry => {
     if (!entry || !["generate", "use_existing"].includes(entry.decision)) return;
     let entryChanged = false;
     const resolved = resolveOutputPath(entry.output_path, manifestPath);
     if (!resolved) {
-      if (entry.decision === "generate") {
+      if (entry.decision === "generate" && entry.required !== false) {
         unresolved.push(entry.output_path || `slide ${entry.slide || "?"}`);
+      } else if (entry.decision === "generate") {
+        deferred.push(entry.output_path || `slide ${entry.slide || "?"}`);
       }
       return;
     }
@@ -82,7 +85,7 @@ function main() {
 
   if (unresolved.length) {
     throw new Error(
-      `Cannot mark unresolved generated image(s) ready: ${unresolved.join(", ")}`,
+      `Cannot mark unresolved generated image(s) ready (required): ${unresolved.join(", ")}`,
     );
   }
   const generatedReady = imagePlan.some(
@@ -101,7 +104,7 @@ function main() {
     fs.writeFileSync(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     fs.renameSync(temporaryPath, manifestPath);
   }
-  console.log(JSON.stringify({ ok: true, manifest: manifestPath, changed }, null, 2));
+  console.log(JSON.stringify({ ok: true, manifest: manifestPath, changed, deferred }, null, 2));
 }
 
 try {

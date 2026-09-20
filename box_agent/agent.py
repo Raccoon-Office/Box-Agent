@@ -8,6 +8,7 @@ giving adapters one stable entry point for configuring and running a turn.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import logging
 import sys
@@ -25,6 +26,7 @@ from .events import (
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
+    LLMOutputEvent,
     LogFileEvent,
     MemoryProposalEvent,
     PermissionRequestEvent,
@@ -44,7 +46,7 @@ from .logger import AgentLogger
 from .kernel.ports import KernelServices
 from .runtime import run_agent_loop
 from .schema import Message
-from .session_log import SessionLog
+from .session_log import SessionLog, SessionLogReplayError
 from .tools.base import Tool, ToolResult, build_tool_name_index
 from .tools.local_tool_exposure import LocalToolExposurePolicy
 from .tools.mcp_tool_catalog import MCPToolCatalog, get_mcp_tool_catalog
@@ -55,6 +57,7 @@ from .tools.mcp_tool_search import (
 )
 from .skill_runtime import SkillRuntime
 from .skill_dependencies import SkillDependencyError
+from .skill_restore import select_restore_records
 from .tool_result_storage import ToolResultStorage
 from .cli_renderer import CliRenderer, Colors, _format_size, render_agent_events
 from .session_continuation import ContinuationMessage
@@ -105,6 +108,7 @@ class AgentRunOptions:
     cache_fingerprint_sink: Callable[[dict[str, Any]], None] | None = None
     current_turn_text: str | None = None
     kernel_services: KernelServices | None = None
+    run_control: Any | None = None
     plugins: tuple[Any, ...] = ()
 
 
@@ -606,9 +610,17 @@ class Agent:
         self.session_log = session_log
         self._pending_skill_restore: list[dict[str, Any]] = []
         self._skill_persistence_pending = False
+        self._persisted_active_skill_records: list[dict[str, Any]] = []
+        self._session_surface_replay_failed = False
         self.session_id = session_id.strip()
-        if self.session_log is not None:
-            projection = self.session_log.replay()
+        # ``replay`` is an optional native SessionStorePort capability. A
+        # third-party Store that only implements the minimal contract
+        # (append / append_unlogged_messages / replace_surface / flush) has
+        # nothing to restore here; the caller supplies the live surface
+        # directly. Feature-detect so such a Store does not crash construction.
+        _replay = getattr(self.session_log, "replay", None)
+        if self.session_log is not None and callable(_replay):
+            projection = _replay()
             self.messages.extend(projection.messages)
             self.restore_goal(projection.goal)
             plan_tool = self.tools.get("plan_write")
@@ -619,10 +631,31 @@ class Agent:
             configure_todos = getattr(todo_tool, "configure_session_persistence", None)
             if callable(configure_todos):
                 configure_todos(self.session_log, projection.todos)
-            self.restored_skills = projection.skills
+            # Skill state is optional session data. A damaged or older log may
+            # contain null/non-object entries; ignore those entries instead of
+            # letting session construction crash before the conversation can
+            # continue. Object records that look like Skill facts still go
+            # through restore validation so invalid field types fail closed.
+            self.restored_skills = select_restore_records(projection.skills)
+            self._persisted_active_skill_records = deepcopy(self.restored_skills)
             if self.restored_skills:
                 try:
                     self.skill_runtime.restore_records(self.restored_skills)
+                    restored_names = {
+                        row["name"] for row in self.skill_runtime.log_records()
+                    }
+                    expected_names = {
+                        row["name"] for row in self.restored_skills
+                        if isinstance(row.get("name"), str)
+                    }
+                    if restored_names != expected_names:
+                        # Partial ACP restoration intentionally drops records
+                        # whose source is unavailable. Preserve the historical
+                        # snapshot as the durable state; an empty runtime is
+                        # not an explicit clear operation.
+                        self._persisted_active_skill_records = deepcopy(
+                            self.skill_runtime.log_records()
+                        )
                 except SkillDependencyError as exc:
                     if exc.code != "SKILL_PROVIDER_UNAVAILABLE":
                         raise
@@ -632,6 +665,20 @@ class Agent:
         else:
             self.restored_skills = []
         self._sync_child_system_prompt()
+
+    @property
+    def thinking_enabled(self) -> bool:
+        return self._thinking_enabled
+
+    @thinking_enabled.setter
+    def thinking_enabled(self, enabled: bool) -> None:
+        self._thinking_enabled = enabled
+        # ACP can inspect attachments before run_events starts. Keep the proxy
+        # aligned when the session is created or its thinking choice changes.
+        image_tool = self.tools.get("inspect_images")
+        set_thinking = getattr(image_tool, "set_thinking_enabled", None)
+        if callable(set_thinking):
+            set_thinking(enabled)
 
     def _persist_goal(self) -> None:
         if self.session_log is None:
@@ -737,10 +784,15 @@ class Agent:
             self._skill_persistence_pending = True
             records = {row["name"]: row for row in self._pending_skill_restore}
             records.update((row["name"], row) for row in self.skill_runtime.log_records())
+            ordered = sorted(records.values(), key=lambda row: row["loadOrder"])
+            if ordered == self._persisted_active_skill_records:
+                self._skill_persistence_pending = False
+                return
             self.session_log.append("skill/change", {
-                "skills": sorted(records.values(), key=lambda row: row["loadOrder"]),
+                "skills": ordered,
             })
             self.session_log.flush()
+            self._persisted_active_skill_records = deepcopy(ordered)
             self._skill_persistence_pending = False
 
     def restore_active_skill_instructions(self, skills: list[tuple[str, str, str, int]]) -> None:
@@ -763,11 +815,45 @@ class Agent:
                 "estimated_tokens": estimated, "token_budget": _ACTIVE_SKILL_TOKEN_BUDGET,
                 "budget_exceeded": estimated > _ACTIVE_SKILL_TOKEN_BUDGET}
 
-    def add_user_message(self, content: str):
-        """Add a user message to history."""
+    def _restore_session_surface_after_replay_failure(self) -> None:
+        """Restore committed history before accepting input or starting a turn."""
+        if self._session_surface_replay_failed:
+            try:
+                replay = getattr(self.session_log, "replay", None)
+                projection = replay() if callable(replay) else None
+                if projection is None:
+                    raise RuntimeError("session log is not configured")
+                self.messages[:] = [self.messages[0], *projection.messages]
+                self._session_surface_replay_failed = False
+            except Exception as exc:
+                raise SessionLogReplayError(
+                    "the previous compact commit could not be replayed; refusing to continue"
+                ) from exc
+
+    def add_user_message(self, content: str) -> None:
+        """Add a user message and materialize selected Skills beside it."""
+        self._restore_session_surface_after_replay_failure()
         if self.goal is not None and self.goal.status == "active":
             content = self._apply_goal_context(content)
+        # Explicit slash/host selection is resolved at the message boundary.
+        # The resulting runtime message becomes ordinary durable history, so
+        # ContextEngine does not need to rediscover Skill bodies per request.
+        materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
+        materialized = materialize(self.messages) if callable(materialize) else ()
         self.messages.append(Message(role="user", content=content))
+        if materialized:
+            skill_messages = []
+            for _name, skill_content in materialized:
+                skill_messages.append(Message(role="user", source="runtime", content=skill_content))
+            self.messages.extend(skill_messages)
+            if self.session_log is not None:
+                self._persist_unlogged_messages(
+                    turn=self._next_session_turn(), step=None,
+                )
+                self.session_log.flush()
+            defer_ack = getattr(self.skill_runtime, "defer_materialized_acknowledgement", None)
+            if callable(defer_ack):
+                defer_ack(skill_messages)
 
     def seed_continuation_messages(
         self, messages: tuple[ContinuationMessage, ...]
@@ -999,8 +1085,19 @@ class Agent:
         if self._skill_persistence_pending:
             self._persist_active_skills()
         if self._pending_skill_restore:
-            self.skill_runtime.restore_records(self._pending_skill_restore)
+            pending = self._pending_skill_restore
+            self.skill_runtime.restore_records(pending)
             self._pending_skill_restore = []
+            # ACP may deliberately drop records whose source is unavailable.
+            # That is a partial restore, not an explicit user clear; keep the
+            # historical snapshot as the durable fact instead of appending an
+            # empty replacement at END_TURN.
+            pending_names = {row["name"] for row in pending}
+            restored_names = {row["name"] for row in self.skill_runtime.log_records()}
+            if restored_names != pending_names:
+                self._persisted_active_skill_records = deepcopy(
+                    self.skill_runtime.log_records()
+                )
         self._sync_child_system_prompt()
         self.skill_runtime.begin_turn()
         effective_options = options or self.default_run_options()
@@ -1042,6 +1139,8 @@ class Agent:
         if callable(set_child_negotiator):
             set_child_negotiator(effective_options.permission_negotiator)
 
+        self._restore_session_surface_after_replay_failure()
+
         session_turn: int | None = None
         session_step: int | None = None
         session_turn_open = False
@@ -1078,6 +1177,7 @@ class Agent:
             web_search_total_limit=effective_options.web_search_total_limit,
             token_limit=self.token_limit,
             is_cancelled=effective_options.is_cancelled,
+            run_control=effective_options.run_control,
             logger=effective_options.logger,
             workspace_dir=str(self.workspace_dir),
             permission_negotiator=effective_options.permission_negotiator,
@@ -1125,6 +1225,20 @@ class Agent:
         events = run_agent_loop(**run_arguments)
         try:
             async for event in events:
+                # LLMOutputEvent is emitted only after the kernel has flushed
+                # request/context and invoked the projection commit callback.
+                # Acknowledge materialized Skill messages at this boundary so
+                # ACP can attribute preloaded usage before it handles the
+                # response, while cancelled or blocked requests remain
+                # unacknowledged.
+                if isinstance(event, LLMOutputEvent):
+                    acknowledge = getattr(
+                        self.skill_runtime,
+                        "acknowledge_pending_materialized",
+                        None,
+                    )
+                    if callable(acknowledge):
+                        acknowledge()
                 if self.session_log is not None and session_turn is not None:
                     if isinstance(event, (ContentEvent, ThinkingEvent)):
                         self.session_log.append(
@@ -1164,6 +1278,16 @@ class Agent:
                             self.session_log.flush()
                             session_step_open = False
                     elif isinstance(event, DoneEvent):
+                        if event.stop_reason is StopReason.END_TURN:
+                            acknowledge = getattr(
+                                self.skill_runtime,
+                                "acknowledge_pending_materialized",
+                                None,
+                            )
+                            if callable(acknowledge):
+                                acknowledge()
+                            if self.session_log is not None:
+                                self._persist_active_skills()
                         self._persist_unlogged_messages(
                             turn=session_turn,
                             step=session_step,
@@ -1198,6 +1322,13 @@ class Agent:
                                 discarded,
                             )
                 yield event
+        except SessionLogReplayError:
+            # The compact replacement is durable, but this Agent's in-memory
+            # surface is no longer trustworthy.  Do not let the interruption
+            # finalizer append the stale surface as a completed turn.
+            session_turn_open = False
+            self._session_surface_replay_failed = True
+            raise
         finally:
             try:
                 close = getattr(events, "aclose", None)

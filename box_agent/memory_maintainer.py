@@ -197,7 +197,7 @@ class MemoryMaintainer:
         active: list[ContextEntry] = []
         to_archive: list[ContextEntry] = []
         for e in entries:
-            if e.hits == 0 and _parse_iso_utc(e.last_used) < threshold:
+            if e.entry_type != "correction" and e.hits == 0 and _parse_iso_utc(e.last_used) < threshold:
                 to_archive.append(e)
             else:
                 active.append(e)
@@ -229,7 +229,7 @@ class MemoryMaintainer:
         keep: list[ContextEntry] = []
         purge: list[ContextEntry] = []
         for e in entries:
-            if _parse_iso_utc(e.last_used) < threshold:
+            if e.entry_type != "correction" and _parse_iso_utc(e.last_used) < threshold:
                 purge.append(e)
             else:
                 keep.append(e)
@@ -263,7 +263,7 @@ class MemoryMaintainer:
         # Priority key: (hits desc, created asc) — most-used + oldest wins.
         token_cache: list[set[str]] = [_tokens(e.content) for e in entries]
         indices = sorted(
-            range(len(entries)),
+            (i for i, entry in enumerate(entries) if entry.entry_type != "correction"),
             key=lambda i: (-entries[i].hits, entries[i].created),
         )
 
@@ -385,23 +385,30 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
             return
 
         entries = await asyncio.to_thread(self._mgr.read_all_context_entries)
-        if len(entries) < 2:
+        # Corrections keep structured lifecycle metadata (entry_type/status/
+        # fingerprint/subject). Generic compaction rebuilds via _new_entry and
+        # would drop those fields, so keep them entirely out of this phase.
+        def _is_correction(entry: ContextEntry) -> bool:
+            return (entry.entry_type or "") == "correction"
+
+        ordinary = [e for e in entries if not _is_correction(e)]
+        if len(ordinary) < 2:
             return
 
         # Trigger only when over capacity (entry count or token budget).
         max_entries = self._cfg.memory_context_max_entries
         max_tokens = self._cfg.memory_context_max_tokens
-        if len(entries) <= max_entries and _estimate_tokens(entries) <= max_tokens:
+        if len(ordinary) <= max_entries and _estimate_tokens(ordinary) <= max_tokens:
             return
 
         from .schema import Message as Msg
 
         bullet_lines = [
             f"- id={e.id}, hits={e.hits}: {e.content.strip()}"
-            for e in entries
+            for e in ordinary
         ]
         user_prompt = "请整理以下 {n} 条记忆：\n\n{body}".format(
-            n=len(entries), body="\n".join(bullet_lines),
+            n=len(ordinary), body="\n".join(bullet_lines),
         )
 
         try:
@@ -423,14 +430,14 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
             logger.exception("MemoryMaintainer: compact LLM call failed; keeping original")
             return
 
-        valid_ids = {e.id for e in entries}
+        valid_ids = {e.id for e in ordinary}
         parsed = _parse_compact_output(response.content or "", valid_ids)
         if parsed is None:
             logger.warning("MemoryMaintainer: compact output invalid; keeping original")
             return
 
         trash_dir = self._mgr.trash_dir / now.strftime("%Y-%m-%d") / "compact"
-        snapshot_by_id = {e.id: e for e in entries}
+        snapshot_by_id = {e.id: e for e in ordinary}
 
         def _commit_compaction() -> tuple[int, int] | None:
             from .memory import _new_entry as _make_entry
@@ -470,12 +477,18 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
                         new.core_status = "rejected"
                     compacted.append(new)
 
-                # Entries added after the LLM snapshot were never part of its
-                # input and must survive the replacement.
-                concurrent = [
-                    e for e in current_entries if e.id not in snapshot_by_id
+                # Preserve every correction entry unchanged (including inactive).
+                preserved_corrections = [
+                    e for e in current_entries if _is_correction(e)
                 ]
-                final_entries = compacted + concurrent
+                # Ordinary entries added after the LLM snapshot were never part
+                # of its input and must survive the replacement.
+                concurrent = [
+                    e
+                    for e in current_entries
+                    if e.id not in snapshot_by_id and not _is_correction(e)
+                ]
+                final_entries = compacted + concurrent + preserved_corrections
 
                 trash_dir.mkdir(parents=True, exist_ok=True)
                 stamp = _now_iso_stamp().replace(":", "-")
@@ -626,7 +639,8 @@ class MemoryMaintainer_Conflict:  # placeholder — bound onto MemoryMaintainer 
         if not self._cfg.memory_conflict_resolution_enabled or self._llm is None:
             return
 
-        entries = await asyncio.to_thread(self._mgr.read_all_context_entries)
+        entries = [entry for entry in await asyncio.to_thread(self._mgr.read_all_context_entries)
+                   if entry.entry_type != "correction"]
         if len(entries) < 2:
             return
 

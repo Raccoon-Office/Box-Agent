@@ -458,6 +458,24 @@ def test_compaction_replacement_commits_exact_new_surface_and_keeps_old_events(
     log.close()
 
 
+def test_user_message_source_is_persisted_and_replayed(tmp_path):
+    log = SessionLog.create(tmp_path, session_id="message-source", cwd=tmp_path)
+    log.append_unlogged_messages(
+        [
+            Message(role="user", content="real request", source="user"),
+            Message(role="user", content="runtime update", source="runtime"),
+        ],
+        turn=1,
+        step=1,
+    )
+    log.flush()
+
+    records = [event for event in log.events if event["type"] == "user/message"]
+    assert [event["data"]["source"] for event in records] == ["user", "runtime"]
+    assert [message.source for message in log.replay().messages] == ["user", "runtime"]
+    log.close()
+
+
 def test_live_surface_rewrite_is_reconciled_without_failing_the_task(
     tmp_path,
     caplog,

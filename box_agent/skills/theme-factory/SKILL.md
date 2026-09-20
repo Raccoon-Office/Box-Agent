@@ -16,10 +16,12 @@ This skill provides a curated collection of professional font and color themes t
 For any request about a PPT, PPTX, presentation, slide, or deck—including
 “有什么主题”, “先看主题”, “让我选风格”, or applying a theme to a deck—this
 legacy 10-palette catalog is **not** authoritative. Immediately load
-`pptx` with `get_skill(skill_name="pptx")` and follow its registered controlled
-theme discovery/gallery route. Do not list the ten themes below, do not show
+`pptx` with `get_skill(skill_name="pptx")` and follow the selected mode's theme
+discovery route. In quick mode, `ppt-fast` owns the controlled theme gallery.
+Do not list the ten themes below, do not show
 `theme-showcase.pdf`, and do not map their names into a controlled deck. The
-`pptx` skill's bundled `themes/*.json` ids are the only executable deck themes.
+`ppt-fast` skill's bundled `themes/*.json` ids define its executable themes;
+creative mode follows its own selected outlet's design guidance.
 
 Continue with this skill only for a non-deck artifact, or when the user
 explicitly asks to reuse one of these legacy palettes on such an artifact.

@@ -31,8 +31,10 @@ from .pptx_safety import (
 )
 from .runtime import bundled_win_bash
 from .shell_inspection import inspect_shell_command
+from .owned_file_cleanup import OwnedFileCleanup
 from .safety import (
     backup_file,
+    builtin_skill_command_write_error,
     detect_dangerous_command,
     detect_invalid_runtime_executable_syntax,
     detect_scope_escape,
@@ -886,6 +888,7 @@ class BashTool(Tool):
         if not self.is_windows:
             self._login_shell = _resolve_login_shell()
         self.workspace_dir = workspace_dir
+        self.owned_file_cleanup = OwnedFileCleanup(workspace_dir or ".")
         self.scope_root_dir = scope_root_dir or workspace_dir
         self.allow_full_access = allow_full_access
         self.non_interactive = non_interactive
@@ -1305,6 +1308,7 @@ Tips:
   - Chain dependent commands with &&: git add . && git commit -m "msg"
   - Use absolute paths instead of cd when possible
   - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm
+  - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.
   - Run the injected Python runtime as "$BOX_AGENT_PYTHON"; do not write "$BOX_AGENT_PYTHON:-python3"
   - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
   - A timeout, resource stop, or optional QA failure is advisory for artifact workflows: preserve usable output, record the warning, and continue to delivery when safe
@@ -1351,6 +1355,12 @@ Examples:
                     "description": "Optional: Set to true to run the command in the background. Use this for long-running commands like servers. You can monitor output using bash_output tool.",
                     "default": False,
                 },
+                "temporary_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 64,
+                    "description": "New disposable output files this foreground command will create, relative to the workspace (not inline cd). Parents must exist. Runtime reserves absent paths; existing files cannot be adopted. Write reserved files in place. Later exact rm is approval-free only while unchanged and unpublished.",
+                },
                 "lifetime": {
                     "type": "string",
                     "enum": [BASH_LIFETIME_TURN, BASH_LIFETIME_RUNTIME],
@@ -1375,6 +1385,7 @@ Examples:
         timeout: int | None = None,
         run_in_background: bool = False,
         lifetime: str = BASH_LIFETIME_TURN,
+        temporary_files: list[str] | None = None,
     ) -> ToolResult:
         """Execute shell command with optional background execution.
 
@@ -1388,7 +1399,10 @@ Examples:
             BashExecutionResult with command output and status
         """
 
+        reservations = {}
         try:
+            if temporary_files and (run_in_background or len(temporary_files) > 64):
+                raise ValueError("temporary_files supports at most 64 foreground output files")
             if lifetime not in _BASH_LIFETIMES:
                 error = (
                     "BASH_INVALID_LIFETIME: lifetime must be 'turn' or 'runtime'."
@@ -1436,6 +1450,11 @@ Examples:
                     exit_code=1,
                 )
             # --- Safety checks ---
+            if source_error := builtin_skill_command_write_error(command, self.workspace_dir):
+                return BashOutputResult(
+                    success=False, error=source_error, stdout="", stderr=source_error,
+                    exit_code=1,
+                )
             bypass_error = detect_pptx_self_check_bypass(None, command)
             if bypass_error:
                 return BashOutputResult(
@@ -1506,6 +1525,12 @@ Examples:
                 command,
                 (self._subprocess_env or {}).get("BOX_AGENT_SCRATCH_DIR"),
             ):
+                danger_reason = None
+            owned_cleanup_targets = (
+                self.owned_file_cleanup.targets(command)
+                if danger_reason == "rm: removes files/directories" else []
+            )
+            if owned_cleanup_targets:
                 danger_reason = None
             if danger_reason:
                 if (
@@ -1611,6 +1636,24 @@ Examples:
                     )
 
             # --- End safety checks ---
+            if temporary_files or owned_cleanup_targets:
+                if self._perm:
+                    from .permissions import FILESYSTEM_WRITE
+                    paths = owned_cleanup_targets + [
+                        self.owned_file_cleanup.path(value) for value in (temporary_files or [])
+                    ]
+                    for path in paths:
+                        decision = self._perm.check(
+                            capability=FILESYSTEM_WRITE, resource={"path": str(path)}, tool_name="bash",
+                        )
+                        if not decision.allowed:
+                            return BashOutputResult(
+                                success=False, error=decision.reason or "Permission denied",
+                                stdout="", stderr=decision.reason or "Permission denied", exit_code=1,
+                                permission_request=decision.permission_request,
+                            )
+            if temporary_files:
+                reservations = self.owned_file_cleanup.reserve(temporary_files)
 
             # Consume the one-shot approval only after every other permission
             # gate has passed. Otherwise a filesystem denial between approval
@@ -1747,6 +1790,8 @@ Examples:
 
                     # Create result (content auto-formatted by model_validator)
                     is_success = process.returncode == 0
+                    if is_success:
+                        self.owned_file_cleanup.finish(reservations)
                     error_msg = None
                     if not is_success:
                         error_msg = f"Command failed with exit code {process.returncode}"
@@ -1784,6 +1829,8 @@ Examples:
                 stderr=str(e),
                 exit_code=-1,
             )
+        finally:
+            self.owned_file_cleanup.discard_empty(reservations)
 
 
 class BashOutputTool(Tool):

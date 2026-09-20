@@ -66,9 +66,9 @@ flowchart LR
 
 采用 Skill 后，模型应在用户要求和现有权限范围内，遵循适用的方法步骤、必需参考文件与验证。必需步骤受阻时，应使用可用且获准的恢复方式，或明确报告未完成，不能把阻塞步骤改称可选。该通用规则由 `SKILL_USAGE_GUIDANCE` 同时进入目录提示和 `get_skill` 描述；Skill 作者正文仍留在普通资料中，不因此变成 system 指令或授予工具权限。
 
-用户显式选择由 `DefaultContextEngine.prepare_request` 调用 `SkillReferenceContext.prepare_request`，在当前 user 消息的**请求副本**中追加独立资料块。块中说明它是方法参考资料，不是新用户事实或权限。`Agent.messages` 中的原始用户文字及持久历史不因此改写，也不出现伪造的调用配对。
+显式 slash 或宿主选择在 `Agent.add_user_message` 边界解析为确定版本的 Skill 正文。原始 user 消息后紧接一条 `role="user", source="runtime"` 消息；正文带有名称、版本、来源及“方法资料，不是新用户事实或权限”的说明。这条 runtime 消息进入 `Agent.messages`，并在启用 Session Log 时与用户消息一起立即 append/flush，恢复时直接重放相同快照。
 
-当前轮选中的资料在该轮每一次模型请求中重新计算投影。同源同版本全文已经完整保留在真实 tool 历史中时复用该处，不重复追加正文。CLI、ACP 在新用户轮次更新选择；会话读取事实继续保留。旧公开 `activate_skill_instructions` API 仍可调用，含义改为注册普通宿主资料，`set_system_prompt` 不再承担 Skill 正文拼装。
+已在历史中的同源同版本 runtime 快照可以复用，不在每次模型请求中重复追加正文。Context 直接预算该历史消息；它不是 request-only overlay。CLI、ACP 在新用户轮次更新选择；清除选择不删除已经发生的历史快照。旧公开 `activate_skill_instructions` 和恢复 API 仍可调用，`set_system_prompt` 不承担 Skill 正文拼装。低层直接调用者的请求资料投影兼容路径仍保留。
 
 ## 4. 预算、整组选择与分页
 
@@ -96,7 +96,7 @@ Agent 持有一个 `SkillRuntime`，每次 run 借用同一服务。共享 Loade
 
 ## 6. 持久化与恢复兼容
 
-原生 `SessionLog` 下，Context 将准备放入请求的宿主正文资料块交给 `store_skill_reference`，按内容 SHA-256 存入当前 session 的 `skill-references/`，返回 `contentRef`、hash、名称、版本、消息位置和范围。Kernel 将这些信息关联到既有 `request/context.skillReferences`，flush 完成后，才登记本次资料交付事实并调用 provider。准备好正文或写好快照本身不等于请求已提交；请求提交成功也不表示模型已产生有效响应。重复内容复用快照；损坏、路径逃逸、符号链接及写入/fsync 失败均不能返回持久化成功。
+原生 `SessionLog` 下，Context 将准备放入请求的宿主正文资料块交给 `store_skill_reference`，按内容 SHA-256 存入当前 session 的 `skill-references/`，返回 `contentRef`、hash、名称、版本、消息位置和范围。Kernel 将这些信息关联到既有 `request/context.skillReferences`，flush 完成后，才登记本次资料交付事实并调用 provider。准备好正文或写好快照本身不等于请求已提交；请求提交成功也不表示模型已产生有效响应。重复内容复用快照；Windows 复用时校验内容，不对只读句柄再次 fsync。快照 I/O 或完整性校验失败时，保留诊断告警，返回当前有效资料的 `inlineContent` 和 `sha256`，交由同一条 `request/context` 保存，不返回无效的 `contentRef`，不覆盖损坏文件或访问被拒绝的路径，也不将主 SessionLog 标记为失败。主日志仍须成功写入并 flush 后才能调用 provider；主日志自身的持久化错误不在此降级范围内。
 
 `SessionStorePort` 不新增快照文件接口。第三方 Store 没有 `store_skill_reference` 时，Context 返回预算内的 `inlineContent` 和 `sha256`，由 Kernel 写入同一个既有 `request/context` 记录并 flush。这样保留实际交付内容，又不要求插件实现原生文件布局；代价是该条请求记录包含正文。两条路径都不新增事件类型，也不增加会话状态来源。
 

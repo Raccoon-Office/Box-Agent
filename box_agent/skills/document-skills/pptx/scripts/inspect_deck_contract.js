@@ -69,8 +69,8 @@ const AUTO_INNER_IMAGE_LAYOUT_IDS = new Set([
 ]);
 const AUTO_INNER_IMAGE_PROMOTION_BLOCK_RE = /(?:纯文字|仅文字|不要图片|不用图片|无图|text[- ]only|without\s+images?|真实|官方|实拍|原图|截图|照片|肖像|人物|客户素材|source[- ]backed|documentary)/i;
 const AUTO_INNER_IMAGE_DATA_RE = /(?:市场规模|增长|收入|营收|融资|成本|财务|排名|占比|趋势|KPI|指标|数据|benchmark|competition|growth|revenue|financial|cost|metrics?|data)/i;
-const AUTO_COVER_IMAGE_OPTOUT_RE = /(?:不要|无需|不需要|不得|禁止|不)(?:生成|使用|添加)?(?:图片|生图|视觉图)|(?:纯文字|仅文字)|\b(?:no\s+(?:generated\s+)?images?|without\s+images?|text[- ]only)\b/i;
-const AUTO_SLIDE_LOCAL_IMAGE_OPTOUT_RE = /(?:第?\s*\d{1,2}\s*页|(?:页面|slide)\s*[:：#-]?\s*\d{1,2}|封面|首页|cover)[^。；;!?！？\n]{0,48}(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)|(?:纯文字|仅文字|无图片|不要图片|不使用图片|text[- ]only|without\s+images?)[^。；;!?！？\n]{0,48}(?:封面|首页|cover)/i;
+const AUTO_COVER_IMAGE_OPTOUT_RE = /(?:不要|不用|无需|不需要|不得|禁止|不)(?:生成|使用|添加)?(?:图片|生图|视觉图)|(?:纯文字|仅文字)|\b(?:no\s+(?:generated\s+)?images?|without\s+images?|text[- ]only)\b/i;
+const AUTO_SLIDE_LOCAL_IMAGE_OPTOUT_RE = /(?:第?\s*\d{1,2}\s*页|(?:页面|slide)\s*[:：#-]?\s*\d{1,2}|封面|首页|cover)[^。；;!?！？\n]{0,48}(?:纯文字|仅文字|无图片|不要图片|不用图片|不使用图片|text[- ]only|without\s+images?)|(?:纯文字|仅文字|无图片|不要图片|不用图片|不使用图片|text[- ]only|without\s+images?)[^。；;!?！？\n]{0,48}(?:封面|首页|cover)/i;
 const STRUCTURED_NEXT_STEPS_MATRIX_RE = /(?:表格|矩阵|table|matrix)|(?:(?:执行)?角色|负责人|责任人|owners?|assignees?|responsibilit(?:y|ies))[^\n。；;]{0,48}(?:姓名|成员|人员|names?|members?)/i;
 const THEME_ID_ALIASES = Object.freeze({
   carnival: "bold-poster",
@@ -452,6 +452,8 @@ function splitDefaultRuntimeSourceFacts(value) {
 function parseArgs(argv) {
   const opts = {
     layoutIds: [],
+    designPlan: null,
+    designInput: null,
     themeId: "auto",
     themeLocked: false,
     themeModelChoice: null,
@@ -462,7 +464,7 @@ function parseArgs(argv) {
     designReviewReason: null,
     modelPalette: null,
     modelStyleOverrides: null,
-    designSeed: null,
+    compositionVariant: null,
     family: null,
     title: "Untitled deck",
     truthMode: "source_bound",
@@ -483,7 +485,13 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = argv[index + 1];
-    if (arg === "--theme" && value) {
+    if (arg === "--design-plan" && value) {
+      opts.designPlan = value;
+      index += 1;
+    } else if (arg === "--design-input" && value) {
+      opts.designInput = value;
+      index += 1;
+    } else if (arg === "--theme" && value) {
       opts.themeId = value;
       index += 1;
     } else if (arg === "--lock-theme") {
@@ -534,8 +542,8 @@ function parseArgs(argv) {
         [match[1]]: match[2],
       };
       index += 1;
-    } else if (arg === "--design-seed" && value) {
-      opts.designSeed = value;
+    } else if (arg === "--composition-variant" && value) {
+      opts.compositionVariant = value;
       index += 1;
     } else if (arg === "--family" && value) {
       opts.family = value;
@@ -597,14 +605,14 @@ function parseArgs(argv) {
       opts.rankThemes = true;
     } else if (arg === "--help" || arg === "-h") {
       console.log(
-        "Usage: inspect_deck_contract.js [LAYOUT_ID ...] " +
+        "Usage: inspect_deck_contract.js [--design-plan design_plan.json --design-input design_input.json] [LAYOUT_ID ...] " +
         "[--theme auto|THEME_ID] [--lock-theme] [--theme-model-choice THEME_ID] " +
         "[--theme-model-reason REASON] [--theme-model-confidence low|medium|high] " +
         "[--theme-model-identity BASIS] [--palette-background HEX --palette-text HEX --palette-primary HEX " +
         "--palette-accent HEX [--palette-secondary HEX] [--palette-accent-usage USAGE]] " +
         "[--style-override KEY=VALUE ...] " +
         "[--design-review-verdict accepted|revised|unavailable --design-review-reason REASON] " +
-        "[--family FAMILY_ID] [--design-seed SEED] [--title TITLE] [--truth-mode MODE] " +
+        "[--family FAMILY_ID] [--composition-variant VARIANT] [--title TITLE] [--truth-mode MODE] " +
         "[--image-mode auto|creative_image_mode] [--no-images] " +
         "[--image-asset SLIDE:SLOT=PATH ...] " +
         "[--fact TEXT ...] [--research-fact TEXT ...] [--assumption TEXT ...] " +
@@ -1215,7 +1223,7 @@ function validateOutlineLayoutFit(orderedLayouts, outlineBinding, layoutPolicy =
       outlineBinding.sourceMode,
       layoutPolicy
     );
-    if (semantic && !semantic.allowed_layout_ids.includes(layout.id)) {
+    if (!layoutPolicy.layoutHintsOnly && semantic && !semantic.allowed_layout_ids.includes(layout.id)) {
       issues.push(
         `slide ${index + 1}: ${layout.id} does not express outline visual intent ` +
         `${JSON.stringify(outlineBinding.slides[index].visual)}; use one of ` +
@@ -1659,6 +1667,40 @@ function findDownstreamArtifacts(deckFile) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
+  let independentDesign = null;
+  if (!opts.designPlan && opts.out) {
+    const inputPath = path.join(path.dirname(resolveArtifactPath(opts.out)), "design_input.json");
+    if (fs.existsSync(inputPath) && JSON.parse(fs.readFileSync(inputPath, "utf8")).protocol_version === 2) {
+      throw new Error("An independent design request is active here; accept the child response and use --design-plan. Main-agent visual overrides are not allowed.");
+    }
+  }
+
+  if (opts.designPlan) {
+    if (opts.layoutIds.length || opts.themeId !== "auto" || opts.themeLocked || opts.family
+      || opts.compositionVariant || opts.themeModelChoice || opts.modelPalette || opts.modelStyleOverrides
+      || opts.designReviewVerdict || opts.rankThemes || opts.listThemes) {
+      throw new Error("--design-plan owns all visual choices; do not combine it with theme, family, layout or review overrides");
+    }
+    const plans = require("./design_plan_core.js");
+    independentDesign = plans.readValidatedPlan(opts.designPlan,
+      opts.designInput || path.join(path.dirname(resolveArtifactPath(opts.designPlan)), "design_input.json"));
+    if (opts.outline && resolveArtifactPath(opts.outline) !== independentDesign.outline_file) {
+      throw new Error("--outline must match the validated design input");
+    }
+    opts.outline = independentDesign.outline_file;
+    opts.title = independentDesign.input.title;
+    opts.layoutIds = independentDesign.plan.slides.map(slide => slide.layout_id);
+    opts.themeId = independentDesign.preset.theme.id;
+    opts.themeLocked = true;
+    opts.family = independentDesign.preset.design.family;
+    opts.compositionVariant = independentDesign.preset.design.variant;
+    opts.noImages = opts.noImages || hasDeckWideImageOptOut([
+      independentDesign.input.source_text || JSON.stringify(independentDesign.input.outline.design_requirements || {}),
+    ].join("\n"));
+  } else if (opts.designInput) {
+    throw new Error("--design-input requires --design-plan");
+  }
+
   if (opts.listThemes && opts.rankThemes) {
     throw new Error("Use either --list-themes or --rank-themes, not both");
   }
@@ -1736,7 +1778,7 @@ function main() {
       || opts.themeLocked
       || opts.themeModelChoice
       || opts.family
-      || opts.designSeed
+      || opts.compositionVariant
       || opts.noImages
       || opts.imageAssets.length
       || opts.requiredFields.length
@@ -1816,6 +1858,7 @@ function main() {
   const assumptionBinding = validateAssumptionsAgainstRuntime(assumptions);
   const truthAdvisories = [...assumptionBinding.issues];
   const layoutPolicy = {
+    layoutHintsOnly: independentDesign?.plan.layout_hints_only === true,
     compositionFamily: opts.family || null,
     userSourceText: runtimeBinding.source_text || "",
     allowIllustrativeQuantitative: (
@@ -1835,19 +1878,23 @@ function main() {
         : "cards-grid-v1";
     });
   }
-  const layoutResolution = promoteOrdinaryInnerImageLayout(
-    normalizeOutlineDrivenLayoutIds(
-      opts.layoutIds,
-      outlineBinding,
-      layoutPolicy
-    ),
-    outlineBinding,
-    { imageMode: opts.imageMode, noImages: generationForbidden }
+  const normalizedLayoutPlan = layoutPolicy.layoutHintsOnly
+    ? { layoutIds: opts.layoutIds.slice(), normalizations: [] }
+    : normalizeOutlineDrivenLayoutIds(opts.layoutIds, outlineBinding, layoutPolicy);
+  if (independentDesign) {
+    normalizedLayoutPlan.layoutIds.forEach((layoutId, index) => {
+      if (layoutId !== opts.layoutIds[index]) {
+        throw new Error(`design_plan.slides.${index}.layout_id: conflicts with bound content; expected ${layoutId}, got ${opts.layoutIds[index]}`);
+      }
+    });
+  }
+  const layoutResolution = independentDesign ? normalizedLayoutPlan : promoteOrdinaryInnerImageLayout(
+    normalizedLayoutPlan, outlineBinding, { imageMode: opts.imageMode, noImages: generationForbidden }
   );
-  const authoringPlan = expandOutlineDrivenPlan(
-    layoutResolution.layoutIds,
-    outlineBinding
-  );
+  const authoringPlan = layoutPolicy.layoutHintsOnly
+    ? outlineBinding.slides.map((slide, index) => ({ layoutId: opts.layoutIds[index], outlineSlide: slide,
+      boundOutlineSlide: slide, sourceOutlinePage: index + 1 }))
+    : expandOutlineDrivenPlan(layoutResolution.layoutIds, outlineBinding);
   const effectiveLayoutIds = authoringPlan.map(entry => {
     const layoutId = entry.layoutId;
     if (!opts.noImages) return layoutId;
@@ -1867,6 +1914,10 @@ function main() {
     }
     return layout.noImageFallbackLayoutId;
   });
+  if (independentDesign && (effectiveLayoutIds.length !== opts.layoutIds.length
+    || effectiveLayoutIds.some((id, index) => id !== opts.layoutIds[index]))) {
+    throw new Error("design_plan.slides: layout capacity or media constraints require a revised design; no automatic replacement or page splitting was applied");
+  }
   const orderedLayouts = effectiveLayoutIds.map(layoutId => getLayout(layoutId));
   const authoringSlides = authoringPlan.map(entry => entry.outlineSlide);
   validateOutlineLayoutFit(
@@ -1874,8 +1925,12 @@ function main() {
     outlineBinding ? { ...outlineBinding, slides: authoringSlides } : null,
     layoutPolicy
   );
-  const themeResolution = selectTheme(opts, designContext);
-  const inferredDesignContract = inferDesignContract(
+  const themeResolution = independentDesign ? {
+    theme: independentDesign.preset.theme, normalization: null,
+    selection: { theme_id: independentDesign.preset.theme.id, source: "independent_design",
+      reason: independentDesign.plan.reason },
+  } : selectTheme(opts, designContext);
+  const inferredDesignContract = independentDesign ? independentDesign.design_contract : inferDesignContract(
     designContext,
     outlineBinding ? authoringSlides : []
   );
@@ -1955,7 +2010,7 @@ function main() {
         }
         : {}),
     };
-  const design = createDeckDesign(theme, opts.designSeed, designSelection.family);
+  const design = createDeckDesign(theme, opts.compositionVariant, designSelection.family);
   const selectedLayouts = [...new Set(effectiveLayoutIds)].map(layoutId => getLayout(layoutId));
   const requiredFieldNormalizations = [];
   const requiredFieldRelaxations = [];
@@ -2057,6 +2112,12 @@ function main() {
       }),
     }
     : null;
+  if (skeleton && independentDesign) {
+    skeleton.design_plan = require("./design_plan_core.js").bindingFor(independentDesign.plan);
+    skeleton.slides.forEach((slide, index) => {
+      Object.assign(slide.props, independentDesign.plan.slides[index].visual_options);
+    });
+  }
   if (skeleton) {
     const validation = validateAndNormalizeDeck(skeleton);
     if (!validation.ok) {
@@ -2250,6 +2311,24 @@ function main() {
     fs.writeFileSync(contractReport, `${JSON.stringify(reportPayload, null, 2)}\n`, "utf8");
   }
 
+  if (independentDesign) {
+    const { visualFields } = require("./design_plan_core.js");
+    console.log(JSON.stringify({ ok: true, deck_file: deckFile, image_manifest: imageManifest,
+      contract_report: contractReport, design_plan_hash: skeleton.design_plan.plan_hash,
+      slides: skeleton.slides.map((slide, index) => {
+        const layout = getLayout(slide.layout_id);
+        const visual = visualFields(layout);
+        return { id: slide.id, layout_id: slide.layout_id,
+          content_fields: Object.fromEntries(Object.entries(layout.fields).filter(([key]) => !visual[key])),
+          content_bindings: independentDesign.plan.slides[index].content_bindings,
+          outline: authoringSlides[index], media_slots: layout.mediaSlots,
+          content_defaults: Object.fromEntries(Object.entries(slide.props).filter(([key]) => !visual[key])),
+        };
+      }),
+      next: "Fill content fields and bind media through deck.patch.json; visual options are owned by the design plan.",
+    }));
+    return;
+  }
   console.log(JSON.stringify({
     contract_version: 2,
     authoring_rules: {
@@ -2279,7 +2358,7 @@ function main() {
         selection_source: designSelection.source,
         selected_direction: directionForFamily(design.family),
         selected_family: design.family,
-        reproducible_scaffold: "Pass --design-seed SEED only for tests or an intentionally reproducible new deck.",
+        reproducible_scaffold: "Composition variants are persisted directly; repeated rendering preserves them.",
       },
       ...(themeSelection.source !== "fallback_default"
         ? {

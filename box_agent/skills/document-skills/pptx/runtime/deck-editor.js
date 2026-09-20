@@ -180,7 +180,9 @@
     const layout = getLayout(modelSlide.layout_id);
     if (!layout || typeof layout.render !== "function") return null;
     const template = document.createElement("template");
-    template.innerHTML = layout.render(modelSlide, index, documentModel.design).trim();
+    const palette = documentModel.design_contract?.palette;
+    const renderContext = palette?.version === 2 ? { palette: palette.tokens, useDeckPalette: true } : null;
+    template.innerHTML = layout.render(modelSlide, index, documentModel.design, renderContext).trim();
     const element = template.content.firstElementChild;
     return element && element.matches(".slide") ? element : null;
   }
@@ -214,6 +216,9 @@
   }
 
   function emitChange(reason) {
+    // Human edits supersede the AI proposal. They remain fully editable and
+    // save normally; only subsequent automatic plan reuse is invalidated.
+    if (documentModel.design_plan) documentModel.design_plan.user_edited = true;
     revision += 1;
     saveError = false;
     modelNode.textContent = safeJson(documentModel);

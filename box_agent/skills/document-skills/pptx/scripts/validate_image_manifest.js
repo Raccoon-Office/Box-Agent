@@ -120,7 +120,14 @@ function main() {
 
   if (!fs.existsSync(manifestPath)) {
     issues.push(`manifest not found: ${manifestPath}`);
-    const payload = { ok: false, manifest: manifestPath, issues, warnings };
+    const payload = {
+      ok: false,
+      manifest: manifestPath,
+      issues,
+      warnings,
+      deferredGenerated: [],
+      blockingIssues: [...issues],
+    };
     writeReport(opts.report, payload);
     console.error(JSON.stringify(payload, null, 2));
     process.exit(1);
@@ -252,11 +259,15 @@ function main() {
     }
   }
 
+  const deferredGenerated = [];
   unresolvedGenerated.forEach(item => {
-    issues.push(
-      `generate entry is unresolved for slide ${item.slide || "?"}: ` +
-      `${item.output_path || "missing output_path"}`
-    );
+    const message = `generate entry is unresolved for slide ${item.slide || "?"}: `
+      + `${item.output_path || "missing output_path"}`;
+    if (item.required !== false) issues.push(message);
+    else {
+      deferredGenerated.push(message);
+      warnings.push(`${message}; continuing with the editable draft.`);
+    }
   });
   unresolvedRequired.forEach(item => {
     issues.push(
@@ -348,6 +359,9 @@ function main() {
     }
   }
 
+  const blockingIssues = issues.filter(issue =>
+    /manifest not found|image_plan is missing|deck not found|required image entry|generation_forbidden/.test(issue)
+  );
   const payload = {
     ok: issues.length === 0,
     manifest: manifestPath,
@@ -367,6 +381,8 @@ function main() {
     deck: opts.deck ? resolveArtifactPath(opts.deck) : null,
     issues,
     warnings,
+    deferredGenerated,
+    blockingIssues,
   };
   writeReport(opts.report, payload);
   console.log(JSON.stringify(payload, null, 2));

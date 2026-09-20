@@ -1,5 +1,6 @@
 """The model and kernel use the same run-scoped tool preparation service."""
 
+import asyncio
 from copy import deepcopy
 from dataclasses import replace
 
@@ -136,8 +137,7 @@ async def test_engine_discovers_cwd_files_and_warns_for_ignored_legacy_root(
         async def execute(self, value):
             report.parent.mkdir()
             report.write_text(value, encoding="utf-8")
-            # No file reference: only the engine's cwd diff can discover it.
-            return ToolResult(success=True, content="written")
+            return ToolResult(success=True, content=f"written {report}")
 
     class WriteThenDone:
         requests = 0
@@ -181,3 +181,118 @@ async def test_engine_discovers_cwd_files_and_warns_for_ignored_legacy_root(
     assert report.read_text(encoding="utf-8") == "report"
     assert not legacy_root.exists()
     assert "artifact_root_dir is deprecated and ignored" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_safe", [False, True], ids=["serial", "parallel"])
+@pytest.mark.parametrize("existing", [False, True], ids=["new-file", "revision"])
+async def test_waiting_task_does_not_claim_another_tasks_published_file(
+    tmp_path, parallel_safe, existing,
+):
+    from box_agent.artifact_publication import write_metadata
+    from box_agent.task_context import TaskContext
+    from box_agent.task_registry import register_artifact_revision
+
+    waiting = asyncio.Event()
+    published = asyncio.Event()
+    report = tmp_path / "shared-report.html"
+    if existing:
+        report.write_text("old revision")
+        write_metadata(report, {"type": "artifact"})
+
+    class WaitTool(MutableTool):
+        name = "wait_for_choice"
+
+        async def execute(self, value):
+            waiting.set()
+            await published.wait()
+            return ToolResult(success=True, content="Still waiting for a choice.")
+
+    class ProducerTool(MutableTool):
+        name = "produce_report"
+
+        async def execute(self, value):
+            await waiting.wait()
+            report.write_text("new report from task B")
+            write_metadata(report, {"type": "artifact"})
+            published.set()
+            return ToolResult(success=True, content="Published report", raw_output={
+                "type": "artifact", "abs_path": str(report),
+            })
+
+    class OneCall:
+        def __init__(self, name):
+            self.name, self.called = name, False
+
+        async def generate_stream(self, **kwargs):
+            if not self.called:
+                self.called = True
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    ToolCall(id=self.name, type="function", function=FunctionCall(
+                        name=self.name, arguments={"value": "run"},
+                    )),
+                ])
+            else:
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def run(tool, task_id):
+        artifacts = []
+        async for event in run_agent_loop(
+            llm=OneCall(tool.name), tools={tool.name: tool}, messages=messages(),
+            workspace_dir=str(tmp_path), max_steps=2,
+        ):
+            if isinstance(event, ArtifactEvent):
+                register_artifact_revision(tmp_path, TaskContext(
+                    session_id=task_id, task_id=task_id, turn_id=task_id,
+                ), event)
+                artifacts.append(event)
+        return artifacts
+
+    waiter = WaitTool()
+    waiter.parallel_safe = parallel_safe
+    a, b = await asyncio.wait_for(asyncio.gather(
+        run(waiter, "task-A"), run(ProducerTool(), "task-B"),
+    ), timeout=5)
+    assert a == []
+    assert [(event.rel_path, event.placement) for event in b] == [
+        (report.name, "primary"),
+    ]
+    registry = tmp_path / ".box-agent/task-registry/tasks"
+    assert not (registry / "task-A.json").exists()
+    assert (registry / "task-B.json").exists()
+    assert report.read_text() == "new report from task B"
+
+
+@pytest.mark.asyncio
+async def test_parallel_outputs_keep_their_producing_tool_call_ids(tmp_path):
+    class Producer(MutableTool):
+        parallel_safe = True
+
+        async def execute(self, value):
+            path = tmp_path / f"{value}.txt"
+            path.write_text(value)
+            return ToolResult(success=True, content=f"written {path}")
+
+    class TwoCalls:
+        called = False
+
+        async def generate_stream(self, **kwargs):
+            if not self.called:
+                self.called = True
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    ToolCall(id=value, type="function", function=FunctionCall(
+                        name="write_record", arguments={"value": value},
+                    )) for value in ["first", "second"]
+                ])
+            else:
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    tool = Producer()
+    events = [event async for event in run_agent_loop(
+        llm=TwoCalls(), tools={tool.name: tool}, messages=messages(),
+        workspace_dir=str(tmp_path), max_steps=2,
+    )]
+    assert {(event.tool_call_id, event.rel_path) for event in events
+            if isinstance(event, ArtifactEvent)} == {
+        ("first", "first.txt"), ("second", "second.txt"),
+    }

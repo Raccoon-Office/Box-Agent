@@ -106,14 +106,14 @@ def test_large_host_selection_leaves_budget_for_forward_reading(tmp_path):
     context, _ = make_context(tmp_path, ("x" * 100 + "\n") * 70)
     context.runtime.select(["demo"])
     original = [Message(role="user", content="task")]
-    projected = context.prepare_request(original, budget_chars=2000)
+    projected = context.prepare_request(original, budget_chars=2000, can_page=lambda _names: True)
     added = sum(len(b["text"]) for b in projected.messages[0].content[1:])
     assert added <= 2000
     first = context.read("demo")
     assert first.success
     info = first.raw_output["skill_reference"]
     original.append(Message(role="tool", name="get_skill", tool_call_id="page_1", content=first.model_context))
-    context.prepare_request(original, budget_chars=2000)
+    context.prepare_request(original, budget_chars=2000, can_page=lambda _names: True)
     next_page = context.read("demo", offset=info["next_offset"], revision=info["revision"])
     assert next_page.success
     assert next_page.raw_output["skill_reference"]["end_offset"] > info["end_offset"]
@@ -142,6 +142,51 @@ def test_messages_only_runtime_retains_read_index_after_body_compaction(tmp_path
     assert "Use get_skill" in str(projection.messages[0].content)
     assert "FIRST_RULE" not in str(projection.messages)
     assert "FIRST_RULE" in restored.read("demo").model_context
+
+
+def test_post_compaction_diagnostic_reinjects_skill_root_directory(tmp_path):
+    # The Skill Root Directory is the only durable, non-derivable on-disk
+    # locator; it lives solely in the get_skill body compaction summarizes
+    # away. After the body drops out of the window, the diagnostic must
+    # re-state the absolute root so the skill's files still resolve.
+    context, path = make_context(tmp_path)
+    result = context.read("demo")
+    history = [Message(role="user", content="task"), Message(
+        role="tool", name="get_skill", tool_call_id="read", content=result.model_context)]
+    restored = SkillReferenceContext(skill_runtime.SkillRuntime(context.runtime.loader))
+    restored.observe_history(history)
+    compacted = [history[0], Message(role="assistant", content="summary")]
+    projection = restored.prepare_request(compacted, budget_chars=50000)
+    text = str(projection.messages[0].content)
+    assert f"Its Skill Root Directory is `{path.parent}`" in text
+    assert "relative to this directory" in text
+    assert "Use get_skill" in text
+
+
+def test_post_compaction_diagnostic_falls_back_when_skill_has_no_path(tmp_path, monkeypatch):
+    # A skill that never carried a path yields an empty snapshot path; emit the
+    # plain notice rather than a misleading `unknown` root.
+    from dataclasses import replace
+
+    context, _ = make_context(tmp_path)
+    result = context.read("demo")
+    history = [Message(role="user", content="task"), Message(
+        role="tool", name="get_skill", tool_call_id="read", content=result.model_context)]
+    restored = SkillReferenceContext(skill_runtime.SkillRuntime(context.runtime.loader))
+    restored.observe_history(history)
+    # Both the recorded fact and the live snapshot must carry an empty path so
+    # the elif (not the "changed" branch) fires.
+    fact = restored.runtime.state.reads["demo"]
+    restored.runtime.state.reads["demo"] = replace(fact, path="")
+    real_resolve = restored.runtime.resolve_reference
+    monkeypatch.setattr(restored.runtime, "resolve_reference",
+                        lambda name: replace(real_resolve(name), path=""))
+    compacted = [history[0], Message(role="assistant", content="summary")]
+    projection = restored.prepare_request(compacted, budget_chars=50000)
+    text = str(projection.messages[0].content)
+    assert "Skill Root Directory" not in text
+    assert "unknown" not in text
+    assert "Use get_skill" in text
 
 
 def test_verified_legacy_system_suffix_is_only_removed_from_request_copy(tmp_path):
@@ -268,7 +313,10 @@ def test_multibyte_body_and_status_obey_actual_reference_budget(tmp_path):
 
     context, _ = make_context(tmp_path, ("请逐页检查，保留全部原始能力。🙂\n") * 120)
     context.runtime.select(["demo"])
-    projection = context.prepare_request([Message(role="user", content="task")], budget_chars=2000)
+    projection = context.prepare_request(
+        [Message(role="user", content="task")], budget_chars=2000,
+        can_page=lambda _names: True,
+    )
     page = context.read("demo")
     assert page.success and page.raw_output["skill_reference"]["next_offset"] > 0
     added = "".join(block["text"] for block in projection.messages[0].content[1:])

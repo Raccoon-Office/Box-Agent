@@ -51,6 +51,13 @@ longer selects an internal provider. Configuration sections
 `tool_limits.presentation` are removed; use `tool_limits.general.max_tool_calls`
 and `max_delegated_tool_calls` for generic turn budgets.
 
+Execution-profile Skill restrictions apply to prompt metadata, ordinary catalog
+browsing, and instruction reads. In `fast`, `research-synthesis` is hidden from
+recommendations and blocked from reading unless explicitly selected for the
+current turn. Exact-name `list_skills` queries retain availability diagnostics.
+Explicit selection is resolved before refreshing prompt metadata; previous-turn
+matches do not override a current-turn restriction.
+
 ## Adapter ownership
 
 CLI and ACP are adapters. They may select Skills, translate events, and render

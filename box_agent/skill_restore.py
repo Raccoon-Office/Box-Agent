@@ -6,8 +6,36 @@ from typing import Any
 from .skill_dependencies import SkillDependencyError, resolve_required_skills
 
 
+_RESTORE_FACT_FIELDS = (
+    "sha256", "loadOrder", "source", "path", "prompt", "reason",
+    "deliveredRanges", "deliveredComplete",
+)
+
+
 def invalid_restore(field: str) -> SkillDependencyError:
     return SkillDependencyError("SKILL_RESTORE_INVALID", f"Invalid Skill restore metadata: {field}.")
+
+
+def select_restore_records(records: Any) -> list[dict[str, Any]]:
+    """Drop log junk; keep objects that look like Skill restore facts.
+
+    Null/non-object entries and empty objects are optional-session debris.
+    A dict that already carries restore fields is a damaged Skill record and
+    must reach validation so invalid types fail closed.
+    """
+    if not isinstance(records, list):
+        return []
+    selected: list[dict[str, Any]] = []
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        if isinstance(name, str) and name.strip() and name == name.strip():
+            selected.append(row)
+            continue
+        if any(field in row for field in _RESTORE_FACT_FIELDS):
+            selected.append(row)
+    return selected
 
 
 def validate_restore_records(records: list[dict[str, Any]]) -> None:

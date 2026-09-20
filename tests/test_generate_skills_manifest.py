@@ -16,7 +16,10 @@ EXPECTED_BUILTIN_SKILLS = {
     "mcp-config": "mcp-config/SKILL.md",
     "memory-guide": "memory-guide/SKILL.md",
     "pdf": "document-skills/pdf/SKILL.md",
-    "pptx": "document-skills/pptx/SKILL.md",
+    "pptx": "pptx/SKILL.md",
+    "ppt-fast": "document-skills/pptx/SKILL.md",
+    **{f"sn-ppt-{module}": f"presentation-suite/skills/sn-ppt-{module}/SKILL.md"
+       for module in ("entry", "tools", "story", "standard", "dazzle", "doctor")},
     "research-synthesis": "research-synthesis/SKILL.md",
     "roadmap": "roadmap/SKILL.md",
     "scheduled-task": "scheduled-task/SKILL.md",

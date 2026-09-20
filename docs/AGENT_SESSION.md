@@ -152,6 +152,47 @@ binds cancellation, injection and summary/extraction references before explicit
 overrides. Managed sessions populate the internal `kernel_services` field;
 adapters should not supply it themselves.
 
+New protocol-neutral runs are available through `AgentService.start(RunRequest,
+session=...)`. The returned `AgentRunHandle` starts the compatible session run,
+exposes ordered `EventEnvelope` values from `events()`, accepts `cancel`,
+`pause`, `resume`, `inject_message`, and `permission_response` commands through
+`send()`, and returns one aggregated `RunResult` from `result()`. `pause` takes
+effect at the next kernel checkpoint; a `PermissionBroker` correlates
+`PermissionRequestEvent.request_id` with `permission_response`. `AgentSession.run_events()` remains the compatibility
+stream for existing adapters during migration.
+
+For a continuation over messages that an adapter has already staged, set
+`RunRequest.user_message` to `None`; the service reuses the current Session
+history without appending another user message.
+
+The Python SDK exposes the same boundary through `AgentClient(session)`. Use
+`await client.run(request)` for a non-rendering run, or
+`await client.start(request)` when the caller needs the handle's event stream
+and control methods. The SDK does not own Session construction or cleanup.
+
+`start()` rejects closed or busy sessions before adding a message or replacing
+the active handle, including when the previous runner has not started yet.
+Commands sent to a completed or superseded handle raise `RuntimeError`; they
+cannot cancel or inject into another run. A new top-level turn clears the previous
+run's cancellation flag; cancellation of an enclosing ACP prompt is preserved.
+Closing a handle settles its runner, preserving asyncio
+cancellation while making the cancelled `RunResult` available.
+
+Create a new `PermissionBroker` for each run. The service binds it to that run
+and the Session's existing `GrantStore`. Responses accept `approved: bool` or
+`option_id` (`approve`, `approve_session`, `reject`, `deny`, `denied`); unknown,
+conflicting, or unoffered options raise `ValueError`. Filesystem approvals grant
+only the requested directory (the parent for a file target). A new user message
+clears prompt grants, while session grants survive; continuations with
+`user_message=None` retain prompt grants. Without a grant store, the broker can
+only approve one-shot safety requests. ACP retains its permission reverse RPC
+and uses the same grant application logic; the new broker does not replace
+that transport.
+
+CLI trace turn IDs identify the user turn, while each continuation has its own
+run ID. ACP binds trace context before starting the producer task, so internal
+LLM and tool records remain associated with the host turn.
+
 ## Adapter boundaries
 
 ACP retains request parsing, workspace/model binding, permission reverse RPC,

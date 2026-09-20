@@ -40,9 +40,17 @@ async def test_session_uses_supplied_runtime_for_ordinary_selected_material(tmp_
                    for message in provider.requests[0])
         assert all("METHOD_BODY" not in str(message.content)
                    for message in provider.requests[0] if message.role in {"system", "developer"})
-        assert [message.content for message in session.agent.messages if message.role == "user"] == [
+        assert [message.content for message in session.agent.messages
+                if message.role == "user" and message.source == "user"] == [
             "Use the assigned method",
         ]
+        runtime_messages = [message for message in session.agent.messages
+                            if message.role == "user" and message.source == "runtime"]
+        assert len(runtime_messages) == 1
+        assert "METHOD_BODY" in str(runtime_messages[0].content)
+        restored_runtime = [message for message in log.replay().messages
+                            if message.role == "user" and message.source == "runtime"]
+        assert [message.content for message in restored_runtime] == [runtime_messages[0].content]
         assert runtime.turn_deliveries["demo"]["complete"]
         assert log.replay().skills[0]["name"] == "demo"
         assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [StopReason.END_TURN]

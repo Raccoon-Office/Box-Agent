@@ -10,13 +10,19 @@ image inside `<PRESENTATION_DIR>` selected in the conversation. Do
 not add another `output/` prefix, and do not write to `/tmp`, `/var/tmp`, or an
 unrelated absolute temp path.
 
-For the default controlled HTML route, the blocking checks are
-`qa/outline_check.json`, `qa/deck_contract.json`, `qa/deck_spec.json`,
-`qa/image_manifest.json`, `qa/html_self_check.json`, and
-`qa/runtime_probe.json`; they must exist and pass. Run self-check against
-`index.html`. Generate `qa/truth_check.json` afterward as a source advisory.
-Its missing sources, unverified URLs, private-fact gaps, or `"ok": false` result
-must not block, invalidate, or reopen an otherwise usable `index.html`.
+For the default controlled HTML route, outline and design-plan validation precede
+scaffold. Core deck structure/design and HTML rendering are hard prerequisites.
+Outline binding drift blocks by default; only the explicit degraded-outline
+switch permits a semantic draft. Image, HTML self-check, runtime-probe and
+source/truth findings preserve already-rendered HTML as advisories with their
+original issues recorded. A report's `ok: true` is not a warning-free verdict.
+Frozen v2 palette mismatches are a deterministic contract failure: the runtime
+probe reports the actual page/component/property, and finalization fails with
+`palette_contract` instead of claiming completion. This does not require vision;
+image pixels are outside the page-color contract and remain separately reviewed.
+Plan-owned decks record that post-content model review was not performed; they
+do not require a second routine reviewer. Run the single finalizer to refresh QA.
+
 Report research quality separately from presentation QA: a `partial` or
 `framework` research handoff may produce a valid deck, but must not be described
 as a full-quality research pass.
@@ -32,8 +38,8 @@ summarize only its user-visible impact under the localized usage-note label
 defined in `SKILL.md` §6.
 
 For HTML-first decks exported with `scripts/html_to_editable_pptx.js` and
-`dom-to-pptx`, inspect both the source HTML preview PNGs and the rendered PPTX
-when renderer runtime exists. If rendering is blocked (missing `soffice`/PDF
+`dom-to-pptx`, inspect both source HTML preview PNGs and the rendered PPTX only when visual
+inspection was requested or a suspected blocking defect requires it. If rendering is blocked (missing `soffice`/PDF
 renderer), continue with the rest of QA and report render as blocked.
 
 Editable export can reflow text, shift layers, or lose CSS effects, so source

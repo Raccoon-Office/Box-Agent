@@ -292,7 +292,7 @@ def test_schema_exposes_flat_contract_with_safe_defaults():
         "budget",
     }
     assert input_schema["required"] == ["task"]
-    assert properties["required_tools"]["default"] == ["read_file"]
+    assert "default" not in properties["required_tools"]
     assert properties["skills"]["default"] == []
 
     openai_schema = tool.to_openai_schema()
@@ -305,7 +305,10 @@ def test_description_explains_flat_contract_and_derived_policy():
     description = tool.description
 
     assert "independent context, parallel latency, or evidence isolation" in description
-    assert "trusted local read tools" in description
+    assert "trusted read/search tools" in description
+    assert "`web_search`" in description
+    assert "`web_extract`" in description
+    assert "restricted to assigned Skills and dependencies" in description
     assert "fail-closed runtime policy" in description
     assert "bounded completeness-checked batch fast path" in description
     assert "parent remains responsible" in description
@@ -880,7 +883,7 @@ async def test_general_loop_uses_only_resolved_tools_and_inherits_parent_prompt(
     }
 
 
-async def test_omitted_required_tools_exposes_only_trusted_local_readers(tmp_path):
+async def test_omitted_required_tools_exposes_trusted_readers_and_search(tmp_path):
     captured_tools = None
 
     async def fake_stream(*, messages, tools, **kwargs):
@@ -904,9 +907,106 @@ async def test_omitted_required_tools_exposes_only_trusted_local_readers(tmp_pat
     result = await tool.execute(task="Inspect safely")
 
     assert result.success is True
-    assert [candidate.name for candidate in captured_tools] == ["read_file"]
-    assert result.raw_output["requested_tools"] == ["read_file"]
+    assert [candidate.name for candidate in captured_tools] == ["read_file", "web_search"]
+    assert result.raw_output["requested_tools"] == ["read_file", "web_search"]
     assert "required_tools" in result.raw_output["defaults_applied"]
+
+
+async def test_omitted_required_tools_can_read_and_write_only_assigned_file(tmp_path):
+    from box_agent.schema import FunctionCall, ToolCall
+
+    (tmp_path / "plan.md").write_text("Use the approved title.", encoding="utf-8")
+    target = tmp_path / "slides" / "slide_01.html"
+    outside = tmp_path / "slides" / "slide_02.html"
+    actions = [
+        ("read_file", {"path": "plan.md"}),
+        ("write_file", {"path": "slides/slide_01.html", "content": "Approved title"}),
+        ("write_file", {"path": "slides/slide_02.html", "content": "Out of scope"}),
+    ]
+    requests = []
+    exposed_tools = []
+
+    async def fake_stream(*, messages, tools, **kwargs):
+        index = len(requests)
+        requests.append([message.model_copy(deep=True) for message in messages])
+        exposed_tools.append({candidate.name for candidate in tools})
+        if index < len(actions):
+            name, arguments = actions[index]
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id=f"scoped-action-{index}",
+                        type="function",
+                        function=FunctionCall(name=name, arguments=arguments),
+                    )
+                ],
+            )
+            return
+        yield StreamEvent(type="text", delta="Assigned file written; other path denied.")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = AsyncMock()
+    llm.generate_stream = fake_stream
+    tool = SubAgentTool(
+        llm=llm,
+        parent_tools={
+            "read_file": ReadTool(workspace_dir=str(tmp_path)),
+            "write_file": WriteTool(workspace_dir=str(tmp_path)),
+            "web_search": WebSearchTool(),
+        },
+        workspace_dir=str(tmp_path),
+    )
+
+    result = await tool.execute(
+        task="Read the plan and write the assigned slide.",
+        files=["plan.md"],
+        write_scope=["slides/slide_01.html"],
+    )
+
+    assert result.success is True, result.error
+    assert result.raw_output["strategy"] == "general_loop"
+    assert result.raw_output["model_routing"]["mode"] == "inherit"
+    assert result.raw_output["constraints"]["write_scope"] == ["slides/slide_01.html"]
+    assert all(names == {"read_file", "write_file", "web_search"} for names in exposed_tools)
+    assert target.read_text(encoding="utf-8") == "Approved title"
+    assert not outside.exists()
+    tool_messages = {
+        message.tool_call_id: message.content
+        for message in requests[-1]
+        if message.role == "tool"
+    }
+    assert "Use the approved title." in tool_messages["scoped-action-0"]
+    assert "WRITE_SCOPE_VIOLATION" in tool_messages["scoped-action-2"]
+
+
+async def test_omitted_required_tools_with_scope_reports_missing_parent_writers(tmp_path):
+    llm = AsyncMock()
+    tool = SubAgentTool(
+        llm=llm,
+        parent_tools={
+            "read_file": ReadTool(workspace_dir=str(tmp_path)),
+            "web_search": WebSearchTool(),
+        },
+        workspace_dir=str(tmp_path),
+    )
+
+    result = await tool.execute(
+        task="Write the assigned summary.",
+        write_scope=["summary.md"],
+    )
+
+    assert result.success is False
+    assert result.raw_output["code"] == "REQUIRED_TOOL_NOT_FOUND"
+    assert result.raw_output["retryable"] is False
+    assert "no available file-write tools" in result.raw_output["message"].lower()
+    assert result.raw_output["required_any_of"] == [
+        "append_file", "edit_file", "write_file"
+    ]
+    llm.generate.assert_not_called()
+    llm.generate_stream.assert_not_called()
+    assert not (tmp_path / "summary.md").exists()
 
 
 async def test_removed_nested_fields_fail_without_calling_llm():
@@ -1107,7 +1207,10 @@ async def test_tool_free_child_receives_required_skill_closure_only_as_reference
     assert "PRIVATE-UNSELECTED-BODY" not in str(messages)
 
 
-async def test_child_skill_tools_only_expose_delegated_closure_in_real_requests(tmp_path):
+@pytest.mark.parametrize("explicit_tools", [True, False], ids=["explicit", "omitted"])
+async def test_child_skill_tools_only_expose_delegated_closure_in_real_requests(
+    tmp_path, explicit_tools
+):
     from box_agent.schema import FunctionCall, ToolCall
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
     from box_agent.tools.skill_tool import GetSkillTool
@@ -1145,8 +1248,9 @@ async def test_child_skill_tools_only_expose_delegated_closure_in_real_requests(
     tool = SubAgentTool(llm=llm, parent_tools={"get_skill": parent_get, "list_skills": parent_list},
                         workspace_dir=str(tmp_path))
     tool.set_skill_provider(lambda: loader)
+    tool_arguments = {"required_tools": ["get_skill", "list_skills"]} if explicit_tools else {}
     result = await tool.execute(task="Use the assigned method", skills=["method"],
-                                required_tools=["get_skill", "list_skills"])
+                                **tool_arguments)
 
     assert result.success
     assert result.raw_output["resolved_tools"] == ["get_skill", "list_skills"]
@@ -1158,6 +1262,88 @@ async def test_child_skill_tools_only_expose_delegated_closure_in_real_requests(
     assert "SECRET-outside" not in str(requests)
     assert parent_get.allowed_skill_names is None
     assert parent_list.allowed_skill_names is None
+
+
+@pytest.mark.parametrize("explicit_read_only", [False, True], ids=["defaults", "explicit-read"])
+async def test_file_inputs_keep_default_search_tools_and_explicit_read_batch(
+    tmp_path, explicit_read_only
+):
+    from box_agent.schema import FunctionCall, ToolCall
+    from box_agent.tools.file_tools import SearchFilesTool
+
+    (tmp_path / "plan.md").write_text("APPROVED_PLAN", encoding="utf-8")
+
+    class WebExtractTool(WebSearchTool):
+        @property
+        def name(self):
+            return "web_extract"
+
+    class RecordingLLM:
+        def __init__(self):
+            self.generate_calls = 0
+            self.stream_calls = 0
+            self.exposed_tools = set()
+            self.requests = []
+
+        async def generate(self, messages, tools=None, **kwargs):
+            self.requests.append((kwargs.get("call_kind"), [
+                message.model_copy(deep=True) for message in messages
+            ]))
+            if kwargs.get("call_kind") == "turn_continuation_judge":
+                return LLMResponse(content='{"continue":false}', finish_reason="stop")
+            self.generate_calls += 1
+            return LLMResponse(content="Plan read.", finish_reason="stop")
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.stream_calls += 1
+            self.exposed_tools = {candidate.name for candidate in tools}
+            self.requests.append((kwargs.get("call_kind"), [
+                message.model_copy(deep=True) for message in messages
+            ]))
+            if self.stream_calls == 1:
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    ToolCall(id="read-plan", type="function", function=FunctionCall(
+                        name="read_file", arguments={"path": "plan.md"},
+                    ))
+                ])
+                return
+            yield StreamEvent(type="text", delta="Plan read.")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = RecordingLLM()
+    tool = SubAgentTool(
+        llm=llm,
+        parent_tools={
+            "read_file": ReadTool(workspace_dir=str(tmp_path)),
+            "search_files": SearchFilesTool(workspace_dir=str(tmp_path)),
+            "web_search": WebSearchTool(),
+            "web_extract": WebExtractTool(),
+            "write_file": WriteTool(workspace_dir=str(tmp_path)),
+        },
+        workspace_dir=str(tmp_path),
+    )
+    tool_arguments = {"required_tools": ["read_file"]} if explicit_read_only else {}
+
+    result = await tool.execute(task="Read the plan.", files=["plan.md"], **tool_arguments)
+
+    assert result.success, result.error
+    child_requests = [messages for kind, messages in llm.requests if kind == "subagent_step"]
+    if explicit_read_only:
+        assert "APPROVED_PLAN" in child_requests[0][-1].content
+        assert result.raw_output["strategy"] == "batch_files"
+        assert result.raw_output["resolved_tools"] == ["read_file"]
+        assert llm.generate_calls == 1
+        assert llm.stream_calls == 0
+    else:
+        read_result = next(message for message in child_requests[-1]
+                           if message.role == "tool" and message.tool_call_id == "read-plan")
+        assert "APPROVED_PLAN" in read_result.content
+        expected = {"read_file", "search_files", "web_search", "web_extract"}
+        assert result.raw_output["strategy"] == "general_loop"
+        assert set(result.raw_output["resolved_tools"]) == expected
+        assert llm.exposed_tools == expected
+        assert llm.generate_calls == 0
+        assert llm.stream_calls == 2
 
 
 @pytest.mark.parametrize("blocked", ["method", "base"])
@@ -1572,7 +1758,17 @@ async def test_max_steps_respected():
     assert call_count <= 4  # max_steps=3 means 3 LLM calls
 
 
-async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(tmp_path):
+@pytest.mark.parametrize(
+    "budget, host_max_steps",
+    [(None, None), ({"max_steps": 1}, None), ({"max_steps": 3}, 1)],
+    ids=["read-only-parent", "explicit-one-step", "host-one-step"],
+)
+async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(
+    tmp_path, budget, host_max_steps
+):
+    from box_agent.config import ToolLimitsConfig
+    from box_agent.tools.file_tools import SearchFilesTool
+
     paths = []
     for index in range(20):
         path = tmp_path / f"project-{index:02d}.md"
@@ -1622,16 +1818,25 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(tmp_p
 
     llm = BatchLLM()
     read_tool = CountingReadTool()
+    parent_tools = {"read_file": read_tool}
+    if budget is not None:
+        parent_tools.update({
+            "search_files": SearchFilesTool(workspace_dir=str(tmp_path)),
+            "web_search": WebSearchTool(),
+        })
     tool = SubAgentTool(
         llm=llm,
-        parent_tools={"read_file": read_tool},
+        parent_tools=parent_tools,
         workspace_dir=str(tmp_path),
+        tool_limits=(ToolLimitsConfig(sub_agent={"general_max_steps": host_max_steps})
+                     if host_max_steps is not None else None),
     )
 
     started = perf_counter()
     result = await tool.execute(
         task="Compare every project and rank them",
         files=list(reversed(paths)),
+        budget=budget,
     )
     elapsed = perf_counter() - started
 
@@ -1648,9 +1853,30 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(tmp_p
     assert llm.messages[-1].content.count("<<<UNTRUSTED_FILE") == 20
     assert result.raw_output["model_calls"] == 1
     assert result.raw_output["tool_calls"] == 20
+    assert result.raw_output["strategy"] == "batch_files"
+    assert result.raw_output["budget"]["max_steps"] == 1
     assert result.raw_output["resolved_tools"] == ["read_file"]
     assert result.raw_output["usage"]["input_tokens"] <= int(3_353_714 * 0.10)
     assert elapsed < 60
+
+
+async def test_file_inputs_without_parent_reader_fail_before_starting_llm(tmp_path):
+    (tmp_path / "plan.md").write_text("Approved plan", encoding="utf-8")
+    llm = AsyncMock()
+    tool = SubAgentTool(
+        llm=llm,
+        parent_tools={"web_search": WebSearchTool()},
+        workspace_dir=str(tmp_path),
+    )
+
+    result = await tool.execute(task="Read the supplied plan.", files=["plan.md"])
+
+    assert result.success is False
+    assert result.raw_output["code"] == "REQUIRED_TOOL_NOT_FOUND"
+    assert result.raw_output["retryable"] is False
+    assert "read_file" in result.error
+    llm.generate.assert_not_called()
+    llm.generate_stream.assert_not_called()
 
 
 async def test_batch_files_uses_parent_permission_negotiator_and_retries(tmp_path):
@@ -2233,6 +2459,103 @@ async def test_parallel_new_style_calls_do_not_leak_resolved_tools():
     assert observed == {"read": ["read_file"], "web": ["web_search"]}
     assert result_read.raw_output["resolved_tools"] == ["read_file"]
     assert result_web.raw_output["resolved_tools"] == ["web_search"]
+
+
+# ── Browser context isolation ────────────────────────────────
+
+
+class _KeyObservingLLM:
+    """Record the browser session key visible inside each child run."""
+
+    def __init__(self, delay: float = 0.0):
+        self.observed: list[str | None] = []
+        self._delay = delay
+
+    async def generate_stream(self, messages, tools=None, **kwargs):
+        from box_agent.tools.browser_runtime_scope import current_browser_session_key
+
+        self.observed.append(current_browser_session_key())
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
+
+
+async def test_sub_agent_binds_derived_browser_session_key():
+    """A child run sees `<parent>:<sub_agent_id>` and the parent key is restored."""
+    from box_agent.tools.browser_runtime_scope import (
+        current_browser_session_key,
+        reset_browser_session_key,
+        set_browser_session_key,
+    )
+
+    llm = _KeyObservingLLM()
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    token = set_browser_session_key("sess-1")
+    try:
+        result = await tool.execute(task="browse something")
+        assert current_browser_session_key() == "sess-1"
+    finally:
+        reset_browser_session_key(token)
+
+    assert result.success is True
+    assert len(llm.observed) == 1
+    child_key = llm.observed[0]
+    assert child_key is not None and child_key.startswith("sess-1:subagent-")
+    assert child_key != "sess-1"
+
+
+async def test_sub_agent_closes_its_browser_context_on_return(monkeypatch):
+    """The derived key's BrowserContext is closed once the child returns."""
+    from box_agent.tools import mcp_loader
+    from box_agent.tools.browser_runtime_scope import (
+        reset_browser_session_key,
+        set_browser_session_key,
+    )
+
+    closed: list[str] = []
+
+    async def fake_close(session_key: str) -> bool:
+        closed.append(session_key)
+        return True
+
+    monkeypatch.setattr(mcp_loader, "close_browser_session", fake_close)
+
+    llm = _KeyObservingLLM()
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    token = set_browser_session_key("sess-2")
+    try:
+        await tool.execute(task="browse something")
+    finally:
+        reset_browser_session_key(token)
+
+    assert closed == [llm.observed[0]]
+    assert closed[0].startswith("sess-2:subagent-")
+
+
+async def test_parallel_sub_agents_get_distinct_browser_keys():
+    """Sibling children in one session never share a browser session key."""
+    from box_agent.tools.browser_runtime_scope import (
+        reset_browser_session_key,
+        set_browser_session_key,
+    )
+
+    llm = _KeyObservingLLM(delay=0.01)
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    token = set_browser_session_key("sess-3")
+    try:
+        results = await asyncio.gather(
+            tool.execute(task="site A"),
+            tool.execute(task="site B"),
+            tool.execute(task="site C"),
+        )
+    finally:
+        reset_browser_session_key(token)
+
+    assert all(r.success for r in results)
+    assert len(llm.observed) == 3
+    assert len(set(llm.observed)) == 3
+    assert all(k.startswith("sess-3:subagent-") for k in llm.observed)
 
 
 def test_add_workspace_tools_wires_sub_agent_token_limit(tmp_path) -> None:

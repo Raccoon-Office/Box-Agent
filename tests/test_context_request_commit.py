@@ -17,6 +17,48 @@ from tests.test_skill_entry_boundaries import CapturingProvider
 BODY = "RESTORED_METHOD_EXACT_BODY"
 
 
+@pytest.mark.asyncio
+async def test_snapshot_failure_preserves_provider_context_and_followup(tmp_path, monkeypatch):
+    import json
+    import box_agent.session_log as session_log_module
+    from box_agent.events import ErrorEvent
+
+    log = SessionLog.create(tmp_path / "sessions", session_id="snapshot-fallback", cwd=tmp_path)
+    provider = CapturingProvider()
+    agent = Agent(llm_client=provider, system_prompt="BASE", tools=[], session_log=log,
+                  workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, max_steps=1)
+    agent.restore_active_skill_instructions([("demo", BODY, sha256(BODY.encode()).hexdigest(), 1)])
+    attempts = 0
+
+    def fail_publication(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("snapshot publication denied")
+
+    monkeypatch.setattr(session_log_module.os, "link", fail_publication)
+    try:
+        for question in ("continue", "hello again"):
+            agent.add_user_message(question)
+            events = [event async for event in agent.run_events()]
+            assert not any(isinstance(event, ErrorEvent) for event in events)
+            assert not log.failed
+        assert attempts >= 1
+        assert len(provider.requests) == 2
+        assert BODY in str(provider.requests[0])
+        assert "hello again" in str(provider.requests[1])
+        # The fallback is committed to disk, not just present in memory.
+        records = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+        references = [ref for event in records if event.get("type") == "request/context"
+                      for ref in event["data"]["skillReferences"]]
+        body_refs = [ref for ref in references if BODY in ref.get("inlineContent", "")]
+        assert body_refs
+        for ref in body_refs:
+            assert ref["sha256"] == sha256(ref["inlineContent"].encode()).hexdigest()
+            assert "contentRef" not in ref
+    finally:
+        log.close()
+
+
 class RecoverableStore:
     """Delegate real persistence, rejecting one write before it reaches disk."""
 

@@ -6939,6 +6939,190 @@
       }
     },
     {
+      "id": "plain-neutral",
+      "name": "Plain Neutral",
+      "description": "Plain fallback: solid canvas, neutral sans-serif typography, no texture or shadow. All colors come from the fixed palette contract.",
+      "source_reference": "builtin",
+      "selection": {
+        "mood_keywords": [
+          "neutral",
+          "plain",
+          "minimal"
+        ],
+        "industry_fit": [],
+        "density": "medium",
+        "scheme": "light",
+        "fallback": true,
+        "visual_dna_ids": []
+      },
+      "palette": {
+        "background": "#FFFFFF",
+        "surface": "#F5F5F7",
+        "surface_strong": "#E8E8ED",
+        "primary": "#1D1D1F",
+        "primary_soft": "#F5F5F7",
+        "text": "#1D1D1F",
+        "muted": "#6E6E73",
+        "border": "#D2D2D7",
+        "inverse": "#FFFFFF",
+        "chart": [
+          "#1D1D1F",
+          "#6E6E73",
+          "#86868B",
+          "#D2D2D7"
+        ]
+      },
+      "typography": {
+        "display": "Arial, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Arial, PingFang SC, Microsoft YaHei, sans-serif",
+        "label": "Arial, PingFang SC, Microsoft YaHei, sans-serif"
+      },
+      "shape": {
+        "radius_small": 12,
+        "radius_medium": 22,
+        "radius_large": 36,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "soft",
+        "shadow": "none",
+        "heading": "standard",
+        "label": "plain",
+        "accent": "line",
+        "alternation": "none"
+      },
+      "presentation": {
+        "version": 1,
+        "voice": "measured",
+        "rhythm": "balanced",
+        "style": {
+          "canvas": "solid",
+          "surface": "soft",
+          "shadow": "none",
+          "heading": "standard",
+          "label": "plain",
+          "accent": "line",
+          "alternation": "none"
+        }
+      },
+      "composition": {
+        "family": "institutional-grid",
+        "direction": "structured-systems",
+        "variants": [
+          "balanced-grid",
+          "rail-grid",
+          "ledger-grid"
+        ],
+        "default_family": "institutional-grid",
+        "default_direction": "structured-systems",
+        "allowed_families": [
+          "institutional-grid",
+          "analytical-exhibit",
+          "product-showcase",
+          "technical-schematic",
+          "literary-minimal"
+        ],
+        "allowed_directions": [
+          "structured-systems",
+          "narrative-pages",
+          "interface-modules"
+        ],
+        "directions": [
+          {
+            "id": "structured-systems",
+            "label": "结构与证据",
+            "families": [
+              "institutional-grid",
+              "analytical-exhibit",
+              "technical-schematic"
+            ]
+          },
+          {
+            "id": "narrative-pages",
+            "label": "编辑与叙事",
+            "families": [
+              "literary-minimal"
+            ]
+          },
+          {
+            "id": "interface-modules",
+            "label": "产品与界面",
+            "families": [
+              "product-showcase"
+            ]
+          }
+        ],
+        "families": [
+          {
+            "family": "institutional-grid",
+            "selection_signals": [
+              "常规商业汇报",
+              "组织治理",
+              "稳健信息秩序"
+            ],
+            "variants": [
+              "balanced-grid",
+              "rail-grid",
+              "ledger-grid"
+            ]
+          },
+          {
+            "family": "analytical-exhibit",
+            "selection_signals": [
+              "KPI 与图表",
+              "证据对照",
+              "决策看板"
+            ],
+            "variants": [
+              "exhibit-grid",
+              "evidence-rail",
+              "decision-board"
+            ]
+          },
+          {
+            "family": "product-showcase",
+            "selection_signals": [
+              "UI 截图",
+              "功能演示",
+              "产品流程"
+            ],
+            "variants": [
+              "device-stage",
+              "browser-story",
+              "annotated-flow"
+            ]
+          },
+          {
+            "family": "technical-schematic",
+            "selection_signals": [
+              "系统架构",
+              "流程节点",
+              "接口与规格说明"
+            ],
+            "variants": [
+              "blueprint-canvas",
+              "annotated-system",
+              "spec-sheet"
+            ]
+          },
+          {
+            "family": "literary-minimal",
+            "selection_signals": [
+              "长文本",
+              "观点文章",
+              "安静研究报告"
+            ],
+            "variants": [
+              "margin-note",
+              "quiet-center",
+              "asymmetric-column"
+            ]
+          }
+        ]
+      }
+    },
+    {
       "id": "product-console",
       "name": "Product Console",
       "description": "A polished B2B product console with browser chrome, app-shell panels, status chips, feature stages, and UI-first storytelling.",
@@ -11951,7 +12135,7 @@
               "type": "array",
               "required": true,
               "editor": true,
-              "minItems": 2,
+              "minItems": 0,
               "maxItems": 5,
               "itemShape": {
                 "type": "text",
@@ -11993,7 +12177,7 @@
               "type": "array",
               "required": true,
               "editor": true,
-              "minItems": 2,
+              "minItems": 0,
               "maxItems": 5,
               "itemShape": {
                 "type": "text",

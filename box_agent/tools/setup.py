@@ -39,12 +39,25 @@ from box_agent.tools.jupyter_tool import (
     SandboxEnvironment,
     SandboxStatusTool,
 )
-from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
+from box_agent.tools.mcp_loader import (
+    load_mcp_tools_async,
+    set_mcp_timeout_config,
+    set_playwright_isolation_config,
+)
 from box_agent.tools.mcp_bootstrap import bootstrap_managed_mcp_config
 from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
-from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
+from box_agent.tools.memory_tool import (
+    MemoryDeleteCorrectionTool,
+    MemoryListCorrectionsTool,
+    MemoryReadTool,
+    MemorySearchTool,
+    MemorySupersedeCorrectionTool,
+    MemoryWriteCorrectionTool,
+    MemoryWriteTool,
+)
 from box_agent.tools.obsidian_tool import create_obsidian_tools
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
+from box_agent.tools.publish_artifact_tool import PublishArtifactTool
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.request_user_input_tool import RequestUserInputTool
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
@@ -173,8 +186,13 @@ def build_file_delivery_prompt() -> str:
         "`search_files`，以 `File Access Context` 中的 `Current workspace` 为 `path`、"
         "原文件名为 `pattern`、`target=\"files\"` 精确定位。将搜索 `path` 与返回的相对路径"
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。\n"
-        "- **桌面交付**：完成后说明文件名和工作目录内相对位置即可。"
-        "宿主会根据结构化 ArtifactEvent 渲染可验证的文件入口。\n"
+        "- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，"
+        "需要把尚未发布的文件作为独立交付结果时调用 `publish_artifact`；可登记多个。"
+        "构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
+        "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
+        "也不调用 `publish_artifact`；保留文件并说明位置。若用户将其中某个文件作为另一项"
+        "独立交付结果，则也应登记。"
+        "完成后说明文件名和工作目录内相对位置即可；CLI 与宿主以共享 ArtifactEvent 展示文件。\n"
         "- **多文件交付**：用户需要单一下载包时才将多文件打包为 ZIP，"
         "例如 `zip -r bundle.zip 文件1 文件2`。"
         + preview_guidance
@@ -280,7 +298,17 @@ async def initialize_base_tools(
         tools.append(MemoryReadTool(memory_manager))
         tools.append(MemoryWriteTool(memory_manager, llm=llm))
         tools.append(MemorySearchTool(memory_manager))
-        _out(f"{Colors.GREEN}✅ Loaded memory tools (memory_read, memory_write, memory_search){Colors.RESET}")
+        tools.append(MemoryListCorrectionsTool(memory_manager))
+        tools.append(MemoryWriteCorrectionTool(memory_manager))
+        tools.append(MemorySupersedeCorrectionTool(memory_manager))
+        tools.append(MemoryDeleteCorrectionTool(memory_manager))
+        _out(
+            f"{Colors.GREEN}✅ Loaded memory tools "
+            f"(memory_read, memory_write, memory_search, "
+            f"memory_list_corrections, memory_write_correction, "
+            f"memory_supersede_correction, memory_delete_correction)"
+            f"{Colors.RESET}"
+        )
 
     # 1. Bash auxiliary tools (output monitoring and kill)
     # Note: BashTool itself is created in add_workspace_tools() with workspace_dir as cwd
@@ -412,6 +440,11 @@ async def initialize_base_tools(
             connect_timeout=mcp_config.connect_timeout,
             execute_timeout=mcp_config.execute_timeout,
             sse_read_timeout=mcp_config.sse_read_timeout,
+        )
+        set_playwright_isolation_config(
+            enabled=mcp_config.playwright_per_session_context,
+            max_clients=mcp_config.playwright_max_session_clients,
+            idle_timeout=mcp_config.playwright_session_idle_timeout,
         )
         # Keep CLI and ACP on the same user-owned configuration. Reconcile the
         # hosted search endpoint and any MCP servers advertised by the frozen
@@ -622,6 +655,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
     relative_root = workspace_dir
+    tools.append(PublishArtifactTool(workspace_dir))
 
     # Relative tool paths always use the stable session cwd.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)

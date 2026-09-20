@@ -85,6 +85,10 @@ async function main() {
     }).promise;
 
     const output = path.join(args.out, `slide-${pageNumber}.png`);
+    fs.writeFileSync(
+      path.join(args.out, `.${path.basename(output)}.artifact.json`),
+      '{"type":"intermediate_asset"}\n'
+    );
     fs.writeFileSync(output, canvas.toBuffer("image/png"));
     written.push(output);
   }

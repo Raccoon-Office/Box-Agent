@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any
 
 from ...events import AgentEvent, LLMActivityEvent, ToolCallResult, ToolCallStart
+from ...artifact_publication import apply_delivery_policy
 from ...kernel.hook_types import HookContext, ResultText, copy_data
 from ...loop_guards import (
     FINAL_SUMMARY_EXCLUDED_TOOLS, delegated_tool_call_budget_wrapup_text,
@@ -22,6 +23,8 @@ from ...schema import Message, ToolCall
 from ...session_log import SessionLogDurabilityError
 from ...session_trace import emit_session_trace
 from ..base import Tool, ToolResult, ToolInvocationContext
+from ..bash_tool import BashTool
+from ..file_tools import WriteTool
 from ..browser_result_adapter import (
     _prepare_browser_snapshot_output, _prepare_browser_screenshot_output,
     _persist_browser_snapshot_output, _persist_browser_screenshot_output,
@@ -345,6 +348,12 @@ class DefaultToolEngine:
         # Keep the actual execution outcome apart from adaptations and Hook
         # display changes. Large result payloads are referenced, not recopied.
         call.execution_result = result
+        if isinstance(call.target, WriteTool) and result.success:
+            raw = result.raw_output or {}
+            if raw.get("created") is True and raw.get("temporary") is True and raw.get("sha256") and raw.get("path"):
+                bash = self._tools.get("bash")
+                if isinstance(bash, BashTool):
+                    bash.owned_file_cleanup.record(raw["path"], sha256=raw["sha256"])
         call.executed = bool(
             call.invoked and not result.permission_request
             and (result.raw_output or {}).get("code") not in {"INVALID_TOOL_SCHEMA", "INVALID_TOOL_ARGUMENTS"}
@@ -353,6 +362,9 @@ class DefaultToolEngine:
             result = control.result_transform(call.name, result)
         result = _persist_browser_snapshot_output(result, call.snapshot_target)
         result = _persist_browser_screenshot_output(result, call.screenshot_target)
+        published_output = apply_delivery_policy(result.raw_output, context.workspace_dir)
+        if published_output is not result.raw_output:
+            result = result.model_copy(update={"raw_output": published_output})
         # Skill text remains an ordinary tool result. The reader has already
         # applied its shared request budget; no system activation is performed.
         result, blocks, tokens = context.validate_followup(
@@ -403,6 +415,7 @@ class DefaultToolEngine:
             turn_id=context.turn_id, step=control.step, started_at=call.started_at,
             parallel=call.parallel, commit_result=context.commit_result,
             hook_text_modified=hook_text_modified,
+            correction_observer=context.correction_observer, executed=call.executed,
         ))
         self._search.record_result(outcome, search)
         if context.hook_dispatch is not None and not context.is_cancelled():
@@ -511,6 +524,7 @@ class DefaultToolEngine:
                     else:
                         yield self._event(record, control.step)
             emitted = set()
+            artifact_results = {}
             # The first parallel batch finishes before the permission UI opens;
             # follow-up permission chains retain input order and no batch timer.
             for call in parallel:
@@ -521,11 +535,17 @@ class DefaultToolEngine:
                     async for event in events:
                         if isinstance(event, ToolCallResult):
                             outcomes[call.call_id] = event.success
+                            if call.user_visible:
+                                artifact_results[call.call_id] = event.content
                         yield event
             if self._options.artifact_detection_enabled and context.workspace_dir:
                 after = _snapshot_workspace_signatures(context.workspace_dir)
-                for artifact in _detect_changed_files(parallel[0].call_id, before, after, emitted, context.workspace_dir):
-                    yield artifact
+                for call_id, content in artifact_results.items():
+                    for artifact in _detect_changed_files(
+                        call_id, before, after, emitted, context.workspace_dir, content=content,
+                    ):
+                        emitted.add(artifact.abs_path)
+                        yield artifact
             if context.is_cancelled():
                 return
         for duplicate, source in duplicates:

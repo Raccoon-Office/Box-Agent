@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, MutableMapping, MutableSequence
 from typing import Any
 from hashlib import sha256
@@ -11,6 +12,7 @@ from .skill_dependencies import SkillDependencyError, resolve_required_skills
 from .skill_state import SkillReferenceSnapshot, SkillRead, SkillSessionState
 from .skill_restore import invalid_restore, recover_available_records, validate_restore_records
 from .tools.base import ToolResult
+from .skill_context import render_reference, read_reference
 
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.skill_preload import (
@@ -29,6 +31,7 @@ class SkillRuntime:
         self._allow_partial_restore = allow_partial_restore
         self.state = SkillSessionState()
         self.turn_deliveries: dict[str, dict[str, Any]] = {}
+        self._pending_materialized_messages: list[Any] = []
         self._restore_pending: tuple[str, ...] = ()
         self._restoring: tuple[str, ...] = ()
         self._restore_diagnostics: dict[str, str] = {}
@@ -44,6 +47,118 @@ class SkillRuntime:
 
     def select(self, names: list[str] | tuple[str, ...]) -> None:
         self.state.selected = tuple(dict.fromkeys(name.strip() for name in names if name.strip()))
+
+    def materialize_selected_messages(self, messages: list[Any]) -> tuple[tuple[str, str], ...]:
+        """Return durable runtime messages for explicitly selected Skills.
+
+        Selection is resolved at the user-message boundary so the request
+        Context Engine can treat Skill instructions as ordinary history. An
+        existing same-revision runtime snapshot is reused rather than copied
+        into every subsequent turn.
+        """
+        existing: set[tuple[str, str, str, str]] = set()
+        for message in messages:
+            if getattr(message, "role", None) != "user" or getattr(message, "source", None) != "runtime":
+                continue
+            content = getattr(message, "content", "")
+            parsed = read_reference(content) if isinstance(content, str) else None
+            if parsed is None:
+                continue
+            metadata, body = parsed
+            name, revision = metadata.get("name"), metadata.get("revision")
+            if (isinstance(name, str) and isinstance(revision, str)
+                    and metadata.get("kind") == "runtime_skill_instructions"
+                    and sha256(body.encode()).hexdigest() == revision):
+                existing.add((name, revision, str(metadata.get("source", "")),
+                              str(metadata.get("path", ""))))
+
+        materialized: list[tuple[str, str]] = []
+        # Only explicit current-turn selection is materialized here. Legacy
+        # restored references retain their existing deferred-delivery path,
+        # even if a later host activate/select also names them this turn.
+        pending_restore = set(self._restore_pending) | set(self._restoring)
+        for name in self.state.selected:
+            if name in pending_restore:
+                continue
+            try:
+                skill = self.resolve_reference(name)
+            except SkillDependencyError as exc:
+                # An explicitly selected Skill must not abort the whole turn
+                # when one of its required Skills is unavailable. Preserve a
+                # structured, model-visible diagnostic while withholding the
+                # unusable Skill body. This keeps the request executable and
+                # prevents an unavailable Skill from being billed as used.
+                message = (
+                    f"Skill '{name}' is unavailable: {exc.message}\n"
+                    "Ask the user to fix or enable the missing Skill dependency before using it."
+                )
+                diagnostic = {
+                    "kind": "runtime_skill_diagnostic",
+                    "name": name,
+                    "revision": sha256(message.encode()).hexdigest(),
+                    "code": exc.code,
+                    "details": dict(exc.details),
+                    "notice": "Selected Skill is unavailable; do not infer or follow its instructions.",
+                }
+                materialized.append((name, render_reference(diagnostic, message)))
+                continue
+            prompt = skill.prompt
+            revision = skill.revision
+            if (name, revision, skill.source, skill.path) in existing:
+                continue
+            lines = prompt.splitlines(keepends=True)
+            metadata = skill.reference_metadata(offset=0, reason="explicit")
+            metadata.update({
+                "end_offset": len(lines),
+                "complete": True,
+                "has_more": False,
+                "next_offset": None,
+                "kind": "runtime_skill_instructions",
+                "notice": "Host-provided method material; not a new user fact or permission.",
+            })
+            content = render_reference(metadata, prompt)
+            materialized.append((name, content))
+        return tuple(materialized)
+
+    def acknowledge_materialized_messages(self, messages: list[Any]) -> None:
+        """Record Skill delivery after the containing messages are durable."""
+        for message in messages:
+            if getattr(message, "role", None) != "user" or getattr(message, "source", None) != "runtime":
+                continue
+            content = getattr(message, "content", "")
+            parsed = read_reference(content) if isinstance(content, str) else None
+            if parsed is None:
+                continue
+            metadata, _ = parsed
+            name = metadata.get("name")
+            if not isinstance(name, str) or metadata.get("kind") != "runtime_skill_instructions":
+                continue
+            # ``reason`` is billing/provenance metadata and is intentionally
+            # omitted from the model-visible reference header.  Recover it
+            # from the current explicit selection when acknowledging the
+            # durable runtime message.
+            if name in self.state.selected:
+                metadata = dict(metadata)
+                metadata["reason"] = "explicit"
+            snapshot = SkillReferenceSnapshot(
+                name=name,
+                source=str(metadata.get("source", "unknown")),
+                path=str(metadata.get("path", "")),
+                revision=str(metadata["revision"]),
+                prompt=parsed[1],
+                metadata_json=json.dumps(metadata, ensure_ascii=False),
+            )
+            self.record_observation(snapshot, metadata)
+            self.turn_deliveries[name] = dict(metadata)
+
+    def defer_materialized_acknowledgement(self, messages: list[Any]) -> None:
+        self._pending_materialized_messages = list(messages)
+
+    def acknowledge_pending_materialized(self) -> None:
+        if self._pending_materialized_messages:
+            messages = self._pending_materialized_messages
+            self._pending_materialized_messages = []
+            self.acknowledge_materialized_messages(messages)
 
     def deactivate_reference(self, name: str) -> bool:
         """Withdraw an active or pending host reference without editing history."""

@@ -367,6 +367,7 @@ class SessionTraceTurn:
 
     content: str = ""
     stop_reason: str | None = None
+    turn_id: str = ""
 
 
 @contextmanager
@@ -384,7 +385,7 @@ def traced_session_turn(
     """
 
     turn_id = f"turn-{uuid4().hex}"
-    result = SessionTraceTurn()
+    result = SessionTraceTurn(turn_id=turn_id)
     started_at = time.perf_counter()
     writer.write("turn.input", turn_id=turn_id, data={"content": content})
     token = set_session_trace_writer(writer, turn_id=turn_id)

@@ -115,7 +115,17 @@ class MemoryPromotionPort(Protocol):
 
 @runtime_checkable
 class SessionStorePort(Protocol):
-    """Durable session operations already called by the kernel."""
+    """Durable session operations already called by the kernel.
+
+    The minimal contract is ``append`` / ``append_unlogged_messages`` /
+    ``replace_surface`` / ``flush`` (see docs/superpowers/specs/
+    2026-09-03-kernel-plugin-architecture-design.md §7). ``replay`` is an
+    *optional* native capability: the kernel feature-detects it and, when a
+    third-party Store does not provide it, keeps the validated post-compaction
+    in-memory surface instead (docs/design/skill-engine.md §6). It is
+    intentionally NOT part of the required Protocol so custom Stores are not
+    forced to implement it.
+    """
 
     def append(
         self,

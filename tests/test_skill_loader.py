@@ -11,6 +11,56 @@ import pytest
 from box_agent.tools.skill_loader import Skill, SkillLoader
 
 
+@pytest.mark.parametrize(("value", "visible"), [
+    (None, True), (False, False), (True, True), ("false", True), (0, True),
+])
+def test_user_visibility_only_hides_explicit_boolean_false(tmp_path, value, visible):
+    directory = tmp_path / "method"
+    directory.mkdir()
+    metadata = "" if value is None else f"metadata:\n  user_visible: {json.dumps(value)}\n"
+    path = directory / "SKILL.md"
+    path.write_text(f"---\nname: method\ndescription: A method\n{metadata}---\nBody\n")
+    loader = SkillLoader(tmp_path, skill_settings_path=tmp_path / "settings.json")
+    loader.discover_skills()
+
+    skill = loader.get_skill("method")
+    assert skill is not None
+    assert skill.user_visible is visible
+    assert skill.to_metadata_dict()["user_visible"] is visible
+    assert loader.list_skills_metadata()[0]["user_visible"] is visible
+    assert not skill.disabled
+
+
+def test_internal_skills_do_not_compete_for_generic_recommendation_slots(tmp_path):
+    loader = SkillLoader(tmp_path, skill_settings_path=tmp_path / "settings.json")
+    loader.loaded_skills = {
+        "topic-engine": Skill(name="topic-engine", description="topic", content="engine",
+                              metadata={"user_visible": False}),
+        "router": Skill(name="router", description="topic", content="entry",
+                        required_skills=["topic-engine"]),
+    }
+
+    assert [skill.name for skill in loader.filter_by_query("topic", max_skills=1)] == ["router"]
+    for query in (None, "topic"):
+        prompt = loader.get_skills_metadata_prompt(query)
+        assert '"name": "router"' in prompt
+        assert '"name": "topic-engine"' not in prompt
+    assert loader.get_skill("topic-engine") is not None
+    assert set(loader.list_skills()) == {"router", "topic-engine"}
+
+
+def test_internal_skills_can_be_explicitly_always_on_without_bypassing_filters(tmp_path):
+    loader = SkillLoader(tmp_path, skill_settings_path=tmp_path / "settings.json")
+    loader.loaded_skills["engine"] = Skill(
+        name="engine", description="topic", content="body", metadata={"user_visible": False}
+    )
+
+    assert loader.filter_by_query("topic") == []
+    assert [skill.name for skill in loader.filter_by_query("", always_on=frozenset({"engine"}))] == ["engine"]
+    assert loader.filter_by_query("topic", always_on=frozenset({"engine"}),
+                                  skill_filter=lambda skill: False) == []
+
+
 def test_search_skills_enumerates_without_selector_cap_or_dependency_expansion(tmp_path):
     loader = SkillLoader(tmp_path, skill_settings_path=tmp_path / "settings.json")
     loader.loaded_skills = {

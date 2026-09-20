@@ -170,6 +170,7 @@ class LLMClient:
         auth_file: str = "",
         timeout: float = 600.0,
         reasoning_effort_when_disabled: str | None = None,
+        max_request_body_bytes: int | None = None,
     ):
         """Initialize LLM client with specified provider.
 
@@ -196,6 +197,7 @@ class LLMClient:
         if reasoning_effort_when_disabled not in (None, "none", "low"):
             raise ValueError("reasoning_effort_when_disabled must be null, 'none' or 'low'")
         self.reasoning_effort_when_disabled = reasoning_effort_when_disabled
+        self.max_request_body_bytes = max_request_body_bytes
 
         # Normalize api_base (remove trailing slash)
         api_base = api_base.rstrip("/")
@@ -225,6 +227,7 @@ class LLMClient:
                 auth_file=auth_file,
                 timeout=timeout,
                 reasoning_effort_when_disabled=reasoning_effort_when_disabled,
+                max_request_body_bytes=max_request_body_bytes,
             )
         else:
             raise ValueError(f"Unsupported provider: {provider}")

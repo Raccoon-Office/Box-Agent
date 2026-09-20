@@ -18,6 +18,11 @@ from box_agent.tools.browser_intent import (
     [
         "看一下当前页面里的两个选项",
         "帮我总结这个网页",
+        "帮我看看这个网站",
+        "看看我打开的那个网页",
+        "分析我现在看的这个页面",
+        "总结我刚刚打开的那个网站",
+        "summarize this website",
         "读取我浏览器里打开的页面",
         "对比我已经登录后的页面",
         "总结这篇公众号文章",
@@ -38,6 +43,9 @@ def test_current_page_intent_accepts_explicit_page_references(user_text: str) ->
         "了解一下这个模型",
         "打开 https://example.com 并总结",
         "做一个网页",
+        "帮我看看",
+        "看看那个问题",
+        "帮我分析一个网站",
         "compare GPT modes",
     ],
 )
@@ -69,7 +77,11 @@ def test_human_handoff_intent_rejects_background_tasks(user_text: str) -> None:
     assert not has_human_browser_handoff_intent(user_text)
 
 
-def test_browser_continuation_requires_recent_successful_browser_context() -> None:
+@pytest.mark.parametrize("user_text", [
+    "继续看", "继续帮我分析一下", "请接着帮我总结一下吧", "帮我看看",
+    "再看一下好吗？", "继续对比一下", "continue",
+])
+def test_browser_continuation_requires_recent_successful_browser_context(user_text: str) -> None:
     messages = [
         Message(role="system", content="system"),
         Message(role="user", content="看看当前页面"),
@@ -80,21 +92,56 @@ def test_browser_continuation_requires_recent_successful_browser_context() -> No
             tool_call_id="browser-1",
             content='{"ok": true}',
         ),
-        Message(role="user", content="继续看"),
+        Message(role="user", content=user_text),
     ]
 
     policy = BrowserToolIntentPolicy.for_turn(
-        current_turn_text="继续看",
+        current_turn_text=user_text,
         messages=messages,
     )
 
     assert policy.allow_current_page is True
+    assert policy.is_tool_visible("user_browser_read_current_page") is True
+    assert policy.tool_call_error("user_browser_read_page", {}) is None
+    assert BrowserToolIntentPolicy.for_turn(
+        current_turn_text=user_text, messages=[],
+    ).allow_current_page is False
     messages[-2] = messages[-2].model_copy(update={"content": "Error: source_unavailable"})
     failed_policy = BrowserToolIntentPolicy.for_turn(
-        current_turn_text="继续看",
+        current_turn_text=user_text,
         messages=messages,
     )
     assert failed_policy.allow_current_page is False
+
+
+@pytest.mark.parametrize("user_text", [
+    "继续帮我分析一下这个模型", "帮我看看代码", "继续写代码", "查一下天气",
+])
+def test_browser_history_does_not_authorize_unrelated_followups(user_text: str) -> None:
+    messages = [
+        Message(role="user", content="看看当前页面"),
+        Message(role="tool", name="user_browser_read_current_page",
+                tool_call_id="browser-1", content='{"ok": true}'),
+        Message(role="user", content=user_text),
+    ]
+    policy = BrowserToolIntentPolicy.for_turn(current_turn_text=user_text, messages=messages)
+    assert policy.is_tool_visible("user_browser_read_current_page") is False
+    assert policy.tool_call_error("user_browser_read_page", {}) is not None
+
+
+def test_browser_continuation_does_not_reuse_context_across_an_unrelated_turn() -> None:
+    messages = [
+        Message(role="user", content="看看当前页面"),
+        Message(role="tool", name="user_browser_read_current_page",
+                tool_call_id="browser-1", content='{"ok": true}'),
+        Message(role="user", content="解释一下冒泡排序"),
+        Message(role="assistant", content="冒泡排序通过比较相邻元素排序。"),
+        Message(role="user", content="继续帮我分析一下"),
+    ]
+    policy = BrowserToolIntentPolicy.for_turn(
+        current_turn_text="继续帮我分析一下", messages=messages,
+    )
+    assert policy.allow_current_page is False
 
 
 def test_browser_continuation_does_not_hide_either_backend() -> None:
@@ -327,7 +374,11 @@ async def test_core_hides_and_denies_current_page_tool_for_generic_request() -> 
 
 
 @pytest.mark.asyncio
-async def test_core_exposes_and_executes_current_page_tool_for_explicit_request() -> None:
+@pytest.mark.parametrize("user_text", [
+    "看一下当前页面里的两个选项", "看看我打开的那个网页", "帮我看看这个网站",
+    "继续帮我分析一下", "帮我看看",
+])
+async def test_core_exposes_and_executes_current_page_tool_for_explicit_request(user_text: str) -> None:
     tool = _CountingCurrentPageTool()
     llm = _CapturingLLM(
         [
@@ -340,16 +391,23 @@ async def test_core_exposes_and_executes_current_page_tool_for_explicit_request(
         ]
     )
 
+    messages = [Message(role="system", content="system")]
+    if user_text in {"继续帮我分析一下", "帮我看看"}:
+        messages.extend([
+            Message(role="user", content="读取当前页面"),
+            Message(role="assistant", content="", tool_calls=[_current_page_call()]),
+            Message(role="tool", name=tool.name, tool_call_id="browser-call",
+                    content='{"ok": true}'),
+            Message(role="assistant", content="已读取页面"),
+        ])
+    messages.append(Message(role="user", content=user_text))
     events = await _collect_events(
         run_agent_loop(
             llm=llm,
-            messages=[
-                Message(role="system", content="system"),
-                Message(role="user", content="看一下当前页面里的两个选项"),
-            ],
+            messages=messages,
             tools={tool.name: tool},
             max_steps=3,
-            current_turn_text="看一下当前页面里的两个选项",
+            current_turn_text=user_text,
         )
     )
 

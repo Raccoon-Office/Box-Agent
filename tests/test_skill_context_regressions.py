@@ -5,7 +5,13 @@ import json
 import pytest
 
 from box_agent.schema import Message
-from box_agent.skill_context import SkillReferenceContext, read_reference, render_reference
+from box_agent.skill_context import (
+    SkillReferenceContext,
+    append_reference,
+    projection_cost,
+    read_reference,
+    render_reference,
+)
 from box_agent.skill_runtime import SkillRuntime
 from box_agent.tools.skill_loader import SkillLoader
 
@@ -42,6 +48,18 @@ def added_text(projection, user_index=0):
     return "" if isinstance(content, str) else "".join(
         block["text"] for block in content[1:] if block.get("type") == "text"
     )
+
+
+def added_cost(projection, original):
+    content = projection.messages[0].content
+    if isinstance(content, str):
+        return 0
+    total = 0
+    target = original
+    for block in content[1:]:
+        total += projection_cost(target, block["text"])
+        target = append_reference(target, block["text"])
+    return total
 
 
 @pytest.mark.parametrize("invalidation", ["disabled", "deleted", "broken"])
@@ -91,6 +109,102 @@ def test_selected_reference_with_budget_smaller_than_host_prefix_stays_bounded(t
     assert projection.messages[0].content == "BASE"
 
 
+def test_selected_overflow_without_paging_reader_is_truncated_with_skill_path(tmp_path):
+    path = write_skill(tmp_path, "large", ("LARGE_METHOD_" + "x" * 100 + "\n") * 20)
+    context, _ = make_context(tmp_path)
+    context.runtime.select(["large"])
+    messages = [Message(role="user", content="task")]
+
+    projection = context.prepare_request(
+        messages, budget_chars=2000, can_page=lambda _names: False
+    )
+
+    text = added_text(projection)
+    assert not projection.reader_required
+    assert projection.blocked_reason is None
+    assert str(path) in text
+    assert "LARGE_METHOD_" in text
+    assert projection.references[0]["end_offset"] < 20
+
+
+def test_selected_single_line_without_reader_keeps_body_prefix_and_skill_path(tmp_path):
+    body = "SINGLE_LINE_RULE_" + "x" * 20000
+    path = write_skill(tmp_path, "single-line", body)
+    context, _ = make_context(tmp_path)
+    context.runtime.select(["single-line"])
+    original = Message(role="user", content="task")
+
+    projection = context.prepare_request(
+        [original], budget_chars=2000, can_page=lambda _names: False
+    )
+
+    text = added_text(projection)
+    assert not projection.reader_required
+    assert projection.blocked_reason is None
+    assert str(path) in text
+    assert "SINGLE_LINE_RULE_" in text
+    assert body not in text
+    assert 0 < added_cost(projection, original) <= 2000
+    assert original.content == "task"
+
+
+def test_selected_skills_without_reader_keep_each_path_when_bodies_overflow(tmp_path):
+    first_path = write_skill(tmp_path, "first", ("FIRST_RULE_" + "x" * 100 + "\n") * 100)
+    second_path = write_skill(tmp_path, "second", ("SECOND_RULE_" + "y" * 100 + "\n") * 100)
+    context, _ = make_context(tmp_path)
+    context.runtime.select(["first", "second"])
+    original = Message(role="user", content="task")
+
+    projection = context.prepare_request(
+        [original], budget_chars=4000, can_page=lambda _names: False
+    )
+
+    text = added_text(projection)
+    assert not projection.reader_required
+    assert projection.blocked_reason is None
+    assert str(first_path) in text
+    assert str(second_path) in text
+    assert "FIRST_RULE_" in text
+    assert 0 < added_cost(projection, original) <= 4000
+
+
+def test_selected_without_reader_bounds_unicode_and_escaped_body_cost(tmp_path):
+    body = 'UNICODE_RULE_中文"\\' * 2000
+    path = write_skill(tmp_path, "unicode", body)
+    context, _ = make_context(tmp_path)
+    context.runtime.select(["unicode"])
+    original = Message(role="user", content='处理 "quoted" text\\path\n下一步')
+
+    projection = context.prepare_request(
+        [original], budget_chars=2500, can_page=lambda _names: False
+    )
+
+    text = added_text(projection)
+    assert not projection.reader_required
+    assert projection.blocked_reason is None
+    assert str(path) in text
+    assert 'UNICODE_RULE_中文"\\' in text
+    assert body not in text
+    assert 0 < added_cost(projection, original) <= 2500
+
+
+def test_selected_without_reader_and_tiny_budget_continues_without_error(tmp_path):
+    write_skill(tmp_path, "small-budget", "SMALL_BUDGET_RULE")
+    context, _ = make_context(tmp_path)
+    context.runtime.select(["small-budget"])
+    original = Message(role="user", content="task")
+
+    projection = context.prepare_request(
+        [original], budget_chars=20, can_page=lambda _names: False
+    )
+
+    assert not projection.reader_required
+    assert projection.blocked_reason is None
+    assert not projection.budget_blocked
+    assert added_cost(projection, original) <= 20
+    assert original.content == "task"
+
+
 def test_oversized_selection_keeps_all_selected_skills_readable_without_pinning_short_body(tmp_path):
     write_skill(tmp_path, "long", ("LONG_METHOD_" + "x" * 100 + "\n") * 70)
     write_skill(tmp_path, "short", "SHORT_METHOD")
@@ -98,7 +212,9 @@ def test_oversized_selection_keeps_all_selected_skills_readable_without_pinning_
     context.runtime.select(["long", "short"])
     messages = [Message(role="user", content="task")]
 
-    projection = context.prepare_request(messages, budget_chars=2000)
+    projection = context.prepare_request(
+        messages, budget_chars=2000, can_page=lambda _names: True
+    )
 
     assert "SHORT_METHOD" not in added_text(projection)
     assert "LONG_METHOD_" not in added_text(projection)
@@ -118,7 +234,9 @@ def test_small_selection_leaves_large_selection_a_path_to_later_pages(tmp_path):
     offset = 0
     revision = None
     for index in range(100):
-        projection = context.prepare_request(messages, budget_chars=2000)
+        projection = context.prepare_request(
+            messages, budget_chars=2000, can_page=lambda _names: True
+        )
         page = context.read("long", offset=offset, revision=revision)
         assert page.success, (
             f"The selected large Skill cannot advance from line {offset}: {page.error}; "

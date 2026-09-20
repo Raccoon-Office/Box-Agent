@@ -1,0 +1,72 @@
+{
+  "list_skills": [
+    {
+      "path": [
+        "description"
+      ],
+      "before": "List or search locally installed Skill names, descriptions and availability. Use an empty query to browse all available Skills, or an exact name to diagnose an unavailable Skill. This does not load instructions or access SkillHub. Follow next_offset for more results; if revision changes, restart from offset 0. Use get_skill to read a chosen Skill.",
+      "after": "List or search locally installed Skill names, descriptions and availability. Use an empty query to browse public Skills, or an exact name to inspect an internal method or diagnose an unavailable Skill. This does not load instructions or access SkillHub. Follow next_offset for more results; if revision changes, restart from offset 0. Use get_skill to read a chosen Skill."
+    }
+  ],
+  "request_user_decision": [
+    {
+      "path": [
+        "description"
+      ],
+      "before": "Pause the current task for one finite, user-visible decision whose options materially change the deliverable, scope, format, or other user-facing outcome. Do not use this for internal implementation choices: choose those yourself. Do not use it for missing facts; use request_user_input instead. Provide 2-6 concise options with stable IDs. You may request a timeout default only when it preserves the user's stated intent, is low-risk, and is reversible. Prefer progress over waiting: when one option safely continues the user's explicit request, put that recommended option first, set it as the default, and request a 30 second timeout. Every call must supply the default, timeout, risk, reversibility, and intent-preservation declarations; the runtime will deny automatic submission for sensitive or unsafe choices. If the model can choose a safe path without changing the user-visible outcome, do not call this tool. The runtime decides whether automatic submission is actually allowed. After calling this tool, end the turn and do not repeat the options in Markdown.",
+      "after": "Pause the current task for one finite, user-visible decision whose options materially change the deliverable, scope, format, or other user-facing outcome. Do not use this for internal implementation choices: choose those yourself. Do not use it for missing facts; use request_user_input instead. Provide 2-6 concise options with stable IDs. You may request a timeout default only when it preserves the user's stated intent, is low-risk, and is reversible. Prefer progress over waiting: when one option safely continues the user's explicit request, put that recommended option first, set it as the default, and request a 30 second timeout. When the user's preference is unknown and must be chosen by the user, omit the default and timeout to wait for a manual response. Calls that request a timeout must supply the default, risk, reversibility, and intent-preservation declarations; the runtime will deny automatic submission for sensitive or unsafe choices. If the model can choose a safe path without changing the user-visible outcome, do not call this tool. The runtime decides whether automatic submission is actually allowed. After calling this tool, end the turn and do not repeat the options in Markdown."
+    },
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "requested_auto_submit_seconds",
+        "description"
+      ],
+      "before": "Requested timeout. The runtime may remove it. Requires a default option plus low risk, reversible, and intent-preserving declarations. Request 30 seconds when those conditions hold.",
+      "after": "Optional timeout; omit to wait for the user without automatic selection. The runtime may remove it. Requires a default option plus low risk, reversible, and intent-preserving declarations. Request 30 seconds when those conditions hold."
+    },
+    {
+      "path": [
+        "input_schema",
+        "required"
+      ],
+      "before": [
+        "question",
+        "decision_kind",
+        "options",
+        "default_option_id",
+        "requested_auto_submit_seconds",
+        "risk_level",
+        "reversible",
+        "preserves_user_intent"
+      ],
+      "after": [
+        "question",
+        "decision_kind",
+        "options"
+      ]
+    }
+  ],
+  "get_skill": [
+    {
+      "path": [
+        "description"
+      ],
+      "before": "Read a Skill's method and resource paths. Follow next_offset with the returned revision when paged. Read required_skills before their steps; related_skills are optional. Skill guidance does not grant tools or permission. Use list_skills for names and availability. When using a Skill, follow its applicable workflow, required reference files and verification, consistent with the user request and permissions. If a required step is blocked, use an available permitted recovery or report it as incomplete; do not treat required steps as optional.",
+      "after": "Read a Skill's method and resource paths. Follow next_offset with the returned revision when paged. Read required_skills before their steps; related_skills are optional. Skill guidance does not grant tools or permission. Use list_skills for names and availability. When the user names a Skill or the task clearly matches an available Skill, read its full instructions with get_skill before planning, delegating, or authoring. A complete Skill reference already supplied in context counts as read; catalog metadata alone does not. When several Skills cover a task and the user has not selected one, read the workflow entry before its backend methods and let it route the task. When using a Skill, follow its applicable workflow, required reference files and verification, consistent with the user request and permissions. If a required step is blocked, use an available permitted recovery or report it as incomplete; do not treat required steps as optional. If a Skill requires a manual user choice, call request_user_decision and wait for the response before executing a branch. Do not substitute prose or a JSON code block for the tool call, or infer a default or timeout from general progress guidance."
+    }
+  ],
+  "generate_image": [
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "publish_artifact",
+        "description"
+      ],
+      "before": "Publish the image as a standalone user deliverable (default true). Set false for intermediate assets embedded in a larger deliverable, as instructed by the PPTX skill. The saved file remains available.",
+      "after": "Publish the image as a standalone user deliverable. When omitted, defaults to false in a producer-declared delivery scope, true elsewhere. Set false for intermediate assets embedded in a larger deliverable, as instructed by the PPTX skill. The saved file remains available."
+    }
+  ]
+}

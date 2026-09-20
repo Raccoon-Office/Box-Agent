@@ -1,5 +1,14 @@
 # 受控 HTML PPTX 架构
 
+## 独立设计角色与无 seed 文档
+
+普通制作入口为 `design_plan.js prepare`：校验大纲并输出简短设计摘要与索引，详情按需读取，主模型只接收路径与复用状态。独立角色按 `references/design-role.md` 只返回主题、逐页布局和必要视觉选项；程序通过 `design_plan.js accept` 从子代理 Session Log 导入结果，生成版本、哈希、页码和固定内容映射，再写入 `design_plan.json`。程序校验后通过 `inspect_deck_contract.js --design-plan` 生成骨架；普通内容补丁不能覆盖视觉枚举字段。事实、近成稿文字和素材获取仍归主模型。
+
+主题预设使用基础主题 ID 或 `主题ID@变体ID`，绑定已有兼容构图家族及命名变体。新 `design.version=2` 直接保存 family/variant，不含 seed；旧 version=1 文档读取时保留合法的已存变体，必要时才使用旧 seed 解析。旧无 design 文档保留历史默认外观。单页 `props.variant`、composition 和全部 HTML 调整控件继续存在。
+
+设计输入与目录指纹相同才复用；用户在 HTML 中主动编辑会使旧 AI 方案失效，保存不会回滚用户修改。新流程不要求第二次常规模型审美复核，记录“未进行事后模型复核”，并继续运行程序 QA。用户原话的硬约束与大纲视觉建议分开处理，修改建议不重置设计预算。主模型不能手写方案替代子代理结果。图片模型无法识图只记录未验证，不阻断后续制作。只有源码与回归测试完成不等于 OfficeV3 已更新；仍需独立打包、安装、重启和真实任务验证。
+
+
 受控 PPTX 路线把结构化 `DeckDocument` 编译成自包含、可编辑的 HTML 演示文稿。
 默认交付物是 `index.html`；`deck.json` 保留为可复现的生成模型，可编辑 PPTX 是可选
 导出物。
@@ -15,11 +24,14 @@
 
 ```mermaid
 flowchart TD
-    O["用户需求 / outline.json"] --> D["deck.json<br/>生成阶段事实源"]
+    O["用户需求 / outline.json"] --> PREP["校验大纲并准备设计输入"]
+    PREP --> ROLE["独立设计角色"]
+    ROLE --> PLAN["通过校验的 design_plan.json"]
+    PLAN --> D["deck.json<br/>生成阶段事实源"]
     D --> V["validateAndNormalizeDeck"]
 
     D --> T["theme_id"]
-    D --> G["design.seed / family / variant"]
+    D --> G["design.family / variant"]
     D --> S["slides[]"]
     S --> L["layout_id"]
     S --> P["props / background"]
@@ -113,6 +125,8 @@ biennale-yellow    -> editorial-spread
 retro-windows      -> retro-interface
 ```
 
+以下是底层构图能力与旧 CLI 的兼容规则。普通制作由设计角色选择完整主题预设，不要求主模型逐层选择方向、family 或 variant。
+
 规则是：
 
 - 没有显式选择时使用 `default_family`，保持旧结果；
@@ -123,12 +137,12 @@ retro-windows      -> retro-interface
 - `inspect_deck_contract.js --family <FAMILY_ID>` 在 scaffold 时持久化该选择；
 - 已持久化且兼容的 `design.family` 在验证、编辑、重开和导出时保留；
 - 未注册家族会报错，不兼容家族会被拒绝或在旧文档规范化时回退到默认值；
-- `design.seed` 只在最终选定的家族内确定性选择 variant。
+- 新文档直接持久化 `design.variant`，不再生成 seed；旧文档保留已保存的 variant。
 
 因此当前关系是：
 
 ```text
-主题 -> 兼容白名单 -> 可用构图方向 -> 内容选择 family -> seed 选择 variant
+主题 -> 兼容白名单 -> 可用构图方向 -> 主题预设 -> 保存 family / variant
 ```
 
 这样既增加创意空间，也不会开放未经视觉验证的任意“主题 × 构图”组合。
@@ -164,7 +178,7 @@ retro-windows      -> retro-interface
 | `technical-schematic` | 蓝图网格、连线节点、规格页 | 架构、工程、科研、技术方案 |
 
 同一主题可以兼容多个家族，但不是任意组合；同一 deck 只选一个家族，页面语义仍由
-15 个 `layout_id` 决定，家族负责整套演示的宏观阅读方式。
+33 个 `layout_id` 决定，家族负责整套演示的宏观阅读方式。
 
 variant 可以拥有少量专属 HTML 锚点，但不得复制布局负责的可编辑字段。界面隐喻必须
 跟内容语义绑定：浏览器条只服务 `browser-story` 的媒体页，系统总线只属于
@@ -182,18 +196,37 @@ variant 可以拥有少量专属 HTML 锚点，但不得复制布局负责的可
 | 布局 | schema、renderer、编辑 metadata、导出映射 | 全部构图家族 |
 | 构图家族 | HTML 外壳、锚点、CSS、variants | 全部已注册布局 |
 
-目标是“加法实现、笛卡尔积验证”，而不是为每个组合复制代码。15 个布局和 11 个构图
-应当是 26 份主要实现和 165 个自动兼容性检查，而不是 165 套独立 renderer。
+目标是“加法实现、笛卡尔积验证”，而不是为每个组合复制代码。33 个布局和 11 个构图
+应当是 44 份主要实现和 363 个自动兼容性检查，而不是 363 套独立 renderer。
 
 ## 关键实现文件
 
 - `scripts/deck_spec_core.js`：DeckDocument 验证与规范化。
-- `scripts/composition_core.js`：5 个方向、11 个家族、兼容白名单与 seed variant。
+- `scripts/composition_core.js`：5 个方向、11 个家族、兼容白名单与直接保存的 variant。
 - `layouts/registry.js`：布局契约与构图 HTML 外壳。
-- `scripts/finalize_controlled_deck.js`：按依赖顺序一次完成 spec/truth/media 校验、HTML 编译、自检与运行时探测，遇到首个可修复问题即停止。
+- `scripts/finalize_controlled_deck.js`：统一完成校验、HTML 编译和运行时检查；结构或渲染失败停止，渲染后的质量与来源问题按降级策略记录。
 - `scripts/render_deck_html.js`：完整 HTML 组装。
 - `runtime/deck-editor.js`：浏览器编辑、重渲染和保存。
 - `scripts/html_to_editable_pptx.js`：可选可编辑 PPTX 导出。
 
 skill 级运行契约继续以
 `box_agent/skills/document-skills/pptx/references/controlled-layouts.md` 为准。
+
+### 视觉要求与主题匹配
+
+独立设计角色先输出 `visual_requirements`（画布、标题风格、标题/正文字体类别、阴影），再选择主题。目录中的 `visual_traits` 从主题已有 style 与 typography 生成，不根据原始配色相似度筛选；最终色值始终来自配色契约。
+
+`theme_match.js` 检查选择：存在符合要求的主题时返回字段冲突和候选；无匹配且 `allow_plain_fallback=true` 时使用 `plain-neutral`，保留配色与逐页布局，在 `theme_match` 记录降级特征。用户要求的视觉特征应设置为不可降级，用户锁定的主题也不允许自动替换。主题匹配不代替配色对比度检查或最终视觉审查。
+
+新输入包含 `visual_contract_version=1`；旧设计输入需要重新 prepare，不能静默复用。已经生成的 HTML 和人工编辑保持原状。语义要求仍由设计角色从需求中提取，程序验证的是结构化要求与主题的一致性，不保证品牌审美自动正确。
+
+### 设计失败后的交付保障
+
+prepare 在检查大纲前立即生成 `fallback.html`，不存在已有页面时也写入 `index.html`。大纲或研究检查失败时交付标记为未核验的基础版。设计修正只合并程序错误中点名的字段组，其余原始选择保持；两次设计响应都无法导入时返回 `status: degraded` 和基础演示路径，不再以设计失败阻断交付。已存在的人工 HTML 不覆盖，报告指向单独的 fallback.html。
+
+降级版生成合法 deck.json，使用 plain-neutral 与注册布局，再调用统一 render_deck_html.js；保留完整编辑器、播放、HTML 保存与导出入口，不维护独立文本 HTML 生成器。它复用大纲事实，不伪造图片或填充数据。额外页通过拆分已有要点保留，报告列出原大纲页数、模型页数及实际页数。正常编译失败时也应交付这份基础版并说明问题；降级不等于设计或事实检查通过。
+### 正常设计阶段的读取与预算
+
+设计入口 brief.json 仅提供阅读计划、用户约束和页数，页面内容、主题索引、布局索引分别写成小文件。索引保留全部注册选项，每份通常不超过约 7 KB；研究证据全文留在内容主流程，不重复灌入设计上下文。设计角色先读完内容和索引，按视觉特征筛选最多三个主题，再读取候选主题与已选布局详情。
+
+正常设计预算为 24 步、48 次工具调用，不用 180 秒的整任务测试上限截断设计。导入器校验每份必读文件的读取记录和内容哈希，不能把只读入口视为已经看完所有页面。首次响应未完成时，第二次完整响应可正常校验；有可用原方案时，修正包包含原方案、错误和合法枚举，修正角色只需读取这个包，预算为 16 步、24 次调用。程序校验它绑定的原始会话与响应哈希，只合并出错字段。该调整解决正常设计输入和重试，不改变降级演示的布局策略。

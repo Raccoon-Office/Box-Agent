@@ -99,6 +99,19 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
   query that already returned usable evidence. Before every later batch, name
   the still-uncovered dimension or conflict; do not rerun a near-equivalent
   entity/fact query merely because an authority-ranked or `site:` query was empty.
+- Treat HTTP 403/429 responses, CAPTCHA or challenge pages, robots or permission
+  denials, repeated timeouts, and repeatedly empty or unreadable responses as
+  blocked-source signals. For the same evidence target, allow at most one
+  materially different recovery attempt after the first such failure. A valid
+  recovery changes the source, exact URL, or available reading backend; a
+  rephrased query or the same URL/backend is not a recovery.
+- After two consecutive blocked-source failures for the same evidence target,
+  stop searching that target for the current turn. Promptly tell the user what
+  target is blocked, what was attempted, which failure signals were observed,
+  what evidence remains usable, and which claim stays unverified. Continue with
+  independent dimensions when possible and finish with an honest `partial` or
+  `framework` handoff; do not silently spend the remaining search budget on
+  near-equivalent retries or imply that retrieval is still running.
 - If an exact public URL is already known, read it with an actually available
   exact-page tool. Prefer `web_extract`, or a user-selected MCP reader that
   accepts the exact URL and returns that page's body. In officev3,

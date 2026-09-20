@@ -1,0 +1,635 @@
+{
+  "files": {
+    "THIRD_PARTY_NOTICES.md": {
+      "sha256": "d85e13753947f8c9feeab80d9832ca35c8a56d84df09d529cf751890b5f0894a",
+      "source_path": "webui/THIRD_PARTY_NOTICES.md",
+      "source_sha256": "2d03bab5d79892eb43175bc7f33f2d752785a61b33e61e9191668e5db8821e24"
+    },
+    "fonts/ArchitectsDaughter-Regular.ttf": {
+      "sha256": "6159718a08898e34bc1cb7354086141a5f9a70b73e54dbec27ead0d59a697359",
+      "source_path": "webui/bundled/fonts/ArchitectsDaughter-Regular.ttf",
+      "source_sha256": "6159718a08898e34bc1cb7354086141a5f9a70b73e54dbec27ead0d59a697359"
+    },
+    "fonts/Archivo.ttf": {
+      "sha256": "0e094a7d3c7c4c25cf1310c4b30014f1dae9332220b1c2c88f4fa996f0b05053",
+      "source_path": "webui/bundled/fonts/Archivo.ttf",
+      "source_sha256": "0e094a7d3c7c4c25cf1310c4b30014f1dae9332220b1c2c88f4fa996f0b05053"
+    },
+    "fonts/BarlowCondensed-Bold.ttf": {
+      "sha256": "e476562ec9c1e16cf16475895b511f08c804f438cc9a9f80a44ea50a0eeb5b65",
+      "source_path": "webui/bundled/fonts/BarlowCondensed-Bold.ttf",
+      "source_sha256": "e476562ec9c1e16cf16475895b511f08c804f438cc9a9f80a44ea50a0eeb5b65"
+    },
+    "fonts/BarlowCondensed-Regular.ttf": {
+      "sha256": "583cec5da3b84bc4dc7c9c72e2a565c94d34e431518b19d7e250b7830ad5f996",
+      "source_path": "webui/bundled/fonts/BarlowCondensed-Regular.ttf",
+      "source_sha256": "583cec5da3b84bc4dc7c9c72e2a565c94d34e431518b19d7e250b7830ad5f996"
+    },
+    "fonts/BarlowCondensed-SemiBold.ttf": {
+      "sha256": "7b619d14bc2327509a9ef32b0890f709626f7ecc9ff61191c2a4314c5499d2d9",
+      "source_path": "webui/bundled/fonts/BarlowCondensed-SemiBold.ttf",
+      "source_sha256": "7b619d14bc2327509a9ef32b0890f709626f7ecc9ff61191c2a4314c5499d2d9"
+    },
+    "fonts/BebasNeue-Regular.ttf": {
+      "sha256": "08e4623805102d819f58601e46e345648846075e363b2ceb23313c2d1c83ec73",
+      "source_path": "webui/bundled/fonts/BebasNeue-Regular.ttf",
+      "source_sha256": "08e4623805102d819f58601e46e345648846075e363b2ceb23313c2d1c83ec73"
+    },
+    "fonts/Bungee-Regular.ttf": {
+      "sha256": "c4f5361ce120af3e6b9156d0bf379fa19cda2ea0cd18ac01fd99596c6bf66e3f",
+      "source_path": "webui/bundled/fonts/Bungee-Regular.ttf",
+      "source_sha256": "c4f5361ce120af3e6b9156d0bf379fa19cda2ea0cd18ac01fd99596c6bf66e3f"
+    },
+    "fonts/Caveat.ttf": {
+      "sha256": "0bdb6b660482d31531b3945849fba5916b3ef8695da7024a9e6b9ee3c4157988",
+      "source_path": "webui/bundled/fonts/Caveat.ttf",
+      "source_sha256": "0bdb6b660482d31531b3945849fba5916b3ef8695da7024a9e6b9ee3c4157988"
+    },
+    "fonts/CormorantGaramond.ttf": {
+      "sha256": "b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0",
+      "source_path": "webui/bundled/fonts/CormorantGaramond.ttf",
+      "source_sha256": "b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0"
+    },
+    "fonts/DMSans.ttf": {
+      "sha256": "8cd08d97e89c24d0aa92edd2f0f4c8ee6195eee9b7c9f154865a58b02f0c1c0d",
+      "source_path": "webui/bundled/fonts/DMSans.ttf",
+      "source_sha256": "8cd08d97e89c24d0aa92edd2f0f4c8ee6195eee9b7c9f154865a58b02f0c1c0d"
+    },
+    "fonts/DancingScript.ttf": {
+      "sha256": "21808625578fe8d8cd10cb684be546dca077b27cd03a53a2f1ec11dc743c924c",
+      "source_path": "webui/bundled/fonts/DancingScript.ttf",
+      "source_sha256": "21808625578fe8d8cd10cb684be546dca077b27cd03a53a2f1ec11dc743c924c"
+    },
+    "fonts/Fraunces.ttf": {
+      "sha256": "177ff6c0f14e5550a3c624247cd1189611d4eb65d000b14944c63d967958abbb",
+      "source_path": "webui/bundled/fonts/Fraunces.ttf",
+      "source_sha256": "177ff6c0f14e5550a3c624247cd1189611d4eb65d000b14944c63d967958abbb"
+    },
+    "fonts/IBMPlexMono-Regular.ttf": {
+      "sha256": "df73e3be25c174d25da4077468c9f70f65ac5b3f171642ccae11040a38d9230b",
+      "source_path": "webui/bundled/fonts/IBMPlexMono-Regular.ttf",
+      "source_sha256": "df73e3be25c174d25da4077468c9f70f65ac5b3f171642ccae11040a38d9230b"
+    },
+    "fonts/IBMPlexMono-SemiBold.ttf": {
+      "sha256": "b77df64bf155780988af10211d38bc74a688df7a779fe4f1442c3d464eb3cf76",
+      "source_path": "webui/bundled/fonts/IBMPlexMono-SemiBold.ttf",
+      "source_sha256": "b77df64bf155780988af10211d38bc74a688df7a779fe4f1442c3d464eb3cf76"
+    },
+    "fonts/IBMPlexSans_1.ttf": {
+      "sha256": "6f7a8c4219e021ff7c9131bc5f1f7af97bcd1436a59578d444a8cb92e9791742",
+      "source_path": "webui/bundled/fonts/IBMPlexSans_1.ttf",
+      "source_sha256": "6f7a8c4219e021ff7c9131bc5f1f7af97bcd1436a59578d444a8cb92e9791742"
+    },
+    "fonts/IBMPlexSans_2.ttf": {
+      "sha256": "6dbe082463cf749cfa057d45c3048c90f4df031496498e5b5bdfd0b6babb9d16",
+      "source_path": "webui/bundled/fonts/IBMPlexSans_2.ttf",
+      "source_sha256": "6dbe082463cf749cfa057d45c3048c90f4df031496498e5b5bdfd0b6babb9d16"
+    },
+    "fonts/IndieFlower-Regular.ttf": {
+      "sha256": "ccc94b22b156e9c5dfe50fd051f01b097600b252c24473e624bb43a143140a94",
+      "source_path": "webui/bundled/fonts/IndieFlower-Regular.ttf",
+      "source_sha256": "ccc94b22b156e9c5dfe50fd051f01b097600b252c24473e624bb43a143140a94"
+    },
+    "fonts/Kalam-Bold.ttf": {
+      "sha256": "2f6576601db015d4f6c08678120277fc8510b98c06e932ce7a6a9cbff4cbdded",
+      "source_path": "webui/bundled/fonts/Kalam-Bold.ttf",
+      "source_sha256": "2f6576601db015d4f6c08678120277fc8510b98c06e932ce7a6a9cbff4cbdded"
+    },
+    "fonts/Kalam-Regular.ttf": {
+      "sha256": "57cecb63d4608019371954274ae1d8c397764debd5b19d4a33c1efa4dc923c0b",
+      "source_path": "webui/bundled/fonts/Kalam-Regular.ttf",
+      "source_sha256": "57cecb63d4608019371954274ae1d8c397764debd5b19d4a33c1efa4dc923c0b"
+    },
+    "fonts/LXGWWenKai-Regular.ttf": {
+      "sha256": "ea47ec17d0f3d0ed1e6d9c51d6146402d4d1e2f0ff397a90765aaaa0ddd382fb",
+      "source_path": "webui/bundled/fonts/LXGWWenKai-Regular.ttf",
+      "source_sha256": "ea47ec17d0f3d0ed1e6d9c51d6146402d4d1e2f0ff397a90765aaaa0ddd382fb"
+    },
+    "fonts/LeagueGothic.ttf": {
+      "sha256": "3b0e998c9a0034222394ffecdd383e6948259ad037b95555b139a217629ce1d0",
+      "source_path": "webui/bundled/fonts/LeagueGothic.ttf",
+      "source_sha256": "3b0e998c9a0034222394ffecdd383e6948259ad037b95555b139a217629ce1d0"
+    },
+    "fonts/LiuJianMaoCao-Regular.ttf": {
+      "sha256": "cab396b91a5b7c0b4005a35891180d06e6751f5ac261fe680aec65c1ae209033",
+      "source_path": "webui/bundled/fonts/LiuJianMaoCao-Regular.ttf",
+      "source_sha256": "cab396b91a5b7c0b4005a35891180d06e6751f5ac261fe680aec65c1ae209033"
+    },
+    "fonts/LongCang-Regular.ttf": {
+      "sha256": "e5bf2c3f24ef2327c6f136d8f73e2f9dfdf44896fdbeb35a9515f44777bb91bc",
+      "source_path": "webui/bundled/fonts/LongCang-Regular.ttf",
+      "source_sha256": "e5bf2c3f24ef2327c6f136d8f73e2f9dfdf44896fdbeb35a9515f44777bb91bc"
+    },
+    "fonts/MaShanZheng-Regular.ttf": {
+      "sha256": "b844c59bf20bf530e41c20d6ff12b383b23a2e553b9b68cc89f070869213155d",
+      "source_path": "webui/bundled/fonts/MaShanZheng-Regular.ttf",
+      "source_sha256": "b844c59bf20bf530e41c20d6ff12b383b23a2e553b9b68cc89f070869213155d"
+    },
+    "fonts/Manrope.ttf": {
+      "sha256": "d0639be45d0af36e798172419d7bd173c4bd4f29e2b76cbb69db1d11bf8b0a40",
+      "source_path": "webui/bundled/fonts/Manrope.ttf",
+      "source_sha256": "d0639be45d0af36e798172419d7bd173c4bd4f29e2b76cbb69db1d11bf8b0a40"
+    },
+    "fonts/Montserrat.ttf": {
+      "sha256": "0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7",
+      "source_path": "webui/bundled/fonts/Montserrat.ttf",
+      "source_sha256": "0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7"
+    },
+    "fonts/NotoSansSC.ttf": {
+      "sha256": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da",
+      "source_path": "webui/bundled/fonts/NotoSansSC.ttf",
+      "source_sha256": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da"
+    },
+    "fonts/NotoSerifSC.ttf": {
+      "sha256": "050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9",
+      "source_path": "webui/bundled/fonts/NotoSerifSC.ttf",
+      "source_sha256": "050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9"
+    },
+    "fonts/OFL-1.1.txt": {
+      "sha256": "66124daea07cb08ada8f37fccbb7745536389efc9ae3197503ab03a702c353e5",
+      "source_path": "webui/bundled/fonts/OFL-1.1.txt",
+      "source_sha256": "66124daea07cb08ada8f37fccbb7745536389efc9ae3197503ab03a702c353e5"
+    },
+    "fonts/Oswald.ttf": {
+      "sha256": "5b38c246e255a12f5712d640d56bcced0472466fc68983d2d0410ec0457c2817",
+      "source_path": "webui/bundled/fonts/Oswald.ttf",
+      "source_sha256": "5b38c246e255a12f5712d640d56bcced0472466fc68983d2d0410ec0457c2817"
+    },
+    "fonts/PatrickHand-Regular.ttf": {
+      "sha256": "0f173b3e6cb6d1af25babf7f0057c5ac4ee11f9992b0469bb817e967ef4ad0fc",
+      "source_path": "webui/bundled/fonts/PatrickHand-Regular.ttf",
+      "source_sha256": "0f173b3e6cb6d1af25babf7f0057c5ac4ee11f9992b0469bb817e967ef4ad0fc"
+    },
+    "fonts/PlayfairDisplay.ttf": {
+      "sha256": "c40f2293766a503bc70cce9e512ef844a4ccb7cbcde792fe2ea31d191917d8d6",
+      "source_path": "webui/bundled/fonts/PlayfairDisplay.ttf",
+      "source_sha256": "c40f2293766a503bc70cce9e512ef844a4ccb7cbcde792fe2ea31d191917d8d6"
+    },
+    "fonts/Sacramento-Regular.ttf": {
+      "sha256": "9341fda10adbfeb7efc94302b34507a3e227d7e7f5c432df3f5ac8753ff73d24",
+      "source_path": "webui/bundled/fonts/Sacramento-Regular.ttf",
+      "source_sha256": "9341fda10adbfeb7efc94302b34507a3e227d7e7f5c432df3f5ac8753ff73d24"
+    },
+    "fonts/ShadowsIntoLight.ttf": {
+      "sha256": "1347863151acdc00fa281daaba1a3543dbce5870b55f9cf7479a15bb84007681",
+      "source_path": "webui/bundled/fonts/ShadowsIntoLight.ttf",
+      "source_sha256": "1347863151acdc00fa281daaba1a3543dbce5870b55f9cf7479a15bb84007681"
+    },
+    "fonts/SmileySans-Oblique.ttf": {
+      "sha256": "b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4",
+      "source_path": "webui/bundled/fonts/SmileySans-Oblique.ttf",
+      "source_sha256": "b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4"
+    },
+    "fonts/Sora.ttf": {
+      "sha256": "84ff7096ae3ec6c8be47d906d1a0ba4de7f2ce78c615275c77301964a316e16c",
+      "source_path": "webui/bundled/fonts/Sora.ttf",
+      "source_sha256": "84ff7096ae3ec6c8be47d906d1a0ba4de7f2ce78c615275c77301964a316e16c"
+    },
+    "fonts/SpaceGrotesk.ttf": {
+      "sha256": "acad6de1fc93436f5c0f1f4137751ef04f1aea3063e7036535970ffcfbd79f72",
+      "source_path": "webui/bundled/fonts/SpaceGrotesk.ttf",
+      "source_sha256": "acad6de1fc93436f5c0f1f4137751ef04f1aea3063e7036535970ffcfbd79f72"
+    },
+    "fonts/Spectral-Bold.ttf": {
+      "sha256": "70ddb1ec6ae3b0b8d0c79231f670de786978f19baeba2130757526e407aebf9b",
+      "source_path": "webui/bundled/fonts/Spectral-Bold.ttf",
+      "source_sha256": "70ddb1ec6ae3b0b8d0c79231f670de786978f19baeba2130757526e407aebf9b"
+    },
+    "fonts/Spectral-Regular.ttf": {
+      "sha256": "c89021dc20720c8d0dcf40b0b2f6e00c13665fa8041717f581396f51b8c78f5d",
+      "source_path": "webui/bundled/fonts/Spectral-Regular.ttf",
+      "source_sha256": "c89021dc20720c8d0dcf40b0b2f6e00c13665fa8041717f581396f51b8c78f5d"
+    },
+    "fonts/Syne.ttf": {
+      "sha256": "ce5ac77142a65cab2248a1a2ebb740b1d4d9c20b52488877d3ff664d1356104a",
+      "source_path": "webui/bundled/fonts/Syne.ttf",
+      "source_sha256": "ce5ac77142a65cab2248a1a2ebb740b1d4d9c20b52488877d3ff664d1356104a"
+    },
+    "fonts/Unbounded.ttf": {
+      "sha256": "323b511be380c8d474ef030686b71aedde501f8d9cd46da558b7c40454372c3f",
+      "source_path": "webui/bundled/fonts/Unbounded.ttf",
+      "source_sha256": "323b511be380c8d474ef030686b71aedde501f8d9cd46da558b7c40454372c3f"
+    },
+    "fonts/Xiaolai-Regular.ttf": {
+      "sha256": "e2f68daf0e72777a8cf58bc83de1b98634b251e537ddbfca24b0ae50d1802da2",
+      "source_path": "webui/bundled/fonts/Xiaolai-Regular.ttf",
+      "source_sha256": "e2f68daf0e72777a8cf58bc83de1b98634b251e537ddbfca24b0ae50d1802da2"
+    },
+    "fonts/ZCOOLKuaiLe-Regular.ttf": {
+      "sha256": "b3ed6f358cb69f9232eb7e794267767e51d8aeeeeeb612a81a24efb52f0b6bae",
+      "source_path": "webui/bundled/fonts/ZCOOLKuaiLe-Regular.ttf",
+      "source_sha256": "b3ed6f358cb69f9232eb7e794267767e51d8aeeeeeb612a81a24efb52f0b6bae"
+    },
+    "fonts/ZCOOLQingKeHuangYou-Regular.ttf": {
+      "sha256": "54f0c0df4308cd74cd0f2fd3494ae054dbc4a1fd6fa7d71f4807eb4cdd8b4136",
+      "source_path": "webui/bundled/fonts/ZCOOLQingKeHuangYou-Regular.ttf",
+      "source_sha256": "54f0c0df4308cd74cd0f2fd3494ae054dbc4a1fd6fa7d71f4807eb4cdd8b4136"
+    },
+    "fonts/ZCOOLXiaoWei-Regular.ttf": {
+      "sha256": "a42b620140f493db42f741351dfbf343c0936d58588ee8004b8b2a218d997ff1",
+      "source_path": "webui/bundled/fonts/ZCOOLXiaoWei-Regular.ttf",
+      "source_sha256": "a42b620140f493db42f741351dfbf343c0936d58588ee8004b8b2a218d997ff1"
+    },
+    "fonts/ZhiMangXing-Regular.ttf": {
+      "sha256": "644e0cae9b40f0b10ab729a01bd32032e3973bac22be3dccae01bf6ae7fde969",
+      "source_path": "webui/bundled/fonts/ZhiMangXing-Regular.ttf",
+      "source_sha256": "644e0cae9b40f0b10ab729a01bd32032e3973bac22be3dccae01bf6ae7fde969"
+    },
+    "skills/sn-ppt-dazzle/SKILL.md": {
+      "sha256": "66662d3e05f1685b77b4b51b15a5ccde30634a48fc1ab92a63889883e028fb81",
+      "source_path": "skills/sn-ppt-dazzle/SKILL.md",
+      "source_sha256": "680f8c4eb578190e2ed4beffe415d7d94ce7d3bd50f160904b214c90de3fe147"
+    },
+    "skills/sn-ppt-dazzle/references/fancy-cookbook.md": {
+      "sha256": "f0e4d893898a9134db8cd817060176c1cb78cf7afd3d3dc3f0a36e01491700bc",
+      "source_path": "skills/sn-ppt-dazzle/references/fancy-cookbook.md",
+      "source_sha256": "f0e4d893898a9134db8cd817060176c1cb78cf7afd3d3dc3f0a36e01491700bc"
+    },
+    "skills/sn-ppt-dazzle/references/style-families.md": {
+      "sha256": "61723cf249ce70e93df2ea23da926194af9df86b9b622ca6604337f494a747fb",
+      "source_path": "skills/sn-ppt-dazzle/references/style-families.md",
+      "source_sha256": "61723cf249ce70e93df2ea23da926194af9df86b9b622ca6604337f494a747fb"
+    },
+    "skills/sn-ppt-dazzle/scripts/render_deck.py": {
+      "sha256": "bd0f5eb02bbb6d06f3666561264f8163937246dcdc04699a731ab230c84684e7",
+      "source_path": "skills/sn-ppt-dazzle/scripts/render_deck.py",
+      "source_sha256": "a9da9f17d15dc067724b64677ace0f9cd7bf0073954a820735c31b99667cea60"
+    },
+    "skills/sn-ppt-dazzle/scripts/sitecustomize.py": {
+      "sha256": "fa1306bcf83baf9f6f8c06e20c8019896c60925b44e7f4e12ec8fb4b2df3165b",
+      "source_path": "skills/sn-ppt-dazzle/scripts/sitecustomize.py",
+      "source_sha256": "fa1306bcf83baf9f6f8c06e20c8019896c60925b44e7f4e12ec8fb4b2df3165b"
+    },
+    "skills/sn-ppt-doctor/SKILL.md": {
+      "sha256": "1c57dd75f37317a4f8e4909a702d7bc8817ddcb6885360171df34fd21f9219a7",
+      "source_path": "skills/sn-ppt-doctor/SKILL.md",
+      "source_sha256": "bc2ba1b05b87aa0064e82a70359568368f5a00376c27759554e355039bb39caf"
+    },
+    "skills/sn-ppt-doctor/ppt_doctor/check_environment.py": {
+      "sha256": "cf79063c90ba81235b39d7f0a59dd16401ab3fb47f6e208d24ebb8f501ead946",
+      "source_path": "skills/sn-ppt-doctor/ppt_doctor/check_environment.py",
+      "source_sha256": "6b5c8bc3e2c9060a8119fbaaf7c9593b082ac813243ed02c8eea11653d329810"
+    },
+    "skills/sn-ppt-doctor/requirements.txt": {
+      "sha256": "81c8cbb6cb3914342f0e09a47001a1522492c3b94cbd82774b2c803d762c8a1c",
+      "source_path": "skills/sn-ppt-doctor/requirements.txt",
+      "source_sha256": "81c8cbb6cb3914342f0e09a47001a1522492c3b94cbd82774b2c803d762c8a1c"
+    },
+    "skills/sn-ppt-entry/SKILL.md": {
+      "sha256": "66be1710f1473d19ccad54835ad81fa3abdea403db080056bf81287ac343de10",
+      "source_path": "skills/sn-ppt-entry/SKILL.md",
+      "source_sha256": "4de3bbe6127e2e30c8068400159c141059f27a6d1e57fee7aae29b8e6e9b21d6"
+    },
+    "skills/sn-ppt-entry/requirements.txt": {
+      "sha256": "70a97342cad68847e78481291445595cf4008dfd10b42fd508e0d7b4d431f2bc",
+      "source_path": "skills/sn-ppt-entry/requirements.txt",
+      "source_sha256": "70a97342cad68847e78481291445595cf4008dfd10b42fd508e0d7b4d431f2bc"
+    },
+    "skills/sn-ppt-entry/scripts/parse_user_docs.py": {
+      "sha256": "e6b45209f745ff4175cc0f856882df8b20bb15ff98729abf83dec3e0cb0408f1",
+      "source_path": "skills/sn-ppt-entry/scripts/parse_user_docs.py",
+      "source_sha256": "23829cbed5ed08b66cc5f031d04c90c2a828caa5ea7f0b1b62bf8f0fd3e488d6"
+    },
+    "skills/sn-ppt-entry/scripts/timing_helper.py": {
+      "sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3",
+      "source_path": "skills/sn-ppt-entry/scripts/timing_helper.py",
+      "source_sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3"
+    },
+    "skills/sn-ppt-standard/SKILL.md": {
+      "sha256": "a81802d813101bac02cbc21544fb8927c538fff9da38593096ea524751b6930a",
+      "source_path": "skills/sn-ppt-standard/SKILL.md",
+      "source_sha256": "2e435e30d8d1ae6f5c47154f8ade51944064576d4d4b14a2867dd849122cb97e"
+    },
+    "skills/sn-ppt-standard/agents/openai.yaml": {
+      "sha256": "fca822e9a5e99f3ba5422a29e074c8cb553e7d864042f5eca2dbf57f98449489",
+      "source_path": "skills/sn-ppt-standard/agents/openai.yaml",
+      "source_sha256": "fca822e9a5e99f3ba5422a29e074c8cb553e7d864042f5eca2dbf57f98449489"
+    },
+    "skills/sn-ppt-standard/assets/licenses/OFL-1.1.txt": {
+      "sha256": "66124daea07cb08ada8f37fccbb7745536389efc9ae3197503ab03a702c353e5",
+      "source_path": "skills/sn-ppt-standard/assets/licenses/OFL-1.1.txt",
+      "source_sha256": "66124daea07cb08ada8f37fccbb7745536389efc9ae3197503ab03a702c353e5"
+    },
+    "skills/sn-ppt-standard/assets/licenses/echarts-5.5.0/LICENSE": {
+      "input_path": "scripts/presentation_suite_licenses/echarts-5.5.0/LICENSE",
+      "sha256": "634293835b43a6dd2094fa39182a3d9a6b9ca43b7fdb9ac354e8037af2a3093a",
+      "source_path": "LICENSE",
+      "source_sha256": "634293835b43a6dd2094fa39182a3d9a6b9ca43b7fdb9ac354e8037af2a3093a",
+      "source_url": "https://raw.githubusercontent.com/apache/echarts/5.5.0/LICENSE"
+    },
+    "skills/sn-ppt-standard/assets/licenses/echarts-5.5.0/NOTICE": {
+      "input_path": "scripts/presentation_suite_licenses/echarts-5.5.0/NOTICE",
+      "sha256": "fa99ac3af859d0e13166906dc53a73ad34a08898da7e8ae83407275496e9e30c",
+      "source_path": "NOTICE",
+      "source_sha256": "fa99ac3af859d0e13166906dc53a73ad34a08898da7e8ae83407275496e9e30c",
+      "source_url": "https://raw.githubusercontent.com/apache/echarts/5.5.0/NOTICE"
+    },
+    "skills/sn-ppt-standard/assets/licenses/echarts-5.5.0/licenses/LICENSE-d3": {
+      "input_path": "scripts/presentation_suite_licenses/echarts-5.5.0/licenses/LICENSE-d3",
+      "sha256": "e1211892da0b0e0585b7aebe8f98c1274fba15bafe47fa1f4ee8a7a502c06304",
+      "source_path": "licenses/LICENSE-d3",
+      "source_sha256": "e1211892da0b0e0585b7aebe8f98c1274fba15bafe47fa1f4ee8a7a502c06304",
+      "source_url": "https://raw.githubusercontent.com/apache/echarts/5.5.0/licenses/LICENSE-d3"
+    },
+    "skills/sn-ppt-standard/assets/vendor/echarts.min.js": {
+      "sha256": "42f8329d989b6f6539dd2b15bbdf0d82025762ac112fbb60dc57b27d7bcf3946",
+      "source_path": "skills/sn-ppt-standard/assets/vendor/echarts.min.js",
+      "source_sha256": "42f8329d989b6f6539dd2b15bbdf0d82025762ac112fbb60dc57b27d7bcf3946"
+    },
+    "skills/sn-ppt-standard/references/base-template.css": {
+      "sha256": "568e6c5249c360de868395eaf64bd7b19e2d91cd0722092abb0c59813224314c",
+      "source_path": "skills/sn-ppt-standard/references/base-template.css",
+      "source_sha256": "568e6c5249c360de868395eaf64bd7b19e2d91cd0722092abb0c59813224314c"
+    },
+    "skills/sn-ppt-standard/references/box-agent-tool-contract.md": {
+      "sha256": "7c7563b0b433815e73f7cb6c9ac0d3aa57e3de780073fb00704788b4b2dd5b53",
+      "source_path": "skills/sn-ppt-standard/references/box-agent-tool-contract.md",
+      "source_sha256": "47239f9b93f23233fb3985ec6507d1a3db140c8ca18bf5749708159a5a67a3d3"
+    },
+    "skills/sn-ppt-standard/references/design-rules.md": {
+      "sha256": "42fc9a7c463b951706a01c2c6c83a9342aee6b36eaa1ad87c50afa951dd2dbce",
+      "source_path": "skills/sn-ppt-standard/references/design-rules.md",
+      "source_sha256": "42fc9a7c463b951706a01c2c6c83a9342aee6b36eaa1ad87c50afa951dd2dbce"
+    },
+    "skills/sn-ppt-standard/references/design-styles.md": {
+      "sha256": "8a8639f7b97b153ee023b14a0f291137f0efd135b4b7e4b4ebfd583b5d307931",
+      "source_path": "skills/sn-ppt-standard/references/design-styles.md",
+      "source_sha256": "8a8639f7b97b153ee023b14a0f291137f0efd135b4b7e4b4ebfd583b5d307931"
+    },
+    "skills/sn-ppt-standard/references/editing-contract.md": {
+      "sha256": "cf0c91af7cf341cdffb0e8436988962b1d39e06d51b9377411df9203ea3bc739",
+      "source_path": "skills/sn-ppt-standard/references/editing-contract.md",
+      "source_sha256": "cf0c91af7cf341cdffb0e8436988962b1d39e06d51b9377411df9203ea3bc739"
+    },
+    "skills/sn-ppt-standard/references/fonts.md": {
+      "sha256": "333eb965a3e8c855f6ec0915a05b362cba66c954411b6433cb2b97c2d7d72548",
+      "source_path": "skills/sn-ppt-standard/references/fonts.md",
+      "source_sha256": "333eb965a3e8c855f6ec0915a05b362cba66c954411b6433cb2b97c2d7d72548"
+    },
+    "skills/sn-ppt-standard/references/layout-patterns.md": {
+      "sha256": "f37c7212704516c9f90924335f992fe0c916a54c2c1f5d03a55aaf7e91a71136",
+      "source_path": "skills/sn-ppt-standard/references/layout-patterns.md",
+      "source_sha256": "f37c7212704516c9f90924335f992fe0c916a54c2c1f5d03a55aaf7e91a71136"
+    },
+    "skills/sn-ppt-standard/references/planning-contract.md": {
+      "sha256": "e21ebc7406b56dfa078afcea583253b0dfab7a51c4054940b390ec4c4ef85e1b",
+      "source_path": "skills/sn-ppt-standard/references/planning-contract.md",
+      "source_sha256": "e21ebc7406b56dfa078afcea583253b0dfab7a51c4054940b390ec4c4ef85e1b"
+    },
+    "skills/sn-ppt-standard/references/quality-checklist.md": {
+      "sha256": "d24462835e40f75495833c69331f2675cff697f1fb161fdf52d1a658a197a12b",
+      "source_path": "skills/sn-ppt-standard/references/quality-checklist.md",
+      "source_sha256": "d24462835e40f75495833c69331f2675cff697f1fb161fdf52d1a658a197a12b"
+    },
+    "skills/sn-ppt-standard/requirements.txt": {
+      "sha256": "e99da4477edfa9ac32905f515ebd468c3308d07ebe31eb2c74d7d54120c6a7b7",
+      "source_path": "skills/sn-ppt-standard/requirements.txt",
+      "source_sha256": "37892c704c3043c862673255a10ce6584e7a8378d2c7fcb28d6a206bdf393085"
+    },
+    "skills/sn-ppt-standard/scripts/deck.py": {
+      "sha256": "f6fb5ee4ef32eca9d579df1e0ccdd08a9259e442a6b39a57f2521aacfb49775c",
+      "source_path": "skills/sn-ppt-standard/scripts/deck.py",
+      "source_sha256": "016cbafe55c5430c3723e25f9de34a8d13a1f3072a9cf010362d9beaf6be9dbf"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs": {
+      "sha256": "4ce7bc7bd5744ba6f454d668466e932ea019c172a722f9a9b60b3f4e2414cb6e",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs",
+      "source_sha256": "9b9b77355a12c6134be4950f90553da3e2a6bbba54fb204237756ff2faf7d880"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/browser_picker.mjs": {
+      "sha256": "e986e7a717a6df820be43b8e75ca93684926379b17fe093bda5db923a98689f9",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/browser_picker.mjs",
+      "source_sha256": "59107279a2029d8d5551043d9213e8168c1eb523cc6bf5bad59c4d3a35184845"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/cli_guards.mjs": {
+      "sha256": "048a4dae192b56d1f7a38a546344a01d8165cc852196b7b67e55975497fea089",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/cli_guards.mjs",
+      "source_sha256": "5275ab8d4580d475f18af8df2972279b0590b41dd21130924e9e46fc8ce3930e"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/dom_extractor.mjs": {
+      "sha256": "d76c4f34c8531e5e91af9357cd175c1ba7b4b4196777924327a258e9e4259059",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/dom_extractor.mjs",
+      "source_sha256": "6068aa230ab7fd3cc88df61e340f8354dbe5324241f45d9960045170bbb89408"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/echarts_discovery.mjs": {
+      "sha256": "f87640b1acd6325140d4b903e97bc918a7c7cc8cbfad012d5d53d7dbb10c4261",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/echarts_discovery.mjs",
+      "source_sha256": "f87640b1acd6325140d4b903e97bc918a7c7cc8cbfad012d5d53d7dbb10c4261"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/echarts_to_pptx.mjs": {
+      "sha256": "01276717c4513d994bff6cc554d34246a68ba3d7858c764bc238da65cfb7bed4",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/echarts_to_pptx.mjs",
+      "source_sha256": "01276717c4513d994bff6cc554d34246a68ba3d7858c764bc238da65cfb7bed4"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/image_downloader.mjs": {
+      "sha256": "1f1be06dcc2d8d49e96fcc8f17d4eef931c5efbccb45f4dc3c853c52e1ddaa62",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/image_downloader.mjs",
+      "source_sha256": "955cd8b7184bd95dc2b292b3d58d52809f69605c057a07bdffb4fb45fa7d1b0a"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/postprocess_pptx.mjs": {
+      "sha256": "1945ca3bedc1355760f11a73d05767f6f261ff3056249c62a81a5cf2c08bddfd",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/postprocess_pptx.mjs",
+      "source_sha256": "1945ca3bedc1355760f11a73d05767f6f261ff3056249c62a81a5cf2c08bddfd"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/pptx_builder.mjs": {
+      "sha256": "483a2e51af62525437b22392dad1b3d9a664921142d131c84fa6261212b51be5",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/pptx_builder.mjs",
+      "source_sha256": "0323483cc487a9327573faa164b5d88a7d93ff15d30bf7dc4b39d63456681d73"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/lib/style_parser.mjs": {
+      "sha256": "62f06b58ece189ea4c523e24e5e1f648a09aac622d2d9aada717af78fb532cae",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/lib/style_parser.mjs",
+      "source_sha256": "fdadb16a451673b968a03ab25980ea507bd50195639e2a6b8ed83dcc6f1c3057"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/package-lock.json": {
+      "sha256": "97d489f594900a91b5028237229ee10a475b3b26255a9398c707b471641f4d5b",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/package-lock.json",
+      "source_sha256": "97d489f594900a91b5028237229ee10a475b3b26255a9398c707b471641f4d5b"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/package.json": {
+      "sha256": "bdf96ced74a9660ebc6e11de71865dcb20a80dc962049e889b29dc4ddeb793f1",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/package.json",
+      "source_sha256": "bdf96ced74a9660ebc6e11de71865dcb20a80dc962049e889b29dc4ddeb793f1"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/screenshot.mjs": {
+      "sha256": "700dcf3dde86d4a4995585bc6d6740cdba632a8c550d3c2a9754f33e0a9d057a",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/screenshot.mjs",
+      "source_sha256": "09670995c8cad64c2f9123e33d6a346793c3a9a4120277bc0e9a6979bcd20c7d"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/fixtures/dom-layout-regression.html": {
+      "sha256": "14a4531c5f1869d57626cb7a93aff7f42ca3403beb3c179637152f30058aacee",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/fixtures/dom-layout-regression.html",
+      "source_sha256": "14a4531c5f1869d57626cb7a93aff7f42ca3403beb3c179637152f30058aacee"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/fixtures/echarts-fallback.html": {
+      "sha256": "0703867337d3cab00fb40bf9e928ebbbf6009318f308f90e7bb97294acff347b",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/fixtures/echarts-fallback.html",
+      "source_sha256": "0703867337d3cab00fb40bf9e928ebbbf6009318f308f90e7bb97294acff347b"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_color_srgb_regression.mjs": {
+      "sha256": "5285ff003746fefc925791d79438efdecfffa149a99cf70a3ada9a06a6abe846",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_color_srgb_regression.mjs",
+      "source_sha256": "5285ff003746fefc925791d79438efdecfffa149a99cf70a3ada9a06a6abe846"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_dom_layout_regression.mjs": {
+      "sha256": "dc0835d5115039f254f1a1468890b338c8e3a5b8b95242400c8c5474e4c3c112",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_dom_layout_regression.mjs",
+      "source_sha256": "dc0835d5115039f254f1a1468890b338c8e3a5b8b95242400c8c5474e4c3c112"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_discovery.mjs": {
+      "sha256": "6c9c935bcc94d9ef1c9829f9803c7b8a04a3dd062756164fa15e4e5c66950c3d",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_discovery.mjs",
+      "source_sha256": "6c9c935bcc94d9ef1c9829f9803c7b8a04a3dd062756164fa15e4e5c66950c3d"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_fallback.mjs": {
+      "sha256": "b92017905f53a4ccb7729c3f6ad8ae670408e18f6d7cc06126bc8cf03d461981",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_fallback.mjs",
+      "source_sha256": "b92017905f53a4ccb7729c3f6ad8ae670408e18f6d7cc06126bc8cf03d461981"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_to_pptx_regression.mjs": {
+      "sha256": "81fea96386c9bb1307e4c26ed2a878d65637016e1ac20f5f132efe12ce0e7218",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_to_pptx_regression.mjs",
+      "source_sha256": "81fea96386c9bb1307e4c26ed2a878d65637016e1ac20f5f132efe12ce0e7218"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_export_contract_regression.mjs": {
+      "sha256": "81bd2b1b9a4e037bd19b193a9315f2f873010b325ac831173a7decf5b50985a2",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_export_contract_regression.mjs",
+      "source_sha256": "339eb644642fb7e66151b737f9cf79f12cca1615afffb2c04d84ae8aec575e0e"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_radial_overlay_regression.mjs": {
+      "sha256": "ac479471e2189901e07123ad0157d6269ea9d631f70f4017d3d0c95fb6393563",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_radial_overlay_regression.mjs",
+      "source_sha256": "ac479471e2189901e07123ad0157d6269ea9d631f70f4017d3d0c95fb6393563"
+    },
+    "skills/sn-ppt-standard/scripts/export_pptx/test/test_text_box_padding_regression.mjs": {
+      "sha256": "72864f88a9776b7eb732228e810e8626ee98da00306ea2506efdb6feb61b3b48",
+      "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_text_box_padding_regression.mjs",
+      "source_sha256": "72864f88a9776b7eb732228e810e8626ee98da00306ea2506efdb6feb61b3b48"
+    },
+    "skills/sn-ppt-standard/scripts/font_bundle.py": {
+      "sha256": "7869aa40580504b7afde5c24aa337309beda04be380a8ab56c5499dd2fb70488",
+      "source_path": "skills/sn-ppt-standard/scripts/font_bundle.py",
+      "source_sha256": "8e33b716a5430a7b209a6a504e24878bdb739f03755dc5976e76ad0108de2595"
+    },
+    "skills/sn-ppt-standard/scripts/image_cutout.py": {
+      "sha256": "cf15ab8ee7cad3fc8202ee125dc893555d60aa9f048405241851f0282c811fa6",
+      "source_path": "skills/sn-ppt-standard/scripts/image_cutout.py",
+      "source_sha256": "cf15ab8ee7cad3fc8202ee125dc893555d60aa9f048405241851f0282c811fa6"
+    },
+    "skills/sn-ppt-standard/scripts/install.sh": {
+      "sha256": "544c05f991795e45a40cb3ae8f32e19da176386504db65cf5efd453eb26a46d1",
+      "source_path": "skills/sn-ppt-standard/scripts/install.sh",
+      "source_sha256": "0841090b40eab67ee3c6084f83f933554838b952ed9c1d5ed800806e2ac25db9"
+    },
+    "skills/sn-ppt-standard/scripts/render.py": {
+      "sha256": "5a9784c6efe958ffa516d069161d3e33a52b7b84b8807928846607f5443d3265",
+      "source_path": "skills/sn-ppt-standard/scripts/render.py",
+      "source_sha256": "ef67a08f244cc2ac507bb4ebd5ebcd4dc1a09ef0538d70bc39f8aa1de4dc9069"
+    },
+    "skills/sn-ppt-standard/scripts/render_runtime.py": {
+      "input_path": "scripts/presentation_suite_overlays/render_runtime.py",
+      "sha256": "8a14b6f96e8affbaa099e6cc686b81dd7396a0cf02449afa2e8eaeb8530c1d24",
+      "source_path": "skills/sn-ppt-standard/scripts/render_runtime.py",
+      "source_sha256": "8a14b6f96e8affbaa099e6cc686b81dd7396a0cf02449afa2e8eaeb8530c1d24"
+    },
+    "skills/sn-ppt-standard/scripts/serper_images.py": {
+      "sha256": "c9c6e1b0864b628cc09fd5a36d7b28e4765b9ee2a1fe2501c2a927e9bc114a55",
+      "source_path": "skills/sn-ppt-standard/scripts/serper_images.py",
+      "source_sha256": "c9c6e1b0864b628cc09fd5a36d7b28e4765b9ee2a1fe2501c2a927e9bc114a55"
+    },
+    "skills/sn-ppt-standard/scripts/stage_materials.py": {
+      "sha256": "0bca48250667635af7526cf25dbb27e8ed6cecbf69e4ee71dcbd2aef42d76106",
+      "source_path": "skills/sn-ppt-standard/scripts/stage_materials.py",
+      "source_sha256": "0bca48250667635af7526cf25dbb27e8ed6cecbf69e4ee71dcbd2aef42d76106"
+    },
+    "skills/sn-ppt-standard/subagents/image.md": {
+      "sha256": "f6aed6ae3e7114f1422345cc0274080127670c2486fc9638a8b940e65e567be1",
+      "source_path": "skills/sn-ppt-standard/subagents/image.md",
+      "source_sha256": "f6aed6ae3e7114f1422345cc0274080127670c2486fc9638a8b940e65e567be1"
+    },
+    "skills/sn-ppt-standard/subagents/review.md": {
+      "sha256": "f0e579ae006d8dcb65d2324b9ca9bd3b4f56888c69564a1c5490021f99e3d34c",
+      "source_path": "skills/sn-ppt-standard/subagents/review.md",
+      "source_sha256": "f0e579ae006d8dcb65d2324b9ca9bd3b4f56888c69564a1c5490021f99e3d34c"
+    },
+    "skills/sn-ppt-standard/subagents/slide.md": {
+      "sha256": "496ca26f01d012aa18211f7cb1f9308779ce06278b968beab067fa207c9142eb",
+      "source_path": "skills/sn-ppt-standard/subagents/slide.md",
+      "source_sha256": "496ca26f01d012aa18211f7cb1f9308779ce06278b968beab067fa207c9142eb"
+    },
+    "skills/sn-ppt-story/SKILL.md": {
+      "sha256": "28596fa06e4d33c09ac5275b9704d446096b4a927cbd2fbb30016c9d0acdec67",
+      "source_path": "skills/sn-ppt-story/SKILL.md",
+      "source_sha256": "1c87ccd30f62928005986b3f8ff32449f5bfec95fa639ec1739d8c4133df2f40"
+    },
+    "skills/sn-ppt-tools/SKILL.md": {
+      "sha256": "e175d712ada54e5e9d3af3f731334e15d98beb576e698b35141b8dfd544e67f6",
+      "source_path": "skills/sn-ppt-tools/SKILL.md",
+      "source_sha256": "6ca70755bc04d6bbad07c8bc64ee184b707e9c0f6635215589cfa90b3aabb99d"
+    },
+    "skills/sn-ppt-tools/references/capability-policy.md": {
+      "sha256": "95fd1544a33a2f874a2aeabfb07aee00d93eee035957fc4b195202c4f18e3793",
+      "source_path": "skills/sn-ppt-tools/references/capability-policy.md",
+      "source_sha256": "c6de1a409175cf29726bc5c8b9928ccc60168801c4e0d3b4022bac58197b9c61"
+    },
+    "skills/sn-ppt-tools/scripts/env_config.py": {
+      "sha256": "ed02ffbb716719b10d4592eb88606efe3619fc56512f69c7472bbf04c5e50e89",
+      "source_path": "skills/sn-ppt-tools/scripts/env_config.py",
+      "source_sha256": "ed02ffbb716719b10d4592eb88606efe3619fc56512f69c7472bbf04c5e50e89"
+    },
+    "skills/sn-ppt-tools/scripts/fetch_image.py": {
+      "sha256": "015361dbc3352b2ed914953442db87d7a2d90677d8a2234e9eb4a195ae071708",
+      "source_path": "skills/sn-ppt-tools/scripts/fetch_image.py",
+      "source_sha256": "015361dbc3352b2ed914953442db87d7a2d90677d8a2234e9eb4a195ae071708"
+    },
+    "skills/sn-ppt-tools/scripts/image_generate.py": {
+      "sha256": "77d70f12758fda4ab8fe9bc27c190afc3727ff79e92b3233651c7924aece3c80",
+      "source_path": "skills/sn-ppt-tools/scripts/image_generate.py",
+      "source_sha256": "77d70f12758fda4ab8fe9bc27c190afc3727ff79e92b3233651c7924aece3c80"
+    },
+    "skills/sn-ppt-tools/scripts/image_search.py": {
+      "sha256": "8f053c23822bca58a3b54423d11b4933e50627ee03c2b84aa4725f48f3b2d8c8",
+      "source_path": "skills/sn-ppt-tools/scripts/image_search.py",
+      "source_sha256": "8f053c23822bca58a3b54423d11b4933e50627ee03c2b84aa4725f48f3b2d8c8"
+    },
+    "skills/sn-ppt-tools/scripts/web_search.py": {
+      "sha256": "ff9019bf2c1ff4fae345506babba6d4d39e274bf0fcadecf238904f4c431e264",
+      "source_path": "skills/sn-ppt-tools/scripts/web_search.py",
+      "source_sha256": "ff9019bf2c1ff4fae345506babba6d4d39e274bf0fcadecf238904f4c431e264"
+    }
+  },
+  "modules": [
+    "sn-ppt-dazzle",
+    "sn-ppt-doctor",
+    "sn-ppt-entry",
+    "sn-ppt-standard",
+    "sn-ppt-story",
+    "sn-ppt-tools"
+  ],
+  "name": "sensenova-presentation-suite",
+  "overlays": [
+    "metadata.user_visible=false",
+    "metadata.allow_override=false",
+    "entry-two-outputs",
+    "story-two-outputs",
+    "doctor-shipped-backends",
+    "remove-image-only-output-policy",
+    "current-task-resume",
+    "dazzle-box-native-tools",
+    "bundle-third-party-notices",
+    "static-player-delivery-gate",
+    "design-mode-delivery-wording",
+    "owned-renderer-lifecycle",
+    "original-uploaded-font-family",
+    "intermediate-render-artifacts",
+    "sequential-ppt-image-inspection",
+    "source-relative-pptx-page-directories",
+    "explicit-delivery-scopes",
+    "presentation-progress-without-reconfirmation",
+    "host-playwright-runtime",
+    "bounded-image-inspection-recovery"
+  ],
+  "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
+  "revision": "e187295633eb4cb201e6a2a5a206a419eb79990a",
+  "schema_version": 1
+}

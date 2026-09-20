@@ -3,15 +3,23 @@
 const NAMED_COLORS = Object.freeze([
   { id: "deep-navy", value: "#173B63", pattern: /(?:深蓝|海军蓝|藏蓝|deep\s*navy|navy\s*blue)/i },
   { id: "cream", value: "#F4EFE4", pattern: /(?:米白|暖白|奶油白|象牙白|cream|ivory|warm\s*white|bone)/i },
+  { id: "sand", value: "#F2E2C6", pattern: /(?:沙色|沙金|sand|beige)/i },
+  { id: "warm-gray", value: "#E3E3DB", pattern: /(?:暖灰|暖灰色|warm\s*gray|warm\s+grey|stone)/i },
+  { id: "light-blue", value: "#DCEFFA", pattern: /(?:浅蓝|淡蓝|light\s*blue|pale\s*blue)/i },
+  { id: "yellow", value: "#F5C518", pattern: /(?:明黄|亮黄|黄色|yellow)/i },
+  { id: "brown", value: "#6B4F3A", pattern: /(?:咖啡棕|棕色|brown)/i },
+  { id: "terracotta", value: "#B86B4B", pattern: /(?:陶土色|陶土红|陶土|terracotta)/i },
+  { id: "charcoal", value: "#2B303E", pattern: /(?:暖炭|炭灰|暖炭灰|charcoal)/i },
+  { id: "olive", value: "#71814B", pattern: /(?:橄榄绿|olive)/i },
   { id: "orange", value: "#D97706", pattern: /(?:橙色|橘色|橙黄|orange|amber)/i },
   { id: "blue", value: "#2563EB", pattern: /(?:蓝色|blue)/i },
   { id: "green", value: "#15803D", pattern: /(?:绿色|green)/i },
   { id: "red", value: "#B91C1C", pattern: /(?:红色|red)/i },
   { id: "black", value: "#111111", pattern: /(?:黑色|纯黑|黑字|black)/i },
-  { id: "white", value: "#FFFFFF", pattern: /(?:白色|white)/i },
+  { id: "white", value: "#FFFFFF", pattern: /(?:白色|白底|white)/i },
 ]);
 
-const PALETTE_REQUEST_RE = /(?:配色|色彩|颜色|色系|主色|背景色|底色|点缀色|点缀强调|米白底|纯黑字|背景[黑白]|正文[黑白]|黑白为主|palette|color\s*(?:palette|scheme)|accent)/i;
+const PALETTE_REQUEST_RE = /(?:配色|色彩|颜色|色系|主色|背景色|底色|点缀色|点缀强调|米白底|白底|纯黑字|背景[黑白]|正文[黑白]|黑白为主|(?:黄|绿|蓝|红)色.{0,8}为主|浅蓝.{0,8}明黄|palette|color\s*(?:palette|scheme)|accent)/i;
 const SPARSE_ACCENT_RE = /(?:少量|少许|小面积|克制|仅作|只作|点缀|sparse|restrained|limited|small\s+amount)/i;
 const HEX_COLOR_RE = /#[0-9a-f]{6}\b/ig;
 const QUADRANT_RELATIONSHIP_RE = /(?:优先级矩阵|影响[^\n]{0,24}(?:紧急|投入|难度)|(?:紧急|投入|难度)[^\n]{0,24}影响|[xX横]\s*轴|[yY纵]\s*轴|横轴[^\n]{0,32}纵轴|纵轴[^\n]{0,32}横轴|impact[^\n]{0,24}(?:effort|urgency)|(?:effort|urgency)[^\n]{0,24}impact)/i;
@@ -171,14 +179,51 @@ function mergeStyleOverrides(existing, requested, { explicit = false } = {}) {
 
 function labeledHex(text, labels) {
   const label = labels.join("|");
-  const after = text.match(new RegExp(`(?:${label})[^#\\n]{0,32}(#[0-9a-f]{6})\\b`, "i"));
+  const nextRole = "背景|正文|标题|主色|强调色|点缀色|辅助色|background|primary|secondary|accent|heading|text";
+  const after = text.match(new RegExp(`(?:${label})(?:(?!(?:${nextRole}))[^#\\n,，;；。]){0,32}(#[0-9a-f]{6})\\b`, "i"));
   if (after) return normalizeHex(after[1]);
-  const before = text.match(new RegExp(`(#[0-9a-f]{6})\\b[^\\n]{0,24}(?:${label})`, "i"));
+  const before = text.match(new RegExp(`(#[0-9a-f]{6})\\b[^#\\n,，;；。]{0,24}(?:${label})`, "i"));
   return before ? normalizeHex(before[1]) : null;
 }
 
+function accentUsage(text) {
+  const setting = text.match(/accent_usage\s*[:=]\s*["']?(sparse|balanced|dominant)/i)?.[1]?.toLowerCase();
+  if (setting) return { accent_usage: setting, accent_usage_explicit: true };
+  if (SPARSE_ACCENT_RE.test(text)) return { accent_usage: "sparse", accent_usage_explicit: true };
+  if (/(?:强调色|点缀色).{0,12}(?:大面积|主导)|dominant\s+accent/i.test(text)) return { accent_usage: "dominant", accent_usage_explicit: true };
+  return { accent_usage: "balanced", accent_usage_explicit: /均衡|适量|balanced/i.test(text) };
+}
+
+function userAccentUsage(palette) {
+  return palette?.accent_usage_explicit === false ? "sparse" : palette?.accent_usage || "sparse";
+}
+
 function exactHexPalette(text, hex) {
-  if (hex.length < 2) return null;
+  if (!hex.length) return null;
+  const roles = {
+    background: labeledHex(text, ["背景色?", "底色", "background"]),
+    text: labeledHex(text, ["正文色?", "文字颜色", "文字色", "text"]),
+    heading: labeledHex(text, ["标题色?", "标题颜色", "heading"]),
+    primary: labeledHex(text, ["主色", "primary"]),
+    accent: labeledHex(text, ["点缀色", "强调色", "accent"]),
+    secondary: labeledHex(text, ["辅助色", "辅色", "secondary"]),
+    surface: labeledHex(text, ["表面色", "表面", "surface"]),
+  };
+  // A labeled single color must keep its role, never become a background
+  // just because it is the first hex literal in the prompt.
+  if (roles.text && !roles.primary && /黑白为主|black\s*(?:and|&)\s*white/i.test(text)) roles.primary = roles.text;
+  if (Object.values(roles).some(Boolean)) {
+    const remaining = hex.filter(value => !Object.values(roles).includes(value));
+    for (const role of ["accent", "secondary"]) {
+      if (!roles[role] && remaining.length) roles[role] = remaining.shift();
+    }
+    return { source: "explicit", requested: hex, requested_hex: hex,
+      ...Object.fromEntries(Object.entries(roles).filter(([, value]) => value)
+        .map(([role, value]) => [role, colorRecord(value, value)])),
+      ...(roles.accent ? accentUsage(text) : {}),
+    };
+  }
+  if (hex.length === 1) return { source: "explicit", requested: hex, requested_hex: hex, primary: colorRecord(hex[0], hex[0]) };
   const background = labeledHex(text, ["背景色", "底色", "background"]);
   const primary = labeledHex(text, ["主色", "正文色", "primary"]);
   const accent = labeledHex(text, ["点缀色", "强调色", "accent"]);
@@ -192,20 +237,68 @@ function exactHexPalette(text, hex) {
   return {
     source: "explicit",
     requested: hex,
+    requested_hex: hex,
     background: colorRecord(resolvedBackground, resolvedBackground),
     primary: colorRecord(resolvedPrimary, resolvedPrimary),
     ...(resolvedAccent
       ? {
         accent: colorRecord(resolvedAccent, resolvedAccent),
-        accent_usage: SPARSE_ACCENT_RE.test(text) ? "sparse" : "balanced",
+        ...accentUsage(text),
       }
       : {}),
   };
 }
 
+const PALETTE_ROLES = ["background", "text", "primary", "accent", "secondary"];
+
+function mergePaletteDecision(value, userPalette) {
+  const result = isPlainObject(value) ? clone(value) : {};
+  for (const role of [...PALETTE_ROLES, "heading"]) {
+    if (userPalette?.[role]?.source === "explicit") result[role] = userPalette[role].value;
+  }
+  if (userPalette?.source === "explicit") result.accent_usage = userAccentUsage(userPalette);
+  return result;
+}
+
+function frozenPaletteContract(existing, value, reason, issues) {
+  const user = existing?.palette;
+  const checked = withModelPaletteContract(null, value, reason, issues);
+  if (!isPlainObject(value)) issues.push("palette: required explicit role colors");
+  if (!normalizeHex(value?.secondary)) issues.push("palette.secondary: expected #RRGGBB color");
+  if (!value?.accent_usage) issues.push("palette.accent_usage: expected sparse, balanced, or dominant");
+  const heading = value?.heading === undefined ? null : normalizeHex(value.heading);
+  if (value?.heading !== undefined && !heading) issues.push("palette.heading: expected #RRGGBB color");
+  if (heading && normalizeHex(value?.background) && contrastRatio(heading, value.background) < 4.5) issues.push("palette.heading: insufficient contrast against the background");
+  for (const role of [...PALETTE_ROLES, "heading"]) {
+    if (user?.[role]?.source === "explicit" && normalizeHex(value?.[role]) !== user[role].value.toUpperCase()) {
+      issues.push(`palette.${role}: conflicts with explicit user color ${user[role].value}`);
+    }
+  }
+  for (const requested of user?.requested_hex || []) {
+    const color = normalizeHex(requested);
+    if (color && ![...PALETTE_ROLES, "heading"].some(role => normalizeHex(value?.[role]) === color)
+      && user?.surface?.value !== color) issues.push(`palette: requested color ${color} has no role in the final palette`);
+  }
+  if (user?.source === "explicit" && value?.accent_usage !== userAccentUsage(user)) {
+    issues.push("palette.accent_usage: conflicts with the user's color usage");
+  }
+  if (issues.length || !checked) return existing || null;
+  const palette = checked.palette;
+  palette.version = 2;
+  palette.source = user?.source === "explicit" ? "explicit" : "inferred";
+  palette.heading = colorRecord(normalizeHex(heading || (contrastRatio(value.primary, value.background) >= 4.5 ? value.primary : value.text)), reason, "inferred");
+  for (const role of [...PALETTE_ROLES, "surface", "heading"]) {
+    if (user?.[role]?.source === "explicit") palette[role] = clone(user[role]);
+  }
+  palette.accent_usage_source = user?.source === "explicit" ? (user.accent_usage && user.accent_usage_explicit !== false ? "explicit" : "recommended") : "inferred";
+  // Freeze derived roles too. Rendering never consults a theme palette again.
+  palette.tokens = frozenPaletteTokens(palette);
+  return { ...(existing || { version: 1 }), palette };
+}
+
 function inferPaletteContract(value) {
   const text = collectText(value).join("\n").normalize("NFKC");
-  if (!PALETTE_REQUEST_RE.test(text)) return null;
+  if (!PALETTE_REQUEST_RE.test(text) && !/(?:标题色?|正文色?|background|primary|heading)|(?:用|采用|使用)(?:米白|浅蓝|深蓝|黄色|绿色|咖啡棕)/i.test(text)) return null;
   const named = namedColorMatches(text);
   const hex = [...new Set((text.match(HEX_COLOR_RE) || []).map(normalizeHex).filter(Boolean))];
   if (!named.length && !hex.length) return null;
@@ -213,32 +306,36 @@ function inferPaletteContract(value) {
   // Two or more exact values form an explicit palette contract. Do not let
   // downstream outline paraphrases such as "red" or "cream" replace them.
   const exact = exactHexPalette(text, hex);
-  if (exact) return exact;
 
   const byId = new Map(named.map(item => [item.id, item]));
-  const cream = byId.get("cream") || byId.get("white");
+  const cream = byId.get("cream") || byId.get("sand") || byId.get("warm-gray") || byId.get("white") || byId.get("light-blue");
   const blackIsText = /(?:纯黑|黑色?|black)\s*(?:字|文字|正文|text)/i.test(text);
   const navy = byId.get("deep-navy")
-    || byId.get("blue")
+    || byId.get("charcoal")
+    || byId.get("brown")
+    || (byId.has("light-blue") ? null : byId.get("blue"))
+    || byId.get("green") || byId.get("olive")
     || (blackIsText ? null : byId.get("black"));
-  const accent = byId.get("orange") || byId.get("green") || byId.get("red");
+  const accent = ["terracotta", "yellow", "orange", "olive", "green", "red"].map(id => byId.get(id))
+    .find(color => color && color !== navy);
   const values = [...named.map(item => item.value), ...hex];
-  const background = cream || (hex[0] ? { id: hex[0], value: hex[0] } : null);
-  const primary = navy || (hex[1] ? { id: hex[1], value: hex[1] } : null);
-  const accentColor = accent || (hex[2] ? { id: hex[2], value: hex[2] } : null);
-  if (!background) return null;
+  const background = cream;
+  const primary = navy || byId.get("light-blue");
+  const accentColor = accent;
+  if (!background && !primary && !accentColor) return exact;
 
   return {
     source: "explicit",
     requested: values,
-    background: colorRecord(background.value, background.id),
+    ...(background ? { background: colorRecord(background.value, background.id) } : {}),
     ...(primary ? { primary: colorRecord(primary.value, primary.id) } : {}),
     ...(accentColor
       ? {
         accent: colorRecord(accentColor.value, accentColor.id),
-        accent_usage: SPARSE_ACCENT_RE.test(text) ? "sparse" : "balanced",
+        ...accentUsage(text),
       }
       : {}),
+    ...(exact || {}),
   };
 }
 
@@ -515,7 +612,7 @@ function validateAndNormalizeDesignContract(value, issues) {
       issues.push("design_contract.palette: expected object");
     } else {
       const palette = { source: value.palette.source === "explicit" ? "explicit" : "inferred" };
-      ["background", "surface", "text", "primary", "accent", "secondary"].forEach(key => {
+      ["background", "surface", "text", "primary", "accent", "secondary", "heading"].forEach(key => {
         if (value.palette[key] === undefined) return;
         const record = normalizeColorRecord(value.palette[key], `design_contract.palette.${key}`, issues);
         if (record) palette[key] = record;
@@ -526,6 +623,32 @@ function validateAndNormalizeDesignContract(value, issues) {
         } else palette.accent_usage = value.palette.accent_usage;
       }
       if (Array.isArray(value.palette.requested)) palette.requested = clone(value.palette.requested);
+      if (value.palette.version !== undefined) {
+        if (value.palette.version !== 2) issues.push("design_contract.palette.version: expected 2");
+        const allowed = ["version", "source", "requested", "background", "surface", "text", "heading", "primary", "accent", "secondary", "accent_usage", "accent_usage_source", "tokens"];
+        Object.keys(value.palette).filter(key => !allowed.includes(key)).forEach(key => issues.push(`design_contract.palette.${key}: unknown field`));
+        if (value.palette.accent_usage_source !== undefined && !["explicit", "inferred", "recommended"].includes(value.palette.accent_usage_source)) {
+          issues.push("design_contract.palette.accent_usage_source: invalid provenance");
+        }
+        const validation = [];
+        const candidate = frozenPaletteContract(null, {
+          ...Object.fromEntries(PALETTE_ROLES.map(role => [role, palette[role]?.value])),
+          ...(palette.heading ? { heading: palette.heading.value } : {}),
+          accent_usage: palette.accent_usage,
+        }, "stored palette", validation);
+        issues.push(...validation);
+        if (candidate && !validation.length) {
+          const expected = frozenPaletteTokens(palette);
+          const tokens = value.palette.tokens;
+          if (!isPlainObject(tokens) || Object.keys(tokens).length !== Object.keys(expected).length
+            || Object.keys(expected).some(key => JSON.stringify(tokens[key]) !== JSON.stringify(expected[key]))) {
+            issues.push("design_contract.palette.tokens: differs from the fixed role colors; recompile the palette contract");
+          }
+          palette.version = 2;
+          palette.tokens = expected;
+          palette.accent_usage_source = value.palette.accent_usage_source || "inferred";
+        }
+      }
       normalized.palette = palette;
     }
   }
@@ -579,7 +702,19 @@ function validateAndNormalizeDesignContract(value, issues) {
   return normalized;
 }
 
+function frozenPaletteTokens(palette) {
+  const tokens = paletteWithOverrides({}, { palette: { ...palette, version: undefined } });
+  const foreground = background => contrastRatio(tokens.text, background) >= 4.5 ? tokens.text : readableForeground(background, tokens.text);
+  for (const role of ["surface", "surface_strong", "primary_soft"]) tokens[`${role}_text`] = foreground(tokens[role]);
+  tokens.primary_fill_text = foreground(tokens.primary);
+  tokens.inverse = tokens.primary_fill_text;
+  tokens.chart_text = tokens.chart.map(foreground);
+  tokens.heading = palette.heading?.value || tokens.primary_text;
+  return tokens;
+}
+
 function paletteWithOverrides(themePalette, designContract) {
+  if (designContract?.palette?.version === 2 && designContract.palette.tokens) return clone(designContract.palette.tokens);
   const palette = clone(themePalette || {});
   const requested = designContract && designContract.palette;
   if (!requested) return resolvePaletteTextRoles(palette);
@@ -612,16 +747,22 @@ function paletteWithOverrides(themePalette, designContract) {
     );
     palette.inverse = readableForeground(primary, palette.text);
     palette.primary_soft = mixHex(background || palette.background || "#FFFFFF", primary, 0.14);
-    palette.chart = [
-      primary,
-      accent || primary,
-      secondary || accent || primary,
-      ...(Array.isArray(palette.chart) ? palette.chart : []),
-    ].slice(0, 4);
   }
   if (accent) palette.accent = accent;
   if (secondary) palette.secondary = secondary;
-  if (background && primary) {
+  // A user palette also owns categorical fills; never append the theme's
+  // unrelated pink/orange/purple colors or duplicate a single series color.
+  const base = primary || accent || palette.primary;
+  palette.chart = [...new Set([base, accent, secondary].filter(Boolean))];
+  for (const weight of [0.38, 0.65, 0.2]) {
+    if (palette.chart.length >= 4) break;
+    const tint = mixHex(base, base === palette.background ? palette.text : palette.background, weight);
+    if (!palette.chart.includes(tint)) palette.chart.push(tint);
+  }
+  palette.chart = palette.chart.slice(0, 4);
+  if (!accent) palette.accent = base;
+  if (!secondary) palette.secondary = palette.chart[1];
+  {
     // Explicit palettes are deck-wide contracts. Theme alternation must not
     // silently restore the template's original foreground/background colors.
     palette.alt_background = palette.background;
@@ -651,6 +792,9 @@ function mixHex(base, overlay, overlayWeight) {
 }
 
 module.exports = {
+  PALETTE_ROLES,
+  mergePaletteDecision,
+  frozenPaletteContract,
   contrastRatio,
   explicitCount,
   explicitCountContract,

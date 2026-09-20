@@ -28,13 +28,24 @@ def test_request_user_decision_contract_prefers_safe_progress():
         "requested_auto_submit_seconds"
     ]["description"]
     assert tool.parameters["properties"]["requested_auto_submit_seconds"]["default"] == 30
-    assert {
-        "default_option_id",
-        "requested_auto_submit_seconds",
-        "risk_level",
-        "reversible",
-        "preserves_user_intent",
-    } <= set(tool.parameters["required"])
+    assert set(tool.parameters["required"]) == {"question", "decision_kind", "options"}
+
+
+@pytest.mark.asyncio
+async def test_manual_decision_waits_for_user_without_default_or_timeout():
+    tool = RequestUserDecisionTool()
+    arguments = dict(question="请选择制作模式。", decision_kind="presentation_mode", options=OPTIONS)
+    result = await tool.invoke(arguments)
+
+    assert result.success is True
+    assert "defaultOptionId" not in result.raw_output
+    assert result.raw_output["autoSubmit"] == {
+        "allowed": False,
+        "requestedSeconds": None,
+        "denialReason": "not_requested",
+    }
+    assert result.raw_output["resumeBehavior"] == "continue_existing_task"
+    assert tool.ends_turn_on_success
 
 
 @pytest.mark.asyncio
@@ -154,7 +165,7 @@ async def test_request_user_decision_rejects_out_of_range_timeout_at_runtime():
 
 
 @pytest.mark.asyncio
-async def test_request_user_decision_rejects_missing_default_and_timeout():
+async def test_timeout_requires_default_but_no_timeout_remains_manual():
     missing_default = await RequestUserDecisionTool().execute(
         question="请选择演示用途。",
         decision_kind="presentation_purpose",
@@ -176,5 +187,5 @@ async def test_request_user_decision_rejects_missing_default_and_timeout():
 
     assert missing_default.success is False
     assert "default_option_id is required" in (missing_default.error or "")
-    assert missing_timeout.success is False
-    assert "requested_auto_submit_seconds" in (missing_timeout.error or "")
+    assert missing_timeout.success is True
+    assert missing_timeout.raw_output["autoSubmit"]["allowed"] is False

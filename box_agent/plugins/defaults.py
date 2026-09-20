@@ -254,6 +254,9 @@ def kernel_services_from_registry(registry: ActivatedRegistry) -> KernelServices
     if context_engine is not None:
         context_engine.configure_run(skill_engine=registry.get(SkillEnginePort),
                                      session_store=registry.get(SessionStorePort))
+        bind_memory = getattr(context_engine, "bind_memory", None)
+        if callable(bind_memory):
+            bind_memory(registry.get(MemoryLookupPort))
     return KernelServices(
         llm=registry.require(LLMPort),
         summary_llm=registry.get(SummaryLLMPort),
@@ -301,6 +304,9 @@ def compose_default_services(
 
         context_engine = DefaultContextEngine()
     context_engine.configure_run(skill_engine=skill_engine, session_store=session_store)
+    bind_memory = getattr(context_engine, "bind_memory", None)
+    if callable(bind_memory):
+        bind_memory(memory_lookup)
     if compact_engine is None:
         from ..kernel.compact_engine import DefaultCompactEngine
 

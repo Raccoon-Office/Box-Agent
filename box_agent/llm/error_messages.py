@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from typing import NamedTuple
 
+from ..auth import HostedAuthRefreshError, HostedAuthRequiredError
+
 
 class FriendlyError(NamedTuple):
     """A humanized error.
@@ -44,6 +46,11 @@ _SOFT_CATEGORIES: frozenset[str] = frozenset({"content_filter"})
 # Ordered list of (category, substring-tokens, friendly-message). First match wins,
 # so put more specific categories before generic ones.
 _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    (
+        "request_body_too_large",
+        ("request_body_too_large", "request body exceeds", "payload too large", "request entity too large"),
+        "本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
+    ),
     (
         "content_filter",
         ("content_filter", "content filter", "content management policy",
@@ -141,12 +148,23 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
     except Exception:
         root = exc
 
+    if isinstance(root, (HostedAuthRequiredError, HostedAuthRefreshError)):
+        try:
+            msg = (_safe_str(root) or "").strip()
+        except Exception:
+            msg = ""
+        if msg:
+            return FriendlyError(message=msg, category="hosted_auth")
+
     try:
         haystack = _build_haystack(root).lower()
     except Exception:
         haystack = ""
 
     try:
+        if _safe_http_status_code(root) == 413:
+            return FriendlyError(message="本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
+                                 category="request_body_too_large")
         if _looks_like_unsupported_model(haystack):
             return FriendlyError(
                 message=_MODEL_CONFIGURATION_MESSAGE,
@@ -307,6 +325,7 @@ def _error_code_from_body(body: object) -> int | str | None:
 # Error categories that a retry cannot fix — deterministic client-side faults.
 # (Mirrors the classifier categories in ``_RULES``.)
 _NON_RETRYABLE_CATEGORIES: frozenset[str] = frozenset({
+    "request_body_too_large",
     "content_filter",
     "auth",
     "permission",
@@ -347,6 +366,32 @@ def _safe_http_status_code(exc: BaseException) -> int | None:
         return None
 
 
+
+
+def is_hosted_provider_auth_rejection(exc: BaseException) -> bool:
+    """True when the provider rejected the request as unauthorized (401 / 200003)."""
+    try:
+        root = _unwrap(exc)
+    except Exception:
+        root = exc
+    try:
+        status = _http_status_code(root)
+    except Exception:
+        status = None
+    if status == 401:
+        return True
+    try:
+        code = extract_llm_error_code(exc)
+    except Exception:
+        code = None
+    if code == 200003 or code == "200003":
+        return True
+    try:
+        haystack = _build_haystack(root).lower()
+    except Exception:
+        haystack = ""
+    return "200003" in haystack or "authorization_verify_error" in haystack
+
 def is_retryable_llm_error(exc: BaseException) -> bool:
     """Whether a (non-streaming) LLM call error is worth retrying.
 
@@ -364,6 +409,9 @@ def is_retryable_llm_error(exc: BaseException) -> bool:
         root = _unwrap(exc)
     except Exception:
         root = exc
+
+    if isinstance(root, HostedAuthRequiredError):
+        return False
 
     # HTTP status is the most precise signal, so check it FIRST. A structured
     # 4xx must fail fast even when its message happens to contain a

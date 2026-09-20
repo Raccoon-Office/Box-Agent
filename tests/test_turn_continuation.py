@@ -31,7 +31,10 @@ class JudgeLLM:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", [True, False])
-async def test_judge_passes_candidate_and_request_without_exposing_tools(decision) -> None:
+@pytest.mark.parametrize("decision_tool_available", [True, False])
+async def test_judge_passes_candidate_and_request_without_exposing_tools(
+    decision, decision_tool_available,
+) -> None:
     # This verifies the protocol, not the real model's semantic classification.
     llm = JudgeLLM(json.dumps({"continue": decision}))
     request = "制作一个关于紫砂壶的 PPT。"
@@ -40,6 +43,7 @@ async def test_judge_passes_candidate_and_request_without_exposing_tools(decisio
         llm,
         user_request=request,
         candidate_response=candidate,
+        decision_tool_available=decision_tool_available,
         session_id="session-test",
         turn_id="turn-test",
         title="PPT",
@@ -48,6 +52,7 @@ async def test_judge_passes_candidate_and_request_without_exposing_tools(decisio
     assert json.loads(llm.messages[-1].content) == {
         "user_request": request,
         "candidate_response": candidate,
+        "decision_tool_available": decision_tool_available,
     }
     assert llm.kwargs == {
         "tools": None,
@@ -417,6 +422,80 @@ async def test_incomplete_reply_can_continue_to_a_real_decision_tool() -> None:
     result = next(e for e in events if isinstance(e, ToolCallResult))
     assert result.tool_name == tool.name and result.success
     assert len(result.raw_output["options"]) == 2
+    assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.WAITING_FOR_USER]
+
+
+@pytest.mark.asyncio
+async def test_prose_choices_recover_to_one_manual_decision_and_wait() -> None:
+    # Semantic classification needs a separate real-model check. This
+    # checks offered-tool facts, recovery, and the real tool's waiting contract.
+    tool = RequestUserDecisionTool()
+    llm = MockLLM([
+        LLMResponse(
+            content="制作前请选择模式：快速模式沿用主题版式；设计模式设计页面。你希望用哪种？",
+            finish_reason="stop",
+        ),
+        LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id="choose-mode", type="function", function=FunctionCall(
+                name=tool.name, arguments={
+                    "question": "请选择制作模式。", "decision_kind": "delivery_format",
+                    "options": [{"id": "fast", "label": "快速模式"},
+                                {"id": "design", "label": "设计模式"}],
+                },
+            ),
+        )]),
+    ], judge_decisions=[True])
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="制作一份商业分析 PPT。")],
+        tools={tool.name: tool}, max_steps=4,
+    ))
+    assert len(llm.judge_requests) == 1
+    assert llm.judge_requests[0]["decision_tool_available"] is True
+    assert llm.calls == 2
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert len(results) == 1 and results[0].success
+    assert [o["id"] for o in results[0].raw_output["options"]] == ["fast", "design"]
+    assert results[0].raw_output.get("defaultOptionId") is None
+    assert results[0].raw_output["autoSubmit"]["allowed"] is False
+    assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.WAITING_FOR_USER]
+
+
+@pytest.mark.asyncio
+async def test_judge_sees_when_only_other_tools_are_available() -> None:
+    tool = SearchTool()
+    llm = MockLLM([
+        LLMResponse(content="请选择：快速模式或设计模式。", finish_reason="stop"),
+    ], judge_decisions=[False])
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="制作 PPT。")],
+        tools={tool.name: tool}, max_steps=4,
+    ))
+    assert llm.judge_requests[0]["decision_tool_available"] is False
+    assert llm.calls == 1
+    assert not any(isinstance(e, InjectedMessageEvent) for e in events)
+    assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.END_TURN]
+
+
+@pytest.mark.asyncio
+async def test_successful_decision_stops_without_judging_or_duplicate_card() -> None:
+    tool = RequestUserDecisionTool()
+    llm = MockLLM([
+        LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id="choose-format", type="function", function=FunctionCall(
+                name=tool.name, arguments={
+                    "question": "请选择交付格式。", "decision_kind": "delivery_format",
+                    "options": [{"id": "html", "label": "网页"},
+                                {"id": "pdf", "label": "PDF"}],
+                },
+            ),
+        )]),
+    ])
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="制作报告。")],
+        tools={tool.name: tool}, max_steps=4,
+    ))
+    assert llm.judge_requests == []
+    assert len([e for e in events if isinstance(e, ToolCallResult)]) == 1
     assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.WAITING_FOR_USER]
 
 

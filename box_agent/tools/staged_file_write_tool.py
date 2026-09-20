@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from .argument_limits import MAX_GENERATED_BODY_CHARS, RECOMMENDED_GENERATED_BODY_CHARS
 from .base import Tool, ToolResult
 from .file_tools import _resolve_from_active_root
-from .safety import backup_file, validate_path_in_workspace
+from .safety import backup_file, builtin_skill_write_error, validate_path_in_workspace
 
 if TYPE_CHECKING:
     from .permissions import PermissionEngine
@@ -147,6 +147,8 @@ class StagedFileWriteTool(Tool):
         )
 
     def _permission_error(self, path: Path, capability: str) -> ToolResult | None:
+        if capability == "filesystem.write" and (error := builtin_skill_write_error(path)):
+            return ToolResult(success=False, error=error)
         if self._perm:
             decision = self._perm.check(
                 capability=capability,
@@ -369,6 +371,8 @@ class StagedFileWriteTool(Tool):
                 success=False,
                 error=f"STAGED_FILE_HASH_MISMATCH: actual_sha256={digest}",
             )
+        if error := self._permission_error(state.target, "filesystem.write"):
+            return error
         state.target.parent.mkdir(parents=True, exist_ok=True)
         if state.target.exists():
             backup_file(state.target)

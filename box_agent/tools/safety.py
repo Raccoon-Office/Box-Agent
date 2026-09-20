@@ -19,6 +19,69 @@ from box_agent.user_paths import state_path
 
 # Global trash directory for file backups
 TRASH_DIR = state_path('trash')
+BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
+
+
+def builtin_skill_write_error(path: Path, skills_root: Path | None = None) -> str | None:
+    """Bundled skills are executable runtime resources, never task output."""
+    root = skills_root or BUILTIN_SKILLS_ROOT
+    if path.resolve().is_relative_to(root.resolve()):
+        return (
+            "BUILTIN_SKILL_READ_ONLY: bundled Skill files cannot be changed by task tools. "
+            "Write presentation artifacts in the task workspace. If a bundled script fails, "
+            "report the error; do not patch the script or bypass its validator."
+        )
+    return None
+
+
+def builtin_skill_command_write_error(command: str, workspace: Path | None) -> str | None:
+    """Reject direct shell/inline-code mutations of bundled Skill resources.
+
+    This is a command guard, not an OS sandbox for arbitrary external programs.
+    File-tool writes are checked separately against their resolved target.
+    """
+    inspection = inspect_shell_command(command)
+    cwd = workspace or Path.cwd()
+    for invocation in inspection.invocations:
+        name = Path(invocation.executable).name.lower()
+        args = invocation.arguments
+        if name in {"cd", "set-location"} and args:
+            candidate = Path(args[-1]).expanduser()
+            cwd = candidate if candidate.is_absolute() else cwd / candidate
+            continue
+        targets: tuple[str, ...] = ()
+        if name in {"cp", "install"} and args:
+            targets = args[-1:]
+        elif name in {"mv", "rm", "rmdir", "tee", "chmod", "chown", "touch"}:
+            targets = args
+        elif name == "sed" and any(arg.startswith("-i") for arg in args):
+            targets = args
+        else:
+            # Quoted paths inside Python/JS are not shell words of their own.
+            # Inspect path arguments, not arbitrary quoted file contents.
+            code = " ".join(args)
+            literal = r"['\"]([^'\"\n]+)['\"]"
+            targets = tuple(
+                match
+                for pattern in (
+                    rf"\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|unlink(?:Sync)?|remove|rmtree)\s*\(\s*{literal}",
+                    rf"\bPath\s*\(\s*{literal}\s*\)\.(?:write_text|write_bytes|unlink)\s*\(",
+                    rf"\bopen\s*\(\s*{literal}\s*,\s*['\"][wax]",
+                )
+                for match in re.findall(pattern, code)
+            )
+        for target in targets:
+            if target.startswith("-"):
+                continue
+            path = Path(target).expanduser()
+            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
+                return error
+    for redirect in inspection.redirections:
+        if ">" in redirect.operator and not redirect.target.isdigit():
+            path = Path(redirect.target).expanduser()
+            if error := builtin_skill_write_error(path if path.is_absolute() else cwd / path):
+                return error
+    return None
 
 _DANGEROUS_EXECUTABLE_REASONS = {
     "chmod": "chmod: changes file permissions",
@@ -55,6 +118,8 @@ _RUNTIME_EXECUTABLE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "BOX_AGENT_SOFFICE": ("soffice", "libreoffice"),
     "BOX_AGENT_SANDBOX_PYTHON": ("python3",),
     "BOX_AGENT_BUNDLED_PYTHON": ("python3",),
+    "HYPERFRAMES_BROWSER_PATH": (),
+    "PRODUCER_HEADLESS_SHELL_PATH": (),
 }
 _SHELL_ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_VARIABLE_NAME_RE = re.compile(

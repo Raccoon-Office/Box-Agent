@@ -188,3 +188,22 @@ body[data-deck-presentation="1"] .open-route-rail::after { content: ""; position
 body[data-deck-presentation="1"] .open-cards.open-count-3[data-presentation-density="sparse"][data-presentation-items="brief"] .open-point-title { font-size: 96px; }
 body[data-deck-presentation="1"][data-deck-rhythm="editorial"] .open-cards.open-count-3[data-presentation-density="sparse"][data-presentation-items="brief"] .open-point-title { font-size: 128px; }
 body[data-deck-presentation="1"] .open-closing.open-count-3[data-presentation-density="sparse"][data-presentation-items="brief"] .open-action-title { font-size: 64px; }
+/* Image treatments are deterministic contrast fallbacks, independent of vision.
+   Keep these after theme/cover styles so a light wash never retains white poster ink. */
+body[data-deck-theme] .slide.has-background.background-wash-light {
+  --deck-poster-bg: var(--deck-base-bg);
+  --deck-poster-text: var(--deck-base-text);
+  color: var(--deck-base-text);
+}
+body[data-deck-theme] .slide.background-wash-light .slide-background::after {
+  background: var(--deck-base-bg);
+  opacity: 0.94;
+}
+body[data-deck-theme] .slide.has-background.background-wash-dark {
+  --deck-poster-text: #FFFFFF;
+  color: #FFFFFF;
+}
+body[data-deck-theme] .slide.background-wash-dark .slide-background::after {
+  background: #000000;
+  opacity: 0.82;
+}

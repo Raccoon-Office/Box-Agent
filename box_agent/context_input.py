@@ -30,6 +30,7 @@ class PreparedContext:
     on_committed: Callable[[], None] | None = None
     budget_blocked: bool = False
     on_response: Callable[[], None] | None = None
+    reader_required: bool = False
 
 
 class DefaultContextEngine:
@@ -43,6 +44,7 @@ class DefaultContextEngine:
         [str, str | tuple[str, ...]], str,
     ] = effective_system_prompt) -> None:
         self._system_prompt_projector = system_prompt_projector
+        self._memory_lookup = None
         self.references: SkillReferenceContext | None = None
         self.prepared_tools: PreparedTools | None = None
         self._history: list[Message] = []
@@ -59,6 +61,10 @@ class DefaultContextEngine:
                            if skill_engine is not None else None)
         self.prepared_tools = None
         self._history = []
+
+    def bind_memory(self, memory_lookup: Any) -> None:
+        """Bind optional memory after run capabilities have been resolved."""
+        self._memory_lookup = memory_lookup
 
     def bind_history(self, messages: list[Message]) -> None:
         """Observe exact tool history before Kernel may compact it; never edit it."""
@@ -101,7 +107,7 @@ class DefaultContextEngine:
         envelopes = [Message(role="tool", name=call.function.name, tool_call_id=call.id, content="")
                      for call in calls if call.id not in committed]
         definitions = self.prepared_tools.definitions if self.prepared_tools is not None else ()
-        pending = ([Message(role="user", content=list(self._pending_followup_blocks))]
+        pending = ([Message(role="user", source="runtime", content=list(self._pending_followup_blocks))]
                    if self._pending_followup_blocks else [])
         available = skill_reference_budget_chars(
             self.project_history([*self._history, *envelopes, *self._extra_messages, *pending]), definitions,
@@ -121,6 +127,18 @@ class DefaultContextEngine:
         self.bind_history(messages)
         self._pending_followup_blocks = []
         self.prepared_tools = prepared_tools
+        from .correction import prepare_correction_context
+        available = skill_reference_budget_chars(
+            self.project_history([*messages, *extra_messages, *((transient_message,) if transient_message else ())]),
+            prepared_tools.definitions, max(0, token_limit - max(0, transient_tokens)), output_tokens,
+        )
+        correction_context = prepare_correction_context(
+            self._memory_lookup, prepared_tools.targets,
+            self.references.runtime if self.references is not None else None, messages,
+            budget_chars=min(1800, max(0, available)),
+        )
+        if correction_context is not None:
+            extra_messages = (*extra_messages, correction_context)
         self._extra_messages = (*extra_messages, *((transient_message,) if transient_message is not None else ()))
         self._token_limit, self._output_tokens = token_limit, output_tokens
         self._transient_tokens = (max(transient_tokens, _fallback_context_estimate([transient_message], {}))
@@ -133,6 +151,7 @@ class DefaultContextEngine:
         self._request_reference_tokens = 0
         blocked_reason = None
         budget_blocked = False
+        reader_required = False
         on_committed = None
         on_response = None
         full_request = ([*context_messages, transient_message]
@@ -152,9 +171,29 @@ class DefaultContextEngine:
             context_messages, references = projection.messages, projection.references
             blocked_reason = projection.blocked_reason
             budget_blocked = projection.budget_blocked
+            reader_required = projection.reader_required
             on_committed = projection.on_committed
             on_response = projection.on_response
             self._request_reference_tokens = projection.input_tokens
+            # Materialized Skill messages are durable history, but their
+            # delivery facts must not be acknowledged until the kernel has
+            # committed the request/context record.  This keeps ACP usage
+            # attribution correct while leaving cancelled or blocked requests
+            # unacknowledged.
+            acknowledge = getattr(
+                self.references.runtime,
+                "acknowledge_pending_materialized",
+                None,
+            )
+            if callable(acknowledge):
+                previous_on_committed = on_committed
+
+                def commit_materialized() -> None:
+                    if previous_on_committed is not None:
+                        previous_on_committed()
+                    acknowledge()
+
+                on_committed = commit_materialized
         if (not blocked_reason and base_input_tokens + self._request_reference_tokens > token_limit):
             blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
             budget_blocked = True
@@ -162,7 +201,10 @@ class DefaultContextEngine:
             on_response = None
         provider_messages = ([*context_messages, transient_message]
                              if transient_message is not None else context_messages)
-        return PreparedContext(provider_messages, context_messages, references,
-                               self._request_reference_tokens,
-                               self._request_reference_tokens + self._transient_tokens, blocked_reason,
-                               on_committed, budget_blocked, on_response)
+        return PreparedContext(
+            provider_messages, context_messages, references,
+            self._request_reference_tokens,
+            self._request_reference_tokens + self._transient_tokens,
+            blocked_reason, on_committed, budget_blocked, on_response,
+            reader_required,
+        )

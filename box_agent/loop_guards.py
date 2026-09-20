@@ -68,6 +68,10 @@ FINAL_SUMMARY_EXCLUDED_TOOLS: Final[frozenset[str]] = frozenset(
         "memory_read",
         "memory_write",
         "memory_search",
+        "memory_list_corrections",
+        "memory_write_correction",
+        "memory_supersede_correction",
+        "memory_delete_correction",
         "request_user_input",
         "request_user_decision",
     }

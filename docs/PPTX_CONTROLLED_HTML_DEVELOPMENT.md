@@ -1,5 +1,14 @@
 # Controlled HTML PPT Development and Extension Guide
 
+## Independent design role and seed-free documents
+
+`design_plan.js prepare` validates the outline and writes a designer-only input/catalog. The main agent receives paths and reuse status. An isolated role follows `references/design-role.md` and returns only visual choices. `design_plan.js accept` imports its completed Session Log response and generates metadata, page numbers and content bindings into `design_plan.json`. The brief contains compact indices with small linked details; no full catalog read is required. `inspect_deck_contract.js --design-plan` validates/scaffolds without silent aesthetic fallback; ordinary patches cannot overwrite visual enums. Facts, near-final copy, media acquisition and delivery remain main-agent responsibilities.
+
+Base theme IDs or `theme-id@variant-id` select complete presets using existing resources. New `design.version=2` stores family/variant directly with no seed. Version-1 reads preserve a valid saved variant, falling back to legacy seed resolution only when needed. Pre-design documents retain their historical default appearance. Page-local variants/composition and all HTML editor controls remain available.
+
+Matching input/catalog fingerprints allow plan reuse. Human HTML edits supersede the proposal and invalidate automatic reuse; saving never rolls them back. Plan-owned decks do not require another routine model reviewer and explicitly record that post-content model review was not performed. Program QA remains active. Unsupported model image inspection is non-blocking. Actual user constraints remain hard; outline visual hints do not override the designer or reset the retry budget. Source checks do not establish packaged OfficeV3 behavior; build/install/restart/live-task verification remain separate.
+
+
 This guide is for maintainers of `box_agent/skills/document-skills/pptx/`.
 It explains how to extend the controlled HTML PPT system without breaking its
 editable, validated, and exportable contract. Read the product model in
@@ -11,7 +20,10 @@ contract for agents.
 
 ```mermaid
 flowchart LR
-    A["outline.json"] --> B["inspect_deck_contract\nscaffold once"]
+    A["outline.json"] --> PREP["design_plan.js prepare"]
+    PREP --> ROLE["Independent design role"]
+    ROLE --> PLAN["design_plan.json"]
+    PLAN --> B["inspect_deck_contract\nscaffold once"]
     B --> C["deck.json\nrecoverable source model"]
     C --> D["apply_deck_patch\ncontrolled mutation"]
     D --> E["finalize_controlled_deck\nvalidate and compile"]
@@ -62,13 +74,39 @@ Do not hand-edit these generated artifacts:
 
 ## 3. Extension recipes
 
+New designs use one palette contract for both input paths. User role colors are
+locked; the designer supplies exact background/text/primary/accent/secondary
+values and accent_usage even when retaining theme defaults (heading is optional).
+The compiler records role provenance and freezes derived tokens under
+`design_contract.palette.version=2`. Initial rendering, charts and editor rerenders
+share those tokens. Partial user palettes are completed with sparse accents by
+default; conflicting locked foreground/background colors are reported, not replaced.
+Theme literals and mixes bind to the fixed palette. Browser QA checks component,
+pseudo-element, gradient and shadow colors; palette mismatches block successful
+finalization. Image pixels remain a separate concern. Legacy HTML/decks stay
+readable; old design inputs need prepare to adopt the new contract without
+overwriting saved human edits.
+
+The five-topic regression checks require default bindings to reference actual layout
+fields. Comparisons may omit supporting bullets rather than repeat a claim to meet
+a minimum count. User palettes also own categorical fills and chart series; numeric
+categories with different labeled units use independent axes. Runtime QA measures
+image-wash contrast and effective diagram label size without requiring a vision model.
+Findings remain delivery advisories.
+
+Bundled Skills are runtime code, not writable task artifacts. File tools and the
+permission engine reject bundled writes, including symlinks; Bash additionally checks
+direct mutations and common inline-script writes. This command guard is not an OS
+sandbox for arbitrary programs. Fixes belong in the development checkout and its
+test/package workflow, never in a presentation task that patches its own validator.
+
 ### Add a theme
 
 Copy the nearest `themes/*.json`, then define a unique id, selection metadata,
 all visual tokens, and `composition.default_family` plus
 `composition.allowed_families`. A theme is not a one-to-one layout clone: it may
 allow several tested families, while one scaffolded deck persists exactly one
-`design.family` and uses its seed to select a variant.
+`design.family` and its named variant directly, without a seed.
 
 Rebuild the manifest and test selection plus a representative gallery.
 

@@ -14,6 +14,7 @@ import box_agent.composition as composition_module
 import box_agent.runtime as runtime_module
 from box_agent.agent import Agent
 from box_agent.agent_session import AgentSession
+from box_agent.agent_service import AgentService
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
 from box_agent.events import DoneEvent, StopReason
 from box_agent.kernel.ports import KernelServices
@@ -51,6 +52,7 @@ def test_cli_uses_session_event_api_without_kernel_or_plugin_imports() -> None:
     ) == []
     assert cli.Agent is Agent
     assert cli.AgentSession is AgentSession
+    assert cli.AgentService is AgentService
     session_run_calls = [
         node
         for node in ast.walk(tree)
@@ -60,7 +62,18 @@ def test_cli_uses_session_event_api_without_kernel_or_plugin_imports() -> None:
         and node.func.value.id == "session"
         and node.func.attr == "run_events"
     ]
-    assert len(session_run_calls) == 1
+    assert len(session_run_calls) == 0
+    service_start_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Call)
+        and isinstance(node.func.value.func, ast.Name)
+        and node.func.value.func.id == "AgentService"
+        and node.func.attr == "start"
+    ]
+    assert len(service_start_calls) == 1
     assert not any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)

@@ -7,9 +7,11 @@ import pytest
 
 from box_agent.agent import Agent
 from box_agent.events import ErrorEvent
-from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.runtime import run_agent_loop
+from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.session_log import SessionLog
 from box_agent.skill_dependencies import SkillDependencyError
+from box_agent.skill_runtime import SkillRuntime
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.skill_tool import GetSkillTool
@@ -174,27 +176,38 @@ async def test_acp_restore_borrows_real_tool_loader_when_separate_loader_is_omit
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size,with_reader", [(32000, False), (100, False), (32000, True)])
-async def test_explicit_material_needs_body_or_an_offered_paging_reader(tmp_path, size, with_reader):
+async def test_explicit_material_continues_with_bounded_body_or_paging_reader(tmp_path, size, with_reader):
     provider = CapturingProvider(request_skill="first" if with_reader else None)
-    tools = [GetSkillTool(loader_at(tmp_path / "skills"))] if with_reader else []
-    agent = Agent(llm_client=provider, system_prompt="BASE", tools=tools, workspace_dir=str(tmp_path),
-                  deferred_mcp_loading_enabled=False, token_limit=5000, max_steps=3)
+    root = tmp_path / "skills"
     for name in ("first", "second"):
-        agent.activate_skill_instructions(name, name.upper() + "\n" + ("x" * 79 + "\n") * (size // 80))
-    agent.add_user_message("follow both selected methods")
-    events = [event async for event in agent.run_events()]
-    if size == 32000 and not with_reader:
-        assert provider.requests == []
-        assert any(isinstance(event, ErrorEvent) and "reader" in event.message.lower() for event in events)
-    else:
-        assert len(provider.requests) == (2 if with_reader else 1)
-        text = str(provider.requests[0])
-        assert ("get_skill" in text and "paged" in text) if with_reader else ("FIRST" in text and "SECOND" in text)
-        if with_reader:
-            result = next(message for message in provider.requests[1] if message.role == "tool")
-            assert result.tool_call_id == "read-selected"
-            assert "FIRST" in result.content and '"has_more": true' in result.content
-    assert ("get_skill" in agent.tools) == with_reader
+        folder = root / name
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: example\n---\n{name.upper()}\n"
+            + ("x" * 79 + "\n") * (size // 80)
+        )
+    loader = SkillLoader(sources=[(root, "user")], skill_settings_path=tmp_path / "settings.json")
+    loader.discover_skills()
+    runtime = SkillRuntime(loader)
+    runtime.select(["first", "second"])
+    tools = {"get_skill": GetSkillTool(loader)} if with_reader else {}
+    events = [event async for event in run_agent_loop(
+        llm=provider,
+        messages=[Message(role="system", content="BASE"), Message(role="user", content="follow both selected methods")],
+        tools=tools,
+        skill_engine=runtime,
+        token_limit=5000,
+        max_steps=3,
+    )]
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert len(provider.requests) == (2 if with_reader else 1)
+    text = str(provider.requests[0])
+    assert ("get_skill" in text and "paged" in text) if with_reader else ("FIRST" in text and "SECOND" in text)
+    if with_reader:
+        result = next(message for message in provider.requests[1] if message.role == "tool")
+        assert result.tool_call_id == "read-selected"
+        assert '"has_more": true' in result.content
+    assert ("get_skill" in tools) == with_reader
 
 
 @pytest.mark.asyncio
@@ -305,30 +318,27 @@ async def test_clearing_restored_references_still_strips_verified_legacy_system_
 
 
 @pytest.mark.asyncio
-async def test_failed_restoration_stays_required_across_runs_until_reader_is_available(tmp_path):
+async def test_restoration_without_reader_continues_with_bounded_source_across_runs(tmp_path):
     from box_agent.skill_runtime import SkillRuntime
 
     loader = loader_at(tmp_path / "skills")
     path = tmp_path / "skills" / "demo" / "SKILL.md"
     path.write_text("---\nname: demo\ndescription: example\n---\nMETHOD_BODY\n" + ("x" * 79 + "\n") * 500)
-    provider = CapturingProvider(request_skill="demo", skill_read_limit=20)
+    provider = CapturingProvider()
     agent = Agent(llm_client=provider, system_prompt="BASE", tools=[], skill_runtime=SkillRuntime(loader),
                   workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, token_limit=5000, max_steps=3)
     agent.restore_active_skill_instructions([("demo", "old text", sha256(b"old text").hexdigest(), 1)])
-    for _ in range(2):
+    for turn in range(2):
         agent.add_user_message("continue using the restored method")
         events = [event async for event in agent.run_events()]
-        assert any(isinstance(event, ErrorEvent) and "reader" in event.message.lower() for event in events)
-        assert provider.requests == []
+        assert not any(isinstance(event, ErrorEvent) for event in events)
+        assert len(provider.requests) == turn + 1
+        request = str(provider.requests[-1])
+        assert "METHOD_BODY" in request and str(path) in request
+        assert '"truncated": true' in request
         assert agent.skill_runtime.turn_deliveries == {}
-    agent.tools["get_skill"] = GetSkillTool(loader)
-    agent.add_user_message("continue with the now available reader")
-    _ = [event async for event in agent.run_events()]
-    assert len(provider.requests) == 2
-    assert "paged" in str(provider.requests[0])
-    result = next(message for message in provider.requests[1] if message.role == "tool")
-    assert result.tool_call_id == "read-selected"
-    assert "METHOD_BODY" in result.content
+    assert "get_skill" not in agent.tools
+    assert path.read_text().count("x" * 79) == 500
 
 
 class RecoverableSkillStore:

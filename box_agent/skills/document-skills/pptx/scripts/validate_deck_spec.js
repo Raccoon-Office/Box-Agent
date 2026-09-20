@@ -311,6 +311,7 @@ function validateOutlineBinding(deckPath, deck) {
       );
     } else if (actualIntent && typeof actualIntent === "object") {
       Object.entries(expectedIntent).forEach(([field, expected]) => {
+        if (deck.design_plan?.layout_hints_only && ["layout", "visual", "visual_item_contract"].includes(field)) return;
         const actual = typeof actualIntent[field] === "string"
           ? actualIntent[field].trim()
           : actualIntent[field];
@@ -326,14 +327,14 @@ function validateOutlineBinding(deckPath, deck) {
       outline.source_mode,
       layoutPolicy
     );
-    if (semantic && !semantic.allowed_layout_ids.includes(slide.layout_id)) {
+    if (!deck.design_plan?.layout_hints_only && semantic && !semantic.allowed_layout_ids.includes(slide.layout_id)) {
       issues.push(
         `${basePath}.layout_id: ${JSON.stringify(slide.layout_id)} does not express ` +
         `outline visual intent ${JSON.stringify(outlineSlide.visual)}; use one of ` +
         semantic.allowed_layout_ids.join(", ")
       );
     }
-    issues.push(...validateOutlineVisualCardinality(
+    if (!deck.design_plan?.layout_hints_only) issues.push(...validateOutlineVisualCardinality(
       slide,
       effectiveOutlineSlide,
       basePath,

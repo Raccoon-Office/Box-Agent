@@ -206,6 +206,13 @@ def _normalize_web_search_refs(payload: Any) -> list[dict[str, Any]]:
             "type": "web",
             "reference_tag": _search_item_reference_tag(item, index),
         }
+        # Models may cite the upstream result Id instead of its display SortId.
+        source_id = _first_present(item, ("Id", "id", "result_id", "resultId"))
+        if isinstance(source_id, str):
+            source_id = source_id.strip()
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", source_id):
+                alias = source_id if source_id.startswith("ref_") else f"ref_{source_id}"
+                ref["reference_aliases"] = [alias]
         if image_details:
             ref["image_details"] = image_details
         refs.append(ref)

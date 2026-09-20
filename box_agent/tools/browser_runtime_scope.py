@@ -1,10 +1,16 @@
-"""Turn-scoped ownership for the shared Playwright MCP browser.
+"""Session/turn scoping for the managed Playwright MCP browser.
 
-OfficeV3 exposes one Playwright MCP stdio session to an ACP process. Multiple
-local-agent sessions may therefore reach the same browser context concurrently.
-This coordinator gives the first Playwright call in a turn an exclusive lease
-until that turn ends, while allowing parallel Playwright calls from the same
-turn to proceed.
+Two cooperating mechanisms live here:
+
+* ``browser session key`` — identifies which agent session (ACP session id, or
+  ``"cli"``) is currently executing. ``PlaywrightSessionPool`` reads it to hand
+  every session its own MCP client, i.e. its own ``BrowserContext``. This is
+  the primary isolation model.
+* ``BrowserRuntimeCoordinator`` — legacy turn-scoped lease used only in the
+  fallback mode where the playwright entry cannot be multiplexed (no
+  ``--isolated``, ``--shared-browser-context`` present, or the feature is
+  disabled). There one stdio session is shared by all turns, so the first
+  Playwright call in a turn gets an exclusive lease until the turn ends.
 """
 
 from __future__ import annotations
@@ -15,6 +21,23 @@ from contextvars import ContextVar, Token
 _current_owner: ContextVar[str | None] = ContextVar(
     "box_agent_browser_runtime_owner", default=None
 )
+
+_current_session_key: ContextVar[str | None] = ContextVar(
+    "box_agent_browser_session_key", default=None
+)
+
+
+def set_browser_session_key(key: str) -> Token[str | None]:
+    """Bind the current task (and its children) to a browser session key."""
+    return _current_session_key.set(key)
+
+
+def reset_browser_session_key(token: Token[str | None]) -> None:
+    _current_session_key.reset(token)
+
+
+def current_browser_session_key() -> str | None:
+    return _current_session_key.get()
 
 
 class BrowserRuntimeCoordinator:

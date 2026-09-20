@@ -30,7 +30,8 @@
       background: cssColor(style, "--deck-bg", "#f7faff"),
       surface: cssColor(style, "--deck-surface", "#ffffff"),
       surfaceStrong: cssColor(style, "--deck-surface-strong", "#eaf1fb"),
-      primary: cssColor(style, "--deck-primary", "#1d5dcc"),
+      primary: cssColor(style, "--deck-primary-text", "#1d5dcc"),
+      primaryFill: cssColor(style, "--deck-primary", "#1d5dcc"),
       primarySoft: cssColor(style, "--deck-primary-soft", "#dce9ff"),
       text: cssColor(style, "--deck-text", "#14233a"),
       muted: cssColor(style, "--deck-muted", "#53657b"),
@@ -101,10 +102,10 @@
         strategy: "wrapped-pipeline",
         padding: 26,
         maxScale: 1.14,
-        labelFontSize: 22,
-        labelLineHeight: 25,
+        labelFontSize: spec.nodes.length <= 3 ? 38 : 30,
+        labelLineHeight: spec.nodes.length <= 3 ? 44 : 34,
         labelMaxChars: 10,
-        detailFontSize: 12,
+        detailFontSize: spec.nodes.length <= 3 ? 24 : 20,
         detailMaxChars: 20,
         kindFontSize: 10,
         edgeFontSize: 11,
@@ -118,10 +119,10 @@
       strategy: "layered-architecture",
       padding: 30,
       maxScale: 1.42,
-      labelFontSize: 24,
-      labelLineHeight: 29,
+      labelFontSize: 34,
+      labelLineHeight: 38,
       labelMaxChars: 12,
-      detailFontSize: 14,
+      detailFontSize: 22,
       detailMaxChars: 28,
       kindFontSize: 12,
       edgeFontSize: 13,
@@ -143,14 +144,15 @@
       };
     }
     if (kind === "pipeline") {
+      const columns = Math.min(6, spec.nodes.length);
       return {
-        width: hub ? 226 : Math.max(198, Math.min(222, 188 + labelLength * 4)),
-        height: hub ? 94 : 86,
+        width: Math.min(380, (1394 - (columns - 1) * 32) / columns),
+        height: spec.nodes.length <= 3 ? 190 : 164,
       };
     }
     return {
-      width: hub ? 304 : Math.max(228, Math.min(272, 208 + labelLength * 5)),
-      height: hub ? 124 : 104,
+      width: hub ? 380 : Math.max(320, Math.min(360, 300 + labelLength * 5)),
+      height: 146,
     };
   }
 
@@ -177,7 +179,7 @@
         "elk.spacing.nodeNode": "28",
         "elk.spacing.edgeNode": "24",
         "elk.spacing.edgeEdge": "16",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "72",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "28",
         "elk.layered.spacing.edgeNodeBetweenLayers": "28",
         "elk.layered.spacing.edgeEdgeBetweenLayers": "18",
         "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
@@ -192,7 +194,9 @@
         id: edge.id || `edge-${index + 1}`,
         sources: [edge.source],
         targets: [edge.target],
-        labels: edge.label ? [{
+        // Small diagrams place labels after routing below. ELK's center-label
+        // dummy layers otherwise consume most of a four-level slide's height.
+        labels: edge.label && spec.nodes.length > 8 ? [{
           id: `${edge.id || `edge-${index + 1}`}-label`,
           text: String(edge.label),
           ...edgeLabelSize(edge, spec),
@@ -416,14 +420,14 @@
   function architectureChainLayout(spec) {
     const mainIds = longestDirectedPath(spec);
     if (mainIds.length < 5 || mainIds.length !== spec.nodes.length) return null;
-    const width = 1450;
-    const height = 500;
     const mainNodes = mainIds.map(id => spec.nodes.find(node => node.id === id)).filter(Boolean);
     const columns = Math.min(4, Math.ceil(mainNodes.length / 2));
     const rows = Math.ceil(mainNodes.length / columns);
     const marginX = 70;
     const sampleWidth = Math.max(...mainNodes.map(node => nodeSize(node, spec).width));
     const maxHeight = Math.max(...mainNodes.map(node => nodeSize(node, spec).height));
+    const width = Math.max(1450, columns * sampleWidth + marginX * 2 + (columns - 1) * 32);
+    const height = Math.max(500, rows * maxHeight + (rows - 1) * 48 + 112);
     const columnStep = columns > 1
       ? (width - marginX * 2 - sampleWidth) / (columns - 1)
       : 0;
@@ -510,7 +514,6 @@
 
   function pipelineLayout(spec) {
     const width = 1450;
-    const height = 520;
     const mainIds = longestDirectedPath(spec);
     const mainSet = new Set(mainIds);
     const mainNodes = mainIds.map(id => spec.nodes.find(node => node.id === id)).filter(Boolean);
@@ -518,15 +521,14 @@
     const maxColumns = 6;
     const rowCount = Math.max(1, Math.ceil(mainNodes.length / maxColumns));
     const columns = Math.min(maxColumns, Math.max(1, mainNodes.length));
+    const maxHeight = Math.max(...spec.nodes.map(node => nodeSize(node, spec).height));
+    const height = Math.max(520, (rowCount + (sideNodes.length ? 1 : 0)) * (maxHeight + 48) + 48);
     const marginX = 28;
     const sampleWidth = Math.max(...spec.nodes.map(node => nodeSize(node, spec).width));
     const columnStep = columns > 1 ? (width - marginX * 2 - sampleWidth) / (columns - 1) : 0;
-    const mainTop = rowCount === 1 ? (sideNodes.length ? 132 : 212) : rowCount === 2 ? 42 : 24;
-    const mainBottom = rowCount === 1
-      ? mainTop
-      : rowCount === 2
-        ? (sideNodes.length ? 244 : 392)
-        : (sideNodes.length ? 326 : 430);
+    const sideY = height - maxHeight - 24;
+    const mainBottom = (sideNodes.length ? sideY - 48 : height - 32) - maxHeight;
+    const mainTop = rowCount === 1 ? (32 + mainBottom) / 2 : 32;
     const rowStep = rowCount > 1 ? (mainBottom - mainTop) / (rowCount - 1) : 0;
     const children = [];
     const mainMeta = new Map();
@@ -540,7 +542,6 @@
       children.push({ id: node.id, ...size, x, y });
       mainMeta.set(node.id, { row, order: index + 1 });
     });
-    const sideY = 414;
     sideNodes.forEach((node, index) => {
       const size = nodeSize(node, spec);
       const x = sideNodes.length === 1
@@ -776,7 +777,7 @@
 
   function nodeColors(node, colors) {
     if (node.kind === "hub" || node.kind === "platform") {
-      return { fill: colors.primary, stroke: colors.primary, label: colors.inverse, detail: colors.inverse };
+      return { fill: colors.primaryFill, stroke: colors.primary, label: colors.inverse, detail: colors.inverse };
     }
     if (node.kind === "data" || node.kind === "database") {
       return { fill: colors.primarySoft, stroke: colors.primary, label: colors.text, detail: colors.muted };
@@ -792,19 +793,20 @@
     const compact = profile.strategy === "wrapped-pipeline";
     const lines = wrapLabel(
       sourceNode.label,
-      sourceNode.kind === "hub" ? profile.labelMaxChars + 2 : profile.labelMaxChars,
+      Math.min(profile.labelMaxChars, Math.floor((layoutNode.width - 32) / profile.labelFontSize)),
       2
     );
     const labelY = compact
-      ? (sourceNode.detail ? 45 : 48) - (lines.length - 1) * profile.labelLineHeight / 2
+      ? (sourceNode.detail ? layoutNode.height * 0.4 : layoutNode.height / 2) - (lines.length - 1) * profile.labelLineHeight / 2
       : sourceNode.detail
         ? layoutNode.height / 2 - (lines.length - 1) * profile.labelLineHeight / 2 - 5
         : layoutNode.height / 2 - (lines.length - 1) * profile.labelLineHeight / 2 + 4;
     const labelMarkup = lines.map((line, index) =>
       `<tspan x="${(layoutNode.width / 2).toFixed(1)}" dy="${index ? profile.labelLineHeight : 0}">${escapeXml(line)}</tspan>`
     ).join("");
-    const kind = `${order ? `${String(order).padStart(2, "0")} · ` : ""}${String(sourceNode.kind || "service").toUpperCase()}`;
+    const kind = order ? String(order).padStart(2, "0") : "";
     const detail = String(sourceNode.detail || "").trim();
+    const detailLines = wrapLabel(detail, Math.floor((layoutNode.width - 32) / profile.detailFontSize), 2);
     const dash = sourceNode.kind === "external" || sourceNode.kind === "client"
       ? ' stroke-dasharray="8 6"'
       : "";
@@ -813,9 +815,9 @@
       `<rect width="${layoutNode.width}" height="${layoutNode.height}" rx="${profile.cornerRadius}" fill="${scheme.fill}" stroke="${scheme.stroke}" stroke-width="2"${dash}/>` ,
       `<rect x="16" y="${compact ? 9 : 14}" width="5" height="${compact ? 13 : 19}" rx="2.5" fill="${sourceNode.kind === "hub" ? colors.inverse : colors.primary}"/>`,
       `<text x="29" y="${compact ? 18 : 28}" fill="${sourceNode.kind === "hub" ? colors.inverse : colors.primary}" font-family="${SVG_PPTX_FONT}" font-size="${profile.kindFontSize}" font-weight="700" letter-spacing="1.15">${escapeXml(kind)}</text>`,
-      `<text x="${(layoutNode.width / 2).toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" fill="${scheme.label}" font-family="${SVG_PPTX_FONT}" font-size="${profile.labelFontSize}" font-weight="700">${labelMarkup}</text>`,
+      `<text data-diagram-text="label" x="${(layoutNode.width / 2).toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" fill="${scheme.label}" font-family="${SVG_PPTX_FONT}" font-size="${profile.labelFontSize}" font-weight="700">${labelMarkup}</text>`,
       detail
-        ? `<text x="${(layoutNode.width / 2).toFixed(1)}" y="${(layoutNode.height - (compact ? 9 : 13)).toFixed(1)}" text-anchor="middle" fill="${scheme.detail}" font-family="${SVG_PPTX_FONT}" font-size="${profile.detailFontSize}">${escapeXml(Array.from(detail).slice(0, profile.detailMaxChars).join(""))}</text>`
+        ? `<text x="${(layoutNode.width / 2).toFixed(1)}" y="${(layoutNode.height - 14 - (detailLines.length - 1) * (profile.detailFontSize + 4)).toFixed(1)}" text-anchor="middle" fill="${scheme.detail}" font-family="${SVG_PPTX_FONT}" font-size="${profile.detailFontSize}">${detailLines.map((line, index) => `<tspan x="${(layoutNode.width / 2).toFixed(1)}" dy="${index ? profile.detailFontSize + 4 : 0}">${escapeXml(line)}</tspan>`).join("")}</text>`
         : "",
       "</g>",
     ].join("");
@@ -884,12 +886,7 @@
         layout.mainOrder && layout.mainOrder[layoutNode.id]
       )
     ).join("");
-    const kindLabels = {
-      architecture: "ARCHITECTURE",
-      integration: "SYSTEM INTEGRATION",
-      pipeline: "DATA PIPELINE",
-    };
-    const kindLabel = kindLabels[spec.kind] || "TECHNICAL DIAGRAM";
+    const kindLabel = spec.title || "";
     return [
       `<svg xmlns="${SVG_NS}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeXml(spec.title || kindLabel)}" data-diagram-layout-strategy="${profile.strategy}" preserveAspectRatio="xMidYMid meet" font-family="${SVG_PPTX_FONT}" style="font-family:${SVG_FONT_FAMILY}">`,
       "<defs>",
@@ -898,7 +895,7 @@
       "</defs>",
       `<rect width="${width}" height="${height}" rx="24" fill="${colors.background}"/>`,
       `<rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="23" fill="url(#${gridId})" stroke="${colors.border}" stroke-width="2"/>`,
-      `<g transform="translate(30 26)"><rect width="8" height="24" rx="4" fill="${colors.primary}"/><text x="22" y="18" fill="${colors.primary}" font-family="${SVG_PPTX_FONT}" font-size="13" font-weight="700" letter-spacing="2">${kindLabel}</text></g>`,
+      `<g transform="translate(30 26)"><rect width="8" height="24" rx="4" fill="${colors.primary}"/><text x="22" y="18" fill="${colors.primary}" font-family="${SVG_PPTX_FONT}" font-size="13" font-weight="700" letter-spacing="2">${escapeXml(kindLabel)}</text></g>`,
       `<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(5)})">`,
       edges,
       nodes,

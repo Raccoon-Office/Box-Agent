@@ -7,6 +7,7 @@ Implements Progressive Disclosure (Level 2): Load full skill content when needed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, MutableSet, Optional, Tuple
 
+from ..execution_profile import is_skill_blocked
 from .base import Tool, ToolResult, ToolInvocationContext
 from .skill_loader import SKILL_USAGE_GUIDANCE, SkillLoader
 
@@ -75,7 +76,7 @@ class GetSkillTool(Tool):
         name = skill_name.strip()
         if self.allowed_skill_names is not None and name not in self.allowed_skill_names:
             return ToolResult(success=False, error="Skill is outside this task's assigned scope.")
-        if name in self.blocked_skill_names and name not in (self.explicitly_allowed_skill_names or ()):
+        if is_skill_blocked(name, self.blocked_skill_names, self.explicitly_allowed_skill_names):
             return ToolResult(success=False, error=(
                 f"Skill '{name}' is disabled by the active execution profile unless the user explicitly requests it. "
                 "Continue with bounded direct work and do not retry loading this Skill."))

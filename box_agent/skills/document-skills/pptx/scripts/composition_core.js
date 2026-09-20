@@ -1,6 +1,6 @@
 "use strict";
 
-const { createHash, randomBytes } = require("crypto");
+const { createHash } = require("crypto");
 
 const COMPOSITION_FAMILIES = Object.freeze({
   "institutional-grid": Object.freeze([
@@ -575,36 +575,22 @@ function normalizedSeed(value) {
   return DESIGN_SEED_RE.test(seed) ? seed : null;
 }
 
-function createDeckDesign(themeOrId, requestedSeed = null, requestedFamily = null) {
+// New documents persist the chosen variant directly. Seeds are read only when
+// migrating a legacy version-1 document; they are never generated or written.
+function createDeckDesign(themeOrId, requestedVariant = null, requestedFamily = null) {
   const policy = themeCompositionPolicy(themeOrId);
   const themeId = themeIdOf(themeOrId);
   if (!policy) throw new Error(`Theme ${JSON.stringify(themeId)} has no composition family`);
-  const requested = requestedFamily === null || requestedFamily === undefined
-    ? null
-    : String(requestedFamily).trim();
-  if (requested && !COMPOSITION_FAMILIES[requested]) {
-    throw new Error(`Unknown composition family: ${requested}`);
+  const family = requestedFamily || policy.default_family;
+  if (!policy.allowed_families.includes(family)) {
+    throw new Error(`Composition family ${family} is not allowed for theme ${themeId}`);
   }
-  if (requested && !policy.allowed_families.includes(requested)) {
-    throw new Error(
-      `Composition family ${requested} is not allowed for theme ${themeId}; ` +
-      `allowed families: ${policy.allowed_families.join(", ")}`
-    );
+  const variants = COMPOSITION_FAMILIES[family];
+  const variant = requestedVariant || variants[0];
+  if (!variants.includes(variant)) {
+    throw new Error(`Composition variant ${variant} does not belong to family ${family}`);
   }
-  const family = requested || policy.default_family;
-  const supplied = requestedSeed === null || requestedSeed === undefined
-    ? null
-    : normalizedSeed(requestedSeed);
-  if (requestedSeed !== null && requestedSeed !== undefined && !supplied) {
-    throw new Error("design seed must use 8-64 letters, numbers, '_' or '-'");
-  }
-  const seed = supplied || randomBytes(8).toString("hex");
-  return {
-    version: 1,
-    seed,
-    family,
-    variant: variantFor(seed, family),
-  };
+  return { version: 2, family, variant };
 }
 
 function legacyDeckSeed(deck, themeOrId) {
@@ -617,22 +603,15 @@ function legacyDeckSeed(deck, themeOrId) {
 }
 
 function resolveDeckDesign(deck, themeOrId) {
-  const policy = themeCompositionPolicy(themeOrId);
-  const themeId = themeIdOf(themeOrId);
-  const persisted = isPlainObject(deck && deck.design)
-    ? normalizedSeed(deck.design.seed)
-    : null;
-  const persistedFamily = isPlainObject(deck && deck.design)
-    && typeof deck.design.family === "string"
-    && policy
-    && policy.allowed_families.includes(deck.design.family)
-    ? deck.design.family
-    : null;
-  return createDeckDesign(
-    themeOrId,
-    persisted || legacyDeckSeed(deck, themeId),
-    persistedFamily
-  );
+  if (isPlainObject(deck && deck.design)) {
+    const issues = [];
+    const design = validateAndNormalizeDeckDesign(deck.design, themeOrId, issues);
+    if (issues.length) throw new Error(issues.join("\n"));
+    return design;
+  }
+  // A pre-design document keeps its historical appearance on first migration.
+  const family = familyForTheme(themeOrId);
+  return createDeckDesign(themeOrId, variantFor(legacyDeckSeed(deck, themeOrId), family), family);
 }
 
 function validateAndNormalizeDeckDesign(value, themeOrId, issues, warnings = []) {
@@ -641,40 +620,36 @@ function validateAndNormalizeDeckDesign(value, themeOrId, issues, warnings = [])
     issues.push("design: expected object");
     return null;
   }
-  const allowed = ["version", "seed", "family", "variant"];
+  const legacy = value.version === 1;
+  const allowed = legacy ? ["version", "seed", "family", "variant"] : ["version", "family", "variant"];
   const unknown = Object.keys(value).filter(key => !allowed.includes(key));
   if (unknown.length) issues.push(`design: unknown field(s): ${unknown.join(", ")}`);
-  if (value.version !== 1) issues.push("design.version: expected 1");
-  const seed = normalizedSeed(value.seed);
-  if (!seed) {
-    issues.push("design.seed: use 8-64 letters, numbers, '_' or '-'");
+  if (![1, 2].includes(value.version)) issues.push("design.version: expected 2 (or legacy 1)");
+  const policy = themeCompositionPolicy(themeOrId);
+  if (!policy) return null;
+  let family = value.family;
+  if (!COMPOSITION_FAMILIES[family]) {
+    issues.push("design.family: expected a registered composition family");
     return null;
   }
-  const policy = themeCompositionPolicy(themeOrId);
-  const themeId = themeIdOf(themeOrId);
-  if (!policy) return null;
-  let family = policy.default_family;
-  if (typeof value.family !== "string" || !COMPOSITION_FAMILIES[value.family]) {
-    issues.push(
-      `design.family: expected one of ${Object.keys(COMPOSITION_FAMILIES).join(", ")}`
-    );
-  } else if (!policy.allowed_families.includes(value.family)) {
-    warnings.push(
-      `design.family normalized from ${value.family} to ${family} for theme ${themeId}; ` +
-      `allowed families: ${policy.allowed_families.join(", ")}`
-    );
-  } else {
-    family = value.family;
+  if (!policy.allowed_families.includes(family)) {
+    if (!legacy) {
+      issues.push(`design.family: ${family} is not allowed for theme ${themeIdOf(themeOrId)}`);
+      return null;
+    }
+    warnings.push(`design.family normalized from ${family} to ${policy.default_family}`);
+    family = policy.default_family;
   }
-  const variant = variantFor(seed, family);
-  if (typeof value.variant !== "string" || !ALL_VARIANTS.has(value.variant)) {
-    issues.push("design.variant: expected a registered composition variant");
-  } else if (value.variant !== variant || value.family !== family) {
-    warnings.push(
-      `design.variant normalized from ${value.variant} to ${variant} for seed ${seed}`
-    );
+  let variant = value.variant;
+  if (!COMPOSITION_FAMILIES[family].includes(variant)) {
+    const seed = legacy && normalizedSeed(value.seed);
+    if (!seed) {
+      issues.push(`design.variant: expected a registered variant of ${family}`);
+      return null;
+    }
+    variant = variantFor(seed, family);
   }
-  return { version: 1, seed, family, variant };
+  return createDeckDesign(themeOrId, variant, family);
 }
 
 function compositionManifestRecord(themeOrId) {

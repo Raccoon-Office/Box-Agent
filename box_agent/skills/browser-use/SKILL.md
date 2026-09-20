@@ -62,7 +62,7 @@ Treat these namespaces as a security boundary. Never pass snapshots, element ref
 - For a new browser task, start with managed browser automation when it can be completed independently of the user's current browser state.
 - Use the user's real browser directly when the task depends on the current page, existing login state, cookies, extensions, intranet access, system/default browser, user review, takeover, or personal submission. This routing decision does not require a separate authorization prompt.
 - Public-web search, retrieval, crawling, bulk collection, testing, screenshots, DOM inspection, and network inspection use managed browser automation unless the task also depends on user-owned browser state.
-- A request only for a visible browser window or headed mode selects a headed managed browser. A request to inspect the current page or let the user review or take over an existing browser interaction selects the user's real browser.
+- “打开浏览器”, “打开网页给我看”, “open the browser”, and requests for a visible window select a headed managed browser. Call `mcp_config(action="set_browser_mode", mode="headed")` before navigation, even if tools are already available. A request to inspect the user's existing page selects their real browser.
 - Treat headed/headless only as the managed browser's window visibility. It does not inherit the user's Chrome login state. Do not treat a visible managed window as proof that the real browser is in use.
 - Do not ask the user to choose a mode when the task requirements identify the correct browser. Ask once only when the request is genuinely ambiguous and either mode would materially change the result or user experience.
 
@@ -80,17 +80,20 @@ Treat these namespaces as a security boundary. Never pass snapshots, element ref
 - If there is no reliable recent browser context, treat the request as a new task and choose the mode from its current state and interaction requirements.
 - If a later step genuinely requires the other mode, switch using a fresh browser operation and keep the two modes' state isolated. Briefly explain the switch when it changes what the user will see or which session state is available.
 
+## Parallel sub-agents and the managed browser
+
+When per-session isolation is enabled, parallel `sub_agent` runs in the same session each get their own managed browser context. Shared stdio fallback configurations still serialize browser access and may return `BROWSER_RUNTIME_BUSY`. When a child returns, that context is closed. The parent can see the child's snapshots in the transcript, but must not reuse that child's snapshots, element refs, or tab identifiers.
+
 ## Switch the managed browser window
 
-Treat the managed Playwright MCP as headless by default. Change its window mode only when the user explicitly requests headed/headless behavior or when a failure is plausibly caused by headless operation. Do not switch merely because an ordinary navigation or selector failed.
+Background retrieval, scraping, screenshots and testing default to headless. Continue the existing session mode for follow-up steps. Do not switch merely because navigation or a selector failed.
 
-1. Call `mcp_config(action="inspect_browser")` and inspect `mode`, `isolated`, `profile`, and `enabled`.
-2. If the current mode already matches the request, use the existing Playwright tools.
-3. If the mode does not match and the user explicitly requested a switch, call:
-   - Headed / visible window (`有头`, `带头`): `mcp_config(action="update", name="playwright", config={"args_remove":["--headless"]})`
-   - Headless / background (`无头`, `后台`): `mcp_config(action="update", name="playwright", config={"args_add":["--headless"]})`
-4. Change only `--headless` on the existing `playwright` entry. Preserve `--isolated`, the executable path, environment variables, and timeouts. Let the host watch the file and hot-reconnect. Never add duplicate instances such as `playwright-headed` or `playwright-headless`.
-5. Inspect again and start a new browser operation. A successful file write does not prove that the new process is active; only a successful hot reconnect and the actual window/runtime result prove the switch. If no host performs hot reconnects, tell the user to restart Box-Agent.
+1. Call `mcp_config(action="inspect_browser")`. Prefer `source=runtime`; a config-file result does not prove a running browser exists.
+2. Use `mcp_config(action="set_browser_mode", mode="headed")` for a visible window, or `mode="headless"` for an explicitly background operation. This verifies browser startup for the current session; it does not modify global configuration or restart other sessions.
+3. Switching an existing session resets tabs, cookies, login, forms and old element refs. Explain this before switching when the session contains user work; do not imply a seamless state transfer. If preserving unsaved work is required, keep the current mode.
+4. After a successful switch with `state_reset=true`, navigate afresh to the task URL and obtain a new snapshot. Never reuse old refs. No page state is automatically restored.
+5. If switching is unsupported or fails, report that a visible window has not been verified. Do not patch global MCP arguments, create duplicate config entries, or silently use the user's real browser.
+6. Only claim a visible browser opened after a successful headed launch. Headless navigation means “已在后台访问页面”. Do not suggest enabling Playwright when runtime tools are already working.
 
 ## Recover from headless-only failures
 
@@ -98,12 +101,12 @@ Use headed recovery when the current managed MCP is headless and there is concre
 
 1. Stop issuing calls to the current Playwright MCP attempt. Do not repeatedly trigger the challenge or try to bypass CAPTCHA or anti-bot protections.
 2. Call `mcp_config(action="inspect_browser")`. If the reported mode is already headed, diagnose another cause instead of toggling modes again.
-3. If it is headless, call `mcp_config(action="update", name="playwright", config={"args_remove":["--headless"]})`. The host hot reload must disconnect/terminate the old Playwright MCP connection and start a headed one; do not keep using the old session while reconnection is pending.
-4. Inspect again and wait for a successful hot reconnect. Then begin a fresh browser operation and navigate back to the target page. Never reuse snapshots, element refs, tabs, or session identifiers from the terminated headless instance.
+3. If it is headless, call `mcp_config(action="set_browser_mode", mode="headed")`. This rebuilds only the current session. Do not keep using the old refs.
+4. Wait for a successful result, then navigate back to the target page and obtain a fresh snapshot. Login and form state from the previous instance are not restored.
 5. Retry the blocked step once in headed mode. If the site still requires human verification, leave the managed headed window open and ask the user to complete the challenge. Resume only after the user confirms completion. Do not solve, outsource, or circumvent the verification.
-6. If hot reconnect is unavailable or fails, tell the user to restart Box-Agent before continuing. Do not silently switch to the user's real browser.
+6. If session switching is unavailable or fails, report the failure. Do not silently switch to the user's real browser.
 
-Officev3 may restore the managed configuration to its default after restart or resynchronization. Even with `mode=headed`, `isolated=true` still means an independent managed Chromium that does not inherit the user's Chrome login state.
+Window mode is session-local and lasts until the session/runtime closes. Host configuration remains the default for new sessions. Even with `mode=headed`, `isolated=true` still means an independent managed Chromium that does not inherit the user's Chrome login state.
 
 ## Tools and safety
 

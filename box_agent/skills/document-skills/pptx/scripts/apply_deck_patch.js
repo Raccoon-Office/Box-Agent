@@ -738,11 +738,13 @@ function main() {
       if (!isPlainObject(slidePatch.props)) {
         throw new Error(`slides.${slideId}.props: expected object`);
       }
+      require("./design_plan_core.js").assertContentPatch(deck, slide, slidePatch.props);
       const normalizedPatch = normalizePatchProps(
         slide,
         slidePatch.props,
         normalizationChanges
       );
+      require("./design_plan_core.js").assertContentPatch(deck, slide, normalizedPatch);
       slide.props = mergeDefaults(slide.props, normalizedPatch);
     }
     if (slidePatch.background === null) delete slide.background;

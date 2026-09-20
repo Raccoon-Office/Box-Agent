@@ -12,7 +12,6 @@ import box_agent.session_log as session_log_module
 from box_agent.session_log import (
     SessionLog,
     SessionLogCorrupted,
-    SessionLogDurabilityError,
 )
 
 
@@ -90,8 +89,9 @@ def test_corrupt_reference_is_rejected_and_never_silently_replaced(log, replacem
 
     with pytest.raises(SessionLogCorrupted, match="hash"):
         log.read_skill_reference(ref)
-    with pytest.raises(SessionLogCorrupted, match="hash"):
-        log.store_skill_reference("original")
+    fallback = log.store_skill_reference("original")
+    assert fallback == {"inlineContent": "original", "sha256": ref["sha256"]}
+    assert not log.failed
     assert path.read_bytes() == replacement
 
 
@@ -100,6 +100,35 @@ def test_missing_reference_has_an_explicit_integrity_error(log):
     (log.path.parent / ref["contentRef"]).unlink()
     with pytest.raises(SessionLogCorrupted, match="read|missing"):
         log.read_skill_reference(ref)
+
+
+def test_existing_snapshot_read_failure_preserves_current_content(log, monkeypatch):
+    ref = log.store_skill_reference("current content")
+    path = log.path.parent / ref["contentRef"]
+    original_read = Path.read_bytes
+
+    def fail_snapshot_read(candidate):
+        if candidate == path:
+            raise PermissionError("snapshot read denied")
+        return original_read(candidate)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_snapshot_read)
+    fallback = log.store_skill_reference("current content")
+    assert fallback == {"inlineContent": "current content", "sha256": ref["sha256"]}
+    assert not log.failed
+    log.append("request/context", {"skillReferences": [fallback]})
+    log.flush()
+
+
+def test_unavailable_snapshot_directory_does_not_disable_session(log):
+    directory = log.path.parent / "skill-references"
+    directory.write_text("unrelated file", encoding="utf-8")
+    fallback = log.store_skill_reference("current content")
+    assert fallback["inlineContent"] == "current content"
+    assert not log.failed
+    log.append("request/context", {"skillReferences": [fallback]})
+    log.flush()
+    assert directory.read_text(encoding="utf-8") == "unrelated file"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX named pipe")
@@ -150,8 +179,7 @@ def test_snapshot_file_symlink_is_rejected_even_when_content_hash_matches(log, t
     path.symlink_to(target)
     with pytest.raises(SessionLogCorrupted, match="reference"):
         log.read_skill_reference(ref)
-    with pytest.raises(SessionLogCorrupted, match="reference"):
-        log.store_skill_reference("original")
+    assert log.store_skill_reference("original")["inlineContent"] == "original"
     assert target.read_text(encoding="utf-8") == "original"
 
 
@@ -164,15 +192,14 @@ def test_snapshot_directory_symlink_cannot_redirect_reads_or_writes(log, tmp_pat
     digest = hashlib.sha256(b"reference").hexdigest()
     ref = {"contentRef": f"skill-references/{digest}.txt", "sha256": digest}
 
-    with pytest.raises(SessionLogCorrupted, match="reference"):
-        log.store_skill_reference("reference")
+    assert log.store_skill_reference("reference")["inlineContent"] == "reference"
     with pytest.raises(SessionLogCorrupted, match="reference"):
         log.read_skill_reference(ref)
     assert list(outside.iterdir()) == []
 
 
 @pytest.mark.parametrize("operation", ["write", "flush", "fsync", "publish"])
-def test_failed_snapshot_persistence_never_returns_success(log, monkeypatch, operation):
+def test_snapshot_io_failure_falls_back_without_poisoning_session(log, monkeypatch, operation, caplog):
     if operation == "fsync":
         def fail_fsync(_fd):
             raise OSError("snapshot fsync failed")
@@ -211,17 +238,21 @@ def test_failed_snapshot_persistence_never_returns_success(log, monkeypatch, ope
             lambda *args, **kwargs: FailingFile(original_fdopen(*args, **kwargs)),
         )
 
-    with pytest.raises(SessionLogDurabilityError, match="reference"):
-        log.store_skill_reference("never acknowledged")
-    assert log.failed
+    ref = log.store_skill_reference("preserved inline")
+    assert ref == {"inlineContent": "preserved inline",
+                   "sha256": hashlib.sha256(b"preserved inline").hexdigest()}
+    assert "using inline request/context content" in caplog.text
+    assert not log.failed
     assert log.events == ()
     assert list((log.path.parent / "skill-references").iterdir()) == []
-    with pytest.raises(SessionLogDurabilityError):
-        log.append("request/context", {})
+    monkeypatch.undo()
+    log.append("request/context", {"skillReferences": [ref]})
+    log.flush()
+    assert log.events[-1]["data"]["skillReferences"] == [ref]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="directory fsync is a POSIX durability boundary")
-def test_directory_sync_failure_cannot_acknowledge_a_published_reference(log, monkeypatch):
+def test_directory_sync_failure_falls_back_to_inline_content(log, monkeypatch):
     original = session_log_module.os.fsync
 
     def fail_directory_sync(fd):
@@ -230,9 +261,10 @@ def test_directory_sync_failure_cannot_acknowledge_a_published_reference(log, mo
         return original(fd)
     monkeypatch.setattr(session_log_module.os, "fsync", fail_directory_sync)
 
-    with pytest.raises(SessionLogDurabilityError, match="reference"):
-        log.store_skill_reference("published but durability uncertain")
-    assert log.failed
+    ref = log.store_skill_reference("published but durability uncertain")
+    assert ref["inlineContent"] == "published but durability uncertain"
+    assert "contentRef" not in ref
+    assert not log.failed
     assert log.events == ()
 
 

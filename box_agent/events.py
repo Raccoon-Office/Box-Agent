@@ -205,6 +205,8 @@ class ArtifactEvent:
         layout_id: Optional controlled artifact layout identifier.
         edit_mode: ``"editable"`` for the current trusted runtime or
             ``"read_only"`` for a recognizable Roadmap with another runtime.
+        description: Optional producer-supplied explanation shown by hosts.
+        placement: ``primary`` for explicitly published deliverables, otherwise ``supporting``.
     """
 
     tool_call_id: str
@@ -219,6 +221,8 @@ class ArtifactEvent:
     produced_at: str = ""
     layout_id: str = ""
     edit_mode: str = ""
+    description: str = ""
+    placement: str = "supporting"
 
 
 # ── Summarization ───────────────────────────────────────────────
@@ -332,6 +336,7 @@ class PermissionRequestEvent:
     persistent_label: str = ""  # optional UI label for the "always allow" option
     command: str = ""           # safety requests only: command requiring approval
     risk: str = ""              # safety requests only: short risk classification
+    request_id: str = ""         # host response correlation id, when available
 
 
 # ── In-stream injection ────────────────────────────────────────
