@@ -110,13 +110,6 @@ class AcpHostProbe:
             self._proc.kill()
             await self._proc.wait()
 
-    @staticmethod
-    def _permission_reply(message):
-        options = message.get("params", {}).get("options", [])
-        option = next((o for o in options if o.get("kind") == "allow_once"), None)
-        outcome = {"outcome": "selected", "optionId": option["optionId"]} if option else {"outcome": "cancelled"}
-        return {"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": outcome}}
-
     async def request(self, method: str, params: dict | None = None) -> object:
         async with self._lock:
             if self._proc is None or self._proc.returncode is not None:
@@ -128,7 +121,7 @@ class AcpHostProbe:
                 response = await _read_until_response(
                     self._proc, self._reader, self._protocol, self._updates, self._lifecycle,
                     SimpleNamespace(stdout_terminal=False), self._next_id, monotonic() + self.timeout_s,
-                    permission_reply=self._permission_reply, strict=True)
+                    strict=True)
             except asyncio.TimeoutError as exc:
                 raise RpcError("timeout", f"Timed out waiting for {method}") from exc
             except (EOFError, BrokenPipeError, ConnectionResetError) as exc:

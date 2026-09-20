@@ -76,6 +76,7 @@ def provision_isolated_box_agent_home(root: Path) -> Path:
 def isolated_probe_env(home: Path) -> dict[str, str]:
     return {
         "BOX_AGENT_HOME": str(home),
+        "PLAYWRIGHT_BROWSERS_PATH": str(home / "browsers"),
         "BOX_AGENT_SESSION_TRACE_ENABLED": "0",
     }
 

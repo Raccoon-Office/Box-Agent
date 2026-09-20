@@ -1,13 +1,13 @@
 """Shared stdio framing and response exchange for ACP evaluation and probes.
 
 The evaluator keeps its permissive capture policy; probes can request strict
-frames and supply an explicit permission response policy.
+frames; reverse RPC keeps the evaluator's deny-by-default permission policy.
 """
 from __future__ import annotations
 
 import asyncio
 from time import monotonic
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from acp_eval.protocol import ACPAccumulator, ProtocolRecorder
 from acp_eval.lifecycle import ProcessRecorder
@@ -93,7 +93,6 @@ async def _read_until_response(
     expected_id: int,
     deadline: float,
     *,
-    permission_reply: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
     strict: bool = False,
 ) -> dict[str, Any]:
     while True:
@@ -114,7 +113,7 @@ async def _read_until_response(
             return message
         if "id" in message and "method" in message:
             if message.get("method") == "session/request_permission":
-                reply = (permission_reply or _permission_reply)(message)
+                reply = _permission_reply(message)
             else:
                 reply = {
                     "jsonrpc": "2.0",

@@ -4,7 +4,8 @@ Spawns a **real** `python -m box_agent.acp.server` subprocess over stdio JSON-RP
 The test adapter reuses `test_workspace/acp_eval/src/acp_eval/transport.py` for
 framing, request/response exchange, and reverse RPC, and `lifecycle.py` for
 stderr capture and shutdown. The existing evaluator uses the same transport.
-Only probe policy (strict frames and allow-once permission replies) differs.
+Only strict framing is probe-specific; permission requests retain the evaluator's
+deny-by-default policy.
 
 ## Layout
 
@@ -22,7 +23,9 @@ Product code under `box_agent/acp/` is **not** patched by this harness. Failures
 ## Isolated `BOX_AGENT_HOME` (default suite)
 
 No-LLM cases (T1-01, T1-02, T2-03, T3-01) provision an **isolated** `$BOX_AGENT_HOME`
-under pytest `tmp_path` and copy `minimal_config.yaml` into it:
+under pytest `tmp_path` and copy `minimal_config.yaml` into it.
+`PLAYWRIGHT_BROWSERS_PATH` is also scoped to that profile so a CI host cache
+cannot violate the child process state-path boundary:
 
 - `api_key: acp-host-probe-fixture-key` — accepted by `Config.load` (not `YOUR_API_KEY_HERE`)
 - `api_base: https://example.invalid/v1` — non-routable; handshake never needs a live provider
@@ -86,7 +89,7 @@ uv run pytest tests/acp_host/ -q
 ## Notes
 
 - Protocol NDJSON on **stdout**; diagnostics on **stderr**. Non-JSON stdout fails pending requests as `protocol_error`.
-- Reverse RPC `session/request_permission` selects an offered `allow_once` option; otherwise it is cancelled.
+- Reverse RPC `session/request_permission` is cancelled, using the evaluator's existing policy.
 - T3 live probes use workspace-scoped default permissions (not `full_access`).
 - T3-01 asserts the host-visible **skills** catalog (`session/new` `_meta.skills` / `_list_skills`) because ACP has no `tools/list` for agent tools. T3-02/T3-03 exercise real `read_file` tool calls via `session/prompt` when live-opted-in.
 - T2-03 kills the real process with an initialize request pending after handshake — never depends on a live LLM.

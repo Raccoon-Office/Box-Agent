@@ -75,8 +75,11 @@ async def test_t1_01_isolated_home_without_real_user_config(
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
+    foreign_cache = tmp_path / "host-browser-cache"
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(foreign_cache))
     # Ensure parent process cannot see a real user profile via HOME.
     assert not (fake_home / ".box-agent" / "config" / "config.yaml").exists()
+    assert not foreign_cache.exists()
 
     profile = provision_isolated_box_agent_home(tmp_path / "profile-root")
     env = isolated_probe_env(profile)

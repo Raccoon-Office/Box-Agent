@@ -14,6 +14,7 @@ async def test_prompt_returns_visible_reply(live_probe):
     response = await probe.session_prompt(session_id, 'Reply with the word hello.')
     updates = collect_session_updates(probe.drain_notifications())
     assert response.get('stopReason') == 'end_turn'
+    assert response.get('_meta', {}).get('ok') is True
     assert message_text_from_updates(updates).strip()
 
 
@@ -32,7 +33,8 @@ async def test_cancel_during_response_returns_cancelled(live_probe):
                 await asyncio.sleep(0.02)
         await asyncio.wait_for(wait_for_text(), timeout=60)
         if pending.done():
-            await pending  # Surface failures before classifying a fast completion.
+            response = await pending
+            assert response.get('_meta', {}).get('ok') is True
             pytest.skip('Provider completed before cancellation could be sent')
         await probe.session_cancel(session_id)
         response = await asyncio.wait_for(pending, timeout=30)
