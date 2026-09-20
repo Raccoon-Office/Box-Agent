@@ -8,7 +8,11 @@ from typing import Any, Callable
 from dataclasses import dataclass
 from hashlib import sha256
 
-from .kernel.context_engine import _message_chars, _summary_message_text
+from .kernel.context_engine import (
+    SKILL_REFERENCE_BUDGET_CHARS,
+    _message_chars,
+    _summary_message_text,
+)
 from .schema import Message
 from .skill_dependencies import SkillDependencyError
 from .tools.base import ToolResult
@@ -144,7 +148,7 @@ class SkillReferenceContext:
         self.session_store = (getattr(runtime, "session_log", None)
                               if session_store is _DEFAULT_STORE else session_store)
         self._messages: list[Message] = []
-        self._remaining = 50_000
+        self._remaining = SKILL_REFERENCE_BUDGET_CHARS
         self._host_visible: dict[str, str] = {}
         self.reference_overhead_chars = 0
 

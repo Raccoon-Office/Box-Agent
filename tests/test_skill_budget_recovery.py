@@ -36,7 +36,7 @@ def test_safe_input_budget_does_not_reserve_model_output_twice():
     # Same observed input pressure as the Web failure, below its derived limit.
     history = [Message(role="assistant", content="previous response",
                        usage=TokenUsage(input_tokens=123183, output_tokens=0))]
-    assert skill_reference_budget_chars(history, (), 180129, 64000) == 50000
+    assert skill_reference_budget_chars(history, (), 180129, 64000) == 100_000
     assert skill_reference_budget_chars(history, (), 180129, 64000) == skill_reference_budget_chars(history, (), 180129, 0)
 
 

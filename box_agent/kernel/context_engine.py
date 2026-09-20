@@ -29,6 +29,8 @@ _RECENT_MESSAGE_CHAR_LIMIT = 20000
 _RUNTIME_STATE_CHAR_LIMIT = 12_000
 # Request serialization/envelope headroom, independent of model output tokens.
 REQUEST_INPUT_HEADROOM_TOKENS = 1_024
+# Shared per-request ceiling for selected / paged Skill reference bodies (~25k tokens).
+SKILL_REFERENCE_BUDGET_CHARS = 100_000
 _SUMMARY_MARKER = (
     "This session is being continued from a previous conversation that ran "
     "out of context. The summary below covers the earlier portion of the "
@@ -863,4 +865,4 @@ def skill_reference_budget_chars(messages: list[Message], tools: Any, token_limi
     """
     estimated = request_input_tokens(messages, tools)
     spare_tokens = max(0, token_limit - estimated - REQUEST_INPUT_HEADROOM_TOKENS)
-    return min(50_000, spare_tokens * 4)
+    return min(SKILL_REFERENCE_BUDGET_CHARS, spare_tokens * 4)
