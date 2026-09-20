@@ -16,6 +16,7 @@ import pytest
 from box_agent.auth import (
     AUTH_TOKEN_ENV_VARS,
     HostedAuthRefreshError,
+    HostedAuthRequiredError,
     bearer_auth_headers,
     ensure_hosted_auth_ready,
     read_auth_token_file,
@@ -877,9 +878,9 @@ async def test_generate_force_refreshes_on_unexpired_jwt_provider_401(
 
     refresh_calls: list[dict] = []
 
-    async def fake_refresh(api_base, auth_file, *, now=None, http_client=None, force=False):
+    async def fake_refresh(api_base, auth_file, *, now=None, http_client=None, force=False, rejected_token=None):
         refresh_calls.append({"force": force})
-        raise HostedAuthRefreshError("登录态已过期，请重新登录")
+        raise HostedAuthRequiredError("登录态已过期，请重新登录")
 
     monkeypatch.setattr(
         "box_agent.llm.base.refresh_hosted_auth_token_if_needed",

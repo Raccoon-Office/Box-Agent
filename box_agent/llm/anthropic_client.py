@@ -3,6 +3,7 @@
 import inspect
 import logging
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from time import monotonic
 from typing import Any
 
@@ -541,6 +542,7 @@ class AnthropicClient(LLMClientBase):
             provider_response_id = None
             last_provider_activity_at: float | None = None
 
+            stream_stack = AsyncExitStack()
             try:
                 async def _open_once():
                     auth_headers = await self._auth_headers(
@@ -548,7 +550,9 @@ class AnthropicClient(LLMClientBase):
                     )
                     if auth_headers:
                         params["extra_headers"] = auth_headers
-                    return self.client.messages.stream(**params)
+                    return await stream_stack.enter_async_context(
+                        self.client.messages.stream(**params)
+                    )
 
                 stream_context = await self._call_with_hosted_auth_retry(_open_once)
             except Exception as exc:
@@ -564,7 +568,8 @@ class AnthropicClient(LLMClientBase):
                 raise
 
             try:
-                async with stream_context as stream:
+                async with stream_stack:
+                    stream = stream_context
                     response_headers = getattr(getattr(stream, "response", None), "headers", None)
                     provider_request_id = request_id_from_headers(response_headers)
                     log_llm_response_meta(

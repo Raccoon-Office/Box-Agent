@@ -5,10 +5,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..auth import (
-    HostedAuthRefreshError,
     HostedAuthRequiredError,
     ensure_hosted_auth_ready,
     read_auth_org_code,
+    read_auth_token_file,
+    _xiaohuanxiong_refresh_url,
     refresh_hosted_auth_token_if_needed,
     request_auth_headers,
 )
@@ -90,38 +91,48 @@ class LLMClientBase(ABC):
             url=self.api_base,
         )
 
-
     def _uses_hosted_auth_json(self) -> bool:
-        """True when this client authenticates via hosted auth.json placeholders."""
-        return bool(self.auth_file) and self.api_key.strip() in HOSTED_AUTH_API_KEY_PLACEHOLDERS
-
-    async def _force_refresh_hosted_auth_after_provider_rejection(self) -> None:
-        """Force-refresh hosted login after the provider rejected the current token."""
-        try:
-            await refresh_hosted_auth_token_if_needed(
-                self.api_base,
-                self.auth_file,
-                force=True,
-            )
-        except HostedAuthRequiredError:
-            raise
-        except HostedAuthRefreshError as exc:
-            raise HostedAuthRequiredError("登录态已过期，请重新登录") from exc
+        """Only recover credentials actually supplied by a hosted auth file."""
+        return (
+            bool(self.auth_file)
+            and bool(read_auth_token_file(self.auth_file))
+            and not self.auth_token.strip()
+            and bool(_xiaohuanxiong_refresh_url(self.api_base))
+            and self.api_key.strip() in HOSTED_AUTH_API_KEY_PLACEHOLDERS
+        )
 
     async def _call_with_hosted_auth_retry(self, operation):
-        """Run ``operation``; on hosted 401/200003 force-refresh and retry once."""
-        try:
-            return await operation()
-        except Exception as first:
-            if not self._uses_hosted_auth_json():
-                raise
-            from .error_messages import is_hosted_provider_auth_rejection
+        """Recover a rejected file token once, before any stream is consumed."""
+        from .error_messages import is_hosted_provider_auth_rejection
 
-            if not is_hosted_provider_auth_rejection(first):
+        await self._auth_headers()
+        uses_file = self._uses_hosted_auth_json()
+        rejected_token = read_auth_token_file(self.auth_file) if uses_file else None
+
+        async def call_once():
+            response = await operation()
+            code = response.get("code") if isinstance(response, dict) else getattr(response, "code", None)
+            if uses_file and code in (200003, "200003"):
+                raise ValueError("provider authorization_verify_error (200003)")
+            return response
+
+        try:
+            return await call_once()
+        except Exception as first:
+            if not uses_file or not is_hosted_provider_auth_rejection(first):
                 raise
-            await self._force_refresh_hosted_auth_after_provider_rejection()
+            # Prefer the credential actually sent, including pre-request refresh.
+            request = getattr(first, "request", None)
+            headers = getattr(request, "headers", {})
+            authorization = headers.get("Authorization", "")
+            if authorization.startswith("Bearer "):
+                rejected_token = authorization[7:]
+            await refresh_hosted_auth_token_if_needed(
+                self.api_base, self.auth_file, force=True,
+                rejected_token=rejected_token,
+            )
             try:
-                return await operation()
+                return await call_once()
             except Exception as second:
                 if is_hosted_provider_auth_rejection(second):
                     raise HostedAuthRequiredError("登录态已过期，请重新登录") from second

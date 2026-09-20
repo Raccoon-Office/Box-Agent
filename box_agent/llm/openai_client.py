@@ -601,36 +601,36 @@ class OpenAIClient(LLMClientBase):
             Exception: API call failed
         """
 
+        params: dict[str, Any] = {
+            "messages": api_messages,
+            "max_tokens": self._consume_effective_max_tokens(),
+        }
+        if self.model:
+            params["model"] = self.model
+
+        if tools:
+            params["tools"] = self._convert_tools(tools)
+
+        _apply_thinking_params(
+            params,
+            model=self.model,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
+        )
+
         async def _once():
-            params: dict[str, Any] = {
-                "messages": api_messages,
-                "max_tokens": self._consume_effective_max_tokens(),
-            }
-            if self.model:
-                params["model"] = self.model
-
-            if tools:
-                params["tools"] = self._convert_tools(tools)
-
-            _apply_thinking_params(
-                params,
-                model=self.model,
-                thinking_enabled=thinking_enabled,
-                reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
-            )
-
             auth_headers = await self._auth_headers(
                 self._request_headers(session_id, turn_id, title, call_kind)
             )
             if auth_headers:
                 params["extra_headers"] = auth_headers
 
-            params = await self._bound_request_body(params, turn_id=turn_id)
-            log_llm_request(provider="openai", mode="completion", api_base=self.api_base, params=params)
+            request_params = await self._bound_request_body(dict(params), turn_id=turn_id)
+            log_llm_request(provider="openai", mode="completion", api_base=self.api_base, params=request_params)
 
             try:
                 raw_response = await _await_if_needed(
-                    self.client.chat.completions.with_raw_response.create(**params)
+                    self.client.chat.completions.with_raw_response.create(**request_params)
                 )
                 log_llm_response_meta(
                     provider="openai",
@@ -643,7 +643,7 @@ class OpenAIClient(LLMClientBase):
                 # Test doubles and older SDK-compatible clients may not expose
                 # ``with_raw_response``. Keep the request log and fall back to the
                 # existing behavior, but request-id metadata will be unavailable.
-                response = await _await_if_needed(self.client.chat.completions.create(**params))
+                response = await _await_if_needed(self.client.chat.completions.create(**request_params))
             except Exception as exc:
                 log_llm_error_meta(provider="openai", mode="completion", exc=exc)
                 raise
