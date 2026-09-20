@@ -18,22 +18,6 @@ MINIMAL_CONFIG = Path(__file__).resolve().parent / "minimal_config.yaml"
 # deterministic and does not spend tokens or depend on personal credentials.
 LIVE_ENV = "BOX_AGENT_ACP_HOST_LIVE"
 
-# Substrings that mean the hosted LLM auth/env is broken (not an ACP product bug).
-_LLM_ENV_FAILURE_MARKERS = (
-    "登录态已过期",
-    "请重新登录",
-    "401 Unauthorized",
-    "HTTP 401",
-    "http 401",
-    "(HTTP 401)",
-    "Authentication failed",
-    "authentication failed",
-    "invalid_api_key",
-    "Incorrect API key",
-    "authentication_error",
-)
-
-
 def _config_candidates() -> list[Path]:
     home = Path.home() / ".box-agent" / "config" / "config.yaml"
     box_home = os.environ.get("BOX_AGENT_HOME")
@@ -72,17 +56,6 @@ def llm_config_available() -> tuple[bool, str]:
 
 def live_llm_opted_in() -> bool:
     return os.environ.get(LIVE_ENV, "").strip() in {"1", "true", "TRUE", "yes", "YES"}
-
-
-def skip_if_llm_env_failure(stderr_text: str, *, case_id: str) -> None:
-    """Skip when logs show expired/invalid LLM credentials (env, not product)."""
-    lowered = stderr_text  # keep original for Chinese markers
-    for marker in _LLM_ENV_FAILURE_MARKERS:
-        if marker in lowered or marker.lower() in lowered.lower():
-            pytest.skip(
-                f"{case_id}: LLM environment failure ({marker!r}); "
-                "not an ACP product bug — refresh ~/.box-agent/config/auth.json or api_key"
-            )
 
 
 def provision_isolated_box_agent_home(root: Path) -> Path:
@@ -166,3 +139,47 @@ def require_llm() -> str:
     if not ok:
         pytest.skip(f"LLM unavailable for ACP host probe: {reason}")
     return reason
+
+
+@pytest.fixture
+async def connected_probe(make_acp_probe, tmp_path):
+    probe = make_acp_probe(cwd=tmp_path / 'ws')
+    await probe.start()
+    try:
+        await probe.initialize()
+        session_id = await probe.session_new(cwd=str(probe.cwd))
+        probe.drain_notifications()
+        yield probe, session_id
+    finally:
+        await probe.stop()
+
+
+@pytest.fixture
+async def live_probe(tmp_path, require_llm):
+    probe = AcpHostProbe(command=default_acp_command(), cwd=tmp_path / 'ws', timeout_s=180)
+    await probe.start()
+    try:
+        await probe.initialize()
+        session_id = await probe.session_new(cwd=str(probe.cwd))
+        probe.drain_notifications()
+        yield probe, session_id
+    finally:
+        await probe.stop()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.failed:
+        from .issue_draft import to_issue_draft
+        from .probe import CaseResult
+        pair = item.funcargs.get('live_probe') or item.funcargs.get('connected_probe')
+        logs = pair[0].stderr_text[-4000:] if pair else ''
+        draft = to_issue_draft(CaseResult(
+            case_id=item.name, ok=False,
+            expected=item.function.__doc__ or item.name,
+            actual=str(report.longrepr), logs=logs,
+            repro_steps=[f'uv run pytest {item.nodeid} -q'],
+        ))
+        report.sections.append(('IssueDraft', draft['title'] + '\n' + draft['body']))

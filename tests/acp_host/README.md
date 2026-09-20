@@ -1,7 +1,10 @@
 # ACP Host-like probe (`tests/acp_host`)
 
 Spawns a **real** `python -m box_agent.acp.server` subprocess over stdio JSON-RPC.
-This is Host-like (officev3-style), not an in-process mock and not a fake JSON-RPC server.
+The test adapter reuses `test_workspace/acp_eval/src/acp_eval/transport.py` for
+framing, request/response exchange, and reverse RPC, and `lifecycle.py` for
+stderr capture and shutdown. The existing evaluator uses the same transport.
+Only probe policy (strict frames and allow-once permission replies) differs.
 
 ## Layout
 
@@ -45,8 +48,8 @@ export BOX_AGENT_ACP_HOST_LIVE=1
 and a usable config exists (`api_key` or `auth.json`) under the usual search path
 (`$BOX_AGENT_HOME` / `box_agent/config` / `~/.box-agent/config`).
 
-Expired hosted auth (`登录态已过期`, `HTTP 401`, `Authentication failed`, …) → **skip**
-(environment, not product).
+Missing configuration skips live tests. Once explicitly enabled, provider/authentication
+failures remain visible failures with IssueDraft diagnostics; they are not silently skipped.
 
 Default `uv run pytest tests/acp_host/ -q` stays deterministic (no tokens / network).
 
@@ -61,12 +64,14 @@ export BOX_AGENT_ACP_HOST_LIVE=1
 uv run pytest tests/acp_host/ -q
 ```
 
-Optional CLI:
+Existing manual entrypoints remain available:
 
 ```bash
-uv run python scripts/acp_host_probe.py --cwd /tmp/acp-probe-ws
-# --command uses shlex.split (quoted args preserved)
+uv run python scripts/test_acp_streaming.py --prompt "hello"
+uv run python test_workspace/run_acp_eval.py --count 3
 ```
+
+These commands use the configured provider and are separate from the isolated tests.
 
 ## Run
 
@@ -81,7 +86,7 @@ uv run pytest tests/acp_host/ -q
 ## Notes
 
 - Protocol NDJSON on **stdout**; diagnostics on **stderr**. Non-JSON stdout fails pending requests as `protocol_error`.
-- Reverse RPC `session/request_permission` is auto-approved by the probe.
+- Reverse RPC `session/request_permission` selects an offered `allow_once` option; otherwise it is cancelled.
 - T3 live probes use workspace-scoped default permissions (not `full_access`).
 - T3-01 asserts the host-visible **skills** catalog (`session/new` `_meta.skills` / `_list_skills`) because ACP has no `tools/list` for agent tools. T3-02/T3-03 exercise real `read_file` tool calls via `session/prompt` when live-opted-in.
-- T2-03 kills a deterministic pending request after handshake — never depends on a live LLM.
+- T2-03 kills the real process with an initialize request pending after handshake — never depends on a live LLM.

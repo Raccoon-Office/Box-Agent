@@ -117,7 +117,7 @@ async def test_t1_02_bad_command_yields_readable_error(tmp_path: Path) -> None:
         await bad.stop()
 
     assert caught is not None, "expected RpcError for bad command"
-    assert caught.code in {"spawn_failed", "timeout", "eof", "stdin_broken", "not_started"} or True
+    assert caught.code in {"spawn_failed", "timeout", "eof", "stdin_broken", "not_started"}
     draft = to_issue_draft(
         CaseResult(
             case_id="T1-02",
@@ -168,3 +168,18 @@ async def test_t1_02_bad_command_yields_readable_error(tmp_path: Path) -> None:
         )
     )
     assert "timeout" in draft2["body"].lower()
+
+
+@pytest.mark.asyncio
+async def test_non_json_stdout_is_protocol_failure(tmp_path):
+    probe = AcpHostProbe(
+        command=[sys.executable, '-c', "print('not-json', flush=True)"],
+        cwd=tmp_path,
+    )
+    await probe.start()
+    try:
+        with pytest.raises(RpcError) as error:
+            await probe.initialize()
+        assert error.value.code == 'protocol_error'
+    finally:
+        await probe.stop()

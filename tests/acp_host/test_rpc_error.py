@@ -1,4 +1,4 @@
-"""RpcError must raise/catch cleanly on CPython 3.10–3.12 (frozen + Exception)."""
+"""Transport errors preserve diagnostic fields and normal exception semantics."""
 
 from __future__ import annotations
 
@@ -28,9 +28,3 @@ def test_rpc_error_catch_as_exception() -> None:
         caught = exc
     assert isinstance(caught, RpcError)
     assert caught.code == -32000
-
-
-def test_rpc_error_frozen_fields() -> None:
-    err = RpcError(code="timeout", message="timed out")
-    with pytest.raises(Exception):
-        err.code = "other"  # type: ignore[misc]
