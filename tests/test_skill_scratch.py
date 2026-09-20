@@ -168,3 +168,37 @@ def test_cleanup_skill_scratch_dir_rejects_replaced_root(tmp_path: Path) -> None
         cleanup_skill_scratch_dir(scratch)
 
     assert replacement.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.asyncio
+async def test_qa_scratch_outputs_are_reclaimed_without_removing_retained_qa(
+    tmp_path: Path,
+) -> None:
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    tools = []
+    scratch = add_workspace_tools(tools, config, tmp_path)
+    bash = next(tool for tool in tools if tool.name == "bash")
+    retained = tmp_path / "qa" / "visual" / "existing.png"
+    retained.parent.mkdir(parents=True)
+    retained.write_bytes(b"retained preview")
+    report = tmp_path / "qa" / "report.json"
+    report.write_text('{"ok": true}', encoding="utf-8")
+
+    result = await bash.execute(
+        command='mkdir -p "$BOX_AGENT_SCRATCH_DIR/visual" && '
+        'printf thumbnail > "$BOX_AGENT_SCRATCH_DIR/visual/crop.png"'
+    )
+    assert result.success, result.error
+    assert result.permission_request is None
+    crop = scratch.path / "visual" / "crop.png"
+    assert crop.read_bytes() == b"thumbnail"
+
+    cleanup_skill_scratch_dir(scratch)
+
+    assert not crop.exists()
+    assert retained.read_bytes() == b"retained preview"
+    assert report.read_text(encoding="utf-8") == '{"ok": true}'

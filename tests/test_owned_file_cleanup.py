@@ -199,3 +199,24 @@ async def test_unverified_host_browser_still_requires_approval(tmp_path):
     result = await tool.execute(command='"$HYPERFRAMES_BROWSER_PATH" --headless')
     assert not result.success
     assert result.permission_request is not None
+
+
+@pytest.mark.asyncio
+async def test_recursive_qa_cleanup_still_requires_approval_with_declared_files(tmp_path):
+    visual = tmp_path / "qa" / "visual"
+    visual.mkdir(parents=True)
+    existing = visual / "existing.png"
+    existing.write_bytes(b"another task's preview")
+    tool = BashTool(workspace_dir=str(tmp_path))
+    result = await tool.execute(
+        command="printf thumbnail > qa/visual/crop.png",
+        temporary_files=["qa/visual/crop.png"],
+    )
+    assert result.success, result.error
+
+    result = await tool.execute(command="rm -rf qa/visual && ls qa | head -30")
+
+    assert not result.success
+    assert result.permission_request is not None
+    assert existing.read_bytes() == b"another task's preview"
+    assert (visual / "crop.png").read_bytes() == b"thumbnail"
