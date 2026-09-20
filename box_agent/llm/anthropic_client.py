@@ -555,19 +555,6 @@ class AnthropicClient(LLMClientBase):
                     )
 
                 stream_context = await self._call_with_hosted_auth_retry(_open_once)
-            except Exception as exc:
-                log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
-                # Detect third-party API event order compatibility issues
-                if isinstance(exc, RuntimeError) and "Unexpected event order" in str(exc):
-                    raise RuntimeError(
-                        f"API 返回的事件顺序不符合 Anthropic 协议规范: {exc}\n"
-                        f"这通常表示第三方 API 的兼容性问题。请检查:\n"
-                        f"1. API 端点是否正确实现了 Anthropic 流式协议\n"
-                        f"2. 是否应该使用 OpenAI 兼容模式（provider: openai）而不是 Anthropic 模式"
-                    ) from exc
-                raise
-
-            try:
                 async with stream_stack:
                     stream = stream_context
                     response_headers = getattr(getattr(stream, "response", None), "headers", None)

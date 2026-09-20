@@ -205,3 +205,39 @@ async def test_http_200_business_error_from_openai_sdk_recovers(auth_file, monke
     finally:
         await client.client.close()
         await sdk.close()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_entry_timeout_keeps_transport_retry(auth_file, monkeypatch):
+    args = client_args(auth_file)
+    args['retry_config'] = RetryConfig(enabled=True, max_retries=1, initial_delay=0)
+    client = AnthropicClient(**args)
+    sdk = client.client
+    refresh = AsyncMock()
+    monkeypatch.setattr('box_agent.llm.base.refresh_hosted_auth_token_if_needed', refresh)
+    entries = []
+
+    class Stream:
+        async def __aenter__(self):
+            entries.append(1)
+            if len(entries) == 1:
+                raise httpx.ReadTimeout('temporary timeout')
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def __aiter__(self):
+            return self.events()
+
+        async def events(self):
+            yield SimpleNamespace(type='message_stop')
+
+    client.client = SimpleNamespace(messages=SimpleNamespace(stream=lambda **kwargs: Stream()))
+    try:
+        events = [event async for event in client.generate_stream([Message(role='user', content='hi')])]
+        assert any(event.type == 'finish' for event in events)
+        assert len(entries) == 2
+        refresh.assert_not_awaited()
+    finally:
+        await sdk.close()
