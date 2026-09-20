@@ -1308,6 +1308,7 @@ Tips:
   - Chain dependent commands with &&: git add . && git commit -m "msg"
   - Use absolute paths instead of cd when possible
   - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm
+  - Keep retained QA reports, requested previews, and delivery dependencies in the task directory. Do not recursively delete QA/task directories as delivery housekeeping; leave undeclared files in place.
   - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.
   - Run the injected Python runtime as "$BOX_AGENT_PYTHON"; do not write "$BOX_AGENT_PYTHON:-python3"
   - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
