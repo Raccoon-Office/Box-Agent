@@ -115,7 +115,9 @@ Skill 安装脚本和 requirements 同步声明依赖。Windows 需要单独的�
 资源，用可检查的替换适配两个出口和 Box-Agent 工具名称。源文本变化不满足适配条件时
 同步失败，要求维护者重新检查，不静默套用旧修改。生命周期适配输入位于
 `scripts/presentation_suite_overlays/`，不要直接修改打包副本。`source.json` 记录来源、
-本地 helper 输入与集成后文件哈希。
+本地 helper 输入与集成后文件哈希。图片检查超时的有限重试与降级交付规则由
+`image_inspection_recovery.py` overlay 维护，完整同步和增量刷新都会应用。
+增量刷新先校验已有文件哈希；发现未登记改动时仍会拒绝执行，不能直接改哈希绕过。
 
 ```bash
 uv run python scripts/sync_presentation_suite.py --source-checkout /path/to/sensenova-presentation-int

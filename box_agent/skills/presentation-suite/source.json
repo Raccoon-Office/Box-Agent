@@ -296,7 +296,7 @@
       "source_sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3"
     },
     "skills/sn-ppt-standard/SKILL.md": {
-      "sha256": "60b9fecd2b3e1f5181af97de1174f2b03360467f0acadab7f76144b12e312ac1",
+      "sha256": "a81802d813101bac02cbc21544fb8927c538fff9da38593096ea524751b6930a",
       "source_path": "skills/sn-ppt-standard/SKILL.md",
       "source_sha256": "2e435e30d8d1ae6f5c47154f8ade51944064576d4d4b14a2867dd849122cb97e"
     },
@@ -342,7 +342,7 @@
       "source_sha256": "568e6c5249c360de868395eaf64bd7b19e2d91cd0722092abb0c59813224314c"
     },
     "skills/sn-ppt-standard/references/box-agent-tool-contract.md": {
-      "sha256": "c439eab69578511e754372676e6ff313d9c427c3d4ed25b8878afbb05a4d80f1",
+      "sha256": "7c7563b0b433815e73f7cb6c9ac0d3aa57e3de780073fb00704788b4b2dd5b53",
       "source_path": "skills/sn-ppt-standard/references/box-agent-tool-contract.md",
       "source_sha256": "47239f9b93f23233fb3985ec6507d1a3db140c8ca18bf5749708159a5a67a3d3"
     },
@@ -626,7 +626,8 @@
     "source-relative-pptx-page-directories",
     "explicit-delivery-scopes",
     "presentation-progress-without-reconfirmation",
-    "host-playwright-runtime"
+    "host-playwright-runtime",
+    "bounded-image-inspection-recovery"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "e187295633eb4cb201e6a2a5a206a419eb79990a",

@@ -33,7 +33,8 @@ OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "owned-renderer-lifecycle", "original-uploaded-font-family",
             "intermediate-render-artifacts", "sequential-ppt-image-inspection",
             "source-relative-pptx-page-directories", "explicit-delivery-scopes",
-            "presentation-progress-without-reconfirmation", "host-playwright-runtime"]
+            "presentation-progress-without-reconfirmation", "host-playwright-runtime",
+            "bounded-image-inspection-recovery"]
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite"
 LICENSE_INPUT_PATH = "scripts/presentation_suite_licenses/echarts-5.5.0"
 LICENSE_INPUT_DIR = Path(__file__).resolve().parents[1] / LICENSE_INPUT_PATH
@@ -52,6 +53,10 @@ _artifact_publication_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "artifact
 _export_page_directories_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "export_page_directories.py"))["apply"]
 _delivery_scope_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "delivery_scope.py"))["apply"]
 _host_playwright_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "host_playwright.py"))["apply"]
+
+_image_inspection_recovery_overlay = runpy.run_path(
+    str(RUNTIME_INPUT_DIR / "image_inspection_recovery.py")
+)["apply"]
 
 
 def _apply_host_metadata(data: bytes) -> bytes:
@@ -355,6 +360,7 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
             source_sha256 = hashlib.sha256(data).hexdigest()
             data = _apply_integration_overlay(str(relative), data)
             data = _host_playwright_overlay(str(relative), data)
+            data = _image_inspection_recovery_overlay(str(relative), data)
             if relative.name == "SKILL.md":
                 data = _apply_host_metadata(data)
             target = staged / relative
@@ -423,7 +429,8 @@ def refresh_host_overlays(output_dir: Path) -> dict:
                    "source-relative-pptx-page-directories": _export_page_directories_overlay,
                    "explicit-delivery-scopes": _delivery_scope_overlay,
                    "presentation-progress-without-reconfirmation": _presentation_progress_overlay,
-                   "host-playwright-runtime": _host_playwright_overlay}
+                   "host-playwright-runtime": _host_playwright_overlay,
+                   "bounded-image-inspection-recovery": _image_inspection_recovery_overlay}
     pending = OVERLAYS[len(applied):]
     if (provenance.get("name") != BUNDLE_NAME
             or provenance.get("revision") != PINNED_REVISION

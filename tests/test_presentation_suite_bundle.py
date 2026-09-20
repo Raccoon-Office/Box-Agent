@@ -155,6 +155,7 @@ def source_repo(tmp_path, monkeypatch):
     sync = _sync_function()
     monkeypatch.setitem(sync.__globals__, "_apply_integration_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_host_playwright_overlay", lambda _, data: data)
+    monkeypatch.setitem(sync.__globals__, "_image_inspection_recovery_overlay", lambda _, data: data)
     repo = tmp_path / "upstream"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -306,3 +307,71 @@ def test_export_directory_refresh_does_not_bless_unrecorded_local_edits(tmp_path
     with pytest.raises(ValueError, match="differs from its provenance"):
         namespace["refresh_host_overlays"](bundle)
     assert (marker.read_bytes(), target.read_bytes()) == before
+
+
+def _image_recovery_overlay():
+    return runpy.run_path(str(REPO / "scripts/presentation_suite_overlays/image_inspection_recovery.py"))
+
+
+def test_image_recovery_refresh_preserves_rules_and_repeats_without_changes(tmp_path):
+    sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
+    overlay = _image_recovery_overlay()
+    source = json.loads((SUITE / "source.json").read_text())
+    source["overlays"] = source["overlays"][:-1]
+    source["files"] = {path: source["files"][path] for path in overlay["REPLACEMENTS"]}
+    bundle = tmp_path / "bundle"
+    expected = {}
+    for relative, (old, new) in overlay["REPLACEMENTS"].items():
+        expected[relative] = (SUITE / relative).read_bytes()
+        previous = expected[relative].decode().replace(new, old, 1).encode()
+        target = bundle / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(previous)
+        source["files"][relative]["sha256"] = hashlib.sha256(previous).hexdigest()
+    marker = bundle / "source.json"
+    marker.write_text(json.dumps(source))
+    first = sync["refresh_host_overlays"](bundle)
+    first_marker = marker.read_bytes()
+    assert first["overlays"][-1] == "bounded-image-inspection-recovery"
+    for relative, content in expected.items():
+        assert (bundle / relative).read_bytes() == content
+        assert b"visual_unverified" in content
+        assert first["files"][relative]["sha256"] == hashlib.sha256(content).hexdigest()
+        assert first["files"][relative]["source_sha256"] == source["files"][relative]["source_sha256"]
+    assert sync["refresh_host_overlays"](bundle) == first
+    assert marker.read_bytes() == first_marker
+    # A later undocumented edit must still fail instead of being blessed.
+    target.write_bytes(target.read_bytes() + b"unrecorded change\n")
+    with pytest.raises(ValueError, match="differs from its provenance"):
+        sync["refresh_host_overlays"](bundle)
+    assert marker.read_bytes() == first_marker
+
+
+def test_full_sync_also_applies_image_recovery_policy(source_repo, tmp_path, monkeypatch):
+    sync, repo, _ = source_repo
+    overlay = _image_recovery_overlay()
+    monkeypatch.setitem(sync.__globals__, "_image_inspection_recovery_overlay", overlay["apply"])
+    for relative, (old, _) in overlay["REPLACEMENTS"].items():
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        prefix = path.read_text() if path.exists() else ""
+        path.write_text(prefix + old + "\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-qm", "recovery fixture"], check=True)
+    revision = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    destination = tmp_path / "regenerated"
+    source = sync(repo, revision, destination)
+    for relative in overlay["REPLACEMENTS"]:
+        data = (destination / relative).read_bytes()
+        assert b"visual_unverified" in data
+        assert source["files"][relative]["sha256"] == hashlib.sha256(data).hexdigest()
+
+
+@pytest.mark.parametrize("relative", [
+    "skills/sn-ppt-standard/SKILL.md",
+    "skills/sn-ppt-standard/references/box-agent-tool-contract.md",
+])
+def test_image_recovery_overlay_rejects_unreviewed_source(relative):
+    with pytest.raises(ValueError, match="needs review"):
+        _image_recovery_overlay()["apply"](relative, b"changed upstream policy\n")
