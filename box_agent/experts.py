@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -694,6 +695,8 @@ class ExpertTeamProfile:
 class ExpertSessionContext:
     expert: ExpertProfile | None = None
     team: ExpertTeamProfile | None = None
+    skill_directories: list[Path] = field(default_factory=list)
+    skill_bindings_by_directory: dict[Path, frozenset[str]] = field(default_factory=dict)
 
     @classmethod
     def from_meta(cls, raw_meta: Any) -> "ExpertSessionContext | None":
@@ -703,7 +706,39 @@ class ExpertSessionContext:
         team = ExpertTeamProfile.from_meta(raw_meta.get("expert_team") or raw_meta.get("expertTeam"))
         if expert is None and team is None:
             return None
-        return cls(expert=expert, team=team)
+        directories: list[Path] = []
+        bindings: dict[Path, frozenset[str]] = {}
+        for container in (raw_meta.get("expert"), raw_meta.get("expert_team") or raw_meta.get("expertTeam")):
+            if not isinstance(container, dict):
+                continue
+            profiles = [container, container.get("leader"), *(container.get("members") or [])]
+            for profile in profiles:
+                if not isinstance(profile, dict):
+                    continue
+                snapshot = profile.get("packageSnapshot")
+                if not isinstance(snapshot, dict):
+                    continue
+                # 绑定属于当前包的专家，不能套用专家团合并后的技能名单。
+                names = frozenset(
+                    name for camel, snake in (
+                        ("requiredSkills", "required_skills"),
+                        ("defaultSkills", "default_skills"),
+                        ("optionalSkills", "optional_skills"),
+                    ) for name in _clean_list(profile.get(camel) or profile.get(snake))
+                )
+                root = Path(snapshot.get("directory", "")).resolve()
+                for skill in snapshot.get("skills") or []:
+                    if not isinstance(skill, dict) or not isinstance(skill.get("directory"), str):
+                        continue
+                    directory = Path(skill["directory"])
+                    if not directory.is_absolute() or not directory.resolve().is_relative_to(root):
+                        raise ValueError("Skill directory is outside the expert package")
+                    directory = directory.resolve()
+                    if directory not in directories:
+                        directories.append(directory)
+                    bindings[directory] = bindings.get(directory, frozenset()) | names
+        return cls(expert=expert, team=team, skill_directories=directories,
+                   skill_bindings_by_directory=bindings)
 
     def render_prompt(self) -> str:
         sections: list[str] = []

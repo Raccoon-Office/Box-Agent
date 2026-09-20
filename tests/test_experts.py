@@ -8,6 +8,7 @@ from box_agent.experts import ExpertSessionContext
 from box_agent.schema import LLMResponse, StreamEvent
 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
 from box_agent.tools.skill_tool import GetSkillTool
+from box_agent.tools.skill_catalog_tool import ListSkillsTool
 
 
 class DoneLLM:
@@ -312,11 +313,13 @@ async def test_acp_expert_explicit_selection_only_overrides_profile_block(
 
 
 @pytest.mark.asyncio
-async def test_acp_expert_can_use_uninstalled_recommended_skill_without_leaking_to_normal_session(tmp_path) -> None:
+@pytest.mark.parametrize("package_kind", [None, "expert", "expert_team"])
+async def test_acp_expert_can_use_uninstalled_recommended_skill_without_leaking_to_normal_session(tmp_path, package_kind) -> None:
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
     _write_skill(skills_dir, "expert-only-skill", "Bundled recommendation for one expert")
-    (skills_dir / "_manifest.json").write_text('{"skills": []}', encoding="utf-8")
+    _write_skill(skills_dir, "shared", "Global skill")
+    (skills_dir / "_manifest.json").write_text('{"skills": ["shared"]}', encoding="utf-8")
 
     skill_loader = SkillLoader(skills_dir)
     skill_loader.discover_skills()
@@ -341,23 +344,49 @@ async def test_acp_expert_can_use_uninstalled_recommended_skill_without_leaking_
     normal_result = await normal_state.agent.tools["get_skill"].execute("expert-only-skill")
     assert normal_result.success is False
 
-    expert_session = await agent.newSession(
-        SimpleNamespace(
-            cwd=str(tmp_path),
-            field_meta={
-                "expert": {
-                    "id": "expert-with-recommendation",
-                    "name": "推荐技能专家",
-                    "requiredSkills": ["expert-only-skill"],
-                },
-            },
-        )
-    )
+    profile = {
+        "id": "expert-with-recommendation", "name": "推荐技能专家",
+        "requiredSkills": ["expert-only-skill"],
+    }
+    meta = {"expert": profile}
+    if package_kind:
+        package_dir = tmp_path / "package"
+        package_dir.mkdir()
+        _write_skill(package_dir, "package-only", "Package skill")
+        _write_skill(package_dir, "shared", "Package skill")
+        with (package_dir / "shared/SKILL.md").open("a") as skill_file:
+            skill_file.write("\nPACKAGE_SHARED\n")
+        profile["requiredSkills"] = ["package-only"]
+        profile["packageSnapshot"] = {
+            "directory": str(package_dir),
+            "skills": [
+                {"directory": str(package_dir / "package-only")},
+                {"directory": str(package_dir / "shared")},
+            ],
+        }
+        if package_kind == "expert_team":
+            meta = {"expert_team": {"id": "team", "name": "team",
+                    "leader": {"id": "lead", "name": "lead"}, "members": [profile]}}
+    expert_session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta=meta))
     expert_state = agent._sessions[expert_session.sessionId]
-    assert "expert-only-skill" in expert_state.agent.system_prompt
-    expert_result = await expert_state.agent.tools["get_skill"].execute("expert-only-skill")
+    name = "package-only" if package_kind else "expert-only-skill"
+    if package_kind != "expert_team":
+        assert name in expert_state.agent.system_prompt
+    expert_result = await expert_state.agent.tools["get_skill"].execute(name)
     assert expert_result.success is True
-    assert "expert-only-skill content" in expert_result.content
+    assert f"{name} content" in expert_result.content
+    metadata = expert_state.skill_loader.get_skill(name).to_metadata_dict()
+    assert metadata["source"] == ("expert" if package_kind else "builtin")
+    assert skill_loader.get_skill(name) is None
+    assert not (await normal_state.agent.tools["get_skill"].execute(name)).success
+    if package_kind:
+        shared = await expert_state.agent.tools["get_skill"].execute("shared")
+        assert shared.success and "PACKAGE_SHARED" in shared.content
+        later_session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        for state in (normal_state, agent._sessions[later_session.sessionId]):
+            shared = await state.agent.tools["get_skill"].execute("shared")
+            assert shared.success and "PACKAGE_SHARED" not in shared.content
+
 
 
 @pytest.mark.asyncio
@@ -428,3 +457,395 @@ async def test_acp_prompt_emits_expert_team_progress_without_internal_rules(tmp_
     assert progress[0]["orchestration"]["workstreams"][0]["title"] == "写作线"
     assert "展示成员贡献" in str(progress[0])
     assert "这条内部规则不能出现在进度事件里" not in str(progress[0])
+
+
+def test_expert_directory_takes_priority_without_changing_normal_loader_on_reload(tmp_path):
+    user, package = tmp_path / "user", tmp_path / "package"
+    user.mkdir()
+    package.mkdir()
+    _write_skill(user, "shared", "User skill")
+    _write_skill(package, "shared", "Package skill")
+    _write_skill(package, "package-only", "Package only")
+    loader = SkillLoader(sources=[(user, "user")])
+    loader.discover_skills()
+    scoped = loader.with_expert_skill_sources([], skill_directories=[package])
+    assert scoped.get_skill("shared").source == "expert"
+    assert scoped.get_skill("shared").skill_path == package / "shared/SKILL.md"
+    assert loader.get_skill("shared").skill_path == user / "shared/SKILL.md"
+    assert scoped.get_skill("package-only") is not None
+    assert loader.get_skill("package-only") is None
+    (package / "package-only/SKILL.md").unlink()
+    assert scoped.maybe_reload()
+    assert scoped.get_skill("package-only") is None
+    assert scoped.get_skill("shared").source == "expert"
+    assert scoped.get_skill("shared").skill_path == package / "shared/SKILL.md"
+    assert loader.get_skill("shared").skill_path == user / "shared/SKILL.md"
+
+
+def test_expert_package_order_fallback_and_other_expert_are_session_local(tmp_path):
+    user, first, second = (tmp_path / name for name in ("user", "first", "second"))
+    for root in (user, first, second):
+        root.mkdir()
+        _write_skill(root, "shared")
+    _write_skill(user, "fallback")
+    loader = SkillLoader(sources=[(user, "user")])
+    loader.discover_skills()
+    team = loader.with_expert_skill_sources([], skill_directories=[first, second])
+    other = loader.with_expert_skill_sources([], skill_directories=[second])
+    assert team.get_skill("shared").skill_path == first / "shared/SKILL.md"
+    assert other.get_skill("shared").skill_path == second / "shared/SKILL.md"
+    assert loader.get_skill("shared").skill_path == user / "shared/SKILL.md"
+    assert team.get_skill("fallback").skill_path == user / "fallback/SKILL.md"
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_expert_package_ignores_global_disable_but_preserves_builtin_protection(tmp_path, disabled):
+    builtin, package = tmp_path / "builtin", tmp_path / "package"
+    for root in (builtin, package):
+        root.mkdir()
+        for name in ("shared", "protected", "roadmap"):
+            _write_skill(root, name)
+    protected = builtin / "protected/SKILL.md"
+    protected.write_text(protected.read_text().replace(
+        "description:", "metadata:\n  allow_override: false\ndescription:",
+    ))
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"disabledSkillNames":["shared"]}' if disabled else '{}')
+    loader = SkillLoader(sources=[(builtin, "builtin")], skill_settings_path=settings)
+    loader.discover_skills()
+    scoped = loader.with_expert_skill_sources(["roadmap", "shared"], skill_directories=[package])
+    for name in ("protected", "roadmap"):
+        assert scoped.get_skill(name).skill_path == builtin / name / "SKILL.md"
+    assert scoped.get_skill("shared", include_disabled=True).skill_path == package / "shared/SKILL.md"
+    assert scoped.get_skill("shared").source == "expert"
+    assert (loader.get_skill("shared") is None) == disabled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("package_kind", ["expert", "expert_team"])
+@pytest.mark.parametrize("disabled", [False, True])
+async def test_expert_source_ignores_global_disable_but_obeys_fast_profile(tmp_path, package_kind, disabled):
+    user, package = tmp_path / "user", tmp_path / "package"
+    user.mkdir()
+    package.mkdir()
+    names = ["pptx", "research-synthesis", "unbound"]
+    for root in (user, package):
+        for name in names:
+            _write_skill(root, name)
+    builtin_pptx = user / "pptx/SKILL.md"
+    builtin_pptx.write_text(builtin_pptx.read_text().replace(
+        "description:", "metadata:\n  allow_override: false\ndescription:",
+    ))
+    settings = tmp_path / "settings.json"
+    settings_text = '{"disabledSkillNames":["pptx","research-synthesis","unbound"]}'
+    settings_text = settings_text if disabled else "{}"
+    settings.write_text(settings_text)
+    loader = SkillLoader(sources=[(user, "builtin")], skill_settings_path=settings)
+    loader.discover_skills()
+    profile = {
+        "id": "designer", "name": "Designer", "defaultSkills": names[:2],
+        "packageSnapshot": {
+            "directory": str(package),
+            "skills": [{"directory": str(package / name)} for name in names],
+        },
+    }
+    meta = {"expert": profile} if package_kind == "expert" else {
+        "expert_team": {"id": "team", "name": "Team", "leader": profile, "members": []},
+    }
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_mcp=False),
+    )
+    agent = BoxACPAgent(
+        DummyConn(), config, DoneLLM(), [GetSkillTool(loader), ListSkillsTool(loader)],
+        f"base system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader,
+    )
+    session = await agent.newSession(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={**meta, "execution_profile": "fast"},
+    ))
+    state = agent._sessions[session.sessionId]
+    assert "research-synthesis" not in state.skill_selector.matched_skill_names
+    for _ in range(2):
+        await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "继续完成任务"}]))
+        for name in names[:2]:
+            result = await state.agent.tools["get_skill"].execute(name)
+            available = name == "pptx"
+            assert result.success is available
+            if available:
+                assert str(package / name) in result.content
+            catalog = await state.agent.tools["list_skills"].execute(query=name)
+            assert catalog.success
+            assert ('"available": true' in catalog.content) is available
+        assert (await state.agent.tools["get_skill"].execute("unbound")).success
+    normal = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    if disabled:
+        for name in names:
+            assert not (await agent._sessions[normal.sessionId].agent.tools["get_skill"].execute(name)).success
+    assert settings.read_text() == settings_text
+
+
+@pytest.mark.asyncio
+async def test_removed_package_skill_does_not_enable_global_fallback(tmp_path):
+    user, package = tmp_path / "user", tmp_path / "package"
+    user.mkdir()
+    package.mkdir()
+    for root in (user, package):
+        _write_skill(root, "research-synthesis")
+    loader = SkillLoader(sources=[(user, "user")])
+    loader.discover_skills()
+    scoped = loader.with_expert_skill_sources(["research-synthesis"], skill_directories=[package])
+    tool = GetSkillTool(scoped, blocked_skill_names={"research-synthesis"})
+    assert not (await tool.execute("research-synthesis")).success
+    restricted = GetSkillTool(scoped, allowed_skill_names=frozenset())
+    assert not (await restricted.execute("research-synthesis")).success
+    (package / "research-synthesis/SKILL.md").unlink()
+    result = await tool.execute("research-synthesis")
+    assert not result.success
+    assert "execution profile" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_discovery,replace_directory", [(False, False), (True, False), (True, True)])
+async def test_expert_skill_rejects_external_symlink_without_blocking_other_skills(
+    tmp_path, after_discovery, replace_directory,
+):
+    package, outside = tmp_path / "package", tmp_path / "outside"
+    package.mkdir()
+    outside.mkdir()
+    _write_skill(package, "shared")
+    _write_skill(package, "healthy")
+    _write_skill(outside, "shared")
+    directory = package / "shared"
+    loader = SkillLoader(sources=[])
+    if after_discovery:
+        loader = loader.with_expert_skill_sources(
+            [], skill_directories=[directory, package / "healthy"],
+        )
+        assert loader.get_skill("shared") is not None
+    (directory / "SKILL.md").unlink()
+    if replace_directory:
+        directory.rmdir()
+        link, target = directory, outside / "shared"
+    else:
+        link, target = directory / "SKILL.md", outside / "shared/SKILL.md"
+    try:
+        link.symlink_to(target, target_is_directory=replace_directory)
+    except OSError as exc:
+        pytest.skip(f"Symlink creation is unavailable: {exc}")
+    if not after_discovery:
+        loader = loader.with_expert_skill_sources(
+            [], skill_directories=[directory, package / "healthy"],
+        )
+    tool = GetSkillTool(loader)
+    assert (await tool.execute("healthy")).success
+    broken = await tool.execute("shared")
+    assert not broken.success
+    assert "outside the expert skill" in str(broken.raw_output)
+    assert loader.get_skill("shared").broken
+    link.unlink()
+    if replace_directory:
+        directory.mkdir()
+    (directory / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: repaired\n---\nrepaired content",
+    )
+    assert (await tool.execute("shared")).success
+    assert not loader.get_skill("shared").broken
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outside_root", [False, True])
+async def test_expert_symlink_change_with_identical_stat_is_detected_and_keeps_identity(tmp_path, outside_root):
+    import os
+
+    package, user = tmp_path / "package", tmp_path / "user"
+    package.mkdir()
+    user.mkdir()
+    _write_skill(package, "folder-name")
+    _write_skill(user, "actual-name")
+    path = package / "folder-name/SKILL.md"
+    body = path.read_text().replace("folder-name", "actual-name")
+    path.write_text(body)
+    original_stat = path.stat()
+    target = tmp_path / "outside.md" if outside_root else path.parent / "alternate.md"
+    target.write_text(body.replace("actual-name content", "updated-now content"))
+    os.utime(target, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert target.stat().st_size == original_stat.st_size
+    loader = SkillLoader(sources=[(user, "user")])
+    loader.discover_skills()
+    scoped = loader.with_expert_skill_sources([], skill_directories=[path.parent])
+    path.unlink()
+    try:
+        path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"Symlink creation is unavailable: {exc}")
+    result = await GetSkillTool(scoped).execute("actual-name")
+    if outside_root:
+        assert not result.success
+        assert "outside the expert skill" in str(result.raw_output)
+        assert scoped.get_skill("actual-name").broken
+    else:
+        assert result.success
+        assert "updated-now content" in result.content
+    assert (await GetSkillTool(loader).execute("actual-name")).success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ordinary_source", ["builtin", "user", "connector"])
+async def test_expert_global_disable_exemption_does_not_leak_on_reload(tmp_path, ordinary_source):
+    ordinary, package = tmp_path / "ordinary", tmp_path / "package"
+    for root in (ordinary, package):
+        root.mkdir()
+        _write_skill(root, "shared")
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"disabledSkillNames":["shared"]}')
+    loader = SkillLoader(sources=[(ordinary, ordinary_source)], skill_settings_path=settings)
+    loader.discover_skills()
+    scoped = loader.with_expert_skill_sources(["shared"], skill_directories=[package])
+    tool = GetSkillTool(scoped)
+    assert (await tool.execute("shared")).success
+    assert scoped.get_skill("shared").source == "expert"
+    assert loader.get_skill("shared") is None
+    catalog = await ListSkillsTool(scoped).execute(query="shared")
+    assert '"available": true' in catalog.content
+    (package / "shared/SKILL.md").unlink()
+    assert scoped.maybe_reload()
+    assert not (await tool.execute("shared")).success
+    assert scoped.get_skill("shared", include_disabled=True).source == "expert"
+    assert scoped.get_skill("shared").broken
+    assert loader.get_skill("shared") is None
+    assert settings.read_text() == '{"disabledSkillNames":["shared"]}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "directory-missing", "malformed"])
+async def test_bound_expert_overrides_protected_builtin_without_silent_fallback(tmp_path, failure):
+    builtin, package = tmp_path / "builtin", tmp_path / "package"
+    for root in (builtin, package):
+        root.mkdir()
+        _write_skill(root, "pptx")
+    builtin_file = builtin / "pptx/SKILL.md"
+    builtin_file.write_text(builtin_file.read_text().replace(
+        "description:", "metadata:\n  allow_override: false\ndescription:",
+    ))
+    loader = SkillLoader(sources=[(builtin, "builtin")])
+    loader.discover_skills()
+    scoped = loader.with_expert_skill_sources(["pptx"], skill_directories=[package / "pptx"])
+    tool = GetSkillTool(scoped)
+    assert (await tool.execute("pptx")).success
+    assert scoped.get_skill("pptx").source == "expert"
+    assert loader.get_skill("pptx").source == "builtin"
+    package_file = package / "pptx/SKILL.md"
+    if failure in {"missing", "directory-missing"}:
+        package_file.unlink()
+        if failure == "directory-missing":
+            package_file.parent.rmdir()
+    else:
+        package_file.write_text("invalid skill")
+    result = await tool.execute("pptx")
+    assert not result.success
+    assert scoped.get_skill("pptx").broken
+    assert scoped.get_skill("pptx").source == "expert"
+    assert loader.get_skill("pptx").source == "builtin"
+
+
+@pytest.mark.asyncio
+async def test_expert_pptx_sync_is_session_scoped_and_rejects_escaped_resources(tmp_path):
+    import shutil
+    from box_agent.tools.bash_tool import BashTool
+    from box_agent.tools.pptx_safety import detect_pptx_image_status_command_bypass
+
+    package = tmp_path / "package"
+    package.mkdir()
+    _write_skill(package, "pptx")
+    script = package / "pptx/scripts/sync_image_manifest_status.js"
+    script.parent.mkdir()
+    script.write_text('console.log("expert-sync-ok")')
+    loader = SkillLoader(sources=[])
+    scoped = loader.with_expert_skill_sources(["pptx"], skill_directories=[package])
+    provider = lambda: scoped.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js")
+    command = f'node "{script}" assets/generated/manifest.json'
+    assert provider() == script.resolve()
+    assert loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") is None
+    unbound = loader.with_expert_skill_sources([], skill_directories=[package])
+    assert unbound.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") is None
+    for shell in ("posix", "powershell"):
+        assert detect_pptx_image_status_command_bypass(
+            command, workspace_dir=str(tmp_path), runtime_env=None,
+            shell_style=shell, expert_sync_script=provider(),
+        ) is None
+    ordinary = BashTool(workspace_dir=str(tmp_path))
+    assert "PPTX_IMAGE_STATUS_SCRIPT_IDENTITY" in (await ordinary.execute(command=command)).error
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from box_agent.tools.setup import add_workspace_tools
+    tools = []
+    add_workspace_tools(
+        tools, Config(agent=AgentConfig(workspace_dir=str(tmp_path)),
+                      llm=LLMConfig(api_key="test-key"), tools=ToolsConfig(enable_sub_agent=False)),
+        tmp_path, skill_loader=scoped, output=lambda _: None,
+    )
+    expert = next(tool for tool in tools if isinstance(tool, BashTool))
+    if shutil.which("node"):
+        result = await expert.execute(command=command)
+        assert result.success, result.error
+        assert "expert-sync-ok" in result.stdout
+    outside = tmp_path / "sync_image_manifest_status.js"
+    outside.write_text('console.log("outside")')
+    script.unlink()
+    script.symlink_to(outside)
+    assert provider() is None
+    assert "PPTX_IMAGE_STATUS_SCRIPT_IDENTITY" in (await expert.execute(command=command)).error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound_first", [False, True])
+async def test_team_prefers_owning_package_binding_over_unbound_same_name(tmp_path, bound_first):
+    profiles = []
+    for label in ("unbound", "bound"):
+        package = tmp_path / label
+        package.mkdir()
+        _write_skill(package, "pptx", label)
+        script = package / "pptx/scripts/sync_image_manifest_status.js"
+        script.parent.mkdir()
+        script.write_text("// " + label)
+        profiles.append({
+            "id": label, "name": label,
+            "requiredSkills": ["pptx"] if label == "bound" else [],
+            "packageSnapshot": {"directory": str(package),
+                                "skills": [{"directory": str(package / "pptx")}]},
+        })
+    if bound_first:
+        profiles.reverse()
+    loader = SkillLoader(sources=[])
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_mcp=False))
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [GetSkillTool(loader)],
+                        SKILL_SLOT_SENTINEL, skill_loader=loader)
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "expert_team": {"id": "team", "name": "Team", "leader": profiles[0], "members": profiles[1:]},
+    }))
+    scoped = agent._sessions[session.sessionId].skill_loader
+    assert scoped.get_skill("pptx").skill_path == tmp_path / "bound/pptx/SKILL.md"
+    assert scoped.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") == (
+        tmp_path / "bound/pptx/scripts/sync_image_manifest_status.js"
+    ).resolve()
+    (tmp_path / "bound/pptx/SKILL.md").unlink()
+    scoped.maybe_reload()
+    assert scoped.get_skill("pptx").broken
+    assert scoped.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") is None
+    assert loader.get_skill("pptx") is None
+
+
+def test_equally_bound_team_packages_preserve_existing_order(tmp_path):
+    directories = []
+    for label in ("first", "second"):
+        package = tmp_path / label
+        package.mkdir()
+        _write_skill(package, "pptx", label)
+        directories.append(package)
+    loader = SkillLoader(sources=[]).with_expert_skill_sources(
+        ["pptx"], skill_directories=directories,
+        skill_bindings_by_directory={directory: {"pptx"} for directory in directories},
+    )
+    assert loader.get_skill("pptx").skill_path == directories[0] / "pptx/SKILL.md"
