@@ -600,6 +600,7 @@ class OpenAIClient(LLMClientBase):
         Raises:
             Exception: API call failed
         """
+
         params: dict[str, Any] = {
             "messages": api_messages,
             "max_tokens": self._consume_effective_max_tokens(),
@@ -617,37 +618,40 @@ class OpenAIClient(LLMClientBase):
             reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
         )
 
-        auth_headers = await self._auth_headers(
-            self._request_headers(session_id, turn_id, title, call_kind)
-        )
-        if auth_headers:
-            params["extra_headers"] = auth_headers
-
-        params = await self._bound_request_body(params, turn_id=turn_id)
-        log_llm_request(provider="openai", mode="completion", api_base=self.api_base, params=params)
-
-        try:
-            raw_response = await _await_if_needed(
-                self.client.chat.completions.with_raw_response.create(**params)
+        async def _once():
+            auth_headers = await self._auth_headers(
+                self._request_headers(session_id, turn_id, title, call_kind)
             )
-            log_llm_response_meta(
-                provider="openai",
-                mode="completion",
-                request_id=getattr(raw_response, "request_id", None),
-                headers=getattr(raw_response, "headers", None),
-            )
-            response = await _await_if_needed(raw_response.parse())
-        except AttributeError:
-            # Test doubles and older SDK-compatible clients may not expose
-            # ``with_raw_response``. Keep the request log and fall back to the
-            # existing behavior, but request-id metadata will be unavailable.
-            response = await _await_if_needed(self.client.chat.completions.create(**params))
-        except Exception as exc:
-            log_llm_error_meta(provider="openai", mode="completion", exc=exc)
-            raise
+            if auth_headers:
+                params["extra_headers"] = auth_headers
 
-        # Return full response to access usage info
-        return response
+            request_params = await self._bound_request_body(dict(params), turn_id=turn_id)
+            log_llm_request(provider="openai", mode="completion", api_base=self.api_base, params=request_params)
+
+            try:
+                raw_response = await _await_if_needed(
+                    self.client.chat.completions.with_raw_response.create(**request_params)
+                )
+                log_llm_response_meta(
+                    provider="openai",
+                    mode="completion",
+                    request_id=getattr(raw_response, "request_id", None),
+                    headers=getattr(raw_response, "headers", None),
+                )
+                response = await _await_if_needed(raw_response.parse())
+            except AttributeError:
+                # Test doubles and older SDK-compatible clients may not expose
+                # ``with_raw_response``. Keep the request log and fall back to the
+                # existing behavior, but request-id metadata will be unavailable.
+                response = await _await_if_needed(self.client.chat.completions.create(**request_params))
+            except Exception as exc:
+                log_llm_error_meta(provider="openai", mode="completion", exc=exc)
+                raise
+
+            # Return full response to access usage info
+            return response
+        return await self._call_with_hosted_auth_retry(_once)
+
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         """Convert tools to OpenAI format.
@@ -1025,22 +1029,33 @@ class OpenAIClient(LLMClientBase):
 
         async def _open_stream() -> Any:
             nonlocal provider_request_id
-            try:
-                raw_response = await _await_if_needed(
-                    self.client.chat.completions.with_raw_response.create(**params)
+
+            async def _once() -> Any:
+                nonlocal provider_request_id
+                # Re-read hosted auth headers so a force-refresh is visible.
+                auth_headers = await self._auth_headers(
+                    self._request_headers(session_id, turn_id, title, call_kind)
                 )
-                provider_request_id = getattr(raw_response, "request_id", None) or request_id_from_headers(
-                    getattr(raw_response, "headers", None)
-                )
-                log_llm_response_meta(
-                    provider="openai",
-                    mode="stream",
-                    request_id=provider_request_id,
-                    headers=getattr(raw_response, "headers", None),
-                )
-                return await _await_if_needed(raw_response.parse())
-            except AttributeError:
-                return await _await_if_needed(self.client.chat.completions.create(**params))
+                if auth_headers:
+                    params["extra_headers"] = auth_headers
+                try:
+                    raw_response = await _await_if_needed(
+                        self.client.chat.completions.with_raw_response.create(**params)
+                    )
+                    provider_request_id = getattr(raw_response, "request_id", None) or request_id_from_headers(
+                        getattr(raw_response, "headers", None)
+                    )
+                    log_llm_response_meta(
+                        provider="openai",
+                        mode="stream",
+                        request_id=provider_request_id,
+                        headers=getattr(raw_response, "headers", None),
+                    )
+                    return await _await_if_needed(raw_response.parse())
+                except AttributeError:
+                    return await _await_if_needed(self.client.chat.completions.create(**params))
+
+            return await self._call_with_hosted_auth_retry(_once)
 
         import asyncio as _asyncio
 
