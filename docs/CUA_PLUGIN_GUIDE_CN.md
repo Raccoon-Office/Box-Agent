@@ -12,13 +12,66 @@ CUA 插件只负责 Box-Agent 内的 MCP 结果适配、图片注入和 sidecar 
 2. CuaDriver.app 已获得辅助功能和屏幕录制权限。
 3. Box-Agent 的 MCP 配置能启动 CuaDriver 的 MCP 子命令。
 
-在 mac-cua 环境中，固定版本的安装由另一个仓库负责：
+下面是一份可以直接复制到 macOS Apple Silicon 上执行的最小安装脚本。它下载并校验固定版本的 CuaDriver，安装 CLI 和 `CuaDriver.app`；它不授予系统权限，也不会自动绕过 TCC。Box-Agent PR 不把这个 macOS 原生驱动打进 Python 包。
 
-```text
-mac-cua/scripts/guest-install-runtime.sh
+```bash
+cat > /tmp/install-cua-driver.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$(/usr/bin/uname -s)" == "Darwin" && "$(/usr/bin/uname -m)" == "arm64" ]] || {
+  echo "This installer requires Apple Silicon macOS." >&2
+  exit 2
+}
+[[ "$(/usr/bin/id -u)" == "0" ]] || {
+  echo "Run with: sudo bash /tmp/install-cua-driver.sh" >&2
+  exit 2
+}
+
+version="0.25.0"
+url="https://github.com/trycua/cua/releases/download/cua-driver-rs-v${version}/cua-driver-rs-${version}-darwin-arm64.tar.gz"
+sha256="48fb4c329987f66ea9b76d47e6fc19bf8618309afb96d53755e1a6a937025d5c"
+prefix="/usr/local/lib/cua-driver-${version}"
+cache="/usr/local/lib/cua-driver-downloads"
+archive="${cache}/cua-driver-rs-${version}-darwin-arm64.tar.gz"
+
+/bin/mkdir -p "${cache}" /usr/local/bin
+if [[ ! -f "${archive}" ]]; then
+  /usr/bin/curl --fail --location --retry 5 --output "${archive}.partial" "${url}"
+  /bin/mv "${archive}.partial" "${archive}"
+fi
+printf '%s  %s\n' "${sha256}" "${archive}" | /usr/bin/shasum -a 256 -c -
+
+if [[ ! -f "${prefix}/.installed" ]]; then
+  /bin/mkdir -p "${prefix}"
+  /usr/bin/tar -xzf "${archive}" -C "${prefix}" --strip-components 1
+  [[ -x "${prefix}/cua-driver" && -d "${prefix}/CuaDriver.app" ]] || {
+    echo "Unexpected CuaDriver package layout." >&2
+    exit 5
+  }
+  /usr/bin/codesign --verify --deep --strict "${prefix}/CuaDriver.app"
+  /usr/bin/touch "${prefix}/.installed"
+fi
+
+/bin/ln -sfn "${prefix}/cua-driver" /usr/local/bin/cua-driver
+if [[ -d /Applications/CuaDriver.app ]]; then
+  current=$(/usr/bin/shasum -a 256 /Applications/CuaDriver.app/Contents/MacOS/cua-driver | /usr/bin/cut -d ' ' -f 1)
+  expected=$(/usr/bin/shasum -a 256 "${prefix}/CuaDriver.app/Contents/MacOS/cua-driver" | /usr/bin/cut -d ' ' -f 1)
+  [[ "${current}" == "${expected}" ]] || {
+    echo "An existing CuaDriver.app has a different binary; remove it explicitly before rerunning." >&2
+    exit 6
+  }
+else
+  /usr/bin/ditto "${prefix}/CuaDriver.app" /Applications/CuaDriver.app
+fi
+/usr/bin/codesign --verify --deep --strict /Applications/CuaDriver.app
+/usr/local/bin/cua-driver --version
+echo "Installed CuaDriver ${version}. Grant Accessibility and Screen Recording permissions, then start CuaDriver.app."
+SH
+sudo bash /tmp/install-cua-driver.sh
 ```
 
-该脚本会下载并校验 `cua-driver 0.25.0`，安装 `CuaDriver.app`，并建立 `/usr/local/bin/cua-driver`。Box-Agent PR 不把这个 macOS 原生驱动打进 Python 包。只有本机已经准备好驱动后，下面的 Box-Agent 配置才有意义。
+安装后，打开 `CuaDriver.app` 并在系统设置中授予辅助功能和屏幕录制权限。需要 MCP 服务时，可以用 `open -g -a /Applications/CuaDriver.app --args serve` 启动驱动。只有本机已经准备好驱动后，下面的 Box-Agent 配置才有意义。
 
 安装后可以先验证：
 
