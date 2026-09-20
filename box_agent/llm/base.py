@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
+
 from ..auth import (
     HostedAuthRequiredError,
     ensure_hosted_auth_ready,
@@ -112,6 +114,23 @@ class LLMClientBase(ABC):
         async def call_once():
             response = await operation()
             code = response.get("code") if isinstance(response, dict) else getattr(response, "code", None)
+            # Streaming SDKs expose the HTTP response, not a parsed JSON envelope.
+            # A gateway may reject authentication with JSON instead of SSE even
+            # when stream=True. Inspect only JSON, before consuming any events.
+            http_response = getattr(response, "response", None)
+            if uses_file and isinstance(http_response, httpx.Response):
+                content_type = http_response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                if content_type == "application/json" or content_type.endswith("+json"):
+                    try:
+                        await http_response.aread()
+                        payload = http_response.json()
+                    finally:
+                        await http_response.aclose()
+                    if isinstance(payload, dict) and payload.get("code") in (200003, "200003"):
+                        raise httpx.HTTPStatusError(
+                            "provider authorization_verify_error (200003)",
+                            request=http_response.request, response=http_response,
+                        )
             if uses_file and code in (200003, "200003"):
                 raise ValueError("provider authorization_verify_error (200003)")
             return response

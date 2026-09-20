@@ -669,6 +669,7 @@ class AnthropicClient(LLMClientBase):
                             if hasattr(event, "usage") and event.usage:
                                 output_tokens = getattr(event.usage, "output_tokens", 0) or 0
             except Exception as exc:
+                await stream_stack.aclose()
                 log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
                 # Detect third-party API event order compatibility issues
                 if isinstance(exc, RuntimeError) and "Unexpected event order" in str(exc):

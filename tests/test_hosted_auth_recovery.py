@@ -241,3 +241,67 @@ async def test_anthropic_stream_entry_timeout_keeps_transport_retry(auth_file, m
         refresh.assert_not_awaited()
     finally:
         await sdk.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider', ['openai', 'anthropic'])
+@pytest.mark.parametrize('second_rejection', [False, True])
+async def test_streaming_sdk_recovers_json_auth_envelope(auth_file, monkeypatch, provider, second_rejection):
+    import anthropic
+    import openai
+
+    cls = OpenAIClient if provider == 'openai' else AnthropicClient
+    client = cls(**client_args(auth_file))
+    original_sdk = client.client
+    refresh = AsyncMock()
+    monkeypatch.setattr('box_agent.llm.base.refresh_hosted_auth_token_if_needed', refresh)
+    responses = []
+
+    def handle(request):
+        if not responses or second_rejection:
+            response = httpx.Response(200, json={'code': 200003, 'message': 'authorization_verify_error'})
+        elif provider == 'openai':
+            payload = {'id': 'completion', 'object': 'chat.completion.chunk', 'created': 1, 'model': 'test',
+                       'choices': [{'index': 0, 'delta': {'content': 'hello'}, 'finish_reason': None}]}
+            response = httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                text='data: ' + json.dumps(payload) + '\n\ndata: [DONE]\n\n')
+        else:
+            frames = [
+                ('message_start', {'type': 'message_start', 'message': {'id': 'msg', 'type': 'message',
+                    'role': 'assistant', 'content': [], 'model': 'test', 'stop_reason': None,
+                    'stop_sequence': None, 'usage': {'input_tokens': 1, 'output_tokens': 0}}}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 0,
+                    'content_block': {'type': 'text', 'text': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 0,
+                    'delta': {'type': 'text_delta', 'text': 'hello'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+                ('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'},
+                    'usage': {'output_tokens': 1}}),
+                ('message_stop', {'type': 'message_stop'}),
+            ]
+            response = httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                text=''.join(f'event: {event}\ndata: {json.dumps(payload)}\n\n' for event, payload in frames))
+        responses.append(response)
+        return response
+
+    sdk_cls = openai.AsyncOpenAI if provider == 'openai' else anthropic.AsyncAnthropic
+    client.client = sdk_cls(api_key='placeholder', base_url=client.api_base,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)), max_retries=0)
+    try:
+        events = []
+        if second_rejection:
+            with pytest.raises(HostedAuthRequiredError):
+                async for event in client.generate_stream([Message(role='user', content='hi')]):
+                    events.append(event)
+            assert not events
+        else:
+            events = [event async for event in client.generate_stream([Message(role='user', content='hi')])]
+            assert any(event.type == 'text' and event.delta == 'hello' for event in events)
+        assert refresh.await_count == 1
+        assert len(responses) == 2
+        assert responses[0].is_closed
+        if second_rejection:
+            assert responses[1].is_closed
+    finally:
+        await client.client.close()
+        await original_sdk.close()
