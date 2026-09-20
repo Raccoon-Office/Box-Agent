@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -809,6 +810,7 @@ class BashTool(Tool):
             _DEFAULT_TOOLS_CONFIG.bash_default_timeout_seconds
         ),
         max_timeout_seconds: int = _DEFAULT_TOOLS_CONFIG.bash_max_timeout_seconds,
+        pptx_sync_script_provider: Callable[[], Path | None] | None = None,
     ):
         """Initialize BashTool with OS-specific shell detection.
 
@@ -836,6 +838,7 @@ class BashTool(Tool):
             raise ValueError(
                 "max_timeout_seconds cannot be lower than default_timeout_seconds"
             )
+        self._pptx_sync_script_provider = pptx_sync_script_provider
         self.default_timeout_seconds = default_timeout_seconds
         self.max_timeout_seconds = max_timeout_seconds
         self.is_windows = platform.system() == "Windows"
@@ -1465,10 +1468,17 @@ Examples:
                     stderr=bypass_error,
                     exit_code=1,
                 )
+            # 仅目标同步命令查询当前会话的技能资源，不缓存可能已失效的路径。
+            expert_sync_script = (
+                self._pptx_sync_script_provider()
+                if self._pptx_sync_script_provider is not None
+                and "sync_image_manifest_status.js" in command else None
+            )
             image_status_error = detect_pptx_image_status_command_bypass(
                 command,
                 workspace_dir=self.workspace_dir,
                 runtime_env=self._subprocess_env,
+                expert_sync_script=expert_sync_script,
                 shell_style=(
                     "powershell"
                     if self.is_windows and self._bundled_win_bash is None

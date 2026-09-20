@@ -1882,7 +1882,8 @@ class BoxACPAgent:
         session_skill_loader = self._skill_loader
         if expert_context is not None and session_skill_loader is not None:
             session_skill_loader = session_skill_loader.with_expert_skill_sources(
-                expert_context.skill_names()
+                expert_context.skill_names(), skill_directories=expert_context.skill_directories,
+                skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
             )
         connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None

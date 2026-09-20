@@ -1372,6 +1372,39 @@ async def test_child_delegation_cannot_read_parent_profile_blocked_skill(tmp_pat
     llm.generate_stream.assert_not_called()
 
 
+@pytest.mark.parametrize("reader", ["get_skill", "list_skills"])
+@pytest.mark.parametrize("bound", [True, False])
+async def test_child_delegation_preserves_profile_for_expert_package(tmp_path, reader, bound):
+    from box_agent.execution_profile import FAST_OPTIONAL_SKILLS
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    name = "research-synthesis"
+    directory = tmp_path / name
+    directory.mkdir()
+    (directory / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Research method\n---\nEXPERT_RESEARCH_METHOD\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(sources=[]).with_expert_skill_sources(
+        [name] if bound else [], skill_directories=[directory],
+    )
+    parent_get = GetSkillTool(loader, blocked_skill_names=FAST_OPTIONAL_SKILLS)
+    parent_reader = parent_get if reader == "get_skill" else ListSkillsTool(
+        loader, blocked_skill_names=FAST_OPTIONAL_SKILLS,
+    )
+    llm = AsyncMock()
+    tool = SubAgentTool(llm=llm, parent_tools={reader: parent_reader}, workspace_dir=str(tmp_path))
+    tool.set_skill_provider(lambda: loader)
+
+    assert not (await parent_get.execute(name)).success
+    result = await tool.execute(task="Use the research method", required_tools=[], skills=[name])
+
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_PROFILE_BLOCKED"
+    llm.generate_stream.assert_not_called()
+
+
 async def test_child_skill_tool_clones_preserve_profile_and_narrow_parent_scope(tmp_path, monkeypatch):
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
     from box_agent.tools.skill_tool import GetSkillTool
