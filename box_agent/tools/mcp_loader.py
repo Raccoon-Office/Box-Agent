@@ -76,6 +76,11 @@ from .mcp_sources import (
     resolve_mcp_sources,
 )
 from .model_tool_context import current_model_tool_context
+from .mcp_result_hooks import (
+    adapt_mcp_durable_inline_images,
+    adapt_mcp_inline_images,
+    allowed_mcp_result_adapters,
+)
 from .playwright_session_pool import (
     BrowserSessionLimitError,
     PlaywrightSessionPool,
@@ -811,6 +816,13 @@ class MCPTool(Tool):
         return self._name
 
     @property
+    def transient_followup_allowed(self) -> bool:
+        """Allow transient follow-up content for the active result adapter."""
+        return bool(allowed_mcp_result_adapters(
+            server_name=self._server_name, remote_name=self._remote_name,
+        ))
+
+    @property
     def server_name(self) -> str:
         return self._server_name
 
@@ -954,6 +966,29 @@ class MCPTool(Tool):
                 self._server_name == "playwright"
                 and self._remote_name == "browser_snapshot"
             )
+            # Optional run-scoped result adapters may expose selected binary
+            # content through the shared ToolResult adaptation channels.
+            # ``raw_output`` remains the original MCP payload.
+            result_adapters = (
+                allowed_mcp_result_adapters(
+                    server_name=self._server_name,
+                    remote_name=self._remote_name,
+                )
+                if inline_images
+                else ()
+            )
+            transient_followup_content = adapt_mcp_inline_images(
+                server_name=self._server_name,
+                remote_name=self._remote_name,
+                inline_images=inline_images,
+                adapters=result_adapters,
+            )
+            durable_followup_content = adapt_mcp_durable_inline_images(
+                server_name=self._server_name,
+                remote_name=self._remote_name,
+                inline_images=inline_images,
+                adapters=result_adapters,
+            )
             return ToolResult(
                 success=True,
                 content=content_str,
@@ -963,6 +998,8 @@ class MCPTool(Tool):
                     if inline_images
                     else None
                 ),
+                transient_followup_content=transient_followup_content or None,
+                durable_followup_content=durable_followup_content or None,
             )
 
         except TimeoutError:

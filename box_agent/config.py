@@ -5,7 +5,7 @@ Provides unified configuration loading and management functionality
 
 import shutil
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -402,6 +402,9 @@ class Config(BaseModel):
     tools: ToolsConfig
     officev3: Officev3Config = Field(default_factory=Officev3Config)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    # Plugin-owned configuration is kept opaque to the core model. Each
+    # plugin validates its own namespace after activation.
+    plugins: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _resolve_profile_paths(self) -> "Config":
@@ -652,6 +655,20 @@ class Config(BaseModel):
             )
             officev3_config._present = True
 
+        # Parse plugin-owned configuration without importing plugin packages.
+        plugins_data = data.get("plugins", {})
+        if plugins_data is None:
+            plugins_data = {}
+        if not isinstance(plugins_data, dict):
+            raise ValueError("plugins must be a mapping")
+        plugin_configs: dict[str, dict[str, Any]] = {}
+        for plugin_name, plugin_data in plugins_data.items():
+            if not isinstance(plugin_name, str) or not plugin_name:
+                raise ValueError("plugin names must be non-empty strings")
+            if not isinstance(plugin_data, dict):
+                raise ValueError(f"plugins.{plugin_name} must be a mapping")
+            plugin_configs[plugin_name] = dict(plugin_data)
+
         # Parse hooks configuration
         hooks_data = data.get("hooks", [])
         if not isinstance(hooks_data, list):
@@ -667,6 +684,7 @@ class Config(BaseModel):
             tools=tools_config,
             officev3=officev3_config,
             hooks=hooks_config,
+            plugins=plugin_configs,
         )
 
     @staticmethod

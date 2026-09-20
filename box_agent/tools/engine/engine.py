@@ -357,6 +357,14 @@ class DefaultToolEngine:
         published_output = apply_delivery_policy(result.raw_output, context.workspace_dir)
         if published_output is not result.raw_output:
             result = result.model_copy(update={"raw_output": published_output})
+        if result.durable_followup_content:
+            summary.durable_blocks.extend(result.durable_followup_content)
+        # A durable adapter provides provider-bound content through its request
+        # boundary; keeping the same bytes in the transient overlay could send
+        # the payload twice. Drop only the transient copy while preserving the
+        # durable references for the live Surface.
+        if result.durable_followup_content and result.transient_followup_content:
+            result = result.model_copy(update={"transient_followup_content": None})
         # Skill text remains an ordinary tool result. The reader has already
         # applied its shared request budget; no system activation is performed.
         result, blocks, tokens = context.validate_followup(

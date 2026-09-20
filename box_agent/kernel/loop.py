@@ -62,6 +62,7 @@ from .context_engine import (
 )
 from .ports import KernelServices
 from .tool_messages import ToolMessageCommitter, session_log_messages
+from ..tools.mcp_result_hooks import adapt_provider_messages
 from ..tools.engine.call_contracts import (
     ToolExecutionOptions, ToolRunContext, ToolStepControl, ToolStepSummary,
 )
@@ -967,6 +968,23 @@ async def _run_agent_loop_impl(
     assert tool_engine is not None
     tool_messages = ToolMessageCommitter(messages, session_log, session_turn)
 
+    def append_durable_followup(blocks: list[dict[str, Any]]) -> None:
+        """Append adapter-owned blocks to the live Surface.
+
+        Durable blocks are ordinary runtime user messages. The adapter has
+        already removed binary data and persisted any sidecar; the core only
+        carries the content reference through its existing Surface commit.
+        They are intentionally separate from ``pending_transient_followup`` so
+        they cannot be duplicated in provider request overlays.
+        """
+        if blocks:
+            messages.append(Message(
+                role="user",
+                source="runtime",
+                content=[dict(block) for block in blocks],
+                trace_redact_content=True,
+            ))
+
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
             result=result, tool=tool, llm=llm, token_limit=token_limit,
@@ -1628,7 +1646,7 @@ async def _run_agent_loop_impl(
             )
 
             stream_kwargs = {
-                "messages": provider_request_messages,
+                "messages": adapt_provider_messages(provider_request_messages),
                 "tools": tool_list,
                 "thinking_enabled": thinking_enabled,
                 "session_id": session_id,
@@ -2669,11 +2687,19 @@ async def _run_agent_loop_impl(
         )
         pending_transient_followup_blocks.extend(tool_summary.transient_blocks)
         pending_transient_followup_tokens += tool_summary.transient_tokens
+        append_durable_followup(tool_summary.durable_blocks)
         if tool_summary.repair_guidance:
             messages.append(Message(role="user", source="runtime", content=format_injected_message(tool_summary.repair_guidance)))
             yield InjectedMessageEvent(content=tool_summary.repair_guidance, injection_id=None, user_visible=False)
 
         if completed_turn_ending_tool is not None:
+            if tool_summary.durable_blocks and session_log is not None and session_turn is not None:
+                session_log.append_unlogged_messages(
+                    session_log_messages(messages),
+                    turn=session_turn,
+                    step=step + 1,
+                )
+                session_log.flush()
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -2698,6 +2724,13 @@ async def _run_agent_loop_impl(
             return
 
         if plan_approval_gate_completed:
+            if tool_summary.durable_blocks and session_log is not None and session_turn is not None:
+                session_log.append_unlogged_messages(
+                    session_log_messages(messages),
+                    turn=session_turn,
+                    step=step + 1,
+                )
+                session_log.flush()
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:

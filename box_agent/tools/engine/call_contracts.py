@@ -111,5 +111,6 @@ class ToolStepSummary:
     successful_tools: set[str] = field(default_factory=set)
     transient_blocks: list[dict[str, Any]] = field(default_factory=list)
     transient_tokens: int = 0
+    durable_blocks: list[dict[str, Any]] = field(default_factory=list)
     repair_guidance: str | None = None
     search_guidance: str | None = None

@@ -15,6 +15,7 @@ from ..client_info import ClientInfo, scoped_client_info
 from ..retry import RetryConfig
 from ..schema import LLMProvider, LLMResponse, Message, StreamEvent
 from ..session_trace import emit_session_trace
+from ..tools.mcp_result_hooks import adapt_provider_messages
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
 from .openai_client import OpenAIClient
@@ -307,6 +308,9 @@ class LLMClient:
         Returns:
             LLMResponse containing the generated content
         """
+        # Optional run-scoped adapters hydrate provider-only references on a
+        # request copy. Durable Surface messages remain sidecar references.
+        messages = adapt_provider_messages(messages)
         llm_call_id = uuid4().hex
         trace_provider, trace_model = _trace_client_identity(self)
         _trace_llm_request(
@@ -408,6 +412,9 @@ class LLMClient:
         Yields:
             StreamEvent chunks
         """
+        # Keep summary/utility calls on the same provider boundary as the main
+        # loop; adapters never mutate the durable history in place.
+        messages = adapt_provider_messages(messages)
         llm_call_id = uuid4().hex
         trace_provider, trace_model = _trace_client_identity(self)
         _trace_llm_request(

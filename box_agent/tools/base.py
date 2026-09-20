@@ -37,6 +37,13 @@ class ToolResult(BaseModel):
         default=None,
         exclude=True,
     )
+    # Persistable runtime Surface blocks. These are deliberately separate from
+    # the transient request overlay; adapters must remove binary ``data`` and
+    # provide a sidecar/content reference before returning them.
+    durable_followup_content: list[dict[str, Any]] | None = Field(
+        default=None,
+        exclude=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)

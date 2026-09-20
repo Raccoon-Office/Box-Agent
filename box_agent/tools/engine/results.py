@@ -210,7 +210,7 @@ def process_tool_result(
         "success": result.success,
         "content": visible_content,
         "error": visible_error,
-        "raw_output": result.raw_output,
+        "raw_output": _trace_safe_tool_raw_output(result.raw_output),
         "model_content": model_content,
         "policy_decision": pipeline_input.policy_decision,
         "user_visible": pipeline_input.user_visible,

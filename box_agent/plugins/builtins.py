@@ -89,6 +89,13 @@ class SessionInitializerPort(Protocol):
     async def prepare(self) -> None: ...
 
 
+@runtime_checkable
+class AgentRunBindingPort(Protocol):
+    """Install a run-scoped wrapper around an Agent's public run stream."""
+
+    def install_agent(self, agent: Any) -> None: ...
+
+
 @dataclass
 class _Initializer:
     plugin_id: str
@@ -140,6 +147,7 @@ def _run_services(context: PluginFactoryContext) -> KernelServices:
 SESSION_CAPABILITY_SCHEMA = CapabilitySchema((
     CapabilityBinding(SessionResources, CapabilityPolicy.REQUIRED_SINGLE),
     CapabilityBinding(SessionInitializerPort, CapabilityPolicy.MULTI),
+    CapabilityBinding(AgentRunBindingPort, CapabilityPolicy.MULTI),
     CapabilityBinding(KernelServices, CapabilityPolicy.REQUIRED_SINGLE),
 ))
 
@@ -168,5 +176,6 @@ def builtin_plugin_descriptors() -> tuple[PluginDescriptor, ...]:
     return tuple(descriptors)
 
 
-__all__ = ["SessionResources", "SessionInitializerPort", "SESSION_CAPABILITY_SCHEMA",
+__all__ = ["SessionResources", "SessionInitializerPort", "AgentRunBindingPort",
+           "SESSION_CAPABILITY_SCHEMA",
            "builtin_plugin_descriptors"]
