@@ -324,6 +324,7 @@ def _config_summary(config: Config, config_path: Path, show_secrets: bool = Fals
             "provider": config.llm.provider,
             "api_base": config.llm.api_base,
             "model": config.llm.model,
+            "image_input": config.llm.image_input,
             "api_key": api_key,
             "auth_file": config.llm.auth_file,
             "context_window": config.llm.context_window,
@@ -1506,6 +1507,7 @@ async def _doctor_api_status(config: Config | None) -> dict[str, Any]:
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,
             reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
+            image_input=config.llm.image_input,
         )
         response = await _probe_llm_api(client)
         if response and response.content:
@@ -1948,6 +1950,7 @@ async def run_agent(
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,
             reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
+            image_input=config.llm.image_input,
         )
 
         # Set retry callback

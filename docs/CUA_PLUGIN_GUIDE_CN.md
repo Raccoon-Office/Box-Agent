@@ -1,6 +1,6 @@
 # CUA 插件使用指南
 
-本文说明如何在 macOS 上让 Box-Agent 通过 CuaDriver 的 MCP 服务使用桌面操作，并让支持图片输入的模型看到 CUA 截图。
+本文说明如何在 macOS 13+ Apple Silicon 上让 Box-Agent 通过 CuaDriver 的 MCP 服务使用桌面操作，并让支持图片输入的模型看到 CUA 截图。
 
 ## 1. 运行前提
 
@@ -71,7 +71,14 @@ SH
 sudo bash /tmp/install-cua-driver.sh
 ```
 
-安装后，打开 `CuaDriver.app` 并在系统设置中授予辅助功能和屏幕录制权限。需要 MCP 服务时，可以用 `open -g -a /Applications/CuaDriver.app --args serve` 启动驱动。只有本机已经准备好驱动后，下面的 Box-Agent 配置才有意义。
+安装后，执行权限引导并检查状态：
+
+```bash
+/usr/local/bin/cua-driver permissions grant
+/usr/local/bin/cua-driver permissions status --json
+```
+
+然后打开 `CuaDriver.app`。需要 MCP 服务时，可以用 `open -g -a /Applications/CuaDriver.app --args serve` 启动驱动；配置了下面的 MCP server 后，Box-Agent 也可以通过 `cua-driver mcp` 代理自动拉起它。只有本机已经准备好驱动后，下面的 Box-Agent 配置才有意义。
 
 安装后可以先验证：
 
@@ -87,7 +94,7 @@ sudo bash /tmp/install-cua-driver.sh
 
 ## 2. 配置 CuaDriver MCP 服务
 
-Box-Agent 默认读取 `~/.box-agent/config/mcp.json`。在 `mcpServers` 下加入一个 stdio server；下面的 `cua` 是服务名，后面插件配置中的 `server_name` 必须与它一致：
+Box-Agent 默认读取 `~/.box-agent/config/mcp.json` 和 `~/.box-agent/config/config.yaml`。开发目录中的配置可能优先；可以用 `box-agent config --json` 查看实际配置文件路径。在 `mcpServers` 下加入一个 stdio server；下面的 `cua` 是服务名，后面插件配置中的 `server_name` 必须与它一致：
 
 ```json
 {
@@ -110,7 +117,7 @@ Box-Agent 默认读取 `~/.box-agent/config/mcp.json`。在 `mcpServers` 下加�
 
 ## 3. 开启 Box-Agent CUA 插件
 
-在 Box-Agent 的 `config.yaml` 中加入：
+在 Box-Agent 的 `~/.box-agent/config/config.yaml` 中加入：
 
 ```yaml
 plugins:
@@ -145,6 +152,45 @@ CUA 插件是显式可选的：
 
 如果接入自定义模型，推荐在 LLM adapter 或模型目录中明确声明 `image_input: true`，或给对应模型候选增加 `vision` tag；不要依赖模型名称猜测。
 
+### 在 `config.yaml` 登记自定义模型的图片能力
+
+对于 OpenAI 兼容的自定义网关（例如 TokenHub），可以在主模型配置中显式登记能力。当前 Box-Agent 的 `config.yaml` 使用顶层模型字段，因此这里写成 `image_input`，不是再包一层 `llm:`：
+
+```yaml
+api_base: "https://tokenhub.sensetime.com/v1"
+provider: "openai"
+model: "你的模型名"
+api_key: "YOUR_TOKENHUB_API_KEY"
+image_input: true
+```
+
+`api_key` 只应保存在本机配置或 `auth.json`，不要把真实 key 提交到仓库。配置写入后，可以先确认 Box-Agent 读取到了声明：
+
+```bash
+box-agent config --json | jq '{config_file, model: .llm.model, image_input: .llm.image_input}'
+```
+
+`image_input` 只接受布尔值：
+
+- `true`：允许 CUA 插件把最新截图作为图片输入发送给该模型；
+- `false`：明确禁止图片输入，即使模型名包含 `vision` 也不会注入截图；
+- 不写该字段：能力保持未知，默认按文本模型处理，不发送截图。
+
+该字段会同时作用于 CLI 和 ACP 入口，并随模型 client 的 `for_model` 绑定保留。它只是 Box-Agent 对模型能力的声明，不会探测或修改服务端模型能力；填写 `true` 前应先确认该模型的接口确实接受 OpenAI 风格的图片消息。API 的 `/models` 返回能力元数据时，也需要由操作者核对具体模型是否支持图片输入，Box-Agent 不会自动把任意 `image` 字段转换成该声明。
+
+TokenHub 当前的模型目录可能只返回模型 ID 和 endpoint 类型，不一定带 `image` 字段。对实际模型发一条带 `image_url` 的最小 `chat/completions` 请求并得到成功响应，才是登记 `image_input: true` 的依据；不能因为模型能生成图片，就推断它能接收图片。
+
+### 最小端到端验收
+
+重启 Box-Agent 后先检查配置和 MCP：
+
+```bash
+box-agent config --json | jq '{config_file, model: .llm.model, image_input: .llm.image_input}'
+box-agent doctor
+```
+
+然后运行 `box-agent`，发送“使用 CUA MCP 读取当前屏幕并描述截图内容”。模型应先调用 CuaDriver 工具；若 `image_input: true` 且模型确实接受图片，后续模型请求会携带最新截图。若只看到工具文本而没有图片，先检查 `image_input`、`server_name` 和 MCP 权限。
+
 ## 5. 图片保存和请求行为
 
 一次 CUA 工具调用返回图片后，插件会：
@@ -177,4 +223,8 @@ SessionLog 和工具 trace 不保存图片 base64，只保存 `contentRef`、SHA
 
 ### 如何完全关闭 CUA
 
-同时执行以下任一项即可停止图片注入：移除 `plugins.cua`，设置 `feed_screenshots: false`，或设置 `BOX_AGENT_CUA_VISION=false`。如果还要停止 CuaDriver MCP 进程，再将 `mcp.json` 中的 `cua` entry 禁用。
+同时执行以下任一项即可停止图片注入：移除 `plugins.cua`，设置 `feed_screenshots: false`，或设置 `BOX_AGENT_CUA_VISION=false`。如果还要停止 CuaDriver MCP 连接，将 `mcp.json` 中的 `cua` entry 禁用并重启 Box-Agent。这个操作不会保证独立的 CuaDriver app daemon 退出；要完全停止驱动，再执行：
+
+```bash
+/usr/local/bin/cua-driver stop
+```

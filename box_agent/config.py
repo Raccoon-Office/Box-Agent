@@ -9,7 +9,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
 
 from .auth import should_attach_auth_header
 from .user_paths import (
@@ -77,6 +77,10 @@ class LLMConfig(BaseModel):
     api_base: str = "https://api.anthropic.com"
     model: str = DEFAULT_MODEL
     provider: str = "anthropic"  # "anthropic" or "openai"
+    # Explicit model capability declaration used by optional image-aware
+    # plugins. ``None`` keeps the capability unknown; callers must opt in with
+    # ``true`` before images are sent to a model.
+    image_input: StrictBool | None = None
     auth_file: str = ""
     context_window: int = 180000
     max_output_tokens: int = USER_CONFIGURED_MAX_OUTPUT_TOKENS
@@ -497,6 +501,7 @@ class Config(BaseModel):
             api_base=api_base,
             model=model,
             provider=data.get("provider", "anthropic"),
+            image_input=data.get("image_input"),
             auth_file=data.get("auth_file") or str(config_path.parent / "auth.json"),
             context_window=data.get("context_window", 180000),
             max_output_tokens=data.get("max_output_tokens", default_max_output_tokens),
