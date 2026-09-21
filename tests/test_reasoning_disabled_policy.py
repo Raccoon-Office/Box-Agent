@@ -160,7 +160,13 @@ async def test_utility_image_web_and_continuation_judge_share_provider_policy(tm
         summary, error = await WebExtractTool(llm=client)._summarize(
             "Evidence text", "https://example.invalid", requested_model="", requested_max_output_tokens=None)
         assert summary and error is None
-        assert not await model_says_continue(client, user_request="Do the task", candidate_response="Completed")
+        assert not await model_says_continue(
+            client,
+            messages=[
+                Message(role="user", content="Do the task"),
+                Message(role="assistant", content="Completed"),
+            ],
+        )
         assert len(requests) == 3
         assert [r["reasoning_effort"] for r in requests] == ["low", "low", "low"]
 

@@ -177,7 +177,10 @@ from ..tools.base import (
 from ..tools.argument_limits import RECOMMENDED_GENERATED_BODY_CHARS
 from ..tools.browser_intent import BrowserToolIntentPolicy
 from ..tool_result_storage import ToolResultStorage
-from ..turn_continuation import TurnContinuationController
+from ..turn_continuation import (
+    ContinuationJudgeFacts,
+    TurnContinuationController,
+)
 from ..turn_policy import (
     text_is_short_non_task_reply,
     text_requests_plan_start,
@@ -2499,14 +2502,21 @@ async def _run_agent_loop_impl(
                 )
                 return
 
+            # assistant_msg was appended above; pass the live transcript so the
+            # judge can fork it without reconstructing or duplicating candidate
+            # text.  The judge request itself is kept out of this list.
             continuation = await turn_continuation.evaluate(
                 llm=llm,
-                user_request=continuation_user_request,
-                content=response.content,
+                messages=messages,
+                facts=ContinuationJudgeFacts(
+                    user_request=continuation_user_request,
+                    decision_tool_available=(
+                        "request_user_decision" in offered_tools_by_name
+                    ),
+                ),
                 finish_reason=response.finish_reason,
                 tools_available=bool(tool_list),
                 thinking_enabled=thinking_enabled,
-                decision_tool_available="request_user_decision" in offered_tools_by_name,
                 step=step,
                 max_steps=max_steps,
                 cancelled=cancelled(),
