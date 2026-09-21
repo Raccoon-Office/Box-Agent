@@ -2134,6 +2134,9 @@ Rules:
    - "feedback": corrections and approaches the user endorsed
    - "general": anything cross-session-useful that fits none of the above
 10. Write memory bullets in the user's dominant language when it is clear; otherwise use concise English.
+11. Apply a portability test before saving every candidate: would this still be useful if the project name, industry, product, audience, URL, filename, and other concrete nouns were replaced? If not, either generalize it to the reusable method/constraint or return nothing.
+12. Separate the reusable rule from the task payload. Remove one-off subject matter, campaign names, brands, links, filenames, example data, and deliverable-specific wording unless the user explicitly made them a durable project constraint. Prefer forms such as "对多格式内容交付，先统一事实与结构，再分别产出各格式并校验一致性" over "家园沟通类内容要先产出设计哲学文档和竖版 PNG".
+13. Preserve a concrete domain only when it is itself durable context (for example, an ongoing project boundary or a stable user preference). Do not turn the current task's requested output or attached document instructions into a user preference.
 
 Output ONLY valid JSON (no markdown fences):
 {{"core_additions": ["- core memory bullet"], "additions": [{{"text": "- context bullet point 1", "topic": "preferences"}}, {{"text": "- context bullet point 2", "topic": "project"}}], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""

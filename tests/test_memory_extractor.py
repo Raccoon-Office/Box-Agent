@@ -60,6 +60,25 @@ async def test_extract_additions(mgr: MemoryManager):
     assert mgr.read_core() == ""
 
 
+async def test_extraction_prompt_requires_portable_generalization(mgr: MemoryManager):
+    """The extractor must be instructed to remove one-off task framing."""
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(mgr, '{"additions": [], "merges": []}')
+    await extractor.maybe_extract(
+        [
+            Message(role="user", content="记住这类多格式内容交付方法"),
+            Message(role="assistant", content="好的"),
+        ],
+        "loop_end",
+    )
+
+    prompt = extractor._llm.generate.await_args.kwargs["messages"][1].content
+    assert "portability test" in prompt
+    assert "would this still be useful" in prompt
+    assert "家园沟通类内容" in prompt
+
+
 async def test_extract_threads_session_id(mgr: MemoryManager):
     from box_agent.schema import Message
 
