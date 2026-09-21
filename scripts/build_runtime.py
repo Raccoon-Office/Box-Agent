@@ -3,6 +3,7 @@
 
 Usage:
     box-agent-build-runtime [--version 0.3.2] [--output dist/runtime]
+    box-agent-build-runtime --version 0.9.11 --install-lab
     arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --arch x64
 
 Produces:
@@ -23,6 +24,8 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
+import uuid
 import urllib.request
 from pathlib import Path
 
@@ -513,6 +516,140 @@ def install_runtime_into_officev3(
     return installed_dir
 
 
+def resolve_lab_dir(value: str | None = None) -> Path:
+    """Resolve a raccoon-lab checkout containing the desktop app."""
+    configured = value or os.environ.get("BOX_AGENT_LAB_DIR")
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        candidates = [candidate.resolve()]
+    else:
+        candidates = [
+            (PROJECT_ROOT.parents[1] / "frontend" / "raccoon-lab").resolve(),
+            (PROJECT_ROOT.parent / "raccoon-lab").resolve(),
+        ]
+
+    for candidate in candidates:
+        desktop_dir = candidate / "apps" / "office-desktop"
+        if (desktop_dir / "package.json").is_file():
+            return candidate
+        if candidate.name == "office-desktop" and (candidate / "package.json").is_file():
+            return candidate.parent.parent
+
+    rendered = ", ".join(str(candidate) for candidate in candidates)
+    raise RuntimeError(
+        "Unable to locate raccoon-lab checkout. "
+        f"Checked: {rendered}. Pass --install-lab /path/to/raccoon-lab "
+        "or set BOX_AGENT_LAB_DIR."
+    )
+
+
+def _runtime_root_from_extract(extract_dir: Path) -> Path:
+    """Find the runtime root in an archive extraction directory."""
+    if (extract_dir / "manifest.json").is_file():
+        return extract_dir
+    roots = [
+        path
+        for path in extract_dir.iterdir()
+        if path.is_dir() and (path / "manifest.json").is_file()
+    ]
+    if len(roots) != 1:
+        raise RuntimeError(f"Expected one runtime root in archive, found {len(roots)}")
+    return roots[0]
+
+
+def install_runtime_into_lab(
+    archive_path: Path,
+    lab_dir: Path,
+    *,
+    expected_version: str,
+) -> Path:
+    """Install a built runtime into raccoon-lab's desktop resource directory."""
+    archive_path = archive_path.resolve()
+    lab_dir = lab_dir.resolve()
+    desktop_dir = lab_dir / "apps" / "office-desktop"
+    if lab_dir.name == "office-desktop" and (lab_dir / "package.json").is_file():
+        desktop_dir = lab_dir
+    if not archive_path.is_file():
+        raise RuntimeError(f"Runtime archive not found: {archive_path}")
+    if not (desktop_dir / "package.json").is_file():
+        raise RuntimeError(f"Lab desktop app not found: {desktop_dir}")
+
+    platform_name, arch = detect_platform()
+    target_dir = desktop_dir / "build-resources" / "box-agent-runtime"
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="box-agent-lab-install-") as temp:
+        extract_dir = Path(temp)
+        try:
+            with tarfile.open(archive_path, "r:gz") as archive:
+                members = archive.getmembers()
+                for member in members:
+                    member_path = Path(member.name)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise RuntimeError(f"Runtime archive contains unsafe path: {member.name}")
+                archive.extractall(extract_dir, filter="data")
+        except (tarfile.TarError, OSError) as exc:
+            raise RuntimeError(f"Failed to extract runtime archive: {exc}") from exc
+
+        runtime_root = _runtime_root_from_extract(extract_dir)
+        manifest_path = runtime_root / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Invalid runtime manifest: {manifest_path}: {exc}") from exc
+        if manifest.get("name") != "box-agent" or manifest.get("mode") != "standalone":
+            raise RuntimeError("Runtime manifest is not a standalone box-agent runtime")
+        if str(manifest.get("version") or "") != expected_version:
+            raise RuntimeError(
+                f"Runtime version mismatch: expected {expected_version}, "
+                f"got {manifest.get('version') or 'unknown'}"
+            )
+        if manifest.get("platform") != platform_name or manifest.get("arch") != arch:
+            raise RuntimeError(
+                "Runtime target mismatch: "
+                f"expected {platform_name}-{arch}, "
+                f"got {manifest.get('platform')}-{manifest.get('arch')}"
+            )
+        entry = manifest.get("entry")
+        if (
+            not isinstance(entry, str)
+            or not entry
+            or Path(entry).is_absolute()
+            or ".." in Path(entry).parts
+        ):
+            raise RuntimeError("Runtime manifest entry is invalid")
+        entry_path = runtime_root / entry
+        if not entry_path.is_file():
+            raise RuntimeError(f"Runtime entry not found: {entry_path}")
+
+        staging = Path(tempfile.mkdtemp(prefix=".box-agent-runtime-", dir=target_dir.parent))
+        backup = target_dir.parent / f".box-agent-runtime-backup-{uuid.uuid4().hex}"
+        try:
+            shutil.copytree(runtime_root, staging, symlinks=True, dirs_exist_ok=True)
+            staged_entry = staging / entry
+            if platform_name != "win32":
+                staged_entry.chmod(staged_entry.stat().st_mode | 0o111)
+            if target_dir.exists() or target_dir.is_symlink():
+                if target_dir.is_symlink() or not target_dir.is_dir():
+                    raise RuntimeError(f"Refusing to replace non-directory runtime: {target_dir}")
+                target_dir.rename(backup)
+            staging.rename(target_dir)
+            if backup.exists():
+                shutil.rmtree(backup)
+        except Exception:
+            if target_dir.exists() and not backup.exists():
+                shutil.rmtree(target_dir)
+            if backup.exists() and not target_dir.exists():
+                backup.rename(target_dir)
+            raise
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+
+    return target_dir
+
+
 def build_runtime(
     version: str,
     output_dir: Path,
@@ -995,10 +1132,27 @@ def main():
             "BOX_AGENT_OFFICEV3_DIR or auto-detect the usual checkout layout."
         ),
     )
+    parser.add_argument(
+        "--install-lab",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help=(
+            "After building, install the archive into raccoon-lab's office-desktop. "
+            "Omit DIR to use BOX_AGENT_LAB_DIR or auto-detect the usual checkout layout."
+        ),
+    )
     args = parser.parse_args()
 
     if args.target and args.arch:
         print("Error: use either --target or --arch, not both", file=sys.stderr)
+        sys.exit(1)
+    if args.install_officev3 is not None and args.install_lab is not None:
+        print(
+            "Error: use either --install-officev3 or --install-lab, not both",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     version = args.version
@@ -1031,12 +1185,20 @@ def main():
                 officev3_dir,
                 expected_version=version,
             )
+        if args.install_lab is not None:
+            lab_dir = resolve_lab_dir(args.install_lab or None)
+            installed_dir = install_runtime_into_lab(
+                archive,
+                lab_dir,
+                expected_version=version,
+            )
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     print(f"\nDone! Artifact: {archive}")
     if installed_dir is not None:
-        print(f"Done! Installed officev3 runtime: {installed_dir}")
+        label = "lab" if args.install_lab is not None else "officev3"
+        print(f"Done! Installed {label} runtime: {installed_dir}")
 
 
 if __name__ == "__main__":
