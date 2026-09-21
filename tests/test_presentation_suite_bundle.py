@@ -48,7 +48,7 @@ def test_entry_routes_static_and_dynamic_without_missing_methods():
 
 def test_provenance_covers_every_file_and_records_integration_changes():
     source = json.loads((SUITE / "source.json").read_text())
-    assert source["revision"] == "e187295633eb4cb201e6a2a5a206a419eb79990a"
+    assert source["revision"] == "b5ef18018940e63eafe28081460a402ec68632b5"
     assert source["modules"] == sorted(NAMES)
     assert "entry-two-outputs" in source["overlays"]
     assert "/Users/" not in json.dumps(source)

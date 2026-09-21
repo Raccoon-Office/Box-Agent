@@ -112,6 +112,8 @@
 - image_opportunity：**只写一个机器可读枚举**，不带任何解释：`real_required` / `generated_ok` / `none` / `chart_only` / `canvas_only` / `typography_only`（`none` 及 `*_only` 判定为无位图）。启动 gate 与交付验收只解析这一行的枚举；理由另写在下一行的 `image_opportunity_reason`，绝不写进本行。
 - image_opportunity_reason：人类可读理由（一句话）。判定内容：先写值得被看见的主体/场景，以及图片能增加的证据、识别、临场感或情绪价值，再决定媒介。没有项目实拍不等于没有图片机会；尚未建成的空间、虚构人物、服务场景与风格化主视觉可考虑统一风格的生成图。具名真实人物、主创、嘉宾或团队成员是默认的真实图片机会：应规划批量检索肖像、官方简介照、活动照或团队合影；“不生成假真人”意味着改走真图检索，不意味着 `none`。具名作品、软件/产品、制作流程和真实案例也应先检查官方画面、界面、幕后图、过程拆解、实物或现场照片，而不是直接退成小图标与空卡片。若为 `none`，理由须说明真实检索后仍不可得且位图为何不增加听众价值，或为何会比图表/Canvas/排印更含糊；“CSS 更可控”“没有实拍”“担心 AI 出错”“为了风格统一”不是单独成立的 none 理由
 - presentation：位图的**展示/背景处理合同**，取值**只能是四枚举之一**：`subject-only` | `framed-scene` | `full-bleed` | `evidence-crop`。**有位图页必填、无位图页完全省略这一行**（不要写 `无` / `none` / `not-applicable` 占位）。⛔ `split-media` / `right-half` / `cards` / `分屏` / `左右` 等是**版式/构图（layout/arch）**，绝不能写进 presentation；它们放到 `layout` 行。角色、产品或物件需要悬浮、跨色场叠放或作为独立元素时必须选 `subject-only`，并在素材 brief 写 `subject_only: true`；其他三种必须把原图背景作为有意的画面、满幅或证据边界，不能偶然露出矩形底色。（例：夜间阅读实拍用于左右分屏 → `presentation: framed-scene`，分屏本身写在 `layout`。）
+- subject_only: true
+  仅在 `presentation: subject-only` 时保留上面这条独立单行机器字段，必须位于本页 `## 视觉实现` 下；其他 presentation 省略。图片 brief 同时保留透明要求，不能只在 brief 中写此字段。
 - asset_id：每个位图机会写一个稳定 `asset_id`（英数/下划线，跨页唯一）；Image 完成后由编排器把 `asset_id → 实际路径 + origin + crop_contract` 回填到本行。无位图页不写。
 - layout：区域比例、对齐、视觉重心
 - spatial_budget：主焦点、文字、证据视觉分别占用哪些区域；剩余空间是呼吸、动线还是待消除的死白。`dense` 页的主信息不得只挤在半张画布或一条窄带，否则先改空间分配而不是留给 Slide 猜
@@ -125,9 +127,9 @@
 - diagram：节点、关系、方向、层级（如需要）
 
 ## Reference route
-- layout-patterns.md：<只列本页命中的章节>
-- design-rules.md：<只列本页命中的主题节>
-- quality-checklist.md：单页检查
+- layout-patterns.md：<本页命中章节的完整标题>
+- design-rules.md：<本页命中主题节的完整标题>
+- quality-checklist.md：一、单页检查
 
 ## 来源
 - <内部溯源字段，仅供讲稿引用与自查，**绝不上屏**；写屏显事实对应来源，无外部来源则写 user-provided / none。文件路径 / 章节锚点（如 `research/research.md §二.4`）只能留在此处，绝不作为页面 source 印出>
@@ -137,6 +139,12 @@
 ```
 
 逐页计划是 Slide 的内容合同。只有 `## 最终屏显文案` 中通过内容充分性与观众价值检查的内容可以进入 HTML；`页面导演`、`视觉实现`、`Reference route`、`来源` 和 `口语讲稿` 都是非屏显区。屏显文案、数据、节点关系和素材路径必须定稿；Slide 可以调整 `.slide-body` 内的比例和排法，并可省略计划中语义完全重复的低价值屏显节点，但不得改事实、自创文案或增加计划外的大型装饰图。`视觉验收` 写观众能从像素读出的结果，不写“做得高级”“有科技感”这类审美愿望；流程/机制/方法/数据/media-led 页需明确语义对象、关系方向与领域证据，纯排印页可用一句话说明焦点与阅读顺序。冻结前先用 Style Lock 的字阶做一次版面预演：如果一页只有把听众需要阅读的文字压到 `--fs-min` 以下才放得下，应在规划阶段缩短屏显、重组层级或拆分职责，不能把“靠小字塞下”交给 Slide 解决。
+
+### Reference route 的精确写法
+
+每条用 `- 文件名.md：完整标题`，标题必须与 reference 中的实际 Markdown 标题完全一致，不含 `#`；多个章节分别写一条。重名标题用 `父标题 > 子标题` 给出完整层级路径，不写简称、范围或逗号拼接。示例：`- design-rules.md：4 · 图表(ECharts)`。按需路由不变，不为脚本扫描全库或删减设计要求。
+
+素材路径回填完成后，`scripts/group_input.py` 按 Production groups 准备完整原文输入；组段、Style Lock、CSS、逐页计划及路由章节不被摘要替换。新计划遵循上面的字段格式；不符合格式的旧任务可沿用完整原文读取，不强制迁移。
 
 ## 3. 页型选择
 

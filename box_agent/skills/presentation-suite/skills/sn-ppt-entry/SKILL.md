@@ -287,9 +287,11 @@ Hermes/OpenClaw 实际读取的用户级 `.env`、缺失项和配置模板。
 11. **出口分发**：Story 已完成且当前磁盘 `outline.md` 已按本档位确认后，
     `static_html` 调用 `sn-ppt-standard`，`dynamic_html` 调用 `sn-ppt-dazzle`；始终传入相同绝对
     `deck_dir`。不得绕过 Story；出口不再研究、重排页面或重写大纲。
-12. **后处理和收尾**：静态页面完成后，父级先按 Standard 的命令执行
-    `deck.py build` 与 `deck.py audit`，核对 `<deck_dir>/present.html` 存在、覆盖全部页面且
-    播放器可打开，再完成最终像素检查。逐页 HTML/PNG 或 PPTX 已存在都不能跳过这一步。
+12. **后处理和收尾**：静态页面完成后，父级核对 Standard 的 `deck.py review-prep`
+    结果及最终 Review 合同，确认 `<deck_dir>/present.html` 存在、覆盖全部页面且播放器
+    可打开，最终全册像素已检查。仅有逐页 HTML/PNG 或 PPTX 不能代替这些验收。
+    本轮尚未准备待审产物时，执行 Standard 的 `review-prep` 后完成最终像素检查；
+    已验收且此后视觉源未变化时直接消费结果，不重复 build/audit 或改动页面。
     随后按 `static_postprocess` 使用 Standard 自有 exporter
     `scripts/export_pptx/html_to_pptx.mjs` 导出 PPTX，默认同时交付；只有用户明确只要 HTML
     时才可省略 PPTX，任何静态任务都不能因此省略 `present.html`。

@@ -18,7 +18,7 @@ def function(text, name):
 
 def apply(relative, data):
     if relative == "skills/sn-ppt-standard/scripts/render.py":
-        if hashlib.sha256(data).hexdigest() != "ef67a08f244cc2ac507bb4ebd5ebcd4dc1a09ef0538d70bc39f8aa1de4dc9069":
+        if hashlib.sha256(data).hexdigest() != "d15ba4f76d0277cfe729cc38896cfa988457aaebec844b41e6c1509f848b35bd":
             raise ValueError("render lifecycle overlay needs review: upstream renderer changed")
         text = data.decode()
         text = replace(text, "import signal\n", "")

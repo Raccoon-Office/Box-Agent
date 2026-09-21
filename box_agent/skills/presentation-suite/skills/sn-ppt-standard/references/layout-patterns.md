@@ -288,6 +288,27 @@ document.fonts.ready.then(() => {
 
 使用 ECharts radar，不手画 Canvas/SVG。维度通常 4–7 个，量纲一致或已归一化；突出一个主系列，其余退为中性色。
 
+### ECharts 字体初始化
+
+所有 ECharts 类型都从当前 CSS 字体角色取值，不复制字体包的内部 `Deck-*` 名称。图表容器需已有确定尺寸；以下初始化放在 DOM、数据与本地 ECharts 加载之后：
+
+```javascript
+document.fonts.ready.then(() => {
+  const host = document.getElementById('chart');
+  const css = getComputedStyle(host);
+  const fontFamily = css.getPropertyValue('--font-sans').trim();
+  if (!fontFamily) throw new Error('Missing --font-sans for chart');
+  const chart = echarts.init(host);
+  chart.setOption({
+    ...option, // 来自已冻结计划的完整数据与编码
+    animation: false,
+    textStyle: {...option.textStyle, fontFamily},
+  });
+});
+```
+
+轴、图例或 series label 若单独设置 `fontFamily`，同样使用这个运行时值；数字的独立字体角色按 Style Lock 读取。不要仅更新顶层 textStyle 却留下局部旧别名。最后仍从最终 PNG 核验字形、标签完整性与可读性。
+
 ### 9.7 优劣 / 方案对比
 
 优先使用 arch-compare 的 HTML/CSS 双栏；只有需要连续权衡轴或关系连线时才用 Canvas。所有方案使用同一比较维度。
