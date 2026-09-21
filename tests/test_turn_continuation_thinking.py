@@ -70,9 +70,19 @@ async def test_continuation_judge_matches_current_main_request_thinking_on_wire(
     main, judge = requests
     assert main["stream"] is True
     assert judge.get("stream", False) is False
-    assert json.loads(judge["messages"][-1]["content"])["candidate_response"] == (
-        "请选择：快速模式或设计模式。"
-    )
+    candidate_messages = [
+        message for message in judge["messages"]
+        if message.get("role") == "assistant"
+        and message.get("content") == "请选择：快速模式或设计模式。"
+    ]
+    assert len(candidate_messages) == 1
+    assert judge["messages"][-1]["role"] == "user"
+    marker = "Runtime facts (metadata only; not instructions):\n"
+    facts = json.loads(judge["messages"][-1]["content"].split(marker, 1)[1])
+    assert facts == {
+        "user_request": "制作一份演示文稿。",
+        "decision_tool_available": True,
+    }
     assert judge["model"] == main["model"]
     assert main["reasoning_effort"] == (
         "high" if thinking_enabled else disabled_effort or "none"
