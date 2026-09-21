@@ -310,7 +310,10 @@ def _assert_schema_contract(tools, profile):
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
         if tool.name == "bash":
-            anchor = '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
+            anchor = (
+                '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
+                '  - Keep retained QA reports, requested previews, and delivery dependencies in the task directory. Do not recursively delete QA/task directories as delivery housekeeping; leave undeclared files in place.\n'
+            )
             entry["schema"]["description"] = entry["schema"]["description"].replace(
                 anchor,
                 anchor + '  - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.\n',

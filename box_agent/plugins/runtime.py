@@ -9,7 +9,7 @@ from typing import Any
 
 from ..composition import _attach_cleanup_error, _combined_cleanup_error
 from ..session_context import RunContext, SessionContext
-from .builtins import (SESSION_CAPABILITY_SCHEMA, SessionInitializerPort,
+from .builtins import (SESSION_CAPABILITY_SCHEMA, AgentRunBindingPort, SessionInitializerPort,
                        SessionResources, builtin_plugin_descriptors)
 from .descriptors import PluginDescriptor, PluginScope
 from .host import PluginActivation, PluginHost
@@ -45,16 +45,28 @@ class PluginSession:
             raise ValueError("run context belongs to another session")
         self._run_opening = True
         try:
-            self._run = await self.runtime.host.activate(
+            activation = await self.runtime.host.activate(
                 session_key=self.context.session_key,
                 plugin_ids=self.plan.plugin_ids,
                 contexts={PluginScope.PROCESS: None, PluginScope.SESSION: self.context,
                           PluginScope.RUN: context},
             )
+            self._run = activation
+            try:
+                for binding in activation.registry.get_all(AgentRunBindingPort):
+                    binding.install_agent(context.agent)
+            except BaseException as error:
+                try:
+                    await activation.dispose()
+                except BaseException as cleanup_error:
+                    _attach_cleanup_error(error, cleanup_error)
+                else:
+                    self._run = None
+                raise
         finally:
             self._run_opening = False
         self.context.emit("plugin.run.start", run_id=context.run_id)
-        return self._run
+        return activation
 
     async def close_run(self, activation: PluginActivation) -> None:
         await activation.dispose()
@@ -89,8 +101,12 @@ class PluginRuntime:
     """
 
     def __init__(self, *, plugins: Iterable[PluginDescriptor] = (),
-                 bindings: Iterable[CapabilityBinding] = ()) -> None:
-        descriptors = builtin_plugin_descriptors() + tuple(plugins)
+                 bindings: Iterable[CapabilityBinding] = (),
+                 include_bundled_plugins: bool = True) -> None:
+        from .catalog import bundled_plugin_descriptors
+
+        bundled = bundled_plugin_descriptors() if include_bundled_plugins else ()
+        descriptors = builtin_plugin_descriptors() + bundled + tuple(plugins)
         self.host = PluginHost(descriptors, schema=CapabilitySchema(
             SESSION_CAPABILITY_SCHEMA.bindings + tuple(bindings),
         ))

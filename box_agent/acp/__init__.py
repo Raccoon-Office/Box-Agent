@@ -5461,6 +5461,7 @@ async def run_acp_server(config: Config | None = None) -> None:
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,
             reasoning_effort_when_disabled=config.llm.reasoning_effort_when_disabled,
+            image_input=config.llm.image_input,
         )
 
         # Kept as a constructor compatibility alias only. Internal calls now

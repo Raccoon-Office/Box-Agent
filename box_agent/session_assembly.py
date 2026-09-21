@@ -79,6 +79,7 @@ async def prepare_model(resources: SessionResources) -> None:
             max_request_body_bytes=llm.max_request_body_bytes,
             timeout=llm.timeout,
             reasoning_effort_when_disabled=llm.reasoning_effort_when_disabled,
+            image_input=llm.image_input,
         )
         resources.cleanup.push_async_callback(resources.llm_client.aclose)
     if context.host.summary_llm is not None:

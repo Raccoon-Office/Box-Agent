@@ -5,11 +5,11 @@ Provides unified configuration loading and management functionality
 
 import shutil
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
 
 from .auth import should_attach_auth_header
 from .user_paths import (
@@ -77,6 +77,10 @@ class LLMConfig(BaseModel):
     api_base: str = "https://api.anthropic.com"
     model: str = DEFAULT_MODEL
     provider: str = "anthropic"  # "anthropic" or "openai"
+    # Explicit model capability declaration used by optional image-aware
+    # plugins. ``None`` keeps the capability unknown; callers must opt in with
+    # ``true`` before images are sent to a model.
+    image_input: StrictBool | None = None
     auth_file: str = ""
     context_window: int = 180000
     max_output_tokens: int = USER_CONFIGURED_MAX_OUTPUT_TOKENS
@@ -402,6 +406,9 @@ class Config(BaseModel):
     tools: ToolsConfig
     officev3: Officev3Config = Field(default_factory=Officev3Config)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    # Plugin-owned configuration is kept opaque to the core model. Each
+    # plugin validates its own namespace after activation.
+    plugins: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _resolve_profile_paths(self) -> "Config":
@@ -494,6 +501,7 @@ class Config(BaseModel):
             api_base=api_base,
             model=model,
             provider=data.get("provider", "anthropic"),
+            image_input=data.get("image_input"),
             auth_file=data.get("auth_file") or str(config_path.parent / "auth.json"),
             context_window=data.get("context_window", 180000),
             max_output_tokens=data.get("max_output_tokens", default_max_output_tokens),
@@ -652,6 +660,20 @@ class Config(BaseModel):
             )
             officev3_config._present = True
 
+        # Parse plugin-owned configuration without importing plugin packages.
+        plugins_data = data.get("plugins", {})
+        if plugins_data is None:
+            plugins_data = {}
+        if not isinstance(plugins_data, dict):
+            raise ValueError("plugins must be a mapping")
+        plugin_configs: dict[str, dict[str, Any]] = {}
+        for plugin_name, plugin_data in plugins_data.items():
+            if not isinstance(plugin_name, str) or not plugin_name:
+                raise ValueError("plugin names must be non-empty strings")
+            if not isinstance(plugin_data, dict):
+                raise ValueError(f"plugins.{plugin_name} must be a mapping")
+            plugin_configs[plugin_name] = dict(plugin_data)
+
         # Parse hooks configuration
         hooks_data = data.get("hooks", [])
         if not isinstance(hooks_data, list):
@@ -667,6 +689,7 @@ class Config(BaseModel):
             tools=tools_config,
             officev3=officev3_config,
             hooks=hooks_config,
+            plugins=plugin_configs,
         )
 
     @staticmethod

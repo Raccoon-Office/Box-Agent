@@ -21,6 +21,10 @@ api_key: "YOUR_API_KEY_HERE"
 api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
 provider: "anthropic"
+# Optional explicit capability declaration. Set this only when the selected
+# model accepts image input. Leave it absent when capability is unknown; CUA
+# then stays text-only unless another adapter declares vision support.
+# image_input: true
 # Provider dialect: models whose name starts with sensenova-/sn-sensenova- use
 # SenseNova thinking parameters and pseudo-tool-call recovery. This is an
 # operator-only compatibility override: only add a family after verifying its
