@@ -442,8 +442,13 @@ class SubAgentTool(EventEmittingTool):
             "`write_scope`, omitted tools also include the parent's available write_file, "
             "edit_file, and append_file, restricted to those outputs; pass an explicit "
             "minimal list for other work or an empty list for a tool-free task. Explicit tools "
-            "still pass a fail-closed runtime policy: external side effects and unknown MCP tools "
-            "are not delegated. Image tools require explicit selection. "
+            "still pass a fail-closed runtime policy: unknown MCP tools and file uploads "
+            "are not delegated. Managed Playwright tools including page interaction, "
+            "screenshots, evaluate, `managed_browser_run_code`, dialogs, and navigation "
+            "(`managed_browser_click`, `managed_browser_type`, `managed_browser_evaluate`, "
+            "`managed_browser_handle_dialog`, `managed_browser_take_screenshot`) may be named "
+            "explicitly when the parent session already has them. Image tools require explicit "
+            "selection. "
             "`bash` is available only when named explicitly and every delegated "
             "command requires one-shot parent-session approval. Path-based "
             "write tools require an exact `write_scope`, with disjoint scopes for parallel "
@@ -452,7 +457,7 @@ class SubAgentTool(EventEmittingTool):
             "`files` and `required_tools:[\"read_file\"]` to use the bounded "
             "completeness-checked batch fast path. Omitted tools with files and a one-step "
             "budget also retain that path when no write_scope is given. Pass "
-            "`budget` as an object such as `{max_steps:12, max_tool_calls:25}`."
+            "`budget` as an object such as `{max_steps:24, max_tool_calls:36}`."
         )
 
     @property
@@ -498,7 +503,9 @@ class SubAgentTool(EventEmittingTool):
                         "A non-empty "
                         "write_scope also supplies available write_file, edit_file, and "
                         "append_file within that scope. Explicit lists, including [], "
-                        "are never expanded."
+                        "are never expanded. Managed Playwright tools including "
+                        "managed_browser_run_code may be named when already active on "
+                        "the parent; file uploads cannot."
                     ),
                     "items": {"type": "string"},
                     "uniqueItems": True,
@@ -531,7 +538,7 @@ class SubAgentTool(EventEmittingTool):
                     "type": "object",
                     "description": (
                         "Optional numeric limits as a JSON object, for example "
-                        "{\"max_steps\":12,\"max_tool_calls\":25}. Never pass a "
+                        "{\"max_steps\":24,\"max_tool_calls\":36}. Never pass a "
                         "serialized JSON string."
                     ),
                     "properties": {
