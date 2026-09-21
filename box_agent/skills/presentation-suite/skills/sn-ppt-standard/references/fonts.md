@@ -52,6 +52,7 @@
 ## 3. 使用规则
 
 - 正文、表格和图表标注固定用 `--font-sans`；代码与技术编号才用 `--font-mono`。
+- ECharts/Canvas 在 `document.fonts.ready` 后从当前元素的 computed CSS 读取字体角色；不把构建生成的 `Deck-*` 名称复制进 JS。字符子集变化会改变这些内部名称，旧名称可能悄悄回退。使用图表前按 `layout-patterns.md` 的“ECharts 字体初始化”示例取值；旧页报告出现硬编码名称时定位修正，不全局替换 JS 或改成通用字体掩盖问题。
 - `--font-number` 按语义选择：报告用 sans/grotesque，编辑叙事用 serif/display-serif，海报用 heavy/playful，工程读数才用 mono。
 - 中文信息标题先服从 Style Lock 与场合：严谨报告使用 Noto Sans/Serif SC，表达型人文、课堂、手作或文旅页面可使用 Xiaolai / LXGW WenKai 承担章节、引言或短标题。不要因题材里出现“科技”“数据”就机械切成卡通黑体，也不要把硬笔体用于党政、法律、医疗等严肃信息正文。草书只用于 ≥48px 且足够短、且主题确实需要书写性的封面、hero 或金句。
 - 中文眉签、页脚、部门名、元数据和短标签默认使用 `--font-sans` 或 `--font-serif`，字距为 `0–0.03em`，允许范围 `-0.01–0.06em`；不得使用 `--font-mono`、`--tracking-caps` 或超过 `0.08em` 的字距。只有纯拉丁 ALL CAPS、代码、API、坐标和真实编号可使用 mono 与疏字距。

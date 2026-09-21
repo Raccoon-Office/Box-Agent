@@ -1240,6 +1240,40 @@ def _hard_render_issues(report):
     return issues
 
 
+def _geometry_diagnostics(report):
+    """Explain existing measurements without turning candidates into verdicts."""
+    diagnostics = []
+    footer = (report.get("layout") or {}).get("footerPushed")
+    if footer:
+        item = {"type": "footerPushed", "severity": "hard", "items": [footer]}
+        below = footer.get("belowViewport")
+        if isinstance(below, (int, float)):
+            item["belowViewport"] = {
+                "value": below, "unit": "px",
+                "direction": "outside" if below > 0 else "inside" if below < 0 else "at-edge",
+                "distance": abs(below),
+            }
+        over = footer.get("bodyOverFooter")
+        if isinstance(over, (int, float)):
+            item["bodyOverFooter"] = {"value": over, "unit": "px",
+                                     "meaning": "body deepest content bottom minus footer top"}
+        diagnostics.append(item)
+    for key in ("boxoverflow", "overlap", "crowded", "cjkTypography", "contrast"):
+        values = report.get(key)
+        if values:
+            item = {"type": key, "severity": "advisory", "items": values,
+                    "meaning": "candidate only; verify against current pixels and DOM"}
+            if key == "boxoverflow":
+                item["fields"] = {
+                    "ob": {"unit": "px", "direction": "bottom",
+                           "meaning": "maximum child extension past container content bottom"},
+                    "orr": {"unit": "px", "direction": "right",
+                            "meaning": "maximum child extension past container content right edge"},
+                }
+            diagnostics.append(item)
+    return diagnostics
+
+
 def _atomic_json(path, payload):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = path + f".{os.getpid()}.tmp"
@@ -1266,6 +1300,7 @@ def _record_render_report(root, number, slide, target, report):
         "png_mtime_ns": os.stat(output).st_mtime_ns,
         "summary": _batch_warning_summary(report),
         "hard_issues": _hard_render_issues(report),
+        "diagnostics": _geometry_diagnostics(report),
         "report": report,
     }
     lock_path = os.path.join(root, "_trace", "render-report.lock")
@@ -1293,6 +1328,7 @@ def _record_render_report(root, number, slide, target, report):
             "source_sha256": record["source_sha256"],
             "png_sha256": record["png_sha256"],
             "hard_issues": record["hard_issues"],
+            "diagnostics": record["diagnostics"],
         }
         _atomic_json(issue_path, ledger)
         _fcntl.flock(lock.fileno(), _fcntl.LOCK_UN)

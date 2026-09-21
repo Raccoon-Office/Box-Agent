@@ -40,28 +40,21 @@
 - 一次 `sub_agent` 只委派一个完整工作单元；需要并行时，在同一模型回合发出多个互相独立的 `sub_agent` 调用，不使用旧 `tasks` 数组。
 - `title` 对应旧 `label`；`task` 必须自包含，包含语言合同、角色卡绝对路径、此契约绝对路径、输入路径、输出路径、页码/素材所有权和结构化返回要求。
 - `required_tools` 只给完成任务所需的 canonical 工具。凡包含 `write_file`、`append_file` 或 `edit_file`，必须给精确且互不重叠的 `write_scope`。
+- 普通页面生产委派省略 `budget`，使用本次运行时工具说明中的默认额度；只有主动限制小任务时才显式收紧。Skill 不保存额度数字，不读取配置或另查预算；父级以工具说明及实际回执为准，只读文件批处理保留其独立限制。
 - 子代理不递归委派，不读运行轨迹。父级以子代理自然语言合同为交接，并用 `read_file` / `search_files` 验证声明的正式产物。
 - Research 可用 `read_file/search_files/web_search/web_extract/write_file`；Material 只在父级 staging 后读取解析产物并写指定摘要；Image 优先用 `generate_image/inspect_images/read_file`；Slide/Review 用文件工具和 `inspect_images`，由父级在两次委派之间完成渲染。
 
 Box-Agent 的 `sub_agent` 没有父子交错的暂停/续跑协议。新建时一次委派一个完整 Production group，子代理完成组内 HTML 后返回待渲染页码；父级统一渲染并逐页看图，需要修复时携带新鲜像素、同一 group 和精确影响范围重新委派，不拆成每页一个新建任务。首次交回待渲染页面不算返修，实际像素问题修复计入根 Skill 的预算。简单编辑由唯一 Review 集中改文件后以 `pending_parent_verification` 交回待渲染页码，由父级完成渲染、build 和最终检查；子代理不能在父级执行前声称像素或交付已通过。
 
-以第 1 页为例，从已存在的 task pack 生成路径参数，再合并进上述自包含的委派 `task`。`files` 只放已存在的输入文本，预计输出只放在 `write_scope` 和任务说明中；不得手抄另一套长路径。
+素材完成并回填计划后，一次准备全部 Production groups 的完整原文输入与绝对路径：
 
 ```bash
-python - "$DECK_DIR/task_pack.json" <<'PY'
-import json, sys
-from pathlib import Path
-pack_path = Path(sys.argv[1]).resolve(strict=True)
-root = Path(json.loads(pack_path.read_text())["deck_dir"])
-assert root.is_absolute() and root.resolve(strict=True) == pack_path.parent
-root = root.resolve()
-inputs = [root / name for name in ("plan/design-brief.md", "plan/slide_01.md", "base.css")]
-assert all(path.is_file() for path in inputs), "先完成计划和 prepare"
-output = str(root / "slides/slide_01.html")
-print(json.dumps({"files": [str(path) for path in inputs],
-                  "write_scope": [output], "task": "按本页计划制作 HTML，写入 " + output}, ensure_ascii=False))
-PY
+python "<SKILL_ROOT>/scripts/group_input.py" "$DECK_DIR" --expected <总页数> --tool-contract "<SKILL_ROOT>/references/box-agent-tool-contract.md"
 ```
+
+取对应组的 `inputs` 作为 `sub_agent.files`，`outputs` 作为 `write_scope`；把组 ID、页码、语言、写入目标和返回合同合并进自包含的 `task`，不手抄另一套长路径。`inputs` 只含已存在文本，预计 HTML 输出不能放进 `files`。要求子代理按返回顺序读完所有 `parts`，其中已包含本契约、Slide 说明、Style Lock、组合同、逐页计划、CSS 和命中参考的原文，不重复读取同一份来源。分片只控制单次读取大小，不保证总体上下文一定装得下。
+
+这些文件只是原文输入视图，源计划仍是真相源；计划、CSS 或素材回填变化后，用同一命令加 `--group <group_id>` 重新准备受影响组。旧自由格式计划若不能解析，说明脚本不适用，沿用完整原文读取和已验证绝对写域，不为使用脚本重做全册计划。路径与 task pack 不一致是错误，不搜索其他 workspace，也不做任务迁移。
 
 ## 4. 生图、搜图与来源账本
 
@@ -95,7 +88,13 @@ Box-Agent 路线将 shell 与页面写入分离：
 1. Slide 子代理只写自己 `write_scope` 内的 HTML，并返回待渲染页码。
 2. 父级运行 `render.py --batch`，再用 `inspect_images(strategy="native")` 看新 PNG。
 3. 有硬伤时，父级把新鲜像素证据和精确问题交给同页范围的修复子代理；最多遵守根 Skill 规定的修复预算。
-4. 父级重渲并复看。最终 Review 同样由父级先提供新鲜 PNG、Review 子代理集中修复、父级统一重渲/build；父级统一执行重渲、build、inspect 和 Standard exporter，只有最终 PNG 与 `present.html` 验证通过后才导出，失败登记 `state.status=partial`。
+4. 父级重渲并复看。最终 Review 同样由父级先提供新鲜 PNG、Review 子代理集中修复；正式待审和修复后的最终待审统一由父级执行下方 `review-prep`。该命令合并机械收尾，不代替 Review 或 Entry 验收；父级按现有分批要求看完最终全册像素，确认 `present.html` 与播放器可用，更新原账本的最终合同后才调用 Standard exporter，失败登记 `state.status=partial`。
+
+```bash
+python "<SKILL_ROOT>/scripts/deck.py" review-prep "$DECK_DIR" --expected <总页数>
+```
+
+返回 `prepared` / `qa: not-run` 只代表待审产物就绪，不是 PASS。先使用返回的最终图片和联系表路径中性看图，再按需读诊断；不追加一次 `contact` 或 `build`。正式待审固定全册，不传 `--pages`；局部诊断仍用下面的指定页命令。最终看图后若又改了 HTML、CSS、字体或资源，必须重新待审与验收。同页修复前读取当前文件并一次汇总修改，优先单次连续区块编辑，必要时用已有 `write_file` 完整提交；不根据猜测旧串反复试 edit，同页只保留一个写者。
 
 渲染命令应单独执行以保留非零退出码。失败先读 `_trace/render-issues.json` 并修对应 HTML，再运行已有的指定页入口，例如：
 

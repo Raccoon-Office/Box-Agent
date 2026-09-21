@@ -21,7 +21,7 @@ import tempfile
 import yaml
 
 
-PINNED_REVISION = "e187295633eb4cb201e6a2a5a206a419eb79990a"
+PINNED_REVISION = "b5ef18018940e63eafe28081460a402ec68632b5"
 SOURCE_URL = "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git"
 BUNDLE_NAME = "sensenova-presentation-suite"
 MODULES = ("dazzle", "doctor", "entry", "standard", "story", "tools")
@@ -189,7 +189,7 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
 
 `<DECK_DIR>/present.html` 是静态整册的必交付入口，包括全生图、只要 PPTX、只要 HTML
 和续改任务。逐页 HTML/PNG、子代理完成或 PPTX 导出成功，都不等于整册完成。
-父级必须执行下方的 `deck.py build` 与 `deck.py audit`，确认播放器覆盖全部页且可打开；
+父级必须执行下方包含 build/audit 的 `deck.py review-prep`，确认播放器覆盖全部页且可打开；
 再完成最终像素检查及所需 PPTX 导出。只缺播放器时复用已有页面补齐收尾，不重新制作整册。
 最终回复必须给出真实 `present.html` 的可点击链接，并保留其依赖的 slides、样式与资源；
 未生成或核验失败则保存现有产物、登记 `partial` 和错误，不得声称完成或伪造链接。
@@ -197,15 +197,21 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
 ## Box-Agent 兼容入口
 """)
         text = _replace_once(text,
-            'python "$SKILL_ROOT/scripts/deck.py" build "$DECK_DIR" --expected <总页数>\n```',
-            'python "$SKILL_ROOT/scripts/deck.py" build "$DECK_DIR" --expected <总页数>\n'
-            'python "$SKILL_ROOT/scripts/deck.py" audit "$DECK_DIR" --expected <总页数>\n```')
-        text = _replace_once(text,
-            '`deck.py build` 生成并校验 `present.html`（缺失即报错，deck.py:1294-1295）。`present.html` 是必交付产物：不得省略 build、不得拿其他文件代替它交付。',
-            '`deck.py build` 生成 `present.html`；随后单独执行 `deck.py audit`，检查文件存在、全部页引用、本地资源与播放器运行情况。两条命令都必须成功，不用后续命令掩盖退出码。`present.html` 不得省略，也不能用 PPTX 或其他文件替代；通过后登记绝对路径到 `state.artifacts.present_html` 并在最终回复提供链接。')
+            '`present.html` 是必交付产物：不得省略构建、不得拿其他文件代替它交付。',
+            '`present.html` 是必交付产物：不得省略构建、不得拿其他文件代替它交付。'
+            '父级验收通过后登记绝对路径到 `state.artifacts.present_html`，最终回复提供真实链接；'
+            '命令失败保持非零状态，不用后续命令掩盖退出码。')
         return text.encode("utf-8")
     if relative == "skills/sn-ppt-entry/SKILL.md":
         text = data.decode("utf-8")
+        # Preserve the public entry's managed scratch rule when regenerating
+        # from upstream; this host-only rule was previously edited in-bundle.
+        text = _replace_once(text, "所有 Skill 安装目录只读。\n",
+            "所有 Skill 安装目录只读。\n\n"
+            "上述目录规则适用于持久文件。仅供本轮看图检查的缩略图、裁片等遵循公共 `pptx` 入口的\n"
+            "“QA 临时文件与收尾”：生成到 `$BOX_AGENT_SCRATCH_DIR`，交由运行时回收。需保留的\n"
+            "QA 报告、正式预览和交付依赖仍放 `deck_dir`；未登记的已有 QA 文件保留，交付不要求\n"
+            "清空目录，不主动发起递归删除或删除审批。\n")
         text = _replace_once(text,
             "`sn-ppt-standard`、`sn-ppt-dazzle` 或 `sn-ppt-creative`。",
             "`sn-ppt-standard` 或 `sn-ppt-dazzle`。")
@@ -253,9 +259,11 @@ def _apply_integration_overlay(relative: str, data: bytes) -> bytes:
         text = _replace_section(text, '12. **出口分发**：', '## 恢复规则\n', """12. **出口分发**：Story 已完成且当前磁盘 `outline.md` 已按本档位确认后，
     `static_html` 调用 `sn-ppt-standard`，`dynamic_html` 调用 `sn-ppt-dazzle`；始终传入相同绝对
     `deck_dir`。不得绕过 Story；出口不再研究、重排页面或重写大纲。
-13. **后处理和收尾**：静态页面完成后，父级先按 Standard 的命令执行
-    `deck.py build` 与 `deck.py audit`，核对 `<deck_dir>/present.html` 存在、覆盖全部页面且
-    播放器可打开，再完成最终像素检查。逐页 HTML/PNG 或 PPTX 已存在都不能跳过这一步。
+13. **后处理和收尾**：静态页面完成后，父级核对 Standard 的 `deck.py review-prep`
+    结果及最终 Review 合同，确认 `<deck_dir>/present.html` 存在、覆盖全部页面且播放器
+    可打开，最终全册像素已检查。仅有逐页 HTML/PNG 或 PPTX 不能代替这些验收。
+    本轮尚未准备待审产物时，执行 Standard 的 `review-prep` 后完成最终像素检查；
+    已验收且此后视觉源未变化时直接消费结果，不重复 build/audit 或改动页面。
     随后按 `static_postprocess` 使用 Standard 自有 exporter
     `scripts/export_pptx/html_to_pptx.mjs` 导出 PPTX，默认同时交付；只有用户明确只要 HTML
     时才可省略 PPTX，任何静态任务都不能因此省略 `present.html`。

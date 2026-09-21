@@ -53,6 +53,39 @@ function collectMotifMarkers(html) {
 }
 
 function ensureReviewArtifact(deckDir, opts = {}) {
+  const currentReview = resolve(deckDir, '_trace', 'review-issues.md');
+  if (existsSync(currentReview)) {
+    // A fenced example is documentation, not the model's final decision.
+    let fence = null;
+    const text = readFileSync(currentReview, 'utf-8').split(/\r?\n/).map(line => {
+      const marker = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+      if (marker) {
+        if (!fence) fence = marker[1];
+        else if (marker[1][0] === fence[0] && marker[1].length >= fence.length &&
+                 !line.slice(marker[0].length).trim()) fence = null;
+        return '';
+      }
+      return fence ? '' : line;
+    }).join('\n');
+    const headings = [...text.matchAll(/^## Final review contract[ \t]*\r?$/gm)];
+    const fail = reason => {
+      throw new Error(`_trace/review-issues.md: ${reason}; complete final pixel review before export`);
+    };
+    if (headings.length !== 1) fail('expected one unique Final review contract section');
+    const start = headings[0].index + headings[0][0].length;
+    const section = text.slice(start).split(/^#{1,2}\s+/m)[0];
+    for (const [key, required] of Object.entries({
+      status: 'ready', final_pixels_inspected: 'yes', remaining: 'none',
+    })) {
+      const values = [...section.matchAll(new RegExp(`^[ \\t]*(?:-[ \\t]+)?${key}:[ \\t]*([^\\r\\n]*)\\r?$`, 'gm'))];
+      if (values.length !== 1 || values[0][1].trim() !== required) {
+        fail(`${key} must occur once and equal ${required}`);
+      }
+    }
+    // The current ledger is authoritative. Historical root PASS and --force
+    // cannot mask a missing or pending final review contract.
+    return;
+  }
   const reviewMd = resolve(deckDir, 'review.md');
   const reviewJson = resolve(deckDir, 'review.json');
   const hasReviewMd = existsSync(reviewMd);
@@ -434,7 +467,7 @@ export function ensureDeckPreconditions(deckDir, opts = {}) {
     throw new Error(`deck_dir 不存在: ${deckDir}`);
   }
 
-  if (!opts.batch) {
+  if (!opts.batch || existsSync(resolve(deckDir, '_trace', 'review-issues.md'))) {
     ensureReviewArtifact(deckDir, opts);
   }
 

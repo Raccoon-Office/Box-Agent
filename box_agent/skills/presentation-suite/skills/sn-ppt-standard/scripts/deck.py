@@ -29,6 +29,7 @@
 import argparse
 import glob
 import hashlib
+import io
 import json
 import math
 import os
@@ -38,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from urllib.parse import unquote
 
 from font_bundle import (
@@ -116,7 +118,7 @@ def _detect_canvas(base_dir):
     return w, h
 
 
-def _build_player(root: Path, expected: int | None = None):
+def _build_player(root: Path, expected: int | None = None, *, font_manifest: dict | None = None):
     root = root.resolve()
     sdir = root / "slides"
     out = root / "present.html"
@@ -130,7 +132,7 @@ def _build_player(root: Path, expected: int | None = None):
         return 1
     base = str(root)
     try:
-        manifest = bundle_workspace(Path(base))
+        manifest = font_manifest if font_manifest is not None else bundle_workspace(Path(base))
     except Exception as exc:
         print(f"字体打包失败: {exc}", file=sys.stderr)
         return 1
@@ -473,7 +475,7 @@ def _resolve_local_reference(root: Path, owner: Path, value: str) -> tuple[Path 
     return candidate, None
 
 
-def _validate_runtime_dependencies(root: Path, expected: int | None = None) -> None:
+def _validate_runtime_dependencies(root: Path, expected: int | None = None, *, check_player: bool = True) -> None:
     """Reject non-portable local CSS/JS/media references before delivery."""
     slides = sorted(
         path for path in (root / "slides").glob("slide_*.html")
@@ -497,7 +499,7 @@ def _validate_runtime_dependencies(root: Path, expected: int | None = None) -> N
                 shown = resolved.relative_to(root).as_posix() if resolved and root.resolve() in resolved.parents else str(resolved)
                 errors.append(f"{owner.relative_to(root).as_posix()}: {reference} -> {shown} {error}")
     present = root / "present.html"
-    if present.is_file():
+    if check_player and present.is_file():
         player = present.read_text(encoding="utf-8", errors="ignore")
         missing_in_player = [
             slide.relative_to(root).as_posix() for slide in slides
@@ -1177,6 +1179,136 @@ def _build_contact(root: Path, expected: int | None = None, focus: str | None = 
     print(json.dumps(payload, ensure_ascii=False))
 
 
+def _validate_deck_font_aliases(root: Path, manifest: dict) -> None:
+    """Report stale literal chart/CSS aliases; never rewrite authored styles."""
+    current = set((manifest.get("delivery_families") or {}).values())
+    current.update(face.get("delivery_family") for face in manifest.get("faces", []))
+    owners = set((root / "slides").glob("slide_*.html"))
+    for slide in list(owners):
+        for reference in _LOCAL_ATTR_RE.findall(slide.read_text(encoding="utf-8")):
+            resolved, error = _resolve_local_reference(root, slide, reference)
+            if not error and resolved and resolved.suffix.lower() in {".js", ".css"}:
+                owners.add(resolved)
+    errors = []
+    for owner in sorted(owners):
+        text = owner.read_text(encoding="utf-8")
+        for declaration in re.finditer(r"(?:fontFamily|font-family)[\"']?\s*:\s*([^;\n}]+)", text):
+            for alias in re.finditer(r"\bDeck-[\w-]+", declaration.group(1)):
+                if alias.group() not in current:
+                    line = text.count("\n", 0, declaration.start(1) + alias.start()) + 1
+                    errors.append(f"{owner.relative_to(root)}:{line}: {alias.group()}")
+    if errors:
+        raise ValueError("stale Deck font aliases (use the current shared font token):\n" + "\n".join(errors))
+
+
+def _prepare_build_inputs(root: Path, expected: int | None) -> None:
+    """All normalizing mutations shared by build and review preparation."""
+    _ensure_canvas_reset(root)
+    _ensure_runtime_assets(root)
+    _normalize_runtime_references(root)
+    _validate_no_pictographs(root, expected, include_html=True)
+    _validate_image_presentations(root, expected)
+    _sync_speech(root, expected)
+    _validate_referenced_assets(root)
+
+
+def _finish_build(root: Path, expected: int | None, *, font_manifest: dict | None = None) -> None:
+    _validate_render_quality(root, expected)
+    if font_manifest is None:
+        result = _build_player(root, expected)
+    else:
+        result = _build_player(root, expected, font_manifest=font_manifest)
+    if result:
+        raise RuntimeError("player build failed")
+    _validate_runtime_dependencies(root, expected)
+    _build_contact(root, expected)
+    _publish_delivery_file(root / "present.html")
+    _publish_delivery_file(root / "renders/contact-sheet.png")
+
+
+def _audit_workspace(root: Path, expected: int | None) -> None:
+    _validate_no_pictographs(root, expected, include_html=True)
+    _validate_image_presentations(root, expected)
+    _validate_referenced_assets(root)
+    _validate_runtime_dependencies(root, expected)
+    _validate_render_quality(root, expected)
+    if not (root / "present.html").is_file():
+        raise ValueError("present.html is missing")
+    _validate_player_runtime(root)
+
+
+def _absolute_deck_root(value: str) -> str:
+    if not Path(value).is_absolute():
+        raise argparse.ArgumentTypeError("review-prep requires an absolute deck root")
+    return value
+
+
+def _review_prep(root: Path, expected: int) -> int:
+    """Prepare fresh full-deck pixels and delivery artifacts, without visual QA."""
+    stage = "validate"
+    captured = io.StringIO()
+    paths = {
+        "present_html": str(root / "present.html"),
+        "render_manifest": str(root / "renders/render.json"),
+        "review_contact": str(root / "renders/review-contact.json"),
+        "diagnostics": str(root / "_trace/render-issues.json"),
+    }
+    try:
+        # Internal commands may print heuristic candidates. Keep them out of the
+        # first pixel-review prompt; their canonical reports remain available.
+        with redirect_stdout(captured), redirect_stderr(captured):
+            if expected < 1:
+                raise ValueError("--expected must be positive")
+            wanted = list(range(1, expected + 1))
+            slides = sorted((root / "slides").glob("slide_*.html"))
+            numbers = sorted(int(match.group(1)) for path in slides
+                             if (match := re.fullmatch(r"slide_(\d+)\.html", path.name)))
+            if numbers != wanted or len(slides) != expected:
+                raise ValueError(f"HTML pages must be continuous: expected {wanted}, got {numbers}")
+            _plan_files(root, expected)
+            _prepare_build_inputs(root, expected)
+            _validate_runtime_dependencies(root, expected, check_player=False)
+            stage = "fonts"
+            manifest = bundle_workspace(root)
+            font_errors = validate_font_bundle(root)
+            if font_errors:
+                raise ValueError("; ".join(font_errors))
+            _validate_deck_font_aliases(root, manifest)
+            stage = "render"
+            render_all(root)
+            # Reuse delivery gates and the contact generated by build. Its
+            # existing font/freshness fallback remains available to all callers.
+            stage = "build"
+            captured.seek(0)
+            captured.truncate(0)
+            _finish_build(root, expected, font_manifest=manifest)
+            stage = "audit"
+            _audit_workspace(root, expected)
+            stage = "artifacts"
+            records = json.loads(Path(paths["render_manifest"]).read_text(encoding="utf-8"))["pages"]
+            images = [str(root / records[f"{number:02d}"]["png"]) for number in wanted]
+            for path in list(paths.values()) + images:
+                if not Path(path).is_file():
+                    raise ValueError(f"prepared artifact is missing: {path}")
+            contact = json.loads(Path(paths["review_contact"]).read_text(encoding="utf-8"))
+            if contact.get("full", {}).get("pages") != wanted:
+                raise ValueError("review contact does not cover the full deck")
+        print(json.dumps({"status": "prepared", "qa": "not-run", "rendered_pages": wanted,
+                          "images": images, **paths}, ensure_ascii=False))
+        return 0
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        diagnostic = str(exc)
+        if isinstance(exc, subprocess.SubprocessError):
+            for output in (getattr(exc, "stdout", None), getattr(exc, "stderr", None)):
+                if output:
+                    diagnostic += "\n" + (output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output)
+        if stage == "build" and str(exc) == "player build failed":
+            diagnostic = captured.getvalue().strip() + "\n" + diagnostic
+        print(json.dumps({"status": "failed", "stage": stage, "error": diagnostic[-6000:],
+                          **paths}, ensure_ascii=False), file=sys.stderr)
+        return 1
+
+
 TPL = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Presentation</title>
 <style>html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif}
@@ -1240,13 +1372,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in (
-        "sync", "prepare", "contact", "build", "audit", "asset-register",
+        "sync", "prepare", "contact", "build", "audit", "review-prep", "asset-register",
         "asset-assign", "asset-contact", "asset-review", "material-figure", "publish",
     ):
         command = subparsers.add_parser(name, aliases=["figure-crop"] if name == "material-figure" else [])
-        command.add_argument("root", nargs="?", default=".")
+        if name == "review-prep":
+            command.add_argument("root", type=_absolute_deck_root)
+        else:
+            command.add_argument("root", nargs="?", default=".")
         if name in {"sync", "prepare", "contact", "build", "audit"}:
             command.add_argument("--expected", type=int)
+        if name == "review-prep":
+            command.add_argument("--expected", type=int, required=True)
         if name == "contact":
             command.add_argument("--focus", help="comma-separated pages or ranges, e.g. 3,7,12-14")
         if name == "publish":
@@ -1299,6 +1436,8 @@ def main(argv=None):
             _sync_speech(root, args.expected)
         elif args.command == "prepare":
             _prepare_workspace(root, args.expected)
+        elif args.command == "review-prep":
+            return _review_prep(root, args.expected)
         elif args.command == "contact":
             _build_contact(root, args.expected, args.focus)
         elif args.command == "asset-register":
@@ -1323,29 +1462,10 @@ def main(argv=None):
                 needs_review=args.needs_review, rejected=args.rejected,
             )
         elif args.command == "build":
-            _ensure_canvas_reset(root)
-            _ensure_runtime_assets(root)
-            _normalize_runtime_references(root)
-            _validate_no_pictographs(root, args.expected, include_html=True)
-            _validate_image_presentations(root, args.expected)
-            _sync_speech(root, args.expected)
-            _validate_referenced_assets(root)
-            _validate_render_quality(root, args.expected)
-            if _build_player(root, args.expected):
-                return 1
-            _validate_runtime_dependencies(root, args.expected)
-            _build_contact(root, args.expected)
-            _publish_delivery_file(root / "present.html")
-            _publish_delivery_file(root / "renders/contact-sheet.png")
+            _prepare_build_inputs(root, args.expected)
+            _finish_build(root, args.expected)
         else:
-            _validate_no_pictographs(root, args.expected, include_html=True)
-            _validate_image_presentations(root, args.expected)
-            _validate_referenced_assets(root)
-            _validate_runtime_dependencies(root, args.expected)
-            _validate_render_quality(root, args.expected)
-            if not (root / "present.html").is_file():
-                raise ValueError("present.html is missing")
-            _validate_player_runtime(root)
+            _audit_workspace(root, args.expected)
             print("delivery-audit:PASS")
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"{args.command}:FAIL\n{exc}", file=sys.stderr)

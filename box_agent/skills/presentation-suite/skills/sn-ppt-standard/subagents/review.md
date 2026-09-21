@@ -50,9 +50,9 @@
    python "$SKILL_ROOT/scripts/deck.py" contact "$DECK_DIR" --focus NN,NN
    ```
 
-7. Review 只返回结构化合同；父级同步讲稿后运行 `python "$SKILL_ROOT/scripts/deck.py" build "$DECK_DIR" --expected <总页数>`，重新渲染并用 `inspect_images` 查看 build 后最终像素，确认通过后再运行 Standard exporter；最后一次看图后不得再修改页面、渲染或 build。
+7. Review 只返回中间结构化合同；父级运行 `python "$SKILL_ROOT/scripts/deck.py" review-prep "$DECK_DIR" --expected <总页数>`，复用返回的最终全册图片与联系表，用 `inspect_images` 检查最终像素，更新下面的最终合同后才运行 Standard exporter；不追加 contact/build，最后一次看图后不得再修改页面、渲染或 build。
 
-简单编辑不生成全册问题账本，不派其他 agent；仍需用 overview/focus 确认局部修改没有破坏跨页一致性。
+简单编辑不重做全册问题诊断、不派其他 agent；仍需用 overview/focus 确认局部修改没有破坏跨页一致性。最终待审保持全册，在原 `_trace/review-issues.md` 中更新最终合同（尚无该文件时只记录本次范围、覆盖与合同），不覆盖已有历史问题。
 
 ## 4. mode=final_review
 
@@ -97,8 +97,8 @@
 3. 所有修改完成后只做一次批量渲染：改过 `base.css` 或字体包则全册 batch；否则只渲变化页。渲染命令成功且目标 PNG 的时间晚于源文件后，才能进入修复确认。
 4. 用一张新生成的 focus 联系表查看变化页；必要时打开本轮刚重渲的单页 PNG。该次看图用于确认修复没有退化，不是最终交付证据。必须同时对比备份版：若只是警告减少，但主体被压扁、信息被删、留白/重心/语义视觉更差，仍判定新版退化。新版更差则从备份恢复相关页，再做一次对应批量渲染。不得继续查看上轮 PNG 或未重新生成的 focus 图。
 5. 最多只做 1 轮 refine：把所有已确认硬伤合并为一批修复并复验，不再开启第二轮，也不为 advisory 开启修改。复验后仍有真实硬伤则 `blocked`；只有 advisory 时记录后返回 `ready`。
-6. 修复确认后同步受影响页的讲稿/来源，运行一次 `deck.py build`。build 可能裁剪字体、更新 `base.css` 并重渲页面，所以 build 前的 Vision 不能作为最终像素证据。
-7. build 成功后重新生成 `renders/review-contact.json` 与全册最终联系表，按 manifest 分批用 Vision 覆盖全部 build 后像素；必要时打开最终单页 PNG。把最终覆盖与结论写回 `_trace/review-issues.md`（有事实核验时同步 `_trace/content-fidelity.md`），随后直接返回合同。最终看图后不得再修改视觉文件、运行 render/prepare/build 或更换字体。
+6. 修复确认后同步受影响页计划中的讲稿/来源，由父级运行一次 `deck.py review-prep "$DECK_DIR" --expected N`。命令按固定顺序准备讲稿、字体、全册渲染、播放器和审计；之前的 Vision 不是最终交付证据。它返回 `prepared` / `qa: not-run`，不返回视觉 PASS。
+7. 复用命令返回的 `renders/review-contact.json` 与全册最终联系表，不另跑 contact/build。按 manifest 分批用 Vision 覆盖全部最终像素；必要时打开最终单页 PNG。首次看图先中性复述，再按需读机检诊断，不把 advisory 当修页指令。把最终覆盖与结论写回 `_trace/review-issues.md`（有事实核验时同步 `_trace/content-fidelity.md`），随后直接返回合同。最终看图后不得再修改视觉文件、运行 render/prepare/build 或更换字体；任何视觉源变化后必须重新待审与验收。
 
 只有实际调用 Vision 查看最终 PNG，才能填写 `final_pixels_inspected: yes`。若当前工具面没有 Vision，不得用读取 HTML、文件尺寸、裁图命令或 render 的 `clean` 摘要冒充像素复验，应返回 `blocked` 并如实说明缺失能力。
 
@@ -107,6 +107,10 @@
 只改讲稿不需要重渲；改变屏显内容必须回到字体准备和批量渲染步骤。
 
 ## 5. 返回合同
+
+导出使用同一份 `_trace/review-issues.md`，不要求额外的根目录 review.md。该账本只保留一个 `## Final review contract` 段，按下面格式逐行写入本轮最终返回字段，不用代码围栏；历史问题保留在其他段，不另追加第二份最终合同。尚未完成父级最终全册看图时写 `status: pending_parent_verification`、`final_pixels_inspected: no` 和实际待验事项，不能提前写 ready。父级完成检查后据实更新该段，只有 `status: ready`、`final_pixels_inspected: yes`、`remaining: none` 才能通过导出门；脚本不代填，不用 `--force` 绕过。
+
+同页修复先读取当前文件、汇总所有已确认问题，再优先一次连续区块修改；必要时用现有完整写入提交。不要凭猜测的旧串反复微调，不增加事务/备份平台；同页保持单一写者，原有修复轮次和视觉标准不变。
 
 最终回复可以先简述修复结果，但**最后必须原样输出下面这组逐行键值，且其后不再追加正文**。只写粗体 `ready`、自然语言“已完成”或构建成功不等于返回合同，不能作为最终质量门的机器可读结论。
 
