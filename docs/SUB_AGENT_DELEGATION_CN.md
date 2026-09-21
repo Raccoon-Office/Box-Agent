@@ -25,7 +25,7 @@
   "task": "比较 API 文档并报告不兼容变更。",
   "required_tools": ["read_file"],
   "skills": ["code-review"],
-  "budget": {"max_steps": 12, "max_tool_calls": 25}
+  "budget": {"max_steps": 24, "max_tool_calls": 36}
 }
 ```
 
@@ -72,7 +72,9 @@
 已知只读网络工具包括 `web_search`、`web_extract`、`inspect_images`，以及根据可信
 服务器元数据识别的受管 Playwright 导航/检查工具。`generate_image` 是必须显式
 选择的可信网络能力。
-浏览器交互和任意浏览器代码仍属于外部副作用能力，默认拒绝。
+父会话已激活且被 `required_tools` 显式点名时，受管 Playwright 工具也可委派，包括
+页面交互、截图、evaluate、`managed_browser_run_code`、对话框、标签、视口和拖拽。
+文件上传仍属外部副作用，默认拒绝。这些工具不会进入子任务默认工具集。
 
 ### 写入范围
 

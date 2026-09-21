@@ -310,13 +310,22 @@ def test_description_explains_flat_contract_and_derived_policy():
     assert "`web_extract`" in description
     assert "restricted to assigned Skills and dependencies" in description
     assert "fail-closed runtime policy" in description
+    assert "`managed_browser_click`" in description
+    assert "`managed_browser_evaluate`" in description
+    assert "`managed_browser_take_screenshot`" in description
+    assert "`managed_browser_run_code`" in description
+    assert "uploads" in description
+    assert "run_code and file uploads cannot" not in (
+        tool.parameters["properties"]["required_tools"]["description"]
+    )
     assert "bounded completeness-checked batch fast path" in description
     assert "parent remains responsible" in description
     assert "final deliverables" in description
     assert "exact `write_scope`" in description
-    assert "Pass `budget` as an object" in description
+    assert "Pass `budget` as an object such as `{max_steps:24, max_tool_calls:36}`." in description
 
     parameters = tool.parameters["properties"]
+    assert '{"max_steps":24,"max_tool_calls":36}' in parameters["budget"]["description"]
     assert "Never pass a serialized JSON string" in parameters["budget"]["description"]
     assert "disjoint scopes" in parameters["write_scope"]["description"]
     assert "general agent loop" in parameters["files"]["description"]
@@ -1045,7 +1054,7 @@ async def test_invalid_budget_string_returns_object_correction_example():
     assert result.raw_output["invalid_fields"] == ["budget"]
     assert result.raw_output["field_corrections"]["budget"] == {
         "message": "Pass budget as a JSON object, never as a JSON string.",
-        "example": {"max_steps": 12, "max_tool_calls": 25},
+        "example": {"max_steps": 24, "max_tool_calls": 36},
     }
     llm.generate_stream.assert_not_called()
 

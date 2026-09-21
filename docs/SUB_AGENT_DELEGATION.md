@@ -30,7 +30,7 @@ The ordinary request is intentionally flat:
   "task": "Compare the API documents and report incompatible changes.",
   "required_tools": ["read_file"],
   "skills": ["code-review"],
-  "budget": {"max_steps": 12, "max_tool_calls": 25}
+  "budget": {"max_steps": 24, "max_tool_calls": 36}
 }
 ```
 
@@ -87,8 +87,11 @@ Known read-only network tools include `web_search`, `web_extract`,
 `inspect_images`, and the managed Playwright navigation/inspection tools
 recognized by trusted server metadata. `generate_image` is an explicitly
 selected trusted network capability.
-Interactive browser actions and arbitrary browser code remain external-side-
-effect capabilities and are denied.
+Explicitly selected managed Playwright tools are also delegable when the parent
+session already has them, including page interaction, screenshots, evaluate,
+`managed_browser_run_code`, dialogs, tabs, resize, drag, and navigation.
+File uploads remain external-side-effect capabilities and are denied. These
+tools are never default child tools.
 
 ### Scoped writes
 
