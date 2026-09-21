@@ -27,7 +27,7 @@ metadata:
 本 Skill 不接收裸 query，不自行创建任务目录。只接受绝对 `DECK_DIR`，且必须存在 `task_pack.json`、`info_pack.json` 和 `outline.md`。
 `choices.output` 必须为 `static_html`，且 `ppt_mode` 必须为 `standard`。开始和恢复时重新读取磁盘上的 `outline.md`；不得自行 Research、重复解析材料、改写 outline、增删页面、重排页序或新增事实。输入不满足时返回 Entry。
 
-执行顺序：复用 task pack → 完成原有计划 → `deck.py prepare "$DECK_DIR" --expected N` 成功 → 素材回填、页组输入准备与页面制作 → 父级指定页渲染并看图、修复 → `deck.py review-prep "$DECK_DIR" --expected N` 后检查最终全册像素与播放器 → 按 `static_postprocess` 导出。质量失败先读诊断并修页；Box-Agent 的绝对写域、指定页重渲和导出结果读取示例见工具契约。
+执行顺序：复用 task pack → 完成原有计划 → `deck.py prepare "$DECK_DIR" --expected N` 成功 → 素材回填、按阶段 4 的环境分工准备输入与制作页面 → 逐页看图与必要修复 → `deck.py review-prep "$DECK_DIR" --expected N` 后检查最终全册像素与播放器 → 按 `static_postprocess` 导出。质量失败先读诊断并修页；Box-Agent 的父级渲染分工、绝对写域、指定页重渲和导出结果读取示例见工具契约。
 
 ## 1. 所有模式共享的合同
 
@@ -46,7 +46,7 @@ Orchestrator 只负责：**读取 Entry/Story 交接、规划、委派、合并�
 | 角色 | 数量与时机 | 唯一职责 |
 | --- | --- | --- |
 | Image | 按素材量并行 | 获取或生成位图素材，返回实际路径 |
-| Slide | 新建或复杂编辑时按设计亲缘页组并行 | 只制作/重做自己的页组并完成组内像素闭环 |
+| Slide | 新建或复杂编辑时按设计亲缘页组并行 | 只制作/重做自己的页组；Box-Agent 由父级完成逐页像素闭环，具备渲染与看图能力的其他环境由 Slide 完成 |
 | Review | 首次验收 1 个，修复后最多复验 2 次；简单编辑时也是执行者 | 先诊断、后集中修复、批量重渲和最终讲稿收口 |
 
 所有角色开工前完整读取自己的 `subagents/<role>.md`（页组分片中的完整原文等价）。任何选中的文件或章节出现截断提示时，续读到结束；**未被路由命中的 reference 不读**。
@@ -181,7 +181,7 @@ Style Lock 锁定的是**视觉语言与判断边界**，不是一套固定 HTML
 
 背景不等于一块纯色，也不等于每页随机换皮。学术、组会、合规、严肃评审等场景可用安静画布承托事实；产品、品牌、招商、文旅、文化、故事、课程导入、活动与大众传播等表达型场景，应主动考虑一层与主题相容的环境设计，而不是整册退回纯色：可以是有方向的柔和光场、局部光晕、低对比颗粒/网点/纸纹/地形等主题肌理、图片背景，或由 Image 统一生成的背景。光晕只有在能解释光源、主题和视觉焦点，且形状、位置与构图相关时才成立；标题后反射式复制的圆形模糊光斑仍属于无主题 glow。先确定贯穿普通内容页的基础画布家族，再选择少量相容手法形成背景语法。章节差异优先通过局部大色场、图片调色、条带或母题状态表达；只有章节页、hero、结尾或叙事确需整体换场时才更换整页画布，并在前一张或后一张保留颜色、肌理、图片处理或构图方向的承接。图片或生成背景必须进入 `image_opportunity_map` 与素材 brief，不能由 Slide 临时发明路径。避免出现数页突然像另一套 Deck、随后又无过渡切回，也避免把深藏青、霓虹蓝紫渐变或通用科技 glow 当作默认“高级感”。
 
-后续主链只有一条：`Style Lock → 全册计划 + prepare → Image 分片并行 → 素材路径一次回填 → 页组输入准备 → Slide 页组并行 → Review 诊断/有限返修 → review-prep → Review 查看最终全册像素并返回合同`。前一节点的真相源未冻结，不启动依赖它的下游；互不依赖的同层任务一次并行派出。`review-prep` 集中执行讲稿、字体、全册渲染、build 和 audit；此前的 Vision 只能用于诊断，不能作为最终像素证据。
+后续主链只有一条：`Style Lock → 全册计划 + prepare → Image 分片并行 → 素材路径一次回填 → 按环境准备输入 → Slide 页组并行 → 逐页像素验收/有限修复 → Review 诊断/有限返修 → review-prep → Review 查看最终全册像素并返回合同`。Box-Agent 直接引用原文件，其他环境保留原文分片准备，详见阶段 4。前一节点的真相源未冻结，不启动依赖它的下游；互不依赖的同层任务一次并行派出。`review-prep` 集中执行讲稿、字体、全册渲染、build 和 audit；此前的 Vision 只能用于诊断，不能作为最终像素证据。
 
 ### 阶段 3：全局规划与字体前置
 
@@ -210,12 +210,14 @@ python "$SKILL_ROOT/scripts/deck.py" prepare "$DECK_DIR" --expected <总页数>
 
 ### 阶段 4：素材与页面制作
 
-完成下列素材验收和路径回填后、委派 Slide 前，调用 `scripts/group_input.py "$DECK_DIR" --expected N` 一次准备全部组；Box-Agent 的完整命令和 `files/write_scope` 映射见工具契约。该脚本只收集完整原文，不代替任何设计判断。若旧计划格式不适用，按原读取要求继续，不强制迁移或重新规划。
+**Box-Agent 的输入准备：**完成下列素材验收和路径回填后，直接以既有原计划、`base.css` 和命中参考委派 Slide，不以生成页组输入分片为前置。先读组合同与共享设计输入，再随组内页序完整读取当前页计划和命中参考、制作当前页；仅复用当前子任务已读且未变化的共享原文，新子任务仍需读取所需输入。委派只交代控制信息与原文件引用，不另抄事实、屏显文案或设计决策。已有且仍与当前来源一致的完整原文分片可以复用，不为分片重排计划或另建一套真相源；路径、`files/write_scope` 规则见工具契约。
+
+**其他环境的输入准备：**保留素材回填后调用 `python "$SKILL_ROOT/scripts/group_input.py" "$DECK_DIR" --expected N` 一次准备全部组的流程；该脚本只收集完整原文，不代替设计判断。旧计划格式不适用时按原读取要求继续，不强制迁移或重新规划。
 
 1. 汇总所有被判定为真实图或生成图的图片 brief，再启动 Image subagent；每个 goal 显式带上稳定 `group_id`、`response_language` 与 `deliverable_language`。**第一次 Image 委派前**，每个 `plan/slide_NN.md` 的唯一 `## 视觉实现` 都必须已有一条完整单行机器字段 `- image_opportunity: <枚举>`；有位图页另用同级独立行写 `- presentation: <四枚举之一>`，不得写成空的 `image_opportunity:` 父块，不得把 `full-bleed` / `framed-scene` 填进 `image_opportunity`，也不得把 `split-media` 等 layout 值填进 `presentation`。缺字段时直接修计划并重试，不搜索或修改运行时代码。只要计划中存在有效配图机会，就不能静默跳过 Image 阶段；若计划需要图片但当前没有 Image Worker，必须重新规划为真正成立的非位图表达，或补派 Image Agent，不能直接进入完成状态。同一视觉配方且能在一张联系表中共同审清的素材归入同一分片，多张生成图在同一工具回合并行提交。Image 与 Slide 不得在同一次 `sub_agent` 中派出：先完成并验收素材，再启动页面制作。
 2. 先把 `attachment_visual_map` 中 must-show / reuse 的图片复制并登记来源，再交给对应 Image 分组；论文命名 Figure 先由 Image 使用 `deck.py material-figure` 从页图生成独立、可追溯的 Figure 裁图，整页 PNG 只作为定位上下文。每个 Image 分组将候选路径绑定到稳定 `asset_id`，由 `deck.py asset-contact` 生成一张带 ID 的素材联系表，默认只做一次整组 Vision；只有被标红、要求抠图、比例可疑或主体完整性无法从缩略图判断的素材才打开单图复核。Image 用 `asset-review` 写回最终状态后，Orchestrator 只按 `ready` 的 `asset_id → actual path + origin + crop_contract` 回填逐页计划；候选、被替换与废弃图片不算正式素材。`assets/catalog.json` 是唯一素材真相源，必须保留下载 URL、生成模型、用户附件路径和派生关系；Image 的自然语言总结不能代替 catalog。逐页图片先锁定 `presentation: subject-only | framed-scene | full-bleed | evidence-crop`（这是位图的展示/背景处理合同，**只允许这四个枚举**；`split-media`/`right-half`/`cards`/分屏等是版式不是 presentation，放到 `layout`；**无位图页完全省略 presentation**，不写 `无`/`none` 占位）：任何要悬浮、跨色场叠放或作为独立角色/物件的图都属于 `subject-only`，必须由 Image 完成透明检查、主体抠图、最终 Alpha 检查与必要的单图 Vision，再回填可用的 `*-cutout.png`；普通 RGB 图不得作为透明资产返回 `ready`。带背景图片只能作为有意的画框场景、满幅裁切或证据裁图，不能把其白底/奶油底矩形偶然贴到另一种画布上。Slide 不临时去背，也不用 CSS mask/multiply 冒充。映射确有问题时交回同一个 Image 复核。失败素材先换可行的真实图或生成图路线，确实不可得时才改为 Canvas 或排版降级，并写清原因，不留占位。Slide 启动前，Image 必须有 `status: ready` 的完成合同，catalog 中所有计划 `asset_id` 都必须为 `ready`、实际文件存在，且路径与裁切合同已经回填逐页计划。
-3. 一个 Production group 委派一个 Slide，可并行执行；goal 的首行必须精确写成 `Slide Group <group_id> [NN,NN]:`，例如 `Slide Group bookends [01,20]:`。页码所有权以已冻结的 `production_group` 为准；不用“负责封面和结尾”、“第一组页面”等叙述取代组 ID 与标准页码头。显式带上 `response_language`、`deliverable_language` 与该组 `boundary_handoff`。不得为了提高并发把已经冻结的多页 group 再拆成“一页一个 Slide”；只有计划本身确实定义为单页组时才单页委派。同组必须同时满足叙事亲缘、设计亲缘和制作负荷相容；复杂 Canvas、独立数据图或重图像合成页在没有真正共享构图系统时应单独成组。Grouping 提供的是共享设计记忆，不是批量降精度：同一个 Slide 按组内页序串行完成每页闭环。
-4. Slide 先读取 Style Lock 与组合同，然后对每一页依次执行“完整首稿 → 父级单页渲染 → 父级 `inspect_images(strategy=\"native\")` → 最多一次合并修复 → 父级重渲复看”；当前页达到 ready 后才进入下一页。全部页面完成后，再批量渲染本组并查看组内全部最终 PNG，确认亲缘性与明显回归，但不为审美偏好开启新循环。封面、每张章节页、结尾页都必须完成自己的单页闭环。首次看图后的“合并修改 → 重渲 → 复看”记为一轮 refine，每页最多 1 轮；仍有真实硬伤时改用更稳定的结构或返回 blocked。最后一次修改后没有重新渲染和看图，不得返回 ready。
+3. 一个 Production group 委派一个 Slide，可并行执行；goal 的首行必须精确写成 `Slide Group <group_id> [NN,NN]:`，例如 `Slide Group bookends [01,20]:`。页码所有权以已冻结的 `production_group` 为准；不用“负责封面和结尾”、“第一组页面”等叙述取代组 ID 与标准页码头。显式带上 `response_language`、`deliverable_language` 和该组计划引用；`boundary_handoff` 从 `plan/deck.md` 的该组读取，不重抄进 task。不得为了提高并发把已经冻结的多页 group 再拆成“一页一个 Slide”；只有计划本身确实定义为单页组时才单页委派。同组必须同时满足叙事亲缘、设计亲缘和制作负荷相容；复杂 Canvas、独立数据图或重图像合成页在没有真正共享构图系统时应单独成组。Grouping 提供的是共享设计记忆，不是批量降精度：同一个 Slide 保留组内设计状态，按页序制作每页。
+4. **Box-Agent：**同一 Slide 在一次委派内按组内页序写完全部 HTML 首稿，一次返回全部待渲染页码；父级随后批量渲染，逐页用 `inspect_images(strategy=\"native\")` 查看新鲜 PNG，按原组集中反馈全部有证据的问题，由原组修复后重渲复看。**其他具备子内渲染和看图能力的环境：**Slide 保留“当前页完整首稿 → 渲染 → 看图 → 必要修复与复验 → 下一页”的子内逐页闭环。两条路径都必须覆盖封面、每张章节页、结尾及全部内容页，并用本组全部最终 PNG 检查亲缘性与明显回归；已有新鲜渲染可直接用于组内总览，不为总览重复渲染或开启审美循环。首次看图后的“合并修改 → 重渲 → 复看”记为一轮 refine，每页最多 1 轮；仍有真实硬伤时改用更稳定的结构或返回 blocked。最后一次修改后没有重新渲染和看图，不得返回 ready。
 5. 等待全部页面完成后再启动首次 Review。新建或复杂编辑过程中不得额外委派 `simple_edit` 或 `review-fix` 角色；Orchestrator 不得追逐 `cjkTypography`、`crowded`、bbox/contrast 候选、轻微换行/标点等 advisory，也不得在 Review 前开启审美清门循环。Review 发现有新鲜像素/DOM 证据的真实硬伤时，只交回原所属 Slide Group；每组最多返修 2 次，每次失败由运行时恢复该组最后一次已看过的版本。返修后才可启动下一次 Review，Review 总计最多 3 次。
 
 ### 阶段 5：全册 Review 与交付
@@ -331,7 +333,7 @@ Review：
 | `stage_materials.py` | 不参与 Entry → Story → Standard 新链路；材料解析由 Entry 完成，Standard 只读取 Entry/Story 已交接的产物 |
 | `font_bundle.py` | 保留：OFL 白名单、官方来源、许可证随包、字符裁剪、交付校验和 render freshness 属于独立高风险能力 |
 | `render.py` | 保留：单页诊断；`--batch` 复用同一 Chromium 渲染整册或指定页 |
-| `group_input.py` | 按已有页组和精确 reference 路由生成完整原文分片、绝对输入路径与写入目标；不调模型、不分配预算 |
+| `group_input.py` | 保留既有工具与有效原文分片的兼容性；Box-Agent 新任务不以前置打包约束计划标题，其他环境保留阶段 4 的输入准备流程 |
 | `image_cutout.py` | 保留：检查 Alpha、清除烘焙棋盘格/纯色背景，并在需要时用 GrabCut 生成独立主体 PNG；不覆盖来源原图 |
 | `deck.py` | `review-prep` 一次完成正式待审前的机械步骤，固定全册渲染，不替模型验收；保留 `prepare` 计划讲稿与字体前置、资产管理、`contact`、独立 `build` 与只改讲稿的 `sync` |
 | `install.sh` | 保留：跨环境依赖、字体和 Chromium 安装无法由运行脚本可靠替代；依赖清单已内联 |
