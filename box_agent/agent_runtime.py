@@ -41,6 +41,7 @@ def build_llm_client(
     timeout: float,
     max_request_body_bytes: int | None = None,
     reasoning_effort_when_disabled: str | None = None,
+    image_input: bool | None = None,
     client_factory: LLMClientFactory = LLMClient,
     retry_callback: RetryCallback | None = None,
 ) -> LLMClient:
@@ -70,6 +71,7 @@ def build_llm_client(
             if reasoning_effort_when_disabled is not None
             else {}
         ),
+        **({"image_input": image_input} if image_input is not None else {}),
     )
     if retry_callback is not None:
         client.retry_callback = retry_callback

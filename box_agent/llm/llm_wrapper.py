@@ -171,6 +171,7 @@ class LLMClient:
         timeout: float = 600.0,
         reasoning_effort_when_disabled: str | None = None,
         max_request_body_bytes: int | None = None,
+        image_input: bool | None = None,
     ):
         """Initialize LLM client with specified provider.
 
@@ -198,6 +199,9 @@ class LLMClient:
             raise ValueError("reasoning_effort_when_disabled must be null, 'none' or 'low'")
         self.reasoning_effort_when_disabled = reasoning_effort_when_disabled
         self.max_request_body_bytes = max_request_body_bytes
+        # Keep an explicit capability separate from provider/model heuristics.
+        # Omitting it preserves the historical unknown state.
+        self.capabilities = {"image_input": image_input} if image_input is not None else {}
 
         # Normalize api_base (remove trailing slash)
         api_base = api_base.rstrip("/")
