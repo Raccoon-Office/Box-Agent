@@ -9,6 +9,16 @@ STANDARD = Path(os.environ.get("PRESENTATION_STANDARD_SOURCE", Path(__file__).re
     / "box_agent/skills/presentation-suite/skills/sn-ppt-standard"))
 
 
+def test_public_entry_uses_standard_review_preparation_before_final_pixels():
+    entry = (Path(__file__).resolve().parents[1] / "box_agent/skills/pptx/SKILL.md").read_text()
+    static_delivery = entry.split("设计模式的静态任务始终交付", 1)[1].split("恢复已有设计模式任务", 1)[0]
+    assert "`deck.py review-prep`" in static_delivery
+    assert "`deck.py build` 与 `deck.py audit`" not in static_delivery
+    assert "最终全册像素" in static_delivery
+    assert "不重复" in static_delivery and "验收" in static_delivery
+    assert "present.html" in static_delivery and "HTML 链接" in static_delivery
+
+
 def test_planning_quality_route_names_an_actual_unique_heading():
     plan = (STANDARD / "references/planning-contract.md").read_text()
     quality = (STANDARD / "references/quality-checklist.md").read_text()
