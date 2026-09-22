@@ -2,11 +2,13 @@
 
 若任务运行于 Box-Agent，先完整读取 `references/box-agent-tool-contract.md`；其中的工具调用、渲染分工和委派规则覆盖本职责卡中的旧 harness 工具写法，但不改变本角色的问题账本、修复预算、像素新鲜度和返回合同。
 
+Box-Agent 静态新建按根 `SKILL.md` 的“Box-Agent 静态新建的执行方式”，由主 Agent 执行本说明全部验收工作，不因切换到 Review 再建子任务。下文父子交接仅适用于实际委派；已有编辑与其他环境保持原分工。
+
 过程说明、可见的 reasoning/thinking、工具前后的简短回复和最终交接必须使用 goal 指定的 `response_language`；屏显修订与讲稿使用 `deliverable_language`。没有显式值时跟随原始 query 的主要语言，不因角色卡语言或模型默认语言切换。
 
 ## 1. 目标与完成条件
 
-你是本次验收尝试的 Review；同一任务最多有 3 次受控 Review，有两种模式：
+你执行本次 Review 验收；同一任务最多有 3 次受控 Review，次数不因切换职责或执行者重置，有两种模式：
 
 - `simple_edit`：直接完成边界明确的局部编辑；
 - `final_review`：完成新建或复杂编辑后的全册像素与讲稿收口。
@@ -22,6 +24,8 @@
 `simple_edit` 读取 Style Lock、`base.css`、overview、目标页计划/HTML/PNG 和对应讲稿。`final_review` 完整读取 `plan/design-brief.md`、`plan/deck.md`、全部逐页计划、`base.css`、`speech.md`，再按根 SKILL 的 Review 路由读取质量参考。存在 `plan/grounded-knowledge.md` 或 Research 产物时必须读取并核对；存在附件时读取 `<DECK_DIR>/info_pack.json`，沿 `info_pack.raw_documents` 的绝对路径读取 `raw_documents.json`，并核对其中 `documents[].inherited_images[].path`、`page_visuals[].path` 和 `<DECK_DIR>/assets/catalog.json`。不得假设 `materials/attachments.json`、`research/materials/material_NN.md` 或分片 Material catalog 存在。
 
 任何选中的文件或章节若出现续读 offset 或截断提示，必须续读到结束。
+
+Box-Agent 静态新建中，以上输入必须完整掌握，但主 Agent 可复用当前上下文完整且未变化的原文，不因从制作切到验收而机械重读。源文件变化、截断或压缩丢失时补读必要原文；修复前核对受影响页的当前 HTML 与必要 CSS。新委派仍完整读取本次所需输入，不能假定继承父任务上下文。
 
 可修复文案、像素、对齐、裁切、溢出、低对比、图片变形、页脚冲突、特殊页漂移和讲稿不一致。必须保留 goal 指定的事实、页序、叙事职责、Style Lock 与未受影响页面。若需要重做叙事、补新事实/素材或改变全局系统，返回 `blocked` 交回 Orchestrator。
 
@@ -89,6 +93,8 @@
 
 ### B. 集中修复：只在完成后渲染
 
+Box-Agent 静态新建的集中修复由主 Agent 在所有写页子任务返回后执行；子任务运行期间不改其页面或共享 CSS。实际修改、事实核验、备份、新鲜像素与下列 refine 上限均不减少。
+
 1. 按根因分组：先修能解决多页问题的 `base.css`，再修局部页。同页所有问题合并为一次修改；修改前读取计划与 HTML，并把当前 HTML 与最新 PNG 同时备份到 `_trace/review-backups/`。整个问题账本的“集中修改 → 批量渲染 → focus 复验”算 1 轮 refine，不按问题数或页数分别计数。
    修改前把备份 PNG 的视觉优点也写入修法（主体尺度、留白、阅读路径、域证据），不只记报错字段。`render.py` 的 overlap/abs 是线索，不是需要“消分”的目标；只有新鲜 PNG/DOM 证明确有可见问题时才改，禁止靠 `overlap-ok`、删信息或压缩主视觉仅为让 lint 变 clean。若像素中没有遮挡而报告来自折行行内元素的联合 bbox，记录 `checker mismatch` 并保留原页；不得把短语拆成块级元素、把逗号/顿号留在块外，或制造孤立标点来迎合告警。
    裁切、底部消失或页脚冲突先检查外层正文区的高度所有权，再检查内层轨道和子元素：absolute 的 `.slide-body` 已由 `top + bottom` 定高时删除额外 `height`；flex 的 `.slide-body` 已由 `flex:1` 占满时同样不叠加 `height:100%`。图片主体裁切则先查 `object-fit / object-position` 与槽位比例：优先移动焦点、改变槽位或改用 `contain`，不得用进一步放大和 `overflow:hidden` 隐藏残缺主体。不得靠缩字号、连续压 gap、固定一个偶然 px 高度或给主容器加 `overflow:hidden` 掩盖父级几何错误。Canvas、SVG 与 HTML 标签叠加的页面还必须把共享几何当作一个坐标系统修复：外层 CSS 尺寸、`canvas` 的 width/height 属性、SVG `viewBox`、JavaScript 中的 W/H 与节点锚点需同时一致。局部遮挡不能只靠加高外容器，也不能用注释冒充修复；应移动冲突对象、调整局部锚点或简化稳定构图。
@@ -133,4 +139,4 @@ summary: <一两句>
 `refine_rounds` 指本任务中已完成的“修改屏显 HTML/CSS → 重渲”循环数；
 `simple_edit` 的目标修改本身也计一轮，不只计 Vision 之后的返修。
 
-`simple_edit` 只有目标修改完成、overview/focus 已看、变化页已批量重渲且构建通过时才能 `ready`；`final_review` 还要求全册诊断完成。存在附件或 Research 时必须 `content_fidelity: pass`；只有无需事实核验的任务才可 `not-applicable`。当前 Review 返回 `blocked` 时必须给出可定位到页面和证据的 `remaining`；Orchestrator 只能把这些硬伤交回原页组有限修复，修复并生成新像素后才允许下一次 Review。不得要求无限重审，也不得把 advisory 包装成硬伤。
+`simple_edit` 只有目标修改完成、overview/focus 已看、变化页已批量重渲且构建通过时才能 `ready`；`final_review` 还要求全册诊断完成。存在附件或 Research 时必须 `content_fidelity: pass`；只有无需事实核验的任务才可 `not-applicable`。当前 Review 返回 `blocked` 时必须给出可定位到页面和证据的 `remaining`；Box-Agent 静态新建由主 Agent 按根 Skill 的页组返修上限处理，其他环境与已有编辑由 Orchestrator 交回原页组。实际修复并生成新像素后才允许下一次 Review。不得要求无限重审，也不得把 advisory 包装成硬伤。
