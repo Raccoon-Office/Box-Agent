@@ -216,6 +216,13 @@ class MyTool(Tool):
 参数 Schema；别名不会转换其他 Agent 的参数格式。`read_file`、`write_file`、
 `search_files`、`execute_code`、`memory_search` 等已经同名的等价工具无需额外别名。
 
+#### Windows 工具输出中的产物路径
+
+脚本返回工作区内已变更文件的路径时，Windows 支持正斜杠或反斜杠的相对
+路径，以及原生或正斜杠形式的绝对路径。匹配仍要求完整路径边界，不能用
+文件名的一部分、`.bak` 后缀或子路径关联另一个文件。此兼容不改变正式产物
+发布与中间文件过滤规则；安装版需更新 Box-Agent runtime 并重启后生效。
+
 #### 生图与编辑图的登录态
 
 `generate_image` 的生图与编辑图请求共用登录态处理：使用小浣熊端点且没有
