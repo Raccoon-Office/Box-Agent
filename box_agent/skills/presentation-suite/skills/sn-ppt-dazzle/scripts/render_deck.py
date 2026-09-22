@@ -33,6 +33,7 @@ import argparse
 import json
 import math
 import os
+import platform
 import sys
 import warnings
 from io import BytesIO
@@ -136,38 +137,53 @@ def ensure_browser_libs() -> None:
             os.environ["FONTCONFIG_FILE"] = str(Path(prefix) / "etc/fonts/fonts.conf")
 
 
-def chromium_executable_path() -> str | None:
-    """Return a concrete Chromium executable when the runtime preselects one.
+def _browser_layouts():
+    """Return native full/headless layouts, including older Playwright caches."""
+    system = platform.system()
+    if system == "Windows":
+        return (
+            ["chrome-headless-shell-win64/chrome-headless-shell.exe", "chrome-win/headless_shell.exe"],
+            ["chrome-win64/chrome.exe", "chrome-win/chrome.exe"],
+        )
+    if system == "Darwin":
+        arch = "arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "x64"
+        return (
+            [f"chrome-headless-shell-mac-{arch}/chrome-headless-shell"],
+            [f"chrome-mac-{arch}/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+             "chrome-mac/Chromium.app/Contents/MacOS/Chromium"],
+        )
+    return (
+        ["chrome-headless-shell-linux64/chrome-headless-shell", "chrome-linux/headless_shell"],
+        ["chrome-linux64/chrome", "chrome-linux/chrome"],
+    )
 
-    Playwright 1.52 may prefer a headless-shell binary that is not present in the
-    shared runtime cache. The generation wrapper sets this explicitly so the
-    agent does not spend turns repairing the browser environment.
-    """
+
+def chromium_executable_path() -> str | None:
+    """Honor host selection, then optional caches, then Playwright's default."""
+    for key in ("BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+                "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "PPT_SKILL_BROWSER_EXE"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            candidate = Path(value).expanduser().resolve()
+            if not candidate.is_file():
+                raise RuntimeError(f"Configured Playwright browser is unavailable: {candidate}")
+            return str(candidate)
     candidates: list[Path] = []
     for key in ("DYNAMIC_PPT_CHROMIUM_EXECUTABLE", "PLAYWRIGHT_CHROMIUM_EXECUTABLE"):
         value = os.environ.get(key, "").strip()
         if value:
-            candidates.append(Path(value))
+            candidates.append(Path(value).expanduser())
     root_value = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    if root_value:
-        root = Path(root_value)
-        candidates.extend(sorted(root.glob("chromium-*/chrome-linux*/chrome"), reverse=True))
-        candidates.extend(
-            sorted(
-                root.glob("chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell"),
-                reverse=True,
-            )
-        )
-    seen = set()
+    if root_value and root_value != "0":
+        root = Path(root_value).expanduser()
+        shells, full = _browser_layouts()
+        for prefix, layouts in (("chromium-*", full), ("chromium_headless_shell-*", shells)):
+            for relative in layouts:
+                candidates.extend(sorted(root.glob(prefix + "/" + relative), reverse=True))
     for candidate in candidates:
-        key = str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        if candidate.exists() and candidate.is_file():
+        if candidate.is_file():
             return str(candidate)
     return None
-
 
 # 读"当前活动页"信号：返回 "活动页索引:总页数"（如 "2:6"）；测不到返回 "-1:N"。
 # 优先级：显式 active/current 类 → 最可见(opacity 高且占满)的 slide 元素。

@@ -114,68 +114,45 @@ def playwright_chromium_status(standard_dir: Path) -> dict[str, Any]:
                 "alternative_install_hint": uv_tool_install_hint,
             }
 
-    probe = r'''
-import json
-from pathlib import Path
-from playwright.sync_api import sync_playwright
+    # Exercise the shipped renderer, including host selection and data locks.
+    import tempfile
 
-result = {
-    "status": "missing",
-    "python_package": True,
-    "browser_present": False,
-    "launchable": False,
-}
-try:
-    with sync_playwright() as playwright:
-        executable = playwright.chromium.executable_path
-        result["browser_executable"] = executable
-        result["browser_present"] = Path(executable).is_file()
-        if not result["browser_present"]:
-            result["reason"] = "chromium_not_installed"
-        else:
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            try:
-                page = browser.new_page(viewport={"width": 320, "height": 180})
-                page.set_content("<html><body>ppt doctor</body></html>")
-                result["launchable"] = True
-                result["status"] = "available"
-            finally:
-                browser.close()
-except Exception as exc:
-    result["reason"] = type(exc).__name__
-    result["detail"] = str(exc).splitlines()[0][:300]
-print(json.dumps(result))
-'''
+    renderer = standard_dir / "scripts" / "render.py"
+    result = {
+        "status": "failed", "python_package": True,
+        "python_source": python_source, "python_runner": python_runner,
+        "browser_present": False, "launchable": False,
+        "renderer_script": str(renderer),
+    }
     try:
-        completed = subprocess.run(
-            [*python_runner, "-c", probe],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        result = json.loads(completed.stdout.strip().splitlines()[-1])
-        result["python_source"] = python_source
-        result["python_runner"] = python_runner
-        if result.get("status") != "available":
-            result["install_hint"] = install_hint
-        return result
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, IndexError) as exc:
-        return {
-            "status": "failed",
-            "python_package": True,
-            "python_source": python_source,
-            "python_runner": python_runner,
-            "browser_present": False,
-            "launchable": False,
-            "reason": type(exc).__name__,
-            "detail": str(exc)[:300],
-            "install_hint": install_hint,
-        }
-
+        with tempfile.TemporaryDirectory(prefix="ppt-doctor-") as directory:
+            root = Path(directory)
+            source, output = root / "probe.html", root / "probe.png"
+            source.write_text(
+                '<!doctype html><html><head><meta charset="utf-8"><style>'
+                'html,body{margin:0;width:1600px;height:900px;background:white}'
+                '.slide{width:1600px;height:900px;display:grid;place-items:center;'
+                'font:48px sans-serif;color:#111}</style></head>'
+                '<body><div class="slide">Presentation renderer probe</div></body></html>',
+                encoding="utf-8",
+            )
+            environment = dict(os.environ, RENDER_JOB_TIMEOUT="20", RENDER_SLOT_TIMEOUT="5")
+            completed = subprocess.run(
+                [*python_runner, str(renderer), str(source), str(output), "1600", "900"],
+                capture_output=True, text=True, timeout=40, check=False, env=environment,
+            )
+            result["renderer_returncode"] = completed.returncode
+            rendered = output.is_file() and output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            if completed.returncode == 0 and rendered:
+                result.update(status="available", browser_present=True, launchable=True)
+                return result
+            result["reason"] = "renderer_failed" if completed.returncode else "renderer_output_missing"
+            result["detail"] = (completed.stderr.strip() or completed.stdout.strip())[-1000:]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result["reason"] = type(exc).__name__
+        result["detail"] = str(exc)[:1000]
+    result["install_hint"] = install_hint
+    return result
 
 def html_to_pptx_status(export_dir: Path) -> dict[str, Any]:
     """Check the Node dependencies and browser used by the HTML -> PPTX exporter."""

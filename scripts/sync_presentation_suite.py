@@ -34,7 +34,7 @@ OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "intermediate-render-artifacts", "sequential-ppt-image-inspection",
             "source-relative-pptx-page-directories", "explicit-delivery-scopes",
             "presentation-progress-without-reconfirmation", "host-playwright-runtime",
-            "bounded-image-inspection-recovery"]
+            "bounded-image-inspection-recovery", "native-windows-rendering"]
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite"
 LICENSE_INPUT_PATH = "scripts/presentation_suite_licenses/echarts-5.5.0"
 LICENSE_INPUT_DIR = Path(__file__).resolve().parents[1] / LICENSE_INPUT_PATH
@@ -53,6 +53,7 @@ _artifact_publication_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "artifact
 _export_page_directories_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "export_page_directories.py"))["apply"]
 _delivery_scope_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "delivery_scope.py"))["apply"]
 _host_playwright_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "host_playwright.py"))["apply"]
+_windows_compat_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "windows_compat.py"))["apply"]
 
 _image_inspection_recovery_overlay = runpy.run_path(
     str(RUNTIME_INPUT_DIR / "image_inspection_recovery.py")
@@ -369,6 +370,7 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
             data = _apply_integration_overlay(str(relative), data)
             data = _host_playwright_overlay(str(relative), data)
             data = _image_inspection_recovery_overlay(str(relative), data)
+            data = _windows_compat_overlay(str(relative), data)
             if relative.name == "SKILL.md":
                 data = _apply_host_metadata(data)
             target = staged / relative
@@ -396,20 +398,21 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
                 "source_path": relative, "source_sha256": expected_sha256,
                 "sha256": expected_sha256,
             }
-        runtime_relative = "skills/sn-ppt-standard/scripts/render_runtime.py"
-        runtime_data = (RUNTIME_INPUT_DIR / "render_runtime.py").read_bytes()
-        runtime_target = staged / runtime_relative
-        if runtime_target.exists():
-            raise ValueError("render lifecycle input needs review: upstream supplies runtime helper")
-        runtime_target.parent.mkdir(parents=True, exist_ok=True)
-        runtime_target.write_bytes(runtime_data)
-        runtime_target.chmod(0o644)
-        runtime_hash = hashlib.sha256(runtime_data).hexdigest()
-        provenance["files"][runtime_relative] = {
-            "input_path": "scripts/presentation_suite_overlays/render_runtime.py",
-            "source_path": runtime_relative, "source_sha256": runtime_hash,
-            "sha256": runtime_hash,
-        }
+        for runtime_name in ("render_runtime.py", "render_runtime_windows.py", "file_lock.py"):
+            runtime_relative = f"skills/sn-ppt-standard/scripts/{runtime_name}"
+            runtime_data = (RUNTIME_INPUT_DIR / runtime_name).read_bytes()
+            runtime_target = staged / runtime_relative
+            if runtime_target.exists():
+                raise ValueError("render lifecycle input needs review: upstream supplies runtime helper")
+            runtime_target.parent.mkdir(parents=True, exist_ok=True)
+            runtime_target.write_bytes(runtime_data)
+            runtime_target.chmod(0o644)
+            runtime_hash = hashlib.sha256(runtime_data).hexdigest()
+            provenance["files"][runtime_relative] = {
+                "input_path": f"scripts/presentation_suite_overlays/{runtime_name}",
+                "source_path": runtime_relative, "source_sha256": runtime_hash,
+                "sha256": runtime_hash,
+            }
         required = [f"skills/sn-ppt-{module}/SKILL.md" for module in MODULES]
         required += ["fonts/OFL-1.1.txt", "THIRD_PARTY_NOTICES.md",
                      "skills/sn-ppt-standard/requirements.txt"]
