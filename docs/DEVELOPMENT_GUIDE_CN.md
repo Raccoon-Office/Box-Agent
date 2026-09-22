@@ -216,6 +216,16 @@ class MyTool(Tool):
 参数 Schema；别名不会转换其他 Agent 的参数格式。`read_file`、`write_file`、
 `search_files`、`execute_code`、`memory_search` 等已经同名的等价工具无需额外别名。
 
+#### 生图与编辑图的登录态
+
+`generate_image` 的生图与编辑图请求共用登录态处理：使用小浣熊端点且没有
+显式 `image_generation.api_key` 时，请求前检查登录态；`auth.json` 中的 JWT
+进入五分钟过期窗口且有 `refresh_token` 时，复用共享认证模块刷新。
+使用认证文件的请求收到 HTTP 401 或业务码 `200003` 后，会强制刷新并最多
+重试一次；再次被拒绝时提示重新登录。编辑图重试保留原始 multipart 请求体。
+图片下载失败不会触发生图重试。显式 API key、第三方端点和仅来自环境变量的
+token 不参与认证文件的自动刷新重试。
+
 #### 示例
 
 ```python
