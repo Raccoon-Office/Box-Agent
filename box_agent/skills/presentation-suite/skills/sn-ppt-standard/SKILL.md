@@ -352,3 +352,7 @@ Review：
 | `install.sh` | 保留：跨环境依赖、字体和 Chromium 安装无法由运行脚本可靠替代；依赖清单已内联 |
 
 首次部署依赖解析 venv、PyMuPDF、可分发字体、FontTools/Brotli 和 Playwright Chromium；用 `scripts/install.sh` 安装。运行脚本时若 skill 挂载路径不同，使用实际 skill root。
+
+`install.sh` 需要 Bash；Windows 请从 Git Bash 运行。可用 `BOX_AGENT_PYTHON` 指定安装所用的
+Python 解释器；解析 venv 会同时识别 Windows 的 `Scripts/python.exe` 和 macOS/Linux 的
+`bin/python`，无需手动改写 venv 路径。
