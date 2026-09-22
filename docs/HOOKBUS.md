@@ -138,6 +138,23 @@ Registering → freeze() → Ready → close() → Draining → Closed
 
 Handler 需要协作式响应取消。忽略取消的协程会使清理等待它结束，同步阻塞代码也不能依靠异步期限强制终止。关闭操作和令牌释放支持重复调用。
 
+## SenseNova 空响应中的 DSML 恢复
+
+默认运行装配为 CLI 和 ACP 注册 `DsmlToolCallRecoveryHook`，先于调用方的旧
+`hooks` 回调执行。它只处理 SenseNova 模型族、没有结构化工具调用且正文为
+空字符串或纯空白的响应，从 thinking 中恢复完整 DSML invoke 块，最多恢复
+八个调用。正文已有内容或模型不匹配时保持原响应；无法解析的块继续走原有
+空响应重试路径。单独的解析 helper 能读取 content，但默认 Hook 不接管非空正文。
+
+恢复会生成正常的 `tool_calls` 并将 `finish_reason` 改为 `tool_calls`；已恢复的
+标记从 thinking 中移除。工具可见性、参数校验、权限审批和预算仍由正常执行链
+处理，调用方的旧 Hook 会看到恢复后的响应。日志记录恢复的工具名和响应 ID，
+不记录参数或 thinking 全文。
+
+该恢复依赖模型标记和完整 DSML 语法，不能修复所有损坏输出，也不验证模型意图。
+没有新增配置、凭据或持久化迁移。回滚需撤销本次 Hook 与装配注册；安装版需
+重建、安装 runtime 并重启，源码测试不能代替真实模型与客户端任务验证。
+
 ## 代码位置
 
 | 文件 | 内容 |
