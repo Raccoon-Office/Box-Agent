@@ -756,3 +756,131 @@ def test_config_lite_llm_max_output_tokens_rejects_ceiling(tmp_path):
     config_path.write_text(yaml.safe_dump(yaml_text), encoding="utf-8")
     with pytest.raises(ValueError, match="65536 ceiling"):
         Config.from_yaml(config_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["title", "summary", "rewrite", "expert", "other"])
+async def test_host_default_routes_unbound_utilities_without_using_process_model(tmp_path, purpose):
+    agent, main, _ = _make_agent(tmp_path, lite=True)
+    await agent.initialize(SimpleNamespace(field_meta={
+        "llm_binding": {"source": "builtin", "model": "visible-model"},
+    }))
+    result = await agent._llm_prompt({"prompt": "hello", "_meta": {"purpose": purpose}})
+    assert result["text"] == "reply-from-bound-visible-model"
+    assert main.last_messages is None
+
+
+@pytest.mark.asyncio
+async def test_host_default_auto_pool_is_used_by_titles_and_unbound_sessions(tmp_path, monkeypatch):
+    agent, main, _ = _make_agent(tmp_path, lite=True)
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    binding = {
+        "source": "builtin", "model": "analysis-model",
+        "autoRouting": {"models": [
+            {"model": "analysis-model", "tags": ["analysis"], "abilityLevel": 3},
+            {"model": "summary-model", "tags": ["summary", "fast"], "abilityLevel": 1},
+        ]},
+    }
+    await agent.initialize(SimpleNamespace(field_meta={"llm_binding": binding}))
+    result = await agent._llm_prompt({"prompt": "hello", "_meta": {"purpose": "title"}})
+    assert result["text"] == "reply-from-bound-summary-model"
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    state = agent._sessions[session.sessionId]
+    assert state.session_llm.model == "analysis-model"
+    assert len(state.session_llm.auto_model_candidates) == 2
+    assert agent._summary_llm_for_session(
+        session_llm=state.session_llm, session_id="test", title="test", client_info=None,
+    ).model == "summary-model"
+    assert main.last_messages is None
+    await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_utilities_and_compaction_keep_their_model_after_default_changes(tmp_path, monkeypatch):
+    agent, main, _ = _make_agent(tmp_path, lite=True)
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    await agent.initialize(SimpleNamespace(field_meta={
+        "llm_binding": {"source": "builtin", "model": "default-model"},
+    }))
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "session_id": "original-session",
+        "llm_binding": {"source": "builtin", "model": "session-model"},
+    }))
+    state = agent._sessions[session.sessionId]
+    result = await agent._llm_prompt({"prompt": "title", "_meta": {
+        "session_id": "original-session", "purpose": "title",
+    }})
+    assert result["text"] == "reply-from-bound-session-model"
+    assert agent._summary_llm_for_session(
+        session_llm=state.session_llm, session_id="test", title="test", client_info=None,
+    ).model == "session-model"
+    result = await agent._llm_prompt({"prompt": "title", "_meta": {
+        "purpose": "title", "llm_binding": {"source": "builtin", "model": "new-default"},
+    }})
+    assert result["text"] == "reply-from-bound-new-default"
+    assert state.session_llm.model == "session-model"
+    assert main.last_messages is None
+    await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_memory_bootstrap_waits_for_host_binding_and_starts_once(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    agent, main, _ = _make_agent(tmp_path, lite=True)
+    memory = SimpleNamespace(import_openclaw=AsyncMock())
+    agent._memory = memory
+    agent._config.agent.memory_maintainer_enabled = True
+    maintenance = AsyncMock(return_value=True)
+    captured = []
+
+    def maintainer(memory_arg, config, *, llm):
+        captured.append(llm.model)
+        return SimpleNamespace(run_if_due=maintenance)
+
+    monkeypatch.setattr("box_agent.memory_maintainer.MemoryMaintainer", maintainer)
+    assert agent._memory_bootstrap_task is None
+    await agent.initialize(SimpleNamespace(field_meta={
+        "llm_binding": {"source": "builtin", "model": "visible-model"},
+    }))
+    await agent._memory_bootstrap_task
+    agent._start_memory_bootstrap()
+    memory.import_openclaw.assert_awaited_once()
+    assert memory.import_openclaw.call_args.args[0].model == "visible-model"
+    assert captured == ["visible-model"]
+    maintenance.assert_awaited_once()
+    assert main.last_messages is None
+    await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_memory_bootstrap_releases_its_profile_client_on_completion_or_shutdown(tmp_path, monkeypatch, cancel):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    agent, main, _ = _make_agent(tmp_path, lite=True)
+    client = _DummyLLM("profile")
+    client.aclose = AsyncMock()
+    main.aclose = AsyncMock()
+    monkeypatch.setattr("box_agent.acp.client_for_model_profile", lambda *args, **kwargs: client)
+    started = asyncio.Event()
+
+    async def import_memory(llm):
+        started.set()
+        if cancel:
+            await asyncio.Event().wait()
+
+    agent._memory = SimpleNamespace(import_openclaw=import_memory)
+    agent._config.agent.memory_maintainer_enabled = False
+    await agent.initialize(SimpleNamespace(field_meta={"llm_binding": {
+        "source": "profile", "version": 2, "profileId": "profile",
+        "profileRevision": "revision", "routingMode": "manual", "model": "visible-model",
+    }}))
+    await started.wait()
+    if not cancel:
+        await agent._memory_bootstrap_task
+    await agent.aclose()
+    client.aclose.assert_awaited_once()
+    main.aclose.assert_not_awaited()

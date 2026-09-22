@@ -1213,6 +1213,8 @@ class BoxACPAgent:
         self._plugin_runtime = create_application_runtime()
         self._config = config
         self._llm = llm
+        self._default_llm_binding: dict[str, Any] | None = None
+        self._memory_bootstrap_task: asyncio.Task | None = None
         self._lite_llm = lite_llm or llm
         self._base_tools = base_tools
         self._system_prompt = system_prompt
@@ -1248,6 +1250,9 @@ class BoxACPAgent:
     async def aclose(self) -> None:
         """Release sessions and application plugins, retaining interrupted owners."""
         errors = []
+        if self._memory_bootstrap_task is not None:
+            self._memory_bootstrap_task.cancel()
+            await asyncio.gather(self._memory_bootstrap_task, return_exceptions=True)
         for handle, state in list(self._sessions.items()):
             try:
                 await state.aclose()
@@ -1273,6 +1278,8 @@ class BoxACPAgent:
             raise combine_cleanup_errors(errors)
 
     def _llm_for_binding(self, binding: dict[str, Any] | None) -> LLMClient:
+        if binding is None:
+            binding = self._default_llm_binding
         if binding is None:
             return self._llm
         if binding.get("source") == "profile":
@@ -1371,6 +1378,7 @@ class BoxACPAgent:
             if state is not None and state.session_llm is not None:
                 return state.session_llm
 
+        binding = binding or self._default_llm_binding
         bound = SessionBoundLLM(self._llm_for_binding(binding))
         bound.set_auto_model_candidates(
             (binding or {}).get("autoRouting", {}).get("models", [])
@@ -1567,11 +1575,47 @@ class BoxACPAgent:
             log.warn("skills/meta_error", message=f"Failed to build skills metadata: {exc}")
             return None
 
+    def _start_memory_bootstrap(self) -> None:
+        """Wait for the host model binding before any background model calls."""
+        if self._memory is None or self._memory_bootstrap_task is not None:
+            return
+        memory_llm = self._utility_llm_for_meta({})
+        bootstrap_id = f"local-agent-memory-{uuid4()}"
+        memory_llm.set_request_context(
+            session_id=bootstrap_id, turn_id=bootstrap_id,
+            title="本地 Agent 记忆维护", client_info=self._client_info,
+        )
+
+        owns_client = (self._default_llm_binding or {}).get("source") == "profile"
+
+        async def bootstrap() -> None:
+            try:
+                try:
+                    await self._memory.import_openclaw(memory_llm)
+                except Exception:
+                    log.warn("server/start", message="OpenClaw import failed (non-fatal)")
+                if self._config.agent.memory_maintainer_enabled:
+                    from box_agent.memory_maintainer import MemoryMaintainer
+
+                    try:
+                        await MemoryMaintainer(
+                            self._memory, self._config.agent, llm=memory_llm,
+                        ).run_if_due()
+                    except Exception:
+                        log.warn("server/start", message="Memory maintainer failed (non-fatal)")
+            finally:
+                if owns_client:
+                    await memory_llm.aclose()
+
+        self._memory_bootstrap_task = asyncio.create_task(bootstrap(), name="memory-bootstrap")
+
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:
         log.info("initialize", message="ACP initialize request received")
         meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
             self._client_info = ClientInfo.from_meta(meta.get("client_info"))
+        self._default_llm_binding = _normalize_llm_binding(meta)
+        self._start_memory_bootstrap()
         kwargs: dict[str, Any] = dict(
             protocolVersion=PROTOCOL_VERSION,
             agentCapabilities=AgentCapabilities(loadSession=False),
@@ -1706,7 +1750,7 @@ class BoxACPAgent:
             if session_mode is None:
                 session_mode = "code_agent"
 
-        llm_binding = _normalize_llm_binding(meta)
+        llm_binding = _normalize_llm_binding(meta) or self._default_llm_binding
         session_llm = SessionBoundLLM(self._llm_for_binding(llm_binding))
         session_context_window, session_max_output_tokens = (
             self._context_capabilities_for_binding(llm_binding)
@@ -3753,7 +3797,7 @@ class BoxACPAgent:
                         planning_llm = state.session_llm
                 if planning_llm is None:
                     planning_id = f"local-agent-memory-review-{uuid4()}"
-                    planning_llm = SessionBoundLLM(self._llm)
+                    planning_llm = self._utility_llm_for_meta(params.get("_meta") or {})
                     planning_llm.set_request_context(
                         session_id=planning_id,
                         turn_id=planning_id,
@@ -5430,7 +5474,7 @@ async def run_acp_server(config: Config | None = None) -> None:
     shutdown_event = asyncio.Event()
     server_adapter: BoxACPAgent | None = None
     llm = lite_llm = None
-    mcp_task = skill_task = memory_bootstrap_task = None
+    mcp_task = skill_task = None
     loop = asyncio.get_running_loop()
     installed_signal_handlers: list[signal.Signals] = []
     for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
@@ -5476,49 +5520,6 @@ async def run_acp_server(config: Config | None = None) -> None:
                 dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
                 manager_factory=MemoryManager,
             )
-
-        # Memory bootstrap (one-time OpenClaw import + maintenance) runs OFF the
-        # critical path. Both steps can issue slow LLM calls — OpenClaw filtering
-        # on first launch, and the maintainer's compact phase on a large
-        # CONTEXT.md — which used to blow the host's ACP init timeout: stdio
-        # (and thus the `initialize` response) is only set up *after* this block,
-        # so an awaited LLM call here delays readiness and the host kills the
-        # process before it ever answers. Fire-and-forget instead — errors are
-        # logged but never block stdio readiness; results land in memory for
-        # subsequent turns. Same pattern as the background MCP loader.
-        #
-        # Import and maintenance run sequentially within the one task so the
-        # maintainer observes freshly-imported content and they never race on
-        # MEMORY.md writes.
-        memory_bootstrap_task: asyncio.Task | None = None
-        if memory_mgr:
-            _maintainer_enabled = config.agent.memory_maintainer_enabled
-            memory_bootstrap_id = f"local-agent-memory-{uuid4()}"
-            memory_bootstrap_llm = SessionBoundLLM(llm)
-            memory_bootstrap_llm.set_request_context(
-                session_id=memory_bootstrap_id,
-                turn_id=memory_bootstrap_id,
-                title="本地 Agent 记忆维护",
-            )
-
-            async def _memory_bootstrap() -> None:
-                try:
-                    await memory_mgr.import_openclaw(memory_bootstrap_llm)
-                except Exception:
-                    log.warn("server/start", message="OpenClaw import failed (non-fatal)")
-                if _maintainer_enabled:
-                    from box_agent.memory_maintainer import MemoryMaintainer
-
-                    try:
-                        await MemoryMaintainer(
-                            memory_mgr,
-                            config.agent,
-                            llm=memory_bootstrap_llm,
-                        ).run_if_due()
-                    except Exception:
-                        log.warn("server/start", message="Memory maintainer failed (non-fatal)")
-
-            memory_bootstrap_task = asyncio.create_task(_memory_bootstrap(), name="memory-bootstrap")
 
         # Skills discovery is deferred: a directory full of malformed
         # SKILL.md (a downstream host regularly ships dozens) used to run
@@ -5643,7 +5644,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 shutdown.push_async_callback(close_owned_clients, (llm, lite_llm))
                 shutdown.push_async_callback(cleanup_mcp_connections)
                 shutdown.push_async_callback(JupyterSandboxTool.shutdown_all)
-                for task in (mcp_task, skill_task, memory_bootstrap_task):
+                for task in (mcp_task, skill_task):
                     if task is not None:
                         shutdown.push_async_callback(stop_background_task, task)
                 if server_adapter is not None:
