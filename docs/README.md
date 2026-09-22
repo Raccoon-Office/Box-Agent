@@ -33,6 +33,7 @@ contracts.
 | Hosted web image search | [Web Image Search](WEB_SEARCH_IMAGE_SEARCH.md) | [联网文搜图](WEB_SEARCH_IMAGE_SEARCH_CN.md) |
 | Controlled HTML PPTX compiler | [PPTX Architecture](PPTX_CONTROLLED_HTML_ARCHITECTURE.md) | [PPTX 架构](PPTX_CONTROLLED_HTML_ARCHITECTURE_CN.md) |
 | Controlled HTML PPTX development and extension | [PPTX Development Guide](PPTX_CONTROLLED_HTML_DEVELOPMENT.md) | [PPTX 开发与扩展手册](PPTX_CONTROLLED_HTML_DEVELOPMENT_CN.md) |
+| PPTX rendering runtime compatibility | [PPTX runtime entry](pptx-entry.md) | [PPTX 渲染运行时入口](pptx-entry.md) |
 
 ## ACP host integration
 
