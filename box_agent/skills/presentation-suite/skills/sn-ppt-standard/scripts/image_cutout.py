@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-import fcntl
+from file_lock import lock_file, unlock_file
 import json
 import os
 from pathlib import Path
@@ -66,7 +66,7 @@ def _record_derived(root: Path, output_relative: str, source_relative: str) -> N
     catalog_path = assets / "catalog.json"
     lock_path = assets / ".catalog.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lock_file(lock)
         try:
             try:
                 catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
@@ -108,7 +108,7 @@ def _record_derived(root: Path, output_relative: str, source_relative: str) -> N
             finally:
                 Path(temporary_name).unlink(missing_ok=True)
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            unlock_file(lock)
 
 
 def _border_pixels(rgb: np.ndarray) -> np.ndarray:

@@ -251,7 +251,7 @@
       "source_sha256": "61723cf249ce70e93df2ea23da926194af9df86b9b622ca6604337f494a747fb"
     },
     "skills/sn-ppt-dazzle/scripts/render_deck.py": {
-      "sha256": "bd0f5eb02bbb6d06f3666561264f8163937246dcdc04699a731ab230c84684e7",
+      "sha256": "1b0992c0bef879696057f94f391c10e65316a99d909fbc119c66f2b5c989be51",
       "source_path": "skills/sn-ppt-dazzle/scripts/render_deck.py",
       "source_sha256": "a9da9f17d15dc067724b64677ace0f9cd7bf0073954a820735c31b99667cea60"
     },
@@ -266,7 +266,7 @@
       "source_sha256": "bc2ba1b05b87aa0064e82a70359568368f5a00376c27759554e355039bb39caf"
     },
     "skills/sn-ppt-doctor/ppt_doctor/check_environment.py": {
-      "sha256": "cf79063c90ba81235b39d7f0a59dd16401ab3fb47f6e208d24ebb8f501ead946",
+      "sha256": "a5e7ff3634f417e9941e64c0bc1c7a450209360c1c9c9943ffe41a1786a7f61b",
       "source_path": "skills/sn-ppt-doctor/ppt_doctor/check_environment.py",
       "source_sha256": "6b5c8bc3e2c9060a8119fbaaf7c9593b082ac813243ed02c8eea11653d329810"
     },
@@ -506,6 +506,12 @@
       "source_path": "skills/sn-ppt-standard/scripts/export_pptx/test/test_text_box_padding_regression.mjs",
       "source_sha256": "72864f88a9776b7eb732228e810e8626ee98da00306ea2506efdb6feb61b3b48"
     },
+    "skills/sn-ppt-standard/scripts/file_lock.py": {
+      "input_path": "scripts/presentation_suite_overlays/file_lock.py",
+      "sha256": "894542a3843a80cf8cba1901a272600d30d3dcc12f3b467cba4783a49df204a1",
+      "source_path": "skills/sn-ppt-standard/scripts/file_lock.py",
+      "source_sha256": "894542a3843a80cf8cba1901a272600d30d3dcc12f3b467cba4783a49df204a1"
+    },
     "skills/sn-ppt-standard/scripts/font_bundle.py": {
       "sha256": "7869aa40580504b7afde5c24aa337309beda04be380a8ab56c5499dd2fb70488",
       "source_path": "skills/sn-ppt-standard/scripts/font_bundle.py",
@@ -517,25 +523,31 @@
       "source_sha256": "5ead74d0963c22b1ec206bdcfe6070c924ff7ae2602c94a6165607cc81ba3824"
     },
     "skills/sn-ppt-standard/scripts/image_cutout.py": {
-      "sha256": "cf15ab8ee7cad3fc8202ee125dc893555d60aa9f048405241851f0282c811fa6",
+      "sha256": "0b5191060c5138760b1026f6ce650faa4b67a2adb076a9867ffc8ce186ad9512",
       "source_path": "skills/sn-ppt-standard/scripts/image_cutout.py",
       "source_sha256": "cf15ab8ee7cad3fc8202ee125dc893555d60aa9f048405241851f0282c811fa6"
     },
     "skills/sn-ppt-standard/scripts/install.sh": {
-      "sha256": "544c05f991795e45a40cb3ae8f32e19da176386504db65cf5efd453eb26a46d1",
+      "sha256": "87306345ee66f061c7f4cec612cd971b2af404067c586e580fd4a813efe1a064",
       "source_path": "skills/sn-ppt-standard/scripts/install.sh",
       "source_sha256": "0841090b40eab67ee3c6084f83f933554838b952ed9c1d5ed800806e2ac25db9"
     },
     "skills/sn-ppt-standard/scripts/render.py": {
-      "sha256": "f74fe0e1fe4d054214175ce7325a2b3f50c39b493f6f162dbc97e54fba4c8ce9",
+      "sha256": "bbd336c88296fb0a550cc1c7ac43e42a93f1da37d1ed07aed1019144ddf767b9",
       "source_path": "skills/sn-ppt-standard/scripts/render.py",
       "source_sha256": "1dca91cee3dbe594be5bfd8e56de295d24eae6c24b0cc2195962169d4accc596"
     },
     "skills/sn-ppt-standard/scripts/render_runtime.py": {
       "input_path": "scripts/presentation_suite_overlays/render_runtime.py",
-      "sha256": "dfdaaed7c081f0feebc734fd497c68ec2e4c6f4533c903fe09c554a9508bf592",
+      "sha256": "df6df998e17683c9cdfdbaff0cecb1de240e793a8604b37b9ad9d54efb0edd1e",
       "source_path": "skills/sn-ppt-standard/scripts/render_runtime.py",
-      "source_sha256": "dfdaaed7c081f0feebc734fd497c68ec2e4c6f4533c903fe09c554a9508bf592"
+      "source_sha256": "df6df998e17683c9cdfdbaff0cecb1de240e793a8604b37b9ad9d54efb0edd1e"
+    },
+    "skills/sn-ppt-standard/scripts/render_runtime_windows.py": {
+      "input_path": "scripts/presentation_suite_overlays/render_runtime_windows.py",
+      "sha256": "677523abcc2b2ef34be1989be46a7dbb16fed8fe3eed17c63ed06b428036f897",
+      "source_path": "skills/sn-ppt-standard/scripts/render_runtime_windows.py",
+      "source_sha256": "677523abcc2b2ef34be1989be46a7dbb16fed8fe3eed17c63ed06b428036f897"
     },
     "skills/sn-ppt-standard/scripts/serper_images.py": {
       "sha256": "c9c6e1b0864b628cc09fd5a36d7b28e4765b9ee2a1fe2501c2a927e9bc114a55",
@@ -632,7 +644,8 @@
     "explicit-delivery-scopes",
     "presentation-progress-without-reconfirmation",
     "host-playwright-runtime",
-    "bounded-image-inspection-recovery"
+    "bounded-image-inspection-recovery",
+    "native-windows-rendering"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "ed82b4ae0238dfa5be108c41271e887876f0f9d8",

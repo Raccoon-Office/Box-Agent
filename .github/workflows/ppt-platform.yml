@@ -1,0 +1,41 @@
+name: PPT platform compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'box_agent/skills/presentation-suite/**'
+      - 'scripts/presentation_suite_overlays/**'
+      - 'scripts/sync_presentation_suite.py'
+      - 'tests/test_presentation_*.py'
+      - '.github/workflows/ppt-platform.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+      PPT_RENDER_BROWSER_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install focused test dependencies and Chromium
+        run: |
+          python -m pip install pytest psutil playwright pillow pyyaml
+          python -m playwright install --with-deps chromium
+      - name: Test shipped Skill on native operating system
+        run: >-
+          python -m pytest -q --tb=short
+          tests/test_presentation_platform.py
+          tests/test_presentation_windows_runtime.py
+          tests/test_presentation_platform_browser.py

@@ -96,7 +96,7 @@ provider 参数映射；单独配置的视觉 client 保留自身 provider 和�
 
 Standard 的单页、批量截图和播放器审计共用同步 Playwright 生命周期。每次调用由独立
 监督进程管理总期限和并发槽，worker 持有 driver 和 browser，每页使用独立 context；
-批量任务内复用 browser。Chromium 启动守卫在启动浏览器前登记专属进程组，父进程消失
+批量任务内复用 browser。macOS/Linux 的 Chromium 启动守卫在启动浏览器前登记专属进程组，父进程消失
 时自行终止该组；守卫提前退出时，监督进程按已登记组及进程身份清理后代。不会按进程
 名称、年龄或孤儿状态清理其他任务。导入模块和 `--help` 不启动或清理浏览器。
 
@@ -108,8 +108,25 @@ Standard 的单页、批量截图和播放器审计共用同步 Playwright 生�
 
 `RENDER_GLOBAL_LIMIT=0` 默认不设全局槽限制；配置正整数后，同一 `RENDER_LOCK_DIR`
 内共用该上限。排队受 `RENDER_SLOT_TIMEOUT`（默认 900 秒）和任务剩余预算共同约束，
-超时失败，不绕过上限。该实现针对 macOS/Linux POSIX，依赖 Playwright 和 `psutil>=5.9`；
-Skill 安装脚本和 requirements 同步声明依赖。Windows 需要单独的进程所有权实现。
+超时失败，不绕过上限。依赖 Playwright 和 `psutil>=5.9`；Skill 安装脚本和 requirements
+同步声明依赖。Windows 使用原生 Job Object：worker 在加入 Job 并收到启动许可前不能
+启动 Playwright，后代进程由 Job 统一持有；父进程被强制结束时由系统关闭 Job 并终止后代。
+正常收尾、超时及可处理的取消均在确认 Job 进程已退出后释放并发槽；Job 创建或绑定失败
+时直接报错，不降级为无监督渲染。Windows 使用本机 TCP 控制连接及随机凭证；
+macOS/Linux 保留原有 Unix socket 和进程组实现。共享总期限、有限重试和回执规则不变。
+
+Standard 和 Dazzle 优先使用宿主的 `BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`、
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`，其次是显式 Skill 浏览器配置及本平台缓存。
+文件导航通过 `Path.as_uri()` 处理盘符、中文、空格和 `#`；数据写锁在 Windows 使用
+`msvcrt`，在 macOS/Linux 使用 `flock`。`install.sh` 仍需 Bash（Windows 可使用 Git Bash），
+支持 `BOX_AGENT_PYTHON` 和虚拟环境的 `Scripts/python.exe`；不会在渲染时自动安装依赖。
+Doctor 的浏览器检查会运行一次离线最小页的真实渲染，只在退出码为零且 PNG 存在时报告
+可用；它不是每次 PPT 任务新增的强制步骤。
+
+`.github/workflows/ppt-platform.yml` 在 Windows、macOS 和 Linux 上执行聚焦回归及真实
+Chromium 单页、批量和播放器审计。Windows 专用用例验证超时、取消、父进程强退、
+子进程遗留和并发槽；在其他系统上这些用例明确跳过。需要单独查看 Windows job 结果，
+不能把 macOS/Linux 上的通过结果当成 Windows 验证。该 CI 不替代 OfficeV3 打包后的端到端验收。
 
 源库保持独立开发。`scripts/sync_presentation_suite.py` 从指定 Git 提交读取六模块及所需
 资源，用可检查的替换适配两个出口和 Box-Agent 工具名称。源文本变化不满足适配条件时
@@ -118,6 +135,7 @@ Skill 安装脚本和 requirements 同步声明依赖。Windows 需要单独的�
 本地 helper 输入与集成后文件哈希。图片检查超时的有限重试与降级交付规则由
 `image_inspection_recovery.py` overlay 维护，完整同步和增量刷新都会应用。
 增量刷新先校验已有文件哈希；发现未登记改动时仍会拒绝执行，不能直接改哈希绕过。
+Windows 适配新增运行时 helper，首次应用须执行完整同步，不能仅刷新已有文件。
 
 ```bash
 uv run python scripts/sync_presentation_suite.py --source-checkout /path/to/sensenova-presentation-int
