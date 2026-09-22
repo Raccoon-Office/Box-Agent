@@ -227,6 +227,42 @@ PPT_TOOLS_DIR = <skills root>/sn-ppt-tools
 需要用户处理配置时只提示运行 `sn-ppt-doctor`；不要在 Entry 重复变量清单。Doctor 会显示
 Hermes/OpenClaw 实际读取的用户级 `.env`、缺失项和配置模板。
 
+## 大纲确认（Box-Agent）
+
+Standard / Deep 的 Story 完成后，先展示一行叙事概括和同一 `deck_dir/outline.md` 的
+可点击完整路径，再调用 `request_user_decision`。这是大纲确认，不重新询问制作模式；
+本次请求 60 秒，不沿用工具的通用 30 秒建议，也不改变制作模式选择卡的时限：
+
+```json
+{
+  "question": "是否按此大纲继续？60 秒内未操作将按当前大纲继续制作；需要修改可直接填写意见。",
+  "decision_kind": "outline_confirmation",
+  "options": [
+    {"id": "approve", "label": "按此大纲继续", "description": "沿用已展示的大纲制作页面。"},
+    {"id": "revise", "label": "需要修改", "description": "先修改大纲，再开始制作。"}
+  ],
+  "default_option_id": "approve",
+  "requested_auto_submit_seconds": 60,
+  "risk_level": "low",
+  "reversible": true,
+  "preserves_user_intent": true,
+  "allow_freeform": true
+}
+```
+
+只在内容足以继续且用户未要求亲自确认时使用此默认。用户明确要求“等我确认”，或必要
+事实/选择仍缺失时，保留确认卡但省略默认选项、超时及三项安全声明，问题中不再承诺
+60 秒后继续，先解决缺口。
+工具不可用时沿用文本确认；是否启用倒计时以工具回执为准。计时和自动续跑由客户端
+负责，不调用 sleep、轮询或自己写“已超时”来模拟回复。用户点击立即生效；卡片中开始
+输入修改意见会取消自动提交。Draft 保持默认直接生产，不新增等待。
+
+收到该卡的 `approve` 回复（`trigger=user` 或 `timeout`）后，重新读取同一路径的
+`outline.md`，按既有输出选择继续；未变的大纲不重复弹卡。超时表示采用默认，不写成
+“用户已亲自确认”。`revise` 或自定义修改意见先交给 Story 更新同一份大纲；只有选择
+“需要修改”而未给意见时，询问具体修改，不开始制作。大纲实质变化后重新展示并确认，
+不能把旧回复用于新内容。普通聊天中的明确确认/修改也按同样规则处理。
+
 ## 新任务流程
 
 1. **进入和识别**：回显已经进入 Entry。提取角色、受众、场景、页数、语言、附件、
@@ -281,15 +317,17 @@ Hermes/OpenClaw 实际读取的用户级 `.env`、缺失项和配置模板。
 9. **调用 Story**：把同一 `deck_dir` 交给 `sn-ppt-story`。Story 读取 query、
    `info_pack.json`、`raw_documents.json` 和已有 Research，生成唯一
    `<deck_dir>/outline.md`。
-10. **大纲交互**：Draft 默认继续生产，同时告知大纲路径；Standard / Deep 展示一行整体
-    叙事和路径，等待用户修改或确认。继续前重新读取磁盘上的 `outline.md`，不能使用聊天
-    中的旧副本。
+10. **大纲交互**：Draft 默认继续生产，同时告知大纲路径；Standard / Deep 在 Box-Agent
+    按“大纲确认”展示原大纲并发卡，其他环境沿用文本确认。继续前重新读取磁盘上的
+    `outline.md`，不能使用聊天中的旧副本；确认方式不改变 Static / Dazzle 的出口分工。
 11. **出口分发**：Story 已完成且当前磁盘 `outline.md` 已按本档位确认后，
     `static_html` 调用 `sn-ppt-standard`，`dynamic_html` 调用 `sn-ppt-dazzle`；始终传入相同绝对
     `deck_dir`。不得绕过 Story；出口不再研究、重排页面或重写大纲。
-12. **后处理和收尾**：静态页面完成后，父级先按 Standard 的命令执行
-    `deck.py build` 与 `deck.py audit`，核对 `<deck_dir>/present.html` 存在、覆盖全部页面且
-    播放器可打开，再完成最终像素检查。逐页 HTML/PNG 或 PPTX 已存在都不能跳过这一步。
+12. **后处理和收尾**：静态页面完成后，父级核对 Standard 的 `deck.py review-prep`
+    结果及最终 Review 合同，确认 `<deck_dir>/present.html` 存在、覆盖全部页面且播放器
+    可打开，最终全册像素已检查。仅有逐页 HTML/PNG 或 PPTX 不能代替这些验收。
+    本轮尚未准备待审产物时，执行 Standard 的 `review-prep` 后完成最终像素检查；
+    已验收且此后视觉源未变化时直接消费结果，不重复 build/audit 或改动页面。
     随后按 `static_postprocess` 使用 Standard 自有 exporter
     `scripts/export_pptx/html_to_pptx.mjs` 导出 PPTX，默认同时交付；只有用户明确只要 HTML
     时才可省略 PPTX，任何静态任务都不能因此省略 `present.html`。

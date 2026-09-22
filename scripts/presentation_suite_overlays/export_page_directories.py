@@ -24,12 +24,12 @@ _PATCHES = {
         ),
     },
     'skills/sn-ppt-standard/scripts/export_pptx/lib/cli_guards.mjs': {
-        "before_sha256": '5275ab8d4580d475f18af8df2972279b0590b41dd21130924e9e46fc8ce3930e',
-        "after_sha256": '048a4dae192b56d1f7a38a546344a01d8165cc852196b7b67e55975497fea089',
+        "before_sha256": '742b6cc859b6949c8a048fef7d3134950ef969a681bfd1d58987b909439ba88d',
+        "after_sha256": '520147c4f4476b117f69c4e0348cdf85c3b7d1292c620d19c7d50408108b3188',
         "edits": (
             (0, 1, r'''import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 '''),
-            (392, 401, r'''function listPageFiles(pagesDir, pattern = /^(?:page|slide)_\d+\.html$/) {
+            (425, 434, r'''function listPageFiles(pagesDir, pattern = /^(?:page|slide)_\d+\.html$/) {
   if (!existsSync(pagesDir) || !statSync(pagesDir).isDirectory()) return [];
   return readdirSync(pagesDir)
     .filter(name => pattern.test(name) && statSync(resolve(pagesDir, name)).isFile())
@@ -49,21 +49,21 @@ function selectDeckPages(deckDir, explicitDir) {
     }
     return { pagesDir, htmlFiles };
 '''),
-            (403, 406, r'''  const candidates = ['pages', 'slides'].map(name => {
+            (436, 439, r'''  const candidates = ['pages', 'slides'].map(name => {
     const pagesDir = resolve(deckDir, name);
     return { pagesDir, htmlFiles: listPageFiles(pagesDir) };
   }).filter(candidate => candidate.htmlFiles.length > 0);
   if (candidates.length > 1) {
     throw new Error('pages/ 和 slides/ 均包含页面，请用 --pages-dir 明确选择一个目录');
 '''),
-            (407, 407, r'''  if (candidates.length === 1) return candidates[0];
+            (440, 440, r'''  if (candidates.length === 1) return candidates[0];
 '''),
-            (408, 440, r'''  // 兼容旧版根目录 page_*.html；就地读取，避免复制页面后破坏相对资源路径。
+            (441, 473, r'''  // 兼容旧版根目录 page_*.html；就地读取，避免复制页面后破坏相对资源路径。
   const htmlFiles = listPageFiles(deckDir, /^page_\d+\.html$/);
   if (htmlFiles.length > 0) return { pagesDir: resolve(deckDir), htmlFiles };
   throw new Error(`未找到页面: ${deckDir} 的 pages/、slides/ 中没有 page_*.html 或 slide_*.html，根目录也没有 page_*.html；可用 --pages-dir 指定页面目录`);
 '''),
-            (454, 474, r'''  const { pagesDir, htmlFiles } = selectDeckPages(deckDir, opts.pagesDir);
+            (487, 507, r'''  const { pagesDir, htmlFiles } = selectDeckPages(deckDir, opts.pagesDir);
 '''),
         ),
     },

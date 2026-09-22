@@ -109,7 +109,9 @@ Dazzle 时交接 `choices.output="dynamic_html"`、`ppt_mode="dazzle"`，交付�
 设计模式对外描述 PPTX 文件交付，不宣传或承诺可编辑、原位编辑能力。
 
 设计模式的静态任务始终交付同一 `deck_dir` 下的整册 `present.html`：父级按 Standard 执行
-`deck.py build` 与 `deck.py audit`，确认全部页面可播放后，在最终回复给出真实 HTML 链接。
+包含 build/audit 的 `deck.py review-prep`，检查最终全册像素并确认全部页面可播放后，
+在最终回复给出真实 HTML 链接。已完成上述验收且此后视觉源未变化时复用结果，不重复收尾；
+视觉源变化后重新待审和验收。
 逐页 HTML/PNG、全生图页面或 PPTX 导出成功都不能代替该入口；缺失时补齐收尾，失败则
 保留产物并说明未完成，不伪造链接。动态任务沿用完整的 `deck.html` 及其本地资源。
 

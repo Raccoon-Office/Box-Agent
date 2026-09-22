@@ -1240,6 +1240,40 @@ def _hard_render_issues(report):
     return issues
 
 
+def _geometry_diagnostics(report):
+    """Explain existing measurements without turning candidates into verdicts."""
+    diagnostics = []
+    footer = (report.get("layout") or {}).get("footerPushed")
+    if footer:
+        item = {"type": "footerPushed", "severity": "hard", "items": [footer]}
+        below = footer.get("belowViewport")
+        if isinstance(below, (int, float)):
+            item["belowViewport"] = {
+                "value": below, "unit": "px",
+                "direction": "outside" if below > 0 else "inside" if below < 0 else "at-edge",
+                "distance": abs(below),
+            }
+        over = footer.get("bodyOverFooter")
+        if isinstance(over, (int, float)):
+            item["bodyOverFooter"] = {"value": over, "unit": "px",
+                                     "meaning": "body deepest content bottom minus footer top"}
+        diagnostics.append(item)
+    for key in ("boxoverflow", "overlap", "crowded", "cjkTypography", "contrast"):
+        values = report.get(key)
+        if values:
+            item = {"type": key, "severity": "advisory", "items": values,
+                    "meaning": "candidate only; verify against current pixels and DOM"}
+            if key == "boxoverflow":
+                item["fields"] = {
+                    "ob": {"unit": "px", "direction": "bottom",
+                           "meaning": "maximum child extension past container content bottom"},
+                    "orr": {"unit": "px", "direction": "right",
+                            "meaning": "maximum child extension past container content right edge"},
+                }
+            diagnostics.append(item)
+    return diagnostics
+
+
 def _atomic_json(path, payload):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = path + f".{os.getpid()}.tmp"
@@ -1266,6 +1300,7 @@ def _record_render_report(root, number, slide, target, report):
         "png_mtime_ns": os.stat(output).st_mtime_ns,
         "summary": _batch_warning_summary(report),
         "hard_issues": _hard_render_issues(report),
+        "diagnostics": _geometry_diagnostics(report),
         "report": report,
     }
     lock_path = os.path.join(root, "_trace", "render-report.lock")
@@ -1293,6 +1328,7 @@ def _record_render_report(root, number, slide, target, report):
             "source_sha256": record["source_sha256"],
             "png_sha256": record["png_sha256"],
             "hard_issues": record["hard_issues"],
+            "diagnostics": record["diagnostics"],
         }
         _atomic_json(issue_path, ledger)
         _fcntl.flock(lock.fileno(), _fcntl.LOCK_UN)
@@ -1323,6 +1359,8 @@ def render_batch(root, pages=None, width=1600, height=900):
         raise FileNotFoundError("no matching slides found")
     os.makedirs(os.path.join(root, "renders"), exist_ok=True)
     _setup_libs()
+    rendered_pages = []
+    images = []
     hard_pages = []
     with RenderSession(_sync_playwright(), _ensure_browser_available, LAUNCH_ARGS, is_fatal=_is_fatal_browser_error) as session:
         for number, slide in slides:
@@ -1342,12 +1380,21 @@ def render_batch(root, pages=None, width=1600, height=900):
             if _hard_render_issues(report):
                 hard_pages.append(number)
             print(f"{target} {_batch_warning_summary(report)}")
+            rendered_pages.append(number)
+            images.append(os.path.realpath(target))
         if hard_pages:
             raise RenderQualityError(
                 "render quality gate failed for pages: "
                 + ",".join(f"{page:02d}" for page in hard_pages)
                 + "; see _trace/render-issues.json"
             )
+        skill_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        return {
+            "status": "rendered", "qa": "not-run", "rendered_pages": rendered_pages,
+            "images": images, "deck_dir": os.path.realpath(root), "skill_root": skill_root,
+            "next_instructions": os.path.join(skill_root, "subagents", "slide.md"),
+            "review_ledger": os.path.realpath(os.path.join(root, "_trace", "review-issues.md")),
+        }
 
 
 def _player_chart_targets(root):
@@ -1453,7 +1500,9 @@ def _batch_cli(argv):
     parser.add_argument("--height", type=int, default=900)
     args = parser.parse_args(argv)
     try:
-        render_batch(args.root, args.pages, args.width, args.height)
+        receipt = render_batch(args.root, args.pages, args.width, args.height)
+        if receipt is not None:
+            print(json.dumps(receipt, ensure_ascii=False))
     except (BrowserUnavailable, RenderQualityError) as exc:
         print(f"batch render failed: {exc}", file=sys.stderr)
         return 1

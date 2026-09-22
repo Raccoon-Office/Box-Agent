@@ -84,10 +84,10 @@ def apply(relative, data):
             '        elif args.command == "sync":\n')
         text = replace_once(text, '    root = Path(args.root).resolve()\n',
                             '    root = Path(args.root).resolve()\n    _declare_delivery_scope(root)\n')
-        text = replace_once(text, '            _build_contact(root, args.expected)\n',
-            '            _build_contact(root, args.expected)\n'
-            '            _publish_delivery_file(root / "present.html")\n'
-            '            _publish_delivery_file(root / "renders/contact-sheet.png")\n')
+        text = replace_once(text, '    _build_contact(root, expected)\n',
+            '    _build_contact(root, expected)\n'
+            '    _publish_delivery_file(root / "present.html")\n'
+            '    _publish_delivery_file(root / "renders/contact-sheet.png")\n')
     elif relative.endswith("/parse_user_docs.py"):
         text = replace_once(text, '    asset_root = Path(args.asset_dir).expanduser().resolve() if args.asset_dir else None\n',
             '    if args.output:\n        _declare_delivery_scope(Path(args.output).expanduser().resolve().parent)\n'
