@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -76,12 +77,108 @@ async def test_write_file_chunks_enforce_order_and_idempotent_retries(tmp_path):
     assert first.success is True
     assert duplicate.success is True
     assert duplicate.raw_output["duplicate"] is True
+    assert duplicate.raw_output["action"] == "continue"
+    assert duplicate.raw_output["next_chunk_index"] == 1
+    assert json.loads(duplicate.content) == {
+        "duplicate": True,
+        "next_chunk_index": 1,
+        "action": "continue",
+    }
     assert duplicate.raw_output["transaction_state"] == "active"
     assert skipped.success is False
     assert skipped.error.startswith("WRITE_FILE_CHUNK_OUT_OF_ORDER")
     assert skipped.raw_output["transaction_state"] == "active"
     assert skipped.raw_output["next_chunk_index"] == 1
     assert not (tmp_path / "a.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_empty_first_nonfinal_chunk_without_transaction(tmp_path):
+    tool = WriteTool(workspace_dir=str(tmp_path))
+
+    rejected = await tool.execute(
+        path="a.txt", content="", chunk_index=0, final=False
+    )
+
+    assert rejected.success is False
+    assert rejected.raw_output["transaction_state"] == "none"
+    assert rejected.raw_output["next_chunk_index"] == 0
+    assert rejected.raw_output["restart_required"] is True
+    assert not list(tmp_path.glob(".a.txt.box-agent-*.part"))
+    accepted = await tool.execute(
+        path="a.txt", content="first", chunk_index=0, final=False
+    )
+    assert accepted.raw_output["next_chunk_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_empty_middle_chunk_without_advancing(tmp_path):
+    tool = WriteTool(workspace_dir=str(tmp_path))
+    await tool.execute(path="a.txt", content="first", chunk_index=0, final=False)
+
+    rejected = await tool.execute(
+        path="a.txt", content="", chunk_index=1, final=False
+    )
+
+    assert rejected.success is False
+    assert rejected.error.startswith("WRITE_FILE_EMPTY_CHUNK")
+    assert rejected.raw_output["transaction_state"] == "active"
+    assert rejected.raw_output["next_chunk_index"] == 1
+    assert rejected.raw_output["size_bytes"] == 5
+    assert next(tmp_path.glob(".a.txt.box-agent-*.part")).read_text() == "first"
+    committed = await tool.execute(
+        path="a.txt", content="last", chunk_index=1, final=True
+    )
+    assert committed.success is True
+    assert (tmp_path / "a.txt").read_text() == "firstlast"
+
+
+@pytest.mark.asyncio
+async def test_write_file_accepts_empty_final_chunk_with_or_without_transaction(tmp_path):
+    tool = WriteTool(workspace_dir=str(tmp_path))
+
+    empty = await tool.execute(
+        path="a.txt", content="", chunk_index=0, final=True
+    )
+    assert empty.success is True
+    assert empty.raw_output["size_bytes"] == 0
+    assert (tmp_path / "a.txt").read_text() == ""
+
+    await tool.execute(path="a.txt", content="body", chunk_index=0, final=False)
+    committed = await tool.execute(
+        path="a.txt", content="", chunk_index=1, final=True
+    )
+    assert committed.success is True
+    assert committed.raw_output["chunks"] == 2
+    assert (tmp_path / "a.txt").read_text() == "body"
+
+    cleared = await tool.execute(path="a.txt", content="", chunk_index=0, final=True)
+    assert cleared.success is True
+    assert (tmp_path / "a.txt").read_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_write_file_conflict_discards_pending_write_and_can_restart(tmp_path):
+    tool = WriteTool(workspace_dir=str(tmp_path))
+    (tmp_path / "a.txt").write_text("original")
+    await tool.execute(path="a.txt", content="first", chunk_index=0, final=False)
+
+    conflict = await tool.execute(
+        path="a.txt", content="changed", chunk_index=0, final=False
+    )
+
+    assert conflict.success is False
+    assert conflict.raw_output["transaction_state"] == "discarded"
+    assert conflict.raw_output["next_chunk_index"] == 0
+    assert conflict.raw_output["restart_required"] is True
+    assert conflict.raw_output["action"] == "restart"
+    assert "restart from chunk_index=0" in conflict.error
+    assert (tmp_path / "a.txt").read_text() == "original"
+    assert not list(tmp_path.glob(".a.txt.box-agent-*.part"))
+
+    restarted = await tool.execute(path="a.txt", content="changed")
+    assert restarted.success is True
+    assert (tmp_path / "a.txt").read_text() == "changed"
 
 
 @pytest.mark.asyncio
@@ -120,7 +217,26 @@ async def test_write_file_rejects_conflicting_final_chunk_retry(tmp_path):
     assert conflict.success is False
     assert conflict.error.startswith("WRITE_FILE_FINAL_CHUNK_CONFLICT")
     assert conflict.raw_output["transaction_state"] == "none"
+    assert conflict.raw_output["next_chunk_index"] == 0
+    assert conflict.raw_output["restart_required"] is True
+    assert "restart from chunk_index=0" in conflict.error
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "first-last"
+
+
+@pytest.mark.asyncio
+async def test_write_file_missing_transaction_gives_restart_index(tmp_path):
+    tool = WriteTool(workspace_dir=str(tmp_path))
+
+    missing = await tool.execute(
+        path="a.txt", content="continuation", chunk_index=2, final=True
+    )
+
+    assert missing.success is False
+    assert missing.raw_output["transaction_state"] == "none"
+    assert missing.raw_output["next_chunk_index"] == 0
+    assert missing.raw_output["restart_required"] is True
+    assert missing.raw_output["action"] == "restart"
+    assert "restart_required=true" in missing.error
 
 
 @pytest.mark.asyncio

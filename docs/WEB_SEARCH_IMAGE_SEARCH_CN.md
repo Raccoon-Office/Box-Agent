@@ -4,7 +4,7 @@
 
 ## 能力边界
 
-当前托管 MCP 工具支持两种 `SearchType`：
+当前托管 MCP 工具支持两种 `search_type`：
 
 - `web`：文搜文，默认值。
 - `image`：文搜图。
@@ -17,9 +17,9 @@
 
 ```json
 {
-  "Query": "山东大学校园建筑",
-  "SearchType": "image",
-  "Count": 5
+  "query": "山东大学校园建筑",
+  "search_type": "image",
+  "count": 5
 }
 ```
 
@@ -27,11 +27,13 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `Query` | string | 是 | 搜索词，1～100 个字符。一次调用只传一个视觉意图，避免拼接多个主题。 |
-| `SearchType` | string | 否 | 文搜图固定传 `image`；省略时为 `web`。 |
-| `Count` | integer | 否 | 图片搜索最多返回 5 条。 |
-| `TimeRange` | string | 否 | 仅文搜文使用；图片搜索不要依赖该字段。 |
-| `AuthLevel` | integer | 否 | 权威等级过滤；`0` 为默认，`1` 为非常权威。图片素材检索通常使用默认值。 |
+| `query` | string | 是 | 搜索词，1～100 个字符。一次调用只传一个视觉意图，避免拼接多个主题。 |
+| `search_type` | string | 否 | 文搜图固定传 `image`；省略时为 `web`。 |
+| `count` | integer | 否 | 文搜文为 1～50，文搜图为 1～5；图片搜索默认 5 条。 |
+| `time_range` | string | 否 | 仅文搜文使用；图片搜索不要依赖该字段。 |
+| `auth_level` | integer | 否 | 权威等级过滤；`0` 为默认，`1` 为非常权威。图片素材检索通常使用默认值。 |
+
+Box-Agent 会把小写参数映射为托管 MCP 服务的大写字段；不冲突时也兼容旧的大写调用。
 
 推荐让模型调用已注册的 `web_search` 工具，不要绕过 Box-Agent 直接请求内部 MCP URL。主 Agent 可直接调用；子 Agent 必须在委派时显式声明 `required_tools: ["web_search"]`。
 
