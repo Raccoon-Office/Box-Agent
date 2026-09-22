@@ -96,9 +96,13 @@ def _parse_invoke_body(body: str) -> dict[str, Any] | None:
     arguments: dict[str, Any] = {}
     for match in _PARAMETER_RE.finditer(body):
         param_name = match.group("name").strip()
-        if not param_name:
+        if not param_name or param_name in arguments:
             return None
-        raw_value = match.group("value").strip()
+        raw_value = match.group("value")
+        # A nested marker can be a missing close tag followed by another
+        # parameter. Do not turn ambiguous markup into executable arguments.
+        if _LEFTOVER_DSML_TAG_RE.search(raw_value):
+            return None
         if _STRING_ATTR_RE.search(match.group("attrs")):
             arguments[param_name] = raw_value
         else:
@@ -107,7 +111,7 @@ def _parse_invoke_body(body: str) -> dict[str, Any] | None:
             try:
                 arguments[param_name] = json.loads(raw_value)
             except (TypeError, ValueError):
-                arguments[param_name] = raw_value
+                arguments[param_name] = raw_value.strip()
     leftover = _PARAMETER_RE.sub("", body)
     if _LEFTOVER_DSML_TAG_RE.search(leftover):
         return None
@@ -120,7 +124,9 @@ def parse_dsml_tool_calls(text: str | None) -> list[DsmlToolCall]:
     Tolerates surrounding thinking prose, blank lines, and multiple invokes
     (inside or outside a ``tool_calls`` envelope). Blocks that are unclosed,
     nameless, or contain unclosed parameter markup are skipped individually;
-    remaining valid invokes are still returned. Never raises.
+    later unambiguous invokes are still returned. An unclosed invoke may
+    consume a following block; do not rescan its interior, which could be
+    literal tool-call markup inside a string parameter. Never raises.
     """
 
     if not text:
@@ -259,6 +265,14 @@ class DsmlToolCallRecoveryHook(BaseHook):
     async def on_llm_response(self, *, response: Any) -> None:
         try:
             if getattr(response, "tool_calls", None):
+                return
+            # Preserve the kernel's existing provider-failure, truncation and
+            # argument-budget recovery paths; only a normal stop is salvageable.
+            if getattr(response, "finish_reason", None) not in {"stop", "end_turn"}:
+                return
+            if any(getattr(response, field, None) for field in (
+                "truncated_tool_calls", "oversized_tool_calls", "stream_dropped_mid_tool",
+            )):
                 return
             content = getattr(response, "content", None)
             if not isinstance(content, str) or content.strip():

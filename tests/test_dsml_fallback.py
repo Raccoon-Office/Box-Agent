@@ -67,6 +67,47 @@ def test_parse_accepts_ascii_pipe_delimiter():
     assert calls[0].name == "bash"
 
 
+@pytest.mark.parametrize("value", ["    return 1\n", "\tline\r\n", " \n", ""])
+def test_recovery_preserves_string_parameter_whitespace(value):
+    response = LLMResponse(content="", finish_reason="stop", thinking=(
+        '<｜DSML｜invoke name="write_file">'
+        f'<｜DSML｜parameter name="content" string="true">{value}</｜DSML｜parameter>'
+        '</｜DSML｜invoke>'
+    ))
+    assert recover_dsml_tool_calls(response) == ["write_file"]
+    assert response.tool_calls[0].function.arguments == {"content": value}
+
+
+@pytest.mark.parametrize("body", [
+    '<｜DSML｜parameter name="command" string="true">echo one'
+    '<｜DSML｜parameter name="timeout">30</｜DSML｜parameter>',
+    '<｜DSML｜parameter name="command" string="true">first</｜DSML｜parameter>'
+    '<｜DSML｜parameter name="command" string="true">second</｜DSML｜parameter>',
+])
+def test_recovery_leaves_ambiguous_parameters_untouched(body):
+    response = LLMResponse(content="", thinking=(
+        f'<｜DSML｜invoke name="bash">{body}</｜DSML｜invoke>'
+    ), finish_reason="stop")
+    original = response.model_copy(deep=True)
+    assert recover_dsml_tool_calls(response) == []
+    assert response == original
+
+
+def test_parse_does_not_rescan_inside_an_unclosed_invoke():
+    text = '<｜DSML｜invoke name="broken">unfinished\n' + DSML_SINGLE
+    assert parse_dsml_tool_calls(text) == []
+
+
+def test_parse_does_not_execute_dsml_example_inside_string_parameter():
+    text = (
+        '<｜DSML｜invoke name="write_file">'
+        '<｜DSML｜parameter name="content" string="true">'
+        + DSML_SINGLE
+        + '</｜DSML｜parameter></｜DSML｜invoke>'
+    )
+    assert parse_dsml_tool_calls(text) == []
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -213,6 +254,26 @@ async def test_hook_recovers_sensenova_response_in_place():
     assert response.tool_calls[0].function.arguments == {"command": "ls -la"}
     assert "DSML" not in (response.thinking or "")
     assert "思考一下。" in (response.thinking or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fields", [
+    {"finish_reason": "length"},
+    {"finish_reason": "max_tokens"},
+    {"finish_reason": "tool_argument_limit"},
+    {"finish_reason": "provider_stale"},
+    {"finish_reason": "content_filter"},
+    {"truncated_tool_calls": [{"name": "bash"}]},
+    {"oversized_tool_calls": [{"name": "write_file", "arguments_len": 10000}]},
+    {"stream_dropped_mid_tool": True},
+])
+async def test_hook_preserves_provider_failure_and_truncation(fields):
+    response = LLMResponse(**{
+        "content": "", "thinking": DSML_SINGLE, "finish_reason": "stop", **fields,
+    })
+    original = response.model_copy(deep=True)
+    await _fire(DsmlToolCallRecoveryHook(model_getter=lambda: "sensenova-test"), response)
+    assert response == original
 
 
 @pytest.mark.asyncio
