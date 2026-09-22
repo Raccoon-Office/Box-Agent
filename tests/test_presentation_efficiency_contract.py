@@ -1,11 +1,13 @@
 """Executable command and reference contracts for the static production flow."""
 
 import os
+import json
 from pathlib import Path
 import re
 import runpy
 import shlex
 import subprocess
+import sys
 
 import pytest
 
@@ -203,22 +205,23 @@ def test_planning_finishes_with_preparation_before_html():
     assert "plan/image-strategy.json" in planning
 
 
-def test_base_css_copy_example_preserves_template_and_existing_deck(tmp_path, monkeypatch):
+def test_base_css_init_example_preserves_template_and_existing_deck(tmp_path, monkeypatch):
     text = (STANDARD / "SKILL.md").read_text()
-    command = next(line for line in text.splitlines() if line.startswith("cp -n "))
+    command = next(line for line in text.splitlines() if 'scripts/deck.py" init ' in line)
     deck = tmp_path / "deck with spaces"
     deck.mkdir()
     expanded = command.replace("$SKILL_ROOT", str(STANDARD)).replace("$DECK_DIR", str(deck))
     from box_agent.tools import safety
     monkeypatch.setattr(safety, "BUILTIN_SKILLS_ROOT", STANDARD)
     assert safety.builtin_skill_command_write_error(expanded, deck) is None
-    subprocess.run(shlex.split(expanded), cwd=deck, check=True, capture_output=True)
+    arguments = shlex.split(expanded)
+    arguments[0] = sys.executable
+    subprocess.run(arguments, cwd=deck, check=True, capture_output=True)
     copied = deck / "base.css"
     original = (STANDARD / "references/base-template.css").read_bytes()
     assert copied.read_bytes() == original
     copied.write_text("existing user design")
-    # -n preserves existing work; GNU and BSD cp can differ on skip exit status.
-    subprocess.run(shlex.split(expanded), cwd=deck, check=False, capture_output=True)
+    subprocess.run(arguments, cwd=deck, check=True, capture_output=True)
     assert copied.read_text() == "existing user design"
     assert (STANDARD / "references/base-template.css").read_bytes() == original
 
@@ -240,3 +243,103 @@ def test_repair_decision_precedes_writes_without_a_new_report_or_tool_quota():
     assert "不新增修复计划文件" in repair
     assert "不相邻" in repair and "多个必要" in repair
     assert "一次合并修复不等于一次工具调用" in repair
+
+
+def test_final_review_has_one_method_route_instead_of_two_full_diagnoses():
+    root = (STANDARD / "SKILL.md").read_text()
+    stage = root.split("### 阶段 5：全册 Review 与交付", 1)[1].split("## 3. 编辑 PPT", 1)[0]
+    assert "subagents/review.md" in stage
+    assert "随后严格两段执行" not in stage
+    assert "Review 诊断/有限返修 → review-prep" not in root
+    review = (STANDARD / "subagents/review.md").read_text()
+    diagnosis = review.split("### A.", 1)[1].split("### B.", 1)[0]
+    assert "review-prep" in diagnosis and "prepared" in diagnosis
+    assert "review_contact" in diagnosis
+    assert "其他环境" in diagnosis, "Non-Box review must keep its existing contact preparation"
+
+
+def test_repair_verification_does_not_require_another_open_ended_confirmation():
+    slide = (STANDARD / "subagents/slide.md").read_text()
+    assert "必须先对当前新 PNG 再做一次中性开放式确认" not in slide
+    assert "结构性改动必须由两次一致的新鲜像素判断" not in slide
+    for name in ("subagents/slide.md", "subagents/review.md"):
+        method = (STANDARD / name).read_text()
+        assert "review-issues.md" in method
+        assert "问题对象" in method and "成立条件" in method
+        assert "受影响" in method and "新鲜像素" in method
+
+
+def test_speech_findings_join_formal_review_instead_of_starting_an_extra_build():
+    review = (STANDARD / "subagents/review.md").read_text()
+    speech = next(line for line in review.splitlines() if line.startswith("讲稿验收不能"))
+    assert "Box-Agent 静态新建" in speech
+    assert "账本" in speech and "review-prep" in speech
+    assert "其他路径" in speech and "deck.py build" in speech
+
+
+def test_machine_candidates_do_not_conflict_with_visual_severity():
+    checklist = (STANDARD / "references/quality-checklist.md").read_text()
+    lint = checklist.split("## 三、", 1)[1].split("## 怎么用", 1)[0]
+    assert "必须为零;等分网格" not in lint
+    assert "`⚠ COVER-OOB` 为零" not in lint
+    assert "中文字后紧跟半角" not in checklist
+    assert "4.5:1" in checklist and "3:1" in checklist
+    assert "crop_contract" in checklist and "signature_visual" in checklist
+
+
+def test_generated_recovery_keeps_final_coverage_without_restarting_diagnosis():
+    repo = Path(__file__).resolve().parents[1]
+    sync = runpy.run_path(str(repo / "scripts/sync_presentation_suite.py"))
+    relative = "skills/sn-ppt-standard/references/box-agent-tool-contract.md"
+    data = (STANDARD / "references/box-agent-tool-contract.md").read_bytes()
+    if "PRESENTATION_STANDARD_SOURCE" in os.environ:
+        data = sync["_apply_integration_overlay"](relative, data)
+        data = sync["_image_inspection_recovery_overlay"](relative, data)
+    text = data.decode()
+    assert "预算是“一次总览 + 一次逐页/分批检查”" not in text
+    assert "恢复最后一次确定性通过版本并执行 build" not in text
+    assert "visual_unverified" in text and "最终" in text
+    assert "3 次 Review" in text and "2 次返修" in text
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("model", ["actual-model-from-tool", None])
+def test_documented_asset_batch_preserves_source_and_stops_on_failure(tmp_path, missing, model):
+    from PIL import Image
+
+    contract = (STANDARD / "references/box-agent-tool-contract.md").read_text()
+    assert "unknown (Box-Agent generate_image)" in contract
+    assert "不为此搜索配置" in contract
+    command = next(block for block in re.findall(r"```bash\n(.*?)\n```", contract, re.S)
+                   if "asset-register" in block)
+    assert "asset-assign" in command and "asset-contact" in command
+    deck = tmp_path / "deck with spaces"
+    (deck / "assets").mkdir(parents=True)
+    if not missing:
+        Image.new("RGB", (160, 90), "white").save(deck / "assets/final hero.png")
+    env = dict(os.environ, DECK_DIR=str(deck), ASSET_PATH="assets/final hero.png",
+               ASSET_ID="launch-hero", GROUP_ID="campaign-art",
+               ORIGINAL_PROMPT="Product hero; original 'quote' and $(not-a-command)")
+    env.pop("GENERATOR_MODEL", None)
+    if model is not None:
+        env["GENERATOR_MODEL"] = model
+    command = command.replace("<SKILL_ROOT>", str(STANDARD))
+    command = re.sub(r"(?m)^python ", shlex.quote(sys.executable) + " ", command)
+    result = subprocess.run(["bash", "-c", command], cwd=tmp_path, env=env,
+                            text=True, capture_output=True, timeout=30)
+    catalog = deck / "assets/catalog.json"
+    if missing:
+        assert result.returncode != 0
+        assert not catalog.exists()
+        assert "asset-assign:PASS" not in result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assets = json.loads(catalog.read_text())["assets"]
+        assert len(assets) == 1
+        asset = assets[0]
+        assert asset["path"] == env["ASSET_PATH"]
+        assert asset["group_id"] == env["GROUP_ID"]
+        assert asset["asset_id"] == env["ASSET_ID"]
+        assert asset["generator_model"] == (model or "unknown (Box-Agent generate_image)")
+        assert asset["prompt"] == env["ORIGINAL_PROMPT"]
+        assert asset["status"] == "candidate", "Registration cannot grant visual approval"

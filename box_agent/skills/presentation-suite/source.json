@@ -276,9 +276,9 @@
       "source_sha256": "81c8cbb6cb3914342f0e09a47001a1522492c3b94cbd82774b2c803d762c8a1c"
     },
     "skills/sn-ppt-entry/SKILL.md": {
-      "sha256": "8ce667cc4e46683b602476f7c43b82ce9183b458ec880aa55ccc3ab8a5bf076e",
+      "sha256": "92c008b3e319de7188646ad890b326448a4f73af1550c20db3ad789820becc31",
       "source_path": "skills/sn-ppt-entry/SKILL.md",
-      "source_sha256": "4de3bbe6127e2e30c8068400159c141059f27a6d1e57fee7aae29b8e6e9b21d6"
+      "source_sha256": "1596cae3b5f4c0187efeeadbeb6fffe9b7d97fafad8636745204e20ece02ea0e"
     },
     "skills/sn-ppt-entry/requirements.txt": {
       "sha256": "70a97342cad68847e78481291445595cf4008dfd10b42fd508e0d7b4d431f2bc",
@@ -296,9 +296,9 @@
       "source_sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3"
     },
     "skills/sn-ppt-standard/SKILL.md": {
-      "sha256": "07270bcbf1f28f8346a302645f97cd924ccec13f068ce2066b3e736c7308ddb1",
+      "sha256": "dcb2bc740153d7c8deaa1831a8b61da98217e4e063cae20cc8b9b4f2ca7a92eb",
       "source_path": "skills/sn-ppt-standard/SKILL.md",
-      "source_sha256": "dcb2e85deed4eb3ac0b0888dad345237fcdcbee8638530a71bb5a7e9a7c1a754"
+      "source_sha256": "f6c258d66837b2270eb7bcd3d38b06c2f6efde746ad883524b78735784ca29b9"
     },
     "skills/sn-ppt-standard/agents/openai.yaml": {
       "sha256": "fca822e9a5e99f3ba5422a29e074c8cb553e7d864042f5eca2dbf57f98449489",
@@ -342,9 +342,9 @@
       "source_sha256": "568e6c5249c360de868395eaf64bd7b19e2d91cd0722092abb0c59813224314c"
     },
     "skills/sn-ppt-standard/references/box-agent-tool-contract.md": {
-      "sha256": "dda8600d4248f77305e2ad5a05a8415568d5627f79c0dce5ef79aeb06bb2c8cd",
+      "sha256": "9c12d75a681d313503b9dcc1793886b725949fb2c10bd53f089eed560f267b23",
       "source_path": "skills/sn-ppt-standard/references/box-agent-tool-contract.md",
-      "source_sha256": "a72ac298d33addcffc37df3467f574a4a0efcba17b6358d2cb5ca27a832ab170"
+      "source_sha256": "a858e2a3bbe5133c48e6d387a22417bb4b368112ae83addee1a7096446837145"
     },
     "skills/sn-ppt-standard/references/design-rules.md": {
       "sha256": "42fc9a7c463b951706a01c2c6c83a9342aee6b36eaa1ad87c50afa951dd2dbce",
@@ -377,9 +377,9 @@
       "source_sha256": "f64e616def44c1002640202b81c51c12d2c35d9fe834a7435d2487e0b53f75f1"
     },
     "skills/sn-ppt-standard/references/quality-checklist.md": {
-      "sha256": "80e2e22a58f7793d95de3a26523a0477723c40db10cfe4ed153074c3e35dd887",
+      "sha256": "39ee4dc9affd0eec7dd742b75236c2d01a1eaa85c9ea6aa7501def079b752e29",
       "source_path": "skills/sn-ppt-standard/references/quality-checklist.md",
-      "source_sha256": "80e2e22a58f7793d95de3a26523a0477723c40db10cfe4ed153074c3e35dd887"
+      "source_sha256": "39ee4dc9affd0eec7dd742b75236c2d01a1eaa85c9ea6aa7501def079b752e29"
     },
     "skills/sn-ppt-standard/requirements.txt": {
       "sha256": "e99da4477edfa9ac32905f515ebd468c3308d07ebe31eb2c74d7d54120c6a7b7",
@@ -387,9 +387,9 @@
       "source_sha256": "37892c704c3043c862673255a10ce6584e7a8378d2c7fcb28d6a206bdf393085"
     },
     "skills/sn-ppt-standard/scripts/deck.py": {
-      "sha256": "413e29a99e39114df06de14895448a61641f7abd0e819f1cb1b30c5069bf99b7",
+      "sha256": "0c181a73b5d2b635cb4739ddd2527eaf5d89890598bbcf785dd1d2133d6f1309",
       "source_path": "skills/sn-ppt-standard/scripts/deck.py",
-      "source_sha256": "1aa1f312e2d550633d86f2254f9d4a9768dd8ada913bc6d8ae89dbfdebc40f02"
+      "source_sha256": "eb341e54e1443b8a8597098a3e132f96a8a8e6f19c043fbe6b909cc1dfee21cd"
     },
     "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs": {
       "sha256": "4ce7bc7bd5744ba6f454d668466e932ea019c172a722f9a9b60b3f4e2414cb6e",
@@ -527,15 +527,15 @@
       "source_sha256": "0841090b40eab67ee3c6084f83f933554838b952ed9c1d5ed800806e2ac25db9"
     },
     "skills/sn-ppt-standard/scripts/render.py": {
-      "sha256": "b56d87f8eed0434301005394431baf2d3c317106ebab894ae16022c252d02511",
+      "sha256": "f74fe0e1fe4d054214175ce7325a2b3f50c39b493f6f162dbc97e54fba4c8ce9",
       "source_path": "skills/sn-ppt-standard/scripts/render.py",
-      "source_sha256": "d15ba4f76d0277cfe729cc38896cfa988457aaebec844b41e6c1509f848b35bd"
+      "source_sha256": "1dca91cee3dbe594be5bfd8e56de295d24eae6c24b0cc2195962169d4accc596"
     },
     "skills/sn-ppt-standard/scripts/render_runtime.py": {
       "input_path": "scripts/presentation_suite_overlays/render_runtime.py",
-      "sha256": "8a14b6f96e8affbaa099e6cc686b81dd7396a0cf02449afa2e8eaeb8530c1d24",
+      "sha256": "dfdaaed7c081f0feebc734fd497c68ec2e4c6f4533c903fe09c554a9508bf592",
       "source_path": "skills/sn-ppt-standard/scripts/render_runtime.py",
-      "source_sha256": "8a14b6f96e8affbaa099e6cc686b81dd7396a0cf02449afa2e8eaeb8530c1d24"
+      "source_sha256": "dfdaaed7c081f0feebc734fd497c68ec2e4c6f4533c903fe09c554a9508bf592"
     },
     "skills/sn-ppt-standard/scripts/serper_images.py": {
       "sha256": "c9c6e1b0864b628cc09fd5a36d7b28e4765b9ee2a1fe2501c2a927e9bc114a55",
@@ -553,14 +553,14 @@
       "source_sha256": "f6aed6ae3e7114f1422345cc0274080127670c2486fc9638a8b940e65e567be1"
     },
     "skills/sn-ppt-standard/subagents/review.md": {
-      "sha256": "9377265acd951d85c20e884b8b8cd44df2ee438b6d82a008ce15278f77dbad51",
+      "sha256": "eb7ed1bed8255924790d4866741395f2c62500911f1059f14f48c4cca356281b",
       "source_path": "skills/sn-ppt-standard/subagents/review.md",
-      "source_sha256": "9377265acd951d85c20e884b8b8cd44df2ee438b6d82a008ce15278f77dbad51"
+      "source_sha256": "eb7ed1bed8255924790d4866741395f2c62500911f1059f14f48c4cca356281b"
     },
     "skills/sn-ppt-standard/subagents/slide.md": {
-      "sha256": "2ceabc6f0badfe4386bca01ff34bcac01544da47d369adb747d76bd09a0c9f75",
+      "sha256": "929d0c913ec2fc65b68fca2185e2f37210c6018afa2489a6b18e8829868c6ed3",
       "source_path": "skills/sn-ppt-standard/subagents/slide.md",
-      "source_sha256": "2ceabc6f0badfe4386bca01ff34bcac01544da47d369adb747d76bd09a0c9f75"
+      "source_sha256": "929d0c913ec2fc65b68fca2185e2f37210c6018afa2489a6b18e8829868c6ed3"
     },
     "skills/sn-ppt-story/SKILL.md": {
       "sha256": "28596fa06e4d33c09ac5275b9704d446096b4a927cbd2fbb30016c9d0acdec67",
@@ -635,6 +635,6 @@
     "bounded-image-inspection-recovery"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
-  "revision": "1f898c0af2bac2e23f2a43f1a541ee20f32e2f1f",
+  "revision": "ed82b4ae0238dfa5be108c41271e887876f0f9d8",
   "schema_version": 1
 }

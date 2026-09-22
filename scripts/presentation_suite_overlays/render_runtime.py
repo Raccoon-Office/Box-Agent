@@ -666,6 +666,19 @@ def run_renderer(renderer, args, timeout=600):
         _release_render_slot(slot)
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+    if code != 0 and "--batch" in args:
+        # A worker receipt is provisional until supervision and cleanup succeed.
+        # Preserve all diagnostics; only withhold the structured success receipt.
+        retained = []
+        for line in output.splitlines(keepends=True):
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                item = None
+            if not (isinstance(item, dict) and item.get("status") == "rendered"
+                    and item.get("qa") == "not-run"):
+                retained.append(line)
+        output = "".join(retained)
     return subprocess.CompletedProcess([str(renderer), *args], code, output,
                                        errors + (error + "\n" if error else ""))
 
