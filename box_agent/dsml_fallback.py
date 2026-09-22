@@ -65,6 +65,7 @@ _WRAPPER_TAG_RE = re.compile(
 # An opening DSML tag left over inside an invoke body means a parameter (or
 # nested markup) was cut off mid-stream — the block is malformed.
 _LEFTOVER_DSML_TAG_RE = re.compile(rf"<\s*/?{_D}DSML{_D}")
+_INVOKE_TAG_RE = re.compile(rf"<\s*(?P<closing>/)?{_D}DSML{_D}invoke\b")
 
 _STRING_ATTR_RE = re.compile(r"string\s*=\s*\"true\"", re.IGNORECASE)
 
@@ -133,6 +134,13 @@ def parse_dsml_tool_calls(text: str | None) -> list[DsmlToolCall]:
         return []
     calls: list[DsmlToolCall] = []
     try:
+        # A nested invoke may be literal content (including several examples).
+        # Reject the whole ambiguous response before recovering any siblings.
+        inside_invoke = False
+        for tag in _INVOKE_TAG_RE.finditer(text):
+            if not tag.group("closing") and inside_invoke:
+                return []
+            inside_invoke = not bool(tag.group("closing"))
         for match in _INVOKE_RE.finditer(text):
             if len(calls) >= _MAX_RECOVERED_CALLS:
                 break

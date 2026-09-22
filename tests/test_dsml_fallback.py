@@ -98,11 +98,13 @@ def test_parse_does_not_rescan_inside_an_unclosed_invoke():
     assert parse_dsml_tool_calls(text) == []
 
 
-def test_parse_does_not_execute_dsml_example_inside_string_parameter():
+@pytest.mark.parametrize("examples", [DSML_SINGLE, DSML_SINGLE + DSML_SINGLE])
+@pytest.mark.parametrize("prefix", ["", DSML_SINGLE])
+def test_parse_does_not_execute_dsml_example_inside_string_parameter(examples, prefix):
     text = (
-        '<｜DSML｜invoke name="write_file">'
+        prefix + '<｜DSML｜invoke name="write_file">'
         '<｜DSML｜parameter name="content" string="true">'
-        + DSML_SINGLE
+        + examples
         + '</｜DSML｜parameter></｜DSML｜invoke>'
     )
     assert parse_dsml_tool_calls(text) == []
