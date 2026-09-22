@@ -1359,6 +1359,8 @@ def render_batch(root, pages=None, width=1600, height=900):
         raise FileNotFoundError("no matching slides found")
     os.makedirs(os.path.join(root, "renders"), exist_ok=True)
     _setup_libs()
+    rendered_pages = []
+    images = []
     hard_pages = []
     with RenderSession(_sync_playwright(), _ensure_browser_available, LAUNCH_ARGS, is_fatal=_is_fatal_browser_error) as session:
         for number, slide in slides:
@@ -1378,12 +1380,21 @@ def render_batch(root, pages=None, width=1600, height=900):
             if _hard_render_issues(report):
                 hard_pages.append(number)
             print(f"{target} {_batch_warning_summary(report)}")
+            rendered_pages.append(number)
+            images.append(os.path.realpath(target))
         if hard_pages:
             raise RenderQualityError(
                 "render quality gate failed for pages: "
                 + ",".join(f"{page:02d}" for page in hard_pages)
                 + "; see _trace/render-issues.json"
             )
+        skill_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        return {
+            "status": "rendered", "qa": "not-run", "rendered_pages": rendered_pages,
+            "images": images, "deck_dir": os.path.realpath(root), "skill_root": skill_root,
+            "next_instructions": os.path.join(skill_root, "subagents", "slide.md"),
+            "review_ledger": os.path.realpath(os.path.join(root, "_trace", "review-issues.md")),
+        }
 
 
 def _player_chart_targets(root):
@@ -1489,7 +1500,9 @@ def _batch_cli(argv):
     parser.add_argument("--height", type=int, default=900)
     args = parser.parse_args(argv)
     try:
-        render_batch(args.root, args.pages, args.width, args.height)
+        receipt = render_batch(args.root, args.pages, args.width, args.height)
+        if receipt is not None:
+            print(json.dumps(receipt, ensure_ascii=False))
     except (BrowserUnavailable, RenderQualityError) as exc:
         print(f"batch render failed: {exc}", file=sys.stderr)
         return 1

@@ -2,6 +2,7 @@
 """Small deterministic CLI for speech, review sheets, and present.html.
 
 使用 Entry 交接的绝对任务目录 `$DECK_DIR`：
+    python deck.py init "$DECK_DIR"
     python deck.py sync "$DECK_DIR" --expected N
     python deck.py prepare "$DECK_DIR" --expected N
     python deck.py asset-register "$DECK_DIR" --path assets/file.png \
@@ -395,6 +396,29 @@ def _ensure_runtime_assets(root: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.is_file() or target.read_bytes() != source.read_bytes():
         shutil.copy2(source, target)
+
+
+def _init_workspace(root: Path) -> None:
+    """Copy only missing base CSS; leave planning, fonts and QA to their stages."""
+    skill_root = Path(__file__).resolve().parent.parent
+    if not root.is_dir() or root.is_relative_to(skill_root):
+        raise ValueError(f"init requires an existing deck outside the Skill: {root}")
+    target = root / "base.css"
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise ValueError(f"base.css must be a regular file, not a link or directory: {target}")
+    created = False
+    if not target.exists():
+        template = skill_root / "references/base-template.css"
+        data = template.read_bytes()
+        try:
+            with target.open("xb") as stream:
+                stream.write(data)
+            created = True
+        except FileExistsError:
+            if target.is_symlink() or not target.is_file():
+                raise ValueError(f"base.css must be a regular file: {target}")
+    print(json.dumps({"deck_dir": str(root), "base_css": str(target),
+                      "created": created, "qa": "not-run"}, ensure_ascii=False))
 
 
 def _ensure_canvas_reset(root: Path) -> None:
@@ -1239,13 +1263,14 @@ def _audit_workspace(root: Path, expected: int | None) -> None:
 
 def _absolute_deck_root(value: str) -> str:
     if not Path(value).is_absolute():
-        raise argparse.ArgumentTypeError("review-prep requires an absolute deck root")
+        raise argparse.ArgumentTypeError("requires an absolute deck root")
     return value
 
 
 def _review_prep(root: Path, expected: int) -> int:
     """Prepare fresh full-deck pixels and delivery artifacts, without visual QA."""
     stage = "validate"
+    skill_root = Path(__file__).resolve().parent.parent
     captured = io.StringIO()
     paths = {
         "present_html": str(root / "present.html"),
@@ -1294,7 +1319,10 @@ def _review_prep(root: Path, expected: int) -> int:
             if contact.get("full", {}).get("pages") != wanted:
                 raise ValueError("review contact does not cover the full deck")
         print(json.dumps({"status": "prepared", "qa": "not-run", "rendered_pages": wanted,
-                          "images": images, **paths}, ensure_ascii=False))
+                          "images": images, **paths, "deck_dir": str(root),
+                          "skill_root": str(skill_root),
+                          "next_instructions": str(skill_root / "subagents/review.md"),
+                          "review_ledger": str(root / "_trace/review-issues.md")}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         diagnostic = str(exc)
@@ -1372,11 +1400,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in (
-        "sync", "prepare", "contact", "build", "audit", "review-prep", "asset-register",
+        "init", "sync", "prepare", "contact", "build", "audit", "review-prep", "asset-register",
         "asset-assign", "asset-contact", "asset-review", "material-figure", "publish",
     ):
         command = subparsers.add_parser(name, aliases=["figure-crop"] if name == "material-figure" else [])
-        if name == "review-prep":
+        if name in {"init", "review-prep"}:
             command.add_argument("root", type=_absolute_deck_root)
         else:
             command.add_argument("root", nargs="?", default=".")
@@ -1420,6 +1448,15 @@ def main(argv=None):
             command.add_argument("--needs-review")
             command.add_argument("--rejected")
     args = parser.parse_args(argv)
+    # Initialization must not enter production setup (including bundled
+    # delivery-scope setup), which may create files before command dispatch.
+    if args.command == "init":
+        try:
+            _init_workspace(Path(args.root).resolve())
+        except (OSError, ValueError) as exc:
+            print(f"init:FAIL\n{exc}", file=sys.stderr)
+            return 1
+        return 0
     root = Path(args.root).resolve()
     _declare_delivery_scope(root)
     try:

@@ -48,7 +48,7 @@ def test_entry_routes_static_and_dynamic_without_missing_methods():
 
 def test_provenance_covers_every_file_and_records_integration_changes():
     source = json.loads((SUITE / "source.json").read_text())
-    assert source["revision"] == "1f898c0af2bac2e23f2a43f1a541ee20f32e2f1f"
+    assert source["revision"] == "ed82b4ae0238dfa5be108c41271e887876f0f9d8"
     assert source["modules"] == sorted(NAMES)
     assert "entry-two-outputs" in source["overlays"]
     assert "/Users/" not in json.dumps(source)
@@ -257,6 +257,8 @@ def test_static_runtime_upgrade_requires_matching_license_review():
 def test_completed_export_directory_refresh_is_idempotent(tmp_path):
     namespace = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
     source = json.loads((SUITE / "source.json").read_text())
+    # Model a completed production overlay chain, independent of local candidate markers.
+    source["overlays"] = list(namespace["OVERLAYS"])
     paths = ("skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs",
              "skills/sn-ppt-standard/references/box-agent-tool-contract.md")
     source["files"] = {relative: source["files"][relative] for relative in paths}
@@ -317,7 +319,7 @@ def test_image_recovery_refresh_preserves_rules_and_repeats_without_changes(tmp_
     sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
     overlay = _image_recovery_overlay()
     source = json.loads((SUITE / "source.json").read_text())
-    source["overlays"] = source["overlays"][:-1]
+    source["overlays"] = sync["OVERLAYS"][:-1]
     source["files"] = {path: source["files"][path] for path in overlay["REPLACEMENTS"]}
     bundle = tmp_path / "bundle"
     expected = {}
@@ -345,6 +347,18 @@ def test_image_recovery_refresh_preserves_rules_and_repeats_without_changes(tmp_
     with pytest.raises(ValueError, match="differs from its provenance"):
         sync["refresh_host_overlays"](bundle)
     assert marker.read_bytes() == first_marker
+
+
+def test_overlay_refresh_rejects_uncommitted_candidate_markers(tmp_path):
+    sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
+    source = json.loads((SUITE / "source.json").read_text())
+    source["overlays"] = [*sync["OVERLAYS"], "test-only-uncommitted-candidate:unpublished"]
+    marker = tmp_path / "source.json"
+    marker.write_text(json.dumps(source))
+    before = marker.read_bytes()
+    with pytest.raises(ValueError, match="requires a full sync"):
+        sync["refresh_host_overlays"](tmp_path)
+    assert marker.read_bytes() == before
 
 
 def test_full_sync_also_applies_image_recovery_policy(source_repo, tmp_path, monkeypatch):

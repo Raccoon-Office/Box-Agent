@@ -21,16 +21,21 @@ STANDARD = Path(os.environ.get(
 
 
 @pytest.fixture
-def modules(monkeypatch):
-    monkeypatch.syspath_prepend(str(STANDARD / "scripts"))
+def modules(monkeypatch, tmp_path):
+    staged = tmp_path / "skill with spaces"
+    for directory in ("scripts", "assets", "subagents"):
+        shutil.copytree(STANDARD / directory, staged / directory)
+    monkeypatch.syspath_prepend(str(staged / "scripts"))
     monkeypatch.delitem(sys.modules, "font_bundle", raising=False)
-    deck = runpy.run_path(str(STANDARD / "scripts/deck.py"))["main"].__globals__
-    render = runpy.run_path(str(STANDARD / "scripts/render.py"))
+    deck = runpy.run_path(str(staged / "scripts/deck.py"))["main"].__globals__
+    render = runpy.run_path(str(staged / "scripts/render.py"))
     return deck, render
 
 
 @pytest.fixture
 def workspace(tmp_path):
+    tmp_path = tmp_path / "deck with spaces"
+    tmp_path.mkdir()
     for directory in ("slides", "plan", "assets", "renders", "_trace"):
         (tmp_path / directory).mkdir()
     (tmp_path / "base.css").write_text(":root{--canvas-w:1600px;--canvas-h:900px;}\n")
@@ -100,6 +105,11 @@ def test_review_prep_orders_mutations_before_full_render_and_returns_only_paths(
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     assert result["status"] == "prepared" and result["qa"] == "not-run"
+    skill_root = Path(deck["__file__"]).resolve().parents[1]
+    assert result["deck_dir"] == str(workspace.resolve())
+    assert result["skill_root"] == str(skill_root)
+    assert result["next_instructions"] == str(skill_root / "subagents/review.md")
+    assert result["review_ledger"] == str(workspace / "_trace/review-issues.md")
     assert result["rendered_pages"] == [1, 2]
     assert events == ["fonts", "render", "contact", "audit"]
     assert "advisory" not in captured.out + captured.err
@@ -109,6 +119,23 @@ def test_review_prep_orders_mutations_before_full_render_and_returns_only_paths(
     assert [Path(path).name for path in result["images"]] == ["slide_01.png", "slide_02.png"]
     assert not (workspace / "_trace/review-issues.md").exists()
     assert not list(workspace.glob("*.pptx"))
+
+
+def test_review_prep_receipt_resolves_deck_from_another_cwd(isolated_runtime, workspace, capsys, monkeypatch):
+    deck, _ = isolated_runtime
+    linked = workspace.parent / "linked deck"
+    linked.symlink_to(workspace, target_is_directory=True)
+    other_cwd = workspace.parent / "another working directory"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    assert prepare(deck, linked) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["deck_dir"] == str(workspace.resolve())
+    assert result["skill_root"] == str(Path(deck["__file__"]).resolve().parents[1])
+    assert Path(result["next_instructions"]).is_file()
+    assert result["review_ledger"] == str(workspace / "_trace/review-issues.md")
+    assert not Path(result["review_ledger"]).exists()
+    assert "ready" not in result and result["qa"] == "not-run"
 
 
 @pytest.mark.parametrize("changed", ["assets/image.png", "assets/runtime.js", "base.css", "slides/slide_01.html"])
