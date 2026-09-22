@@ -94,6 +94,9 @@ def _old_bundle(tmp_path):
     digest = hashlib.sha256(content).hexdigest()
     # Model the bundle before publication markers, even when later overlays exist.
     publication_index = sync["OVERLAYS"].index("intermediate-render-artifacts")
+    # Keep this historical incremental-update fixture scoped to publication;
+    # later overlays may add helper files and require a complete source sync.
+    sync["refresh_host_overlays"].__globals__["OVERLAYS"] = sync["OVERLAYS"][:publication_index + 1]
     record = {"name": sync["BUNDLE_NAME"], "revision": sync["PINNED_REVISION"],
               "overlays": sync["OVERLAYS"][:publication_index],
               "files": {relative: {"source_sha256": digest, "sha256": digest}}}

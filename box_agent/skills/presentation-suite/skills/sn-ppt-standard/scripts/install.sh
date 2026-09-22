@@ -29,7 +29,7 @@ BUNDLED_FONTS_DIR="${BUNDLED_FONTS_DIR:-$HERE/../../../../fonts}"
 NORMALIZE_VENV="${NORMALIZE_VENV:-$HOME/.cache/sn-ppt-standard/venv-normalize}"
 FONTS_DIR="${FONTS_DIR:-$HOME/.fonts}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
-PYBIN="${PYBIN:-python3}"
+PYBIN="${BOX_AGENT_PYTHON:-${PYBIN:-python3}}"
 PPT_FONT_DOWNLOADS="${PPT_FONT_DOWNLOADS:-1}"
 GOOGLE_FONTS_REV="2796410152d4f9524b68ed46e69c1b60f8e0f7c3"
 NORMALIZE_PACKAGES=(
@@ -47,18 +47,30 @@ NORMALIZE_PACKAGES=(
 
 log(){ echo "[install] $*"; }
 
+normalize_python(){
+  local candidate
+  for candidate in "$NORMALIZE_VENV/Scripts/python.exe" "$NORMALIZE_VENV/bin/python"; do
+    if [ -f "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  log "normalize interpreter missing: $NORMALIZE_VENV" >&2
+  return 1
+}
+
 install_normalize(){
+  local NORMALIZE_PY
   log "1) normalize venv → $NORMALIZE_VENV"
   if command -v uv >/dev/null 2>&1; then
-    uv venv "$NORMALIZE_VENV" >/dev/null 2>&1 || true
-    uv pip install --python "$NORMALIZE_VENV/bin/python" "${NORMALIZE_PACKAGES[@]}"
+    uv venv --python "$PYBIN" "$NORMALIZE_VENV" >/dev/null 2>&1 || true
+    NORMALIZE_PY="$(normalize_python)"
+    uv pip install --python "$NORMALIZE_PY" "${NORMALIZE_PACKAGES[@]}"
   else
     "$PYBIN" -m venv "$NORMALIZE_VENV"
-    "$NORMALIZE_VENV/bin/python" -m pip install -q --upgrade pip
-    "$NORMALIZE_VENV/bin/python" -m pip install -q "${NORMALIZE_PACKAGES[@]}"
+    NORMALIZE_PY="$(normalize_python)"
+    "$NORMALIZE_PY" -m pip install -q --upgrade pip
+    "$NORMALIZE_PY" -m pip install -q "${NORMALIZE_PACKAGES[@]}"
   fi
   # 冒烟:import 三个关键库
-  "$NORMALIZE_VENV/bin/python" - <<'PY' && log "  normalize venv OK"
+  "$NORMALIZE_PY" - <<'PY' && log "  normalize venv OK"
 import markitdown, pdfminer, openpyxl
 print("  imports ok:", markitdown.__name__, pdfminer.__name__, openpyxl.__name__)
 PY
@@ -184,7 +196,8 @@ PY
 
 install_chromium(){
   log "6) Playwright Chromium → $PLAYWRIGHT_BROWSERS_PATH"
-  local PW="$NORMALIZE_VENV/bin/python"
+  local PW
+  PW="$(normalize_python 2>/dev/null)" || PW="$PYBIN"
   [ -x "$PW" ] || PW="$PYBIN"
   "$PYBIN" -m pip install -q playwright "psutil>=5.9" 2>/dev/null || true
   "$PYBIN" -m playwright install chromium 2>/dev/null && log "  Chromium OK" \
@@ -264,7 +277,7 @@ done
 
 echo
 log "完成。运行附件解析前设置："
-echo "  export NORMALIZE_PY=\"$NORMALIZE_VENV/bin/python\""
+echo "  export NORMALIZE_PY=\"$(normalize_python 2>/dev/null || printf '%s' "$PYBIN")\""
 echo
 log "系统 .so 缺失(headless chromium 报缺库)时:render.py 会自动从 ~/pwdeps/lib 补;"
 log "若无 pwdeps,用 micromamba 免 root 装到 ~/pwdeps(见 SKILL.md 渲染依赖段)。"
