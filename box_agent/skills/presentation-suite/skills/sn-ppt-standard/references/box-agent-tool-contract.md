@@ -2,9 +2,11 @@
 
 本文件是 `sn-ppt-standard` 在 Box-Agent 上的薄适配层。只翻译 harness 接口，不降低根 `SKILL.md`、reference 或角色卡中的事实、设计、视觉验收与交付要求。
 
+从零生成静态 PPT 时按根 `SKILL.md` 的“Box-Agent 静态新建的执行方式”执行；本文件的子任务规则只在实际委派时生效，不要求为制作、修复或 Review 新建子任务。已有编辑分工不变。
+
 ## 1. 路径与执行所有权
 
-- 从已加载 Skill 提示中的 `Skill Root Directory` 取得绝对路径，记为 `<SKILL_ROOT>`。所有确定性命令使用 `python "<SKILL_ROOT>/scripts/<name>.py" ...`；不得依赖 `${SKILL_DIR:-skills/sn-ppt-standard}` 或当前目录中存在 `skills/`。
+- `<SKILL_ROOT>` 只取 `get_skill(skill_name="sn-ppt-standard")` 返回的 `Skill Root Directory` 绝对路径；它是 Standard 的目录，不是 `pptx` 公共入口、Entry、Story 或最后加载的任意 Skill 目录。所有确定性命令使用 `python "<SKILL_ROOT>/scripts/<name>.py" ...`；不得依赖 `${SKILL_DIR:-skills/sn-ppt-standard}` 或当前目录中存在 `skills/`。压缩后若该路径或原说明已丢失，直接重新加载 `sn-ppt-standard` 恢复，不从其他 Skill 根目录猜测、扫描其他 workspace 或硬编码某台机器的安装路径。
 - 父 Orchestrator 不在 Standard 阶段执行材料解析；Standard 只读取 Entry/Story 已交接的 `raw_documents.json`、`info_pack.json` 和 `outline.md`。父级使用 `bash` 执行 `deck.py`、`render.py`、`font_bundle.py`、`image_cutout.py` 和本契约的 `serper_images.py`。Box-Agent 子代理不请求 `bash`；父级负责转换、渲染、联系表、来源登记和 build。
 - 所有 bash/脚本命令的任务根参数必须传入已验证的绝对 `"$DECK_DIR"`；禁止以当前工作目录、`.`或未解析的 `output/` 代替任务根。`write_scope` 由 Box-Agent 按文件工具的工作区解析，不经过 Skill 脚本；统一传入从同一个 `task_pack.deck_dir` 派生的绝对路径。只有 CLI 明确要求的资产键（例如 `assets/<file>`）使用 deck 内相对路径，由脚本解析。产物直接写 `plan/`、`assets/`、`slides/`、`renders/`、`speech.md`、`present.html`，并可由 Standard exporter 生成 `<DECK_ID>.pptx`；不要添加 `output/` 层。
 
@@ -44,13 +46,13 @@
 - 子代理不递归委派，不读运行轨迹。父级以子代理自然语言合同为交接，并用 `read_file` / `search_files` 验证声明的正式产物。
 - Research 可用 `read_file/search_files/web_search/web_extract/write_file`；Material 只在父级 staging 后读取解析产物并写指定摘要；Image 优先用 `generate_image/inspect_images/read_file`；Slide/Review 用文件工具和 `inspect_images`，由父级在两次委派之间完成渲染。
 
-Box-Agent 的 `sub_agent` 没有父子交错的暂停/续跑协议。新建时一次委派一个完整 Production group，同一子代理在这次委派内按组内页序写完全部 HTML 首稿，一次返回全部待渲染页码；不在首张后结束任务等待父级。父级随后批量渲染并逐页看图，按原 group 集中反馈有新鲜像素证据的问题和精确影响范围，由原组集中修复，不拆成每页一个新建任务。首次交回待渲染页面不算返修，实际像素问题修复计入根 Skill 的预算。简单编辑由唯一 Review 集中改文件后以 `pending_parent_verification` 交回待渲染页码，由父级完成渲染、build 和最终检查；子代理不能在父级执行前声称像素或交付已通过。
+Box-Agent 的 `sub_agent` 没有父子交错的暂停/续跑协议。实际委派制作时，一次任务仍负责一个完整 Production group，在本次任务内写完组内全部 HTML 首稿，一次返回全部待渲染页码；不在首张后结束任务等待父级。父级随后批量渲染并逐页看图；静态新建在所有写页子任务返回后由主 Agent 集中修复，不默认再按组重派。首次交回待渲染页面不算返修，实际像素问题修复计入根 Skill 的预算。简单编辑仍由唯一 Review 集中改文件后以 `pending_parent_verification` 交回待渲染页码，由父级完成渲染、build 和最终检查；子代理不能在父级执行前声称像素或交付已通过。
 
 素材完成并回填计划后，直接引用当前原文件，不要求先生成 `group_input.py` 分片。所有 deck 内输入路径与 HTML 目标都从同一个已验证的 `task_pack.deck_dir` 派生为绝对路径；角色卡、此契约和参考文档从已加载的 `<SKILL_ROOT>` 派生。`sub_agent.files` 只列已存在的输入文件，预计 HTML 输出只进入 `write_scope`，不能放进 `files`；两者使用同一组页码与任务根，不另猜目录或缩短成相对写域。
 
-新建组先完整读取所属组合同、Style Lock 和 `base.css`，再按页序读取当前页完整计划与命中参考、制作当前页；仅复用当前子任务已读且未变化的共享原文，新子任务仍需读取所需输入，不将全组计划和参考合成一次大读。选中文件或章节出现截断时继续读取到结束，不能用摘要补齐。此读取顺序不提供总体上下文容量保证；工具明确拒绝输入或缺失原文时如实返回阻塞，不把缺失当成已读。
+实际新建子任务完整读取所属组合同、Style Lock、`base.css`、必要逐页计划与命中参考。静态新建允许在容量合适时同回合读取多页输入，再连续提交多页 HTML；不强制逐页读写往返，也不要求一次读完整册。主 Agent 或同一子任务完整掌握且未变化的原文可复用；新子任务仍需读取所需输入。选中文件或章节截断、修改或上下文压缩丢失时补读原文，不能用摘要补齐。这不提供总体上下文容量保证；工具明确拒绝输入或缺失原文时如实返回阻塞，不把缺失当成已读。
 
-已有且仍与当前来源一致的完整原文分片可按顺序复用，已含角色卡、契约或参考原文的不重复读取来源；它们只是输入视图，原计划、CSS 与素材账本仍是真相源。来源变化或分片缺失时读取当前源文件，不要求重新包装或迁移计划。每次新委派仍须读取角色说明与本契约；修复任务读取受影响页的当前 HTML、逐页计划，以及本次问题必要的当前 Style Lock、CSS、组合同和参考，不重新准备无关页面的输入或重做规划。路径与 task pack 不一致是错误，不搜索其他 workspace，也不做任务迁移。
+已有且仍与当前来源一致的完整原文分片可按顺序复用，已含角色卡、契约或参考原文的不重复读取来源；它们只是输入视图，原计划、CSS 与素材账本仍是真相源。来源变化或分片缺失时读取当前源文件，不要求重新包装或迁移计划。每次新委派仍须读取角色说明与本契约；同一主 Agent 从制作切换到修复或验收，不必重读仍完整有效的说明。修复前读取受影响页的当前 HTML、逐页计划，以及本次问题必要的当前 Style Lock、CSS、组合同和参考，不重新准备无关页面的输入或重做规划。路径与 task pack 不一致是错误，不搜索其他 workspace，也不做任务迁移。
 
 ## 4. 生图、搜图与来源账本
 
@@ -79,12 +81,14 @@ python "<SKILL_ROOT>/scripts/serper_images.py" fetch --url '<图片直链>' --ro
 
 ## 5. 父级渲染闭环
 
-Box-Agent 路线将 shell 与页面写入分离：
+静态新建仍先完成 `deck.py prepare`、素材验收、catalog ready 状态与实际路径/crop 合同回填；`prepare` 不代替素材验收。随后由主 Agent 完成闭环：
 
-1. 同一 Slide 子代理按页序写完自己 `write_scope` 内的全部 HTML 首稿，一次返回全部待渲染页码。
+1. 主 Agent 连续制作一批页面；实际委派的 Slide 则写完自己 `write_scope` 内的全部首稿，一次返回全部待渲染页码。
 2. 父级运行 `render.py --batch`，再用 `inspect_images(strategy="native")` 逐页查看全部新 PNG，遵守本契约的视觉检查分批要求。
-3. 有硬伤时，父级按原组一次汇总新鲜像素证据和精确问题，交回同一 `group_id`、受影响页写域的 Slide；遵守根 Skill 规定的修复预算。
-4. 父级重渲并复看。最终 Review 同样由父级先提供新鲜 PNG、Review 子代理集中修复；正式待审和修复后的最终待审统一由父级执行下方 `review-prep`。该命令合并机械收尾，不代替 Review 或 Entry 验收；父级按现有分批要求看完最终全册像素，确认 `present.html` 与播放器可用，更新原账本的最终合同后才调用 Standard exporter，失败登记 `state.status=partial`。
+3. 有硬伤时一次汇总新鲜像素证据和精确问题，所有写页子任务返回后由主 Agent 集中修复；子任务未返回前不改其页面或共享 CSS。遵守根 Skill 规定的修复预算，不因执行者变化重置次数。
+4. 主 Agent 重渲并复看，按 `subagents/review.md` 完成全册 Review；不因进入验收阶段自动新建子任务。正式待审和修复后的最终待审统一执行下方 `review-prep`。该命令合并机械收尾，不代替 Review 或 Entry 验收；主 Agent 按现有分批要求看完最终全册像素，确认 `present.html` 与播放器可用，更新原账本的最终合同后才调用 Standard exporter，失败登记 `state.status=partial`。
+
+已有编辑仍由原 Slide/Review 子任务集中改文件、父级渲染与看图；本文不改变编辑委派方式。
 
 ```bash
 python "<SKILL_ROOT>/scripts/deck.py" review-prep "$DECK_DIR" --expected <总页数>

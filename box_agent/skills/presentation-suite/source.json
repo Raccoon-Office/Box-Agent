@@ -296,9 +296,9 @@
       "source_sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3"
     },
     "skills/sn-ppt-standard/SKILL.md": {
-      "sha256": "96d5e9529d02d8b8393b225176ae83d8c1b44aa28827ea068825e3503adb6b58",
+      "sha256": "07270bcbf1f28f8346a302645f97cd924ccec13f068ce2066b3e736c7308ddb1",
       "source_path": "skills/sn-ppt-standard/SKILL.md",
-      "source_sha256": "356a2f8635da31e738547da6f23bcfea9a8b34f422c3ea6ae0dde32b794a8bbd"
+      "source_sha256": "dcb2e85deed4eb3ac0b0888dad345237fcdcbee8638530a71bb5a7e9a7c1a754"
     },
     "skills/sn-ppt-standard/agents/openai.yaml": {
       "sha256": "fca822e9a5e99f3ba5422a29e074c8cb553e7d864042f5eca2dbf57f98449489",
@@ -342,9 +342,9 @@
       "source_sha256": "568e6c5249c360de868395eaf64bd7b19e2d91cd0722092abb0c59813224314c"
     },
     "skills/sn-ppt-standard/references/box-agent-tool-contract.md": {
-      "sha256": "b00ef2396143f07bc5614064f697b8b5a4ce4cbb74ca7e34eef9b4ab6eaf8029",
+      "sha256": "dda8600d4248f77305e2ad5a05a8415568d5627f79c0dce5ef79aeb06bb2c8cd",
       "source_path": "skills/sn-ppt-standard/references/box-agent-tool-contract.md",
-      "source_sha256": "fd6c69ca3c9b630ecb242014715bfa03b76f7a4215e4701425049e31cc172c1e"
+      "source_sha256": "a72ac298d33addcffc37df3467f574a4a0efcba17b6358d2cb5ca27a832ab170"
     },
     "skills/sn-ppt-standard/references/design-rules.md": {
       "sha256": "42fc9a7c463b951706a01c2c6c83a9342aee6b36eaa1ad87c50afa951dd2dbce",
@@ -372,14 +372,14 @@
       "source_sha256": "7934524a778353a8f333c0c29b91466680b57a6f4abf6fd075781856ec585ec6"
     },
     "skills/sn-ppt-standard/references/planning-contract.md": {
-      "sha256": "2429d16c13f6ee2b5c3c0215788374f58a432a24edad992188fd6638c6f8b3f7",
+      "sha256": "f64e616def44c1002640202b81c51c12d2c35d9fe834a7435d2487e0b53f75f1",
       "source_path": "skills/sn-ppt-standard/references/planning-contract.md",
-      "source_sha256": "2429d16c13f6ee2b5c3c0215788374f58a432a24edad992188fd6638c6f8b3f7"
+      "source_sha256": "f64e616def44c1002640202b81c51c12d2c35d9fe834a7435d2487e0b53f75f1"
     },
     "skills/sn-ppt-standard/references/quality-checklist.md": {
-      "sha256": "241a048759e6f68a49d699a37c194a1d00c63bfd09fef6c5a2721e106a5dd97e",
+      "sha256": "80e2e22a58f7793d95de3a26523a0477723c40db10cfe4ed153074c3e35dd887",
       "source_path": "skills/sn-ppt-standard/references/quality-checklist.md",
-      "source_sha256": "241a048759e6f68a49d699a37c194a1d00c63bfd09fef6c5a2721e106a5dd97e"
+      "source_sha256": "80e2e22a58f7793d95de3a26523a0477723c40db10cfe4ed153074c3e35dd887"
     },
     "skills/sn-ppt-standard/requirements.txt": {
       "sha256": "e99da4477edfa9ac32905f515ebd468c3308d07ebe31eb2c74d7d54120c6a7b7",
@@ -553,14 +553,14 @@
       "source_sha256": "f6aed6ae3e7114f1422345cc0274080127670c2486fc9638a8b940e65e567be1"
     },
     "skills/sn-ppt-standard/subagents/review.md": {
-      "sha256": "91daf90cd907370c280a1552f5282472acbf0c081c32c8ebddc5f8911e1a03be",
+      "sha256": "9377265acd951d85c20e884b8b8cd44df2ee438b6d82a008ce15278f77dbad51",
       "source_path": "skills/sn-ppt-standard/subagents/review.md",
-      "source_sha256": "91daf90cd907370c280a1552f5282472acbf0c081c32c8ebddc5f8911e1a03be"
+      "source_sha256": "9377265acd951d85c20e884b8b8cd44df2ee438b6d82a008ce15278f77dbad51"
     },
     "skills/sn-ppt-standard/subagents/slide.md": {
-      "sha256": "34019121b7ffed04e3a907b646e74e8ed7141ce4d54a9ec07fc24761d9f2802d",
+      "sha256": "2ceabc6f0badfe4386bca01ff34bcac01544da47d369adb747d76bd09a0c9f75",
       "source_path": "skills/sn-ppt-standard/subagents/slide.md",
-      "source_sha256": "34019121b7ffed04e3a907b646e74e8ed7141ce4d54a9ec07fc24761d9f2802d"
+      "source_sha256": "2ceabc6f0badfe4386bca01ff34bcac01544da47d369adb747d76bd09a0c9f75"
     },
     "skills/sn-ppt-story/SKILL.md": {
       "sha256": "28596fa06e4d33c09ac5275b9704d446096b4a927cbd2fbb30016c9d0acdec67",
@@ -635,6 +635,6 @@
     "bounded-image-inspection-recovery"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
-  "revision": "09a3625a9544cec13c32d9aa6d36e142f0fdaf68",
+  "revision": "1f898c0af2bac2e23f2a43f1a541ee20f32e2f1f",
   "schema_version": 1
 }
