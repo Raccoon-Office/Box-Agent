@@ -292,6 +292,9 @@ def _detect_changed_files(
         except (OSError, RuntimeError, ValueError):
             continue
         paths = {str(file_path.resolve()), relative}
+        if os.name == "nt":
+            paths.add(relative.replace("/", "\\"))
+            paths.add(file_path.resolve().as_posix())
         if not any(
             re.search(r"(?<![\w./\\-])" + re.escape(path) + r"(?![\w./\\-])", content)
             for path in paths
