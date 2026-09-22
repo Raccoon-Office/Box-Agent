@@ -686,8 +686,10 @@ def run_renderer(renderer, args, timeout=600):
                 finally:
                     stdout.seek(0)
                     stderr.seek(0)
-                    output = stdout.read().decode("utf-8", "replace")
-                    errors = stderr.read().decode("utf-8", "replace")
+                    # Captured worker bytes may use CRLF. Return logical text
+                    # so Windows stdout/stderr do not translate it a second time.
+                    output = stdout.read().decode("utf-8", "replace").replace("\r\n", "\n")
+                    errors = stderr.read().decode("utf-8", "replace").replace("\r\n", "\n")
     except BaseException as exc:
         code = 130 if isinstance(exc, KeyboardInterrupt) else CLEANUP_EXIT if isinstance(exc, RenderCleanupError) else 1
         error = _error_chain(exc)

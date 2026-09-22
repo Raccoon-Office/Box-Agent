@@ -14,6 +14,7 @@ from pathlib import Path
 import platform
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import time
@@ -197,6 +198,25 @@ def test_doctor_exercises_renderer_and_propagates_failure(tmp_path, monkeypatch,
         assert "renderer injected failure" in result["detail"]
 
 
+def _git_bash_path(git):
+    # Git wrappers live in cmd/bin; the native executable lives in mingw64/bin.
+    for root in Path(git).resolve().parents[1:3]:
+        for relative in ("bin/bash.exe", "usr/bin/bash.exe"):
+            bash = root / relative
+            if bash.is_file():
+                return str(bash)
+    raise AssertionError(f"Git Bash is missing beside {git}")
+
+
+@pytest.mark.parametrize("git_layout", ["cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe"])
+@pytest.mark.parametrize("bash_layout", ["bin/bash.exe", "usr/bin/bash.exe"])
+def test_installer_finds_git_bash_in_standard_install_layouts(tmp_path, git_layout, bash_layout):
+    root = tmp_path / "Git with spaces"
+    git = browser_file(root, git_layout)
+    bash = browser_file(root, bash_layout)
+    assert Path(_git_bash_path(str(git))) == bash
+
+
 @pytest.mark.parametrize("layout", ["Scripts/python.exe", "bin/python"])
 def test_installer_selects_actual_normalize_interpreter(layout, tmp_path):
     source = (STANDARD / "install.sh").read_text(encoding="utf-8")
@@ -206,8 +226,15 @@ def test_installer_selects_actual_normalize_interpreter(layout, tmp_path):
     script = tmp_path / "probe.sh"
     script.write_text(preamble + '\nprintf "%s\\n" "$PYBIN" "$(normalize_python)"\n',
                       encoding="utf-8", newline="\n")
-    env = dict(os.environ, NORMALIZE_VENV=str(venv), BOX_AGENT_PYTHON="/host python.exe", PYBIN="/legacy python")
-    result = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+    bash = "bash"
+    if sys.platform == "win32":
+        # PATH's bash.exe may be the WSL launcher. Use Git for Windows' Bash,
+        # the shell supported by install.sh, without requiring a WSL distro.
+        git = shutil.which("git")
+        assert git, "Git for Windows is required for the installer test"
+        bash = _git_bash_path(git)
+    env = dict(os.environ, NORMALIZE_VENV=venv.as_posix(), BOX_AGENT_PYTHON="/host python.exe", PYBIN="/legacy python")
+    result = subprocess.run([bash, script.as_posix()], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     selected = result.stdout.splitlines()[-2:]
     assert selected[0] == "/host python.exe"

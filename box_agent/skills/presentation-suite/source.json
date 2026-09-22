@@ -539,9 +539,9 @@
     },
     "skills/sn-ppt-standard/scripts/render_runtime.py": {
       "input_path": "scripts/presentation_suite_overlays/render_runtime.py",
-      "sha256": "df6df998e17683c9cdfdbaff0cecb1de240e793a8604b37b9ad9d54efb0edd1e",
+      "sha256": "d388e0dae35eb638ac6ab43acf1153afaa8d2cc35704493524abe5625fb4e377",
       "source_path": "skills/sn-ppt-standard/scripts/render_runtime.py",
-      "source_sha256": "df6df998e17683c9cdfdbaff0cecb1de240e793a8604b37b9ad9d54efb0edd1e"
+      "source_sha256": "d388e0dae35eb638ac6ab43acf1153afaa8d2cc35704493524abe5625fb4e377"
     },
     "skills/sn-ppt-standard/scripts/render_runtime_windows.py": {
       "input_path": "scripts/presentation_suite_overlays/render_runtime_windows.py",

@@ -1,5 +1,6 @@
 """Windows renderer contracts. Native tests never pass by mocking Win32 APIs."""
 
+import json
 import os
 from pathlib import Path
 import runpy
@@ -44,6 +45,36 @@ def worker(tmp_path, body):
     path = tmp_path / "worker 中文 with spaces.py"
     path.write_text("def main():\n" + "\n".join("    " + line for line in body.splitlines()) + "\n", encoding="utf-8")
     return path
+
+
+@pytest.mark.parametrize("worker_newline", ["\n", "\r\n"])
+def test_cli_preserves_receipt_and_diagnostics_with_windows_text_streams(tmp_path, worker_newline):
+    receipt = {"status": "rendered", "qa": "not-run"}
+    output = "渲染完成\n\n" + json.dumps(receipt) + "\n"
+    diagnostic = "诊断信息\n"
+    worker_output = output.replace("\n", worker_newline).encode("utf-8")
+    worker_diagnostic = diagnostic.replace("\n", worker_newline).encode("utf-8")
+    script = worker(tmp_path, "import os\n"
+                    f"os.write(1, {worker_output!r})\n"
+                    f"os.write(2, {worker_diagnostic!r})")
+    # Exercise the real worker and CLI forwarding on every OS, with the same
+    # text-stream newline translation that native Windows applies by default.
+    code = """import sys
+sys.path.insert(0, sys.argv[1])
+from render_runtime import supervise
+sys.stdout.reconfigure(encoding='utf-8', newline='\\r\\n')
+sys.stderr.reconfigure(encoding='utf-8', newline='\\r\\n')
+raise SystemExit(supervise(sys.argv[2], ['--batch']))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPTS), str(script)],
+        env=dict(os.environ, RENDER_JOB_TIMEOUT="20"),
+        capture_output=True, text=True, encoding="utf-8", timeout=25,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == output
+    assert result.stderr == diagnostic
+    assert json.loads(result.stdout.splitlines()[-1]) == receipt
 
 
 def alive(pid):
