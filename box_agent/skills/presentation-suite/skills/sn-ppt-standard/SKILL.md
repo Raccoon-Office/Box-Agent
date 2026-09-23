@@ -21,7 +21,7 @@ metadata:
 
 ## Box-Agent 兼容入口
 
-当当前 harness 暴露 `sub_agent`、`inspect_images`、`generate_image`、`bash` 等 Box-Agent 原生工具时，开始任何制作动作前必须完整读取 `references/box-agent-tool-contract.md`。该契约只覆盖工具名称、参数、脚本路径、委派方式和权限边界；本文件及各职责卡的事实、设计、质量和交付标准仍然有效。委派时按该契约交接原文：子任务须完整掌握同一契约与自己的 `subagents/<role>.md`，task 或有效分片已完整提供的内容不重复读取；未提供时给出绝对路径并要求读完整。
+当当前 harness 暴露 `sub_agent`、`inspect_images`、`generate_image`、`bash` 等 Box-Agent 原生工具时，父级开始制作前完整读取 `references/box-agent-tool-contract.md`；只负责写页的 Slide 子任务按该文件的阅读路由读取相关章节，不要求通读父级的素材、渲染和导出操作。该契约只覆盖工具名称、参数、脚本路径、委派方式和权限边界；本文件及各职责卡的事实、设计、质量和交付标准仍然有效。委派时按该契约交接原文：子任务须完整掌握自己的 `subagents/<role>.md` 与所需工具契约章节，task 或有效分片已完整提供的内容不重复读取；未提供时给出绝对路径并要求读完整。
 
 ## Entry / Story 输入契约（最高优先级）
 本 Skill 不接收裸 query，不自行创建任务目录。只接受绝对 `DECK_DIR`，且必须存在 `task_pack.json`、`info_pack.json` 和 `outline.md`。
@@ -138,7 +138,7 @@ present.html   ← 必交付产物：由 `deck.py build` 生成，缺失即技�
 
 #### Grounding gate
 
-Entry/Story 产物交接后，Orchestrator 先校验 `info_pack.json`、Entry/Story 的 Research 报告和当前磁盘 `outline.md`；缺少必需报告时返回 Entry，不能在 Standard 内重新 Research、解析材料或改写事实。校验通过后再写唯一 `plan/grounded-knowledge.md`，并用 `read_file` 验证文件完整；完成前不得进入 `design-brief.md`、Style Lock 或逐页规划。文件只整理已交接的用户事实、外部核验、编排器假设、示意、冲突和未确认项，不添加无来源的新事实。
+Entry/Story 产物交接后，Orchestrator 先校验 `info_pack.json`、Entry/Story 的 Research 报告和当前磁盘 `outline.md`；缺少必需报告时返回 Entry，不能在 Standard 内重新 Research、解析材料或改写事实。校验通过后再写唯一 `plan/grounded-knowledge.md`，确认完整提交后才进入 `design-brief.md`、Style Lock 或逐页规划；Box-Agent 按工具契约的文件提交规则确认，不固定追加一次 `read_file`，其他环境保留原有完整性确认。文件只整理已交接的用户事实、外部核验、编排器假设、示意、冲突和未确认项，不添加无来源的新事实。
 
 附件提供的是**事实与可复用素材边界，不是默认设计上限**。合并时同时整理材料里的可复用页图、内嵌图片、图表结构和品牌线索；随后在 `design-brief.md` 明确 `material_visual_mode`：`facts-only`、`visual-reuse`、`style-reference` 或用户明确要求的 `faithful-restyle`。对每张图片附件另写 `attachment_visual_map`，决定 must-show / reuse / reference-only / omit、上屏页与处理方式；论文整页视觉与页内命名 Figure 必须区分为 `page-facsimile` 和 `figure-crop`。这项判断独立于外部搜图/生图的 `image_opportunity`。除 `faithful-restyle` 外，不继承附件的小字号、密集表格、普通文档排版或低质量视觉；仍按听众、场合和叙事重新定调。
 
@@ -147,20 +147,20 @@ Entry/Story 产物交接后，Orchestrator 先校验 `info_pack.json`、Entry/St
 1. 按 Reference 路由读取视觉规则，不扫描全库。
 2. 先锁定 `scene_register`（庄重汇报 / 编辑叙事 / 产品发布 / 教学解释 / 文化体验等）和一个明确的主风格；风格必须能解释“为什么适合这个受众、场合与内容”，不能只写抽象形容词，也不要把多个风格编号拼成折中套餐。允许借一种辅助 craft，但整册要能用一句视觉主张说清。
 3. 写 `plan/design-brief.md#Style Lock`：
-   - scene；
+   - scene / scene_register 与选择理由；
    - primary_style；
    - supporting_craft（最多一种）；
    - visual_thesis / signature_visual；
    - palette / typography / numeric_voice；
    - image_language / image_opportunity_map / composition_grammar；
-   - background_system：先根据场景说明背景应偏“克制秩序”还是“氛围表达”，再定义一个贯穿内容页的 `base_canvas_family` 与允许变化的视觉状态（明度、色场、环境光、肌理、图片占比、密度和章节状态）；每种状态写清叙事用途、适用页面及进入/退出承接。学术、组会、合规、严肃评审等场景可以更安静，但仍需有排版和证据视觉；其他场景不要把整册同一纯色底当作安全默认。统一不等于全册同底色；变化也不能脱离同一画布家族；
+   - background_system：先根据场景说明背景应偏“克制秩序”还是“氛围表达”，再定义一个贯穿内容页的 `base_canvas_family` 与 `visual_state_range`（明度、色场、环境光、肌理、图片占比、信息密度、构图方向和章节状态）；每种状态写清叙事用途、适用页面及 `enter_from / exit_to`。学术、组会、合规、严肃评审等场景可以更安静，但仍需有排版和证据视觉；其他场景不要把整册同一纯色底当作安全默认。统一不等于全册同底色；变化也不能脱离同一画布家族；
    - motif_role：说明主题母题在哪些页作为主视觉、在哪些页只作次要线索、哪些页主动缺席。同一装饰母题不得承担封面、章节页和大多数内容页的主要视觉；一致性主要来自字体、颜色语义、图片处理和构图语法。技术注、坐标、场记、档案编号等只有在传递真实且有用的信息时才可成为母题，不能编造伪元数据营造“高级感”；
    - special_pages；
    - avoid；
    - spatial_rhythm：内容页如何铺开、呼吸页如何聚焦、峰值页在哪里；
    - special_page_system：封面、章节页、结尾页共享什么设计 DNA，各自用什么构图动作。
    - material_visual_mode（有附件时）：哪些只作为事实，哪些图片/图表可直接复用，哪些风格线索值得保留。
-   - attachment_visual_map（有图片附件时）：原路径、must-show / reuse / reference-only / omit、`material_asset_type`、正式 asset 路径、上屏页、裁切/整图/抠图/调色与理由。论文 `Figure N` 必须记录 figure-crop 的来源页与边界，不能直接复用整页 PDF PNG。
+   - attachment_visual_map（有图片附件时）：原路径、must-show / reuse / reference-only / omit、`material_asset_type`、正式 asset 路径、上屏页、裁切/整图/抠图/调色与理由。论文 `Figure N` 必须记录 figure-crop 的 `figure_id / source_page / crop_box`，不能直接复用整页 PDF PNG。
 4. 用户未指定风格时，按主题 × 受众 × 场合主动判断。没有 Style Lock 不进入规划；没有可见的 `signature_visual` 兑现页，也不把通用配色和字体清单当作完成定调。
 
 `image_language` 先说明哪些颜色本身承担识别、证据或教学信息，再决定统一处理。人物、动物、植物、作品、产品、场地、实验输出等真实主体默认保留有意义的原始色彩；统一感优先来自选图、裁切、色温、局部色罩、边框与背景。只有用户明确要求黑白/双色调，或本册视觉主张确实依赖该处理且不会损害辨认与证据价值时，才使用整图灰阶或 duotone；“学术感”“高级感”“为了统一”本身不构成把整册真实图片去色的理由。对承担识别、证据或主视觉职责的图片，同时定义轻量 `crop_contract`：焦点、必须保留的主体部位/图内信息、允许裁掉的背景与推荐 fit；不能只写宽高比后让 Slide 猜裁切。
@@ -207,7 +207,7 @@ Style Lock 锁定的是**视觉语言与判断边界**，不是一套固定 HTML
 python "$SKILL_ROOT/scripts/deck.py" init "$DECK_DIR"
 ```
 
-4. 一次写完全部 `plan/slide_NN.md`，每页附自己的 Reference route；
+4. 一次写完全部 `plan/slide_NN.md`，每页同时定稿屏显文案、视觉实现、来源、`## 口语讲稿` 和 Reference route，不先留空讲稿再新建补稿任务；
 5. 在 `plan/deck.md` 定义 Production groups：全部过渡页为 `dividers`，封面与结尾为 `bookends`；内容页首先按**制作方式与构图亲缘性**分组，再考虑叙事连续，最后才考虑章节归属。一个组应共享同一种制作问题，而不是把 cards、复杂 Canvas、数据图表、真实照片等不同媒介仅因属于同一章就塞给一个 Agent；章名相同不构成分组理由。每组同时写 `boundary_handoff`，说明进入本组前与离开本组后的画布、明度、色场和母题状态；分组完成后按逐页表复核一次，确保每页恰好归属一个组，章节页与互动页等页型没有错号。
 6. 参考文献与结尾页分开承担职责：需要上屏的来源使用独立 references 页或前置内容页；closing 只负责收束命题、行动或提问，不与长参考文献、详细回顾或多栏总结合并。
 7. 在启动 Image 或 Slide 前写一段简短的 `## Repetition & rhythm preflight`：逐页比较画布状态、标题锚点、构图方向、媒介、图片占比、信息密度与母题角色；同时纵向比较各章的页面脚本，不能把同一套“痛点—案例前—案例后—步骤—工具”机械复制到不同章节。共享节奏可以形成亲缘性，但每章仍应有自己的问题视角、证据任务与阅读动作；某页没有独立职责且需要合并或改变叙事时，返回 Story 更新同一 `outline.md`。在已确认页数、页序和内容关系不变的范围内，调整视觉页面地图、Style Lock 或 Production groups，再冻结计划。
@@ -218,6 +218,8 @@ python "$SKILL_ROOT/scripts/deck.py" init "$DECK_DIR"
 ```bash
 python "$SKILL_ROOT/scripts/deck.py" prepare "$DECK_DIR" --expected <总页数>
 ```
+
+Box-Agent 静态新建若 `prepare` 报规划缺项，由当前规划者按已列出的全部错误一次补齐原计划，再运行回执的 `retry_after_fix`；不为补漏另派讲稿或计划子任务。失败回执的 `plan_dir` 与 `planning_reference` 给出绝对定位；按原始错误处理，已掌握的合同不重读，也不因回执列了规划路径就把字体或依赖故障误当规划问题。缺少上游事实仍返回 Entry/Story，不由脚本或补稿任务编造。成功回执不要求重跑。
 
 规划冻结条件：事实、页序、屏显文案、视觉媒介、逐页配图机会、素材 brief、背景处理、来源、讲稿、页型和字体全部确定，`plan/image-strategy.json` 已写入，并已通过内容充分性、屏显语义去重与 screen-copy firewall。本阶段以 `deck.py prepare` 成功为结束，不以“计划已写完”结束；依据它更新后的 `base.css` 与 `assets/fonts/manifest.json` 中的实际字体，以及已准备依赖制作首张 HTML，不能到收尾时才准备字体。冻结前专门反证所有 `image_opportunity: none`：若页面已经有可视化的主体或场景，不能只用“代码更可控”将它排除。屏显文案或字体 token 变化时，先同步计划再重跑 `deck.py prepare`。
 
