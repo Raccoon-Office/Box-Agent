@@ -4,6 +4,7 @@
 Usage:
     box-agent-build-runtime [--version 0.3.2] [--output dist/runtime]
     box-agent-build-runtime --version 0.9.11 --install-lab
+    box-agent-build-runtime --mac-all --version 0.9.13 [--dry-run]
     arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --arch x64
 
 Produces:
@@ -1112,6 +1113,23 @@ def main():
         help="Shortcut for --target <current-platform>-<arch>, e.g. --arch x64",
     )
     parser.add_argument(
+        "--mac-all",
+        action="store_true",
+        help="Build both macOS architectures from one source snapshot; requires separate ARM/Intel Python environments.",
+    )
+    parser.add_argument(
+        "--arm-python", metavar="PATH",
+        help="--mac-all only: ARM Python (default: .venv/bin/python).",
+    )
+    parser.add_argument(
+        "--intel-python", metavar="PATH",
+        help="--mac-all only: Intel Python (default: .venv-x64/bin/python).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="--mac-all only: check both Python environments and print the plan without building.",
+    )
+    parser.add_argument(
         "--external-python-sandbox",
         action="store_true",
         default=env_flag("BOX_AGENT_EXTERNAL_PYTHON_SANDBOX"),
@@ -1144,6 +1162,24 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    if args.mac_all:
+        if args.target or args.arch or args.install_officev3 is not None or args.install_lab is not None:
+            parser.error("--mac-all cannot be combined with --target/--arch or host installation options")
+        if not args.version:
+            parser.error("--mac-all requires --version X.Y.Z (or BOX_AGENT_RUNTIME_VERSION)")
+        from scripts.build_macos_runtimes import build_macos_runtimes
+        try:
+            build_macos_runtimes(
+                PROJECT_ROOT, args.version, Path(args.output),
+                arm_python=args.arm_python, intel_python=args.intel_python, dry_run=args.dry_run,
+            )
+        except (OSError, RuntimeError, ValueError, tarfile.TarError, subprocess.SubprocessError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+    if args.arm_python or args.intel_python or args.dry_run:
+        parser.error("--arm-python/--intel-python/--dry-run require --mac-all")
 
     if args.target and args.arch:
         print("Error: use either --target or --arch, not both", file=sys.stderr)

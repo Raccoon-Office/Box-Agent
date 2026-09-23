@@ -214,7 +214,23 @@ dependency consistency before building:
 uv pip check --python .venv-x64/bin/python
 ```
 
-Optional environment defaults:
+For a single-command ARM + Intel release from the same current source snapshot:
+
+```bash
+uv run box-agent-build-runtime --mac-all --version 0.9.13 --dry-run
+uv run box-agent-build-runtime --mac-all --version 0.9.13
+```
+
+This requires prepared ARM `.venv` and Intel `.venv-x64` environments with the same
+Python major/minor and PyInstaller version. Override their Python executables using
+`--arm-python PATH` and `--intel-python PATH`. Builds and caches are isolated; both
+archives are validated before being promoted together into `dist/runtime/`, with
+SHA-256 sidecars and a source-snapshot report. Existing versioned files are never
+overwritten. No GitHub upload or host installation is performed. This mode requires
+an explicit stable version and cannot be combined with single-target or install flags.
+See the [full workflow](PRODUCTION_GUIDE_CN.md#macos-双架构一次构建).
+
+Single-target environment defaults:
 
 ```bash
 BOX_AGENT_RUNTIME_VERSION=X.Y.Z uv run box-agent-build-runtime
