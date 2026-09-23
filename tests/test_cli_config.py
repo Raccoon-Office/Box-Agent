@@ -152,7 +152,8 @@ def test_cmd_config_human_summary_uses_generic_tool_limits(
 
     assert cli.cmd_config() == 0
     output = capsys.readouterr().out
-    assert "tools 160+512 delegated" in output
+    assert "tools 300+512 delegated" in output
+    assert "summary>300" in output
     assert "completion gate" not in output
     assert "presentation" not in output
 
@@ -216,7 +217,8 @@ def test_config_tool_limits_defaults_and_nested_overrides(tmp_path: Path) -> Non
     default_path = tmp_path / "default.yaml"
     _write_config(default_path)
     defaults = cli.Config.from_yaml(default_path).tool_limits
-    assert defaults.general.max_tool_calls == 160
+    assert defaults.general.max_tool_calls == 300
+    assert defaults.general.final_summary_after_calls == 300
     assert defaults.general.max_delegated_tool_calls == 512
     assert defaults.web_search.concurrency == 2
     assert defaults.web_search.total_calls == 80

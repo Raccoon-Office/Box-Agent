@@ -162,9 +162,9 @@ class ToolLimitsModel(BaseModel):
 class GeneralToolLimitsConfig(ToolLimitsModel):
     """Limits shared by ordinary top-level agent turns."""
 
-    max_tool_calls: int = Field(default=160, ge=1, le=512)
+    max_tool_calls: int = Field(default=300, ge=1, le=512)
     max_delegated_tool_calls: int = Field(default=512, ge=1, le=4096)
-    final_summary_after_calls: int = Field(default=200, ge=1, le=512)
+    final_summary_after_calls: int = Field(default=300, ge=1, le=512)
     wrapup_remaining_steps: int = Field(default=10, ge=0, le=50)
 
 

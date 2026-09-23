@@ -103,9 +103,9 @@ max_truncation_continuations: 1 # Max continuations per turn (loop guard)
 # specific values that should remain user-controlled across upgrades.
 # tool_limits:
 #   general:
-#     max_tool_calls: 160 # 1..512; total top-level tool-call budget
+#     max_tool_calls: 300 # 1..512; total top-level tool-call budget
 #     max_delegated_tool_calls: 512 # 1..4096; aggregate child-tool budget
-#     final_summary_after_calls: 200 # 1..512; request a final summary after this many visible tool calls
+#     final_summary_after_calls: 300 # 1..512; request a final summary after this many visible tool calls
 #     wrapup_remaining_steps: 10 # 0..50; start wrapping up this many steps before max_steps
 #   web_search:
 #     batch_size: 8 # 1..32; web searches allowed in one agent step

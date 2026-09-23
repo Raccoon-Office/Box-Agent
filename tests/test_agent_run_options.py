@@ -73,6 +73,7 @@ async def test_agent_run_forwards_core_execution_options(
     assert captured["artifact_detection_enabled"] is False
     assert captured["thinking_enabled"] is True
     assert captured["tool_limits"].web_search.total_calls == 31
+    assert captured["max_tool_calls"] == 300
     assert captured["skill_engine"] is skill_runtime is agent.skill_runtime
     assert "active_skill_activator" not in captured
     assert captured["current_turn_text"] == "current user request"
