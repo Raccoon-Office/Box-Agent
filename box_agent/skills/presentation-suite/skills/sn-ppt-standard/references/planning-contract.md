@@ -6,7 +6,7 @@ Box-Agent 静态新建遵守根 `SKILL.md` 的“Box-Agent 静态新建的执行
 
 ## 阅读顺序
 
-1. 先写 `plan/deck.md`，锁定叙事弧与 Production groups；
+1. 先写 `plan/deck.md`，沿用已确认的叙事弧，确定页面地图与 Production groups；
 2. 再按统一字段一次写完全部 `plan/slide_NN.md`；
 3. 最后过页型、素材、讲稿与冻结检查。
 
@@ -19,15 +19,15 @@ Box-Agent 静态新建遵守根 `SKILL.md` 的“Box-Agent 静态新建的执行
 `deck.md` 至少包含：
 
 - response / deliverable language；
-- Speaker、Audience、Occasion、Objective、Duration、Page count；
-- 一句话核心命题与 1–3 条 takeaway；
-- 叙事弧：开场、各幕、转折、结论、行动；
+- 任务与叙事：Box-Agent 静态新建直接引用 `outline.md` 及 task/info pack 中已有背景、核心命题、takeaway 与叙事弧的精确文件和章节/字段位置，不再复写一份；仅补充上游尚未表达、且不改变已确认事实与叙事的制作假设。其他环境保留 Speaker、Audience、Occasion、Objective、Duration、Page count、一句话核心命题、1–3 条 takeaway 及开场/各幕/转折/结论/行动的完整记录；
 - 逐页表：页码、标题、页面职责、页型、核心证据、视觉媒介、节奏；
 - Style Lock 的源文件与章节定位：`plan/design-brief.md#Style Lock`；场景与理由、稳定语言与变化边界、配图与附件映射、背景系统、视觉状态、母题和特殊页系统均直接消费该处原文，不另写摘要；
 - `visual_thesis / signature_visual` 的兑现地图：落在哪些页面、以什么可见形式出现、Review 如何判断不是只写在 brief 里；
 - Production groups；
 - `Repetition & rhythm preflight`：规划冻结前对页面地图做一次重复率与节奏预检，记录需要调整的页面或 `pass`；
-- 假设、风险和待核项。
+- 假设、风险和待核项；Box-Agent 静态新建只记录本阶段新增项，已在上游或 Grounding 补充记录中说明的直接引用。
+
+引用不是省略输入：必须能定位到具体文件及章节/字段，不能只写“见上文”。Box-Agent 主 Agent 复用当前上下文完整且未变化的原文；截断、源变化或压缩丢失时按定位补读。实际委派仍交接本组所需的完整原文或精确路径，不假定子任务继承父级上下文。
 
 上述分工不省略设计决定：Style Lock 必须完整保留根 Skill 阶段 2 的 `image_opportunity_map`、附件映射、`background_system / visual_state_range`、`motif_role`、`spatial_rhythm` 与 `special_page_system`。页面地图、签名视觉兑现页和组边界仍须明确；逐页计划与素材机读字段不改成链接。新增全局决定回填 Style Lock，页级决定回填对应页面，不在多个文件重写同一套规则。
 

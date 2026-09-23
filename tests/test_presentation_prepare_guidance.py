@@ -128,6 +128,51 @@ def test_non_prepare_failure_does_not_gain_planning_guidance(command, tmp_path, 
     )
 
 
+@pytest.mark.parametrize("legacy_summary", [False, True])
+def test_prepare_preserves_referenced_facts_without_rewriting_global_context(
+    command, tmp_path, capsys, legacy_summary,
+):
+    _, main = command
+    root = workspace(tmp_path)
+    (root / "research").mkdir()
+    (root / "research/report.md").write_text(
+        "# Market research\n## Scope\n"
+        "2025 全网销售额 1.7 万亿元，第三方统计，不是公司收入。\n",
+        encoding="utf-8",
+    )
+    (root / "outline.md").write_text(
+        "# 已确认大纲\n## 任务\n受众：渠道负责人；目标：预算评审。\n"
+        "## 叙事\n01 市场变化；02 渠道分工。\n", encoding="utf-8",
+    )
+    (root / "plan/deck.md").write_text(
+        "language: zh\n任务与叙事：outline.md#任务、outline.md#叙事\n"
+        "## 页面地图\n01 市场变化\n02 渠道分工\n", encoding="utf-8",
+    )
+    summary = root / "plan/grounded-knowledge.md"
+    if legacy_summary:
+        summary.write_text("既有汇总：2025 全网 1.7 万亿元；不是公司收入。\n", encoding="utf-8")
+    for number in (1, 2):
+        plan = root / f"plan/slide_{number:02d}.md"
+        plan.write_text(plan.read_text().replace(
+            "- user-provided", "- research/report.md#Scope：2025 全网销售额 1.7 万亿元，第三方统计。"
+        ), encoding="utf-8")
+    inputs = {p: p.read_bytes() for p in root.rglob("*.md")}
+
+    assert main(["prepare", str(root), "--expected", "2"]) == 0
+
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "prepare:PASS" in output.out
+    assert {p: p.read_bytes() for p in inputs} == inputs
+    assert summary.exists() is legacy_summary
+    assert set(root.rglob("*.md")) == set(inputs) | {root / "speech.md"}
+    speech = (root / "speech.md").read_text(encoding="utf-8")
+    # Internal evidence locations stay in unchanged page plans, not spoken copy.
+    assert "research/report.md" not in speech
+    for number in (1, 2):
+        assert f"这是第 {number} 页的完整讲述。" in speech
+
+
 def test_prepare_without_plans_does_not_invent_them(command, tmp_path, capsys):
     _, main = command
     root = tmp_path / "no plans"

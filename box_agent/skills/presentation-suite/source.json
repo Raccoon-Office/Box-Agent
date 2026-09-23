@@ -296,9 +296,9 @@
       "source_sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3"
     },
     "skills/sn-ppt-standard/SKILL.md": {
-      "sha256": "36dfd68c31a4e5baa0a750c31c9fbfa1fb3887ee4a9e64ae6614efa49b3289a1",
+      "sha256": "db6412d13536fdd99d6b860b0c4f4af8bc2d0a96e7b44dec3056921ba379e7a6",
       "source_path": "skills/sn-ppt-standard/SKILL.md",
-      "source_sha256": "3d7fd758741d3467b7acd556c5656be11a1edd7c63ff43c9b5d9635470d0fc78"
+      "source_sha256": "0fae52e6ca2cb95bb7aa421e8aca7c431a9ba82c99bf713a647ba63a8d2b1f39"
     },
     "skills/sn-ppt-standard/agents/openai.yaml": {
       "sha256": "fca822e9a5e99f3ba5422a29e074c8cb553e7d864042f5eca2dbf57f98449489",
@@ -372,9 +372,9 @@
       "source_sha256": "7934524a778353a8f333c0c29b91466680b57a6f4abf6fd075781856ec585ec6"
     },
     "skills/sn-ppt-standard/references/planning-contract.md": {
-      "sha256": "1cde0d310d792edaf19c24211c6fca59c0e5711dd22ac602f0a72c6d9294a5ac",
+      "sha256": "786faeab351000bcfca717dbd23bb94e43de2fd73aa2585fe08255b468597f2c",
       "source_path": "skills/sn-ppt-standard/references/planning-contract.md",
-      "source_sha256": "1cde0d310d792edaf19c24211c6fca59c0e5711dd22ac602f0a72c6d9294a5ac"
+      "source_sha256": "786faeab351000bcfca717dbd23bb94e43de2fd73aa2585fe08255b468597f2c"
     },
     "skills/sn-ppt-standard/references/quality-checklist.md": {
       "sha256": "682227cb733fc10afe070b8041d1211eb57be0c4b387f17860c091a578a801f6",
@@ -565,9 +565,9 @@
       "source_sha256": "f6aed6ae3e7114f1422345cc0274080127670c2486fc9638a8b940e65e567be1"
     },
     "skills/sn-ppt-standard/subagents/review.md": {
-      "sha256": "eb7ed1bed8255924790d4866741395f2c62500911f1059f14f48c4cca356281b",
+      "sha256": "aa01825933246247c56f5477069d0d0f6d1a99bba82082d7cd4dd92203b6f379",
       "source_path": "skills/sn-ppt-standard/subagents/review.md",
-      "source_sha256": "eb7ed1bed8255924790d4866741395f2c62500911f1059f14f48c4cca356281b"
+      "source_sha256": "aa01825933246247c56f5477069d0d0f6d1a99bba82082d7cd4dd92203b6f379"
     },
     "skills/sn-ppt-standard/subagents/slide.md": {
       "sha256": "311f85a35cecfc802b523b48b9e284bd64117f8181991c0538ad510682bf5e58",
@@ -648,6 +648,6 @@
     "native-windows-rendering"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
-  "revision": "8cb074f6dac9710fb28a407cbbc2860888ecb471",
+  "revision": "0cdc9d71789ec798be971992e0afc8746bf94457",
   "schema_version": 1
 }

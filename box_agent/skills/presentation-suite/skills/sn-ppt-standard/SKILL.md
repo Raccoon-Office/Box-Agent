@@ -90,7 +90,7 @@ present.html   ← 必交付产物：由 `deck.py build` 生成，缺失即技�
 `<DECK_DIR>/<DECK_ID>.pptx`   ← 必交付产物（`static_postprocess` 含 `pptx` 时）：只能由 `scripts/export_pptx/html_to_pptx.mjs` 生成
 ```
 
-`outline.md` 是页面事实、页数、页序、标题、结论和内容关系的真相源；`plan/grounded-knowledge.md` 由 Standard Orchestrator 按 Grounding gate 汇总 Entry/Story 已交接的事实与证据，不新增研究或事实，也不得覆盖 `outline.md`。
+`outline.md` 是页面事实、页数、页序、标题、结论和内容关系的真相源；事实证据沿用 Entry/Story 已交接的 Research 或原始材料。`plan/grounded-knowledge.md` 按 Grounding gate 按需补充，不新增研究或事实，也不得覆盖 `outline.md`。
 `design-brief.md` 是视觉真相源；
 `slide_NN.md` 是页面内容合同；
 `base.css` 是全局设计系统；
@@ -132,13 +132,17 @@ present.html   ← 必交付产物：由 `deck.py build` 生成，缺失即技�
 
 1. 读取 `task_pack.json`、`info_pack.json` 和当前磁盘 `outline.md`；页数、页序、标题、结论、事实与内容关系全部以 `outline.md` 为准，场景、受众、材料与 Research 路径以 task/info pack 为准。
 2. 锁定语言、能力、附件清单和交付范围，不向用户追问非阻塞偏好，并在规划中显式记录合理假设。
-3. `static_html` 新建流程不启动 Research 或 Material，只读取 Entry/Story 已生成的产物；若 required Research 报告缺失则返回 Entry，事实不足时不编造数字、不改写 Story，`grounded-knowledge.md` 仅作为生产汇总。
+3. `static_html` 新建流程不启动 Research 或 Material，只读取 Entry/Story 已生成的产物；若 required Research 报告缺失则返回 Entry，事实不足时不编造数字、不改写 Story；事实复用与补充记录按下面的 Grounding gate 执行。
 
 ### 阶段 1：按需接地
 
 #### Grounding gate
 
-Entry/Story 产物交接后，Orchestrator 先校验 `info_pack.json`、Entry/Story 的 Research 报告和当前磁盘 `outline.md`；缺少必需报告时返回 Entry，不能在 Standard 内重新 Research、解析材料或改写事实。校验通过后再写唯一 `plan/grounded-knowledge.md`，确认完整提交后才进入 `design-brief.md`、Style Lock 或逐页规划；Box-Agent 按工具契约的文件提交规则确认，不固定追加一次 `read_file`，其他环境保留原有完整性确认。文件只整理已交接的用户事实、外部核验、编排器假设、示意、冲突和未确认项，不添加无来源的新事实。
+Entry/Story 产物交接后，Orchestrator 先校验 `info_pack.json`、Entry/Story 的 Research 报告和当前磁盘 `outline.md`；缺少必需报告时返回 Entry，不能在 Standard 内重新 Research、解析材料或改写事实。
+
+**Box-Agent 静态新建：**直接复用已交接的事实与证据，不强制创建 `plan/grounded-knowledge.md`。只有尚未在上游原文中说明的跨来源冲突、口径、假设或未确认项需要补充时，才在该文件简记相关 claim、准确数值/单位/时间、事实或示意属性、出处定位及处理结论，不重抄其余事实，也不逐条重建已有来源索引。没有补充项即可进入设计规划，不写“无问题”占位文件。需要改变已确认事实或叙事的冲突先交回 Entry/Story 处理，补充记录不能代替上游修正。已有汇总保留并按需核对，不为新规则删除或迁移。
+
+**其他环境：**保留原有生产汇总流程，校验通过后写唯一 `plan/grounded-knowledge.md`，整理已交接的用户事实、外部核验、编排器假设、示意、冲突和未确认项，确认完整提交后再进入设计规划。所有路径均不添加无来源的新事实；Box-Agent 文件提交确认仍按工具契约，不固定追加一次 `read_file`。
 
 附件提供的是**事实与可复用素材边界，不是默认设计上限**。合并时同时整理材料里的可复用页图、内嵌图片、图表结构和品牌线索；随后在 `design-brief.md` 明确 `material_visual_mode`：`facts-only`、`visual-reuse`、`style-reference` 或用户明确要求的 `faithful-restyle`。对每张图片附件另写 `attachment_visual_map`，决定 must-show / reuse / reference-only / omit、上屏页与处理方式；论文整页视觉与页内命名 Figure 必须区分为 `page-facsimile` 和 `figure-crop`。这项判断独立于外部搜图/生图的 `image_opportunity`。除 `faithful-restyle` 外，不继承附件的小字号、密集表格、普通文档排版或低质量视觉；仍按听众、场合和叙事重新定调。
 
