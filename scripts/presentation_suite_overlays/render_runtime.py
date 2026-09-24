@@ -1,4 +1,4 @@
-"""Per-invocation ownership for the portable synchronous PPT renderer (POSIX).
+"""Per-invocation ownership for the portable synchronous PPT renderer.
 
 The supervisor owns admission and deadlines. A worker owns Playwright; a small
 browser guard keeps Chromium's detached process group owned until it is empty.
@@ -7,7 +7,6 @@ Only registered processes are signalled. No imports start or reap processes.
 
 from contextlib import contextmanager
 import array
-import fcntl
 import json
 import math
 import os
@@ -21,6 +20,9 @@ import sys
 import tempfile
 import threading
 import time
+
+if sys.platform != "win32":
+    import fcntl
 
 
 CLEANUP_SECONDS = 10.0
@@ -44,6 +46,9 @@ def _positive(value, name):
 
 
 def _acquire_render_slot(deadline=None):
+    if sys.platform == "win32":
+        from render_runtime_windows import acquire_render_slot
+        return acquire_render_slot(deadline)
     limit = int(os.environ.get("RENDER_GLOBAL_LIMIT", "0") or "0")
     if limit < 0:
         raise ValueError("RENDER_GLOBAL_LIMIT must be nonnegative")
@@ -70,6 +75,9 @@ def _acquire_render_slot(deadline=None):
 
 def _release_render_slot(fd):
     if fd is not None:
+        if sys.platform == "win32":
+            fd.close()
+            return
         # Duplicates sent to worker/guards share the flock. Explicit LOCK_UN
         # would release their ownership too, before they finish cleanup.
         os.close(fd)
@@ -95,6 +103,15 @@ _SLOT_COPIES = []
 
 
 def _connect(role):
+    if sys.platform == "win32":
+        connection = socket.create_connection(tuple(json.loads(os.environ["_PPT_RENDER_SOCKET"])), timeout=5)
+        _send(connection, {"event": "register", "role": role, "pid": os.getpid(),
+                           "token": os.environ["_PPT_RENDER_TOKEN"]})
+        if _receive(connection).get("event") != "start":
+            connection.close()
+            raise RuntimeError("render supervisor denied process startup")
+        connection.settimeout(None)
+        return connection
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(5)
     connection.connect(os.environ["_PPT_RENDER_SOCKET"])
@@ -122,6 +139,10 @@ def _connect(role):
 
 
 def _kill_own_group():
+    if sys.platform == "win32":
+        # The supervisor's Job Object owns all descendants. Exiting the worker
+        # makes a live supervisor fail/clean up; a dead supervisor closes the job.
+        os._exit(CLEANUP_EXIT)
     # The caller is its own live identity anchor. Never signal an inherited group.
     if os.getpgrp() == os.getpid():
         os.killpg(os.getpid(), signal.SIGKILL)
@@ -317,14 +338,20 @@ class RenderSession:
             self.manager = self.sync_factory()
             self.playwright = self.manager.start()
             executable = self.resolve_browser(self.playwright)
-            wrapper = Path(os.environ["_PPT_RENDER_DIRECTORY"]) / "browser-launch"
-            wrapper.write_text("#!/bin/sh\nexec " + " ".join(shlex.quote(value) for value in
-                [sys.executable, str(Path(__file__).resolve()), "--browser", executable]) + ' "$@"\n')
-            wrapper.chmod(0o700)
+            if sys.platform == "win32":
+                # Job membership was established before the worker was released.
+                # Native CreateProcess cannot execute the POSIX shell wrapper.
+                browser_executable = executable
+            else:
+                wrapper = Path(os.environ["_PPT_RENDER_DIRECTORY"]) / "browser-launch"
+                wrapper.write_text("#!/bin/sh\nexec " + " ".join(shlex.quote(value) for value in
+                    [sys.executable, str(Path(__file__).resolve()), "--browser", executable]) + ' "$@"\n')
+                wrapper.chmod(0o700)
+                browser_executable = str(wrapper)
             _phase("launch", 60)
             try:
                 self.browser = self.playwright.chromium.launch(
-                    executable_path=str(wrapper), args=self.launch_args, timeout=60000)
+                    executable_path=browser_executable, args=self.launch_args, timeout=60000)
             except Exception as exc:
                 if self.is_fatal is not None and self.is_fatal(str(exc)):
                     raise RenderEnvironmentError(str(exc)) from exc
@@ -621,16 +648,24 @@ def run_renderer(renderer, args, timeout=600):
         raise KeyboardInterrupt(f"render cancelled by signal {signum}")
 
     if threading.current_thread() is threading.main_thread():
-        for signum in (signal.SIGTERM, signal.SIGINT):
+        signals = [signal.SIGTERM, signal.SIGINT]
+        if sys.platform == "win32":
+            signals.append(signal.SIGBREAK)
+        for signum in signals:
             previous[signum] = signal.signal(signum, cancel)
     try:
         slot = _acquire_render_slot(deadline)
-        with tempfile.TemporaryDirectory(prefix="ppt-render-", dir="/tmp") as directory:
+        if sys.platform == "win32":
+            from render_runtime_windows import WindowsSupervisor
+            supervisor_type = WindowsSupervisor
+        else:
+            supervisor_type = _Supervisor
+        with tempfile.TemporaryDirectory(prefix="ppt-render-", dir=None if sys.platform == "win32" else "/tmp") as directory:
             with tempfile.TemporaryFile(mode="w+b") as stdout, tempfile.TemporaryFile(mode="w+b") as stderr:
                 try:
                     attempts = 2 if "--batch" in args else 1 if "--audit-player" in args else 3
                     for attempt in range(attempts):
-                        supervisor = _Supervisor(str(renderer), list(args), directory, deadline, stdout, stderr, slot=slot)
+                        supervisor = supervisor_type(str(renderer), list(args), directory, deadline, stdout, stderr, slot=slot)
                         try:
                             code = supervisor.run()
                         finally:
@@ -646,12 +681,15 @@ def run_renderer(renderer, args, timeout=600):
                             break
                         if time.monotonic() + CLEANUP_SECONDS >= deadline:
                             raise TimeoutError("render retry has no remaining cleanup budget")
-                        Path(directory, "control.sock").unlink()
+                        if sys.platform != "win32":
+                            Path(directory, "control.sock").unlink()
                 finally:
                     stdout.seek(0)
                     stderr.seek(0)
-                    output = stdout.read().decode("utf-8", "replace")
-                    errors = stderr.read().decode("utf-8", "replace")
+                    # Captured worker bytes may use CRLF. Return logical text
+                    # so Windows stdout/stderr do not translate it a second time.
+                    output = stdout.read().decode("utf-8", "replace").replace("\r\n", "\n")
+                    errors = stderr.read().decode("utf-8", "replace").replace("\r\n", "\n")
     except BaseException as exc:
         code = 130 if isinstance(exc, KeyboardInterrupt) else CLEANUP_EXIT if isinstance(exc, RenderCleanupError) else 1
         error = _error_chain(exc)
@@ -666,6 +704,19 @@ def run_renderer(renderer, args, timeout=600):
         _release_render_slot(slot)
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+    if code != 0 and "--batch" in args:
+        # A worker receipt is provisional until supervision and cleanup succeed.
+        # Preserve all diagnostics; only withhold the structured success receipt.
+        retained = []
+        for line in output.splitlines(keepends=True):
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                item = None
+            if not (isinstance(item, dict) and item.get("status") == "rendered"
+                    and item.get("qa") == "not-run"):
+                retained.append(line)
+        output = "".join(retained)
     return subprocess.CompletedProcess([str(renderer), *args], code, output,
                                        errors + (error + "\n" if error else ""))
 

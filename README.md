@@ -428,6 +428,11 @@ gh release download --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime
 # Or build from source (current platform)
 uv run box-agent-build-runtime
 
+# Build both macOS architectures from one source snapshot (no upload/host install)
+# Requires prepared .venv (ARM) and .venv-x64 (Intel), including PyInstaller.
+uv run box-agent-build-runtime --mac-all --version 0.9.13 --dry-run
+uv run box-agent-build-runtime --mac-all --version 0.9.13
+
 # Build macOS Intel/x64 runtime from Apple Silicon
 # Requires a separate x86_64 venv because PyInstaller cannot bundle arm64 wheels into an x64 binary.
 # One-time setup:
@@ -442,6 +447,16 @@ The runtime communicates via JSON-RPC over stdio. stdout = protocol only, stderr
 macOS runtime archives contain ACP and its internal dependencies. Stable tool
 Python/Node runtimes are host-managed and must match the target architecture;
 they are not bundled into this ACP-only archive.
+
+`--mac-all` checks the actual Python process architectures, uses separate build/cache
+directories, and validates every native Mach-O file. Only after both builds pass are
+the two archives, SHA-256 sidecars and a `box-agent-runtime-v<version>-mac.json` report
+placed together in `dist/runtime/`. Existing same-version output is never overwritten.
+Use `--arm-python PATH` / `--intel-python PATH` for custom environments; both must use
+the same Python major/minor and PyInstaller version. `--dry-run` checks prerequisites
+without building. This mode requires an explicit stable version and cannot be combined
+with `--target`, `--arch`, `--install-officev3` or `--install-lab`.
+See the [dual-architecture workflow](docs/PRODUCTION_GUIDE_CN.md#macos-双架构一次构建).
 
 ## Testing
 

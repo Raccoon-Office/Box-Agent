@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tarfile
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -229,6 +230,54 @@ def test_resolve_officev3_dir_uses_environment(
     monkeypatch.setenv("BOX_AGENT_OFFICEV3_DIR", str(officev3_dir))
 
     assert build_runtime.resolve_officev3_dir() == officev3_dir.resolve()
+
+
+def test_resolve_lab_dir_accepts_lab_checkout(tmp_path: Path) -> None:
+    lab_dir = tmp_path / "raccoon-lab"
+    desktop_dir = lab_dir / "apps" / "office-desktop"
+    desktop_dir.mkdir(parents=True)
+    (desktop_dir / "package.json").write_text("{}", encoding="utf-8")
+
+    assert build_runtime.resolve_lab_dir(str(lab_dir)) == lab_dir.resolve()
+
+
+def test_install_runtime_into_lab_replaces_runtime_and_checks_version(tmp_path: Path) -> None:
+    lab_dir = tmp_path / "raccoon-lab"
+    desktop_dir = lab_dir / "apps" / "office-desktop"
+    desktop_dir.mkdir(parents=True)
+    (desktop_dir / "package.json").write_text("{}", encoding="utf-8")
+    target = desktop_dir / "build-resources" / "box-agent-runtime"
+    (target / "bin").mkdir(parents=True)
+    (target / "VERSION").write_text("old\n", encoding="utf-8")
+
+    platform_name, arch = build_runtime.detect_platform()
+    runtime = tmp_path / "box-agent-runtime"
+    entry = runtime / "bin" / "box-agent-acp"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(b"runtime")
+    manifest = {
+        "name": "box-agent",
+        "version": "0.9.11",
+        "platform": platform_name,
+        "arch": arch,
+        "entry": "bin/box-agent-acp",
+        "mode": "standalone",
+    }
+    (runtime / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (runtime / "VERSION").write_text("0.9.11\n", encoding="utf-8")
+    archive = tmp_path / "runtime.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        handle.add(runtime, arcname="box-agent-runtime")
+
+    installed = build_runtime.install_runtime_into_lab(
+        archive,
+        lab_dir,
+        expected_version="0.9.11",
+    )
+
+    assert installed == target
+    assert (target / "VERSION").read_text(encoding="utf-8") == "0.9.11\n"
+    assert (target / "bin" / "box-agent-acp").read_bytes() == b"runtime"
 
 
 def test_install_runtime_into_officev3_runs_installer_and_checks_version(

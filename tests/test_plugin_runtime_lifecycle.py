@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 import pytest
 
 from box_agent.agent_session import AgentSession
-from box_agent.plugins.builtins import SessionInitializerPort
+from box_agent.plugins.builtins import AgentRunBindingPort, SessionInitializerPort
 from box_agent.plugins.descriptors import PluginDescriptor, PluginScope
 from box_agent.plugins.registries import CapabilityBinding, CapabilityPolicy
 from box_agent.plugins.host import PluginScopeError
@@ -27,6 +27,44 @@ async def open_session(tmp_path, runtime=None, llm=None):
         config=session_config(tmp_path), runtime=runtime,
         host=HostBindings(llm_client=llm or RecordingLLM(), tools=[], system_prompt="system"),
     )
+
+
+@pytest.mark.parametrize("interrupt_cleanup", [False, True])
+async def test_failed_run_binding_is_disposed_or_retained_for_cleanup_retry(
+    tmp_path, interrupt_cleanup,
+):
+    attempts = []
+
+    class FailingBinding:
+        def install_agent(self, agent):
+            raise ValueError("binding installation failed")
+
+    def dispose(binding):
+        attempts.append(binding)
+        if interrupt_cleanup and len(attempts) == 1:
+            raise asyncio.CancelledError("retry binding cleanup")
+
+    runtime = PluginRuntime(
+        include_bundled_plugins=False,
+        plugins=(PluginDescriptor(
+            "test.binding", "1.0.0", (AgentRunBindingPort,),
+            factory=FailingBinding, scope=PluginScope.RUN, disposer=dispose,
+        ),),
+    )
+    session = await open_session(tmp_path, runtime)
+    try:
+        with pytest.raises(ValueError, match="binding installation failed"):
+            _ = [event async for event in session.run_events()]
+        assert len(attempts) == 1
+        assert (session.plugin_session._run is not None) is interrupt_cleanup
+        if interrupt_cleanup:
+            with pytest.raises(RuntimeError, match="active run"):
+                _ = [event async for event in session.run_events()]
+        await session.aclose()
+        assert len(attempts) == (2 if interrupt_cleanup else 1)
+        assert all(binding is attempts[0] for binding in attempts)
+    finally:
+        await runtime.aclose()
 
 
 @pytest.mark.asyncio

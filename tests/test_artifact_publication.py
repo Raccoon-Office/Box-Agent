@@ -101,15 +101,20 @@ def test_workspace_changes_and_publication_marker_do_not_establish_ownership(tmp
     assert events == []
 
 
-@pytest.mark.parametrize("absolute", [False, True])
-def test_script_returned_path_selects_only_its_own_changed_artifact(tmp_path, absolute):
+@pytest.mark.parametrize("path_style", ["relative", "absolute", "native-relative", "posix-absolute"])
+def test_script_returned_path_selects_only_its_own_changed_artifact(tmp_path, path_style):
     own = tmp_path / "own/报告 with spaces.html"
     other = tmp_path / "other/报告 with spaces.html"
     for path in [own, other]:
         path.parent.mkdir()
         path.write_text("report")
         write_metadata(path, {"type": "artifact"})
-    returned = str(own) if absolute else own.relative_to(tmp_path).as_posix()
+    returned = {
+        "relative": own.relative_to(tmp_path).as_posix(),
+        "absolute": str(own),
+        "native-relative": str(own.relative_to(tmp_path)),
+        "posix-absolute": own.as_posix(),
+    }[path_style]
     events = _detect_tool_artifacts(
         "build", "bash", f'wrote "{returned}"', None, {},
         _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
@@ -117,3 +122,18 @@ def test_script_returned_path_selects_only_its_own_changed_artifact(tmp_path, ab
     assert [(e.rel_path, e.placement) for e in events] == [
         (own.relative_to(tmp_path).as_posix(), "primary"),
     ]
+
+
+@pytest.mark.parametrize("suffix", ["", ".bak", "/child"])
+def test_native_relative_script_output_keeps_exact_path_and_publication_rules(tmp_path, suffix):
+    report = tmp_path / "projects/供应链月度KPI汇报.html"
+    report.parent.mkdir()
+    report.write_text("report", encoding="utf-8")
+    returned = str(report.relative_to(tmp_path)) + suffix
+    events = _detect_tool_artifacts(
+        "build", "bash", f"{returned} 10209 8", None, {},
+        _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
+    )
+    assert [(e.rel_path, e.placement) for e in events] == (
+        [(report.relative_to(tmp_path).as_posix(), "supporting")] if not suffix else []
+    )

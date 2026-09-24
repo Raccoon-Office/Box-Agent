@@ -18,7 +18,11 @@ def function(text, name):
 
 def apply(relative, data):
     if relative == "skills/sn-ppt-standard/scripts/render.py":
-        if hashlib.sha256(data).hexdigest() != "ef67a08f244cc2ac507bb4ebd5ebcd4dc1a09ef0538d70bc39f8aa1de4dc9069":
+        # Keep the pinned source reproducible while testing the additive receipt.
+        if hashlib.sha256(data).hexdigest() not in {
+            "d15ba4f76d0277cfe729cc38896cfa988457aaebec844b41e6c1509f848b35bd",
+            "1dca91cee3dbe594be5bfd8e56de295d24eae6c24b0cc2195962169d4accc596",
+        }:
             raise ValueError("render lifecycle overlay needs review: upstream renderer changed")
         text = data.decode()
         text = replace(text, "import signal\n", "")
@@ -69,7 +73,9 @@ from render_runtime import RenderSession, run_renderer, supervise
         old = function(text, "_batch_cli")
         new = old[:old.index('    last_error = None')]
         new += '''    try:
-        render_batch(args.root, args.pages, args.width, args.height)
+        receipt = render_batch(args.root, args.pages, args.width, args.height)
+        if receipt is not None:
+            print(json.dumps(receipt, ensure_ascii=False))
     except (BrowserUnavailable, RenderQualityError) as exc:
         print(f"batch render failed: {exc}", file=sys.stderr)
         return 1

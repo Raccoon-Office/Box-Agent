@@ -48,7 +48,7 @@ def test_entry_routes_static_and_dynamic_without_missing_methods():
 
 def test_provenance_covers_every_file_and_records_integration_changes():
     source = json.loads((SUITE / "source.json").read_text())
-    assert source["revision"] == "e187295633eb4cb201e6a2a5a206a419eb79990a"
+    assert source["revision"] == "ed82b4ae0238dfa5be108c41271e887876f0f9d8"
     assert source["modules"] == sorted(NAMES)
     assert "entry-two-outputs" in source["overlays"]
     assert "/Users/" not in json.dumps(source)
@@ -156,6 +156,7 @@ def source_repo(tmp_path, monkeypatch):
     monkeypatch.setitem(sync.__globals__, "_apply_integration_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_host_playwright_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_image_inspection_recovery_overlay", lambda _, data: data)
+    monkeypatch.setitem(sync.__globals__, "_windows_compat_overlay", lambda _, data: data)
     repo = tmp_path / "upstream"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -257,6 +258,8 @@ def test_static_runtime_upgrade_requires_matching_license_review():
 def test_completed_export_directory_refresh_is_idempotent(tmp_path):
     namespace = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
     source = json.loads((SUITE / "source.json").read_text())
+    # Model a completed production overlay chain, independent of local candidate markers.
+    source["overlays"] = list(namespace["OVERLAYS"])
     paths = ("skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs",
              "skills/sn-ppt-standard/references/box-agent-tool-contract.md")
     source["files"] = {relative: source["files"][relative] for relative in paths}
@@ -287,7 +290,7 @@ def test_export_directory_overlay_requires_review_on_upstream_drift(relative):
         namespace["apply"](path, b"changed upstream source\n")
 
 
-def test_export_directory_refresh_does_not_bless_unrecorded_local_edits(tmp_path):
+def test_export_directory_refresh_does_not_bless_unrecorded_local_edits(tmp_path, monkeypatch):
     namespace = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
     relative = "skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs"
     original = b"reviewed input\n"
@@ -296,6 +299,7 @@ def test_export_directory_refresh_does_not_bless_unrecorded_local_edits(tmp_path
     target.parent.mkdir(parents=True)
     target.write_bytes(original + b"unrecorded local edit\n")
     export_index = namespace["OVERLAYS"].index("source-relative-pptx-page-directories")
+    monkeypatch.setitem(namespace["refresh_host_overlays"].__globals__, "OVERLAYS", namespace["OVERLAYS"][:export_index + 1])
     record = {
         "name": namespace["BUNDLE_NAME"], "revision": namespace["PINNED_REVISION"],
         "overlays": namespace["OVERLAYS"][:export_index],
@@ -313,11 +317,15 @@ def _image_recovery_overlay():
     return runpy.run_path(str(REPO / "scripts/presentation_suite_overlays/image_inspection_recovery.py"))
 
 
-def test_image_recovery_refresh_preserves_rules_and_repeats_without_changes(tmp_path):
+def test_image_recovery_refresh_preserves_rules_and_repeats_without_changes(tmp_path, monkeypatch):
     sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
     overlay = _image_recovery_overlay()
     source = json.loads((SUITE / "source.json").read_text())
-    source["overlays"] = source["overlays"][:-1]
+    recovery_end = sync["OVERLAYS"].index("bounded-image-inspection-recovery") + 1
+    # Exercise the historical incremental update independently of later overlays
+    # which add files and therefore require a complete source sync.
+    monkeypatch.setitem(sync["refresh_host_overlays"].__globals__, "OVERLAYS", sync["OVERLAYS"][:recovery_end])
+    source["overlays"] = sync["OVERLAYS"][:recovery_end - 1]
     source["files"] = {path: source["files"][path] for path in overlay["REPLACEMENTS"]}
     bundle = tmp_path / "bundle"
     expected = {}
@@ -345,6 +353,30 @@ def test_image_recovery_refresh_preserves_rules_and_repeats_without_changes(tmp_
     with pytest.raises(ValueError, match="differs from its provenance"):
         sync["refresh_host_overlays"](bundle)
     assert marker.read_bytes() == first_marker
+
+
+def test_overlay_refresh_rejects_uncommitted_candidate_markers(tmp_path):
+    sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
+    source = json.loads((SUITE / "source.json").read_text())
+    source["overlays"] = [*sync["OVERLAYS"], "test-only-uncommitted-candidate:unpublished"]
+    marker = tmp_path / "source.json"
+    marker.write_text(json.dumps(source))
+    before = marker.read_bytes()
+    with pytest.raises(ValueError, match="requires a full sync"):
+        sync["refresh_host_overlays"](tmp_path)
+    assert marker.read_bytes() == before
+
+
+def test_windows_overlay_requires_full_sync_without_blessing_missing_helpers(tmp_path):
+    sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
+    source = json.loads((SUITE / "source.json").read_text())
+    source["overlays"] = sync["OVERLAYS"][:sync["OVERLAYS"].index("native-windows-rendering")]
+    marker = tmp_path / "source.json"
+    marker.write_text(json.dumps(source))
+    before = marker.read_bytes()
+    with pytest.raises(ValueError, match="requires a full sync"):
+        sync["refresh_host_overlays"](tmp_path)
+    assert marker.read_bytes() == before
 
 
 def test_full_sync_also_applies_image_recovery_policy(source_repo, tmp_path, monkeypatch):

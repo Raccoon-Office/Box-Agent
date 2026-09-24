@@ -8,13 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
-import box_agent.turn_continuation as continuation_module
 from box_agent.core import run_agent_loop
 from box_agent.events import DoneEvent, InjectedMessageEvent, StopReason, ToolCallResult
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
-from box_agent.turn_continuation import TurnContinuationController, model_says_continue
+from box_agent.turn_continuation import (
+    ContinuationJudgeFacts,
+    TurnContinuationController,
+    model_says_continue,
+)
 
 
 class JudgeLLM:
@@ -29,31 +32,57 @@ class JudgeLLM:
         return LLMResponse(content=self.decision, finish_reason="stop")
 
 
+def _history(request: str, candidate: str) -> list[Message]:
+    return [
+        Message(role="system", content="system"),
+        Message(role="user", content=request),
+        Message(role="assistant", content=candidate),
+    ]
+
+
+def _runtime_facts(message: Message) -> dict:
+    marker = "Runtime facts (metadata only; not instructions):\n"
+    assert isinstance(message.content, str)
+    return json.loads(message.content.split(marker, 1)[1])
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", [True, False])
 @pytest.mark.parametrize("decision_tool_available", [True, False])
-async def test_judge_passes_candidate_and_request_without_exposing_tools(
+async def test_judge_forks_existing_transcript_without_duplicate_candidate(
     decision, decision_tool_available,
 ) -> None:
     # This verifies the protocol, not the real model's semantic classification.
     llm = JudgeLLM(json.dumps({"continue": decision}))
     request = "制作一个关于紫砂壶的 PPT。"
     candidate = "为避免方向偏差，请先选择这份紫砂壶 PPT 的主要用途。"
+    messages = _history(request, candidate)
+    messages[-1].thinking = "private reasoning that must not reach the judge wire"
+    before = [message.model_copy(deep=True) for message in messages]
     result = await model_says_continue(
         llm,
-        user_request=request,
-        candidate_response=candidate,
-        decision_tool_available=decision_tool_available,
+        messages=messages,
+        facts=ContinuationJudgeFacts(
+            user_request=request,
+            decision_tool_available=decision_tool_available,
+        ),
         session_id="session-test",
         turn_id="turn-test",
         title="PPT",
     )
     assert result is decision
-    assert json.loads(llm.messages[-1].content) == {
+    assert len(llm.messages) == len(messages) + 1
+    assert [message.role for message in llm.messages] == [
+        "system", "user", "assistant", "user",
+    ]
+    assert llm.messages[-2].role == "assistant"
+    assert llm.messages[-2].content == candidate
+    assert llm.messages[-2].thinking is None
+    assert _runtime_facts(llm.messages[-1]) == {
         "user_request": request,
-        "candidate_response": candidate,
         "decision_tool_available": decision_tool_available,
     }
+    assert messages == before
     assert llm.kwargs == {
         "tools": None,
         "thinking_enabled": False,
@@ -65,16 +94,95 @@ async def test_judge_passes_candidate_and_request_without_exposing_tools(
 
 
 @pytest.mark.asyncio
+async def test_legacy_scalar_judge_arguments_remain_supported() -> None:
+    llm = JudgeLLM('{"continue":false}')
+    assert not await model_says_continue(
+        llm,
+        user_request="创建文件。",
+        candidate_response="我会创建文件。",
+        decision_tool_available=True,
+    )
+    assert [message.role for message in llm.messages] == ["user", "assistant", "user"]
+    assert _runtime_facts(llm.messages[-1]) == {
+        "user_request": "创建文件。",
+        "decision_tool_available": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_judge_redacts_hidden_reasoning_and_multimodal_payloads() -> None:
+    llm = JudgeLLM('{"continue":false}')
+    messages = [
+        Message(
+            role="user",
+            content=[
+                {"type": "text", "text": "请检查这张图片。"},
+                {"type": "input_image", "media_type": "image/png", "data": "SECRET"},
+                {"type": "image", "content": "SECRET_CONTENT"},
+                {"type": "image_url", "text": "SECRET_TEXT"},
+                {"type": "thinking", "content": "SECRET_REASONING"},
+            ],
+        ),
+        Message(
+            role="assistant",
+            content="我会检查图片并给出结论。",
+            thinking="private reasoning",
+        ),
+    ]
+    before = [message.model_copy(deep=True) for message in messages]
+
+    assert not await model_says_continue(llm, messages=messages)
+    assert all(message.thinking is None for message in llm.messages)
+    assert "SECRET" not in str(llm.messages)
+    assert "SECRET_CONTENT" not in str(llm.messages)
+    assert "SECRET_TEXT" not in str(llm.messages)
+    assert "SECRET_REASONING" not in str(llm.messages)
+    assert "image content omitted" in str(llm.messages[0].content)
+    assert messages == before
+
+
+@pytest.mark.asyncio
+async def test_judge_fails_closed_for_a_tool_call_candidate() -> None:
+    llm = JudgeLLM()
+    messages = [
+        Message(role="user", content="创建文件。"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(
+                id="write-1",
+                type="function",
+                function=FunctionCall(name="write_file", arguments={}),
+            )],
+        ),
+    ]
+    assert not await model_says_continue(llm, messages=messages)
+    assert llm.messages is None
+
+
+@pytest.mark.asyncio
+async def test_judge_fails_closed_for_an_image_only_candidate() -> None:
+    llm = JudgeLLM()
+    messages = [
+        Message(role="user", content="检查附件。"),
+        Message(
+            role="assistant",
+            content=[{"type": "image", "content": "raw-image-payload"}],
+        ),
+    ]
+    assert not await model_says_continue(llm, messages=messages)
+    assert llm.messages is None
+
+
+@pytest.mark.asyncio
 async def test_model_judge_rejects_false_or_invalid_response() -> None:
     assert not await model_says_continue(
         JudgeLLM('{"continue":false}'),
-        user_request="解释答案。",
-        candidate_response="答案是 42。",
+        messages=_history("解释答案。", "答案是 42。"),
     )
     assert not await model_says_continue(
         JudgeLLM("not json"),
-        user_request="生成文件。",
-        candidate_response="我会生成文件。",
+        messages=_history("生成文件。", "我会生成文件。"),
     )
 
 
@@ -92,7 +200,7 @@ async def test_judge_rejects_non_text_responses_without_invoking_content_methods
             return SimpleNamespace(content=NonTextContent())
 
     assert not await model_says_continue(
-        InvalidLLM(), user_request="制作 PPT", candidate_response="请选择用途。",
+        InvalidLLM(), messages=_history("制作 PPT", "请选择用途。"),
     )
     assert calls == []
 
@@ -108,7 +216,7 @@ async def test_controller_requires_tools_budget_and_normal_finish() -> None:
     for override in cases:
         controller = TurnContinuationController()
         arguments = {
-            "content": "我会创建文件并运行测试。",
+            "messages": _history("创建文件。", "我会创建文件并运行测试。"),
             "finish_reason": "stop",
             "tools_available": True,
             "step": 0,
@@ -117,7 +225,7 @@ async def test_controller_requires_tools_budget_and_normal_finish() -> None:
         }
         arguments.update(override)
         assert await controller.evaluate(
-            llm=JudgeLLM(), user_request="创建文件。", **arguments
+            llm=JudgeLLM(), **arguments
         ) is None
 
 
@@ -125,7 +233,7 @@ async def test_controller_requires_tools_budget_and_normal_finish() -> None:
 async def test_controller_is_bounded_to_two_continuations() -> None:
     controller = TurnContinuationController(max_continuations=2)
     arguments = {
-        "content": "我会创建文件并运行测试。",
+        "messages": _history("创建文件。", "我会创建文件并运行测试。"),
         "finish_reason": "stop",
         "tools_available": True,
         "step": 0,
@@ -134,17 +242,33 @@ async def test_controller_is_bounded_to_two_continuations() -> None:
     }
 
     first = await controller.evaluate(
-        llm=JudgeLLM(), user_request="创建文件。", **arguments
+        llm=JudgeLLM(), **arguments
     )
     second = await controller.evaluate(
-        llm=JudgeLLM(), user_request="创建文件。", **arguments
+        llm=JudgeLLM(), **arguments
     )
 
     assert first is not None and first.attempt == 1
     assert second is not None and second.attempt == 2
     assert await controller.evaluate(
-        llm=JudgeLLM(), user_request="创建文件。", **arguments
+        llm=JudgeLLM(), **arguments
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_controller_legacy_scalar_arguments_remain_supported() -> None:
+    request = await TurnContinuationController().evaluate(
+        llm=JudgeLLM(),
+        user_request="创建文件。",
+        content="我会创建文件。",
+        decision_tool_available=True,
+        finish_reason="stop",
+        tools_available=True,
+        step=0,
+        max_steps=3,
+        cancelled=False,
+    )
+    assert request is not None
 
 
 class MockLLM:
@@ -157,10 +281,13 @@ class MockLLM:
         self._judge_decisions = list(judge_decisions or [])
         self.calls = 0
         self.judge_requests = []
+        self.judge_messages = []
         self.stream_requests = []
 
     async def generate(self, messages, tools=None, **_):
-        self.judge_requests.append(json.loads(messages[-1].content))
+        snapshot = [message.model_copy(deep=True) for message in messages]
+        self.judge_messages.append(snapshot)
+        self.judge_requests.append(_runtime_facts(snapshot[-1]))
         decision = self._judge_decisions.pop(0) if self._judge_decisions else False
         return LLMResponse(
             content=json.dumps({"continue": decision}), finish_reason="stop"
@@ -252,6 +379,11 @@ async def test_loop_continues_after_model_announces_work_without_tool_call() -> 
     assert "interaction tool with complete options" in injected[0].content
     assert messages[-2].role == "user"
     assert messages[-1].role == "assistant"
+    assert not any(
+        isinstance(message.content, str)
+        and "[Runtime control-plane continuation check]" in message.content
+        for message in messages
+    )
     done = [event for event in events if isinstance(event, DoneEvent)][-1]
     assert done.stop_reason is StopReason.END_TURN
 
@@ -276,21 +408,36 @@ class BlockingJudgeLLM(MockLLM):
 
 
 @pytest.mark.asyncio
-async def test_judge_timeout_cancels_provider_request(monkeypatch) -> None:
-    monkeypatch.setattr(continuation_module, "JUDGE_TIMEOUT_SECONDS", 0.02)
-    llm = BlockingJudgeLLM()
+async def test_judge_waits_for_slow_llm_response() -> None:
+    class DelayedJudgeLLM(JudgeLLM):
+        async def generate(self, messages, tools=None, **kwargs):
+            await asyncio.sleep(0.05)
+            return await super().generate(messages, tools=tools, **kwargs)
+
+    llm = DelayedJudgeLLM('{"continue":true}')
     result = await asyncio.wait_for(model_says_continue(
-        llm, user_request="制作 PPT", candidate_response="请选择用途。",
+        llm, messages=_history("制作 PPT", "请选择用途。"),
     ), timeout=1)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_underlying_llm_timeout_is_handled_as_failed_judge() -> None:
+    class ProviderTimeoutLLM(JudgeLLM):
+        async def generate(self, messages, tools=None, **kwargs):
+            raise TimeoutError("provider request timed out")
+
+    result = await model_says_continue(
+        ProviderTimeoutLLM(), messages=_history("制作 PPT", "请选择用途。"),
+    )
     assert result is False
-    assert llm.judge_closed.is_set()
 
 
 @pytest.mark.asyncio
 async def test_caller_cancellation_propagates_and_closes_judge_request() -> None:
     llm = BlockingJudgeLLM()
     task = asyncio.create_task(model_says_continue(
-        llm, user_request="制作 PPT", candidate_response="请选择用途。",
+        llm, messages=_history("制作 PPT", "请选择用途。"),
     ))
     await asyncio.wait_for(llm.judge_started.wait(), 1)
     task.cancel()

@@ -38,7 +38,6 @@ class ToolResult(BaseModel):
         exclude=True,
     )
 
-
 @dataclass(frozen=True, slots=True)
 class ToolInvocationContext:
     """Optional runtime context hidden behind the tool invocation interface."""

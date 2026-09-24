@@ -132,6 +132,58 @@ uv run box-agent-build-runtime --version X.Y.Z --install-officev3
 位置，传入 `--install-officev3 /path/to/officev3` 或设置
 `BOX_AGENT_OFFICEV3_DIR`。
 
+#### macOS 双架构一次构建
+
+在 Box-Agent 项目目录执行（`0.9.13` 为示例 Agent 版本，不修改项目版本文件）：
+
+```bash
+# 检查两套 Python / PyInstaller 和输出冲突，不实际构建
+uv run box-agent-build-runtime --mac-all --version 0.9.13 --dry-run
+
+# 同一份源码快照，依次构建并校验 ARM + Intel
+uv run box-agent-build-runtime --mac-all --version 0.9.13
+```
+
+前提是 macOS 上已有两套能运行的独立 Python 环境：默认 ARM 为 `.venv/bin/python`，
+Intel 为 `.venv-x64/bin/python`；Apple Silicon 上运行 Intel Python 需要 Rosetta。
+两套环境均需安装项目依赖和 PyInstaller，Python 主/次版本及 PyInstaller 版本需一致。
+可用 `--arm-python /path/to/arm/python`、`--intel-python /path/to/intel/python` 指定其他环境。
+命令不自动创建或修改这些环境；可以分别用 `uv pip check --python <python-path>` 检查依赖。
+
+两边使用一次复制的当前源码（包含 Git 可见的未提交改动），不切换分支、不改开发 runtime。
+快照不含本地 `config.yaml`、`mcp.json`、`.env*`、缓存及构建产物。源码必须是 Git checkout，
+当前流程要求普通源文件；未展开的子模块或符号链接会明确报错，不能静默漏包。
+ARM/Intel 的 PyInstaller 工作目录与缓存隔离。每个包校验 manifest、VERSION、全部 Mach-O
+的目标架构及归档内原生文件，全部成功才汇总到本地输出目录；不上传 GitHub/TOS，不安装到宿主。
+
+```text
+dist/runtime/
+  box-agent-runtime-v0.9.13-darwin-arm64.tar.gz
+  box-agent-runtime-v0.9.13-darwin-arm64.tar.gz.sha256
+  box-agent-runtime-v0.9.13-darwin-x64.tar.gz
+  box-agent-runtime-v0.9.13-darwin-x64.tar.gz.sha256
+  box-agent-runtime-v0.9.13-mac.json
+```
+
+支持 `--output DIR` / `BOX_AGENT_RUNTIME_OUTPUT`。版本必须显式传入 `--version` 或
+`BOX_AGENT_RUNTIME_VERSION`，接受前缀 `v`；不自动沿用可能滞后的 Python 包版本。
+不允许覆盖已有同版本产物；需要改内容时升新版本，或先用另一个空输出目录做验证。
+任一架构失败都不会把半套产物放到输出目录顶层。临时工作区保留在输出目录内打印的
+`.mac-all-v<version>-*` 路径，便于排查，确认后可自行清理。正常退出会释放同版本构建锁；
+若被强制结束留下 `.mac-all-v<version>.lock`，先确认没有构建在运行，再处理残留锁。
+
+随后在 OfficeV3 使用新加入的双架构发布入口，显式指定同一个 Agent 版本：
+
+```bash
+npm run release:mac -- --version 1.0.37 --agent-version 0.9.13
+# 客户端验收后，再上传合并产物
+npm run release:mac -- --publish-only ./publish-mac/1.0.37
+```
+
+OfficeV3 默认在相邻 `Box-Agent/dist/runtime*` 查找归档；自定义输出时传
+`--runtime-dir /absolute/path/to/runtime`。Box-Agent 归档包含 ACP 及其内部依赖，
+稳定 Python/Node 仍由宿主管理。这些构建检查不替代客户端打包、安装、权限和实际升级验证。
+
 运行时约束：
 
 | 通道 | 内容 | 规则 |

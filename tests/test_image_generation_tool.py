@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import httpx
@@ -735,6 +736,7 @@ async def test_generate_image_uses_default_size_for_seedream_models(
         workspace_dir=str(tmp_path),
         allow_full_access=False,
         endpoint="https://code-dev.xiaohuanxiong.com/api/web/llm/v2/images/gen",
+        api_key="test-image-key",
         model="Doubao-Seedream-5.0-lite",
     )
 
@@ -803,6 +805,7 @@ async def test_generate_image_maps_seedream_explicit_size_to_supported(
         workspace_dir=str(tmp_path),
         allow_full_access=False,
         endpoint="https://code-dev.xiaohuanxiong.com/api/web/llm/v2/images/gen",
+        api_key="test-image-key",
         model="Doubao-Seedream-5.0-lite",
     )
 
@@ -837,6 +840,7 @@ async def test_generate_image_respects_seedream_exact_ratio_input(
         workspace_dir=str(tmp_path),
         allow_full_access=False,
         endpoint="https://code-dev.xiaohuanxiong.com/api/web/llm/v2/images/gen",
+        api_key="test-image-key",
         model="Doubao-Seedream-5.0-lite",
     )
 
@@ -1571,3 +1575,102 @@ async def test_intermediate_image_failure_does_not_publish_artifact(
     assert not result.success
     assert not result.raw_output
     assert not (tmp_path / "hero.png").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("scenario", [
+    "expired", "near_expiry", "401", "200003", "200003_string", "rejected_twice",
+    "refresh_401", "refresh_503", "missing_refresh", "missing_login",
+    "explicit_key", "custom_host", "environment", "server_error", "download_401",
+])
+async def test_image_requests_handle_hosted_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit: bool, scenario: str,
+) -> None:
+    def jwt(expiry: int) -> str:
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+        return f"header.{payload}.signature"
+
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    now = int(time.time())
+    old_token = jwt(now - 60 if scenario == "expired" else now + 60 if scenario == "near_expiry" else now + 3600)
+    new_token = jwt(now + 7200)
+    state = {"access_token": old_token, "refresh_token": "refresh-secret"}
+    if scenario == "missing_refresh":
+        state.pop("refresh_token")
+    if scenario in {"missing_login", "environment"}:
+        state = {}
+    if scenario == "environment":
+        monkeypatch.delenv("BOX_AGENT_HOME")
+        monkeypatch.setenv("BOX_AGENT_AUTH_TOKEN", "environment-token")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(state))
+    calls: list[str] = []
+    bodies: list[bytes] = []
+    authorizations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/web/auth/v1/refresh":
+            calls.append("refresh")
+            assert json.loads(request.content) == {"refresh_token": "refresh-secret"}
+            if scenario in {"refresh_401", "refresh_503"}:
+                return httpx.Response(401 if scenario == "refresh_401" else 503)
+            return httpx.Response(200, json={"data": {"access_token": new_token}})
+        if request.url.path == "/result.png":
+            calls.append("download")
+            return httpx.Response(401)
+        calls.append("image")
+        assert request.url.path.endswith("/images/edits" if edit else "/images/generations")
+        bodies.append(request.content)
+        authorizations.append(request.headers.get("Authorization", ""))
+        if scenario == "download_401":
+            return httpx.Response(200, json={"url": "https://cdn.example.test/result.png"})
+        if scenario == "server_error":
+            return httpx.Response(500)
+        if scenario not in {"expired", "near_expiry"} and (len(bodies) == 1 or scenario == "rejected_twice"):
+            if scenario.startswith("200003"):
+                return httpx.Response(200, json={"code": "200003" if scenario.endswith("string") else 200003})
+            return httpx.Response(401)
+        return httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": "image/png"})
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path), allow_full_access=False,
+        endpoint="https://image.example.test/v1/images/generations" if scenario == "custom_host" else "https://image.xiaohuanxiong.com/v1/images/generations",
+        auth_file=str(auth_file), api_key="dedicated-key" if scenario == "explicit_key" else "",
+    )
+    (tmp_path / "reference.png").write_bytes(PNG_BYTES)
+    result = await tool.execute(
+        prompt="draw a tree", output_path="result.png", watermark=False,
+        reference_images=["reference.png"] if edit else None,
+        image_mode="image_to_image" if edit else "text_to_image",
+    )
+    success = scenario in {"expired", "near_expiry", "401", "200003", "200003_string"}
+    assert result.success == success, result.error
+    if scenario in {"expired", "near_expiry"}:
+        assert calls == ["refresh", "image"]
+        assert authorizations == [f"Bearer {new_token}"]
+    elif scenario in {"401", "200003", "200003_string", "rejected_twice"}:
+        assert calls == ["image", "refresh", "image"]
+        assert authorizations == [f"Bearer {old_token}", f"Bearer {new_token}"]
+        assert bodies[0] == bodies[1]
+        if edit:
+            assert PNG_BYTES in bodies[1]
+    elif scenario in {"refresh_401", "refresh_503"}:
+        assert calls == ["image", "refresh"]
+    elif scenario == "missing_login":
+        assert calls == []
+        assert "未登录" in result.error
+    elif scenario == "download_401":
+        assert calls == ["image", "download"]
+    else:
+        assert calls == ["image"]
+    if scenario in {"rejected_twice", "refresh_401", "missing_refresh"}:
+        assert "重新登录" in result.error
+    if scenario == "explicit_key":
+        assert authorizations == ["Bearer dedicated-key"]
+    if scenario == "custom_host":
+        assert authorizations == [""]
+    if scenario == "environment":
+        assert authorizations == ["Bearer environment-token"]
+    assert (tmp_path / "result.png").exists() == success

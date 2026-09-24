@@ -418,13 +418,39 @@ def test_unknown_mcp_tools_fail_closed_even_when_explicitly_selected() -> None:
     assert result.details["denied_reason"] == "unknown_capability_metadata"
 
 
-def test_playwright_read_only_tools_are_trusted_but_actions_are_denied() -> None:
+_PLAYWRIGHT_DELEGABLE_MANAGED_TOOLS = (
+    "managed_browser_click",
+    "managed_browser_close",
+    "managed_browser_drag",
+    "managed_browser_drop",
+    "managed_browser_evaluate",
+    "managed_browser_fill_form",
+    "managed_browser_handle_dialog",
+    "managed_browser_hover",
+    "managed_browser_navigate",
+    "managed_browser_network_request",
+    "managed_browser_press_key",
+    "managed_browser_resize",
+    "managed_browser_run_code",
+    "managed_browser_select_option",
+    "managed_browser_tabs",
+    "managed_browser_take_screenshot",
+    "managed_browser_type",
+)
+_PLAYWRIGHT_BLOCKED_MANAGED_TOOLS = (
+    "managed_browser_file_upload",
+)
+
+
+def test_playwright_named_run_code_is_delegable_like_navigate() -> None:
     navigate = NamedMcpTool("managed_browser_navigate", "playwright")
     run_code = NamedMcpTool("managed_browser_run_code", "playwright")
     navigate_spec = _parse(required_tools=["managed_browser_navigate"])
     run_code_spec = _parse(required_tools=["managed_browser_run_code"])
     assert isinstance(navigate_spec, DelegationSpec)
     assert isinstance(run_code_spec, DelegationSpec)
+    assert run_code_spec.constraints.network is True
+    assert run_code_spec.constraints.external_side_effect is False
 
     navigate_result = CapabilityResolver().resolve(
         navigate_spec,
@@ -436,11 +462,54 @@ def test_playwright_read_only_tools_are_trusted_but_actions_are_denied() -> None
     )
 
     assert isinstance(navigate_result, ResolvedCapabilityBundle)
-    assert isinstance(run_code_result, CapabilityFailure)
-    assert run_code_result.details["denied_reason"] in {
+    assert isinstance(run_code_result, ResolvedCapabilityBundle)
+    assert run_code_result.resolved_tool_names == ("managed_browser_run_code",)
+
+
+@pytest.mark.parametrize("tool_name", _PLAYWRIGHT_DELEGABLE_MANAGED_TOOLS)
+def test_explicit_playwright_page_interact_tools_are_delegable(tool_name: str) -> None:
+    spec = _parse(required_tools=[tool_name])
+    assert isinstance(spec, DelegationSpec)
+    assert spec.constraints.network is True
+    assert spec.constraints.external_side_effect is False
+
+    result = CapabilityResolver().resolve(
+        spec,
+        parent_tools={tool_name: NamedMcpTool(tool_name, "playwright")},
+    )
+
+    assert isinstance(result, ResolvedCapabilityBundle)
+    assert result.resolved_tool_names == (tool_name,)
+
+
+@pytest.mark.parametrize("tool_name", _PLAYWRIGHT_BLOCKED_MANAGED_TOOLS)
+def test_playwright_file_upload_remains_denied(tool_name: str) -> None:
+    spec = _parse(required_tools=[tool_name])
+    assert isinstance(spec, DelegationSpec)
+
+    result = CapabilityResolver().resolve(
+        spec,
+        parent_tools={tool_name: NamedMcpTool(tool_name, "playwright")},
+    )
+
+    assert isinstance(result, CapabilityFailure)
+    assert result.details["denied_reason"] in {
         "network_disabled",
         "external_side_effect_disabled",
     }
+
+
+def test_playwright_interact_tools_are_not_default_child_tools() -> None:
+    parsed = _parse(
+        default_required_tools=(
+            "read_file",
+            *_PLAYWRIGHT_DELEGABLE_MANAGED_TOOLS,
+            *_PLAYWRIGHT_BLOCKED_MANAGED_TOOLS,
+        )
+    )
+
+    assert isinstance(parsed, DelegationSpec)
+    assert parsed.required_tools == ("read_file",)
 
 
 def test_selected_skill_adds_guidance_without_adding_tools(tmp_path: Path) -> None:

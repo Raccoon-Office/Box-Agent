@@ -30,7 +30,6 @@ import importlib.util as _iutil
 import re
 import glob
 import platform
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.path.expanduser("~/.cache/ms-playwright"))
 
 # chromium 稳定性参数。关 GPU / 软渲染省内存,降低高并发下崩溃(TargetClosed)。
 # ★--disable-dev-shm-usage 的坑(2026-07-16 崩池真因)★:它逼 chromium 把 shm 从 /dev/shm 改用 /tmp。
@@ -73,7 +72,8 @@ LAUNCH_ARGS = ["--no-sandbox", "--disable-gpu",
 if _should_disable_devshm():
     LAUNCH_ARGS.insert(1, "--disable-dev-shm-usage")
 
-import fcntl as _fcntl
+from pathlib import Path
+from file_lock import lock_file, unlock_file
 from render_runtime import RenderSession, run_renderer, supervise
 
 
@@ -191,118 +191,91 @@ def _ensure_browser_available(p):
             f"且本地无可回退的 chromium 版本。请先运行 `playwright install chromium`。")
     raise BrowserUnavailable("无法解析 Chromium 路径，请检查环境变量 PLAYWRIGHT_BROWSERS_PATH")
 
+def _browser_layouts():
+    """Return native full/headless layouts, including older Playwright caches."""
+    system = platform.system()
+    if system == "Windows":
+        return (
+            ["chrome-headless-shell-win64/chrome-headless-shell.exe", "chrome-win/headless_shell.exe"],
+            ["chrome-win64/chrome.exe", "chrome-win/chrome.exe"],
+        )
+    if system == "Darwin":
+        arch = "arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "x64"
+        return (
+            [f"chrome-headless-shell-mac-{arch}/chrome-headless-shell"],
+            [f"chrome-mac-{arch}/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+             "chrome-mac/Chromium.app/Contents/MacOS/Chromium"],
+        )
+    return (
+        ["chrome-headless-shell-linux64/chrome-headless-shell", "chrome-linux/headless_shell"],
+        ["chrome-linux64/chrome", "chrome-linux/chrome"],
+    )
+
+
+def _browser_cache_roots(p):
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if configured and configured != "0":
+        return [Path(configured).expanduser()]
+    roots = []
+    expected = getattr(p.chromium, "executable_path", "")
+    for parent in Path(expected).parents if expected else []:
+        if re.fullmatch(r"chromium(?:_headless_shell)?-\d+", parent.name):
+            roots.append(parent.parent)
+            break
+    if configured == "0":
+        return roots
+    if platform.system() == "Windows":
+        roots.append(Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "ms-playwright")
+    elif platform.system() == "Darwin":
+        roots.append(Path.home() / "Library/Caches/ms-playwright")
+    roots.extend([Path.home() / ".cache/ms-playwright", Path.home() / ".box-agent/browsers"])
+    return list(dict.fromkeys(roots))
+
+
+def _browser_is_executable(candidate):
+    return candidate.is_file() and (platform.system() == "Windows" or os.access(candidate, os.X_OK))
+
+
 def _prefer_headless_shell(exe):
-    """
-    原逻辑:从期望路径提取 revision，优先用同 revision 的 headless-shell。
-    """
-    revision = re.search(r"chromium-(\d+)", exe)
-    cache_root = os.path.dirname(os.path.dirname(os.path.dirname(exe)))
-    candidates = []
+    revision = re.search(r"chromium-(\d+)", str(exe))
     if revision:
-        candidates.append(os.path.join(
-            cache_root,
-            f"chromium_headless_shell-{revision.group(1)}",
-            "chrome-headless-shell-linux64",
-            "chrome-headless-shell",
-        ))
-    else:
-        candidates.extend(sorted(glob.glob(os.path.join(
-            cache_root, "chromium_headless_shell-*",
-            "chrome-headless-shell-linux64", "chrome-headless-shell"
-        )), reverse=True))
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+        for parent in Path(exe).parents:
+            if parent.name == f"chromium-{revision.group(1)}":
+                root = parent.parent / f"chromium_headless_shell-{revision.group(1)}"
+                for relative in _browser_layouts()[0]:
+                    candidate = root / relative
+                    if _browser_is_executable(candidate):
+                        return str(candidate)
+                break
     return exe
 
+
 def _scan_local_chromium(p):
-    """
-    不依赖 playwright 的 revision，直接扫描本地缓存目录，
-    返回架构匹配且可执行的最接近版本。
-
-    搜索顺序:
-      1. chrome-headless-shell (更快，无 crashpad)
-      2. full Google Chrome for Testing
-    """
-    cache_root = os.path.expanduser(
-        os.environ.get("PLAYWRIGHT_BROWSERS_PATH",
-                       os.path.expanduser("~/.box-agent/browsers")))
-    if not os.path.isdir(cache_root):
-        return None
-
-    # 确定本机架构
-    system = platform.system()
-    machine = platform.machine()
-    if system == "Darwin":
-        mac_arch = "chrome-mac-arm64" if machine == "arm64" else "chrome-mac-x64"
-        shell_arch = "chrome-headless-shell-mac-arm64" if machine == "arm64" else "chrome-headless-shell-mac-x64"
-    else:
-        mac_arch = None
-        shell_arch = "chrome-headless-shell-linux64"
-
-    # 从 p.chromium.executable_path 提取期望的 revision 和 full arch，用于排序
-    exe = getattr(p.chromium, "executable_path", None)
-    desired_rev = None
-    desired_full_arch = None
-    if exe:
-        m = re.search(r"chromium-(\d+)", exe)
-        if m:
-            desired_rev = int(m.group(1))
-        # 提取完整架构目录名 (e.g. "chrome-mac-arm64")
-        parts = exe.split(os.sep)
-        for part in parts:
-            if part.startswith("chrome-mac-") or part.startswith("chrome-linux"):
-                desired_full_arch = part
-                break
-
-    candidates = []  # list of (rev_distance, path)
-
-    # ① 扫 headless-shell:chromium_headless_shell-<rev>/shell_arch/chrome-headless-shell
-    for d in sorted(glob.glob(os.path.join(cache_root, "chromium_headless_shell-*"))):
-        m = re.search(r"chromium_headless_shell-(\d+)", d)
-        if not m:
-            continue
-        rev = int(m.group(1))
-        for arch_name in [shell_arch]:
-            if not arch_name:
-                continue
-            candidate = os.path.join(d, arch_name, "chrome-headless-shell")
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                dist = abs(desired_rev - rev) if desired_rev is not None else rev
-                candidates.append((dist, candidate))
-
-    # ② 扫 full chromium:chromium-<rev>/full_arch/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing
-    for d in sorted(glob.glob(os.path.join(cache_root, "chromium-*"))):
-        m = re.search(r"chromium-(\d+)", d)
-        if not m:
-            continue
-        rev = int(m.group(1))
-        # 用期望的 arch 优先，否则扫同版本下所有 arch
-        full_archs = [desired_full_arch] if desired_full_arch else [
-            a for a in ["chrome-mac-arm64", "chrome-mac-x64", "chrome-linux64"]
-        ]
-        for arch_name in full_archs:
-            # macOS: .app/Contents/MacOS/Google Chrome for Testing
-            candidate_mac = os.path.join(
-                d, arch_name,
-                "Google Chrome for Testing.app", "Contents", "MacOS",
-                "Google Chrome for Testing")
-            # Linux: google-chrome
-            candidate_linux = os.path.join(d, arch_name, "chrome")
-            for c in [candidate_mac, candidate_linux]:
-                if os.path.isfile(c) and os.access(c, os.X_OK):
-                    dist = abs(desired_rev - rev) if desired_rev is not None else rev
-                    candidates.append((dist, c))
-
+    expected = getattr(p.chromium, "executable_path", "") or ""
+    revision = re.search(r"chromium(?:_headless_shell)?-(\d+)", expected)
+    desired = int(revision.group(1)) if revision else None
+    candidates = []
+    shells, full = _browser_layouts()
+    for root in _browser_cache_roots(p):
+        for priority, (pattern, layouts) in enumerate([
+            ("chromium_headless_shell-*", shells), ("chromium-*", full)
+        ]):
+            for directory in root.glob(pattern):
+                match = re.fullmatch(r"chromium(?:_headless_shell)?-(\d+)", directory.name)
+                if not match:
+                    continue
+                rev = int(match.group(1))
+                for relative in layouts:
+                    candidate = directory / relative
+                    if _browser_is_executable(candidate):
+                        distance = abs(desired - rev) if desired is not None else rev
+                        candidates.append((distance, priority, str(candidate)))
     if not candidates:
         return None
-
-    candidates.sort()
-    best_dist, best_path = candidates[0]
-    if desired_rev is not None and best_dist > 0:
-        print(f"[render] 期望 chromium-{desired_rev} 不存在，回退到 {os.path.basename(best_path)} (revision 差 {best_dist})",
-              file=sys.stderr)
-    return best_path
+    distance, _, selected = min(candidates)
+    if desired is not None and distance:
+        print(f"[render] chromium-{desired} unavailable; using cached {selected}", file=sys.stderr)
+    return selected
 
 
 
@@ -1091,7 +1064,7 @@ def _render_once(session, html, out, w, h):
         try:
             # 用 "load" 而非 "networkidle":本地 file:// 页若引用外部 CDN,
             # networkidle 可能永远不达成、白等满 timeout;load 只等本地资源就绪。
-            pg.goto("file://" + html, wait_until="load", timeout=30000)
+            pg.goto(Path(html).resolve().as_uri(), wait_until="load", timeout=30000)
         except Exception as e:
             # 不静默吞:goto 异常打到 stderr,免得"截到半截却当成功"。
             print(f"警告: goto 未正常完成({e}),仍尝试截图", file=sys.stderr)
@@ -1240,6 +1213,40 @@ def _hard_render_issues(report):
     return issues
 
 
+def _geometry_diagnostics(report):
+    """Explain existing measurements without turning candidates into verdicts."""
+    diagnostics = []
+    footer = (report.get("layout") or {}).get("footerPushed")
+    if footer:
+        item = {"type": "footerPushed", "severity": "hard", "items": [footer]}
+        below = footer.get("belowViewport")
+        if isinstance(below, (int, float)):
+            item["belowViewport"] = {
+                "value": below, "unit": "px",
+                "direction": "outside" if below > 0 else "inside" if below < 0 else "at-edge",
+                "distance": abs(below),
+            }
+        over = footer.get("bodyOverFooter")
+        if isinstance(over, (int, float)):
+            item["bodyOverFooter"] = {"value": over, "unit": "px",
+                                     "meaning": "body deepest content bottom minus footer top"}
+        diagnostics.append(item)
+    for key in ("boxoverflow", "overlap", "crowded", "cjkTypography", "contrast"):
+        values = report.get(key)
+        if values:
+            item = {"type": key, "severity": "advisory", "items": values,
+                    "meaning": "candidate only; verify against current pixels and DOM"}
+            if key == "boxoverflow":
+                item["fields"] = {
+                    "ob": {"unit": "px", "direction": "bottom",
+                           "meaning": "maximum child extension past container content bottom"},
+                    "orr": {"unit": "px", "direction": "right",
+                            "meaning": "maximum child extension past container content right edge"},
+                }
+            diagnostics.append(item)
+    return diagnostics
+
+
 def _atomic_json(path, payload):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = path + f".{os.getpid()}.tmp"
@@ -1266,12 +1273,13 @@ def _record_render_report(root, number, slide, target, report):
         "png_mtime_ns": os.stat(output).st_mtime_ns,
         "summary": _batch_warning_summary(report),
         "hard_issues": _hard_render_issues(report),
+        "diagnostics": _geometry_diagnostics(report),
         "report": report,
     }
     lock_path = os.path.join(root, "_trace", "render-report.lock")
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     with open(lock_path, "a+b") as lock:
-        _fcntl.flock(lock.fileno(), _fcntl.LOCK_EX)
+        lock_file(lock)
         manifest_path = os.path.join(root, "renders", "render.json")
         try:
             with open(manifest_path, encoding="utf-8") as stream:
@@ -1293,9 +1301,10 @@ def _record_render_report(root, number, slide, target, report):
             "source_sha256": record["source_sha256"],
             "png_sha256": record["png_sha256"],
             "hard_issues": record["hard_issues"],
+            "diagnostics": record["diagnostics"],
         }
         _atomic_json(issue_path, ledger)
-        _fcntl.flock(lock.fileno(), _fcntl.LOCK_UN)
+        unlock_file(lock)
 
 
 def _workspace_from_render_paths(slide, target):
@@ -1323,6 +1332,8 @@ def render_batch(root, pages=None, width=1600, height=900):
         raise FileNotFoundError("no matching slides found")
     os.makedirs(os.path.join(root, "renders"), exist_ok=True)
     _setup_libs()
+    rendered_pages = []
+    images = []
     hard_pages = []
     with RenderSession(_sync_playwright(), _ensure_browser_available, LAUNCH_ARGS, is_fatal=_is_fatal_browser_error) as session:
         for number, slide in slides:
@@ -1342,12 +1353,21 @@ def render_batch(root, pages=None, width=1600, height=900):
             if _hard_render_issues(report):
                 hard_pages.append(number)
             print(f"{target} {_batch_warning_summary(report)}")
+            rendered_pages.append(number)
+            images.append(os.path.realpath(target))
         if hard_pages:
             raise RenderQualityError(
                 "render quality gate failed for pages: "
                 + ",".join(f"{page:02d}" for page in hard_pages)
                 + "; see _trace/render-issues.json"
             )
+        skill_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        return {
+            "status": "rendered", "qa": "not-run", "rendered_pages": rendered_pages,
+            "images": images, "deck_dir": os.path.realpath(root), "skill_root": skill_root,
+            "next_instructions": os.path.join(skill_root, "subagents", "slide.md"),
+            "review_ledger": os.path.realpath(os.path.join(root, "_trace", "review-issues.md")),
+        }
 
 
 def _player_chart_targets(root):
@@ -1395,7 +1415,7 @@ def audit_player(root):
                     pass
 
             page.on("requestfailed", failed)
-            page.goto("file://" + present, wait_until="load", timeout=30000)
+            page.goto(Path(present).resolve().as_uri(), wait_until="load", timeout=30000)
             failures = []
             for number, ids, expected in targets:
                 session.renew_page_deadline()
@@ -1453,7 +1473,9 @@ def _batch_cli(argv):
     parser.add_argument("--height", type=int, default=900)
     args = parser.parse_args(argv)
     try:
-        render_batch(args.root, args.pages, args.width, args.height)
+        receipt = render_batch(args.root, args.pages, args.width, args.height)
+        if receipt is not None:
+            print(json.dumps(receipt, ensure_ascii=False))
     except (BrowserUnavailable, RenderQualityError) as exc:
         print(f"batch render failed: {exc}", file=sys.stderr)
         return 1

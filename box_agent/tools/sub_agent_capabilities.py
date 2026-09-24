@@ -94,16 +94,15 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "obsidian_daily_note": ToolCapabilityMetadata(write=True, external_side_effect=True),
 }
 
-_PLAYWRIGHT_READ_ONLY_TOOLS = frozenset(
+_PLAYWRIGHT_BLOCKED_TOOLS = frozenset(
     {
-        "managed_browser_console_messages",
-        "managed_browser_navigate",
-        "managed_browser_navigate_back",
-        "managed_browser_network_requests",
-        "managed_browser_snapshot",
-        "managed_browser_wait_for",
+        "managed_browser_file_upload",
     }
 )
+
+
+def _is_managed_browser_tool(name: str) -> bool:
+    return name.startswith("managed_browser_")
 
 
 def _tool_capability_metadata(name: str, tool: Tool) -> ToolCapabilityMetadata | None:
@@ -113,18 +112,16 @@ def _tool_capability_metadata(name: str, tool: Tool) -> ToolCapabilityMetadata |
 
     # MCP tool names alone are not a trustworthy security boundary. The live
     # wrapper also records the server that supplied them, so recognize the
-    # managed Playwright server explicitly. Navigation/inspection remains
-    # read-only from the user's resource perspective; interaction, arbitrary
-    # browser code, uploads, and screenshots require an external-side-effect
-    # grant rather than falling through as unknown metadata.
+    # managed Playwright server explicitly. Managed-browser tools are
+    # delegable when named; file uploads stay external-side-effect.
     if getattr(tool, "server_name", "") == "playwright":
-        if name in _PLAYWRIGHT_READ_ONLY_TOOLS:
-            return ToolCapabilityMetadata(read=True, network=True)
-        return ToolCapabilityMetadata(
-            read=True,
-            network=True,
-            external_side_effect=True,
-        )
+        if name in _PLAYWRIGHT_BLOCKED_TOOLS:
+            return ToolCapabilityMetadata(
+                read=True,
+                network=True,
+                external_side_effect=True,
+            )
+        return ToolCapabilityMetadata(read=True, network=True)
     return None
 
 
@@ -201,7 +198,7 @@ class CapabilityFailure:
             if any(field == "budget" or field.startswith("budget.") for field in self.invalid_fields):
                 field_corrections["budget"] = {
                     "message": "Pass budget as a JSON object, never as a JSON string.",
-                    "example": {"max_steps": 12, "max_tool_calls": 25},
+                    "example": {"max_steps": 24, "max_tool_calls": 36},
                 }
             if any(
                 field == "write_scope" or field.startswith("write_scope[")
@@ -441,12 +438,11 @@ def parse_delegation_spec(
             or set(normalized_required_tools) & PERMISSION_GATED_PROCESS_TOOL_NAMES
         ),
         network=bool(
-            set(normalized_required_tools)
-            & (
-                TRUSTED_NETWORK_TOOL_NAMES
-                | _PLAYWRIGHT_READ_ONLY_TOOLS
-                | PERMISSION_GATED_PROCESS_TOOL_NAMES
+            (
+                set(normalized_required_tools)
+                & (TRUSTED_NETWORK_TOOL_NAMES | PERMISSION_GATED_PROCESS_TOOL_NAMES)
             )
+            or any(_is_managed_browser_tool(name) for name in normalized_required_tools)
         ),
         write_scope=normalized_write_scope,
         external_side_effect=False,

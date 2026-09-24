@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from box_agent.config import ToolLimitsConfig
 from box_agent.events import InjectedMessageEvent, ToolCallResult
 from box_agent.kernel.state import ToolBudgetState
 from box_agent.runtime import run_agent_loop
@@ -28,6 +29,18 @@ def test_reserve_increments_direct_total_and_matching_tool_count() -> None:
     assert state.reserve("web_search") == (True, None)
     assert state.tool_call_total == 1
     assert state.tool_call_counts == {"web_search": 1}
+
+
+def test_default_direct_budget_allows_300_calls_and_rejects_the_next() -> None:
+    state = _state(max_tool_calls=ToolLimitsConfig().general.max_tool_calls)
+
+    for _ in range(300):
+        assert state.reserve("read_file") == (True, None)
+
+    allowed, error = state.reserve("read_file")
+    assert allowed is False
+    assert "Total tool call budget reached (300 calls this task)" in error
+    assert state.tool_call_total == 300
 
 
 @pytest.mark.parametrize(

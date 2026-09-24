@@ -501,6 +501,34 @@ class MCPToolExposureManager:
             return True
         return connector_id in self._allowed_connector_ids_provider()
 
+    def activate_server(self, server_name: str) -> int:
+        """Activate every currently discovered tool owned by one MCP server.
+
+        This is a host-facing capability for opt-in integrations that own a
+        whole MCP server (for example a CUA plugin). It changes only the
+        session activation map; normal name/conflict/permission checks still
+        run when the next tool exposure is prepared.
+        """
+        activated = 0
+        for entry in self._catalog.snapshot():
+            if (
+                entry.server_name != server_name
+                or entry.name_conflict
+                or entry.model_name == TOOL_SEARCH_NAME
+                or not self._entry_is_allowed(entry)
+            ):
+                continue
+            previous = self._activated.get(entry.tool_id)
+            if previous is not None and previous.generation == entry.generation:
+                continue
+            self._activated[entry.tool_id] = ActivatedMCPTool(
+                tool_id=entry.tool_id,
+                model_name=entry.model_name,
+                generation=entry.generation,
+            )
+            activated += 1
+        return activated
+
     def prepare_tools(self, candidates: list[Tool]) -> ToolExposure:
         # ``candidates`` is the session's stable core-tool registry. Ordinary
         # MCP tools live only in the process catalog and are appended here

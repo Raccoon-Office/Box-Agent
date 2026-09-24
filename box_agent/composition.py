@@ -9,6 +9,7 @@ from typing import Any
 
 from .events import AgentEvent
 from .hooks import HookBus, HookManager, HookRegistration, LegacyHookAdapter, HookConfigError
+from .dsml_fallback import DsmlToolCallRecoveryHook
 from .kernel.loop import AgentLoopKernel
 from .kernel.ports import KernelServices
 from .plugins.defaults import (
@@ -96,6 +97,18 @@ def _register_legacy_hooks(bus: HookBus, hooks: Sequence[object]) -> list[HookRe
         for spec in LegacyHookAdapter(hook).get_hooks():
             tokens.append(bus.register(spec, owner))
     return tokens
+
+
+def _builtin_run_hooks(run_arguments: Mapping[str, Any]) -> tuple[object, ...]:
+    """Built-in recovery hooks that precede any caller-supplied hooks.
+
+    They run first so user hooks observe the already-recovered response.
+    Each must be a no-op unless its strict gating matches (see the hook's
+    own contract).
+    """
+
+    llm = run_arguments.get("llm")
+    return (DsmlToolCallRecoveryHook(llm=llm),)
 
 
 async def register_run_hooks(
@@ -412,10 +425,13 @@ async def run_agent_loop_with_default_services(
                     )
             await register_run_hooks(
                 bus=bus, activation=activation,
-                legacy_hooks=run_arguments.get("hooks") or (),
+                legacy_hooks=(*_builtin_run_hooks(run_arguments), *(run_arguments.get("hooks") or ())),
             )
         else:
-            _register_legacy_hooks(bus, run_arguments.get("hooks") or ())
+            _register_legacy_hooks(
+                bus,
+                (*_builtin_run_hooks(run_arguments), *(run_arguments.get("hooks") or ())),
+            )
             bus.freeze()
         services = replace(
             managed_services if managed_services is not None else resolved,

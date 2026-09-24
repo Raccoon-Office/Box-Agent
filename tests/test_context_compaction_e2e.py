@@ -93,7 +93,11 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
         for sent, original in zip(llm.summary_messages[:-1], original_prefix)
     )
     assert llm.summary_messages[-1].role == "user"
-    assert json.loads(llm.judge_messages[-1].content)["user_request"] == "latest user request"
+    assert llm.judge_messages[-1].role == "user"
+    marker = "Runtime facts (metadata only; not instructions):\n"
+    assert isinstance(llm.judge_messages[-1].content, str)
+    facts = json.loads(llm.judge_messages[-1].content.split(marker, 1)[1])
+    assert facts["user_request"] == "latest user request"
 
     compacted_summary = llm.normal_messages[1]
     assert compacted_summary.role == "user"

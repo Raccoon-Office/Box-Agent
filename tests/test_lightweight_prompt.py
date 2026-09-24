@@ -212,6 +212,7 @@ class _StubAgent:
 
     def __init__(self, llm: _FakeLLM):
         self._llm = llm
+        self._default_llm_binding = None
         self._lite_llm = llm
 
     # Bind the real implementation as if it were a method on this stub.

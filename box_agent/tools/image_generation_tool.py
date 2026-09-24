@@ -14,7 +14,14 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 import httpx
 
-from box_agent.auth import request_auth_headers
+from box_agent.auth import (
+    HostedAuthRequiredError,
+    _xiaohuanxiong_refresh_url,
+    ensure_hosted_auth_ready,
+    read_auth_token_file,
+    refresh_hosted_auth_token_if_needed,
+    request_auth_headers,
+)
 from box_agent.artifact_publication import delivery_scope, write_metadata
 from box_agent.llm.debug_logging import (
     log_image_generation_error_meta,
@@ -759,12 +766,52 @@ class GenerateImageTool(Tool):
             raise ValueError(f"Reference image is not a file: {self._display_path(path)}")
         return path
 
-    def _request_headers(self) -> dict[str, str]:
+    async def _request_headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json, image/*"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             return headers
+        await ensure_hosted_auth_ready(self.endpoint, self.auth_file)
         return request_auth_headers(auth_file=self.auth_file, existing=headers, url=self.endpoint)
+
+    async def _send_with_hosted_auth_retry(
+        self, client: httpx.AsyncClient, request: httpx.Request,
+    ) -> httpx.Response:
+        uses_file = (
+            not self.api_key
+            and bool(self.auth_file)
+            and bool(_xiaohuanxiong_refresh_url(str(request.url)))
+            and bool(read_auth_token_file(self.auth_file))
+        )
+        if uses_file:
+            # Buffer multipart bodies so an edit can be replayed exactly once.
+            await request.aread()
+        for attempt in range(2):
+            response = await client.send(request)
+            if not uses_file:
+                return response
+            rejected = response.status_code == 401
+            if not rejected:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                rejected = isinstance(payload, dict) and payload.get("code") in (200003, "200003")
+            if not rejected:
+                return response
+            self._log_error_meta(
+                "image_to_image" if request.headers.get("content-type", "").startswith("multipart/") else "text_to_image",
+                str(request.url), response=response,
+            )
+            await response.aclose()
+            if attempt:
+                raise HostedAuthRequiredError("登录态已过期，请重新登录")
+            token = await refresh_hosted_auth_token_if_needed(
+                str(request.url), self.auth_file, force=True,
+                rejected_token=request.headers.get("Authorization", "").removeprefix("Bearer "),
+            )
+            request.headers["Authorization"] = f"Bearer {token}"
+        raise AssertionError("unreachable")
 
     def _log_response_meta(self, mode: str, endpoint: str, response: httpx.Response) -> None:
         log_image_generation_response_meta(
@@ -863,7 +910,7 @@ class GenerateImageTool(Tool):
                 "POST",
                 self.endpoint,
                 json=payload,
-                headers=self._request_headers(),
+                headers=await self._request_headers(),
             )
             log_image_generation_request(
                 mode="text_to_image",
@@ -876,7 +923,7 @@ class GenerateImageTool(Tool):
             )
             response: httpx.Response | None = None
             try:
-                response = await client.send(request)
+                response = await self._send_with_hosted_auth_retry(client, request)
                 self._log_response_meta("text_to_image", str(request.url), response)
                 return await self._image_from_response(client, response)
             except Exception as exc:
@@ -919,7 +966,7 @@ class GenerateImageTool(Tool):
                 endpoint,
                 data=data,
                 files=files,
-                headers=self._request_headers(),
+                headers=await self._request_headers(),
             )
             log_image_generation_request(
                 mode="image_to_image",
@@ -933,7 +980,7 @@ class GenerateImageTool(Tool):
             )
             response: httpx.Response | None = None
             try:
-                response = await client.send(request)
+                response = await self._send_with_hosted_auth_retry(client, request)
                 self._log_response_meta("image_to_image", str(request.url), response)
                 return await self._image_from_response(client, response)
             except Exception as exc:
