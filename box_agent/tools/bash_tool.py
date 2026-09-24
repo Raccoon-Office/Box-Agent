@@ -1271,8 +1271,9 @@ class BashTool(Tool):
             "Windows": f"""Execute PowerShell commands in foreground or background.
 
 Do NOT use Get-Content/type to read files; use read_file instead.
-Do NOT use Select-String/Get-ChildItem/dir to search or list files; use search_files instead.
-Reserve bash for git, builds, tests, package managers, processes, scripts, and system commands.
+For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
+For a one-level directory view, use a read-only non-recursive command such as Get-ChildItem -Name. Do not use PowerShell for recursive file discovery or content search.
+Reserve bash for that directory view, git, builds, tests, package managers, processes, scripts, and system commands.
 
 Parameters:
   - command (required): PowerShell command to execute
@@ -1294,8 +1295,9 @@ Examples:
             "Unix": f"""Execute bash commands in foreground or background.
 
 Do NOT use cat/head/tail to read files; use read_file instead.
-Do NOT use grep/rg/find/ls to search or list files; use search_files instead.
-Reserve bash for git, builds, tests, package managers, processes, scripts, and system commands.
+For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
+For a one-level directory view, use a read-only non-recursive command such as find . -mindepth 1 -maxdepth 1 -print. Do not use Bash for recursive file discovery or content search.
+Reserve bash for that directory view, git, builds, tests, package managers, processes, scripts, and system commands.
 
 Parameters:
   - command (required): Bash command to execute

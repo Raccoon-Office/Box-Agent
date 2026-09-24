@@ -14,6 +14,7 @@ from .obsidian_tool import ObsidianCreateNoteTool, ObsidianDailyNoteTool, Obsidi
 from .plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from .request_user_decision_tool import RequestUserDecisionTool
 from .request_user_input_tool import RequestUserInputTool
+from .ripgrep_tool import GlobTool, GrepTool, resolve_ripgrep_executable
 from .skillhub_search_tool import SkillHubSearchTool
 from .skillhub_install_tool import SkillHubInstallTool
 from .setup import add_workspace_tools, await_skill_discovery, initialize_base_tools
@@ -40,6 +41,9 @@ __all__ = [
     "PlanReadTool",
     "RequestUserInputTool",
     "RequestUserDecisionTool",
+    "GrepTool",
+    "GlobTool",
+    "resolve_ripgrep_executable",
     "SkillHubSearchTool",
     "SkillHubInstallTool",
     "TodoStore",

@@ -60,6 +60,11 @@ from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from box_agent.tools.publish_artifact_tool import PublishArtifactTool
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.request_user_input_tool import RequestUserInputTool
+from box_agent.tools.ripgrep_tool import (
+    GlobTool,
+    GrepTool,
+    resolve_ripgrep_executable,
+)
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.skill_execution_env import build_skill_execution_env
 from box_agent.tools.skill_scratch import SKILL_SCRATCH_DIR_NAME, prepare_skill_scratch_dir
@@ -626,7 +631,8 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                         skill_access_filter=None,
                         env_context=None,
                         process_owner_id: str | None = None,
-                        bypass_dangerous_command_approval: bool = False):
+                        bypass_dangerous_command_approval: bool = False,
+                        session_mode: str | None = None):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -650,6 +656,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             reclaim background shell processes.
         bypass_dangerous_command_approval: Skip dangerous-command approval for
             an explicitly trusted full-access session.
+        session_mode: Optional mode used to expose mode-specific tools.
     """
     _out = output or print
     # Ensure workspace directory exists
@@ -694,50 +701,71 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # File tools resolve relative paths from relative_root and retain workspace scope.
     if config.tools.enable_file_tools:
-        tools.extend(
-            [
-                ReadTool(
-                    workspace_dir=str(workspace_dir),
-                    allow_full_access=allow_full_access,
-                    permission_engine=permission_engine,
-                    relative_root_dir=str(relative_root),
-                ),
-                JsonlQueryTool(
-                    workspace_dir=str(workspace_dir),
-                    allow_full_access=allow_full_access,
-                    permission_engine=permission_engine,
-                    relative_root_dir=str(relative_root),
-                ),
-                SearchFilesTool(
-                    workspace_dir=str(workspace_dir),
-                    allow_full_access=allow_full_access,
-                    permission_engine=permission_engine,
-                    relative_root_dir=str(relative_root),
-                ),
-                WriteTool(
-                    workspace_dir=str(workspace_dir),
-                    allow_full_access=allow_full_access,
-                    permission_engine=permission_engine,
-                    relative_root_dir=str(relative_root),
-                ),
-                AppendTool(
-                    workspace_dir=str(workspace_dir),
-                    allow_full_access=allow_full_access,
-                    permission_engine=permission_engine,
-                    relative_root_dir=str(relative_root),
-                ),
-                EditTool(
-                    workspace_dir=str(workspace_dir),
-                    allow_full_access=allow_full_access,
-                    permission_engine=permission_engine,
-                    relative_root_dir=str(relative_root),
-                ),
-            ]
+        file_tools: list[Tool] = [
+            ReadTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            JsonlQueryTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            SearchFilesTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            WriteTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            AppendTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            EditTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+        ]
+        rg_executable = (
+            resolve_ripgrep_executable(runtime_env)
+            if session_mode == "code_agent"
+            else None
         )
+        if rg_executable:
+            search_kwargs = {
+                "workspace_dir": str(workspace_dir),
+                "executable": rg_executable,
+                "allow_full_access": allow_full_access,
+                "permission_engine": permission_engine,
+                "relative_root_dir": str(relative_root),
+            }
+            file_tools.extend([GrepTool(**search_kwargs), GlobTool(**search_kwargs)])
+        tools.extend(file_tools)
         _out(
             f"{Colors.GREEN}✅ Loaded file operation tools "
             f"(relative root: {relative_root}, scope: {workspace_dir}){Colors.RESET}"
         )
+        if session_mode == "code_agent":
+            if rg_executable:
+                _out(f"{Colors.GREEN}✅ Loaded code search tools (grep, glob){Colors.RESET}")
+            else:
+                _out(
+                    f"{Colors.DIM}⏭️  ripgrep unavailable; using search_files fallback"
+                    f"{Colors.RESET}"
+                )
 
     # Todo tool - task tracking for multi-step workflows
     if config.tools.enable_todo:

@@ -144,7 +144,12 @@ def test_code_agent_prompt_includes_software_engineering_contract(tmp_path):
 
     assert "Software Engineering Mode (code_agent)" not in general_prompt
     assert "Software Engineering Mode (code_agent)" in code_prompt
-    assert "优先用 `rg` 定位" in code_prompt
+    assert "用 `glob` 发现文件" in code_prompt
+    assert "用 `grep` 搜索内容" in code_prompt
+    assert "不可用时回退到 `search_files`" in code_prompt
+    assert "Bash 执行只读、非递归的目录命令" in code_prompt
+    assert '`glob("*")`' in code_prompt
+    assert '`pattern="*"` 代替目录列表' in code_prompt
     assert "代码工作区就是交付位置" in code_prompt
     assert "不要默认创建或使用 `output/`" in code_prompt
     assert "`git diff`/`git status` 失败不能当作已确认" in code_prompt
