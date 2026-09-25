@@ -378,6 +378,7 @@ class Officev3Config(BaseModel):
     """Officev3 configuration block."""
 
     _present: bool = PrivateAttr(default=False)  # True if officev3 block exists in config.yaml
+    use_default_image_generation_preset: bool = False
     permissions: Officev3Permissions = Field(default_factory=Officev3Permissions)
     paths: Officev3Paths = Field(default_factory=Officev3Paths)
 
@@ -628,6 +629,7 @@ class Config(BaseModel):
         officev3_config = Officev3Config()
         if officev3_data is not None and isinstance(officev3_data, dict):
             officev3_config._present = True
+            llm_data = officev3_data.get("llm", {})
             perms_data = officev3_data.get("permissions", {})
             paths_data = officev3_data.get("paths", {})
 
@@ -653,6 +655,10 @@ class Config(BaseModel):
             ) if isinstance(mem_data, dict) else MemoryPermissions()
 
             officev3_config = Officev3Config(
+                use_default_image_generation_preset=(
+                    llm_data.get("use_default_image_generation_preset") is True
+                    if isinstance(llm_data, dict) else False
+                ),
                 permissions=Officev3Permissions(filesystem=fs_perms, memory=mem_perms),
                 paths=Officev3Paths(
                     session_workspace_root=paths_data.get("session_workspace_root", "") if isinstance(paths_data, dict) else "",

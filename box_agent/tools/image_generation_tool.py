@@ -11,6 +11,7 @@ import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -21,6 +22,7 @@ from box_agent.auth import (
     read_auth_token_file,
     refresh_hosted_auth_token_if_needed,
     request_auth_headers,
+    should_attach_auth_header,
 )
 from box_agent.artifact_publication import delivery_scope, write_metadata
 from box_agent.llm.debug_logging import (
@@ -144,6 +146,19 @@ def resolve_image_generation_endpoint(
         if value:
             return value
     return ""
+
+
+def align_hosted_image_endpoint(endpoint: str, llm_api_base: str) -> str:
+    """Use the session's hosted origin for the built-in image service."""
+    if not (should_attach_auth_header(endpoint) and should_attach_auth_header(llm_api_base)):
+        return endpoint
+    image_url = urlsplit(endpoint)
+    llm_url = urlsplit(llm_api_base)
+    if image_url.scheme not in {"http", "https"} or llm_url.scheme not in {"http", "https"}:
+        return endpoint
+    return urlunsplit(
+        (llm_url.scheme, llm_url.netloc, image_url.path, image_url.query, image_url.fragment)
+    )
 
 
 def _guess_mime_from_data_url(data_url: str) -> str:

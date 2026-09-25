@@ -31,6 +31,7 @@ from box_agent.tools.file_tools import (
 )
 from box_agent.tools.image_generation_tool import (
     GenerateImageTool,
+    align_hosted_image_endpoint,
     resolve_image_generation_endpoint,
 )
 from box_agent.tools.jupyter_tool import (
@@ -812,12 +813,17 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # unconfigured generate_image can only fail on every call and wastes steps.
     image_generation_config = getattr(config, "image_generation", None)
     if image_generation_service_configured(config):
+        image_endpoint = getattr(image_generation_config, "endpoint", "") or None
+        if getattr(getattr(config, "officev3", None), "use_default_image_generation_preset", False):
+            image_endpoint = align_hosted_image_endpoint(
+                image_endpoint or "", getattr(llm, "api_base", "") or "",
+            )
         tools.append(
             GenerateImageTool(
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,
-                endpoint=getattr(image_generation_config, "endpoint", "") or None,
+                endpoint=image_endpoint,
                 api_key=getattr(image_generation_config, "api_key", "") or None,
                 model=getattr(image_generation_config, "model", "") or None,
                 auth_file=(
