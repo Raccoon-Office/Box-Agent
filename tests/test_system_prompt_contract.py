@@ -10,7 +10,7 @@ def _prompt() -> str:
 def test_system_prompt_keeps_the_stable_template_compact():
     prompt = _prompt()
 
-    assert len(prompt) <= 4_000
+    assert len(prompt) <= 4_300
     assert prompt.count("{SKILLS_METADATA}") == 1
     assert prompt.count("{SANDBOX_INFO}") == 1
     assert prompt.count("{FILE_DELIVERY_INFO}") == 1
@@ -144,9 +144,12 @@ def test_system_prompt_pauses_only_for_blocking_input_or_sensitive_decisions():
     assert "若 `request_user_input` 可用，必须调用一次" in prompt
     assert "只问一个聚焦问题并列出最少必要字段" in prompt
     assert "保留已有产物并在用户补充后继续" in prompt
-    assert "需要用户选择时使用 `request_user_decision`" in prompt
+    assert "**向用户提问**" in prompt
+    assert "需要用户在选项中选择时使用 `request_user_decision`" in prompt
     assert "可推荐偏好，不得使用 `request_user_input`" in prompt
-    assert "请求 30 秒倒计时" in prompt
+    assert "请求短倒计时（如 30 秒）" in prompt
+    assert "若已给出 `defaultOptionId`，超时或自动提交时必须采用该默认项" in prompt
+    assert "不得改选其他偏好（例如把 design 改成 fast）" in prompt
     assert "已授权操作直接继续，不重复确认" in prompt
     assert "新增未授权的敏感事项须等待用户选择，不得自动提交" in prompt
 
@@ -154,6 +157,9 @@ def test_system_prompt_pauses_only_for_blocking_input_or_sensitive_decisions():
 def test_system_prompt_checks_explicit_requirements_before_completion():
     prompt = _prompt()
 
-    assert "结束前逐项核对用户要求的内容、数据、时效和格式" in prompt
-    assert "产物存在不等于任务完成" in prompt
+    assert "**完成定义**" in prompt
+    assert "格式与页数（或用户点名的其他验收项）" in prompt
+    assert "产物文件存在不等于任务完成" in prompt
+    assert "须在交付中明确写出缺口与降级说明，不得宣称已完成" in prompt
+    assert "**产物降级**" in prompt
     assert "明确标记未完成和证据缺口" in prompt
