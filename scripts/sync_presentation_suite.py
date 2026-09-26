@@ -21,7 +21,7 @@ import tempfile
 import yaml
 
 
-PINNED_REVISION = "ed82b4ae0238dfa5be108c41271e887876f0f9d8"
+PINNED_REVISION = "0cdc9d71789ec798be971992e0afc8746bf94457"
 SOURCE_URL = "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git"
 BUNDLE_NAME = "sensenova-presentation-suite"
 MODULES = ("dazzle", "doctor", "entry", "standard", "story", "tools")

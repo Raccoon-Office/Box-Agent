@@ -61,6 +61,41 @@ def test_box_delegation_uses_source_files_without_mandatory_input_packaging():
     assert not re.search(r"max_(?:steps|tool_calls)[\"']?\s*[:=]\s*\d+", text)
 
 
+def test_page_writer_tool_route_has_complete_unique_sections():
+    text = (STANDARD / "references/box-agent-tool-contract.md").read_text()
+    sections = []
+    for heading in ("## 1. 路径与执行所有权", "### 文件工具与提交", "### 子任务输入与返回"):
+        assert text.splitlines().count(heading) == 1
+        level = len(heading) - len(heading.lstrip("#"))
+        rest = text.split(heading + "\n", 1)[1]
+        sections.append(re.split(r"(?m)^#{1," + str(level) + r"} ", rest, maxsplit=1)[0])
+    selected = "\n".join(sections)
+    for required in ("write_scope", "task_pack.deck_dir", "chunk", "未完成",
+                     "父级产物核验", "Style Lock", "base.css", "全部 HTML 首稿",
+                     "files", "不自动注入文件内容", "截断", "上下文压缩",
+                     "不递归委派", "不读运行轨迹", "相同失败再次出现", "不得搜索或修改 Box-Agent 源码"):
+        assert required in selected
+    assert "--generator-model" not in selected
+    assert "review-prep" not in selected
+    for relative in ("SKILL.md", "subagents/slide.md"):
+        instructions = (STANDARD / relative).read_text()
+        assert "阅读路由" in instructions
+        assert "子任务须完整掌握同一契约" not in instructions
+        assert "未提供的本说明与工具契约仍须完整读取" not in instructions
+
+
+def test_global_design_references_agree_on_single_style_lock_source():
+    planning = (STANDARD / "references/planning-contract.md").read_text()
+    global_plan = planning.split("## 1. `plan/deck.md`", 1)[1].split("### Production groups", 1)[0]
+    assert "不把 Style Lock 的全套内容复制" in global_plan
+    assert "逐页计划与素材机读字段不改成链接" in global_plan
+    rules = (STANDARD / "references/design-rules.md").read_text()
+    for line in rules.splitlines():
+        if line.startswith(("- **写一句贴主题的", "- **写一句「设计概念」")):
+            assert "plan/design-brief.md#Style Lock" in line
+            assert "plan/deck.md" not in line
+
+
 @pytest.mark.parametrize("relative", [
     "SKILL.md",
     "subagents/slide.md",
