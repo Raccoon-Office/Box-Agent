@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import os
@@ -909,6 +910,7 @@ class WriteTool(Tool):
         *,
         reason: str,
         final: bool = True,
+        restart: bool = False,
     ) -> ToolResult:
         """Discard a terminally invalid write and expose the transaction outcome."""
         raw_output = {
@@ -922,6 +924,10 @@ class WriteTool(Tool):
             "chunks": state.next_index,
             "final": final,
         }
+        if restart:
+            raw_output.update(
+                next_chunk_index=0, action="restart", restart_required=True
+            )
         cleanup_error = self._discard(state)
         if cleanup_error is not None:
             raw_output["cleanup_error"] = cleanup_error
@@ -961,12 +967,14 @@ class WriteTool(Tool):
         digest = hashlib.sha256(data).hexdigest()
         if chunk_index < state.next_index:
             if state.chunk_hashes.get(chunk_index) == digest:
+                receipt = {
+                    "duplicate": True,
+                    "next_chunk_index": state.next_index,
+                    "action": "continue",
+                }
                 return ToolResult(
                     success=True,
-                    content=(
-                        f"Chunk {chunk_index} was already accepted for {state.target}; "
-                        f"next chunk_index={state.next_index}."
-                    ),
+                    content=json.dumps(receipt),
                     raw_output={
                         "type": "write_file_chunk",
                         "path": str(state.target),
@@ -974,19 +982,21 @@ class WriteTool(Tool):
                         "chunk_index": chunk_index,
                         "next_chunk_index": state.next_index,
                         "size_bytes": state.size_bytes,
-                        "duplicate": True,
+                        **receipt,
                         "final": False,
                     },
                 )
-            return self._active_result(
+            return self._discarded_result(
                 state,
-                ToolResult(
-                    success=False,
-                    error=(
-                        "WRITE_FILE_CHUNK_CONFLICT: chunk_index="
-                        f"{chunk_index} was already accepted with different content."
-                    ),
+                (
+                    "WRITE_FILE_CHUNK_CONFLICT: chunk_index="
+                    f"{chunk_index} was already accepted with different content. "
+                    "The pending transaction was discarded; restart from "
+                    "chunk_index=0. restart_required=true."
                 ),
+                reason="chunk_conflict",
+                final=final,
+                restart=True,
             )
         if chunk_index > state.next_index:
             return self._active_result(
@@ -997,6 +1007,18 @@ class WriteTool(Tool):
                         f"WRITE_FILE_CHUNK_OUT_OF_ORDER: expected {state.next_index}, "
                         f"got {chunk_index}."
                     ),
+                ),
+            )
+        if not data and not final:
+            return self._active_result(
+                state,
+                ToolResult(
+                    success=False,
+                    error=(
+                        "WRITE_FILE_EMPTY_CHUNK: a non-final chunk must contain "
+                        f"content. Retry chunk_index={state.next_index} with content."
+                    ),
+                    raw_output={"action": "continue", "restart_required": False},
                 ),
             )
         if state.next_index >= MAX_WRITE_FILE_CHUNKS:
@@ -1154,12 +1176,16 @@ class WriteTool(Tool):
                 success=False,
                 error=(
                     "WRITE_FILE_FINAL_CHUNK_CONFLICT: committed chunk_index="
-                    f"{chunk_index} had different content."
+                    f"{chunk_index} had different content. No transaction is active; "
+                    "restart from chunk_index=0. restart_required=true."
                 ),
                 raw_output={
                     "type": "write_file_final_chunk_conflict",
                     "path": str(target),
                     "transaction_state": "none",
+                    "next_chunk_index": 0,
+                    "restart_required": True,
+                    "action": "restart",
                     "final": True,
                 },
             )
@@ -1190,17 +1216,26 @@ class WriteTool(Tool):
                 )
                 if replay is not None:
                     return replay
-                if chunk_index != 0:
+                if chunk_index != 0 or (not data and not final):
+                    reason = (
+                        "A non-final chunk must contain content."
+                        if not data
+                        else "No active write transaction exists."
+                    )
                     return ToolResult(
                         success=False,
                         error=(
                             "WRITE_FILE_TRANSACTION_NOT_FOUND: no active write for "
-                            f"{target}; start with chunk_index=0."
+                            f"{target}. {reason} Restart with chunk_index=0; "
+                            "non-final chunks need content. restart_required=true."
                         ),
                         raw_output={
                             "type": "write_file_transaction_missing",
                             "path": str(target),
                             "transaction_state": "none",
+                            "next_chunk_index": 0,
+                            "restart_required": True,
+                            "action": "restart",
                             "final": final,
                         },
                     )

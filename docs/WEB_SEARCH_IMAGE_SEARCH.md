@@ -15,13 +15,13 @@ The current MCP schema does not expose the upstream Global API's `visual` image-
 
 ```json
 {
-  "Query": "Shandong University campus architecture",
-  "SearchType": "image",
-  "Count": 5
+  "query": "Shandong University campus architecture",
+  "search_type": "image",
+  "count": 5
 }
 ```
 
-`Query` is required and should describe one visual intent in 1–100 characters. Set `SearchType` to `image`; otherwise it defaults to `web`. Image search returns at most five results. `TimeRange` is intended for web results, and `AuthLevel` optionally filters authority (`0` default, `1` very high).
+The model-facing parameters are lowercase: `query` is required and must contain 1–100 characters; `count` is 1–50 for web and 1–5 for image; `search_type` is `web` or `image` and defaults to `web`; `time_range` is `OneDay`, `OneWeek`, `OneMonth`, `OneYear`, or a valid ascending `YYYY-MM-DD..YYYY-MM-DD` range; and `auth_level` is `0` (default) or `1`. Box-Agent maps these names to the hosted MCP service's legacy `Query`, `Count`, `SearchType`, `TimeRange`, and `AuthLevel` fields. Legacy uppercase calls remain accepted when they do not conflict with a lowercase value.
 
 Call the registered `web_search` tool instead of addressing the internal MCP URL directly. A delegated sub-agent must explicitly request `required_tools: ["web_search"]`.
 
