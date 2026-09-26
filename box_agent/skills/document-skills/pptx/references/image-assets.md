@@ -54,7 +54,7 @@ Rules:
    `assets/source/`, hashes them, and records `decision: "use_existing"`.
    Reference that portable copied path from `deck.json`; never leave the final
    deck pointing at the user's original machine path.
-9. A `web` row calls the registered `web_search` tool with `SearchType=image` before any generation call. A successfully localized result becomes `use_existing`, `resolved_via: web`, and retains its search/source metadata plus `license_status: unverified`; no usable result or tool/provider unavailability keeps the row as `generate` with the terminal search status and fallback reason preserved.
+9. A `web` row calls the registered `web_search` tool with `search_type=image` before any generation call. A successfully localized result becomes `use_existing`, `resolved_via: web`, and retains its search/source metadata plus `license_status: unverified`; no usable result or tool/provider unavailability keeps the row as `generate` with the terminal search status and fallback reason preserved.
 
 ## 2. Trigger rules
 
@@ -129,7 +129,7 @@ Rules:
 ## 4.1 Hosted web image search before generation
 
 For every `acquire_via: web` row, call the registered `web_search` tool with
-the exact scaffolded query, `SearchType: "image"`, and `Count: 5` before calling
+the exact scaffolded query, `search_type: "image"`, and `count: 5` before calling
 `generate_image`. Call once per unique query and reuse the returned candidate
 batch for any identical-query rows, because the runtime intentionally rejects
 duplicate searches. Do not invoke the hosted MCP URL from a script: the Agent tool

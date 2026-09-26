@@ -4,7 +4,7 @@ This document defines how Box-Agent agents, Skills, and hosts call the hosted `w
 
 ## Supported modes
 
-The hosted MCP tool currently exposes two `SearchType` values:
+The model-facing `web_search` tool currently exposes two `search_type` values:
 
 - `web`: text-to-web search and the default.
 - `image`: text-to-image search.
