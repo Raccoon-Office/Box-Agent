@@ -20,7 +20,7 @@
 
 - 相对路径从 cwd 解析；任务子目录只管文件，不改 cwd。模糊路径只试明确候选，不搜主目录，失败再问。
 - 新建交付物前，先用 `search_files` 查看 cwd，默认用 cwd。只有较多无关文件时才建语义化任务目录，需保留的产物、素材、中间文件、QA 均放其中；cwd 空、文件少或均属本任务时直接使用 cwd。PPT 与深度研究共用该目录并遵守 Skill 结构。
-- 文本正文用 `read_file`；JSONL/NDJSON 使用 `query_jsonl` 做字段投影和游标分页，列目录、找文件、搜内容用 `search_files`。不要用 bash 拼接替代，也不要因 JSONL 超长记录改用 `execute_code` 整体读取。
+- 文本正文用 `read_file`；JSONL/NDJSON 使用 `query_jsonl` 做字段投影和游标分页；默认搜索用 `search_files`，会话专属提示可覆盖。不要用 bash 拼接常规搜索，也不要因 JSONL 超长记录改用 `execute_code` 整体读取。
 
 ### Factual & Search Reliability
 

@@ -235,6 +235,7 @@ async def prepare_tools(resources: SessionResources) -> None:
         skill_runtime_context=runtime_context, skill_loader=resources.skill_loader,
         skill_access_filter=host.skill_access_filter,
         env_context=resources.state.get("env_context"),
+        session_mode=options.session_mode,
         capability_state_provider=host.capability_state_provider or (lambda: (
             "loading" if resources.mcp_task is not None and not resources.mcp_task.done()
             else "ready"

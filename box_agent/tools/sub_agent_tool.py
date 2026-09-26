@@ -436,8 +436,9 @@ class SubAgentTool(EventEmittingTool):
             "the startup and merge cost. The parent remains responsible for synthesis, conflicts, "
             "final deliverables, and verification.\n\n"
             "Pass a complete `task` brief. `required_tools` defaults only to available trusted "
-            "read/search tools (`read_file`, `query_jsonl`, `search_files`, `web_search`, "
-            "`web_extract`). Declaring `skills` also includes available get_skill/list_skills, "
+            "read/search tools (`read_file`, `query_jsonl`, `search_files`, `grep`, `glob`, "
+            "`web_search`, `web_extract`). Declaring `skills` also includes available "
+            "get_skill/list_skills, "
             "restricted to assigned Skills and dependencies. With an exact "
             "`write_scope`, omitted tools also include the parent's available write_file, "
             "edit_file, and append_file, restricted to those outputs; pass an explicit "
@@ -498,7 +499,8 @@ class SubAgentTool(EventEmittingTool):
                     "type": "array",
                     "description": (
                         "Exact parent tools requested for this child. When omitted, "
-                        "defaults to available local read/search and web_search/web_extract; "
+                        "defaults to available local read/search (including grep/glob) and "
+                        "web_search/web_extract; "
                         "declared skills add available get_skill/list_skills within their assigned scope. "
                         "A non-empty "
                         "write_scope also supplies available write_file, edit_file, and "

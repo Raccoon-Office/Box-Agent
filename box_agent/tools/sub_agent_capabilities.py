@@ -27,7 +27,9 @@ BATCH_FILE_MAX_CHARS = 64_000
 BATCH_AGGREGATE_MAX_CHARS = 200_000
 
 _BATCH_FILES_ALLOWED_TOOLS = frozenset({"read_file"})
-DEFAULT_SAFE_TOOL_NAMES = frozenset({"query_jsonl", "read_file", "search_files"})
+DEFAULT_SAFE_TOOL_NAMES = frozenset(
+    {"glob", "grep", "query_jsonl", "read_file", "search_files"}
+)
 DEFAULT_READ_TOOL_NAMES = DEFAULT_SAFE_TOOL_NAMES | frozenset({"web_extract", "web_search"})
 SKILL_READ_TOOL_NAMES = frozenset({"get_skill", "list_skills"})
 PATH_SCOPED_WRITE_TOOLS = frozenset({"append_file", "edit_file", "write_file"})
@@ -60,6 +62,8 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "read_file": ToolCapabilityMetadata(read=True),
     "query_jsonl": ToolCapabilityMetadata(read=True),
     "search_files": ToolCapabilityMetadata(read=True),
+    "grep": ToolCapabilityMetadata(read=True),
+    "glob": ToolCapabilityMetadata(read=True),
     "write_file": ToolCapabilityMetadata(write=True),
     "append_file": ToolCapabilityMetadata(write=True),
     "edit_file": ToolCapabilityMetadata(write=True),

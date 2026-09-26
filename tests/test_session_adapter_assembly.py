@@ -29,6 +29,54 @@ async def test_legacy_positional_session_profile_starts_without_log_restore(tmp_
 
 
 @pytest.mark.asyncio
+async def test_shared_assembly_passes_session_mode_to_workspace_tools(tmp_path):
+    from box_agent.agent_session import AgentSession
+    from box_agent.session_context import HostBindings, SessionOptions
+
+    received = []
+
+    def workspace_tools(_tools, _config, _workspace, **kwargs):
+        received.append(kwargs)
+        return None
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(
+            workspace_dir=str(tmp_path),
+            enable_memory=False,
+            enable_memory_extraction=False,
+        ),
+        tools=ToolsConfig(
+            enable_mcp=False,
+            enable_skills=False,
+            enable_file_tools=False,
+            enable_bash=False,
+            enable_sub_agent=False,
+        ),
+    )
+    session = await AgentSession.open(
+        config=config,
+        options=SessionOptions(
+            profile="cli",
+            workspace_dir=tmp_path,
+            session_mode="code_agent",
+        ),
+        host=HostBindings(
+            llm_client=DoneLLM(),
+            base_tools=[],
+            workspace_tools_factory=workspace_tools,
+        ),
+    )
+    try:
+        assert received and received[0]["session_mode"] == "code_agent"
+        assert "已知文件路径" in session.agent.system_prompt
+        assert "开放式项目分析" in session.agent.system_prompt
+        assert "截断或超时" in session.agent.system_prompt
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.asyncio
 async def test_acp_uses_shared_preparation_and_managed_session(tmp_path, monkeypatch):
     config = Config(llm=LLMConfig(api_key="test"), agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False), tools=ToolsConfig(enable_mcp=False, enable_skills=False, enable_file_tools=False, enable_bash=False, enable_sub_agent=False))
     calls = []

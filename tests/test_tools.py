@@ -925,6 +925,120 @@ def test_workspace_tools_register_search_files(tmp_path):
     assert "report_execution_result" in tool_names
 
 
+def test_code_workspace_registers_ripgrep_tools_without_removing_search_files(
+    tmp_path,
+    monkeypatch,
+):
+    from box_agent.tools import setup as setup_module
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    monkeypatch.setattr(
+        setup_module,
+        "resolve_ripgrep_executable",
+        lambda _runtime_env: "/injected/rg",
+        raising=False,
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        session_mode="code_agent",
+    )
+
+    assert {"search_files", "grep", "glob"} <= {tool.name for tool in tools}
+
+
+def test_general_workspace_does_not_register_ripgrep_tools(tmp_path, monkeypatch):
+    from box_agent.tools import setup as setup_module
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    monkeypatch.setattr(
+        setup_module,
+        "resolve_ripgrep_executable",
+        lambda _runtime_env: "/injected/rg",
+        raising=False,
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        session_mode="general",
+    )
+
+    tool_names = {tool.name for tool in tools}
+    assert "search_files" in tool_names
+    assert "grep" not in tool_names
+    assert "glob" not in tool_names
+
+
+def test_code_workspace_falls_back_when_ripgrep_is_unavailable(tmp_path, monkeypatch):
+    from box_agent.tools import setup as setup_module
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    monkeypatch.setattr(
+        setup_module,
+        "resolve_ripgrep_executable",
+        lambda _runtime_env: None,
+        raising=False,
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        session_mode="code_agent",
+    )
+
+    tool_names = {tool.name for tool in tools}
+    assert "search_files" in tool_names
+    assert "grep" not in tool_names
+    assert "glob" not in tool_names
+
+
 def test_add_workspace_tools_applies_configured_bash_timeouts(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test"),

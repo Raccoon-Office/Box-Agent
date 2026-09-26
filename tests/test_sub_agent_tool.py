@@ -306,6 +306,8 @@ def test_description_explains_flat_contract_and_derived_policy():
 
     assert "independent context, parallel latency, or evidence isolation" in description
     assert "trusted read/search tools" in description
+    assert "`grep`" in description
+    assert "`glob`" in description
     assert "`web_search`" in description
     assert "`web_extract`" in description
     assert "restricted to assigned Skills and dependencies" in description
