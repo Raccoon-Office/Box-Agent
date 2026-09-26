@@ -680,6 +680,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             sandbox_venv_path=sandbox_venv_path,
             permission_engine=permission_engine,
             runtime_env=runtime_env,
+            pptx_sync_script_provider=(
+                lambda: skill_loader.get_bound_expert_resource(
+                    "pptx", "scripts/sync_image_manifest_status.js"
+                )
+            ) if skill_loader is not None else None,
             process_owner_id=process_owner_id,
             bypass_dangerous_command_approval=bypass_dangerous_command_approval,
             default_timeout_seconds=config.tools.bash_default_timeout_seconds,

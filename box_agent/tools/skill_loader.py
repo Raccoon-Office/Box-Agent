@@ -12,7 +12,7 @@ Supports:
 """
 
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from hashlib import sha256
 import os
 import re
@@ -27,7 +27,7 @@ import yaml
 from box_agent.execution_profile import is_skill_blocked
 from box_agent.user_paths import state_path
 
-SkillSource = Literal["builtin", "connector", "user"]
+SkillSource = Literal["builtin", "connector", "user", "expert"]
 
 SKILL_USAGE_GUIDANCE = (
     "When the user names a Skill or the task clearly matches an available Skill, read its "
@@ -294,6 +294,10 @@ class _SourceEntry:
     manifest_paths: Optional[Tuple[Path, ...]] = None
     manifest_loaded: bool = False
     unavailable_skills: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    # 专家技能固定真实根目录，发现和刷新时都不能通过链接读取目录外正文。
+    containment_root: Optional[Path] = None
+    bound_skill_names: frozenset[str] = frozenset()
+    bound_skill_paths: Dict[Path, str] = field(default_factory=dict)
 
 
 class SkillLoader:
@@ -380,19 +384,44 @@ class SkillLoader:
     def skills_dir(self) -> Path:
         return self._sources[0].directory if self._sources else Path("./skills")
 
-    def with_expert_skill_sources(self, skill_names: List[str]) -> "SkillLoader":
-        """Clone this loader with uninstalled bundled skills requested by an expert.
+    def get_bound_expert_resource(self, name: str, relative_path: str) -> Optional[Path]:
+        """返回当前选中且明确绑定的专家技能资源；每次使用时复核目录边界。"""
+        self.maybe_reload()
+        skill = self.get_skill(name)
+        if skill is None or skill.source != "expert" or skill.broken:
+            return None
+        for entry in self._sources:
+            if (entry.source != "expert" or entry.containment_root is None
+                    or entry.bound_skill_paths.get(skill.skill_path) != name):
+                continue
+            try:
+                root = skill.skill_path.parent.resolve(strict=True)
+                resource = (root / relative_path).resolve(strict=True)
+                if (root.is_relative_to(entry.containment_root)
+                        and resource.is_relative_to(root) and resource.is_file()):
+                    return resource
+            except (OSError, RuntimeError):
+                continue
+        return None
+
+    def with_expert_skill_sources(
+        self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
+        skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
+    ) -> "SkillLoader":
+        """Clone this loader with session-local expert skills.
 
         Recommended skills intentionally stay out of the builtin manifest until
         a user installs them. The clone adds only the exact requested skill
         directories, keeping this capability scoped to the expert session.
+        Explicit package bindings may replace protected builtins in this session;
+        reserved runtime names and execution-profile policies remain protected.
         """
         requested_names = [
             name.strip()
             for name in skill_names
             if isinstance(name, str) and _SKILL_NAME_RE.match(name.strip())
         ]
-        if not requested_names:
+        if not requested_names and not skill_directories:
             return self
 
         extra_sources: List[Tuple[Path, SkillSource]] = []
@@ -413,16 +442,31 @@ class SkillLoader:
                     extra_sources.append((candidate, "builtin"))
                     break
 
-        if not extra_sources:
+        package_directories = [Path(directory).resolve() for directory in skill_directories or []]
+        if not extra_sources and not package_directories:
             return self
 
+        # 仅调整会话副本的顺序；普通会话仍使用原加载器和原优先级。
         loader = SkillLoader(
             sources=[
+                *((directory, "expert") for directory in package_directories),
                 *((entry.directory, entry.source) for entry in self._sources),
                 *extra_sources,
             ],
             skill_settings_path=self._skill_settings_path,
         )
+        for entry in loader._sources[:len(package_directories)]:
+            entry.containment_root = entry.directory
+            entry.bound_skill_names = frozenset(
+                requested_names if skill_bindings_by_directory is None
+                else skill_bindings_by_directory.get(entry.directory, ())
+            )
+            if entry.directory.name in entry.bound_skill_names:
+                entry.bound_skill_paths[entry.directory / "SKILL.md"] = entry.directory.name
+        for original, entry in zip(self._sources, loader._sources[len(package_directories):]):
+            entry.containment_root = original.containment_root
+            entry.bound_skill_names = original.bound_skill_names
+            entry.bound_skill_paths = dict(original.bound_skill_paths)
         loader.discover_skills()
         return loader
 
@@ -637,6 +681,8 @@ class SkillLoader:
 
     def discover_skills(self) -> List[Skill]:
         """Discover skills, preserving canonical implementations of reserved runtimes."""
+        previous_by_path = {skill.skill_path: skill for skill in self._all_skills.values()}
+        selected_bound_names: set[str] = set()
         self.loaded_skills = {}
         self._all_skills = {}
         # Reset per-run parse errors so callers always see the current pass only.
@@ -650,7 +696,7 @@ class SkillLoader:
         # ones overwrite by dict assignment.
         for entry in reversed(self._sources):
             entry.unavailable_skills.clear()
-            if not entry.directory.exists():
+            if not entry.directory.exists() and not entry.bound_skill_paths:
                 continue
 
             # Manifest only applies to builtin sources. For user skills we
@@ -659,8 +705,21 @@ class SkillLoader:
             if entry.source == "builtin":
                 self._load_manifest(entry)
 
-            for skill_file in self._iter_skill_files(entry):
-                skill = self.load_skill(skill_file, source=entry.source)
+            # 已绑定正文消失时仍保留入口，返回损坏诊断，不能静默换成内置版本。
+            skill_files = dict.fromkeys([*self._iter_skill_files(entry), *entry.bound_skill_paths])
+            for skill_file in skill_files:
+                error = None
+                if entry.containment_root is not None:
+                    _, error = self._expert_path_state(skill_file, entry.containment_root)
+                if error:
+                    # 只隔离违规技能，不能因刷新一个坏链接而中断整个会话。
+                    skill = self._broken_placeholder(skill_file, entry.source, error)
+                    previous = previous_by_path.get(skill_file)
+                    if previous is not None:
+                        # 目录名可能不同于 YAML 名称；保留身份，避免误回退到全局同名技能。
+                        skill.name = previous.name
+                else:
+                    skill = self.load_skill(skill_file, source=entry.source)
                 if skill is None:
                     continue
 
@@ -674,25 +733,41 @@ class SkillLoader:
                     orphan_count += 1
                     continue
 
+                if skill.broken and skill_file in entry.bound_skill_paths:
+                    skill.name = entry.bound_skill_paths[skill_file]
+                bound_package_skill = (
+                    entry.source == "expert"
+                    and entry.containment_root is not None
+                    and skill.name in entry.bound_skill_names
+                )
+                if bound_package_skill:
+                    entry.bound_skill_paths[skill_file] = skill.name
+                # 明确绑定的包优先于未绑定同名项；同级仍保留原来源顺序。
+                if skill.name in selected_bound_names and not bound_package_skill:
+                    continue
                 current = self._all_skills.get(skill.name)
                 if (
-                    (entry.source == "user" and skill.name in RESERVED_BUILTIN_SKILL_NAMES)
+                    (entry.source in {"user", "expert"} and skill.name in RESERVED_BUILTIN_SKILL_NAMES)
                     or (
                         entry.source != "builtin"
                         and current is not None
                         and current.source == "builtin"
                         and not current.allow_override
+                        and not bound_package_skill
                     )
                 ):
-                    # These skills own host-negotiated runtime contracts.  A
-                    # user prompt skill may extend the workflow under another
-                    # name, but must not replace the packaged implementation.
+                    # 仅明确绑定的专家包可替换；损坏项也保留诊断，保留名称仍不放行。
                     reserved_override_count += 1
                     continue
 
                 self._all_skills[skill.name] = skill
+                if bound_package_skill:
+                    selected_bound_names.add(skill.name)
 
-                if skill.disabled or skill.name in disabled_skill_names:
+                # 专家包来源不受普通技能的同名开关影响；不改全局配置和其他限制。
+                if skill.disabled or (
+                    skill.source != "expert" and skill.name in disabled_skill_names
+                ):
                     self.loaded_skills.pop(skill.name, None)
                     continue
 
@@ -755,7 +830,21 @@ class SkillLoader:
         ):
             return [path for path in entry.manifest_paths if path.is_file()]
 
+        if entry.containment_root is not None:
+            _, error = self._expert_path_state(entry.directory, entry.containment_root)
+            if error:
+                # 根目录本身被替换时不递归扫描外部目录，保留入口用于不可用诊断。
+                return [entry.directory / "SKILL.md"]
         return list(entry.directory.rglob("SKILL.md"))
+
+    @staticmethod
+    def _expert_path_state(path: Path, root: Path) -> Tuple[str, Optional[str]]:
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            return "unresolvable", "Cannot resolve the expert skill path"
+        error = None if resolved.is_relative_to(root) else "Skill file is outside the expert skill directory"
+        return str(resolved), error
 
     def _load_manifest(self, entry: _SourceEntry) -> None:
         """Populate ``entry.manifest_names`` from ``_manifest.json`` if present.
@@ -905,13 +994,19 @@ class SkillLoader:
         ):
             candidates.extend(entry.manifest_paths)
         else:
-            candidates.extend(entry.directory.rglob("SKILL.md"))
+            candidates.extend(self._iter_skill_files(entry))
 
-        signatures = [
-            signature
-            for path in candidates
-            if (signature := self._stat_signature(path, entry.directory)) is not None
-        ]
+        signatures = []
+        for path in candidates:
+            if entry.containment_root is not None:
+                resolved, error = self._expert_path_state(path, entry.containment_root)
+                # 目标身份也参与刷新，不能只依赖可能相同的文件大小和修改时间。
+                signatures.append((f"expert-path:{path}:{resolved}", 0, 0))
+                if error:
+                    continue
+            signature = self._stat_signature(path, entry.directory)
+            if signature is not None:
+                signatures.append(signature)
         return tuple(sorted(signatures))
 
     @staticmethod
