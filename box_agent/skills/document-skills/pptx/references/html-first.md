@@ -207,7 +207,7 @@ concepts, abstract scenes, textures, and visual metaphors.
 Default to `acquire_via: ai` for explicitly generated covers, dividers, posters,
 brand campaigns, product concepts, vision/future-state pages, abstract concept
 pages, and emotionally led closing pages. Use `acquire_via: web` for real or
-ordinary photographic subjects; it calls `web_search` with `SearchType=image`
+ordinary photographic subjects; it calls `web_search` with `search_type=image`
 before retaining `generate` as a labelled concept fallback. Localize the selected
 result with `scripts/localize_web_image.py`; web-search reuse rights remain
 unverified until the source page is reviewed. Avoid generating
