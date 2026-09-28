@@ -469,6 +469,29 @@ def _get_field(value: Any, name: str) -> Any:
     return getattr(value, name, None)
 
 
+def _token_usage_from_openai(provider_usage: Any) -> TokenUsage:
+    """Keep cached prompt tokens as a subset of the provider's prompt total."""
+    prompt_tokens = _get_field(provider_usage, "prompt_tokens") or 0
+    cached_tokens = _get_field(
+        _get_field(provider_usage, "prompt_tokens_details"), "cached_tokens"
+    )
+    cache_reported = (
+        isinstance(cached_tokens, int)
+        and not isinstance(cached_tokens, bool)
+        and 0 <= cached_tokens <= prompt_tokens
+    )
+    cached_tokens = cached_tokens if cache_reported else 0
+    return TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=_get_field(provider_usage, "completion_tokens") or 0,
+        total_tokens=_get_field(provider_usage, "total_tokens") or 0,
+        input_tokens=prompt_tokens - cached_tokens,
+        output_tokens=_get_field(provider_usage, "completion_tokens") or 0,
+        cache_read_input_tokens=cached_tokens,
+        cache_read_input_tokens_reported=cache_reported,
+    )
+
+
 def _reasoning_text_from_aliases(value: Any) -> str:
     """Return reasoning text from common OpenAI-compatible field aliases."""
     for name in ("reasoning", "reasoning_content"):
@@ -886,13 +909,7 @@ class OpenAIClient(LLMClientBase):
         # Extract token usage from response
         usage = None
         if hasattr(response, "usage") and response.usage:
-            usage = TokenUsage(
-                prompt_tokens=response.usage.prompt_tokens or 0,
-                completion_tokens=response.usage.completion_tokens or 0,
-                total_tokens=response.usage.total_tokens or 0,
-                input_tokens=response.usage.prompt_tokens or 0,
-                output_tokens=response.usage.completion_tokens or 0,
-            )
+            usage = _token_usage_from_openai(response.usage)
 
         return LLMResponse(
             content=text_content,
@@ -1119,13 +1136,7 @@ class OpenAIClient(LLMClientBase):
                         )
                     # Usage info (sent in the final chunk with choices=[])
                     if hasattr(chunk, "usage") and chunk.usage:
-                        usage = TokenUsage(
-                            prompt_tokens=chunk.usage.prompt_tokens or 0,
-                            completion_tokens=chunk.usage.completion_tokens or 0,
-                            total_tokens=chunk.usage.total_tokens or 0,
-                            input_tokens=chunk.usage.prompt_tokens or 0,
-                            output_tokens=chunk.usage.completion_tokens or 0,
-                        )
+                        usage = _token_usage_from_openai(chunk.usage)
 
                     if not chunk.choices:
                         continue

@@ -1974,7 +1974,11 @@ class CapabilityUsageLLM:
                         function=FunctionCall(name="browser_open", arguments={"url": "https://example.com"}),
                     ),
                 ],
-                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                usage=TokenUsage(
+                    prompt_tokens=10, completion_tokens=5, total_tokens=15,
+                    input_tokens=6, cache_read_input_tokens=4,
+                    cache_read_input_tokens_reported=True,
+                ),
             )
         else:
             yield StreamEvent(type="text", delta="done")
@@ -3795,6 +3799,7 @@ async def test_acp_emits_turn_usage_for_tools_mcp_and_tokens(tmp_path, monkeypat
         "completionTokens": 6,
         "totalTokens": 18,
         "calls": 2,
+        "cachedTokens": 4,
     }
 
 

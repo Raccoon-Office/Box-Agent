@@ -260,7 +260,7 @@ paths; do not generate descriptive aliases first and rename them afterwards.
 Read `references/image-assets.md` for image acquisition. Follow the scaffolded
 `acquire_via`: `user` keeps localized supplied assets; `web` uses image search;
 `ai` uses generation; `none` stays image-free. Web rows use the exact search query
-with `SearchType: "image"` and `Count: 5`, once per unique query. Localize selected
+with `search_type: "image"` and `count: 5`, once per unique query. Localize selected
 receipts with `scripts/localize_web_image.py`. Only after `exhausted` or
 `unavailable` may a web job use its labelled AI-concept fallback. Never fabricate
 a documentary image of a real subject. Call `generate_image` with

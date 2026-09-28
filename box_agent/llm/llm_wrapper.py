@@ -378,7 +378,7 @@ class LLMClient:
                 "thinking": response.thinking,
                 "tool_calls": response.tool_calls,
                 "finish_reason": response.finish_reason,
-                "usage": response.usage,
+                "usage": response.usage.reported_usage() if response.usage else None,
                 "provider_response_id": response.provider_response_id,
                 "timing": timing,
             },
@@ -470,7 +470,7 @@ class LLMClient:
                             "raw_finish_reason": event.raw_finish_reason,
                             "provider_response_id": event.provider_response_id,
                             "provider_request_id": event.provider_request_id,
-                            "usage": event.usage,
+                            "usage": event.usage.reported_usage() if event.usage else None,
                             "timing": _trace_timing(
                                 started_at=started_at,
                                 first_event_at=first_event_at,

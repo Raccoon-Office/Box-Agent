@@ -125,6 +125,35 @@ def test_token_usage_accumulator_accepts_provider_key_aliases() -> None:
     }
 
 
+def test_token_usage_accumulator_preserves_legacy_positional_call_count() -> None:
+    usage = TokenUsageAccumulator(10, 5, 15, 2)
+
+    assert usage.as_payload() == {
+        "promptTokens": 10,
+        "completionTokens": 5,
+        "totalTokens": 15,
+        "calls": 2,
+    }
+    assert usage.cached_tokens == 0
+    assert usage.cache_usage_reported_calls == 0
+
+
+def test_token_usage_accumulator_preserves_reported_cache_reads() -> None:
+    usage = TokenUsageAccumulator()
+
+    assert usage.add({
+        "prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
+        "cached_tokens": 40,
+    })
+    assert usage.as_payload() == {
+        "promptTokens": 100,
+        "completionTokens": 10,
+        "totalTokens": 110,
+        "calls": 1,
+        "cachedTokens": 40,
+    }
+
+
 def test_token_usage_accumulator_ignores_empty_or_malformed_values() -> None:
     usage = TokenUsageAccumulator()
 

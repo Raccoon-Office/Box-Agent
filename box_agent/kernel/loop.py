@@ -1774,13 +1774,7 @@ async def _run_agent_loop_impl(
                 ),
                 finish_reason=response.finish_reason,
                 usage=(
-                    response.usage.model_dump(
-                        include={
-                            "prompt_tokens",
-                            "completion_tokens",
-                            "total_tokens",
-                        }
-                    )
+                    response.usage.reported_usage()
                     if response.usage
                     else None
                 ),

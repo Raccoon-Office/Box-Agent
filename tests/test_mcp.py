@@ -459,6 +459,127 @@ class TestMCPToolRegistration:
 class TestMCPToolExecution:
     """Tests for defensive normalization of remote MCP results."""
 
+    @staticmethod
+    def hosted_web_search(session):
+        return MCPTool(
+            name="web_search",
+            remote_name="web_search",
+            server_name="mcp-server-askecho-search-infinity",
+            description="remote search",
+            parameters={
+                "type": "object",
+                "properties": {"Query": {"type": "string"}},
+                "required": ["Query"],
+            },
+            session=session,
+        )
+
+    @pytest.mark.asyncio
+    async def test_hosted_web_search_exposes_lowercase_schema_and_maps_to_remote(self):
+        class FakeSession:
+            arguments = None
+
+            async def call_tool(self, name, arguments):
+                self.arguments = arguments
+                return SimpleNamespace(content=[SimpleNamespace(text="ok")], isError=False)
+
+        session = FakeSession()
+        tool = self.hosted_web_search(session)
+
+        assert set(tool.parameters["properties"]) == {
+            "query", "count", "search_type", "time_range", "auth_level"
+        }
+        result = await tool.invoke({
+            "query": "cats",
+            "count": 3,
+            "search_type": "web",
+            "time_range": "2026-09-01..2026-09-19",
+            "auth_level": 1,
+        })
+
+        assert result.success is True
+        assert session.arguments == {
+            "Query": "cats",
+            "Count": 3,
+            "SearchType": "web",
+            "TimeRange": "2026-09-01..2026-09-19",
+            "AuthLevel": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_hosted_web_search_accepts_legacy_uppercase_call(self):
+        class FakeSession:
+            arguments = None
+
+            async def call_tool(self, name, arguments):
+                self.arguments = arguments
+                return SimpleNamespace(content=[], isError=False)
+
+        session = FakeSession()
+        result = await self.hosted_web_search(session).invoke({"Query": "legacy"})
+
+        assert result.success is True
+        assert session.arguments == {"Query": "legacy"}
+
+    @pytest.mark.asyncio
+    async def test_hosted_image_search_defaults_count_to_safe_limit(self):
+        class FakeSession:
+            arguments = None
+
+            async def call_tool(self, name, arguments):
+                self.arguments = arguments
+                return SimpleNamespace(content=[], isError=False)
+
+        session = FakeSession()
+        result = await self.hosted_web_search(session).invoke(
+            {"query": "campus", "search_type": "image"}
+        )
+
+        assert result.success is True
+        assert session.arguments == {"Query": "campus", "SearchType": "image", "Count": 5}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("arguments", "path"),
+        [
+            ({"query": "   "}, "/query"),
+            ({"query": "x", "search_type": "video"}, "/search_type"),
+            ({"query": "x", "time_range": "2026-09-20..2026-09-01"}, "/time_range"),
+            ({"query": "x", "search_type": "image", "count": 6}, "/count"),
+        ],
+    )
+    async def test_hosted_web_search_rejects_invalid_constraints_without_remote_call(
+        self, arguments, path
+    ):
+        class FakeSession:
+            calls = 0
+
+            async def call_tool(self, name, arguments):
+                self.calls += 1
+                raise AssertionError("invalid search arguments must not call remote")
+
+        session = FakeSession()
+        result = await self.hosted_web_search(session).invoke(arguments)
+
+        assert result.success is False
+        assert result.raw_output["code"] == "INVALID_TOOL_ARGUMENTS"
+        assert result.raw_output["issues"][0]["path"] == path
+        assert result.raw_output["suggested_call"] == {"query": "your search terms"}
+        assert session.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_hosted_web_search_rejects_conflicting_legacy_and_lowercase_values(self):
+        class FakeSession:
+            async def call_tool(self, name, arguments):
+                raise AssertionError("conflicting aliases must not call remote")
+
+        result = await self.hosted_web_search(FakeSession()).invoke(
+            {"query": "one", "Query": "two"}
+        )
+
+        assert result.success is False
+        assert result.raw_output["issues"][0]["keyword"] == "conflict"
+
     @pytest.mark.asyncio
     async def test_invalid_remote_schema_fails_closed_without_leaking_arguments(self):
         class FakeSession:

@@ -2986,18 +2986,21 @@ class BoxACPAgent:
         duration_ms = int((perf_counter() - prompt_start) * 1000)
 
         if state.trace_writer is not None:
+            usage = {
+                "input_tokens": turn_meter.prompt_tokens if turn_meter else 0,
+                "output_tokens": turn_meter.completion_tokens if turn_meter else 0,
+                "total_tokens": turn_total_tokens,
+                "calls": turn_meter.calls if turn_meter else 0,
+            }
+            if turn_meter and turn_meter.cache_usage_reported_calls:
+                usage["cached_tokens"] = turn_meter.cached_tokens
             state.trace_writer.write(
                 "turn.end",
                 turn_id=turn_id,
                 data={
                     "stop_reason": stop_reason,
                     "duration_ms": duration_ms,
-                    "usage": {
-                        "input_tokens": turn_meter.prompt_tokens if turn_meter else 0,
-                        "output_tokens": turn_meter.completion_tokens if turn_meter else 0,
-                        "total_tokens": turn_total_tokens,
-                        "calls": turn_meter.calls if turn_meter else 0,
-                    },
+                    "usage": usage,
                     "goal_autopilot_continuations": autopilot.continuations,
                     "task_id": task_id,
                 },
@@ -3011,6 +3014,10 @@ class BoxACPAgent:
             stop_reason=stop_reason,
             duration_ms=duration_ms,
             total_tokens=turn_total_tokens,
+            cached_tokens=turn_meter.cached_tokens if turn_meter else 0,
+            cache_usage_reported_calls=(
+                turn_meter.cache_usage_reported_calls if turn_meter else 0
+            ),
             goal_autopilot_continuations=autopilot.continuations,
             goal_autopilot_budget_exhausted=autopilot.budget_exhausted,
             goal_autopilot_no_progress_exhausted=autopilot.no_progress_exhausted,
@@ -4222,6 +4229,8 @@ class BoxACPAgent:
                 if meter is not None and meter.total_tokens > 0
                 else observer.usage.as_payload()
             )
+            if meter is not None and meter.total_tokens > 0 and meter.cache_usage_reported_calls:
+                token_usage["cachedTokens"] = meter.cached_tokens
             payload: dict[str, Any] = {
                 "type": "turn_usage",
                 "version": 3,

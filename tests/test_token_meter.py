@@ -14,6 +14,7 @@ import pytest
 
 from box_agent.llm.llm_wrapper import LLMClient
 from box_agent.llm.token_meter import (
+    TokenAccumulator,
     get_token_meter,
     record_usage,
     reset_token_meter,
@@ -23,6 +24,14 @@ from box_agent.schema import LLMProvider, LLMResponse, StreamEvent, TokenUsage
 
 
 # ── Accumulator + scoping ───────────────────────────────────────
+
+
+def test_accumulator_preserves_legacy_positional_call_count():
+    meter = TokenAccumulator(10, 5, 15, 2)
+
+    assert meter.calls == 2
+    assert meter.cached_tokens == 0
+    assert meter.cache_usage_reported_calls == 0
 
 
 def test_accumulator_folds_usage():
@@ -37,6 +46,23 @@ def test_accumulator_folds_usage():
         assert meter.prompt_tokens == 15
         assert meter.completion_tokens == 6
         assert meter.calls == 2
+    finally:
+        reset_token_meter(token)
+
+
+def test_accumulator_tracks_cache_reads_as_part_of_prompt_tokens():
+    token = start_token_meter()
+    try:
+        record_usage(TokenUsage(
+            prompt_tokens=100, completion_tokens=10, total_tokens=110,
+            input_tokens=60, cache_read_input_tokens=40,
+            cache_read_input_tokens_reported=True,
+        ))
+        meter = get_token_meter()
+        assert meter.prompt_tokens == 100
+        assert meter.total_tokens == 110
+        assert meter.cached_tokens == 40
+        assert meter.cache_usage_reported_calls == 1
     finally:
         reset_token_meter(token)
 

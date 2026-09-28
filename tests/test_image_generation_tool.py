@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from box_agent.config import ImageGenerationConfig, ToolsConfig
+from box_agent.config import Config, ImageGenerationConfig, Officev3Config, ToolsConfig
 from box_agent.llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.setup import (
@@ -1194,6 +1194,105 @@ def test_add_workspace_tools_passes_image_generation_config(tmp_path: Path) -> N
     assert tool.model == "chatgpt-image-latest"
     assert tool.auth_file == str(tmp_path / "auth.json")
     assert tool.timeout == 45.0
+
+
+@pytest.mark.parametrize(
+    ("default_image", "image_endpoint", "llm_endpoint", "expected"),
+    [
+        (
+            True,
+            "https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen",
+            "https://xiaohuanxiong.com/api/web/llm/v2",
+            "https://xiaohuanxiong.com/api/web/llm/v2/images/gen",
+        ),
+        (
+            True,
+            "https://xiaohuanxiong.com/api/web/llm/v2/images/gen",
+            "https://code-test.xiaohuanxiong.com/api/web/llm/v2",
+            "https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen",
+        ),
+        (
+            False,
+            "https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen",
+            "https://xiaohuanxiong.com/api/web/llm/v2",
+            "https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen",
+        ),
+        (
+            True,
+            "https://images.example.test/v1/images/generations",
+            "https://xiaohuanxiong.com/api/web/llm/v2",
+            "https://images.example.test/v1/images/generations",
+        ),
+    ],
+)
+def test_workspace_image_endpoint_follows_hosted_session_only_for_default_preset(
+    tmp_path: Path,
+    default_image: bool,
+    image_endpoint: str,
+    llm_endpoint: str,
+    expected: str,
+) -> None:
+    class ToolConfig:
+        tools = ToolsConfig(enable_bash=False, enable_file_tools=False, enable_todo=False, enable_sub_agent=False)
+        image_generation = ImageGenerationConfig(endpoint=image_endpoint)
+        officev3 = Officev3Config(use_default_image_generation_preset=default_image)
+
+    class SessionLlm:
+        api_base = llm_endpoint
+
+    tools = []
+    add_workspace_tools(
+        tools, ToolConfig(), tmp_path, llm=SessionLlm(), output=lambda *_: None,
+    )
+
+    tool = next(tool for tool in tools if tool.name == "generate_image")
+    assert tool.endpoint == expected
+
+
+def test_default_image_endpoint_is_pinned_for_each_session(tmp_path: Path) -> None:
+    class ToolConfig:
+        tools = ToolsConfig(enable_bash=False, enable_file_tools=False, enable_todo=False, enable_sub_agent=False)
+        image_generation = ImageGenerationConfig(
+            endpoint="https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen"
+        )
+        officev3 = Officev3Config(use_default_image_generation_preset=True)
+
+    class SessionLlm:
+        def __init__(self, api_base: str) -> None:
+            self.api_base = api_base
+
+    first_tools = []
+    second_tools = []
+    add_workspace_tools(
+        first_tools, ToolConfig(), tmp_path,
+        llm=SessionLlm("https://xiaohuanxiong.com/api/web/llm/v2"),
+        output=lambda *_: None,
+    )
+    add_workspace_tools(
+        second_tools, ToolConfig(), tmp_path,
+        llm=SessionLlm("https://code-test.xiaohuanxiong.com/api/web/llm/v2"),
+        output=lambda *_: None,
+    )
+
+    first = next(tool for tool in first_tools if tool.name == "generate_image")
+    second = next(tool for tool in second_tools if tool.name == "generate_image")
+    assert first.endpoint == "https://xiaohuanxiong.com/api/web/llm/v2/images/gen"
+    assert second.endpoint == "https://code-test.xiaohuanxiong.com/api/web/llm/v2/images/gen"
+
+
+def test_officev3_default_image_preset_flag_is_loaded_from_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "api_base: https://xiaohuanxiong.com/api/web/llm/v2\n"
+        "provider: openai\n"
+        "model: raccoon-test\n"
+        "officev3:\n"
+        "  llm:\n"
+        "    use_default_image_generation_preset: true\n",
+        encoding="utf-8",
+    )
+
+    assert Config.from_yaml(config_path).officev3.use_default_image_generation_preset is True
 
 
 @pytest.mark.asyncio

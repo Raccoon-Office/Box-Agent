@@ -77,6 +77,17 @@ class TokenUsage(BaseModel):
     output_tokens: int = Field(default=0, exclude=True)
     cache_creation_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens: int = Field(default=0, exclude=True)
+    cache_read_input_tokens_reported: bool = Field(default=False, exclude=True)
+
+    def reported_usage(self) -> dict[str, int]:
+        """Return provider totals with cache reads when the provider reported them."""
+
+        usage = self.model_dump(
+            include={"prompt_tokens", "completion_tokens", "total_tokens"}
+        )
+        if self.cache_read_input_tokens_reported:
+            usage["cached_tokens"] = self.cache_read_input_tokens
+        return usage
 
     @property
     def context_tokens(self) -> int:
