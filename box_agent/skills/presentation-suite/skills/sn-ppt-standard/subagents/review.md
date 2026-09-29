@@ -21,7 +21,7 @@ Box-Agent 静态新建按根 `SKILL.md` 的“Box-Agent 静态新建的执行方
 
 ## 2. 读取与修改边界
 
-`simple_edit` 读取 Style Lock、`base.css`、overview、目标页计划/HTML/PNG 和对应讲稿。`final_review` 完整读取 `plan/design-brief.md`、`plan/deck.md`、全部逐页计划、`base.css`、`speech.md`，再按根 SKILL 的 Review 路由读取质量参考。存在 `plan/grounded-knowledge.md` 或 Research 产物时必须读取并核对；存在附件时读取 `<DECK_DIR>/info_pack.json`，沿 `info_pack.raw_documents` 的绝对路径读取 `raw_documents.json`，并核对其中 `documents[].inherited_images[].path`、`page_visuals[].path` 和 `<DECK_DIR>/assets/catalog.json`。不得假设 `materials/attachments.json`、`research/materials/material_NN.md` 或分片 Material catalog 存在。
+`simple_edit` 读取 Style Lock、`base.css`、overview、目标页计划/HTML/PNG 和对应讲稿。`final_review` 完整读取 `plan/design-brief.md`、`plan/deck.md`、全部逐页计划、`base.css`、`speech.md`，并掌握 deck 引用的已确认大纲与任务原文，再按根 SKILL 的 Review 路由读取质量参考。存在 `plan/grounded-knowledge.md` 或 Research 产物时必须读取并核对；Box-Agent 静态新建不因缺少 `grounded-knowledge.md` 补建汇总，直接核对已交接的原始证据。存在附件时读取 `<DECK_DIR>/info_pack.json`，沿 `info_pack.raw_documents` 的绝对路径读取 `raw_documents.json`，并核对其中 `documents[].inherited_images[].path`、`page_visuals[].path` 和 `<DECK_DIR>/assets/catalog.json`。不得假设 `materials/attachments.json`、`research/materials/material_NN.md` 或分片 Material catalog 存在。
 
 任何选中的文件或章节若出现续读 offset 或截断提示，必须续读到结束。
 
@@ -66,13 +66,13 @@ Box-Agent 静态新建中，以上输入必须完整掌握，但主 Agent 可复
 
 1. 若存在附件或 Research，先做内容保真核验：
    - 有附件且已交接 `info_pack.raw_documents` 时，沿其路径读取原始解析内容，核对附件覆盖和解析错误；有附件却缺少必需解析产物时返回 Entry 补齐。无附件的 Research 任务直接核对已交接的研究报告；已有 Material catalog、摘要或 Coverage ledger 时作为辅证核对，不要求当前 Entry/Story 未约定生产的旧分片文件或字段；
-   - 按页列出屏显数字、名称、日期、单位、原话和关键关系，逐条对照逐页计划、`grounded-knowledge.md` 与已交接的原始材料/Research；高风险或冲突项必须回到对应原始 chunk/扫描页复核，不能用同一份下游摘要自证。表格、排行榜、消融和多系列图按原始表头逐格核对 `对象 × 指标 × 值`；摘要里的“最佳/提升率”与表格行冲突时直接判 fail。
+   - 按页列出屏显数字、名称、日期、单位、原话和关键关系，沿逐页计划的 `## 来源` 定位已交接的原始材料/Research，并核对已有的 `grounded-knowledge.md` 补充或历史汇总；高风险或冲突项必须回到对应原始 chunk/扫描页复核，不能用同一份下游摘要自证。表格、排行榜、消融和多系列图按原始表头逐格核对 `对象 × 指标 × 值`；摘要里的“最佳/提升率”与表格行冲突时直接判 fail。
    - 数据页同时核对最终实现和最终像素，而不只核对计划文案：检查 ECharts 的类别、series、图例、标签和值是否完整映射，Vision 必须复述它实际看到的柱/点/行。计划或 JS 有 7 项、像素只有 4 项，或值挂到错误类别下，都属于内容保真硬伤。
    - 把结果写入 `_trace/content-fidelity.md`，包含页码、屏显 claim、证据位置和 verdict；未覆盖、误写或无法追溯即为硬伤。
    - 保真核验只判断事实与引用，不把附件原版式、字号或信息密度当成视觉标准；计划中明确标为概念/氛围/愿景的表达性图片不承担事实证明，不得因附件没有同款图片而删除。
    - 对照 `attachment_visual_map`：must-show 图片必须在目标页实际引用已登记的 material/derived asset，并在最终像素中可辨认；“已读懂后重画”“借用了附件配色”或讲稿提及不能代替上屏。reuse/reference-only/omit 按计划理由核验，不要求机械展示所有附件。
    - 页面声称展示论文 `Figure/Fig./图 N` 时，核对实际引用资产的 catalog：必须是由`raw_documents.documents[].page_visuals[].path` 生成的 `material_figure_crop`，或明确登记为已完整面板的 `attachment-image`；并在像素中完整保留该 Figure 的面板、坐标轴、图例和图内标签。若仍看得到无关摘要/正文、论文页眉页脚、页码或大面积整页边距，属于素材粒度错误，不能以“保持论文原貌”放行。只有计划明确为 `page-facsimile` 时才允许展示整页，且不得把整页误称为 Figure。
-   无附件但使用了 Research 时，同样把具体数字、具名产品/人物/案例和外部结论逐页对照 `grounded-knowledge.md`，并把 `content_fidelity` 记为 `pass` 或 `fail`。生成图若承担真实产品或品牌识别，必须在页面明确标为概念示意，否则属于事实呈现硬伤。只有既无附件、又无 Research 和高风险外部事实时才记 `not-applicable`；Review 不自行新增研究。
+   无附件但使用了 Research 时，同样把具体数字、具名产品/人物/案例和外部结论逐页对照原始研究报告及已有补充记录，并把 `content_fidelity` 记为 `pass` 或 `fail`；没有知识汇总文件不等于无需事实核验。生成图若承担真实产品或品牌识别，必须在页面明确标为概念示意，否则属于事实呈现硬伤。只有既无附件、又无 Research 和高风险外部事实时才记 `not-applicable`；Review 不自行新增研究。
 2. Box-Agent 静态新建直接使用上述 `review_contact`；其他环境及已有编辑保留生成全册联系表的步骤：
 
    ```bash

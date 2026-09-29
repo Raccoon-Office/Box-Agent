@@ -4,6 +4,8 @@
 
 从零生成静态 PPT 时按根 `SKILL.md` 的“Box-Agent 静态新建的执行方式”执行；本文件的子任务规则只在实际委派时生效，不要求为制作、修复或 Review 新建子任务。已有编辑分工不变。
 
+阅读路由：父级完整读取本文件；只负责 HTML 写入的 Slide 子任务只需完整掌握 §1、§2“文件工具与提交”和 §3“子任务输入与返回”。其他任务保留完整工具契约。此路由只排除不由写页子任务执行的工具操作，不缩减 `subagents/slide.md`、Style Lock、完整 CSS、所属页计划及命中设计/质量参考。
+
 ## 1. 路径与执行所有权
 
 - `<SKILL_ROOT>` 只取 `get_skill(skill_name="sn-ppt-standard")` 返回的 `Skill Root Directory` 绝对路径；它是 Standard 的目录，不是 `pptx` 公共入口、Entry、Story 或最后加载的任意 Skill 目录。所有确定性命令使用 `python "<SKILL_ROOT>/scripts/<name>.py" ...`；不得依赖 `${SKILL_DIR:-skills/sn-ppt-standard}` 或当前目录中存在 `skills/`。批量渲染与正式待审成功回执中的 `skill_root`、`deck_dir`、`next_instructions` 和 `review_ledger` 分别给出本次实际方法、任务根与既有账本的绝对定位；确认任务根与当前 task pack 一致后，直接使用回执，原文已完整且未变则复用。压缩后回执也已丢失时，直接重新加载 `sn-ppt-standard` 恢复，不从其他 Skill 根目录猜测、扫描其他 workspace 或硬编码某台机器的安装路径。
@@ -14,12 +16,23 @@
 
 只调用 Box-Agent 展示的 canonical 工具名，不依赖执行期旧别名。
 
+### 文件工具与提交
+
 | 旧 harness 写法 | Box-Agent 写法 |
 | --- | --- |
 | `read_file(path, offset, limit)` | `read_file(path, offset, limit)` |
 | `write_file(path, content)` | `write_file(path, content)`；大文件按该工具返回的 chunk 合同继续 |
 | `patch(path, old_string, new_string)` | `edit_file(path, old_str, new_str)`；旧串必须唯一，先读后改 |
 | `search_files(...)` | `search_files(...)` |
+
+文件提交是否完成以本次 `write_file` / `edit_file` 的实际回执为准：已明确完整提交时直接继续，不为每份计划、讲稿或 HTML 固定追加读尾、搜索闭合标签或全文回读。若返回 chunk / 未完成，则按工具合同续写至完整；回执缺失或明确异常时再针对该文件核查。修改已有内容前仍需掌握当前原文，截断、外部修改或上下文压缩丢失时补读。提交成功只证明写入完成，不证明设计正确，不代替父级产物核验、渲染、看图和正式 Review。
+
+工具名或权限失败先按本契约修正一次；相同失败再次出现就保存原始错误、调用参数和产物状态，返回 `blocked`，不得搜索或修改 Box-Agent 源码。
+
+### 父级与视觉工具
+
+| 旧 harness 写法 | Box-Agent 写法 |
+| --- | --- |
 | `terminal(command, ...)` | 父级 `bash(command, timeout)`；不用旧 `workdir/background` 参数 |
 | `vision_analyze(image_url, question)` | `inspect_images(image_paths=[...], instruction=..., strategy="native")` |
 | `image_generate(prompt, aspect_ratio)` | `generate_image(prompt, output_path, size, watermark=false)` |
@@ -40,11 +53,17 @@
 ## 3. Box-Agent 委派合同
 
 - 一次 `sub_agent` 只委派一个完整工作单元；需要并行时，在同一模型回合发出多个互相独立的 `sub_agent` 调用，不使用旧 `tasks` 数组。
-- `title` 对应旧 `label`；`task` 给出语言、所属组与页码、输入/输出绝对路径、写入边界和返回要求。静态新建时，父级已掌握且适合直接传入的短原文（本组合同、`boundary_handoff`、Style Lock、逐页计划）可随任务提供，标明来源路径与章节；不要改写事实、屏显文案或设计决策。区分“已提供原文”和“仍需读取”，后者给出精确定位，不再要求把前者读一遍。
+- `title` 对应旧 `label`；`task` 只组织执行信息：语言、所属组与页码、输入/输出绝对路径、写入边界、所需阅读章节和返回要求。页面文案、设计决定与制作规则通过原文或精确引用交接，不另写一套 SLIDE NOTES、风格摘要或制作教程。静态新建时，父级已掌握且适合直接传入的短原文（本组合同、`boundary_handoff`、Style Lock、逐页计划）可随任务提供，标明来源路径与章节，不改写；区分“已提供原文”和“仍需读取”，后者给出精确定位，不再要求把前者读一遍。
 - `required_tools` 只给完成任务所需的 canonical 工具。凡包含 `write_file`、`append_file` 或 `edit_file`，必须给精确且互不重叠的 `write_scope`。
 - 普通页面生产委派省略 `budget`，使用本次运行时工具说明中的默认额度；只有主动限制小任务时才显式收紧。Skill 不保存额度数字，不读取配置或另查预算；父级以工具说明及实际回执为准，只读文件批处理保留其独立限制。
-- 子代理不递归委派，不读运行轨迹。父级以子代理自然语言合同为交接，并用 `read_file` / `search_files` 验证声明的正式产物。
+- 父级以子代理自然语言合同为交接，并用 `read_file` / `search_files` 验证声明的正式产物。
 - Research 可用 `read_file/search_files/web_search/web_extract/write_file`；Material 只在父级 staging 后读取解析产物并写指定摘要；Image 优先用 `generate_image/inspect_images/read_file`；Slide/Review 用文件工具和 `inspect_images`，由父级在两次委派之间完成渲染。
+
+首次准备基础 CSS 使用 `python "<SKILL_ROOT>/scripts/deck.py" init "$DECK_DIR"`，不拼接跨 Skill 的复制命令。它只在缺失时复制原模板、返回绝对路径，已有 CSS 不覆盖；不是 `prepare`、素材验收或页面验收。
+
+### 子任务输入与返回
+
+子代理不递归委派，不读运行轨迹。
 
 Box-Agent 的 `sub_agent` 没有父子交错的暂停/续跑协议。实际委派制作时，一次任务仍负责一个完整 Production group，在本次任务内写完组内全部 HTML 首稿，一次返回全部待渲染页码；不在首张后结束任务等待父级。父级随后批量渲染并逐页看图；静态新建在所有写页子任务返回后由主 Agent 集中修复，不默认再按组重派。首次交回待渲染页面不算返修，实际像素问题修复计入根 Skill 的预算。简单编辑仍由唯一 Review 集中改文件后以 `pending_parent_verification` 交回待渲染页码，由父级完成渲染、build 和最终检查；子代理不能在父级执行前声称像素或交付已通过。
 
@@ -52,9 +71,7 @@ Box-Agent 的 `sub_agent` 没有父子交错的暂停/续跑协议。实际委�
 
 实际新建子任务必须完整掌握所属组合同、Style Lock、`base.css`、必要逐页计划与命中参考。随 `task` 已完整提供、未变化的原文满足对应读取要求，不能仅因是新子任务而回源重读；其余输入仍按路径读取。较大的 CSS、说明或参考保留精确路径并按需分段读完整，不为减少读取次数把全册或长 CSS 重复输出到每个 task。静态新建允许在容量合适时同回合读取多页输入，再连续提交多页 HTML；不强制逐页读写往返。选中文件或章节截断、修改或上下文压缩丢失时补读原文，不能用摘要补齐；工具明确拒绝输入或缺失原文时如实返回阻塞。
 
-已有且仍与当前来源一致的完整原文分片可按顺序复用；与 task 中的完整原文一样，已含角色说明、契约或参考原文的不重复读取来源。它们只是输入视图，原计划、CSS 与素材账本仍是真相源。来源变化或原文缺失时读取当前源文件，不要求重新包装或迁移计划。新委派必须获得角色说明与本契约的完整内容，但不限定为额外一次读取；同一主 Agent 切换职责也不必重读仍完整有效的说明。修复前读取受影响页的当前 HTML、逐页计划，以及本次问题必要的当前 Style Lock、CSS、组合同和参考，不重新准备无关页面的输入或重做规划。路径与 task pack 不一致是错误，不搜索其他 workspace，也不做任务迁移。
-
-首次准备基础 CSS 使用 `python "<SKILL_ROOT>/scripts/deck.py" init "$DECK_DIR"`，不拼接跨 Skill 的复制命令。它只在缺失时复制原模板、返回绝对路径，已有 CSS 不覆盖；不是 `prepare`、素材验收或页面验收。
+已有且仍与当前来源一致的完整原文分片可按顺序复用；与 task 中的完整原文一样，已含角色说明、契约或参考原文的不重复读取来源。它们只是输入视图，原计划、CSS 与素材账本仍是真相源。来源变化或原文缺失时读取当前源文件，不要求重新包装或迁移计划。新委派必须获得完整角色说明与本文件阅读路由指定的工具契约章节，但不限定为额外一次读取；同一主 Agent 切换职责也不必重读仍完整有效的说明。修复前读取受影响页的当前 HTML、逐页计划，以及本次问题必要的当前 Style Lock、CSS、组合同和参考，不重新准备无关页面的输入或重做规划。路径与 task pack 不一致是错误，不搜索其他 workspace，也不做任务迁移。
 
 ## 4. 生图、搜图与来源账本
 
@@ -112,8 +129,6 @@ python "<SKILL_ROOT>/scripts/render.py" --batch "$DECK_DIR" --pages 2,7
 ```
 
 不要用 `| tail` 或后接 `echo` 覆盖渲染退出码，也不要原样重复渲染未修复的质量失败页。导出成功后，按 stdout JSON 的精确 `output` 路径检查文件；不要执行 `ls "$DECK_DIR/*.pptx"`（星号被引用不会展开）并因此重导出。导出失败不能自行把用户要求的 PPTX 改称 HTML 已交付。字体 manifest 的源字体映射用于 PPTX 文本；接收机器仍需安装源字体，浏览器 WOFF2 并未嵌入 PPTX。
-
-工具名或权限失败先按本契约修正一次；相同失败再次出现就保存原始错误、调用参数和产物状态，返回 `blocked`，不得搜索或修改 Box-Agent 源码。
 
 
 ## Artifact delivery boundary

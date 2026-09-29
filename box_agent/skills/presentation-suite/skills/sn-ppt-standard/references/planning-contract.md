@@ -6,7 +6,7 @@ Box-Agent 静态新建遵守根 `SKILL.md` 的“Box-Agent 静态新建的执行
 
 ## 阅读顺序
 
-1. 先写 `plan/deck.md`，锁定叙事弧与 Production groups；
+1. 先写 `plan/deck.md`，沿用已确认的叙事弧，确定页面地图与 Production groups；
 2. 再按统一字段一次写完全部 `plan/slide_NN.md`；
 3. 最后过页型、素材、讲稿与冻结检查。
 
@@ -14,27 +14,22 @@ Box-Agent 静态新建遵守根 `SKILL.md` 的“Box-Agent 静态新建的执行
 
 ## 1. `plan/deck.md`
 
-至少包含：
+`plan/design-brief.md#Style Lock` 保存完整的全局视觉决定，`deck.md` 保存页面地图与跨页关系，`slide_NN.md` 保存逐页内容及实现合同。同一决定只在所属文件维护；不把 Style Lock 的全套内容复制成第二份全局计划。已有任务不为此删改或迁移计划，旧字段仍可读取。
+
+`deck.md` 至少包含：
 
 - response / deliverable language；
-- Speaker、Audience、Occasion、Objective、Duration、Page count；
-- 一句话核心命题与 1–3 条 takeaway；
-- 叙事弧：开场、各幕、转折、结论、行动；
+- 任务与叙事：Box-Agent 静态新建直接引用 `outline.md` 及 task/info pack 中已有背景、核心命题、takeaway 与叙事弧的精确文件和章节/字段位置，不再复写一份；仅补充上游尚未表达、且不改变已确认事实与叙事的制作假设。其他环境保留 Speaker、Audience、Occasion、Objective、Duration、Page count、一句话核心命题、1–3 条 takeaway 及开场/各幕/转折/结论/行动的完整记录；
 - 逐页表：页码、标题、页面职责、页型、核心证据、视觉媒介、节奏；
-- Style Lock 摘要与全册设计读数：明确稳定的视觉语言和允许变化的构图变量；Style Lock 不是固定页面模板；
-- `image_opportunity_map`：哪些页面需要真实证据、人物/场景识别、产品展示或情绪主画面，哪些页面更适合图表/Canvas/排印，以及判断理由；
-- 有附件时的 `material_visual_mode` 与 reuse map：区分事实来源、可直接复用的图片/图表、可参考的视觉语言和需要重新设计的文档结构；
-- 有图片附件时的 `attachment_visual_map`：每张图写 `source_path`、`decision`（must-show / reuse / reference-only / omit）、`material_asset_type`（attachment-image / figure-crop / page-facsimile）、实际 `asset_path`、计划上屏页、处理方式与理由。论文命名 Figure 使用 `figure-crop`，并保留 `figure_id / source_page / crop_box`；整页论文页面仅在页面原貌本身就是证据时使用 `page-facsimile`。该判断独立于外部/生成图片的 `image_opportunity`；后者为 `none` 不能自动排除用户附件；
-- `background_system`：先说明本场景为何偏克制秩序或氛围表达，再定义 `base_canvas_family`（普通内容页共同的明暗/色温/材质家族）、局部色场/环境光、主题肌理、图片背景、允许整页使用的变体及其叙事用途，并写清整页变体的 `enter_from / exit_to`。表达型场景不能无理由把“整册同一纯色底”当作安全默认；需要下载或生成的背景进入 Image 素材计划；
-- `visual_state_range`：在基础画布家族内允许变化的明度、色场、图片占比、信息密度、构图方向与章节状态；给出适用页面与前后承接，避免把统一误解为全册同一底色或同一几何；
-- `motif_role`：列出母题作为 `primary / secondary / absent` 的页面范围及语义用途；同一个装饰母题不能同时承担封面、全部过渡页和多数内容页的主视觉；
-- scene_register 与选择理由；
+- Style Lock 的源文件与章节定位：`plan/design-brief.md#Style Lock`；场景与理由、稳定语言与变化边界、配图与附件映射、背景系统、视觉状态、母题和特殊页系统均直接消费该处原文，不另写摘要；
 - `visual_thesis / signature_visual` 的兑现地图：落在哪些页面、以什么可见形式出现、Review 如何判断不是只写在 brief 里；
-- `spatial_rhythm`：哪些页铺满、哪些页聚焦、哪些页留白，以及这些变化如何服务叙事；
-- `special_page_system`：bookends 与 dividers 共享的字体角色、标题锚点家族、图像处理和图形语法，以及各页不同的构图动作；
 - Production groups；
 - `Repetition & rhythm preflight`：规划冻结前对页面地图做一次重复率与节奏预检，记录需要调整的页面或 `pass`；
-- 假设、风险和待核项。
+- 假设、风险和待核项；Box-Agent 静态新建只记录本阶段新增项，已在上游或 Grounding 补充记录中说明的直接引用。
+
+引用不是省略输入：必须能定位到具体文件及章节/字段，不能只写“见上文”。Box-Agent 主 Agent 复用当前上下文完整且未变化的原文；截断、源变化或压缩丢失时按定位补读。实际委派仍交接本组所需的完整原文或精确路径，不假定子任务继承父级上下文。
+
+上述分工不省略设计决定：Style Lock 必须完整保留根 Skill 阶段 2 的 `image_opportunity_map`、附件映射、`background_system / visual_state_range`、`motif_role`、`spatial_rhythm` 与 `special_page_system`。页面地图、签名视觉兑现页和组边界仍须明确；逐页计划与素材机读字段不改成链接。新增全局决定回填 Style Lock，页级决定回填对应页面，不在多个文件重写同一套规则。
 
 所有“用户明确要求 / 用户原文 / 用户提供”的陈述必须能在当前 `outline.md`、`task_pack.request.query` 或 Entry Material 原文中定位；Research goal、搜索 query 和编排器推断不构成用户事实，外部证据否定候选时记录为“编排器假设未成立”，不得写成“更正用户”。Standard 只消费 Entry/Story 已交接的事实与叙事，不把自己的规划推断升级为用户事实。
 

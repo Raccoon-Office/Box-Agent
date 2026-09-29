@@ -1506,6 +1506,17 @@ def main(argv=None):
             print("delivery-audit:PASS")
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"{args.command}:FAIL\n{exc}", file=sys.stderr)
+        if args.command == "prepare":
+            script = Path(__file__).resolve()
+            retry = ["python", str(script), "prepare", str(root)]
+            if args.expected is not None:
+                retry.extend(["--expected", str(args.expected)])
+            print(json.dumps({
+                "deck_dir": str(root),
+                "plan_dir": str(root / "plan"),
+                "planning_reference": str(script.parent.parent / "references/planning-contract.md"),
+                "retry_after_fix": retry,
+            }, ensure_ascii=False), file=sys.stderr)
         return 1
     return 0
 
