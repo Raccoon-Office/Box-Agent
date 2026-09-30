@@ -5,13 +5,11 @@ Implements Progressive Disclosure (Level 2): Load full skill content when needed
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Mapping, MutableSet, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, MutableSet, Optional, Tuple
 
 from ..execution_profile import is_skill_blocked
 from .base import Tool, ToolResult, ToolInvocationContext
-from .skill_loader import SKILL_USAGE_GUIDANCE, SkillLoader
-
-SkillSource = Literal["builtin", "connector", "user"]
+from .skill_loader import SKILL_USAGE_GUIDANCE, SkillLoader, SkillSource
 
 
 class GetSkillTool(Tool):
