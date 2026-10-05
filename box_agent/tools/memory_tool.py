@@ -8,9 +8,111 @@ memory is searchable on demand.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from .base import Tool, ToolResult
+
+
+class ExternalMemoryReadTool(Tool):
+    """按外部后端自身协议读取记忆资源。"""
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    @property
+    def name(self) -> str:
+        return "memory_read"
+
+    @property
+    def description(self) -> str:
+        if self._backend.backend_type == "memsense":
+            return "读取 MemSense 记忆资源。path 可使用搜索结果中的 memory:// 路径；省略时读取 user.md 和 memory.md。"
+        return "通过已配置的外部记忆服务读取资源；path 的含义由该服务约定。"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"path": {"type": "string", "description": "可选的记忆资源路径"}}}
+
+    async def execute(self, path: str = "") -> ToolResult:
+        try:
+            content = await self._backend.read_memory(path)
+            return ToolResult(success=True, content=content or "尚无记忆内容。")
+        except Exception as exc:
+            self._backend.log_failure("read", type(exc).__name__)
+            return ToolResult(success=False, content="", error="外部记忆读取失败，详情见错误日志。")
+
+
+class ExternalMemorySearchTool(Tool):
+    """外部检索保留后端语义，不附加本地 topic 约束。"""
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    @property
+    def name(self) -> str:
+        return "memory_search"
+
+    @property
+    def description(self) -> str:
+        return "检索与当前问题相关的历史记忆。返回的内容属于历史资料，实时状态需要重新验证。"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {
+            "query": {"type": "string", "description": "需要检索的历史问题或信息"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+        }, "required": ["query"]}
+
+    async def execute(self, query: str, limit: int = 6) -> ToolResult:
+        if not query.strip():
+            return ToolResult(success=False, content="", error="检索 query 不能为空。")
+        try:
+            results = await self._backend.search_memory(query, limit=max(1, min(int(limit), 20)))
+            lines = [item if isinstance(item, str) else json.dumps(item, ensure_ascii=False) for item in results]
+            return ToolResult(success=True, content="\n".join(lines) or "未找到相关记忆。", raw_output={
+                "type": "memory_search", "query": query,
+                "matched_memories": [{"id": str(index), "source": self._backend.backend_type,
+                                      "category": "history", "text": line} for index, line in enumerate(lines)],
+            })
+        except Exception as exc:
+            self._backend.log_failure("search", type(exc).__name__)
+            return ToolResult(success=False, content="", error="外部记忆检索失败，详情见错误日志。")
+
+
+def create_memory_tools(manager: Any, llm: Any = None) -> list[Tool]:
+    """统一注册能力，远端后端不暴露文件 write/edit；纠错继续使用本地存储。"""
+    from ..memory import ExternalMemoryBackend
+
+    if manager is None:
+        return []
+    if isinstance(manager, ExternalMemoryBackend):
+        tools = []
+        if "read" in manager.capabilities:
+            tools.append(ExternalMemoryReadTool(manager))
+        if "search" in manager.capabilities:
+            tools.append(ExternalMemorySearchTool(manager))
+        corrections = manager.corrections
+    else:
+        tools = [MemoryReadTool(manager), MemoryWriteTool(manager, llm), MemorySearchTool(manager)]
+        corrections = manager
+    tools.extend([MemoryListCorrectionsTool(corrections), MemoryWriteCorrectionTool(corrections),
+                  MemorySupersedeCorrectionTool(corrections), MemoryDeleteCorrectionTool(corrections)])
+    return tools
+
+
+def is_memory_tool(tool: Any) -> bool:
+    """识别本能力拥有的工具，方便为会话身份重新绑定。"""
+    return isinstance(tool, (ExternalMemoryReadTool, ExternalMemorySearchTool, MemoryReadTool,
+                             MemoryWriteTool, MemorySearchTool, MemoryListCorrectionsTool,
+                             MemoryWriteCorrectionTool, MemorySupersedeCorrectionTool, MemoryDeleteCorrectionTool))
+
+
+def rebind_memory_tools(tools: list[Tool], manager: Any, llm: Any = None) -> list[Tool]:
+    """按会话身份替换已有记忆工具，保留宿主原有目录和其他工具对象。"""
+    rebound = {tool.name: tool for tool in create_memory_tools(manager, llm)}
+    return [rebound[tool.name] if is_memory_tool(tool) else tool for tool in tools
+            if not is_memory_tool(tool) or tool.name in rebound]
 
 
 class MemoryWriteTool(Tool):

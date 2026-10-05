@@ -11,23 +11,27 @@ Directory layout::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import aclosing, asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 from .llm.model_routing import resolve_model_client
 from .user_paths import configured_box_agent_home, default_memory_dir, state_path
 
 if TYPE_CHECKING:
+    from .config import AgentConfig, ExternalMemoryConfig, MemoryHttpOperation
+    from .events import AgentEvent
     from .schema import Message
 
 logger = logging.getLogger(__name__)
@@ -2886,3 +2890,388 @@ class MemoryExtractor:
 
         if operations:
             self._mgr.apply_context_operations(operations)
+
+
+# 外部后端仍属于现有 memory 能力；生命周期和传输不进入稳定内核。
+_MEMORY_HTTP_REQUEST: ContextVar[bool] = ContextVar("memory_http_request", default=False)
+
+
+class _MemoryHTTPLogFilter(logging.Filter):
+    """通用 GET 可能携带记忆正文，保留本能力的脱敏日志而跳过请求 URL 日志。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _MEMORY_HTTP_REQUEST.get()
+
+
+_MEMORY_HTTP_LOG_FILTER = _MemoryHTTPLogFilter()
+
+
+def memory_identity(tenant_id: Any = None, user_id: Any = None) -> tuple[str, str]:
+    """独立解析租户和用户，空值使用 default。"""
+    return str(tenant_id or "").strip() or "default", str(user_id or "").strip() or "default"
+
+
+def scoped_memory_dir(directory: str, tenant_id: str, user_id: str) -> str:
+    """默认身份保留旧目录，其余身份使用不会被路径字符干扰的独立目录。"""
+    if (tenant_id, user_id) == ("default", "default"):
+        return directory
+    digest = hashlib.sha256(json.dumps([tenant_id, user_id], ensure_ascii=False).encode()).hexdigest()
+    return str(Path(directory).expanduser() / "identities" / digest)
+
+
+def uses_local_memory(manager: Any) -> bool:
+    """兼容现有自定义本地 manager，仅外部后端关闭本地提取和维护。"""
+    return manager is not None and not isinstance(manager, ExternalMemoryBackend)
+
+
+def create_memory_backend(settings: AgentConfig, *, manager_factory: Any = MemoryManager) -> Any:
+    """统一构造后端，本地存储同时承载独立的纠错记忆能力。"""
+    tenant_id, user_id = memory_identity(settings.memory_tenant_id, settings.memory_user_id)
+    local = manager_factory(
+        memory_dir=scoped_memory_dir(settings.memory_dir, tenant_id, user_id),
+        dedup_jaccard_threshold=settings.memory_dedup_jaccard,
+    )
+    if settings.memory_backend_type == "local":
+        return local
+    backend_class = MemsenseMemoryBackend if settings.memory_backend_type == "memsense" else ExternalMemoryBackend
+    return backend_class(settings.memory_backend_type, settings.memory_external, tenant_id, user_id, local)
+
+
+class MemoryBackendError(RuntimeError):
+    """可对用户展示的错误摘要，不携带服务地址、认证信息或响应正文。"""
+
+
+class ExternalMemoryBackend:
+    """可配置的通用 HTTP 后端，mem0/memu 占位类型复用此实现。"""
+
+    def __init__(self, backend_type: str, config: ExternalMemoryConfig, tenant_id: str,
+                 user_id: str, corrections: MemoryManager) -> None:
+        self.backend_type = backend_type
+        self.config = config
+        self.tenant_id, self.user_id = tenant_id, user_id
+        self.corrections = corrections
+        self.log_context: dict[str, str] = {}
+        self.capabilities = frozenset(name for name in ("recall", "read", "search", "save")
+                                      if getattr(config, name, None) is not None)
+        if backend_type in {"mem0", "memu"}:
+            logger.warning("memory backend=%s 使用 generic 映射，尚未提供原生协议适配", backend_type)
+
+    @property
+    def correction_curator(self) -> Any:
+        """远端模式继续使用同身份的本地纠错机制。"""
+        return self.corrections.correction_curator
+
+    def recall_corrections(self, *args: Any, **kwargs: Any) -> Any:
+        """纠错记录不发送到远端。"""
+        return self.corrections.recall_corrections(*args, **kwargs)
+
+    def auto_match_context(self, query: str, *, limit: int = 3) -> list[dict[str, str]]:
+        """外部自动召回由轮次入口负责，避免复用本地经验匹配。"""
+        return []
+
+    def recall(self, **kwargs: Any) -> str:
+        """会话装配时不访问网络；核心记忆在真实用户轮次开始时读取。"""
+        return ""
+
+    def read_core(self) -> str:
+        """同步的本地引导提示入口不触发远端读取。"""
+        return ""
+
+    def _variables(self, **values: Any) -> dict[str, Any]:
+        return {"tenant_id": self.tenant_id, "user_id": self.user_id,
+                "agent_id": "box-agent", **self.log_context, **values}
+
+    @staticmethod
+    def _render(value: Any, variables: dict[str, Any]) -> Any:
+        """仅替换完整的 ${变量} 值，保留对象类型且不执行模板代码。"""
+        if isinstance(value, dict):
+            return {key: ExternalMemoryBackend._render(item, variables) for key, item in value.items()}
+        if isinstance(value, list):
+            return [ExternalMemoryBackend._render(item, variables) for item in value]
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            key = value[2:-1]
+            if key not in variables:
+                raise ValueError("unknown_template_variable")
+            return variables[key]
+        return value
+
+    @staticmethod
+    def _select(value: Any, path: str) -> Any:
+        """点分路径选择 JSON 字段，数字段可选择数组元素。"""
+        for key in path.split(".") if path else ():
+            value = value[int(key)] if isinstance(value, list) else value[key]
+        return value
+
+    def log_failure(self, operation: str, reason: str, *, attempt: int = 0,
+                    status: int | None = None, **context: Any) -> None:
+        """记录定位字段，避免记录请求正文及可能包含凭证的异常字符串。"""
+        fields = self._variables(**context)
+        logger.warning(
+            "memory backend=%s operation=%s tenant=%s user=%s session=%s turn=%s "
+            "attempt=%s status=%s reason=%s",
+            self.backend_type, operation, self.tenant_id, self.user_id,
+            fields.get("session_id", ""), fields.get("turn_id", ""), attempt, status, reason,
+        )
+
+    async def _invoke(self, operation: str, spec: MemoryHttpOperation, *, request_payload: dict[str, Any] | None = None,
+                      **variables: Any) -> Any:
+        """有限超时重试；HTTP 和协议错误均由后端记录，调用者决定如何降级。"""
+        import httpx
+
+        attempts = self.config.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            status = None
+            retryable = False
+            try:
+                if not self.config.base_url.startswith(("http://", "https://")):
+                    raise ValueError("missing_or_invalid_base_url")
+                payload = (request_payload if request_payload is not None
+                           else self._render(spec.request, self._variables(**variables)))
+                logging.getLogger("httpx").addFilter(_MEMORY_HTTP_LOG_FILTER)
+                token = _MEMORY_HTTP_REQUEST.set(True)
+                try:
+                    async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                        response = await asyncio.wait_for(client.request(
+                            spec.method, self.config.base_url.rstrip("/") + spec.path,
+                            headers=self.config.headers,
+                            **({"params": payload} if spec.method == "GET" else {"json": payload}),
+                        ), timeout=self.config.timeout_seconds)
+                finally:
+                    _MEMORY_HTTP_REQUEST.reset(token)
+                status = response.status_code
+                response.raise_for_status()
+                if not response.content and spec.success_path is None and not spec.response_path:
+                    return None
+                data = response.json()
+                if spec.success_path is not None and self._select(data, spec.success_path) != spec.success_value:
+                    raise ValueError("service_rejected_request")
+                return self._select(data, spec.response_path)
+            except httpx.HTTPStatusError:
+                retryable = status == 429 or (status is not None and status >= 500)
+                reason = "http_error"
+            except (httpx.TransportError, asyncio.TimeoutError) as exc:
+                retryable = True
+                reason = type(exc).__name__
+            except Exception as exc:
+                reason = type(exc).__name__
+            self.log_failure(operation, reason, attempt=attempt, status=status, **variables)
+            if not retryable or attempt == attempts:
+                self.log_failure(operation, "abandoned", attempt=attempt, status=status, **variables)
+                raise MemoryBackendError(f"{self.backend_type} {operation} 失败（{reason}）")
+            await asyncio.sleep(min(0.25 * 2 ** (attempt - 1), 2))
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+    async def load_context(self, *, query: str, **context: Any) -> str:
+        """通用预加载是可选操作，不假定远端有核心文件。"""
+        if "recall" not in self.capabilities:
+            return ""
+        return self._text(await self._invoke("recall", self.config.recall, query=query, **context))
+
+    async def read_memory(self, path: str = "") -> str:
+        """按 read 映射读取资源；资源名称完全由配置和服务约定。"""
+        return self._text(await self._invoke("read", self.config.read, path=path))
+
+    async def search_memory(self, query: str, limit: int = 6) -> list[Any]:
+        """将查询交给后端，保留原始结果字段供模型使用。"""
+        data = await self._invoke("search", self.config.search, query=query, limit=limit)
+        return data if isinstance(data, list) else ([] if data is None else [data])
+
+    async def save_turn(self, user: str, assistant: str, **context: Any) -> None:
+        """按模板保存最终 QA；只有显式使用身份变量的服务才接收身份字段。"""
+        await self._invoke("save", self.config.save, user=user, assistant=assistant,
+                           messages=[{"role": "user", "content": user},
+                                     {"role": "assistant", "content": assistant}], **context)
+
+
+class MemsenseMemoryBackend(ExternalMemoryBackend):
+    """MemSense 的核心文件、历史资源搜索及 QA 保存协议。"""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.capabilities = frozenset({"recall", "read", "search", "save"})
+
+    async def _post(self, operation: str, endpoint: str, payload: dict[str, Any], **context: Any) -> Any:
+        from .config import MemoryHttpOperation
+
+        spec = MemoryHttpOperation(path=endpoint, success_path="ok", response_path="data")
+        return await self._invoke(operation, spec, request_payload=payload, **context)
+
+    def _identity_payload(self) -> dict[str, str]:
+        return {"tenant_id": self.tenant_id, "user_id": self.user_id}
+
+    def _session_id(self, session_id: str) -> str:
+        """会话文件路径要求 UUID；稳定映射宿主标识，不改变本地会话或日志。"""
+        value = str(session_id)
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            identity = json.dumps(
+                ["box-agent", "memsense", self.tenant_id, self.user_id, value],
+                ensure_ascii=False,
+            )
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
+
+    async def _read_file(self, path: str, **context: Any) -> str:
+        data = await self._post("read", "/v1/memory/files/read",
+                                {**self._identity_payload(), "path": path}, **context)
+        if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+            self.log_failure("read", "invalid_file_response", **context)
+            raise MemoryBackendError("memsense read 返回的文件内容格式无效")
+        return data["content"]
+
+    async def load_context(self, *, query: str, **context: Any) -> str:
+        paths = ("memory://user.md", "memory://memory.md")
+        # 两个文件独立降级，单个文件故障不丢弃另一个已成功的结果。
+        values = await asyncio.gather(*(self._read_file(path, **context) for path in paths), return_exceptions=True)
+        budget = max(1, self.config.context_max_chars // len(paths))
+        return "\n\n".join(f"[{path}]\n{value[:budget]}" for path, value in zip(paths, values)
+                            if isinstance(value, str) and value.strip())
+
+    async def read_memory(self, path: str = "") -> str:
+        if not path:
+            paths = ("memory://user.md", "memory://memory.md")
+            values = await asyncio.gather(*(self._read_file(item) for item in paths))
+            return "\n\n".join(f"[{item}]\n{value}" for item, value in zip(paths, values) if value)
+        if not path.startswith("memory://"):
+            raise MemoryBackendError("MemSense 读取路径须使用 memory://")
+        return await self._read_file(path)
+
+    async def search_memory(self, query: str, limit: int = 6) -> list[Any]:
+        data = await self._post("search", "/v1/memory/resource_search", {
+            **self._identity_payload(), "query": query, "resource_types": ["date_session_title", "qa_chunk"],
+            "filters": {}, "top_k": limit, "mode": "hybrid", "scope": "user",
+        })
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            self.log_failure("search", "invalid_search_response")
+            raise MemoryBackendError("memsense search 返回的结果格式无效")
+        return data["results"]
+
+    async def save_turn(self, user: str, assistant: str, **context: Any) -> None:
+        # 时间戳由轮次固定，传输重试复用同一份请求；不伪造服务端幂等能力。
+        data = await self._post("save", "/v1/memory/save", {
+            **self._identity_payload(), "scope": "user", "session_id": self._session_id(context["session_id"]),
+            "agent_id": "box-agent", "source": "box_agent_auto", "type_hint": "qa_chunk",
+            "timestamp": context["timestamp"], "content": {"user": user, "assistant": assistant},
+        }, **context)
+        if not isinstance(data, dict):
+            self.log_failure("save", "invalid_save_response", **context)
+            raise MemoryBackendError("memsense save 返回的确认格式无效")
+
+
+@dataclass
+class _MemoryTurn:
+    user: str
+    session_id: str
+    turn_id: str
+    timestamp: int
+    handle: Any = None
+
+
+class MemoryRuntime:
+    """现有 memory 插件的会话资源，拥有上下文刷新和后台保存任务。"""
+
+    def __init__(self, backend: ExternalMemoryBackend) -> None:
+        self.backend = backend
+        self.active: _MemoryTurn | None = None
+        self.tasks: set[asyncio.Task] = set()
+        self._save_slots = asyncio.Semaphore(2)
+        self._closed = False
+
+    async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
+        self.backend.log_context = {"session_id": turn.session_id, "turn_id": turn.turn_id}
+        try:
+            content = await self.backend.load_context(query=turn.user, **self.backend.log_context)
+        except Exception as exc:
+            self.backend.log_failure("recall", type(exc).__name__)
+            content = ""
+        content = content[:self.backend.config.context_max_chars]
+        block = ("--- EXTERNAL MEMORY START ---\n"
+                 "以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
+                 + content.replace("--- EXTERNAL MEMORY END ---", "[记忆边界]")
+                 + "\n--- EXTERNAL MEMORY END ---") if content.strip() else ""
+        # 只替换本能力拥有的块；失败时清除旧值，避免身份或内容过期后仍被使用。
+        prompt = re.sub(r"\n*--- EXTERNAL MEMORY START ---.*?--- EXTERNAL MEMORY END ---", "",
+                        session.agent.system_prompt, flags=re.DOTALL)
+        session.agent.set_system_prompt(prompt.rstrip() + ("\n\n" + block if block else ""))
+        session.memory_block = block or None
+
+    def schedule(self, turn: _MemoryTurn) -> None:
+        if not turn.user.strip() or turn.handle is None or "save" not in self.backend.capabilities:
+            return
+        if self._closed or len(self.tasks) >= self.backend.config.save_queue_limit:
+            self.backend.log_failure("save", "abandoned_queue_full_or_closed",
+                                     session_id=turn.session_id, turn_id=turn.turn_id)
+            return
+        task = asyncio.create_task(self._save(turn), name="memory-save")
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _save(self, turn: _MemoryTurn) -> None:
+        context = {"session_id": turn.session_id, "turn_id": turn.turn_id, "timestamp": turn.timestamp}
+        try:
+            # 结算可能在 DoneEvent 后因清理或传输失败而变更，必须等待最终结果。
+            result = await turn.handle.result(consume_events=False)
+            if result.status.value != "completed" or not result.final_content.strip():
+                return
+            async with self._save_slots:
+                await self.backend.save_turn(turn.user, result.final_content, **context)
+            logger.info("memory backend=%s operation=save session=%s turn=%s saved=true",
+                        self.backend.backend_type, turn.session_id, turn.turn_id)
+        except asyncio.CancelledError:
+            self.backend.log_failure("save", "abandoned_shutdown", **context)
+            raise
+        except Exception as exc:
+            self.backend.log_failure("save", type(exc).__name__, **context)
+
+    async def aclose(self) -> None:
+        """关闭时有限等待已接收的任务，保证失败和放弃都有日志。"""
+        self._closed = True
+        pending = tuple(self.tasks)
+        if not pending:
+            return
+        _, unfinished = await asyncio.wait(pending, timeout=self.backend.config.shutdown_timeout_seconds)
+        for task in unfinished:
+            task.cancel()
+        if unfinished:
+            await asyncio.gather(*unfinished, return_exceptions=True)
+
+
+@asynccontextmanager
+async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
+                           turn_id: str) -> AsyncIterator[_MemoryTurn | None]:
+    """宿主声明真实用户轮次，内部续跑复用同一边界。"""
+    runtime = getattr(session, "memory_runtime", None)
+    if runtime is None:
+        yield None
+        return
+    if runtime.active is not None:
+        yield runtime.active
+        return
+    turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000))
+    runtime.active = turn
+    try:
+        await runtime.refresh(session, turn)
+        yield turn
+    except BaseException:
+        raise
+    else:
+        runtime.schedule(turn)
+    finally:
+        runtime.active = None
+
+
+async def memory_run_events(session: Any, request: Any, options: Any) -> AsyncIterator[AgentEvent]:
+    """共享服务运行包装器，普通运行和 CLI/ACP 外层轮次使用同一策略。"""
+    user_text = request.user_message if request.user_message is not None else (getattr(options, "current_turn_text", None) or "")
+    async with memory_user_turn(session, user_text=user_text, session_id=request.session_id,
+                                turn_id=getattr(options, "turn_id", "") or request.run_id) as turn:
+        if turn is not None:
+            turn.handle = session._run_handle
+        async with aclosing(session.run_events(options=options)) as events:
+            async for event in events:
+                yield event

@@ -57,6 +57,7 @@ from box_agent.agent import (
     should_continue_goal_autopilot,
 )
 from box_agent.config import AgentConfig, Config
+from box_agent.memory import memory_user_turn, uses_local_memory
 from box_agent.events import StopReason
 from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.goal_runtime import (
@@ -2127,7 +2128,7 @@ async def run_agent(
 
             # Wire memory promotion negotiator (interactive prompts).
             # Non-interactive `--task` mode skips it to avoid blocking on stdin.
-            if memory_mgr and agent_session.config.agent.memory_promotion_proposal_enabled and not task:
+            if uses_local_memory(memory_mgr) and agent_session.config.agent.memory_promotion_proposal_enabled and not task:
                 from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
                 agent.set_memory_proposal_negotiator(CLIMemoryProposalNegotiator(memory_mgr))
 
@@ -2246,39 +2247,43 @@ async def run_agent(
                 )
                 try:
                     with traced_session_turn(trace_writer, content=task) as traced_turn:
-                        final_content = await _run_session_turn(
-                            agent_session,
-                            user_message=task,
-                            session_id=logical_session_id,
+                        async with memory_user_turn(
+                            agent_session, user_text=task, session_id=logical_session_id,
                             turn_id=traced_turn.turn_id,
-                            force_plan_start=agent_session.force_plan_start,
-                            current_turn_text=task,
-                        )
-                        while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
-                            if autopilot.budget_exhausted_at(perf_counter()):
-                                break
-                            if agent.goal is None:
-                                break
-                            autopilot.begin_continuation()
-                            print(
-                                f"\n{Colors.DIM}Goal autopilot continuing "
-                                f"{autopilot.continuations}/{agent_session.config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
-                            )
-                            continuation = goal_autopilot_prompt(
-                                agent.goal,
-                                autopilot.continuations,
-                                agent_session.config.agent.goal_autopilot_max_turns,
-                            )
-                            before_signature = goal_autopilot_progress_signature(agent.goal)
+                        ):
                             final_content = await _run_session_turn(
-                                agent_session, user_message=continuation,
+                                agent_session,
+                                user_message=task,
                                 session_id=logical_session_id,
                                 turn_id=traced_turn.turn_id,
+                                force_plan_start=agent_session.force_plan_start,
+                                current_turn_text=task,
                             )
-                            after_signature = goal_autopilot_progress_signature(agent.goal)
-                            if should_continue_goal_autopilot(agent, agent.last_stop_reason):
-                                if autopilot.record_progress(before_signature, after_signature):
+                            while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                                if autopilot.budget_exhausted_at(perf_counter()):
                                     break
+                                if agent.goal is None:
+                                    break
+                                autopilot.begin_continuation()
+                                print(
+                                    f"\n{Colors.DIM}Goal autopilot continuing "
+                                    f"{autopilot.continuations}/{agent_session.config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
+                                )
+                                continuation = goal_autopilot_prompt(
+                                    agent.goal,
+                                    autopilot.continuations,
+                                    agent_session.config.agent.goal_autopilot_max_turns,
+                                )
+                                before_signature = goal_autopilot_progress_signature(agent.goal)
+                                final_content = await _run_session_turn(
+                                    agent_session, user_message=continuation,
+                                    session_id=logical_session_id,
+                                    turn_id=traced_turn.turn_id,
+                                )
+                                after_signature = goal_autopilot_progress_signature(agent.goal)
+                                if should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                                    if autopilot.record_progress(before_signature, after_signature):
+                                        break
                         traced_turn.content = final_content
                         traced_turn.stop_reason = agent.last_stop_reason
                     if agent.last_stop_reason == StopReason.ERROR.value:
@@ -2518,8 +2523,8 @@ async def run_agent(
                             parts = user_input.split(maxsplit=1)
                             sub = parts[1].strip().lower() if len(parts) > 1 else ""
                             if sub == "review":
-                                if not memory_mgr:
-                                    print(f"{Colors.YELLOW}⚠️  Memory disabled in config.{Colors.RESET}\n")
+                                if not uses_local_memory(memory_mgr):
+                                    print(f"{Colors.YELLOW}⚠️  当前后端未启用本地记忆晋升。{Colors.RESET}\n")
                                 else:
                                     from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
                                     from box_agent.events import MemoryProposalEvent, MemoryPromotionCandidate

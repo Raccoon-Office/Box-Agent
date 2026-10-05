@@ -52,6 +52,8 @@ class AgentSession:
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None
     memory_extractor: Any | None = None
+    memory_manager: Any | None = field(default=None, kw_only=True)
+    memory_runtime: Any | None = field(default=None, kw_only=True)
     inject_queue: asyncio.Queue[Any] = field(default_factory=InjectionManager)
     turn_active: bool = False
     memory_block: str | None = None
@@ -261,6 +263,8 @@ class AgentSession:
         }
         if self.memory_extractor is not None:
             values["memory_extractor"] = self.memory_extractor
+        if self.memory_runtime is not None and self.memory_manager is not None:
+            values["memory_manager"] = self.memory_manager
         values.update(overrides)
         return replace(self.agent.default_run_options(), **values)
 

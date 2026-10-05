@@ -48,6 +48,7 @@ from box_agent.tools.mcp_loader import (
 from box_agent.tools.mcp_bootstrap import bootstrap_managed_mcp_config
 from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
 from box_agent.tools.memory_tool import (
+    create_memory_tools,
     MemoryDeleteCorrectionTool,
     MemoryListCorrectionsTool,
     MemoryReadTool,
@@ -301,18 +302,11 @@ async def initialize_base_tools(
 
     # 0. Memory tools (cross-session, workspace-independent)
     if memory_manager is not None:
-        tools.append(MemoryReadTool(memory_manager))
-        tools.append(MemoryWriteTool(memory_manager, llm=llm))
-        tools.append(MemorySearchTool(memory_manager))
-        tools.append(MemoryListCorrectionsTool(memory_manager))
-        tools.append(MemoryWriteCorrectionTool(memory_manager))
-        tools.append(MemorySupersedeCorrectionTool(memory_manager))
-        tools.append(MemoryDeleteCorrectionTool(memory_manager))
+        memory_tools = create_memory_tools(memory_manager, llm)
+        tools.extend(memory_tools)
         _out(
             f"{Colors.GREEN}✅ Loaded memory tools "
-            f"(memory_read, memory_write, memory_search, "
-            f"memory_list_corrections, memory_write_correction, "
-            f"memory_supersede_correction, memory_delete_correction)"
+            f"({', '.join(tool.name for tool in memory_tools)})"
             f"{Colors.RESET}"
         )
 

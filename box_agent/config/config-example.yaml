@@ -123,6 +123,18 @@ max_truncation_continuations: 1 # Max continuations per turn (loop guard)
 # ===== Memory Configuration =====
 enable_memory: true # Enable cross-session memory system
 memory_dir: "~/.box-agent/memory" # Memory storage directory
+memory_backend_type: local # local / memsense / generic；mem0、memu 暂走 generic 映射
+memory_tenant_id: default # 空值也使用 default
+memory_user_id: default # 空值也使用 default
+# MemSense 示例：将 memory_backend_type 改为 memsense，并配置以下连接。
+# memory_external:
+#   base_url: "http://127.0.0.1:8787"
+#   timeout_seconds: 20
+#   max_retries: 1
+#   context_max_chars: 16000
+#   save_queue_limit: 128
+#   shutdown_timeout_seconds: 45
+# 通用协议映射和会话身份覆盖见 docs/MEMORY_INTEGRATION.md。
 
 # ===== Memory Auto-Extraction =====
 enable_memory_extraction: true # Auto-extract memories at lifecycle points

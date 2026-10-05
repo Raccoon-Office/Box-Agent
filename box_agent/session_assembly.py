@@ -91,24 +91,63 @@ async def prepare_model(resources: SessionResources) -> None:
 
 
 async def prepare_memory(resources: SessionResources) -> None:
+    from .memory import ExternalMemoryBackend, MemoryRuntime, memory_identity, uses_local_memory
+
     context = resources.context
     config = context.config
     resources.memory_manager = context.host.memory_manager
-    if _prepared(resources) or context.options.utility:
+    if context.options.utility:
+        # 工具型会话保留宿主提供的引导信息，仍不创建提取或外部保存资源。
+        resources.state.update(memory_manager=None, memory_runtime=None, memory_extractor=None)
         return
-    if (resources.memory_manager is None and config.agent.enable_memory
-            and context.options.profile != "acp"):
+    if not config.agent.enable_memory and not uses_local_memory(resources.memory_manager):
+        # 兼容旧宿主显式借用本地 manager 的约定；配置开关控制自动装配和远端访问。
+        resources.memory_manager = None
+        resources.state.update(memory_manager=None, memory_runtime=None, memory_extractor=None)
+        return
+    overrides = {
+        name: getattr(context.options, name)
+        for name in ("memory_tenant_id", "memory_user_id")
+        if getattr(context.options, name) is not None
+    }
+    should_create = (resources.memory_manager is None
+                     and (context.options.profile != "acp" or config.agent.memory_backend_type != "local"))
+    if (not _prepared(resources) and should_create) or overrides:
         from .agent_runtime import build_memory_manager
 
+        settings = config.agent.model_copy(update=overrides)
+        if isinstance(resources.memory_manager, ExternalMemoryBackend):
+            settings.memory_backend_type = resources.memory_manager.backend_type
+            settings.memory_external = resources.memory_manager.config
+        settings.memory_tenant_id, settings.memory_user_id = memory_identity(
+            settings.memory_tenant_id, settings.memory_user_id,
+        )
         resources.memory_manager = build_memory_manager(
             memory_dir=config.agent.memory_dir,
             dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
+            settings=settings,
         )
-    if resources.memory_manager is not None and context.options.profile == "cli":
-        try:
-            await resources.memory_manager.import_openclaw(resources.llm_client)
-        except Exception:
-            pass
+    elif isinstance(resources.memory_manager, ExternalMemoryBackend):
+        # ACP 可借用进程后端配置，但每个会话的请求上下文必须独立。
+        manager = resources.memory_manager
+        resources.memory_manager = type(manager)(
+            manager.backend_type, manager.config, manager.tenant_id, manager.user_id, manager.corrections,
+        )
+    resources.state["memory_manager"] = resources.memory_manager
+    if isinstance(resources.memory_manager, ExternalMemoryBackend):
+        runtime = MemoryRuntime(resources.memory_manager)
+        resources.state["memory_runtime"] = runtime
+        resources.state["memory_extractor"] = None
+        resources.cleanup.push_async_callback(runtime.aclose)
+    if _prepared(resources):
+        return
+    local = uses_local_memory(resources.memory_manager)
+    if local and context.options.profile == "cli":
+        if memory_identity(config.agent.memory_tenant_id, config.agent.memory_user_id) == ("default", "default") and not overrides:
+            try:
+                await resources.memory_manager.import_openclaw(resources.llm_client)
+            except Exception:
+                pass
         if config.agent.memory_maintainer_enabled:
             from .memory_maintainer import MemoryMaintainer
             async def maintain():
@@ -118,7 +157,7 @@ async def prepare_memory(resources: SessionResources) -> None:
                     pass
             task = asyncio.create_task(maintain(), name="memory-maintainer")
             resources.cleanup.push_async_callback(_stop_task, task)
-    if resources.memory_manager is not None and config.agent.enable_memory_extraction:
+    if local and config.agent.enable_memory_extraction:
         from .agent_runtime import build_memory_extractor
 
         resources.state.setdefault("memory_extractor", build_memory_extractor(
@@ -177,6 +216,11 @@ async def prepare_tools(resources: SessionResources) -> None:
     resources.mcp_task, resources.skill_task = host.mcp_task, host.skill_task
     if host.tools is not None:
         resources.tools = host.tools
+        if resources.memory_manager is not host.memory_manager:
+            from .tools.memory_tool import rebind_memory_tools
+
+            # 预装配目录只替换已有的记忆工具，不扩大宿主显式提供的工具集合。
+            resources.tools = rebind_memory_tools(host.tools, resources.memory_manager, resources.llm_client)
         await _bind_skill_runtime(resources)
         return
     expert = resources.state.get("expert_context")
@@ -210,6 +254,11 @@ async def prepare_tools(resources: SessionResources) -> None:
                 resources.cleanup.push_async_callback(_stop_task, task)
     else:
         resources.tools = list(host.base_tools)
+        if resources.memory_manager is not host.memory_manager:
+            # 进程工具目录可能绑定其他身份，按本会话替换已有记忆工具。
+            from .tools.memory_tool import rebind_memory_tools
+
+            resources.tools = rebind_memory_tools(resources.tools, resources.memory_manager, resources.llm_client)
 
     grant_store = resources.state.get("grant_store")
     permission_engine = resources.state.get("permission_engine")
@@ -359,6 +408,11 @@ async def prepare_hooks(resources: SessionResources) -> None:
 
 async def finish_session(session: Any, resources: SessionResources) -> None:
     """Restore and bind shared Skills only after the Agent owns its prompt."""
+    from .memory import ExternalMemoryBackend
+
+    # 同时关闭 Agent 的旧晋升开关，保持公共运行参数与插件绑定一致。
+    if isinstance(resources.memory_manager, ExternalMemoryBackend):
+        session.agent.memory_promotion_enabled = False
     if _prepared(resources):
         return
     agent = session.agent
@@ -510,7 +564,10 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
 
 def _build_action_hints_prompt(config, memory, env_context: EnvContext | None = None) -> str:
     """Detect onboarding / browser-tools scenarios and build the hint contract."""
-    memory_scarce = is_memory_scarce(memory.read_core() if memory else None)
+    from .memory import ExternalMemoryBackend
+
+    memory_scarce = (not isinstance(memory, ExternalMemoryBackend)
+                     and is_memory_scarce(memory.read_core() if memory else None))
 
     try:
         _host_mcp = os.environ.get("BOX_AGENT_MCP_CONFIG_PATH", "").strip()

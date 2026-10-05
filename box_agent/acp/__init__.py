@@ -223,7 +223,7 @@ from box_agent.execution_profile import (
     ExecutionProfile,
     normalize_execution_profile,
 )
-from box_agent.memory import MemoryManager
+from box_agent.memory import MemoryManager, memory_identity, memory_user_turn, uses_local_memory
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.retry import StreamInterrupted
 from box_agent.schema import LLMProvider, Message
@@ -1613,7 +1613,7 @@ class BoxACPAgent:
 
     def _start_memory_bootstrap(self) -> None:
         """Wait for the host model binding before any background model calls."""
-        if self._memory is None or self._memory_bootstrap_task is not None:
+        if not uses_local_memory(self._memory) or self._memory_bootstrap_task is not None:
             return
         memory_llm = self._utility_llm_for_meta({})
         bootstrap_id = f"local-agent-memory-{uuid4()}"
@@ -1627,7 +1627,8 @@ class BoxACPAgent:
         async def bootstrap() -> None:
             try:
                 try:
-                    await self._memory.import_openclaw(memory_llm)
+                    if memory_identity(self._config.agent.memory_tenant_id, self._config.agent.memory_user_id) == ("default", "default"):
+                        await self._memory.import_openclaw(memory_llm)
                 except Exception:
                     log.warn("server/start", message="OpenClaw import failed (non-fatal)")
                 if self._config.agent.memory_maintainer_enabled:
@@ -1742,6 +1743,8 @@ class BoxACPAgent:
         # text transform, not a real user conversation.
         utility = False
         meta = getattr(params, "field_meta", None) or {}
+        memory_meta = meta.get("memory", {}) if isinstance(meta, dict) else {}
+        memory_meta = memory_meta if isinstance(memory_meta, dict) else {}
         client_info = self._client_info
         if isinstance(meta, dict):
             client_info = ClientInfo.from_meta(meta.get("client_info")) or client_info
@@ -2108,6 +2111,8 @@ class BoxACPAgent:
                 options=SessionOptions(
                     profile="acp", workspace_dir=workspace, token_limit=session_token_limit,
                     utility=utility, sandbox_mode=session_sandbox_mode,
+                    memory_tenant_id=memory_meta.get("tenant_id"),
+                    memory_user_id=memory_meta.get("user_id"),
                     session_mode=session_mode, allow_full_access=session_allow_full_access,
                     permission_mode=permission_mode, effective_policy=effective_policy,
                     process_owner_id=session_id,
@@ -2909,58 +2914,62 @@ class BoxACPAgent:
             no_progress_limit=state.config.agent.goal_autopilot_no_progress_turns,
         )
         try:
-            stop_reason = await self._run_turn(
-                state,
-                session_id,
-                task_context=task_context,
-                turn_id=turn_id,
-                billing_session_id=billing_session_id,
-                force_plan_start=force_plan_start,
-                require_plan_approval=require_plan_approval,
-                plan_approval=plan_approval,
-                auto_approve_plan=auto_approve_plan,
-                plan_start_text=plan_detection_text,
-                explicitly_selected_skill_names=explicitly_selected_skill_names,
-                ui_language=ui_language,
-                clear_prompt_grants=False,
-            )
-            while (
-                auto_enabled
-                and state.pending_plan_approval is None
-                and should_continue_goal_autopilot(state.agent, stop_reason)
+            async with memory_user_turn(
+                state, user_text=plan_detection_text,
+                session_id=state.upstream_session_id or session_id, turn_id=turn_id,
             ):
-                if autopilot.budget_exhausted_at(perf_counter()):
-                    break
-                if state.cancelled or state.agent.goal is None:
-                    break
-                autopilot.begin_continuation()
-                continuation = goal_autopilot_prompt(
-                    state.agent.goal,
-                    autopilot.continuations,
-                    state.config.agent.goal_autopilot_max_turns,
-                )
-                log.info(
-                    "goal_autopilot/continue",
-                    session_id=session_id,
-                    continuation=autopilot.continuations,
-                    max_continuations=state.config.agent.goal_autopilot_max_turns,
-                )
-                await state.agent.aadd_user_message(continuation)
-                before_signature = goal_autopilot_progress_signature(state.agent.goal)
                 stop_reason = await self._run_turn(
                     state,
                     session_id,
                     task_context=task_context,
                     turn_id=turn_id,
                     billing_session_id=billing_session_id,
+                    force_plan_start=force_plan_start,
+                    require_plan_approval=require_plan_approval,
+                    plan_approval=plan_approval,
                     auto_approve_plan=auto_approve_plan,
                     plan_start_text=plan_detection_text,
+                    explicitly_selected_skill_names=explicitly_selected_skill_names,
+                    ui_language=ui_language,
                     clear_prompt_grants=False,
                 )
-                after_signature = goal_autopilot_progress_signature(state.agent.goal)
-                if should_continue_goal_autopilot(state.agent, stop_reason):
-                    if autopilot.record_progress(before_signature, after_signature):
+                while (
+                    auto_enabled
+                    and state.pending_plan_approval is None
+                    and should_continue_goal_autopilot(state.agent, stop_reason)
+                ):
+                    if autopilot.budget_exhausted_at(perf_counter()):
                         break
+                    if state.cancelled or state.agent.goal is None:
+                        break
+                    autopilot.begin_continuation()
+                    continuation = goal_autopilot_prompt(
+                        state.agent.goal,
+                        autopilot.continuations,
+                        state.config.agent.goal_autopilot_max_turns,
+                    )
+                    log.info(
+                        "goal_autopilot/continue",
+                        session_id=session_id,
+                        continuation=autopilot.continuations,
+                        max_continuations=state.config.agent.goal_autopilot_max_turns,
+                    )
+                    await state.agent.aadd_user_message(continuation)
+                    before_signature = goal_autopilot_progress_signature(state.agent.goal)
+                    stop_reason = await self._run_turn(
+                        state,
+                        session_id,
+                        task_context=task_context,
+                        turn_id=turn_id,
+                        billing_session_id=billing_session_id,
+                        auto_approve_plan=auto_approve_plan,
+                        plan_start_text=plan_detection_text,
+                        clear_prompt_grants=False,
+                    )
+                    after_signature = goal_autopilot_progress_signature(state.agent.goal)
+                    if should_continue_goal_autopilot(state.agent, stop_reason):
+                        if autopilot.record_progress(before_signature, after_signature):
+                            break
         except asyncio.CancelledError as exc:
             if state.trace_writer is not None:
                 state.trace_writer.write(
@@ -3840,7 +3849,8 @@ class BoxACPAgent:
             self._config_for_session(self._sessions[session_id])
             if session_id else self._config
         )
-        if self._memory is None:
+        memory = (self._sessions[session_id].memory_manager or self._memory) if session_id else self._memory
+        if not uses_local_memory(memory):
             return {"candidates": []}
         cooldown_days = (
             0
@@ -3848,7 +3858,7 @@ class BoxACPAgent:
             else config.agent.memory_promotion_cooldown_days
         )
         entries = await asyncio.to_thread(
-            self._memory.list_promotion_candidates,
+            memory.list_promotion_candidates,
             hit_threshold=config.agent.memory_promotion_hit_threshold,
             cooldown_days=cooldown_days,
         )
@@ -3871,7 +3881,7 @@ class BoxACPAgent:
             wanted = {e.id for e in entries}
             try:
                 context_entries = await asyncio.to_thread(
-                    self._memory.read_all_context_entries,
+                    memory.read_all_context_entries,
                 )
                 full_entries = [
                     e for e in context_entries if e.id in wanted
@@ -3898,7 +3908,7 @@ class BoxACPAgent:
                         title="本地 Agent 记忆整理",
                     )
                 try:
-                    plan = await self._memory.plan_promotion(full_entries, planning_llm)
+                    plan = await memory.plan_promotion(full_entries, planning_llm)
                 except Exception as exc:
                     log.warn(
                         "memory/proposal_list_plan_skipped",
@@ -3953,7 +3963,8 @@ class BoxACPAgent:
         session_id = params.get("sessionId", "")
         if session_id and session_id not in self._sessions:
             return {"error": "session_not_found"}
-        if self._memory is None:
+        memory = (self._sessions[session_id].memory_manager or self._memory) if session_id else self._memory
+        if not uses_local_memory(memory):
             return {"error": "memory_unavailable"}
 
         # ── Plan-mode branch ──────────────────────────────
@@ -3987,9 +3998,9 @@ class BoxACPAgent:
 
             if decision == "apply":
                 def _apply_plan() -> tuple[dict[str, int], str]:
-                    with self._memory.context_transaction():
-                        counts = self._memory.apply_promotion_plan(plan)
-                        return counts, self._memory.read_core()
+                    with memory.context_transaction():
+                        counts = memory.apply_promotion_plan(plan)
+                        return counts, memory.read_core()
 
                 counts, core = await asyncio.to_thread(_apply_plan)
                 log.info(
@@ -4004,9 +4015,9 @@ class BoxACPAgent:
                 }
             if decision == "reject":
                 def _reject_plan() -> tuple[dict[str, int], str]:
-                    with self._memory.context_transaction():
-                        counts = self._memory.reject_promotion_plan(plan)
-                        return counts, self._memory.read_core()
+                    with memory.context_transaction():
+                        counts = memory.reject_promotion_plan(plan)
+                        return counts, memory.read_core()
 
                 counts, core = await asyncio.to_thread(_reject_plan)
                 log.info(
@@ -4020,7 +4031,7 @@ class BoxACPAgent:
                 }
             # skip: host is just dropping its cache; nothing to do here.
             log.info("memory/plan_skip", session_id=session_id)
-            core = await asyncio.to_thread(self._memory.read_core)
+            core = await asyncio.to_thread(memory.read_core)
             return {"skipped": 1, "core": core}
 
         # ── Legacy per-candidate branch ───────────────────
@@ -4033,9 +4044,9 @@ class BoxACPAgent:
             if isinstance(value, str) and value in ("pin", "skip", "reject")
         }
         def _consume_proposal() -> tuple[dict[str, int], str]:
-            with self._memory.context_transaction():
-                counts = self._memory.consume_core_proposal(decisions)
-                return counts, self._memory.read_core()
+            with memory.context_transaction():
+                counts = memory.consume_core_proposal(decisions)
+                return counts, memory.read_core()
 
         counts, core = await asyncio.to_thread(_consume_proposal)
         log.info(
@@ -4525,7 +4536,7 @@ class BoxACPAgent:
             logger=None,  # ACP uses its own logging via the connection
             permission_negotiator=negotiator,
             hooks=self._hooks,
-            memory_manager=self._memory,
+            memory_manager=state.memory_manager or self._memory,
             memory_turn_id=turn_id,
             session_id=state.upstream_session_id,
             turn_id=turn_id,
@@ -5052,11 +5063,11 @@ class BoxACPAgent:
                         # Falls through to case _: pass (no ACP notification sent).
 
                         case MemoryProposalEvent():
-                            if self._memory is not None:
+                            if uses_local_memory(state.memory_manager or self._memory):
                                 negotiator_mem = _MemoryProposalNegotiator(
                                     conn=self._conn,
                                     session_id=session_id,
-                                    memory_manager=self._memory,
+                                    memory_manager=state.memory_manager or self._memory,
                                 )
                                 try:
                                     await negotiator_mem.negotiate(event)
@@ -5658,6 +5669,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 memory_dir=config.agent.memory_dir,
                 dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
                 manager_factory=MemoryManager,
+                settings=config.agent,
             )
 
         # Skills discovery is deferred: a directory full of malformed

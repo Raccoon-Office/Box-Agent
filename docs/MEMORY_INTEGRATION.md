@@ -1,5 +1,108 @@
 # Memory System Integration Guide
 
+## 后端选择与外部接入
+
+默认 `memory_backend_type: local` 使用原有本地记忆。`memsense` 提供原生接入；
+`generic` 提供可配置 HTTP 映射；`mem0`、`memu` 当前是使用 generic 的占位类型，
+需要自己配置对应服务的操作，尚不支持它们的完整原生工作流。
+
+```yaml
+enable_memory: true
+memory_backend_type: memsense
+memory_tenant_id: default
+memory_user_id: default
+memory_external:
+  base_url: "http://127.0.0.1:8787"
+  timeout_seconds: 20
+  max_retries: 1
+  context_max_chars: 16000
+  save_queue_limit: 128
+  shutdown_timeout_seconds: 45
+  # headers: {} # 按部署要求配置认证头，凭证只保存在本地配置中
+```
+
+| 行为 | local | memsense |
+| --- | --- | --- |
+| 核心上下文 | 会话开始加载本地核心和目录摘要 | 每个真实用户轮次开始读取 `memory://user.md`、`memory://memory.md` |
+| 搜索 | 本地 topic/关键词检索 | `/v1/memory/resource_search`，检索会话标题和历史记忆 |
+| 保存 | 原有工具写入及本地 LLM 提取 | 整轮结束后，后台调用 `/v1/memory/save` 保存用户输入和最终回答 |
+| 文件修改 | 保留 `memory_write` | 不开放文件 write/edit |
+
+MemSense 的 `memory_read(path=...)` 可读取核心文件或检索返回的资源路径；省略
+path 时读取两个核心文件。`memory_search(query, limit=6)` 使用外部搜索协议。
+当前 MemSense 服务将 `qa_chunk` 搜索类型兼容映射到事实记忆；原始 QA 仍通过
+save 保存，搜索结果保留服务实际返回的类型和资源路径。
+`enable_memory_extraction` 和维护、晋升配置只作用于 local。纠错工具仍保存到
+同身份的本地存储，不修改远端文件。
+
+MemSense 的会话文件路径要求 UUID。已有 UUID 会话标识保持不变，CLI/ACP 等
+非 UUID 标识在后端内结合 tenant/user 稳定映射为 UUID；本地 Session Log 和
+日志继续使用原始标识。generic 不执行此映射。切换前已用非 UUID 保存的远端
+数据不会自动迁移。
+
+tenant/user 为空时分别取 `default`。本地 `default/default` 使用旧目录；其余
+身份使用 `memory_dir/identities/<身份摘要>/`。Python 管理会话可以通过
+`SessionOptions(memory_tenant_id=..., memory_user_id=...)` 覆盖身份；ACP 可在
+`session/new` 的 `_meta` 中指定：
+
+```json
+{"memory": {"tenant_id": "tenant-a", "user_id": "user-a"}}
+```
+
+未提供的会话字段继承配置，空字符串使用 default。身份在会话创建时绑定，
+记忆工具、纠错存储和上下文均使用该身份。身份字段是宿主提供的路由上下文，
+不是认证授权机制；远端服务仍需按实际部署执行访问控制。
+
+通用协议示例（外部服务不需要 tenant/user 字段）：
+
+```yaml
+memory_backend_type: generic
+memory_external:
+  base_url: "http://memory-service.example"
+  search:
+    path: /lookup
+    method: POST
+    request:
+      query: "${query}"
+      count: "${limit}"
+    response_path: results
+  save:
+    path: /conversations
+    request:
+      messages: "${messages}"
+    response_path: ""
+```
+
+`recall`、`read`、`search`、`save` 都是可选操作；缺省的操作不发送请求，对应
+工具不注册。每项操作支持 GET（query params）或 POST（JSON），默认 POST。
+请求模板仅替换完整的 `${变量名}` 值，支持嵌套对象和数组，不执行代码。
+可用变量包括 `tenant_id`、`user_id`、`agent_id`、`session_id`、`turn_id`，以及
+操作相关的 `query`、`limit`、`path`、`user`、`assistant`、`messages`、`timestamp`。
+`messages` 是 user/assistant 两条消息。generic 不默认发送任何身份字段；
+需要跨身份隔离的服务，应在请求中映射其身份字段，或为不同身份使用独立实例
+及连接配置。内部身份不会自动赋予不支持身份的外部协议隔离能力。
+
+`response_path` 使用点分字段路径（如 `data.results`，数组下标也可用），空串
+表示整个响应。HTTP 非成功状态始终视为错误；如服务有应用层状态，还可配置
+`success_path: ok`、`success_value: true`。read/recall 将选定内容渲染为文本，
+search 保留结果对象。不要把 MemSense 的 `{ok,data}` 格式当作 generic 默认。
+未配置响应字段或成功标记时，也接受 HTTP 204 等无正文的成功响应。
+
+CLI 和 ACP 的自动续跑共享外层用户轮次：开始时刷新一次，最后只调度一次 QA
+保存。单次 Python `AgentService.start()` 对应一轮；需要组合多次运行时可用
+`box_agent.memory.memory_user_turn(session, user_text=..., session_id=..., turn_id=...)`
+作为异步上下文管理器。底层 `Agent.run_events`/`AgentSession.run_events` 不会
+自行推断宿主的真实用户轮次，外部保存应通过共享服务边界调用。
+
+取消、失败、等待用户或无最终回答的运行不保存。远端失败记录标准错误日志，
+不改变主任务结果；日志不记录 QA 正文和认证头。连接使用有限超时、重试，后台
+保存有队列上限，会话关闭时有限等待。进程崩溃可能丢失尚未完成的保存，本期
+没有额外持久队列；MemSense 的传输重试复用请求内容和时间戳，仍受服务端现有
+去重语义约束。以下章节描述 `local` 的原有行为。
+
+兼容既有 Python 宿主：显式通过 `HostBindings` 借用本地 manager 时，仍保留
+宿主提供的能力；`enable_memory` 控制自动创建的本地记忆及外部后端访问。
+
 Box-Agent provides persistent cross-session memory with core memory plus topic-sharded context memory:
 
 | Type | Purpose | Recall behavior | Storage |

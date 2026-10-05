@@ -345,15 +345,17 @@ class AgentRunHandle:
 
         await self.send(ControlCommand.cancel())
 
-    async def result(self) -> RunResult:
+    async def result(self, *, consume_events: bool = True) -> RunResult:
         """Wait for the result; without a stream consumer, consume privately.
 
         Start iterating events first when the caller needs the event stream.
         Cancelling this waiter never cancels the run or its private consumer.
+        consume_events=False 仅观察结果，事件仍由原宿主负责消费。
         """
 
         self._start()
-        if not self._events_consumed and not self._result_only:
+        # 后台观察者可等待结算而不抢占宿主尚未开始消费的事件流。
+        if consume_events and not self._events_consumed and not self._result_only:
             self._result_only = True
             if self._permission_broker is not None:
                 self._permission_broker.use_result_only()
