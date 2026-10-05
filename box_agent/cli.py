@@ -14,12 +14,17 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import platform
 import shutil
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -494,6 +499,48 @@ def _config_exit_error(message: str, json_output: bool = False) -> int:
 def get_log_directory() -> Path:
     """Get the log directory path."""
     return state_path('log')
+
+
+class _QuietMemoryLogHandler(RotatingFileHandler):
+    """记忆诊断只写文件，磁盘错误也不能打断终端输入或主任务。"""
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        # 标准处理会向 stderr 打印堆栈；日志目录不可写时只能放弃该条记录。
+        pass
+
+
+@contextmanager
+def _memory_file_logging() -> Iterator[None]:
+    """由 CLI 接管记忆日志，直到后台保存清理完成后恢复原有设置。"""
+    memory_logger = logging.getLogger("box_agent.memory")
+    previous = memory_logger.handlers, memory_logger.level, memory_logger.propagate
+    handler: logging.Handler = logging.NullHandler()
+    try:
+        # 按进程分文件，避免多个 CLI 同时轮转同一个文件。
+        log_path = state_path(f"log/memory_{os.getpid()}.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = _QuietMemoryLogHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
+            encoding="utf-8", delay=True,
+        )
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        ))
+    except OSError:
+        # 无法创建日志目录时保持静默，不能因可选记忆能力阻断主任务。
+        pass
+    memory_logger.handlers = [handler]
+    memory_logger.setLevel(logging.INFO)
+    memory_logger.propagate = False
+    try:
+        yield
+    finally:
+        memory_logger.handlers, previous_level, memory_logger.propagate = previous
+        memory_logger.setLevel(previous_level)
+        try:
+            handler.close()
+        except OSError:
+            pass
 
 
 def show_log_directory(open_file_manager: bool = True) -> None:
@@ -1932,6 +1979,7 @@ async def run_agent(
 
     owned_clients = []
     session_log = None
+    memory_log_scope = ExitStack()
 
     def _new_client(**kwargs):
         client = build_llm_client(**kwargs)
@@ -1939,6 +1987,8 @@ async def run_agent(
         return client
 
     try:
+        if config.agent.enable_memory:
+            memory_log_scope.enter_context(_memory_file_logging())
         llm_client = _new_client(
             client_factory=LLMClient,
             api_key=config.llm.api_key,
@@ -2720,8 +2770,11 @@ async def run_agent(
         try:
             await close_owned_clients(owned_clients)
         finally:
-            if session_log is not None:
-                session_log.close()
+            try:
+                if session_log is not None:
+                    session_log.close()
+            finally:
+                memory_log_scope.close()
 
 
 def main() -> int:

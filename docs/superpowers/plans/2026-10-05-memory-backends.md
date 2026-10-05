@@ -77,3 +77,19 @@ default/default。已验证：
 
 后台队列保存在进程内，崩溃或超出关闭等待时间时可能丢失未完成保存；放弃会
 记录日志。
+
+## CLI 后台记忆日志静默修复
+
+用户要求后台重试和最终失败均不提示。CLI 接管 `box_agent.memory` 的日志，
+按进程写入用户目录中的轮转文件；路由覆盖会话初始化、输入等待和退出清理，
+结束后恢复原有 logger 设置。目录或文件不可写时保持静默，不影响主任务。
+memory 插件和 MemSense 无须修改，ACP 继续使用已有日志路由。
+
+- `uv run --no-sync pytest -q tests/test_cli_runtime.py tests/test_cli_session_trace.py tests/test_memory_backends.py tests/test_acp.py tests/test_user_paths.py`：318 passed。
+- 回归通过真实 CLI、AgentService 和 memory 插件配合模拟 HTTP 超时，验证
+  输入期间及退出时的保存重试、放弃均记录到文件，终端不输出提示；另覆盖
+  日志配置恢复、profile 路径、磁盘错误和关闭 memory 时不创建记忆日志。
+- `uv run --no-sync python -m compileall -q box_agent/cli.py tests/test_cli_runtime.py tests/test_cli_session_trace.py`、`git diff --check` 通过。
+
+本次修复验证到源码及模拟故障集成测试；未重新运行全量套件、构建或安装
+外部运行时，也未重启用户当前 CLI。现有进程须退出后用更新后的代码重启。

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -511,6 +512,61 @@ def test_cli_ctrl_d_exits_without_empty_error(
     assert _EOFPromptSession.prompt_count == 1
     assert "Goodbye! Thanks for using Box Agent" in output
     assert "❌ Error:" not in output
+    assert not list((home / ".box-agent" / "log").glob("memory_*.log"))
+
+
+def test_cli_memory_logs_only_to_file_and_restores_host_logging_after_error(
+    tmp_path, monkeypatch, capsys, caplog,
+):
+    """已有终端 handler 不能泄漏记忆日志，其他日志和退出后的设置不受影响。"""
+    profile = tmp_path / "profile"
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    logger = logging.getLogger("box_agent.memory")
+    terminal_handler = logging.StreamHandler()
+    monkeypatch.setattr(logger, "handlers", [terminal_handler])
+    monkeypatch.setattr(logger, "propagate", True)
+    original_level = logger.level
+    try:
+        with pytest.raises(RuntimeError, match="退出测试"):
+            with cli._memory_file_logging():
+                logger.info("memory saved=true")
+                logger.warning("memory reason=TimeoutError")
+                logging.getLogger("box_agent.cli.other").warning("其他诊断仍可记录")
+                raise RuntimeError("退出测试")
+        assert logger.handlers == [terminal_handler]
+        assert logger.propagate is True
+        assert logger.level == original_level
+        captured = capsys.readouterr()
+        assert "memory" not in captured.out + captured.err
+        assert "其他诊断仍可记录" in caplog.text
+        assert "reason=TimeoutError" not in caplog.text
+        log = profile / "log" / f"memory_{os.getpid()}.log"
+        text = log.read_text(encoding="utf-8")
+        assert "[INFO]" in text and "saved=true" in text
+        assert "[WARNING]" in text and "reason=TimeoutError" in text
+        logger.warning("恢复后的宿主日志")
+        assert "恢复后的宿主日志" in capsys.readouterr().err
+    finally:
+        terminal_handler.close()
+
+
+@pytest.mark.parametrize("failure", ["directory", "write"])
+def test_cli_unwritable_memory_log_does_not_print_or_interrupt(failure, tmp_path, monkeypatch, capsys):
+    """目录创建或文件写入失败时，也不能向输入中的终端打印 logging 堆栈。"""
+    if failure == "directory":
+        obstacle = tmp_path / "file"
+        obstacle.write_text("不是目录", encoding="utf-8")
+        monkeypatch.setattr(cli, "state_path", lambda _: obstacle / "memory.log")
+    else:
+        def fail_open(_handler):
+            raise PermissionError("日志文件不可写")
+
+        monkeypatch.setattr(cli._QuietMemoryLogHandler, "_open", fail_open)
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    with cli._memory_file_logging():
+        logging.getLogger("box_agent.memory").warning("memory reason=TimeoutError")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
 
 
 def test_interactive_cli_delivers_explicit_skill_as_ordinary_reference(
