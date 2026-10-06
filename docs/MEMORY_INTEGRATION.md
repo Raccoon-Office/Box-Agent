@@ -13,7 +13,7 @@ memory_tenant_id: default
 memory_user_id: default
 memory_external:
   base_url: "http://127.0.0.1:8787"
-  timeout_seconds: 20
+  timeout_seconds: 30
   max_retries: 1
   context_max_chars: 16000
   save_queue_limit: 128
