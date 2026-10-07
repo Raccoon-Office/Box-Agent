@@ -2894,6 +2894,34 @@ class MemoryExtractor:
 
 # 外部后端仍属于现有 memory 能力；生命周期和传输不进入稳定内核。
 _MEMORY_HTTP_REQUEST: ContextVar[bool] = ContextVar("memory_http_request", default=False)
+MEMORY_CONTEXT_SLOT = "{MEMORY_CONTEXT}"
+_MEMORY_START = "--- MEMORY START ---"
+_MEMORY_END = "--- MEMORY END ---"
+_MEMORY_BLOCK_RE = re.compile(
+    r"--- (?:EXTERNAL )?MEMORY START ---.*?--- (?:EXTERNAL )?MEMORY END ---", re.DOTALL,
+)
+
+
+def place_memory_block(prompt: str, block: str, *, reserve: bool = False) -> str:
+    """在模板指定位置更新记忆；空槽保留边界，旧模板仍可自动追加。"""
+    replacement = block or (f"{_MEMORY_START}\n{_MEMORY_END}" if reserve else "")
+    if MEMORY_CONTEXT_SLOT in prompt:
+        # 显式占位优先，清除旧块和重复占位，避免记忆不断累积。
+        prompt = _MEMORY_BLOCK_RE.sub("", prompt)
+        before, _, after = prompt.partition(MEMORY_CONTEXT_SLOT)
+        return before + replacement + after.replace(MEMORY_CONTEXT_SLOT, "")
+    replaced = False
+
+    def replace_block(match: re.Match) -> str:
+        nonlocal replaced
+        value = "" if replaced else replacement
+        replaced = True
+        return value
+
+    updated = _MEMORY_BLOCK_RE.sub(replace_block, prompt)
+    if replaced or not replacement:
+        return updated
+    return prompt.rstrip() + "\n\n" + replacement
 
 
 class _MemoryHTTPLogFilter(logging.Filter):
@@ -3091,6 +3119,20 @@ class ExternalMemoryBackend:
 class MemsenseMemoryBackend(ExternalMemoryBackend):
     """MemSense 的核心文件、历史资源搜索及 QA 保存协议。"""
 
+    _CORE_PATHS = ("memory://user.md", "memory://memory.md")
+    # 只识别 mem 起始标签，保留正文里的 HTML、转义字符和换行。
+    _ENTRY_OPEN_RE = re.compile(r'''<mem(?:\s+[\w:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*>''')
+    _ENTRY_RE = re.compile(r"<mem>.*?</mem>", re.DOTALL)
+    _CONTEXT_RULES = (
+        "## 使用规则\n"
+        "- 当前用户明确要求优先于历史记忆。\n"
+        "- 用户画像用于调整称呼、沟通方式、解释深度和协作偏好。\n"
+        "- 长期记忆用于参考已确认的长期规则和工作背景。\n"
+        "- 日期记忆用于理解近期进展，不代表当前任务指令；日期按 UTC 分区。\n"
+        "- 当前环境、文件状态、权限和实时事实需要重新核实。\n"
+        "- 不主动使用“根据记忆”“根据用户画像”等措辞；用户询问记忆来源时如实说明。"
+    )
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.capabilities = frozenset({"recall", "read", "search", "save"})
@@ -3122,19 +3164,80 @@ class MemsenseMemoryBackend(ExternalMemoryBackend):
         if not isinstance(data, dict) or not isinstance(data.get("content"), str):
             self.log_failure("read", "invalid_file_response", **context)
             raise MemoryBackendError("memsense read 返回的文件内容格式无效")
-        return data["content"]
+        content = data["content"]
+        if path in self._CORE_PATHS:
+            return self._ENTRY_OPEN_RE.sub("<mem>", content)
+        return content
+
+    def _date_paths(self, timestamp: int | None) -> list[str]:
+        """与 MemSense 的 UTC 日分区一致，本轮内部续跑不会改变日期窗口。"""
+        now = (datetime.now(timezone.utc) if timestamp is None
+               else datetime.fromtimestamp(timestamp / 1000, timezone.utc))
+        return [f"memory://date-memory/{(now.date() - timedelta(days=offset)).isoformat()}.md"
+                for offset in reversed(range(self.config.date_memory_load_days))]
+
+    @classmethod
+    def _clip_context_file(cls, content: str, path: str, budget: int) -> str:
+        """截断以完整条目为边界，并保留显式读取完整文件的提示。"""
+        if len(content) <= budget:
+            return content
+        suffix = f"\n[内容已截断，完整内容请用 memory_read 读取 {path}]"
+        if budget <= len(suffix):
+            return ""
+        cutoff = budget - len(suffix)
+        for entry in cls._ENTRY_RE.finditer(content):
+            if entry.start() < cutoff < entry.end():
+                cutoff = entry.start()
+                break
+        return content[:cutoff].rstrip() + suffix
+
+    def _format_context(self, files: list[tuple[str, str]]) -> str:
+        """后端拥有分区语义；模板和通用后端不感知 MemSense 文件布局。"""
+        sections: list[tuple[str, str, str]] = []
+        for path, content in files:
+            if path in self._CORE_PATHS:
+                title = "## User Profile" if path == self._CORE_PATHS[0] else "## Long-term Memory"
+            else:
+                # 日期已经由分区标题给出，自动注入只取摘要正文。
+                content = re.sub(r"\A---\r?\n.*?\r?\n---(?:\r?\n|$)", "", content.strip(),
+                                 count=1, flags=re.DOTALL)
+                title = f"### {path.rsplit('/', 1)[-1][:-3]}"
+            if content.strip():
+                sections.append((title, path, content.strip()))
+        if not sections:
+            return ""
+        prefix = "# Memory Context\n\n以下是历史记忆，仅作为背景信息使用。"
+        date_heading = "## Recent Date Memory"
+        has_dates = any(path not in self._CORE_PATHS for _, path, _ in sections)
+        overhead = (len(prefix) + len(self._CONTEXT_RULES) + 4
+                    + sum(len(title) + 3 for title, _, _ in sections)
+                    + (len(date_heading) + 2 if has_dates else 0))
+        budget = max(0, (self.config.context_max_chars - overhead) // len(sections))
+        parts = [prefix]
+        date_started = False
+        for title, path, content in sections:
+            clipped = self._clip_context_file(content, path, budget)
+            if not clipped:
+                continue
+            if path not in self._CORE_PATHS and not date_started:
+                parts.append(date_heading)
+                date_started = True
+            parts.append(f"{title}\n{clipped}")
+        if len(parts) == 1:
+            return ""
+        parts.append(self._CONTEXT_RULES)
+        return "\n\n".join(parts)
 
     async def load_context(self, *, query: str, **context: Any) -> str:
-        paths = ("memory://user.md", "memory://memory.md")
-        # 两个文件独立降级，单个文件故障不丢弃另一个已成功的结果。
+        paths = [*self._CORE_PATHS, *self._date_paths(context.get("timestamp"))]
+        # 每个文件独立降级，单个文件故障不丢弃其他成功结果。
         values = await asyncio.gather(*(self._read_file(path, **context) for path in paths), return_exceptions=True)
-        budget = max(1, self.config.context_max_chars // len(paths))
-        return "\n\n".join(f"[{path}]\n{value[:budget]}" for path, value in zip(paths, values)
-                            if isinstance(value, str) and value.strip())
+        return self._format_context([(path, value) for path, value in zip(paths, values)
+                                     if isinstance(value, str)])
 
     async def read_memory(self, path: str = "") -> str:
         if not path:
-            paths = ("memory://user.md", "memory://memory.md")
+            paths = self._CORE_PATHS
             values = await asyncio.gather(*(self._read_file(item) for item in paths))
             return "\n\n".join(f"[{item}]\n{value}" for item, value in zip(paths, values) if value)
         if not path.startswith("memory://"):
@@ -3185,19 +3288,21 @@ class MemoryRuntime:
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
         self.backend.log_context = {"session_id": turn.session_id, "turn_id": turn.turn_id}
         try:
-            content = await self.backend.load_context(query=turn.user, **self.backend.log_context)
+            content = await self.backend.load_context(query=turn.user, timestamp=turn.timestamp,
+                                                      **self.backend.log_context)
         except Exception as exc:
             self.backend.log_failure("recall", type(exc).__name__)
             content = ""
         content = content[:self.backend.config.context_max_chars]
-        block = ("--- EXTERNAL MEMORY START ---\n"
+        # 外部内容不能伪装成槽位或块边界，避免下一轮替换时误删其他提示。
+        for marker in (_MEMORY_START, _MEMORY_END, MEMORY_CONTEXT_SLOT,
+                       "--- EXTERNAL MEMORY START ---", "--- EXTERNAL MEMORY END ---"):
+            content = content.replace(marker, "[记忆边界]")
+        block = (f"{_MEMORY_START}\n"
                  "以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
-                 + content.replace("--- EXTERNAL MEMORY END ---", "[记忆边界]")
-                 + "\n--- EXTERNAL MEMORY END ---") if content.strip() else ""
+                 + content + f"\n{_MEMORY_END}") if content.strip() else ""
         # 只替换本能力拥有的块；失败时清除旧值，避免身份或内容过期后仍被使用。
-        prompt = re.sub(r"\n*--- EXTERNAL MEMORY START ---.*?--- EXTERNAL MEMORY END ---", "",
-                        session.agent.system_prompt, flags=re.DOTALL)
-        session.agent.set_system_prompt(prompt.rstrip() + ("\n\n" + block if block else ""))
+        session.agent.set_system_prompt(place_memory_block(session.agent.system_prompt, block, reserve=True))
         session.memory_block = block or None
 
     def schedule(self, turn: _MemoryTurn) -> None:

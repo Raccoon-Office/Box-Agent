@@ -333,6 +333,22 @@ async def prepare_tools(resources: SessionResources) -> None:
         resources.cleanup.callback(cleanup_skill_scratch_dir, scratch)
 
 
+async def _prepare_memory_prompt(resources: SessionResources, prompt: str) -> str:
+    """共享槽位装配只负责位置，具体内容仍由现有 memory 能力提供。"""
+    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
+
+    manager = resources.memory_manager
+    if resources.context.options.utility or manager is None:
+        return prompt.replace(MEMORY_CONTEXT_SLOT, "")
+    external = isinstance(manager, ExternalMemoryBackend)
+    if _prepared(resources) and not external and MEMORY_CONTEXT_SLOT not in prompt:
+        # 已装配宿主继续拥有本地提示，仅在显式给出新槽位时填充。
+        return prompt
+    memory = await asyncio.to_thread(manager.recall)
+    resources.state["memory_block"] = memory or None
+    return place_memory_block(prompt, memory, reserve=external)
+
+
 async def prepare_prompt(resources: SessionResources) -> None:
     """Load the profile's template, then compose it with the shared builder.
 
@@ -343,7 +359,7 @@ async def prepare_prompt(resources: SessionResources) -> None:
     context = resources.context
     host, options, config = context.host, context.options, context.config
     if _prepared(resources):
-        resources.system_prompt = host.system_prompt
+        resources.system_prompt = await _prepare_memory_prompt(resources, host.system_prompt)
         return
     from .config import Config
 
@@ -738,8 +754,15 @@ def build_session_prompt(
         follow_up_suggestions_enabled=follow_up_suggestions_enabled,
         host_ui_hints=host_ui_hints,
     )
-    if memory_block and not utility:
-        prompt = append_prompt_segment(prompt, memory_block)
+    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
+
+    # 统一装配器使用后端已有的槽位规则，避免各入口重复召回或追加记忆。
+    if utility or (memory is None and not memory_block):
+        prompt = prompt.replace(MEMORY_CONTEXT_SLOT, "")
+    else:
+        prompt = place_memory_block(
+            prompt, memory_block or "", reserve=isinstance(memory, ExternalMemoryBackend),
+        )
     if not utility:
         prompt = append_prompt_segment(prompt, build_image_generation_prompt(config))
     if prompt_suffix and prompt_suffix.strip():

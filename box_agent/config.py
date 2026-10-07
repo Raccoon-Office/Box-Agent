@@ -235,6 +235,8 @@ class ExternalMemoryConfig(BaseModel):
     timeout_seconds: float = Field(default=5, gt=0, le=60)
     max_retries: int = Field(default=1, ge=0, le=3)
     context_max_chars: int = Field(default=16000, ge=1)
+    # 仅 MemSense 使用，按服务端 UTC 日期读取近期摘要；0 表示关闭日期预载。
+    date_memory_load_days: int = Field(default=3, ge=0, le=31)
     save_queue_limit: int = Field(default=128, ge=1)
     shutdown_timeout_seconds: float = Field(default=20, gt=0, le=60)
     # 以下操作均可省略；mem0/memu 占位类型使用相同映射。

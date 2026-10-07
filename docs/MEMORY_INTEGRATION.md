@@ -16,6 +16,7 @@ memory_external:
   timeout_seconds: 30
   max_retries: 1
   context_max_chars: 16000
+  date_memory_load_days: 3 # 仅 MemSense；0 关闭日期预载
   save_queue_limit: 128
   shutdown_timeout_seconds: 45
   # headers: {} # 按部署要求配置认证头，凭证只保存在本地配置中
@@ -23,17 +24,39 @@ memory_external:
 
 | 行为 | local | memsense |
 | --- | --- | --- |
-| 核心上下文 | 会话开始加载本地核心和目录摘要 | 每个真实用户轮次开始读取 `memory://user.md`、`memory://memory.md` |
+| 核心上下文 | 会话开始加载本地核心和目录摘要 | 每个真实用户轮次开始读取两个核心文件及近期日期摘要 |
 | 搜索 | 本地 topic/关键词检索 | `/v1/memory/resource_search`，检索会话标题和历史记忆 |
 | 保存 | 原有工具写入及本地 LLM 提取 | 整轮结束后，后台调用 `/v1/memory/save` 保存用户输入和最终回答 |
 | 文件修改 | 保留 `memory_write` | 不开放文件 write/edit |
 
 MemSense 的 `memory_read(path=...)` 可读取核心文件或检索返回的资源路径；省略
 path 时读取两个核心文件。`memory_search(query, limit=6)` 使用外部搜索协议。
+核心文件交给模型前保留 `<mem>...</mem>` 条目及正文，去掉 `time`、`priority`
+等存储属性；自动注入和 `memory_read` 使用同一转换，远端存储不变。
 当前 MemSense 服务将 `qa_chunk` 搜索类型兼容映射到事实记忆；原始 QA 仍通过
 save 保存，搜索结果保留服务实际返回的类型和资源路径。
 `enable_memory_extraction` 和维护、晋升配置只作用于 local。纠错工具仍保存到
 同身份的本地存储，不修改远端文件。
+
+### System prompt 的记忆位置
+
+模板可以使用 `{MEMORY_CONTEXT}` 指定记忆位置；默认模板已预留该位置。
+旧模板没有占位符时自动追加，禁用记忆和 utility 会话移除占位符。
+local 保留原有内容和加载时机，generic 保留服务返回格式。
+外部后端每个真实用户轮次原位替换一个 `--- MEMORY START ---` 块；
+同轮工具调用和自动续跑不重复读取。读取失败清除旧数据、保留空块位置，
+不影响后续恢复或其他系统提示。
+
+MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
+三个非空分区及使用规则，全部位于 system prompt 中。日期按旧到新排列，
+自动注入只保留日期标题和摘要正文，显式 `memory_read` 仍返回完整日期文件。
+`date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31；读取
+`memory://date-memory/YYYY-MM-DD.md`。日期依据本轮时间戳和 MemSense 服务端
+的 UTC 日分区计算，包含当天和此前若干天，每个新 query 重新计算和读取。
+服务端不存在或为空的文件不生成分区；失败文件单独记录日志，其他文件继续使用。
+日期预载只读取已有摘要，不会等待后台保存或代替服务端生成摘要。
+`context_max_chars` 限制后端上下文总长度；MemSense 截断保留完整 mem 条目
+边界，并提示通过 memory_read 获取完整内容。
 
 MemSense 的会话文件路径要求 UUID。已有 UUID 会话标识保持不变，CLI/ACP 等
 非 UUID 标识在后端内结合 tenant/user 稳定映射为 UUID；本地 Session Log 和

@@ -113,6 +113,9 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 2. 附件判断互斥处理：用户明确说明文件“还没有上传/未上传/未提供”时，视为确定缺失，不得调用 `search_files` 或猜测路径；若 `request_user_input` 可用，直接调用它请求上传文件或提供路径。只有用户已经给出路径或位置时，才先按当前路径与权限语义调用工具验证；若用户未明言文件缺失，不要仅因缺少附件元信息就把请求判定为缺失输入。
 3. 会话指代：用户使用“上面、刚才、前面、上一条、继续、按刚才的”等指代时，必须先从当前会话消息历史解析目标。历史中存在对应内容时，不得声称“没有历史上下文”或要求用户重复提供；未指定角色时优先采用紧邻当前请求的上一条可见消息，存在多个合理目标且会影响结果时才询问。
 
+## Memory
+<memory block>
+
 ## File Access Context
 - Current workspace: `<WORKSPACE>`
 - File tools and bash may access paths allowed by the active runtime policy.
@@ -185,9 +188,6 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 - 建议必须基于刚完成的结果，具体且互不重复；不要给泛泛的“还有问题吗”。
 - 简单问候、仅确认/致谢、任务失败、正在执行、需要用户确认或补充信息时不要输出该块。
 - 围栏块是宿主读取的元数据，不要在可见正文解释它，也不要输出其他字段。
-
-## Memory
-<memory block>
 
 ## Native Image Generation
 
