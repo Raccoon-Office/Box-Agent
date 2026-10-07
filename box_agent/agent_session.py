@@ -350,32 +350,38 @@ class AgentSession:
 
             errors = []
             try:
-                if self._external_run_cleanup is not None:
-                    error = await asyncio.shield(self._external_run_cleanup)
-                    if error is not None:
-                        errors.append(error)
-                else:
-                    try:
-                        await self._close_run_stream(events, activation)
-                    except BaseException as error:
-                        errors.append(error)
+                try:
+                    if self._external_run_cleanup is not None:
+                        error = await asyncio.shield(self._external_run_cleanup)
+                        if error is not None:
+                            errors.append(error)
+                    else:
+                        try:
+                            await self._close_run_stream(events, activation)
+                        except BaseException as error:
+                            errors.append(error)
+                finally:
+                    self._active_events = None
+                    self._active_activation = None
+                    self._active_run_task = None
+                    self._active_run_finished = None
+                    self._run_driving = False
+                    if not finished.done():
+                        finished.set_result(None)
+                    # ACP can own a wider prompt spanning several continuation runs.
+                    self.turn_active = enclosing_turn_active
+                    if not enclosing_turn_active and isinstance(self.inject_queue, InjectionManager):
+                        self.inject_queue.end_run()
+                if errors:
+                    cleanup_error = _combined_cleanup_error(errors)
+                    if primary_error is None:
+                        raise cleanup_error
+                    _attach_cleanup_error(primary_error, cleanup_error)
             finally:
-                self._active_events = None
-                self._active_activation = None
-                self._active_run_task = None
-                self._active_run_finished = None
-                self._run_driving = False
-                if not finished.done():
-                    finished.set_result(None)
-                # ACP can own a wider prompt spanning several continuation runs.
-                self.turn_active = enclosing_turn_active
-                if not enclosing_turn_active and isinstance(self.inject_queue, InjectionManager):
-                    self.inject_queue.end_run()
-            if errors:
-                cleanup_error = _combined_cleanup_error(errors)
-                if primary_error is None:
-                    raise cleanup_error
-                _attach_cleanup_error(primary_error, cleanup_error)
+                # Keep propagated exceptions intact without retaining them
+                # through their own traceback's finished run frame.
+                primary_error = cleanup_error = error = None
+                errors.clear()
 
     async def _close_run_stream(self, events: Any, activation: Any) -> None:
         from .composition import _combined_cleanup_error
