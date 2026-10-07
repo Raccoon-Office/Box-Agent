@@ -23,20 +23,6 @@ if TYPE_CHECKING:
     from .config import Config
 
 
-def _consume_runner_cancellation(task: asyncio.Task) -> None:
-    """Release the Task's saved cancellation traceback after it finishes.
-
-    The original error is delivered by events(); result() uses RunResult.
-    gather(return_exceptions=True) alone need not consume a Task's saved
-    CancelledError, which can retain all the producer's execution frames.
-    """
-    if task.cancelled():
-        try:
-            task.exception()
-        except asyncio.CancelledError:
-            pass
-
-
 @dataclass(slots=True)
 class AgentRunHandle:
     """A protocol-independent view over one session's mutable run state.
@@ -205,7 +191,6 @@ class AgentRunHandle:
         self._collector = RunResultCollector(self.run_id)
         self._result_future = loop.create_future()
         self._runner_task = loop.create_task(self._run())
-        self._runner_task.add_done_callback(_consume_runner_cancellation)
 
     async def _run(self) -> None:
         try:
@@ -243,8 +228,9 @@ class AgentRunHandle:
                     error={"type": type(exc).__name__, "message": str(exc),
                            **({"code": exc.code} if isinstance(exc, RunDeliveryError) else {})},
                 )
-            if isinstance(exc, asyncio.CancelledError):
-                raise
+            # Cancellation is delivered through events() and RunResult. Let
+            # this private producer finish normally: older asyncio Tasks keep
+            # a re-raised cancellation's traceback even after exception().
         finally:
             self._events_factory = None
             if self._permission_broker is not None:

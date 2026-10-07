@@ -11,7 +11,7 @@ import pytest
 from box_agent.agent_run import AgentRunHandle
 from box_agent.agent_service import AgentService
 from box_agent.api import ControlCommand, RunRequest
-from box_agent.events import DoneEvent, StopReason
+from box_agent.events import ContentEvent, DoneEvent, StopReason
 
 
 @pytest.fixture
@@ -27,6 +27,44 @@ def without_cyclic_gc():
 
 class _Payload:
     pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_abandoned_active_run_releases_inputs_and_keeps_outcome(
+    without_cyclic_gc, cleanup_fails,
+):
+    references = []
+    waiting, closed = asyncio.Event(), asyncio.Event()
+
+    async def provider():
+        local = _Payload()
+        references.append(weakref.ref(local))
+        try:
+            yield ContentEvent(content="started")
+            waiting.set()
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+            if cleanup_fails:
+                raise ValueError("cleanup failed")
+
+    state = object()
+    handle = AgentRunHandle.for_run(state=state, run_id="abandoned", events_factory=provider)
+    async with aclosing(handle.events()) as events:
+        assert (await anext(events)).payload.content == "started"
+        await asyncio.wait_for(waiting.wait(), 1)
+    result = await handle.result()
+    await asyncio.sleep(0)
+
+    assert closed.is_set()
+    assert references[0]() is None
+    assert handle.state is state
+    assert await handle.result() is result
+    assert result.status == ("failed" if cleanup_fails else "cancelled")
+    assert result.error["type"] == ("ValueError" if cleanup_fails else "CancelledError")
+    if cleanup_fails:
+        assert result.error["message"] == "cleanup failed"
 
 
 @pytest.mark.asyncio
