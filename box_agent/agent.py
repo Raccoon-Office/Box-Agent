@@ -690,6 +690,10 @@ class Agent:
     def _next_session_turn(self) -> int:
         if self.session_log is None:
             raise RuntimeError("session log is not configured")
+        next_turn_number = getattr(self.session_log, "next_turn_number", None)
+        if callable(next_turn_number):
+            return next_turn_number()
+        # Custom stores may only expose the existing events snapshot interface.
         turns = [
             event["data"].get("turn")
             for event in self.session_log.events
