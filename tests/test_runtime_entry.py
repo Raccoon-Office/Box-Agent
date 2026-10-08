@@ -17,6 +17,7 @@ def test_runtime_entry_bootstraps_managed_mcp_config(
     capsys,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["box-agent-acp", "--bootstrap-mcp-config"])
     monkeypatch.setattr(mcp_bootstrap.shutil, "which", lambda _command: None)
 

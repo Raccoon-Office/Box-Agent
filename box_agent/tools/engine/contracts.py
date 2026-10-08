@@ -23,7 +23,7 @@ def _execution_identity(tool: Tool) -> tuple[Any, ...]:
             "name", "mcp_tool_id", "server_name", "_server_name",
             "remote_name", "_remote_name",
         )
-    )
+    ) + (getattr(tool, "deduplicate_within_batch", False) is True,)
 
 
 def _without_description(schema: dict[str, Any]) -> dict[str, Any]:
@@ -51,6 +51,7 @@ class ToolDefinitionView:
     _openai_schema: dict[str, Any] = field(repr=False)
     _identity: tuple[Any, ...] = field(repr=False)
     _compaction_state_reader: Callable[[], tuple[str, str] | None] = field(repr=False)
+    _deduplicate_within_batch: bool = field(default=False, repr=False)
 
     @classmethod
     def from_tool(cls, tool: Tool) -> ToolDefinitionView:
@@ -65,6 +66,7 @@ class ToolDefinitionView:
             _openai_schema=deepcopy(tool.to_openai_schema()),
             _identity=_execution_identity(tool),
             _compaction_state_reader=tool.compaction_state,
+            _deduplicate_within_batch=getattr(tool, "deduplicate_within_batch", False) is True,
         )
 
     @property
@@ -124,6 +126,16 @@ class PreparedTools:
             execution_call.function.name = self.call_names.get(name, name)
             normalized.append(execution_call)
         return normalized
+
+    def allows_batch_deduplication(self, name: str) -> bool:
+        """Use only the offered target's unchanged, trusted opt-in."""
+        name = self.call_names.get(name, name)
+        definition = self._definitions_by_name.get(name)
+        return (
+            definition is not None
+            and definition._deduplicate_within_batch
+            and self.validate_call(name) is None
+        )
 
     def admission_error(self, name: str) -> str | None:
         """Apply offer restrictions while retaining visible unknown-call errors.

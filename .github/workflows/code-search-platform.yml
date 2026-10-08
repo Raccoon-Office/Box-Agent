@@ -1,0 +1,64 @@
+name: Code search platform compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'box_agent/tools/ripgrep_tool.py'
+      - 'tests/test_ripgrep_tool.py'
+      - 'box_agent/session_assembly.py'
+      - 'box_agent/tools/bash_tool.py'
+      - 'box_agent/config/code_prompt.md'
+      - 'tests/test_session_adapter_assembly.py'
+      - 'tests/test_bash_tool.py'
+      - '.github/workflows/code-search-platform.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ripgrep:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+      BOX_AGENT_TEST_REQUIRE_RG: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Install ripgrep (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Install ripgrep (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+
+      - name: Install ripgrep (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ripgrep -y --no-progress
+
+      - name: Show ripgrep version
+        run: rg --version
+
+      - name: Test code search tools on native operating system
+        run: >-
+          uv run pytest tests/test_ripgrep_tool.py
+          tests/test_bash_tool.py::test_description_prefers_dedicated_search_tools_over_shell_search
+          tests/test_session_adapter_assembly.py::test_shared_assembly_keeps_legacy_workspace_tools_factories_working
+          -q --tb=short

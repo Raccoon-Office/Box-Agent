@@ -157,7 +157,7 @@ def test_post_compaction_diagnostic_reinjects_skill_root_directory(tmp_path):
     restored.observe_history(history)
     compacted = [history[0], Message(role="assistant", content="summary")]
     projection = restored.prepare_request(compacted, budget_chars=50000)
-    text = str(projection.messages[0].content)
+    text = "\n".join(block.get("text", "") for block in projection.messages[0].content)
     assert f"Its Skill Root Directory is `{path.parent}`" in text
     assert "relative to this directory" in text
     assert "Use get_skill" in text
@@ -183,7 +183,7 @@ def test_post_compaction_diagnostic_falls_back_when_skill_has_no_path(tmp_path, 
                         lambda name: replace(real_resolve(name), path=""))
     compacted = [history[0], Message(role="assistant", content="summary")]
     projection = restored.prepare_request(compacted, budget_chars=50000)
-    text = str(projection.messages[0].content)
+    text = "\n".join(block.get("text", "") for block in projection.messages[0].content)
     assert "Skill Root Directory" not in text
     assert "unknown" not in text
     assert "Use get_skill" in text

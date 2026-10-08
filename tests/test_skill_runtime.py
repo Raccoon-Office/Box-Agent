@@ -32,6 +32,9 @@ from box_agent.tools.skill_preload import (
 )
 
 
+_IMPORTED_HOME = Path.home()
+
+
 def _make_executable(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -366,9 +369,9 @@ def test_node_runtime_defaults_missing(tmp_path: Path) -> None:
 
 
 def test_default_node_runtime_root_is_separate_from_python_dirs() -> None:
-    assert DEFAULT_NODE_RUNTIME_ROOT == Path.home() / ".box-agent" / "runtimes" / "node"
-    assert DEFAULT_NODE_RUNTIME_ROOT != Path.home() / ".box-agent" / "sandbox"
-    assert DEFAULT_NODE_RUNTIME_ROOT != Path.home() / ".box-agent" / "runtime-packages"
+    assert DEFAULT_NODE_RUNTIME_ROOT == _IMPORTED_HOME / ".box-agent" / "runtimes" / "node"
+    assert DEFAULT_NODE_RUNTIME_ROOT != _IMPORTED_HOME / ".box-agent" / "sandbox"
+    assert DEFAULT_NODE_RUNTIME_ROOT != _IMPORTED_HOME / ".box-agent" / "runtime-packages"
 
 
 def test_self_managed_node_runtime_from_manifest(tmp_path: Path) -> None:
@@ -400,7 +403,7 @@ def test_self_managed_node_runtime_from_manifest(tmp_path: Path) -> None:
     skill_tools = tmp_path / ".box-agent" / "skill-tools"
     assert execution_env["NPM_CONFIG_CACHE"] == str(skill_tools / "npm-cache")
     assert execution_env["NPM_CONFIG_PREFIX"] == str(skill_tools)
-    assert execution_env["PATH"].split(":")[0] == str(skill_tools / "bin")
+    assert execution_env["PATH"].split(os.pathsep)[0] == str(skill_tools if os.name == "nt" else skill_tools / "bin")
 
 
 def test_self_managed_node_runtime_accepts_relative_manifest_paths(tmp_path: Path) -> None:
@@ -434,8 +437,10 @@ def test_cli_reuses_office_provisioned_node_without_manifest(
 ) -> None:
     default_root = tmp_path / ".box-agent" / "runtimes" / "node"
     office_root = tmp_path / ".box-agent" / "box-agent-runtime" / "runtimes" / "node"
-    node_bin = office_root / "versions" / "node-v24.15.0-darwin-arm64" / "bin"
-    for name in ("node", "npm", "npx"):
+    version = office_root / "versions" / "node-v24.15.0-test"
+    node_bin = version if os.name == "nt" else version / "bin"
+    names = ("node.exe", "npm.cmd", "npx.cmd") if os.name == "nt" else ("node", "npm", "npx")
+    for name in names:
         _make_executable(node_bin / name)
     monkeypatch.setattr("box_agent.tools.runtime.DEFAULT_NODE_RUNTIME_ROOT", default_root)
 
@@ -449,7 +454,7 @@ def test_cli_reuses_office_provisioned_node_without_manifest(
     default_runtime = NodeRuntimeManager(root=default_root).discover()
     assert default_runtime.status == "missing"
     assert ctx.get("node").status == "available"
-    assert ctx.env()["BOX_AGENT_NODE"] == str(node_bin / "node")
+    assert ctx.env()["BOX_AGENT_NODE"] == str(node_bin / names[0])
 
 
 def test_frozen_runtime_discovers_bundled_node_and_uses_user_state_dirs(tmp_path: Path, monkeypatch) -> None:
@@ -950,22 +955,22 @@ def test_skill_execution_env_prefers_managed_tools_and_shared_browser(tmp_path: 
         home_dir=tmp_path,
     )
     skill_tools = tmp_path / ".box-agent" / "skill-tools"
-    path_entries = env["PATH"].split(":")
+    path_entries = env["PATH"]
 
-    assert path_entries[0] == str(skill_tools / "bin")
+    assert path_entries.startswith(str(skill_tools / "bin") + ":")
     assert path_entries.index(str(node_dir)) < path_entries.index("/user/node/bin")
     assert path_entries.index(str(python_dir)) < path_entries.index("/user/node/bin")
     assert env["NPM_CONFIG_PREFIX"] == str(skill_tools)
     assert env["PYTHONUSERBASE"] == str(skill_tools / "python")
-    assert env["PYTHONPATH"].split(":")[0] == str(
+    assert env["PYTHONPATH"].startswith(str(
         skill_tools
         / "python"
         / "lib"
         / f"python{sys.version_info.major}.{sys.version_info.minor}"
         / "site-packages"
-    )
+    ))
     assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == str(chromium)
-    assert env["NODE_PATH"].split(":")[0] == str(skill_tools / "lib" / "node_modules")
+    assert env["NODE_PATH"].startswith(str(skill_tools / "lib" / "node_modules") + ":")
     assert "BOX_AGENT_OUTPUT_DIR" not in env
 
 

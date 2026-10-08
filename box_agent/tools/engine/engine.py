@@ -23,6 +23,7 @@ from ...schema import Message, ToolCall
 from ...session_log import SessionLogDurabilityError
 from ...session_trace import emit_session_trace
 from ..base import Tool, ToolResult, ToolInvocationContext
+from ..delegated_budget import DelegatedBudget, current_budgets
 from ..bash_tool import BashTool
 from ..file_tools import WriteTool
 from ..browser_result_adapter import (
@@ -102,10 +103,18 @@ class DefaultToolEngine:
                 "artifact_root_dir is deprecated and ignored; artifact discovery uses workspace_dir"
             )
         self._context, self._options = context, options
+        self._ancestor_budgets = current_budgets()
+        self._delegated_budget = (
+            DelegatedBudget(options.max_delegated_tool_calls)
+            if options.max_delegated_tool_calls is not None else None
+        )
+        self._child_budgets = self._ancestor_budgets + (
+            (self._delegated_budget,) if self._delegated_budget is not None else ()
+        )
         self._budget = ToolBudgetState(
             tool_call_limits=options.tool_call_limits,
             max_tool_calls=options.max_tool_calls,
-            max_delegated_tool_calls=options.max_delegated_tool_calls,
+            max_delegated_tool_calls=None,
             search_files_empty_result_limit=options.search_files_empty_result_limit,
             logger=_log,
         )
@@ -140,8 +149,8 @@ class DefaultToolEngine:
             if budget.tool_call_counts.get(name, 0) >= limit and name not in budget.tool_budget_wrapup_injected:
                 budget.tool_budget_wrapup_injected.add(name)
                 guidance.append(tool_call_budget_wrapup_text(name, limit))
-        if (options.max_delegated_tool_calls is not None
-                and budget.delegated_tool_call_total >= options.max_delegated_tool_calls
+        if (self._delegated_budget is not None
+                and self._delegated_budget.used >= self._delegated_budget.limit
                 and not budget.delegated_budget_guidance_injected):
             budget.delegated_budget_guidance_injected = True
             guidance.append(delegated_tool_call_budget_wrapup_text(options.max_delegated_tool_calls))
@@ -302,7 +311,13 @@ class DefaultToolEngine:
         return ToolInvocationRequest(
             call.call_id, call.name, call.arguments, immediate_result=result,
             on_invoke=lambda: setattr(call, "invoked", True),
-            invocation_context=ToolInvocationContext(parent_tool_call_id=call.call_id, skill_reader=self._context.skill_reader),
+            invocation_context=self._invocation_context(call),
+        )
+
+    def _invocation_context(self, call: ToolCallRecord) -> ToolInvocationContext:
+        return ToolInvocationContext(
+            parent_tool_call_id=call.call_id, skill_reader=self._context.skill_reader,
+            child_budgets=self._child_budgets, budget_charge=call.budget_charge,
         )
 
     def _log_result(self, call: ToolCallRecord, result: ToolResult) -> None:
@@ -331,6 +346,7 @@ class DefaultToolEngine:
                         ToolInvocationRequest(
                             call.call_id, call.name, call.arguments,
                             approved_permission_request=approval,
+                            invocation_context=self._invocation_context(call),
                             on_invoke=lambda: setattr(call, "invoked", True),
                         )
                     ),
@@ -376,7 +392,7 @@ class DefaultToolEngine:
         self._recovery = _record_model_history_placeholder_recovery_result(
             self._recovery, call.name, call.arguments, result,
         )
-        self._budget.record_delegated_tool_budget(call.name, result.raw_output)
+        self._budget.record_delegated_tool_budget(call.name, result.raw_output, call.call_id)
         if call.name == "search_files":
             if search_files_result_is_empty(result):
                 self._budget.search_files_consecutive_empty_results += 1
@@ -470,14 +486,18 @@ class DefaultToolEngine:
         unique, duplicates, first_by_signature = [], [], {}
         for original, normalized in zip(calls, prepared.canonicalize_calls(calls)):
             name, arguments = normalized.function.name, normalized.function.arguments
-            signature = name, json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            deduplicate = prepared.allows_batch_deduplication(name)
+            signature = (
+                name, json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            ) if deduplicate else None
             tool_id, server_name = prepared.target_identity(name)
             call = ToolCallRecord(normalized.id, original.function.name, name, arguments,
                                   prepared.targets.get(name), tool_id, server_name)
-            if signature in first_by_signature:
+            if deduplicate and signature in first_by_signature:
                 duplicates.append((call, first_by_signature[signature]))
             else:
-                first_by_signature[signature] = call
+                if deduplicate:
+                    first_by_signature[signature] = call
                 unique.append(call)
         if duplicates:
             _log.info("tool/dedupe skipped=%d unique=%d", len(duplicates), len(unique))

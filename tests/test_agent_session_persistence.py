@@ -306,6 +306,10 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
         assert phase == interrupt_during
         expected.extend(message.content for message in messages if marker in str(message.content))
         assert len(expected) == 1
+        feedback = next(message for message in messages if marker in str(message.content))
+        assert feedback.source == "runtime"
+        assert "Runtime state update:" in feedback.content
+        assert "The user sent" not in feedback.content
         if phase == "summary":
             assert _read_durable_events(log.path)[-1]["type"] == "compaction/start"
         # Open the on-disk checkpoint before unwinding/closing the active log:
@@ -316,8 +320,10 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
         snapshot.write_bytes(log.path.read_bytes())
         reopened = SessionLog.open(snapshot_root, session_id="wrapup-checkpoint", cwd=tmp_path)
         try:
-            recovered.extend(message.content for message in reopened.replay().messages
-                             if marker in str(message.content))
+            replayed = [message for message in reopened.replay().messages
+                        if marker in str(message.content)]
+            assert all(message.source == "runtime" for message in replayed)
+            recovered.extend(message.content for message in replayed)
         finally:
             reopened.close()
         raise Interrupted
@@ -1014,8 +1020,9 @@ async def test_agent_restore_uses_current_skill_and_reports_known_changes_withou
     assert restored.skill_runtime.state.sequence == before_sequence
     restored.add_user_message("continue review")
     await restored.run()
-    reference = str(llm.requests[0][-1].content)
-    assert current.to_prompt() in reference.replace("\\n", "\n")
+    content = llm.requests[0][-1].content
+    reference = "\n".join(block["text"] for block in content if block["type"] == "text")
+    assert current.to_prompt() in reference
     assert current.to_prompt() not in llm.requests[0][0].content
     if change == "hash" or not legacy_record:
         assert original_records[0]["sha256"] in reference

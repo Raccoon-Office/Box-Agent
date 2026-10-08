@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import date
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -56,7 +57,7 @@ except ImportError:
 from box_agent.auth import request_auth_headers, resolve_auth_token, should_attach_auth_header
 from box_agent.config import MCPConfig
 
-from .base import Tool, ToolResult
+from .base import Tool, ToolInvocationContext, ToolResult
 from .browser_runtime_scope import (
     acquire_browser_runtime_for_current_turn,
     release_browser_runtime_for_current_turn,
@@ -258,6 +259,62 @@ ConnectionType = Literal["stdio", "sse", "http", "streamable_http", "stdio_http"
 # this internal: per-turn fan-out may be tuned, but concurrent Agent sessions
 # must not multiply load beyond the shared MCP connection's capacity.
 WEB_SEARCH_MCP_MAX_CONCURRENCY = 5
+HOSTED_WEB_SEARCH_SERVER_NAME = "mcp-server-askecho-search-infinity"
+
+
+def _hosted_web_search_wire_name(name: str) -> str:
+    """Convert model-facing snake_case fields to the hosted service's PascalCase."""
+    return "".join(part.capitalize() for part in name.split("_"))
+
+
+HOSTED_WEB_SEARCH_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Search query, 1–100 characters; must contain non-whitespace text.",
+        },
+        "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Number of results: 1–50 for web (default 10), 1–5 for image (default 5).",
+        },
+        "search_type": {
+            "type": "string",
+            "enum": ["web", "image"],
+            "default": "web",
+            "description": "Search mode: web (default) or image.",
+        },
+        "time_range": {
+            "type": "string",
+            "description": (
+                "Web-search time filter: OneDay, OneWeek, OneMonth, OneYear, "
+                "or YYYY-MM-DD..YYYY-MM-DD with valid dates in ascending order. "
+                "Omit this field for no time filter."
+            ),
+            "anyOf": [
+                {"enum": ["OneDay", "OneWeek", "OneMonth", "OneYear"]},
+                {
+                    "pattern": (
+                        r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\.\."
+                        r"[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                    )
+                },
+            ],
+        },
+        "auth_level": {
+            "type": "integer",
+            "enum": [0, 1],
+            "default": 0,
+            "description": "Authority filter: 0 (default) or 1 (very high authority).",
+        },
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
 _DEFAULT_MCP_CONFIG = MCPConfig()
 
 
@@ -853,14 +910,158 @@ class MCPTool(Tool):
 
     @property
     def description(self) -> str:
+        if self._is_hosted_web_search:
+            return (
+                "Search the web or images. Use lowercase snake_case parameters: "
+                "query (required, 1–100 characters), count (1–50; image max 5), "
+                "search_type (web or image), time_range (relative preset or "
+                "YYYY-MM-DD..YYYY-MM-DD), and auth_level (0 or 1)."
+            )
         return self._description
 
     @property
     def parameters(self) -> dict[str, Any]:
+        if self._is_hosted_web_search:
+            return HOSTED_WEB_SEARCH_PARAMETERS
         return self._parameters
+
+    @property
+    def _is_hosted_web_search(self) -> bool:
+        return (
+            self._server_name == HOSTED_WEB_SEARCH_SERVER_NAME
+            and self._remote_name == "web_search"
+        )
+
+    @staticmethod
+    def _web_search_aliases() -> dict[str, tuple[str, ...]]:
+        return {
+            name: (name, _hosted_web_search_wire_name(name))
+            for name in HOSTED_WEB_SEARCH_PARAMETERS["properties"]
+        }
+
+    def _web_search_error(
+        self,
+        message: str,
+        *,
+        path: str = "/",
+        keyword: str = "custom",
+    ) -> ToolResult:
+        issue = {"path": path, "keyword": keyword, "message": message}
+        return ToolResult(
+            success=False,
+            error=(
+                f"INVALID_TOOL_ARGUMENTS: {self.name}\n"
+                f"- {path}: {message}\n"
+                "Use lowercase parameters: query, count, search_type, "
+                "time_range, auth_level."
+            ),
+            raw_output={
+                "code": "INVALID_TOOL_ARGUMENTS",
+                "tool": self.name,
+                "issues": [issue],
+                "suggested_call": {"query": "your search terms"},
+            },
+        )
+
+    def _normalize_web_search_arguments(
+        self, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, ToolResult | None]:
+        normalized: dict[str, Any] = {}
+        for canonical, aliases in self._web_search_aliases().items():
+            present = [name for name in aliases if name in arguments]
+            if len(present) > 1 and arguments[present[0]] != arguments[present[1]]:
+                return None, self._web_search_error(
+                    f"provide only one value for {canonical}; {present[0]} and "
+                    f"{present[1]} disagree",
+                    path=f"/{canonical}",
+                    keyword="conflict",
+                )
+            if present:
+                normalized[canonical] = arguments[present[0]]
+        known_aliases = {
+            alias for aliases in self._web_search_aliases().values() for alias in aliases
+        }
+        # Keep unknown fields so the shared schema validator can report them
+        # instead of silently discarding a malformed model call.
+        normalized.update(
+            {name: value for name, value in arguments.items() if name not in known_aliases}
+        )
+
+        time_range = normalized.get("time_range")
+        if time_range == "":
+            normalized.pop("time_range")
+            time_range = None
+        query = normalized.get("query")
+        if isinstance(query, str) and not query.strip():
+            return None, self._web_search_error(
+                "query must contain at least one non-whitespace character",
+                path="/query",
+                keyword="minLength",
+            )
+        if (
+            normalized.get("search_type") == "image"
+            and isinstance(normalized.get("count"), int)
+            and normalized["count"] > 5
+        ):
+            return None, self._web_search_error(
+                "count must be between 1 and 5 when search_type is 'image'",
+                path="/count",
+                keyword="maximum",
+            )
+        if normalized.get("search_type") == "image" and "count" not in normalized:
+            # The hosted service's general default is 10, which is invalid for
+            # image mode; make the safe image default explicit on the wire.
+            normalized["count"] = 5
+        if isinstance(time_range, str) and ".." in time_range:
+            start_text, end_text = time_range.split("..", 1)
+            try:
+                start = date.fromisoformat(start_text)
+                end = date.fromisoformat(end_text)
+            except ValueError:
+                return None, self._web_search_error(
+                    "time_range date bounds must be valid YYYY-MM-DD dates",
+                    path="/time_range",
+                    keyword="date",
+                )
+            if start > end:
+                return None, self._web_search_error(
+                    "time_range start date must be on or before its end date",
+                    path="/time_range",
+                    keyword="dateOrder",
+                )
+        return normalized, None
+
+    async def invoke(
+        self,
+        arguments: dict[str, Any],
+        *,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
+        if not self._is_hosted_web_search:
+            return await super().invoke(arguments, context=context)
+        normalized, error = self._normalize_web_search_arguments(arguments)
+        if error is not None:
+            return error
+        result = await super().invoke(normalized or {}, context=context)
+        if not result.success and result.raw_output is not None:
+            result.raw_output = {
+                **result.raw_output,
+                "suggested_call": {"query": "your search terms"},
+            }
+            if result.error and "Use lowercase parameters:" not in result.error:
+                result.error += (
+                    "\nUse lowercase parameters: query, count, search_type, "
+                    "time_range, auth_level."
+                )
+        return result
 
     async def execute(self, **kwargs) -> ToolResult:
         """Execute MCP tool via the session with timeout protection."""
+        if self._is_hosted_web_search:
+            normalized, argument_error = self._normalize_web_search_arguments(kwargs)
+            if argument_error is not None:
+                return argument_error
+            kwargs = normalized or {}
         timeout = self._execute_timeout or _default_timeout_config.execute_timeout
         is_web_extract = (
             self._server_name == "box-agent-web-extract"
@@ -898,6 +1099,16 @@ class MCPTool(Tool):
                     concurrency_slot_acquired = True
                     waiting_for_concurrency_slot = False
                 call_arguments = {**kwargs, **self._fixed_arguments}
+                if self._is_hosted_web_search:
+                    call_arguments = {
+                        _hosted_web_search_wire_name(local_name): call_arguments[local_name]
+                        for local_name in HOSTED_WEB_SEARCH_PARAMETERS["properties"]
+                        if local_name in call_arguments
+                        and not (
+                            local_name == "time_range"
+                            and call_arguments[local_name] == ""
+                        )
+                    }
                 if is_web_extract:
                     model_context = current_model_tool_context()
                     if model_context is not None:

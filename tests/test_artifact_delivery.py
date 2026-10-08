@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import runpy
 import shutil
@@ -12,6 +13,27 @@ from box_agent.tools.engine.artifact_results import _detect_tool_artifacts, _sna
 REPO = Path(__file__).resolve().parents[1]
 FAST = REPO / "box_agent/skills/document-skills/pptx/scripts"
 STANDARD = REPO / "box_agent/skills/presentation-suite/skills/sn-ppt-standard/scripts"
+
+
+@pytest.mark.parametrize("reference", ["exact", "directory", "same-basename"])
+@pytest.mark.parametrize("changed", [True, False])
+def test_json_output_requires_changed_file_and_exact_path(tmp_path, reference, changed):
+    folder = tmp_path / "nested"
+    folder.mkdir()
+    target = folder / "report.html"
+    target.write_text("old", encoding="utf-8")
+    before = _snapshot_workspace_signatures(str(tmp_path))
+    if changed:
+        target.write_text("new report", encoding="utf-8")
+    path = {"exact": target, "directory": folder,
+            "same-basename": tmp_path / target.name}[reference]
+    events = _detect_tool_artifacts(
+        "call", "bash", json.dumps({"html": str(path)}, ensure_ascii=False), None,
+        before, _snapshot_workspace_signatures(str(tmp_path)), str(tmp_path),
+    )
+    assert [event.filename for event in events] == (
+        [target.name] if changed and reference == "exact" else []
+    )
 
 
 def published(root):

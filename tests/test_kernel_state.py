@@ -153,7 +153,7 @@ class _BudgetBoundaryLLM:
 
 
 @pytest.mark.asyncio
-async def test_delegated_limit_rejection_keeps_error_and_wrapup_at_loop_boundary() -> None:
+async def test_hard_delegated_limit_rejects_custom_tool_without_shared_ledger() -> None:
     tool = _DelegatingTool()
     events = [
         event
@@ -171,15 +171,9 @@ async def test_delegated_limit_rejection_keeps_error_and_wrapup_at_loop_boundary
         for event in events
         if isinstance(event, ToolCallResult) and event.tool_call_id == "sub-agent-2"
     )
-    assert tool.calls == 1
+    assert tool.calls == 0
     assert blocked.success is False
     assert blocked.error == (
-        "Delegated tool call budget reached (2 child calls this task). "
-        "Do not start another sub_agent. Continue with the parent tools to merge, "
-        "verify, finalize, and deliver the artifacts already produced."
+        "DELEGATED_BUDGET_UNSUPPORTED: sub_agent must honor invocation context budgets"
     )
-    assert any(
-        isinstance(event, InjectedMessageEvent)
-        and "子 Agent 内部工具预算已达到上限（2 次）" in event.content
-        for event in events
-    )
+    assert not any(isinstance(event, InjectedMessageEvent) for event in events)

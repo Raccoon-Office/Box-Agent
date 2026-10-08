@@ -111,6 +111,8 @@ async def test_inject_at_step_boundary():
     assert "mid-turn guidance" in injected_msg.content
     assert "not as a new standalone task" in injected_msg.content
     assert "then continue the original task" in injected_msg.content
+    assert injected_msg.source == "user"
+    assert "The user sent" in injected_msg.content
 
 
 @pytest.mark.asyncio
@@ -141,6 +143,94 @@ async def test_hidden_runtime_injection_updates_context_without_user_message():
     )
     assert "authoritative runtime context" in runtime_message.content
     assert "Mid-turn user message" not in runtime_message.content
+    assert runtime_message.source == "runtime"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_steps,reserve,expected_step", [
+    (12, 10, 3), (300, 10, 291), (10, 10, None), (12, 0, None),
+])
+async def test_budget_feedback_reaches_model_as_runtime_at_existing_threshold(
+    max_steps, reserve, expected_step,
+):
+    from box_agent.config import ToolLimitsConfig
+    from box_agent.kernel.loop import _latest_user_text
+
+    calls = []
+    final_step = expected_step or 2
+
+    class CapturingLLM:
+        async def generate_stream(self, messages, **kwargs):
+            calls.append([message.model_copy(deep=True) for message in messages])
+            if len(calls) == final_step:
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+            else:
+                yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                    ToolCall(id=f"echo-{len(calls)}", type="function", function=FunctionCall(
+                        name="echo", arguments={"text": "progress"},
+                    )),
+                ])
+
+    msgs = _msgs()
+    events = await collect(run_agent_loop(
+        llm=CapturingLLM(), messages=msgs, tools={"echo": EchoTool()}, max_steps=max_steps,
+        tool_limits=ToolLimitsConfig(general={
+            "wrapup_remaining_steps": reserve, "final_summary_after_calls": 512,
+        }),
+    ))
+    nudges = [event for event in events if isinstance(event, InjectedMessageEvent)
+              and "步数预算即将用尽" in event.content]
+    assert _latest_user_text(msgs) == "hi"
+    if expected_step is None:
+        assert not nudges
+        return
+    assert len(nudges) == 1
+    assert nudges[0].user_visible is False
+    assert not any("步数预算即将用尽" in str(message.content)
+                   for request in calls[:-1] for message in request)
+    feedback = next(message for message in calls[-1]
+                    if "步数预算即将用尽" in str(message.content))
+    assert feedback.role == "user"
+    assert feedback.source == "runtime"
+    assert "Runtime state update:" in feedback.content
+    assert "The user sent" not in feedback.content
+    assert feedback.content.endswith(nudges[0].content)
+
+
+@pytest.mark.asyncio
+async def test_mixed_queue_preserves_order_and_latest_user_request_before_model_call():
+    from box_agent.kernel.loop import _latest_user_text
+
+    queue = asyncio.Queue()
+    queue.put_nowait({"id": "user-1", "content": "Make it ten pages"})
+    queue.put_nowait({"id": "runtime-1", "content": "Tool catalog ready",
+                      "source": "runtime", "user_visible": False})
+    captured = []
+
+    class CapturingLLM(MockLLM):
+        async def generate_stream(self, messages, **kwargs):
+            captured.extend(message.model_copy(deep=True) for message in messages)
+            async for event in super().generate_stream(messages, **kwargs):
+                yield event
+
+    events = await collect(run_agent_loop(
+        llm=CapturingLLM([LLMResponse(content="done", finish_reason="stop")]),
+        messages=_msgs(), tools={}, max_steps=5, inject_queue=queue,
+    ))
+    user_message, runtime_message = captured[-2:]
+    assert user_message.source == "user"
+    assert runtime_message.source == "runtime"
+    assert user_message.content.endswith("Make it ten pages")
+    assert runtime_message.content.endswith("Tool catalog ready")
+    assert _latest_user_text(captured) == user_message.content
+    injected = [event for event in events if isinstance(event, InjectedMessageEvent)]
+    assert [(event.injection_id, event.user_visible) for event in injected] == [
+        ("user-1", True), ("runtime-1", False),
+    ]
+    step = next(index for index, event in enumerate(events) if isinstance(event, StepStart))
+    assert all(events.index(event) < step for event in injected)
+    assert queue.empty()
 
 
 @pytest.mark.asyncio

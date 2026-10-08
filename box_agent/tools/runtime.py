@@ -9,6 +9,7 @@ import platform
 import shutil
 import sys
 import tarfile
+import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,18 @@ DEFAULT_NODE_RUNTIME_ROOT = state_path('runtimes/node')
 DEFAULT_NODE_VERSION = "v24.15.0"
 NODE_DIST_BASE_URL = "https://nodejs.org/dist"
 _MAX_RUNTIME_PATH_LEN = 1024
+
+
+def _publish_extracted_directory(source: Path, destination: Path) -> None:
+    """Keep atomic publication while tolerating brief Windows scanner locks."""
+    for attempt in range(4):
+        try:
+            source.rename(destination)
+            return
+        except PermissionError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 3:
+                raise
+            time.sleep(0.05 * 2 ** attempt)
 
 
 @dataclass(frozen=True)
@@ -338,7 +351,7 @@ class NodeRuntimeManager:
             if version_dir.exists():
                 shutil.rmtree(version_dir)
             version_dir.parent.mkdir(parents=True, exist_ok=True)
-            extracted.rename(version_dir)
+            _publish_extracted_directory(extracted, version_dir)
         except Exception as exc:
             if version_dir.exists() and not all(_is_executable_file(str(path)) for path in (node, npm, npx)):
                 shutil.rmtree(version_dir)
@@ -526,7 +539,7 @@ class NodeRuntimeManager:
             if version_dir.exists():
                 shutil.rmtree(version_dir)
             version_dir.parent.mkdir(parents=True, exist_ok=True)
-            extracted.rename(version_dir)
+            _publish_extracted_directory(extracted, version_dir)
         except Exception as exc:
             if version_dir.exists() and not all(
                 _is_executable_file(str(path)) for path in (node, npm, npx)

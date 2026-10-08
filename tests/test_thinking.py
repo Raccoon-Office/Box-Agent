@@ -188,10 +188,15 @@ async def test_openai_request_no_extra_body_by_default(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_tools", [False, True])
 @pytest.mark.parametrize(
     ("model", "thinking_enabled", "expected_extra_body", "expected_effort"),
     [
         ("gpt-5", True, None, "high"),
+        ("gpt-6-astra", True, None, "high"),
+        ("gpt-6.1-sol", True, None, "high"),
+        ("gpt-6-lunar", True, None, "high"),
+        ("gpt-6-solstice", True, None, "high"),
         ("sn-kimi-k3", True, None, "high"),
         ("sn-kimi-k3", False, None, "low"),
         ("custom-chat-model", False, None, None),
@@ -236,6 +241,7 @@ async def test_openai_stream_request_maps_thinking_to_provider_dialect(
     expected_extra_body,
     expected_effort,
     monkeypatch,
+    with_tools,
 ):
     """Streaming requests use the same model-specific mapping as completions."""
     client = OpenAIClient(api_key="k", api_base="https://x.example", model=model)
@@ -275,6 +281,10 @@ async def test_openai_stream_request_maps_thinking_to_provider_dialect(
         event
         async for event in client.generate_stream(
             [Message(role="user", content="go")],
+            tools=[{"type": "function", "function": {
+                "name": "echo", "description": "Echo the input.",
+                "parameters": {"type": "object", "properties": {}},
+            }}] if with_tools else None,
             thinking_enabled=thinking_enabled,
         )
     ]

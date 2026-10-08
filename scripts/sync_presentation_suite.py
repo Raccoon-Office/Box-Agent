@@ -382,9 +382,8 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
                 "sha256": hashlib.sha256(data).hexdigest()
             }
         for relative, expected_sha256 in LICENSE_INPUT_HASHES.items():
-            data = (LICENSE_INPUT_DIR / relative).read_bytes()
-            if hashlib.sha256(data).hexdigest() != expected_sha256:
-                raise ValueError(f"ECharts license input needs review: {relative}")
+            data = _verified_input(LICENSE_INPUT_DIR / relative, expected_sha256,
+                                   f"ECharts license input needs review: {relative}")
             bundled_path = f"{LICENSE_OUTPUT_PATH}/{relative}"
             target = staged / bundled_path
             if target.exists():
@@ -400,7 +399,7 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
             }
         for runtime_name in ("render_runtime.py", "render_runtime_windows.py", "file_lock.py"):
             runtime_relative = f"skills/sn-ppt-standard/scripts/{runtime_name}"
-            runtime_data = (RUNTIME_INPUT_DIR / runtime_name).read_bytes()
+            runtime_data = (RUNTIME_INPUT_DIR / runtime_name).read_text(encoding="utf-8").encode("utf-8")
             runtime_target = staged / runtime_relative
             if runtime_target.exists():
                 raise ValueError("render lifecycle input needs review: upstream supplies runtime helper")
@@ -431,6 +430,20 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
     return provenance
 
 
+def _verified_input(path: Path, expected: str, message: str) -> bytes:
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() == expected:
+        return data
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(message) from None
+    canonical = data.replace(b"\r\n", b"\n")
+    if hashlib.sha256(canonical).hexdigest() != expected:
+        raise ValueError(message)
+    return canonical
+
+
 def refresh_host_overlays(output_dir: Path) -> dict:
     """Apply append-only overlays to a verified bundle without upstream access."""
     provenance = json.loads((output_dir / "source.json").read_text())
@@ -454,9 +467,8 @@ def refresh_host_overlays(output_dir: Path) -> dict:
         raise ValueError("Bundle file set differs from its provenance")
     replacements = {}
     for relative, record in provenance["files"].items():
-        data = (output_dir / relative).read_bytes()
-        if hashlib.sha256(data).hexdigest() != record["sha256"]:
-            raise ValueError(f"Bundle file differs from its provenance: {relative}")
+        data = _verified_input(output_dir / relative, record["sha256"],
+                               f"Bundle file differs from its provenance: {relative}")
         for name in pending:
             data = incremental[name](relative, data)
         replacements[relative] = data
@@ -480,16 +492,52 @@ def refresh_host_overlays(output_dir: Path) -> dict:
     return provenance
 
 
+def refresh_runtime_inputs(output_dir: Path) -> dict:
+    """Regenerate repository-owned runtime helpers in a verified pinned bundle."""
+    provenance = json.loads((output_dir / "source.json").read_text(encoding="utf-8"))
+    if provenance.get("revision") != PINNED_REVISION or provenance.get("overlays") != OVERLAYS:
+        raise ValueError("Bundle requires a full sync before refreshing runtime inputs")
+    actual = {p.relative_to(output_dir).as_posix() for p in output_dir.rglob("*")
+              if p.is_file() and "__pycache__" not in p.parts}
+    if actual != set(provenance["files"]) | {"source.json"}:
+        raise ValueError("Bundle file set differs from its provenance")
+    replacements = {}
+    for relative, record in provenance["files"].items():
+        _verified_input(output_dir / relative, record["sha256"],
+                        f"Bundle file differs from its provenance: {relative}")
+        input_path = record.get("input_path", "")
+        if input_path.startswith("scripts/presentation_suite_overlays/"):
+            source = RUNTIME_INPUT_DIR / Path(input_path).name
+            if input_path != f"scripts/presentation_suite_overlays/{source.name}":
+                raise ValueError("Invalid runtime input path")
+            replacement = source.read_text(encoding="utf-8").encode("utf-8")
+            digest = hashlib.sha256(replacement).hexdigest()
+            if digest != record["sha256"]:
+                replacements[relative] = replacement
+                record.update(sha256=digest, source_sha256=digest)
+    for relative, data in replacements.items():
+        (output_dir / relative).write_bytes(data)
+    if replacements:
+        (output_dir / "source.json").write_text(
+            json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8", newline="\n",
+        )
+    return provenance
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--source-checkout", type=Path)
     source.add_argument("--refresh-host-overlays", action="store_true",
                         help="Apply pending append-only overlays to a hash-verified local bundle")
+    source.add_argument("--refresh-runtime-inputs", action="store_true",
+                        help="Regenerate repository-owned runtime helpers in a verified bundle")
     parser.add_argument("--revision", default=PINNED_REVISION)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     args = parser.parse_args()
-    result = (refresh_host_overlays(args.output_dir) if args.refresh_host_overlays
+    result = (refresh_runtime_inputs(args.output_dir) if args.refresh_runtime_inputs
+              else refresh_host_overlays(args.output_dir) if args.refresh_host_overlays
               else sync_suite(args.source_checkout, args.revision, args.output_dir))
     print(f"Synced {len(result['files'])} files from {result['revision']} and pinned license inputs")
     return 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -150,12 +151,13 @@ def _session_params(
 ) -> dict[str, Any]:
     workspace = workspace.resolve()
     metadata = metadata or CaseMetadata()
+    identity = hashlib.sha256(f"{case_id}\n{workspace}".encode("utf-8")).hexdigest()[:24]
     params = {
         "cwd": str(workspace),
         "mcpServers": [],
         "_meta": {
             "title": "acp",
-            "session_id": f"eval-acp-{case_id}",
+            "session_id": f"eval-acp-{identity}",
             "permission_mode": "default",
             "filesystem_policy": {
                 "session_workspace_root": str(workspace),
@@ -475,6 +477,29 @@ async def _finish_stream_tasks(
         state.collection_error = True
 
 
+def _trace_directory(attempt_dir: Path, environment: Mapping[str, str]) -> Path:
+    profile = environment.get("BOX_AGENT_HOME")
+    if profile is None:
+        return attempt_dir / "agent"
+    root = Path(profile)
+    if not profile.strip() or not root.is_absolute():
+        raise ValueError("BOX_AGENT_HOME must be an absolute dedicated directory")
+    root = root.resolve()
+    target = (root / "log" / "acp-eval" / attempt_dir.name).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("evaluation trace path escapes profile")
+    return target
+
+
+def _capture_profile_traces(source: Path, destination: Path) -> None:
+    if source == destination:
+        return
+    for path in source.glob("*.jsonl"):
+        if path.is_symlink() or not path.resolve().is_relative_to(source.resolve()):
+            raise ValueError("evaluation trace file escapes capture directory")
+        shutil.copyfile(path, destination / path.name)
+
+
 async def _run_process(
     config: CaseConfig,
     attempt_dir: Path,
@@ -494,7 +519,8 @@ async def _run_process(
     process_group_id: int | None = None
     command = [config.python_executable, "-m", "box_agent.acp.server"]
     environment = os.environ.copy()
-    environment["BOX_AGENT_SESSION_TRACE_DIR"] = str(attempt_dir / "agent")
+    trace_dir = _trace_directory(attempt_dir, environment)
+    environment["BOX_AGENT_SESSION_TRACE_DIR"] = str(trace_dir)
     try:
         process_recorder.write("process.starting", command=command, cwd=str(config.repo_root))
         process = await asyncio.create_subprocess_exec(
@@ -589,6 +615,12 @@ async def _run_process(
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             state.collection_error = True
+        _try_finalize(
+            "agent-trace",
+            lambda: _capture_profile_traces(trace_dir, attempt_dir / "agent"),
+            process_recorder,
+            state,
+        )
 
 
 def _process_events(path: Path) -> list[dict[str, Any]]:

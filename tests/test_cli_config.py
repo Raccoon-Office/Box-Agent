@@ -267,6 +267,7 @@ def test_config_example_does_not_pin_tool_limit_defaults(
     assert "sub_agent_batch_synthesis_timeout_seconds" not in data
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     generated_path = cli.Config._ensure_user_config()
     generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
     assert "tool_limits" not in generated
@@ -631,6 +632,7 @@ def test_main_persists_code_workspace_type_without_creating_output(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     workspace = tmp_path / "project"
     config_path = tmp_path / "config.yaml"
     _write_config(config_path)
@@ -670,6 +672,7 @@ def test_main_persists_code_workspace_type_without_creating_output(
 
 def test_cmd_goal_persists_workspace_goal(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -697,6 +700,7 @@ def test_cmd_goal_persists_workspace_goal(tmp_path: Path, monkeypatch, capsys) -
 
 def test_cmd_goal_can_persist_goal_in_session_log(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 

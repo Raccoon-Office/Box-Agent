@@ -21,7 +21,7 @@ def entry_text():
     if "PRESENTATION_ENTRY_SOURCE" in os.environ:
         sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
         data = sync["_apply_integration_overlay"]("skills/sn-ppt-entry/SKILL.md", data)
-    return data.decode()
+    return data.decode("utf-8").replace("\r\n", "\n")
 
 
 def decision_example():

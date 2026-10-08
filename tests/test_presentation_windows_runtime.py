@@ -77,10 +77,12 @@ raise SystemExit(supervise(sys.argv[2], ['--batch']))
     assert json.loads(result.stdout.splitlines()[-1]) == receipt
 
 
-def alive(pid):
+def alive(pid, created=None):
     import psutil
     try:
-        return psutil.Process(pid).is_running() and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        process = psutil.Process(pid)
+        return (process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+                and (created is None or process.create_time() == created))
     except psutil.NoSuchProcess:
         return False
 
@@ -107,12 +109,13 @@ def test_windows_worker_returns_utf8_and_releases_admission(runtime, tmp_path, m
 
 
 @native_windows
-def test_windows_timeout_reaps_descendants_and_preserves_unrelated_process(runtime, tmp_path):
+@pytest.mark.parametrize("child_python", [sys.executable, sys._base_executable], ids=["venv", "base"])
+def test_windows_timeout_reaps_descendants_and_preserves_unrelated_process(runtime, tmp_path, child_python):
     pidfile = tmp_path / "child.pid"
-    script = worker(tmp_path, f"""import subprocess,sys,time
+    script = worker(tmp_path, f"""import subprocess,sys,time,json,psutil
 from pathlib import Path
-child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(120)'])
-Path({str(pidfile)!r}).write_text(str(child.pid))
+child = subprocess.Popen([{child_python!r}, '-c', 'import time;time.sleep(120)'])
+Path({str(pidfile)!r}).write_text(json.dumps([child.pid, psutil.Process(child.pid).create_time()]))
 time.sleep(120)""")
     other = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(120)"])
     try:
@@ -122,7 +125,8 @@ time.sleep(120)""")
         assert "timed out" in result.stderr
         assert time.monotonic() - started < 12
         assert pidfile.exists(), result.stderr
-        assert not alive(int(pidfile.read_text()))
+        pid, created = json.loads(pidfile.read_text())
+        assert not alive(pid, created)
         assert other.poll() is None
     finally:
         other.kill()

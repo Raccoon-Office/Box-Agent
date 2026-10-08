@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -210,7 +211,7 @@ def test_base_css_init_example_preserves_template_and_existing_deck(tmp_path, mo
     command = next(line for line in text.splitlines() if 'scripts/deck.py" init ' in line)
     deck = tmp_path / "deck with spaces"
     deck.mkdir()
-    expanded = command.replace("$SKILL_ROOT", str(STANDARD)).replace("$DECK_DIR", str(deck))
+    expanded = command.replace("$SKILL_ROOT", STANDARD.as_posix()).replace("$DECK_DIR", str(deck))
     from box_agent.tools import safety
     monkeypatch.setattr(safety, "BUILTIN_SKILLS_ROOT", STANDARD)
     assert safety.builtin_skill_command_write_error(expanded, deck) is None
@@ -317,15 +318,15 @@ def test_documented_asset_batch_preserves_source_and_stops_on_failure(tmp_path, 
     (deck / "assets").mkdir(parents=True)
     if not missing:
         Image.new("RGB", (160, 90), "white").save(deck / "assets/final hero.png")
-    env = dict(os.environ, DECK_DIR=str(deck), ASSET_PATH="assets/final hero.png",
+    env = dict(os.environ, DECK_DIR=deck.as_posix(), ASSET_PATH="assets/final hero.png",
                ASSET_ID="launch-hero", GROUP_ID="campaign-art",
                ORIGINAL_PROMPT="Product hero; original 'quote' and $(not-a-command)")
     env.pop("GENERATOR_MODEL", None)
     if model is not None:
         env["GENERATOR_MODEL"] = model
-    command = command.replace("<SKILL_ROOT>", str(STANDARD))
-    command = re.sub(r"(?m)^python ", shlex.quote(sys.executable) + " ", command)
-    result = subprocess.run(["bash", "-c", command], cwd=tmp_path, env=env,
+    command = command.replace("<SKILL_ROOT>", STANDARD.as_posix())
+    command = re.sub(r"(?m)^python ", shlex.quote(Path(sys.executable).as_posix()) + " ", command)
+    result = subprocess.run([str(Path(shutil.which("git")).parent.parent / "usr/bin/bash.exe") if os.name == "nt" else "bash", "-c", command], cwd=tmp_path, env=env,
                             text=True, capture_output=True, timeout=30)
     catalog = deck / "assets/catalog.json"
     if missing:

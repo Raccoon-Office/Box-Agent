@@ -199,17 +199,27 @@ def test_agent_logger_records_cache_fingerprint(tmp_path, monkeypatch) -> None:
     assert '"pptx"' in log_text
 
 
-def test_agent_logger_uses_unique_run_files_within_one_second(tmp_path) -> None:
+@pytest.mark.parametrize("separate_logger", [False, True])
+def test_agent_logger_uses_unique_run_files_within_one_second(tmp_path, monkeypatch, separate_logger) -> None:
+    from datetime import datetime
+    monkeypatch.setattr("box_agent.logger.datetime", SimpleNamespace(
+        now=lambda: datetime(2026, 1, 1),
+    ))
     agent_logger = AgentLogger()
     agent_logger.log_dir = tmp_path
 
     agent_logger.start_new_run()
     first = agent_logger.get_log_file_path()
+    first.write_text("first run must remain intact", encoding="utf-8")
+    if separate_logger:
+        agent_logger = AgentLogger()
+        agent_logger.log_dir = tmp_path
     agent_logger.start_new_run()
     second = agent_logger.get_log_file_path()
 
     assert first != second
     assert first.exists()
+    assert first.read_text(encoding="utf-8") == "first run must remain intact"
     assert second.exists()
 
 

@@ -56,7 +56,14 @@ def test_provenance_covers_every_file_and_records_integration_changes():
               if p.is_file() and "__pycache__" not in p.parts}
     assert actual == set(source["files"]) | {"source.json"}
     for relative, record in source["files"].items():
-        assert hashlib.sha256((SUITE / relative).read_bytes()).hexdigest() == record["sha256"]
+        data = (SUITE / relative).read_bytes()
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            data = data.replace(b"\r\n", b"\n")
+        assert hashlib.sha256(data).hexdigest() == record["sha256"], relative
         assert re.fullmatch(r"[a-f0-9]{64}", record["source_sha256"])
 
 
@@ -194,7 +201,7 @@ def test_sync_uses_pinned_tracked_content_and_repeats_without_local_state(source
         path = f"skills/sn-ppt-standard/assets/licenses/echarts-5.5.0/{relative}"
         record = first["files"][path]
         assert record["source_url"].endswith(f"/5.5.0/{relative}")
-        assert (destination / path).read_bytes() == (REPO / record["input_path"]).read_bytes()
+        assert (destination / path).read_bytes() == (REPO / record["input_path"]).read_text(encoding="utf-8").encode("utf-8")
 
 
 def test_modified_license_input_preserves_previous_generated_bundle(source_repo, tmp_path, monkeypatch):
@@ -330,7 +337,7 @@ def test_image_recovery_refresh_preserves_rules_and_repeats_without_changes(tmp_
     bundle = tmp_path / "bundle"
     expected = {}
     for relative, (old, new) in overlay["REPLACEMENTS"].items():
-        expected[relative] = (SUITE / relative).read_bytes()
+        expected[relative] = (SUITE / relative).read_text(encoding="utf-8").encode("utf-8")
         previous = expected[relative].decode().replace(new, old, 1).encode()
         target = bundle / relative
         target.parent.mkdir(parents=True, exist_ok=True)

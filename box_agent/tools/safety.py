@@ -672,7 +672,11 @@ def backup_file(file_path: Path) -> Path | None:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
         # Preserve original path structure under trash dir
         # e.g., /home/user/project/foo.py → ~/.box-agent/trash/2024-01-01_120000_000000/home/user/project/foo.py
-        backup_path = TRASH_DIR / timestamp / str(resolved).lstrip("/")
+        relative = Path(*resolved.parts[1:])
+        if resolved.drive:
+            drive = re.sub(r"[^A-Za-z0-9_.-]", "_", resolved.drive)
+            relative = Path(drive) / relative
+        backup_path = TRASH_DIR / timestamp / relative
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(resolved, backup_path)
         return backup_path

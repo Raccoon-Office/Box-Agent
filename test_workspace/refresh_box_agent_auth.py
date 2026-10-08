@@ -130,7 +130,9 @@ def _atomic_write_auth(auth_file: Path, document: Mapping[str, Any]) -> None:
     )
     temporary_path = Path(temporary_name)
     try:
-        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+        # Windows inherits the parent directory ACL and has no fchmod.
+        if os.name != "nt":
+            os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             descriptor = -1
             json.dump(document, stream, ensure_ascii=False, indent=2)

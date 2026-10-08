@@ -7,6 +7,20 @@ from box_agent.tools.bash_tool import BashTool
 from box_agent.tools.file_tools import WriteTool
 
 
+@pytest.fixture(autouse=True)
+def posix_shell_for_posix_commands(posix_shell):
+    pass
+
+
+def make_symlink(link, target, **kwargs):
+    try:
+        link.symlink_to(target, **kwargs)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link privilege")
+        raise
+
+
 @pytest.mark.asyncio
 async def test_declared_new_screenshots_can_be_cleaned_without_approval(tmp_path):
     task = tmp_path / "report"
@@ -44,7 +58,7 @@ async def test_cleanup_never_adopts_foreign_changed_or_published_files(tmp_path,
         path.unlink()
         other = tmp_path / "user.png"
         other.write_text("user data")
-        path.symlink_to(other)
+        make_symlink(path, other)
     elif change == "hardlink":
         (tmp_path / "alias.png").hardlink_to(path)
     result = await tool.execute(command="rm -f qa.png")
@@ -76,7 +90,8 @@ async def test_cleanup_exception_does_not_weaken_other_dangerous_commands(tmp_pa
 @pytest.mark.parametrize("target", ["existing.png", "../outside.png", "alias/new.png"])
 async def test_temporary_declaration_cannot_claim_existing_or_escaped_paths(tmp_path, target):
     (tmp_path / "existing.png").write_text("original")
-    (tmp_path / "alias").symlink_to(tmp_path, target_is_directory=True)
+    if target == "alias/new.png":
+        make_symlink(tmp_path / "alias", tmp_path, target_is_directory=True)
     tool = BashTool(workspace_dir=str(tmp_path))
     result = await tool.execute(command="touch executed", temporary_files=[target])
     assert not result.success
@@ -183,7 +198,7 @@ async def test_verified_host_browser_executes_without_dangerous_command_prompt(t
     browser = tmp_path / "browser"
     browser.write_text("#!/bin/sh\nprintf screenshot-ok\n")
     browser.chmod(0o755)
-    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={variable: str(browser)})
+    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={variable: browser.as_posix()})
     result = await tool.execute(command=f'"${variable}" --headless')
     assert result.success, result.error
     assert result.permission_request is None

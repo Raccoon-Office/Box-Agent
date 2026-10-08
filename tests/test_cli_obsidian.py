@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ def _write_obsidian_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, data
 
 
 def _fake_cli(tmp_path: Path) -> Path:
-    cli = tmp_path / "obsidian"
+    cli = tmp_path / ("obsidian.exe" if os.name == "nt" else "obsidian")
     cli.write_text("#!/bin/sh\n", encoding="utf-8")
     cli.chmod(0o755)
     return cli

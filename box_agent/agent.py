@@ -44,6 +44,7 @@ from .config import AgentConfig, ToolLimitsConfig
 from .llm import LLMClient
 from .logger import AgentLogger
 from .kernel.ports import KernelServices
+from .injections import InjectionManager
 from .runtime import run_agent_loop
 from .schema import Message
 from .session_log import SessionLog, SessionLogReplayError
@@ -494,7 +495,7 @@ class Agent:
         self.local_tool_exposure = LocalToolExposurePolicy(
             lambda: self.tools,
             goal_provider=lambda: getattr(self, "goal", None),
-            active_skills_provider=lambda: self.skill_runtime.active_names,
+            active_skills_provider=lambda: self.skill_runtime.current_active_names,
         )
         self.mcp_tool_exposure: MCPToolExposureManager | None = None
         if enable_builtin_tools:
@@ -528,7 +529,7 @@ class Agent:
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         self.cancel_event: Optional[asyncio.Event] = None
-        self.inject_queue: asyncio.Queue[Any] = asyncio.Queue()
+        self.inject_queue: asyncio.Queue[Any] = InjectionManager()
         self._permission_negotiator = None  # set by CLI/ACP when permission engine is active
         self._proposal_negotiator = None  # set by CLI/ACP to handle MemoryProposalEvent
         self._hooks = hooks
@@ -830,6 +831,11 @@ class Agent:
                     "the previous compact commit could not be replayed; refusing to continue"
                 ) from exc
 
+    async def aadd_user_message(self, content: str) -> None:
+        validation = await self.skill_runtime.avalidate_references(self.skill_runtime.selected_names)
+        with self.skill_runtime.reference_scope(validation):
+            self.add_user_message(content)
+
     def add_user_message(self, content: str) -> None:
         """Add a user message and materialize selected Skills beside it."""
         self._restore_session_surface_after_replay_failure()
@@ -1005,7 +1011,7 @@ class Agent:
         """Inject a user message into the running agent loop.
 
         The message is queued and will be appended to the conversation
-        at the next step boundary.  Safe to call from any thread.
+        at the next step boundary. Call on the agent's owning event loop.
         """
         self.inject_queue.put_nowait(content)
 
@@ -1086,7 +1092,7 @@ class Agent:
             self._persist_active_skills()
         if self._pending_skill_restore:
             pending = self._pending_skill_restore
-            self.skill_runtime.restore_records(pending)
+            await self.skill_runtime.arestore_records(pending)
             self._pending_skill_restore = []
             # ACP may deliberately drop records whose source is unavailable.
             # That is a partial restore, not an explicit user clear; keep the
@@ -1222,6 +1228,14 @@ class Agent:
         )
         if effective_options.kernel_services is not None:
             run_arguments["kernel_services"] = effective_options.kernel_services
+        own_injections = (
+            self.inject_queue
+            if effective_options.inject_queue is self.inject_queue
+            and isinstance(self.inject_queue, InjectionManager)
+            else None
+        )
+        if own_injections is not None:
+            own_injections.begin_run()
         events = run_agent_loop(**run_arguments)
         try:
             async for event in events:
@@ -1335,6 +1349,8 @@ class Agent:
                 if callable(close):
                     await close()
             finally:
+                if own_injections is not None:
+                    own_injections.end_run()
                 if (
                     self.session_log is not None
                     and session_turn is not None

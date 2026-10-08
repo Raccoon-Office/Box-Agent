@@ -48,6 +48,8 @@ class TokenAccumulator:
     completion_tokens: int = 0
     total_tokens: int = 0
     calls: int = 0
+    cached_tokens: int = 0
+    cache_usage_reported_calls: int = 0
 
     def add(self, usage: Any) -> None:
         """Fold one provider usage record into the running totals.
@@ -61,6 +63,9 @@ class TokenAccumulator:
         self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
         self.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
         self.total_tokens += getattr(usage, "total_tokens", 0) or 0
+        if getattr(usage, "cache_read_input_tokens_reported", False):
+            self.cached_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+            self.cache_usage_reported_calls += 1
         self.calls += 1
 
     def merge(self, other: TokenAccumulator | None) -> None:
@@ -70,6 +75,8 @@ class TokenAccumulator:
         self.prompt_tokens += other.prompt_tokens
         self.completion_tokens += other.completion_tokens
         self.total_tokens += other.total_tokens
+        self.cached_tokens += other.cached_tokens
+        self.cache_usage_reported_calls += other.cache_usage_reported_calls
         self.calls += other.calls
 
 

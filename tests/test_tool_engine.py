@@ -218,6 +218,8 @@ async def test_serial_opt_in_cancellation_waits_for_grace_boundary() -> None:
 
 @pytest.mark.asyncio
 async def test_parallel_batch_caps_concurrency_and_is_addressable_in_call_order() -> None:
+    heartbeat_seen = asyncio.Event()
+
     class ParallelTool(_TestTool):
         parallel_safe = True
 
@@ -242,6 +244,8 @@ async def test_parallel_batch_caps_concurrency_and_is_addressable_in_call_order(
             try:
                 if value == "0":
                     await self.release_first.wait()
+                elif value == "1":
+                    await heartbeat_seen.wait()
                 elif value == "3":
                     self.release_first.set()
                 else:
@@ -270,6 +274,7 @@ async def test_parallel_batch_caps_concurrency_and_is_addressable_in_call_order(
         batch_timeout_seconds=0.2,
     ).invoke_parallel(requests):
         if isinstance(record, ToolEngineActivity):
+            heartbeat_seen.set()
             activity_was_live = (
                 activity_was_live or tool.completed < len(requests)
             )

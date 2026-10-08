@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from acp import text_block, update_agent_message
+from acp import RequestError, text_block, update_agent_message
 
 import box_agent.acp as acp_module
 import box_agent.composition as composition_module
@@ -55,7 +55,7 @@ from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
 from box_agent.session_log import SessionLog, SessionLogWorkspaceMismatch
 from box_agent.tools.base import Tool, ToolResult
-from box_agent.tools.bash_tool import BackgroundShellManager
+from box_agent.tools.bash_tool import BackgroundShell, BackgroundShellManager
 from box_agent.tools.jupyter_tool import MAX_EXECUTE_CODE_CHARS
 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
 from box_agent.tools.skill_tool import create_skill_tools
@@ -478,6 +478,7 @@ async def test_acp_session_metadata_hides_physically_isolated_connector_skills(t
 @pytest.mark.asyncio
 async def test_acp_workspace_config_methods_share_profiles(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     workspace = tmp_path / "project"
     workspace.mkdir()
     config = Config(
@@ -505,6 +506,7 @@ async def test_acp_workspace_config_methods_share_profiles(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_acp_uses_saved_code_type_when_host_omits_session_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     workspace = tmp_path / "project"
     workspace.mkdir()
     WorkspaceRegistry().set(workspace, "code")
@@ -933,6 +935,219 @@ async def test_acp_session_update_send_times_out(tmp_path):
 
     with pytest.raises(TimeoutError, match="ACP session update timed out"):
         await agent._send("session-1", update_agent_message(text_block("hello")))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("log_format", ["text", "json"])
+async def test_acp_event_send_failure_logs_original_error_and_continues(
+    tmp_path, monkeypatch, capsys, log_format,
+):
+    from box_agent.acp.debug_logger import ACPDebugLogger
+
+    monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", "error")
+    monkeypatch.setenv("BOX_AGENT_LOG_FORMAT", log_format)
+    monkeypatch.delenv("BOX_AGENT_LOG_FILE", raising=False)
+    monkeypatch.setattr(acp_module, "log", ACPDebugLogger())
+
+    class FailOnceConn(DummyConn):
+        failed = False
+
+        async def sessionUpdate(self, payload):
+            if payload.update.sessionUpdate == "agent_message_chunk" and not self.failed:
+                self.failed = True
+                raise OSError("fixture notification failure")
+            await super().sessionUpdate(payload)
+
+    class ChunkedLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **_):
+            yield StreamEvent(type="text", delta="before failure")
+            yield StreamEvent(type="text", delta="after failure")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = FailOnceConn()
+    agent = BoxACPAgent(conn, config, ChunkedLLM(), [], "system")
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    capsys.readouterr()
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+    )
+
+    assert conn.failed
+    assert response.stopReason == "end_turn"
+    assert response.field_meta["ok"] is True
+    assert any(
+        getattr(getattr(update.update, "content", None), "text", "") == "after failure"
+        for update in conn.updates
+    )
+    continued = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}])
+    )
+    assert continued.field_meta["ok"] is True
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    if log_format == "json":
+        record = json.loads(captured.err)
+        assert record["event"] == "event/error"
+        assert record["event_type"] == "ContentEvent"
+        assert record["session_id"] == session.sessionId
+        assert record["error"] == "fixture notification failure"
+        assert "OSError: fixture notification failure" in record["traceback"]
+    else:
+        assert "[ERROR] event/error" in captured.err
+        assert "event_type=ContentEvent" in captured.err
+        assert f"session_id={session.sessionId}" in captured.err
+        assert "OSError: fixture notification failure" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_acp_event_send_timeout_remains_terminal(tmp_path):
+    class HangingContentConn(DummyConn):
+        async def sessionUpdate(self, payload):
+            if payload.update.sessionUpdate == "agent_message_chunk":
+                await asyncio.Event().wait()
+            await super().sessionUpdate(payload)
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(HangingContentConn(), config, DoneLLM(), [], "system")
+    agent._SESSION_UPDATE_TIMEOUT_SECONDS = 0.01
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    with pytest.raises(TimeoutError, match="ACP session update timed out"):
+        await agent.prompt(
+            SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        )
+    state = agent._sessions[session.sessionId]
+    assert not state._prompt_in_progress
+    assert not state.run_handle.is_active
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_operation", ["scan", "read"])
+async def test_slow_skill_validation_keeps_other_acp_updates_and_control_responsive(
+    tmp_path, monkeypatch, slow_operation,
+):
+    import threading
+
+    from box_agent.skill_runtime import SkillRuntime
+
+    path = tmp_path / "skills" / "demo" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nname: demo\ndescription: example\n---\nVERIFIED_METHOD\n")
+    tools, loader = create_skill_tools(sources=[(tmp_path / "skills", "user")])
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_sub_agent=False))
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, DoneLLM(), tools, "system", skill_loader=loader)
+    first = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    second = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    # Seed an actual source-verified snapshot, without recording a delivery.
+    await SkillRuntime(loader).avalidate_references(("demo",))
+    loader.validation_timeout_seconds = 0.05
+    agent._sessions[first.sessionId].agent.skill_runtime.validation_timeout_seconds = 0.05
+    entered, release = threading.Event(), threading.Event()
+    if slow_operation == "scan":
+        original = loader._source_signature
+
+        def slow(entry):
+            entered.set()
+            assert release.wait(3)
+            return original(entry)
+
+        monkeypatch.setattr(loader, "_source_signature", slow)
+    else:
+        original = loader.read_skill_bytes
+
+        def slow(file):
+            assert threading.current_thread() is not threading.main_thread(), "Skill read blocked the event loop"
+            entered.set()
+            assert release.wait(3)
+            return original(file)
+
+        monkeypatch.setattr(loader, "read_skill_bytes", slow)
+
+    prompt = asyncio.create_task(agent.prompt(SimpleNamespace(
+        sessionId=first.sessionId, prompt=[{"text": "/demo task"}],
+    )))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        await asyncio.wait_for(agent._send(second.sessionId, update_agent_message(text_block("other session"))), 0.5)
+        await asyncio.wait_for(agent.cancel(SimpleNamespace(sessionId=second.sessionId)), 0.5)
+        response = await asyncio.wait_for(prompt, 1)
+        assert response.stopReason == "end_turn"
+        assert response.field_meta["ok"] is True, response.field_meta
+        assert any("VERIFIED_METHOD" in str(message.content)
+                   for message in agent._sessions[first.sessionId].agent.messages)
+        assert agent._SESSION_UPDATE_TIMEOUT_SECONDS == 15.0
+    finally:
+        release.set()
+        if not prompt.done():
+            prompt.cancel()
+        await asyncio.gather(prompt, return_exceptions=True)
+        if loader._validation_task is not None:
+            await asyncio.wait_for(asyncio.shield(loader._validation_task), 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+async def test_acp_session_creation_and_restore_do_not_scan_skills_on_event_loop(tmp_path, monkeypatch, resume):
+    import threading
+
+    monkeypatch.setattr(acp_module, "state_path", lambda relative: tmp_path / "profile" / relative)
+    path = tmp_path / "skills" / "demo" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nname: demo\ndescription: example\n---\nMETHOD\n")
+    tools, loader = create_skill_tools(sources=[(tmp_path / "skills", "user")])
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False))
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), tools, "system", skill_loader=loader)
+    control = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    request = SimpleNamespace(cwd=None, field_meta={"session_mode": "general", "session_id": "restore-demo"})
+    if resume:
+        previous = await agent.newSession(request)
+        state = agent._sessions[previous.sessionId]
+        state.agent.skill_runtime.read("demo")
+        state.agent.session_log.close()
+    entered, release = threading.Event(), threading.Event()
+    original = loader._source_signature
+
+    def scan(entry):
+        assert threading.current_thread() is not threading.main_thread(), "Skill scan blocked session creation"
+        entered.set()
+        assert release.wait(4)
+        return original(entry)
+
+    monkeypatch.setattr(loader, "_source_signature", scan)
+    creation = asyncio.create_task(agent.newSession(request))
+    try:
+        if resume:
+            assert await asyncio.to_thread(entered.wait, 1)
+        await asyncio.wait_for(agent._send(control.sessionId, update_agent_message(text_block("control"))), 0.5)
+        await asyncio.wait_for(agent.cancel(SimpleNamespace(sessionId=control.sessionId)), 0.5)
+        response = await asyncio.wait_for(creation, 3)
+        assert response.sessionId
+    finally:
+        release.set()
+        await asyncio.gather(creation, return_exceptions=True)
+        if loader._validation_task is not None:
+            await asyncio.wait_for(asyncio.shield(loader._validation_task), 2)
+        for state in agent._sessions.values():
+            if state.agent.session_log is not None:
+                state.agent.session_log.close()
 
 
 def test_sandbox_prompt_requires_execute_code_for_explicit_python_results():
@@ -1750,6 +1965,7 @@ async def test_acp_rejects_workspace_change_without_dropping_existing_session(
     monkeypatch,
 ):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     first_workspace = tmp_path / "first"
     second_workspace = tmp_path / "second"
     first_workspace.mkdir()
@@ -1827,6 +2043,456 @@ async def test_prompt_clears_prompt_grants_once_before_attachment_processing(
 
     assert clear_calls == 1
     assert not state.grant_store.has_grant("filesystem", "user_home")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_kind", ["prompt", "rebind"])
+@pytest.mark.parametrize("phase,cancel_requested", [
+    ("preparation", False), ("preparation", True),
+    ("running", False), ("running", True), ("finalization", False),
+])
+async def test_overlapping_request_preserves_original_task_state(
+    tmp_path, monkeypatch, phase, cancel_requested, request_kind
+):
+    from copy import deepcopy
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingLLM(DoneLLM):
+        async def generate_stream(self, *args, **kwargs):
+            if phase == "running" and not started.is_set():
+                started.set()
+                await release.wait()
+            async for event in super().generate_stream(*args, **kwargs):
+                yield event
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, BlockingLLM(), [], "system")
+    session = await agent.newSession(SimpleNamespace(
+        cwd=str(tmp_path),
+        field_meta={"permission_mode": "default", "session_id": "busy-product"},
+    ))
+    state = agent._sessions[session.sessionId]
+    original_attachment = agent._run_image_attachment_tool
+
+    async def attachment(**kwargs):
+        if phase == "preparation" and not started.is_set():
+            started.set()
+            await release.wait()
+        return await original_attachment(**kwargs)
+
+    monkeypatch.setattr(agent, "_run_image_attachment_tool", attachment)
+    original_cleanup = acp_module.cleanup_turn_resources
+
+    async def cleanup(**kwargs):
+        if phase == "finalization" and not started.is_set():
+            started.set()
+            await release.wait()
+        return await original_cleanup(**kwargs)
+
+    monkeypatch.setattr(acp_module, "cleanup_turn_resources", cleanup)
+    first = asyncio.create_task(agent.prompt(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "original task"}],
+    )))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        state.grant_store.add_grant("filesystem", "user_home", "prompt")
+        state.inject_queue.submit({"id": "keep", "content": "keep supplement"})
+        if cancel_requested:
+            await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
+        history = deepcopy(state.agent.messages)
+        turn_id, turn_counter = state.current_turn_id, state.turn_counter
+        handle, injection_run = state.run_handle, state.inject_queue.run_id
+
+        with pytest.raises(RequestError) as raised:
+            if request_kind == "rebind":
+                await asyncio.wait_for(agent.newSession(SimpleNamespace(
+                    cwd=str(tmp_path), field_meta={"session_id": "busy-product"},
+                )), 5)
+            else:
+                await asyncio.wait_for(agent.prompt(SimpleNamespace(
+                    sessionId=session.sessionId, prompt=[{"text": "must not enter history"}],
+                    field_meta={"selected_connector_ids": ["unexpected"]},
+                )), 5)
+
+        assert raised.value.code == -32010
+        assert raised.value.data == {"code": "SESSION_BUSY", "sessionId": session.sessionId}
+        assert "Wait for it to finish" in str(raised.value)
+        assert agent._sessions[session.sessionId] is state
+        assert not state._closed
+        assert state.agent.messages == history
+        assert state.current_turn_id == turn_id and state.turn_counter == turn_counter
+        assert state.run_handle is handle
+        assert state.cancelled is cancel_requested
+        assert state.grant_store.has_grant("filesystem", "user_home")
+        assert state.inject_queue.run_id == injection_run
+        assert state.inject_queue.qsize() == 1
+        assert not state.selected_connector_ids
+        assert not first.done()
+        if phase == "running":
+            assert state.turn_active
+            result = await agent.extMethod("inject", {
+                "sessionId": session.sessionId, "text": "another supplement", "injectionId": "new",
+            })
+            assert result["ok"] is True
+            # The rejected request must not clear deduplication receipts either.
+            duplicate = await agent.extMethod("inject", {
+                "sessionId": session.sessionId, "text": "keep supplement", "injectionId": "keep",
+            })
+            assert duplicate["deduplicated"] is True
+        # A busy session must not reserve other sessions on the same adapter.
+        peer = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        response = await asyncio.wait_for(agent.prompt(SimpleNamespace(
+            sessionId=peer.sessionId, prompt=[{"text": "independent task"}],
+        )), 5)
+        assert response.field_meta["ok"] is True
+        release.set()
+        response = await asyncio.wait_for(first, 5)
+        assert response.stopReason == ("cancelled" if cancel_requested else "end_turn")
+        if request_kind == "rebind":
+            history = deepcopy(state.agent.messages)
+            replacement = await agent.newSession(SimpleNamespace(
+                cwd=str(tmp_path), field_meta={"session_id": "busy-product"},
+            ))
+            assert session.sessionId not in agent._sessions
+            assert state._closed
+            restored = agent._sessions[replacement.sessionId]
+            assert restored.agent.messages[1:] == history[1:]
+            session = replacement
+        followup = await agent.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "next task"}],
+        ))
+        assert followup.field_meta["ok"] is True
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, return_exceptions=True), 5)
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_request", ["prompt", "rebind"])
+@pytest.mark.parametrize("failure", ["error", "cancelled"])
+async def test_prompt_preparation_failure_allows_next_task(
+    tmp_path, monkeypatch, failure, next_request
+):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "failed-product"})
+    session = await agent.newSession(request)
+    original = agent._run_image_attachment_tool
+
+    async def fail(**kwargs):
+        if failure == "error":
+            raise RuntimeError("attachment failed")
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(agent, "_run_image_attachment_tool", fail)
+    params = SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "task"}])
+    try:
+        with pytest.raises(RuntimeError if failure == "error" else asyncio.CancelledError):
+            await agent.prompt(params)
+        monkeypatch.setattr(agent, "_run_image_attachment_tool", original)
+        if next_request == "rebind":
+            replacement = await agent.newSession(request)
+            assert session.sessionId not in agent._sessions
+            params.sessionId = replacement.sessionId
+        response = await agent.prompt(params)
+        assert response.field_meta["ok"] is True
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["close", "browser", "open"])
+async def test_rebinding_rejects_concurrent_prompt_and_rebind(tmp_path, monkeypatch, phase):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "rebinding"})
+    session = await agent.newSession(request)
+    state = agent._sessions[session.sessionId]
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    if phase == "close":
+        owner, name = state, "aclose"
+    elif phase == "browser":
+        owner, name = acp_module, "close_browser_session"
+    else:
+        owner, name = acp_module.SessionState, "open"
+    original = getattr(owner, name)
+
+    async def blocked(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, blocked)
+    pending = asyncio.create_task(agent.newSession(request))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        sessions = dict(agent._sessions)
+        for call in (
+            lambda: agent.prompt(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": "must not run"}],
+            )),
+            lambda: agent.newSession(request),
+        ):
+            with pytest.raises(RequestError) as raised:
+                await asyncio.wait_for(call(), 5)
+            assert raised.value.code == -32010
+            assert raised.value.data == {"code": "SESSION_BUSY", "sessionId": session.sessionId}
+            assert "being created or rebound" in str(raised.value)
+            assert agent._sessions == sessions
+        # Reservations are per product session, not a global queue.
+        peer = await asyncio.wait_for(agent.newSession(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"session_id": "independent"},
+        )), 5)
+        response = await agent.prompt(SimpleNamespace(
+            sessionId=peer.sessionId, prompt=[{"text": "independent task"}],
+        ))
+        assert response.field_meta["ok"] is True
+        release.set()
+        replacement = await asyncio.wait_for(pending, 5)
+        assert session.sessionId not in agent._sessions
+        response = await agent.prompt(SimpleNamespace(
+            sessionId=replacement.sessionId, prompt=[{"text": "next task"}],
+        ))
+        assert response.field_meta["ok"] is True
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(pending, return_exceptions=True), 5)
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure", ["error", "cancelled"])
+async def test_session_creation_failure_releases_product_reservation(
+    tmp_path, monkeypatch, existing, failure
+):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "retry-create"})
+    old = await agent.newSession(request) if existing else None
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = agent._ensure_skills_loaded
+
+    async def fail_once():
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+            if failure == "error":
+                raise RuntimeError("session preparation failed")
+            raise asyncio.CancelledError()
+        return await original()
+
+    monkeypatch.setattr(agent, "_ensure_skills_loaded", fail_once)
+    pending = asyncio.create_task(agent.newSession(request))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(RequestError) as raised:
+            await asyncio.wait_for(agent.newSession(request), 5)
+        assert raised.value.code == -32010
+        expected = {"code": "SESSION_BUSY"}
+        if old is not None:
+            expected["sessionId"] = old.sessionId
+        assert raised.value.data == expected
+        release.set()
+        with pytest.raises(RuntimeError if failure == "error" else asyncio.CancelledError):
+            await asyncio.wait_for(pending, 5)
+        if old is not None:
+            response = await agent.prompt(SimpleNamespace(
+                sessionId=old.sessionId, prompt=[{"text": "original session still works"}],
+            ))
+            assert response.field_meta["ok"] is True
+        replacement = await agent.newSession(request)
+        response = await agent.prompt(SimpleNamespace(
+            sessionId=replacement.sessionId, prompt=[{"text": "retry succeeded"}],
+        ))
+        assert response.field_meta["ok"] is True
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(pending, return_exceptions=True), 5)
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["close", "browser", "initialization"])
+async def test_shutdown_cancels_rebinding_before_releasing_sessions(tmp_path, monkeypatch, phase):
+    import box_agent.session_assembly as assembly
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "shutdown-rebind"})
+    session = await agent.newSession(request)
+    state = agent._sessions[session.sessionId]
+    entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    if phase == "close":
+        owner, name = state.plugin_session, "aclose"
+    elif phase == "browser":
+        owner, name = acp_module, "close_browser_session"
+    else:
+        owner, name = assembly, "finish_session"
+    original = getattr(owner, name)
+
+    async def blocked(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, blocked)
+    pending = asyncio.create_task(agent.newSession(request))
+    closing = []
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        # Concurrent shutdown callers must not duplicate resource release.
+        closing = [asyncio.create_task(agent.aclose()) for _ in range(2)]
+        _, waiting = await asyncio.wait(closing, timeout=2)
+        assert not waiting, "shutdown did not cancel the pending rebind"
+        await asyncio.gather(*closing)
+        assert cancelled.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert not agent._sessions
+        assert not agent._session_bindings_in_progress
+        assert not agent._plugin_runtime._sessions
+        assert not agent._plugin_runtime._opening
+        assert state.agent.session_log._closed
+        assert agent._plugin_runtime._closed
+        await agent.aclose()
+    finally:
+        release.set()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await asyncio.gather(*closing, return_exceptions=True)
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("product_id", [None, "first-product"])
+async def test_shutdown_settles_initial_creation_and_rejects_new_requests(
+    tmp_path, monkeypatch, product_id
+):
+    import box_agent.session_assembly as assembly
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    entered, cancelling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = assembly.finish_session
+
+    async def blocked(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelling.set()
+            await release.wait()
+            raise
+
+    monkeypatch.setattr(assembly, "finish_session", blocked)
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": product_id})
+    pending = asyncio.create_task(agent.newSession(request))
+    closing = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        closing = asyncio.create_task(agent.aclose())
+        await asyncio.wait_for(cancelling.wait(), 2)
+        assert not closing.done(), "shutdown must wait for creation rollback"
+        monkeypatch.setattr(assembly, "finish_session", original)
+        for call in (
+            lambda: agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={})),
+            lambda: agent.prompt(SimpleNamespace(
+                sessionId="unknown-handle", prompt=[{"text": "must not auto-create"}],
+            )),
+        ):
+            with pytest.raises(RequestError) as raised:
+                await asyncio.wait_for(call(), 2)
+            assert raised.value.code == -32000
+            assert raised.value.data == {"code": "AGENT_CLOSING"}
+        release.set()
+        await asyncio.wait_for(closing, 2)
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert not agent._sessions
+        assert not agent._plugin_runtime._sessions
+        assert not agent._plugin_runtime._opening
+        assert not agent._session_bindings_in_progress
+        with pytest.raises(RequestError) as raised:
+            await agent.newSession(request)
+        assert raised.value.data == {"code": "AGENT_CLOSING"}
+    finally:
+        release.set()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        if closing is not None:
+            await asyncio.wait_for(asyncio.gather(closing, return_exceptions=True), 5)
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_before_creation_starts_leaves_no_session_reservations(tmp_path, monkeypatch):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    entered = asyncio.Event()
+    original = agent._new_session_with_binding
+
+    async def creation(*args, **kwargs):
+        entered.set()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(agent, "_new_session_with_binding", creation)
+    pending = asyncio.create_task(agent.newSession(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"session_id": "cancel-before-create"},
+    )))
+    try:
+        # Let the request enter; its child creation task has not run yet.
+        await asyncio.sleep(0)
+        await agent.aclose()
+        assert not entered.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert not agent._session_creation_tasks
+        assert not agent._session_bindings_in_progress
+        assert not agent._sessions
+        assert not agent._plugin_runtime._sessions
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await agent.aclose()
 
 
 class EmptyFinalAnswerLLM:
@@ -1974,7 +2640,11 @@ class CapabilityUsageLLM:
                         function=FunctionCall(name="browser_open", arguments={"url": "https://example.com"}),
                     ),
                 ],
-                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                usage=TokenUsage(
+                    prompt_tokens=10, completion_tokens=5, total_tokens=15,
+                    input_tokens=6, cache_read_input_tokens=4,
+                    cache_read_input_tokens_reported=True,
+                ),
             )
         else:
             yield StreamEvent(type="text", delta="done")
@@ -3247,6 +3917,7 @@ async def test_acp_binds_cumulative_real_user_text_to_bash_env(tmp_path):
     bash_env = agent._sessions[session.sessionId].agent.tools["bash"]._subprocess_env
     source_text = base64.b64decode(bash_env["BOX_AGENT_SOURCE_TEXT_B64"]).decode("utf-8")
     assert source_text == "原始事实 A\n\n补充事实 B"
+    await agent.aclose()
 
 
 @pytest.mark.asyncio
@@ -3324,6 +3995,187 @@ async def test_acp_prompt_keeps_runtime_http_service_reachable_after_turn_end(
             pytest.fail("runtime HTTP service did not remain reachable after turn end")
     finally:
         await BackgroundShellManager.terminate_owner(session.sessionId)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell command quoting")
+@pytest.mark.parametrize("failed_rebind", [None, "error", "cancelled", "workspace"])
+async def test_rebound_product_session_can_manage_original_runtime_service(
+    tmp_path, monkeypatch, failed_rebind,
+):
+    import box_agent.session_assembly as assembly
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "service"})
+    first = await agent.newSession(request)
+    original_tools = agent._sessions[first.sessionId].agent.tools
+    peer = await agent.newSession(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"session_id": "peer"},
+    ))
+    peer_tools = agent._sessions[peer.sessionId].agent.tools
+    try:
+        service = await original_tools["bash"].execute(
+            command="echo ready; sleep 30", run_in_background=True, lifetime="runtime",
+        )
+        assert service.success
+        shell = BackgroundShellManager.get(service.bash_id)
+        for _ in range(100):
+            output = await original_tools["bash_output"].execute(bash_id=service.bash_id)
+            if "ready" in output.stdout:
+                break
+            await asyncio.sleep(0.02)
+        assert "ready" in output.stdout
+
+        if failed_rebind in {"error", "cancelled"}:
+            original_finish = assembly.finish_session
+
+            async def fail(*args, **kwargs):
+                # This point is after the old ACP handle has been removed.
+                assert first.sessionId not in agent._sessions
+                if failed_rebind == "cancelled":
+                    raise asyncio.CancelledError()
+                raise RuntimeError("replacement initialization failed")
+
+            monkeypatch.setattr(assembly, "finish_session", fail)
+            error = asyncio.CancelledError if failed_rebind == "cancelled" else RuntimeError
+            with pytest.raises(error):
+                await agent.newSession(request)
+            monkeypatch.setattr(assembly, "finish_session", original_finish)
+            assert shell.process.returncode is None
+            with pytest.raises(SessionLogWorkspaceMismatch):
+                await agent.newSession(SimpleNamespace(
+                    cwd=str(tmp_path / "other"), field_meta=request.field_meta,
+                ))
+        elif failed_rebind == "workspace":
+            with pytest.raises(SessionLogWorkspaceMismatch):
+                await agent.newSession(SimpleNamespace(
+                    cwd=str(tmp_path / "other"), field_meta=request.field_meta,
+                ))
+            assert shell.process.returncode is None
+
+        previous_handle = first.sessionId
+        for _ in range(3):
+            rebound = await agent.newSession(request)
+            assert rebound.sessionId != previous_handle
+            state = agent._sessions[rebound.sessionId]
+            tools = state.agent.tools
+            # Exercise the model-facing exposure as well as direct execution.
+            offered = state.agent.mcp_tool_exposure.prepare_tools(
+                list(tools.values())
+            ).offered_names
+            assert {"bash_output", "bash_kill"} <= offered
+            output = await tools["bash_output"].execute(bash_id=service.bash_id)
+            assert output.success
+            assert output.lifetime == "runtime"
+            assert shell.process.returncode is None
+            previous_handle = rebound.sessionId
+
+        # An ordinary turn on the replacement must still clean only turn tasks.
+        turn = await tools["bash"].execute(command="sleep 30", run_in_background=True)
+        assert turn.success
+        turn_shell = BackgroundShellManager.get(turn.bash_id)
+        response = await agent.prompt(SimpleNamespace(
+            sessionId=rebound.sessionId, prompt=[{"text": "continue"}],
+        ))
+        assert response.stopReason == "end_turn"
+        assert BackgroundShellManager.get(turn.bash_id) is None
+        assert turn_shell.process.returncode is not None
+        assert shell.process.returncode is None
+
+        for name in ("bash_output", "bash_kill"):
+            denied = await peer_tools[name].execute(bash_id=service.bash_id)
+            assert not denied.success
+        assert shell.process.returncode is None
+        stopped = await tools["bash_kill"].execute(bash_id=service.bash_id)
+        assert stopped.success
+        assert shell.process.returncode is not None
+        assert BackgroundShellManager.get(service.bash_id) is None
+    finally:
+        await original_tools["bash"].cleanup_background_processes()
+        await peer_tools["bash"].cleanup_background_processes()
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rebinding_does_not_expose_previous_handles_python_kernels(tmp_path, monkeypatch):
+    from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    request = SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "python"})
+    try:
+        first = await agent.newSession(request)
+        old_tool = agent._sessions[first.sessionId].agent.tools["execute_code"]
+        monkeypatch.setattr(JupyterSandboxTool, "_sessions", {
+            old_tool._session_key("analysis"): SimpleNamespace(
+                is_alive=lambda: True, workspace=tmp_path,
+            ),
+        })
+        assert old_tool.get_status()["total_sessions"] == 1
+
+        rebound = await agent.newSession(request)
+        new_tool = agent._sessions[rebound.sessionId].agent.tools["execute_code"]
+        assert new_tool.get_status()["total_sessions"] == 0
+        assert new_tool.process_owner_id == rebound.sessionId
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_session", ["product", "anonymous", "adapter"])
+async def test_background_service_remains_private_to_its_product_and_adapter(
+    tmp_path, other_session, monkeypatch,
+):
+    # Ownership is platform independent; a managed record suffices to prove
+    # foreign tools cannot read it or reach its termination method.
+    from unittest.mock import AsyncMock
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    other = (BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+             if other_session == "adapter" else agent)
+    request = SimpleNamespace(
+        cwd=str(tmp_path), field_meta={} if other_session == "anonymous" else {"session_id": "a"},
+    )
+    try:
+        first = await agent.newSession(request)
+        owner = agent._sessions[first.sessionId].agent.tools["bash"].process_owner_id
+        shell = BackgroundShell("private", "synthetic", SimpleNamespace(returncode=None),
+                                0, owner_id=owner, lifetime="runtime")
+        shell.add_output("private output")
+        shell.terminate = AsyncMock()
+        monkeypatch.setattr(BackgroundShellManager, "_shells", {shell.bash_id: shell})
+        if other_session == "adapter":
+            # Close the durable log lock; runtime services intentionally outlive
+            # individual AgentSessions. A new adapter must not inherit them.
+            await agent.aclose()
+        second = await other.newSession(SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={"session_id": "b"} if other_session == "product" else request.field_meta,
+        ))
+        tools = other._sessions[second.sessionId].agent.tools
+        for name in ("bash_output", "bash_kill"):
+            result = await tools[name].execute(bash_id=shell.bash_id)
+            assert not result.success
+            assert "Available: none" in result.error
+        assert shell.get_new_output() == ["private output"]
+        shell.terminate.assert_not_awaited()
+    finally:
+        await other.aclose()
+        await agent.aclose()
 
 
 @pytest.mark.asyncio
@@ -3654,6 +4506,7 @@ async def test_acp_skill_invocations_are_idempotent_and_keep_context(
     monkeypatch,
 ):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "paid-skill"
     skill_dir.mkdir(parents=True)
@@ -3740,6 +4593,7 @@ async def test_acp_skill_invocations_are_idempotent_and_keep_context(
 @pytest.mark.asyncio
 async def test_acp_emits_turn_usage_for_tools_mcp_and_tokens(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
@@ -3795,12 +4649,14 @@ async def test_acp_emits_turn_usage_for_tools_mcp_and_tokens(tmp_path, monkeypat
         "completionTokens": 6,
         "totalTokens": 18,
         "calls": 2,
+        "cachedTokens": 4,
     }
 
 
 @pytest.mark.asyncio
 async def test_acp_threads_session_turn_and_title_to_llm(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(
@@ -4415,6 +5271,7 @@ async def test_acp_injects_standard_box_agent_image_generation_policy(tmp_path):
 @pytest.mark.asyncio
 async def test_acp_ignores_host_artifact_root_dir(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.delenv("BOX_AGENT_WORKSPACE_DIR", raising=False)
     workspace = tmp_path / "session-a"
     workspace.mkdir()
@@ -4486,6 +5343,7 @@ async def test_acp_workspace_layout_prompt_ignores_legacy_roots(
     layout_keys,
 ):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     selected_root = tmp_path / "workbench"
     task_root = selected_root / "2026-08-31-task"
     artifact_root = task_root / "output" / "tasks" / "task-1"
@@ -5369,6 +6227,7 @@ async def test_acp_does_not_read_or_rewrite_legacy_external_skill_owner(
     monkeypatch,
 ):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.setenv("BOX_AGENT_WORKFLOW_OWNER_DIR", str(tmp_path / "owners"))
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "ppt-master"
@@ -6081,6 +6940,10 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
     assert injected == {"ok": True, "injectionId": "inj-2"}
     assert cancelled == {"ok": True}
     assert state.inject_queue.empty()
+    assert await agent.extMethod("inject", {
+        "sessionId": session.sessionId, "text": "改成5页", "injectionId": "inj-2",
+    }) == {"ok": True, "injectionId": "inj-2"}
+    assert state.inject_queue.qsize() == 1
 
 
 @pytest.mark.asyncio
@@ -6117,14 +6980,15 @@ async def test_acp_inject_same_id_is_idempotent(tmp_path):
     assert third == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
     assert state.inject_queue.empty()
 
-    # An explicit cancel clears the id so the host may deliberately re-inject it.
-    await agent.extMethod(
+    # Cancelling consumed input cannot make a network retry run it twice.
+    cancelled = await agent.extMethod(
         "cancel_inject",
         {"sessionId": session.sessionId, "injectionId": "dup-1"},
     )
+    assert cancelled == {"ok": False}
     fourth = await agent.extMethod("inject", dict(args))
-    assert fourth == {"ok": True, "injectionId": "dup-1"}
-    assert state.inject_queue.qsize() == 1
+    assert fourth == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
+    assert state.inject_queue.empty()
 
 
 @pytest.mark.asyncio
@@ -6482,7 +7346,7 @@ async def test_acp_full_access_skips_dangerous_command_approval(tmp_path, monkey
 async def test_acp_prompt_includes_skill_runtime_context(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     sandbox_base = tmp_path / "sandbox-runtime"
-    python_path = sandbox_base / "venv" / "bin" / "python"
+    python_path = sandbox_base / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     python_path.parent.mkdir(parents=True)
     python_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     python_path.chmod(0o755)
@@ -6573,7 +7437,7 @@ async def test_acp_prompt_and_bash_env_include_self_managed_node_runtime(tmp_pat
     assert bash_tool._subprocess_env["BOX_AGENT_NPX"] == str(npx)
     skill_tools = Path.home() / ".box-agent" / "skill-tools"
     assert bash_tool._subprocess_env["NODE_PATH"].split(os.pathsep) == [
-        str(skill_tools / "lib" / "node_modules"),
+        str(skill_tools / "node_modules" if os.name == "nt" else skill_tools / "lib" / "node_modules"),
         str(node_root / "sandbox" / "node_modules"),
     ]
     assert bash_tool._subprocess_env["NPM_CONFIG_CACHE"] == str(skill_tools / "npm-cache")
@@ -7545,6 +8409,7 @@ async def test_acp_prompt_binds_browser_session_key_to_session_id(tmp_path, monk
 @pytest.mark.asyncio
 async def test_acp_rebind_closes_retired_handles_browser_context(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     closed: list[str] = []
 
     async def fake_close(session_key: str) -> bool:

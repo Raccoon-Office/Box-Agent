@@ -73,7 +73,7 @@ def validate_restore_records(records: list[dict[str, Any]]) -> None:
                 raise invalid_restore("deliveredRanges must contain valid integer [start, end] pairs")
 
 
-def recover_available_records(records: Any, loader: Any) -> list[dict[str, Any]]:
+def recover_available_records(records: Any, loader: Any, *, refresh: bool = True) -> list[dict[str, Any]]:
     """Project legacy optional state onto current sources without writing facts.
 
     Missing legacy hashes remain explicitly unverified. Invalid modern coverage
@@ -81,7 +81,8 @@ def recover_available_records(records: Any, loader: Any) -> list[dict[str, Any]]
     """
     if not isinstance(records, list) or loader is None:
         return []
-    loader.maybe_reload()
+    if refresh:
+        loader.maybe_reload()
     recovered: list[dict[str, Any]] = []
     names: set[str] = set()
     orders: set[int] = set()

@@ -2149,13 +2149,15 @@ async def run_agent(
                 if agent_session.skill_selector is None:
                     _sync_cli_cache_fingerprint_context()
                     return ()
-                new_prompt = agent_session.skill_selector.update(user_input)
+                new_prompt = agent_session.skill_selector.update(user_input, refresh=False)
                 if new_prompt is not None:
                     _set_agent_system_prompt(new_prompt)
                 _sync_cli_cache_fingerprint_context()
                 return agent_session.skill_selector.matched_skill_names
 
-            def _select_cli_skills(user_input: str) -> None:
+            async def _select_cli_skills(user_input: str) -> None:
+                if agent_session.skill_loader is not None:
+                    await agent_session.skill_loader.areload()
                 explicit = resolve_explicit_skill_invocation(agent_session.skill_loader, user_input)
                 agent_session.explicitly_allowed_skill_names.clear()
                 if explicit is not None:
@@ -2222,7 +2224,7 @@ async def run_agent(
                 if not agent_session.config.tools.mcp.deferred_loading_enabled:
                     register_mcp_tools(agent.tools, loaded_mcp_tools)
                 await _refresh_mcp_after_auth_change()
-                _select_cli_skills(task)
+                await _select_cli_skills(task)
                 _apply_skill_filter(task)
                 agent_session.source_text = bind_user_source_text(
                     agent.tools, agent_session.source_text, task,
@@ -2572,7 +2574,7 @@ async def run_agent(
                         f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
                         f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
                     )
-                    _select_cli_skills(user_input)
+                    await _select_cli_skills(user_input)
                     _apply_skill_filter(user_input)
                     agent_session.source_text = bind_user_source_text(
                         agent.tools, agent_session.source_text, user_input

@@ -76,6 +76,41 @@ async def test_endpoint_policy_changes_only_disabled_reasoning_wire(stream, poli
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("with_tools", [False, True])
+@pytest.mark.parametrize("model", [
+    "gpt-6-luna", "gpt-6-luna/azure_L/qwb", "gpt-6-sol",
+    "openai/gpt-6-sol-2026-09-01",
+])
+async def test_gpt6_chat_function_tools_require_explicit_none(
+    stream, enabled, with_tools, model,
+):
+    tool = {"type": "function", "function": {
+        "name": "echo", "description": "Return the supplied value.",
+        "parameters": {"type": "object", "properties": {"value": {"type": "string"}}},
+    }}
+    async with wire_client(model=model, policy="low") as (client, requests):
+        messages = [Message(role="user", content="hello")]
+        kwargs = {"tools": [tool] if with_tools else None, "thinking_enabled": enabled}
+        if stream:
+            events = [event async for event in client.generate_stream(messages, **kwargs)]
+            assert events[-1].type == "finish"
+        else:
+            response = await client.generate(messages, **kwargs)
+            assert response.content
+        assert len(requests) == 1
+        payload = requests[0]
+        if with_tools:
+            assert payload["reasoning_effort"] == "none"
+            assert payload["tools"] == [tool]
+        elif enabled:
+            assert payload["reasoning_effort"] == "high"
+        else:
+            assert "reasoning_effort" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
 async def test_deterministic_422_is_not_retried_even_with_transient_words(stream):
     async with wire_client(policy="low", reject=True) as (client, requests):
         with pytest.raises(UnprocessableEntityError):

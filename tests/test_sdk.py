@@ -62,6 +62,57 @@ async def test_sdk_client_starts_and_completes_a_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sdk_result_only_run_reports_cleanup_failure_after_done() -> None:
+    class CleanupFailureSession(_Session):
+        async def run_events(self, *, options=None):
+            try:
+                yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="answer")
+            finally:
+                raise RuntimeError("cleanup failed")
+
+    result = await AgentClient(CleanupFailureSession()).run(
+        RunRequest("sdk-cleanup", "sdk-session", "Explain this"),
+    )
+
+    assert result.status == "failed"
+    assert result.error == {"type": "RuntimeError", "message": "cleanup failed"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [False, True])
+async def test_sdk_result_only_run_uses_permission_callback(approved):
+    decisions = []
+
+    async def callback(request):
+        if approved:
+            await broker.respond(ControlCommand.permission_response(request["request_id"], approved=True))
+
+    broker = PermissionBroker(run_id="sdk-permission", on_request=callback)
+
+    class PermissionSession(_Session):
+        async def run_events(self, *, options=None):
+            decisions.append(await options.permission_negotiator.negotiate({"scope": "safety"}))
+            yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="done")
+
+    result = await asyncio.wait_for(AgentClient(PermissionSession()).run(
+        RunRequest("sdk-permission", "s"), options=_Options(permission_negotiator=broker),
+    ), 1)
+    assert result.final_content == "done"
+    assert decisions == [approved]
+
+
+@pytest.mark.asyncio
+async def test_sdk_result_only_run_returns_structured_delivery_failure():
+    from box_agent.api import RunDeliveryOptions
+
+    result = await AgentClient(_Session()).run(
+        RunRequest("sdk-failed", "s"), delivery_options=RunDeliveryOptions(max_bytes=1),
+    )
+    assert result.status == "failed"
+    assert result.error["code"] == "RUN_EVENT_TOO_LARGE"
+
+
+@pytest.mark.asyncio
 async def test_sdk_client_exposes_handle_for_streaming_and_control() -> None:
     session = _Session()
     handle = await AgentClient(session).start(

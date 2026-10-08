@@ -17,7 +17,9 @@ def test_archify_snapshot_preserves_attribution_and_file_integrity():
     assert (ARCHIFY / "THIRD_PARTY_NOTICES.md").is_file()
     assert not (ARCHIFY / "SKILL.md").exists()
     for name, digest in manifest["sha256"].items():
-        assert hashlib.sha256((ARCHIFY / name).read_bytes()).hexdigest() == digest, name
+        data = (ARCHIFY / name).read_bytes()
+        # Git may materialize the vendored text snapshot with CRLF on Windows.
+        assert hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() == digest, name
 
 
 def test_pptx_routes_archify_to_documented_image_supplement():

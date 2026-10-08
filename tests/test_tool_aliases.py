@@ -276,6 +276,7 @@ async def test_hyphenated_name_executes_underscore_canonical_tool() -> None:
 @pytest.mark.asyncio
 async def test_alias_is_canonicalized_before_duplicate_calls_are_removed() -> None:
     tool = RecordingTool()
+    tool.deduplicate_within_batch = True
     llm = SequenceLLM(
         [
             LLMResponse(

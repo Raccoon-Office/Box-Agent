@@ -264,18 +264,21 @@ async def test_session_durability_failure_propagates_out_of_the_bus():
     await bus.close()
 
 
-async def test_chain_budget_is_not_reset_for_each_handler():
+async def test_chain_budget_is_not_reset_for_each_handler(monkeypatch):
+    import box_agent.hook_bus as hook_bus
+    now = [0.0]
+    monkeypatch.setattr(hook_bus, "monotonic", lambda: now[0])
     bus = HookBus(interceptor_timeout_ms=200, chain_timeout_ms=30)
     seen = []
 
     async def first(ctx):
         seen.append("first")
-        await asyncio.sleep(0.02)
+        now[0] += 0.02
         return BeforeToolDecision.allow()
 
     async def second(ctx):
         seen.append("second")
-        await asyncio.sleep(0.05)
+        now[0] += 0.02
         return BeforeToolDecision.allow()
 
     register(bus, "first", first)

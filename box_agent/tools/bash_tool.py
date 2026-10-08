@@ -15,6 +15,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -55,6 +56,9 @@ log = logging.getLogger(__name__)
 # context limit. The marker itself is intentionally additional to this payload
 # budget. This mirrors Hermes terminal's 50K, 40%-head/60%-tail policy.
 MAX_BASH_OUTPUT_CHARS = 50_000
+_BACKGROUND_READ_CHUNK_BYTES = 64 * 1024
+_BACKGROUND_MEMORY_BYTES = 256 * 1024
+_MAX_RETAINED_COMPLETED_SHELLS = 128
 _DEFAULT_TOOLS_CONFIG = ToolsConfig()
 BASH_LIFETIME_TURN = "turn"
 BASH_LIFETIME_RUNTIME = "runtime"
@@ -523,12 +527,67 @@ class BashOutputResult(ToolResult):
         return self
 
 
-class BackgroundShell:
-    """Background shell data container.
+class _BackgroundOutputBuffer:
+    """Unread bytes, spilling to a private temporary file above the RAM budget."""
 
-    Pure data class that only stores state and output.
-    IO operations are managed externally by BackgroundShellManager.
-    """
+    def __init__(self) -> None:
+        self._stream = None
+        self.size = 0
+        self._readable = 0
+
+    def append(self, data: bytes) -> None:
+        if not data:
+            return
+        if self._stream is None:
+            self._stream = tempfile.SpooledTemporaryFile(max_size=_BACKGROUND_MEMORY_BYTES)
+        self._stream.seek(0, os.SEEK_END)
+        self._stream.write(data)
+        last_newline = data.rfind(b"\n")
+        if last_newline >= 0:
+            self._readable = self.size + last_newline + 1
+        self.size += len(data)
+
+    def finish(self) -> None:
+        """Expose the final unterminated line once reading has stopped."""
+        self._readable = self.size
+
+    def take_lines(self) -> list[str]:
+        if not self._readable:
+            return []
+        stream = self._stream
+        stream.seek(0)
+        data = stream.read(self._readable)
+        remaining = self.size - self._readable
+        replacement = None
+        try:
+            if remaining:
+                replacement = tempfile.SpooledTemporaryFile(max_size=_BACKGROUND_MEMORY_BYTES)
+                # An unfinished line can itself be large. Preserve it without
+                # materializing the tail in RAM during a poll of earlier lines.
+                while chunk := stream.read(_BACKGROUND_READ_CHUNK_BYTES):
+                    replacement.write(chunk)
+        except BaseException:
+            if replacement is not None:
+                replacement.close()
+            raise
+        stream.close()
+        self._stream = replacement
+        self.size = remaining
+        self._readable = 0
+        text = data.decode("utf-8", errors="replace")
+        if text.endswith("\n"):
+            text = text[:-1]
+        return text.split("\n")
+
+    def close(self) -> None:
+        if self._stream is not None:
+            self._stream.close()
+        self._stream = None
+        self.size = self._readable = 0
+
+
+class BackgroundShell:
+    """Process state and consumable output owned by BackgroundShellManager."""
 
     def __init__(
         self,
@@ -545,19 +604,19 @@ class BackgroundShell:
         self.start_time = start_time
         self.owner_id = owner_id
         self.lifetime = lifetime
-        self.output_lines: list[str] = []
-        self.last_read_index = 0
+        self._output = _BackgroundOutputBuffer()
+        self.output_error: str | None = None
+        self.completed_at: float | None = None
         self.status = "running"
         self.exit_code: int | None = None
 
     def add_output(self, line: str):
         """Add new output line."""
-        self.output_lines.append(line)
+        self._output.append((line + "\n").encode("utf-8"))
 
     def get_new_output(self, filter_pattern: str | None = None) -> list[str]:
         """Get new output since last check, optionally filtered by regex."""
-        new_lines = self.output_lines[self.last_read_index :]
-        self.last_read_index = len(self.output_lines)
+        new_lines = self._output.take_lines()
 
         if filter_pattern:
             try:
@@ -572,8 +631,10 @@ class BackgroundShell:
     def update_status(self, is_alive: bool, exit_code: int | None = None):
         """Update process status."""
         if not is_alive:
-            self.status = "completed" if exit_code == 0 else "failed"
+            if self.status != "terminated":
+                self.status = "error" if self.output_error else "completed" if exit_code == 0 else "failed"
             self.exit_code = exit_code
+            self.completed_at = time.monotonic()
         else:
             self.status = "running"
 
@@ -595,6 +656,40 @@ class BackgroundShell:
         self.exit_code = self.process.returncode
 
 
+def _background_output_result(shell: BackgroundShell, stdout: str) -> BashOutputResult:
+    """Bound the display while keeping the complete consumed batch for persistence."""
+    exit_code = shell.exit_code if shell.exit_code is not None else 0
+    original_chars = len(stdout)
+    complete_content = _format_bash_result_content(
+        stdout, "", bash_id=shell.bash_id, lifetime=shell.lifetime, exit_code=exit_code,
+    )
+    stdout, _stderr, dropped = _truncate_bash_streams(stdout, "")
+    raw_output = None
+    if dropped:
+        raw_output = {
+            "dropped_chars": dropped,
+            "original_stdout_chars": original_chars,
+            "original_stderr_chars": 0,
+            "streams_combined": False,
+            "max_output_chars": MAX_BASH_OUTPUT_CHARS,
+        }
+        log.warning(
+            "bash/background_output_truncated bash_id=%s stdout_dropped=%d",
+            shell.bash_id, dropped,
+        )
+    return BashOutputResult(
+        success=shell.output_error is None,
+        error=shell.output_error,
+        stdout=stdout,
+        stderr="",  # Background shells combine stdout/stderr.
+        exit_code=exit_code,
+        bash_id=shell.bash_id,
+        lifetime=shell.lifetime,
+        raw_output=raw_output,
+        persistence_content=complete_content if dropped else None,
+    )
+
+
 class BackgroundShellManager:
     """Manager for all background shell processes."""
 
@@ -605,6 +700,36 @@ class BackgroundShellManager:
     def add(cls, shell: BackgroundShell) -> None:
         """Add a background shell to management."""
         cls._shells[shell.bash_id] = shell
+        cls._prune_completed()
+
+    @classmethod
+    def _prune_completed(cls) -> None:
+        """Keep a bounded history without discarding unread output or services."""
+        completed = sorted(
+            (shell for shell in cls._shells.values()
+             if shell.status in {"completed", "failed"}
+             and not shell._output.size
+             and shell.process.returncode is not None
+             and shell.bash_id not in cls._monitor_tasks),
+            key=lambda shell: shell.completed_at or shell.start_time,
+        )
+        excess = len(completed) - _MAX_RETAINED_COMPLETED_SHELLS
+        for shell in completed:
+            if excess <= 0:
+                break
+            if not sys.platform.startswith("win"):
+                # The wrapper may have exited while a child service still uses
+                # its process group, even when that child closed stdout.
+                try:
+                    os.killpg(shell.process.pid, 0)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    continue  # Unknown ownership/liveness: retain the handle.
+                else:
+                    continue
+            cls._remove(shell.bash_id)
+            excess -= 1
 
     @classmethod
     def get(
@@ -632,10 +757,12 @@ class BackgroundShellManager:
         ]
 
     @classmethod
-    def _remove(cls, bash_id: str) -> None:
+    def _remove(cls, bash_id: str, *, preserve_output: bool = False) -> None:
         """Remove a background shell from management (internal use only)."""
         if bash_id in cls._shells:
-            del cls._shells[bash_id]
+            shell = cls._shells.pop(bash_id)
+            if not preserve_output:
+                shell._output.close()
 
     @classmethod
     async def start_monitor(cls, bash_id: str) -> None:
@@ -647,64 +774,45 @@ class BackgroundShellManager:
         async def monitor():
             try:
                 process = shell.process
-                # Continuously read output until process ends
-                while process.returncode is None:
-                    try:
-                        if process.stdout:
-                            line = await asyncio.wait_for(process.stdout.readline(), timeout=0.1)
-                            if line:
-                                decoded_line = line.decode("utf-8", errors="replace").rstrip("\n")
-                                shell.add_output(decoded_line)
-                            else:
-                                break
-                    except asyncio.TimeoutError:
-                        await asyncio.sleep(0.1)
-                        continue
-                    except Exception:
-                        await asyncio.sleep(0.1)
-                        continue
-
-                # A short-lived process can exit before the monitor gets its
-                # first iteration. Drain everything still buffered after exit
-                # so fast commands do not silently lose their output.
+                # Chunk reads handle arbitrarily long lines and drain buffered
+                # bytes even if the process exited before this task ran.
                 if process.stdout:
-                    remaining = await process.stdout.read()
-                    if remaining:
-                        decoded = remaining.decode("utf-8", errors="replace")
-                        for line in decoded.splitlines():
-                            shell.add_output(line)
-
-                # Process ended, wait for exit code
-                try:
-                    returncode = await process.wait()
-                except Exception:
-                    returncode = -1
-
+                    while chunk := await process.stdout.read(_BACKGROUND_READ_CHUNK_BYTES):
+                        shell._output.append(chunk)
+                shell._output.finish()
+                returncode = await process.wait()
                 shell.update_status(is_alive=False, exit_code=returncode)
-
             except Exception as e:
-                if bash_id in cls._shells:
-                    cls._shells[bash_id].status = "error"
-                    cls._shells[bash_id].add_output(f"Monitor error: {str(e)}")
+                shell.status = "error"
+                shell.output_error = f"Failed to read background output: {e}"
+                log.warning("bash/background_read_failed bash_id=%s error=%s", bash_id, e)
             finally:
-                if bash_id in cls._monitor_tasks:
-                    del cls._monitor_tasks[bash_id]
+                shell._output.finish()
+                cls._monitor_tasks.pop(bash_id, None)
+                cls._prune_completed()
 
         task = asyncio.create_task(monitor())
         cls._monitor_tasks[bash_id] = task
 
     @classmethod
-    def _cancel_monitor(cls, bash_id: str) -> None:
-        """Cancel and remove a monitoring task (internal use only)."""
-        if bash_id in cls._monitor_tasks:
-            task = cls._monitor_tasks[bash_id]
+    async def _settle_monitor(cls, shell: BackgroundShell) -> None:
+        """Drain the killed process before releasing its temporary output file."""
+        task = cls._monitor_tasks.get(shell.bash_id)
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2)
+        except asyncio.TimeoutError:
+            shell.output_error = "Timed out draining background output after termination"
+        finally:
             if not task.done():
                 task.cancel()
-            del cls._monitor_tasks[bash_id]
+            await asyncio.gather(task, return_exceptions=True)
+            cls._monitor_tasks.pop(shell.bash_id, None)
 
     @classmethod
     async def terminate(
-        cls, bash_id: str, owner_id: str | None = None
+        cls, bash_id: str, owner_id: str | None = None, *, preserve_output: bool = False,
     ) -> BackgroundShell:
         """Terminate a background shell and clean up all resources.
 
@@ -724,9 +832,24 @@ class BackgroundShellManager:
         # Terminate the process
         await shell.terminate()
 
-        # Clean up monitoring and remove from manager
-        cls._cancel_monitor(bash_id)
-        cls._remove(bash_id)
+        # Settle the reader before closing its output file. bash_kill consumes
+        # the final bytes; lifecycle cleanup closes them without materializing.
+        try:
+            try:
+                await cls._settle_monitor(shell)
+            finally:
+                # A failed/cancelled reader can leave a paused pipe open after
+                # the child exits. Process has no public close API; explicitly
+                # release its asyncio transport rather than relying on GC.
+                # Normal readers have already drained the final output above.
+                transport = getattr(shell.process, "_transport", None)
+                if transport is not None:
+                    transport.close()
+                    await asyncio.sleep(0)  # Run queued pipe-close callbacks.
+        except BaseException:
+            cls._remove(bash_id)
+            raise
+        cls._remove(bash_id, preserve_output=preserve_output)
 
         return shell
 
@@ -1271,8 +1394,9 @@ class BashTool(Tool):
             "Windows": f"""Execute PowerShell commands in foreground or background.
 
 Do NOT use Get-Content/type to read files; use read_file instead.
-Do NOT use Select-String/Get-ChildItem/dir to search or list files; use search_files instead.
-Reserve bash for git, builds, tests, package managers, processes, scripts, and system commands.
+For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
+For a one-level directory view, use a read-only non-recursive command such as Get-ChildItem -Name. Do not use PowerShell for recursive file discovery or content search.
+Reserve bash for that directory view, git, builds, tests, package managers, processes, scripts, and system commands.
 
 Parameters:
   - command (required): PowerShell command to execute
@@ -1294,8 +1418,9 @@ Examples:
             "Unix": f"""Execute bash commands in foreground or background.
 
 Do NOT use cat/head/tail to read files; use read_file instead.
-Do NOT use grep/rg/find/ls to search or list files; use search_files instead.
-Reserve bash for git, builds, tests, package managers, processes, scripts, and system commands.
+For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
+For a one-level directory view, use a read-only non-recursive command such as find . -mindepth 1 -maxdepth 1 -print. Do not use Bash for recursive file discovery or content search.
+Reserve bash for that directory view, git, builds, tests, package managers, processes, scripts, and system commands.
 
 Parameters:
   - command (required): Bash command to execute
@@ -1371,7 +1496,8 @@ Examples:
                         "Use 'runtime' only when the user explicitly asks for a "
                         "service or command to remain available after the final "
                         "response; it remains manageable with bash_output/bash_kill "
-                        "until Box-Agent exits."
+                        "until Box-Agent exits. Fully consumed, completed shell history "
+                        "is limited to the most recent 128 records per runtime."
                     ),
                     "default": BASH_LIFETIME_TURN,
                 },
@@ -1856,7 +1982,9 @@ class BashOutputTool(Tool):
         - Supports optional regex filtering to show only lines matching a pattern
         - Use this tool when you need to monitor or check the output of a long-running shell
         - Shell IDs can be found using the bash tool with run_in_background=true
-        - A `turn` shell is reclaimed when its turn ends; a `runtime` shell remains available until bash_kill or Box-Agent exit
+        - A `turn` shell is reclaimed when its turn ends; active or unread `runtime` shells remain available until bash_kill or Box-Agent exit
+        - Already read output is released; unread output remains available, spilling to a temporary file when large
+        - Fully consumed, completed shell history is limited to 128 records per runtime; expired IDs return Shell not found
 
         Process status values:
           - "running": Still executing
@@ -1914,45 +2042,10 @@ class BashOutputTool(Tool):
                     exit_code=-1,
                 )
 
-            # Get new output
             new_lines = bg_shell.get_new_output(filter_pattern=filter_str)
-            stdout = "\n".join(new_lines) if new_lines else ""
-            exit_code = bg_shell.exit_code if bg_shell.exit_code is not None else 0
-            complete_content = _format_bash_result_content(
-                stdout,
-                "",
-                bash_id=bash_id,
-                exit_code=exit_code,
-            )
-
-            # Truncate large batches for the same reason foreground execution
-            # does — `bash_output` can pull a very large accumulated stream
-            # (e.g. a long-running server that emitted MBs since the last read).
-            stdout, _stderr, dropped = _truncate_bash_streams(stdout, "")
-            raw_output: dict | None = None
-            if dropped:
-                raw_output = {
-                    "dropped_chars": dropped,
-                    "original_stdout_chars": len("\n".join(new_lines)),
-                    "original_stderr_chars": 0,
-                    "streams_combined": False,
-                    "max_output_chars": MAX_BASH_OUTPUT_CHARS,
-                }
-                log.warning(
-                    "bash/background_output_truncated bash_id=%s stdout_dropped=%d",
-                    bash_id, dropped,
-                )
-
-            return BashOutputResult(
-                success=True,
-                stdout=stdout,
-                stderr="",  # Background shells combine stdout/stderr
-                exit_code=exit_code,
-                bash_id=bash_id,
-                lifetime=bg_shell.lifetime,
-                raw_output=raw_output,
-                persistence_content=complete_content if dropped else None,
-            )
+            result = _background_output_result(bg_shell, "\n".join(new_lines))
+            BackgroundShellManager._prune_completed()
+            return result
 
         except Exception as e:
             return BashOutputResult(
@@ -1966,6 +2059,8 @@ class BashOutputTool(Tool):
 
 class BashKillTool(Tool):
     """Terminate a running background bash shell."""
+
+    max_result_size_chars = math.inf
 
     def __init__(self, process_owner_id: str | None = None):
         self.process_owner_id = process_owner_id
@@ -2012,33 +2107,19 @@ class BashKillTool(Tool):
         """
 
         try:
-            # Get remaining output before termination
-            bg_shell = BackgroundShellManager.get(bash_id, self.process_owner_id)
-            if bg_shell:
-                remaining_lines = bg_shell.get_new_output()
-            else:
-                remaining_lines = []
-
-            # Terminate through manager (handles all cleanup)
             bg_shell = await BackgroundShellManager.terminate(
-                bash_id, self.process_owner_id
+                bash_id, self.process_owner_id, preserve_output=True,
             )
-
-            # Get remaining output
-            stdout = "\n".join(remaining_lines) if remaining_lines else ""
-
-            return BashOutputResult(
-                success=True,
-                stdout=stdout,
-                stderr="",
-                exit_code=bg_shell.exit_code if bg_shell.exit_code is not None else 0,
-                bash_id=bash_id,
-                lifetime=bg_shell.lifetime,
-            )
+            try:
+                return _background_output_result(bg_shell, "\n".join(bg_shell.get_new_output()))
+            finally:
+                bg_shell._output.close()
 
         except ValueError as e:
             # Shell not found
-            available_ids = BackgroundShellManager.get_available_ids()
+            available_ids = BackgroundShellManager.get_available_ids(
+                self.process_owner_id
+            )
             return BashOutputResult(
                 success=False,
                 error=f"{str(e)}. Available: {available_ids or 'none'}",

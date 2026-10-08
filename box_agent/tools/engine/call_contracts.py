@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...schema import Message
 from ..base import Tool, ToolResult
+from ..delegated_budget import BudgetCharge
 
 if TYPE_CHECKING:
     from ...context_resources import ContextResourceLedger
@@ -84,6 +85,7 @@ class ToolCallRecord:
     name: str
     arguments: dict[str, Any]
     target: Tool | None
+    budget_charge: BudgetCharge = field(default_factory=BudgetCharge, kw_only=True)
     tool_id: str | None = None
     server_name: str | None = None
     allowed: bool = False

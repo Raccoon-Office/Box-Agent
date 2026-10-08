@@ -47,6 +47,7 @@ members of this read/search set:
 - `read_file`
 - `query_jsonl`
 - `search_files`
+- `grep` and `glob` (when available in the parent session)
 - `web_search` and `web_extract`
 
 When `skills` are assigned, available `get_skill` and `list_skills` are also

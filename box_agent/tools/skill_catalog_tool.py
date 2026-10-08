@@ -93,7 +93,7 @@ class ListSkillsTool(Tool):
         )
         if issues:
             return self._invalid_arguments_result(issues)
-        self.skill_loader.maybe_reload()
+        await self.skill_loader.areload()
         query = query.strip()
         skills = [
             skill for skill in self.skill_loader.search_skills(include_disabled=True)

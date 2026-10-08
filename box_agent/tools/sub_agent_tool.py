@@ -35,6 +35,7 @@ from ..events import (
 )
 from ..llm.model_routing import resolve_model_client
 from ..schema import Message
+from ..skill_dependencies import SkillDependencyError
 from ..session_log import SessionLog, SessionLogDurabilityError
 from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from .schema_validation import ToolArgumentIssue
@@ -256,6 +257,14 @@ class SubAgentTool(EventEmittingTool):
     aliases = ("sessions_spawn", "delegate_task")
 
     parallel_safe = True
+    supports_delegated_budget = True
+
+    async def _invoke_validated(self, arguments, *, context):
+        from .delegated_budget import bind_budgets, current_budgets
+
+        budgets = (context.child_budgets if context is not None else ()) or current_budgets()
+        with bind_budgets(budgets):
+            return await super()._invoke_validated(arguments, context=context)
 
     def __init__(
         self,
@@ -436,8 +445,9 @@ class SubAgentTool(EventEmittingTool):
             "the startup and merge cost. The parent remains responsible for synthesis, conflicts, "
             "final deliverables, and verification.\n\n"
             "Pass a complete `task` brief. `required_tools` defaults only to available trusted "
-            "read/search tools (`read_file`, `query_jsonl`, `search_files`, `web_search`, "
-            "`web_extract`). Declaring `skills` also includes available get_skill/list_skills, "
+            "read/search tools (`read_file`, `query_jsonl`, `search_files`, `grep`, `glob`, "
+            "`web_search`, `web_extract`). Declaring `skills` also includes available "
+            "get_skill/list_skills, "
             "restricted to assigned Skills and dependencies. With an exact "
             "`write_scope`, omitted tools also include the parent's available write_file, "
             "edit_file, and append_file, restricted to those outputs; pass an explicit "
@@ -498,7 +508,8 @@ class SubAgentTool(EventEmittingTool):
                     "type": "array",
                     "description": (
                         "Exact parent tools requested for this child. When omitted, "
-                        "defaults to available local read/search and web_search/web_extract; "
+                        "defaults to available local read/search (including grep/glob) and "
+                        "web_search/web_extract; "
                         "declared skills add available get_skill/list_skills within their assigned scope. "
                         "A non-empty "
                         "write_scope also supplies available write_file, edit_file, and "
@@ -1495,10 +1506,22 @@ class SubAgentTool(EventEmittingTool):
         if isinstance(parsed, CapabilityFailure):
             return self._failure_result(parsed)
 
+        skill_loader = self._resolve_skill_loader()
+        if parsed.skill_names and skill_loader is not None:
+            validation = await skill_loader.avalidate_references(tuple(parsed.skill_names), allow_stale=False)
+            for name in parsed.skill_names:
+                try:
+                    validation.resolve(name)
+                except SkillDependencyError as exc:
+                    return self._failure_result(CapabilityFailure(
+                        code=exc.code, message=exc.message, retryable=True, details=exc.details,
+                    ), parsed)
+            skill_loader = validation.catalog
         resolved = CapabilityResolver().resolve(
             parsed,
             parent_tools=live_tools,
-            skill_loader=self._resolve_skill_loader(),
+            skill_loader=skill_loader,
+            refresh_skills=False,
             skill_access_filter=self._skill_access_filter,
             capability_state=self._resolve_capability_state(),
             permission_negotiator_available=self._permission_negotiator is not None,

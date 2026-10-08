@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 from ...session_log import SessionLogDurabilityError
 from ..base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
+from ..delegated_budget import current_budgets
+from ..schema_validation import validate_tool_arguments, ToolSchemaValidationError
 
 if TYPE_CHECKING:
     from .scheduler import ToolEngineRecord
@@ -35,12 +37,44 @@ async def invoke_tool_once(
     tool: Tool,
     arguments: dict[str, Any],
     context: ToolInvocationContext | None = None,
+    *,
+    approved_permission_request: dict[str, Any] | None = None,
+    on_invoke: Callable[[], None] | None = None,
 ) -> ToolResult:
     """Invoke the validated tool interface once, preserving legacy overrides."""
-    if context is not None and (isinstance(tool, EventEmittingTool)
-                               or getattr(tool, "uses_invocation_context", False)):
-        return await tool.invoke(arguments, context=context)
-    return await tool.invoke(arguments)
+    context = context or ToolInvocationContext()
+    ledgers = current_budgets()
+    if getattr(tool, "name", "") == "sub_agent" and (ledgers or context.child_budgets):
+        if not (getattr(tool, "supports_delegated_budget", False) and (
+            isinstance(tool, EventEmittingTool) or getattr(tool, "uses_invocation_context", False)
+        )):
+            return ToolResult(success=False, error="DELEGATED_BUDGET_UNSUPPORTED: sub_agent must honor invocation context budgets")
+        if any(ledger.used >= ledger.limit for ledger in context.child_budgets):
+            return ToolResult(success=False, error="DELEGATED_BUDGET_EXHAUSTED: no child execution quota remains")
+    if ledgers:
+        try:
+            issues = validate_tool_arguments(tool.parameters, arguments)
+        except ToolSchemaValidationError:
+            return tool._invalid_schema_result()
+        if issues:
+            return tool._invalid_arguments_result(issues)
+        if not context.budget_charge.reserve(ledgers):
+            return ToolResult(success=False, error="DELEGATED_BUDGET_EXHAUSTED: ancestor execution quota exhausted")
+    try:
+        if approved_permission_request is not None:
+            _approve_tool_permission(tool, approved_permission_request)
+        if on_invoke is not None:
+            on_invoke()
+    except BaseException:
+        context.budget_charge.release_unexecuted()
+        raise
+    if isinstance(tool, EventEmittingTool) or getattr(tool, "uses_invocation_context", False):
+        result = await tool.invoke(arguments, context=context)
+    else:
+        result = await tool.invoke(arguments)
+    if result.permission_request:
+        context.budget_charge.release_unexecuted()
+    return result
 
 
 async def stream_tool_invocation(

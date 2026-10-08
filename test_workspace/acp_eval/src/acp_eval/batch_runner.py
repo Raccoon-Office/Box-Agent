@@ -490,7 +490,8 @@ def _successful(case: Mapping[str, Any]) -> bool:
 
 
 def _python_executable(repo_root: Path) -> str:
-    candidate = repo_root / ".venv" / "bin" / "python"
+    relative = ("Scripts", "python.exe") if sys.platform == "win32" else ("bin", "python")
+    candidate = repo_root / ".venv" / relative[0] / relative[1]
     return str(candidate) if candidate.is_file() else sys.executable
 
 

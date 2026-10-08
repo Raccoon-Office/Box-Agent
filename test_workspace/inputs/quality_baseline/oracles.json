@@ -1,0 +1,155 @@
+{
+  "version": "p0-q0/v1",
+  "cases": [
+    {
+      "id": "q0-file",
+      "split": "development",
+      "checks": [
+        {
+          "kind": "json",
+          "path": "settings.json",
+          "value": {
+            "theme": "dark",
+            "keep": "Q0-preserve"
+          }
+        }
+      ]
+    },
+    {
+      "id": "q0-source",
+      "split": "development",
+      "checks": [
+        {
+          "kind": "json",
+          "path": "answer.json",
+          "value": {
+            "owner": "Mei",
+            "budget": 37,
+            "source_id": "Q0-SOURCE-2026"
+          }
+        },
+        {
+          "kind": "text",
+          "path": "source.md",
+          "value": "# 合成资料（不是互联网事实）\n2024 草稿：项目 Aurora，负责人 Lin，预算 99。\n2026 已批准版本：项目 Aurora，负责人 Mei，预算 37。\n引用标识：Q0-SOURCE-2026。"
+        }
+      ]
+    },
+    {
+      "id": "q0-skill",
+      "split": "development",
+      "checks": [
+        {
+          "kind": "tool",
+          "name": "get_skill",
+          "success": true,
+          "arguments": {
+            "skill_name": "xlsx"
+          }
+        },
+        {
+          "kind": "xlsx",
+          "path": "report.xlsx",
+          "cells": {
+            "A1": "item",
+            "B1": "count",
+            "A2": "apple",
+            "B2": "3"
+          },
+          "numeric": [
+            "B2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q0-long",
+      "split": "holdout",
+      "checks": [
+        {
+          "kind": "json",
+          "path": "selected.json",
+          "value": {
+            "id": 731,
+            "code": "Q0-0731",
+            "value": 5117
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "query_jsonl",
+          "success": true
+        }
+      ]
+    },
+    {
+      "id": "q0-wait",
+      "split": "holdout",
+      "expected_state": "waiting_for_user",
+      "checks": [
+        {
+          "kind": "tool",
+          "name": "request_user_input",
+          "success": true
+        },
+        {
+          "kind": "no_tool",
+          "names": [
+            "search_files",
+            "read_file",
+            "execute_code",
+            "bash",
+            "write_file",
+            "query_jsonl",
+            "edit_file",
+            "append_file",
+            "sub_agent"
+          ]
+        },
+        {
+          "kind": "absent",
+          "path": "total.json"
+        }
+      ]
+    },
+    {
+      "id": "q0-recover",
+      "split": "development",
+      "checks": [
+        {
+          "kind": "recovery",
+          "missing": "missing-source.json",
+          "source": "recovery-source.json"
+        },
+        {
+          "kind": "json",
+          "path": "recovered.json",
+          "value": {
+            "receipt": "Q0-recovered",
+            "amount": 29
+          }
+        },
+        {
+          "kind": "absent",
+          "path": "missing-source.json"
+        }
+      ]
+    },
+    {
+      "id": "q0-complete",
+      "split": "holdout",
+      "checks": [
+        {
+          "kind": "json",
+          "path": "result.json",
+          "value": 391
+        },
+        {
+          "kind": "tool",
+          "name": "read_file",
+          "success": true
+        }
+      ]
+    }
+  ]
+}

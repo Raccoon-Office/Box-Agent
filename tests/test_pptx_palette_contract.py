@@ -138,7 +138,7 @@ cp.spawnSync=function(command,args,options){
 };
 ''')
     result = _run('finalize_controlled_deck.js',str(deck_path),'--out',str(tmp_path/'index.html'),
-                  env={**os.environ,'NODE_OPTIONS':f'--require "{preload}"'})
+                  env={**os.environ,'NODE_OPTIONS':f'--require "{preload.as_posix()}"'})
     assert result.returncode != 0
     assert 'FINALIZE_STOP stage=palette_contract' in result.stderr + result.stdout
     assert json.loads((tmp_path/'qa/runtime_probe.json').read_text())['ok'] is False

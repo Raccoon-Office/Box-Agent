@@ -170,6 +170,8 @@ def test_supervised_batch_publishes_receipt_only_after_successful_cleanup(
                 raise cleanup_error("injected supervisor cleanup failure")
 
     monkeypatch.setitem(runtime, "_Supervisor", Supervisor)
+    if sys.platform == "win32":
+        monkeypatch.setattr("render_runtime_windows.WindowsSupervisor", Supervisor)
     monkeypatch.setitem(runtime, "_acquire_render_slot", lambda deadline: None)
     code = state["supervise"](state["__file__"], ["--batch", str(deck), "--pages", "1"])
     captured = capsys.readouterr()

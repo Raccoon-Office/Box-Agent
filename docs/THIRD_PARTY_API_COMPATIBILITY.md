@@ -68,6 +68,29 @@ API 返回的事件顺序不符合 Anthropic 协议规范: Unexpected event orde
 
 运行 `box-agent doctor` 可以测试 API 连接性和基本兼容性。
 
+## 输出 token 参数兼容
+
+OpenAI 兼容接口默认继续使用 `max_tokens`。若服务端返回 HTTP 400，错误码为
+`unsupported_parameter`、参数为 `max_tokens`，且错误说明要求使用
+`max_completion_tokens`，Box-Agent 会保留原输出上限，换参数重试一次。
+流式与非流式请求共用此行为；流式重试只发生在接收输出前。
+
+成功后，当前客户端实例会按 API Base 和模型 ID 记住参数选择，后续请求直接使用
+`max_completion_tokens`。此记录不持久化，不按 GPT 版本猜测第三方网关能力。
+其他参数错误不会触发此兼容重试，也不会仅因包含 `max_tokens` 而提示上下文过长。
+
+## GPT-6 Sol / Luna 的工具调用
+
+GPT-6 Sol 和 Luna 在 Chat Completions 中携带 function tools 时，必须显式设置
+`reasoning_effort: "none"`。Box-Agent 对这些模型（含供应商命名空间、版本后缀和
+`/azure_L/qwb` 等路由后缀）应用这一规则，无论会话是否开启深度思考。
+只关闭界面开关、不发送此字段，仍可能触发服务端默认推理模式。
+
+此兼容处理保留工具调用能力，但这类请求不启用推理。需要同时使用推理与工具时，
+须接入 Responses API，不能仅替换当前 Chat Completions 的 URL。
+无工具请求、其他模型及其已有的 thinking 参数映射保持原有行为。
+参见 [GPT-6 Luna 官方说明](https://developers.openai.com/api/docs/models/gpt-6-luna)。
+
 ## Kimi K3 思考强度
 
 当 `provider: openai` 且使用 `kimi-k3` 或 `sn-kimi-k3`（包括供应商命名空间和

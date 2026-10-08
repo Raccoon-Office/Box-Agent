@@ -134,7 +134,8 @@ async def test_init_runs_through_bash_permission_engine_with_read_only_skill(ski
     ]))
     assert not denied.success
     assert "BUILTIN_SKILL_READ_ONLY" in denied.error
-    command = shlex.join([sys.executable, str(skill / "scripts/deck.py"), "init", str(root)])
+    arguments = [sys.executable, str(skill / "scripts/deck.py"), "init", str(root)]
+    command = "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in arguments) if os.name == "nt" else shlex.join(arguments)
     result = await tool.execute(command=command)
     assert result.success, result.error or result.stderr
     assert json.loads(result.stdout)["created"] is True

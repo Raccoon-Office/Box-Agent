@@ -81,9 +81,14 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "账户额度不足或欠费，模型已拒绝请求。请充值或检查账单后重试。",
     ),
     (
+        "unsupported_parameter",
+        ("unsupported_parameter", "unsupported parameter"),
+        "当前模型接口不支持请求中的参数。请检查模型与接口的参数兼容性，或切换模型后重试。",
+    ),
+    (
         "context_length",
         ("context_length_exceeded", "context length", "maximum context",
-         "too long", "reduce the length", "max_tokens", "input prompt token len"),
+         "too long", "reduce the length", "input prompt token len"),
         "当前对话内容过长，超出所选模型可处理的上限。"
         "请新建会话，或精简历史消息、附件和本次输入后重试。",
     ),
@@ -330,6 +335,7 @@ _NON_RETRYABLE_CATEGORIES: frozenset[str] = frozenset({
     "auth",
     "permission",
     "quota",
+    "unsupported_parameter",
     "context_length",
     "model_not_found",
     "model_configuration",

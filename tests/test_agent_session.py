@@ -161,6 +161,60 @@ def test_sessions_isolate_injection_and_skill_state(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_new_run_accepts_same_injection_id_and_drops_unconsumed_tail(tmp_path, standalone):
+    from box_agent.agent_session import AgentSession
+    from box_agent.events import InjectedMessageEvent
+    from box_agent.injections import InjectionStatus
+
+    session = AgentSession.create(
+        config=session_config(tmp_path), llm_client=ToolThenAnswerLLM(),
+        system_prompt="system", tools=[],
+    )
+    owner = session.agent if standalone else session
+    queue = owner.inject_queue
+    for _ in range(2):
+        session.agent.add_user_message("Continue the report.")
+        queue.put_nowait({"id": "same-id", "content": "Use Chinese."})
+        events = []
+        async for event in owner.run_events():
+            events.append(event)
+            if isinstance(event, InjectedMessageEvent):
+                assert queue.status("same-id") is InjectionStatus.INJECTED
+            if isinstance(event, DoneEvent):
+                queue.put_nowait({"id": "tail", "content": "too late"})
+        assert len([event for event in events if isinstance(event, InjectedMessageEvent)
+                    and event.injection_id == "same-id"]) == 1
+        assert queue.empty()
+        assert queue.status("tail") is InjectionStatus.DISCARDED
+
+
+@pytest.mark.asyncio
+async def test_continuation_runs_share_injection_deduplication_until_host_turn_ends(tmp_path):
+    from box_agent.agent_session import AgentSession
+    from box_agent.injections import InjectionManager
+
+    session = AgentSession.create(
+        config=session_config(tmp_path), llm_client=ToolThenAnswerLLM(),
+        system_prompt="system", tools=[],
+    )
+    session.agent.add_user_message("Continue the report.")
+    session.turn_active = True
+    queue = session.inject_queue
+    assert isinstance(queue, InjectionManager)
+    item = {"id": "same-id", "content": "Use Chinese."}
+    queue.submit(item)
+    scope = queue.run_id
+    for _ in range(2):
+        async for _event in session.run_events():
+            pass
+        assert queue.run_id == scope
+        assert not queue.submit(item)
+    queue.end_run()
+    assert queue.submit(item)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("selected", [False, True])
 async def test_acp_creates_configured_session_and_runs_through_it(tmp_path, monkeypatch, selected):
     import box_agent.acp as acp_module

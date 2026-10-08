@@ -300,7 +300,15 @@ def test_npm_run_retains_script_identity(manager):
         arguments={"command": "npm run export -- --mode supported"}, success=True) is not None
 
 
-def test_script_edit_then_unchanged_rerun_can_verify_repair(manager, tmp_path):
+def test_script_edit_then_unchanged_rerun_can_verify_repair(manager, tmp_path, monkeypatch):
+    from itertools import count
+    ticks = count()
+    origin = datetime.now(timezone.utc)
+    class OrderedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return origin + timedelta(microseconds=next(ticks))
+    monkeypatch.setattr("box_agent.correction.datetime", OrderedClock)
     curator = manager.correction_curator
     subject = CorrectionSubject("tool", "bash")
     args = {"command": "uv run python export.py --input same.pptx"}

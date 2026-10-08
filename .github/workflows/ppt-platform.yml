@@ -24,6 +24,7 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PPT_RENDER_BROWSER_TESTS: '1'
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

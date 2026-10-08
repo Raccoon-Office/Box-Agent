@@ -71,6 +71,8 @@ def test_minimal_spec_defaults_to_trusted_local_read_tools_only() -> None:
     parsed = _parse(
         default_required_tools=(
             "write_file",
+            "grep",
+            "glob",
             "search_files",
             "read_file",
             "query_jsonl",
@@ -78,7 +80,13 @@ def test_minimal_spec_defaults_to_trusted_local_read_tools_only() -> None:
     )
 
     assert isinstance(parsed, DelegationSpec)
-    assert parsed.required_tools == ("query_jsonl", "read_file", "search_files")
+    assert parsed.required_tools == (
+        "glob",
+        "grep",
+        "query_jsonl",
+        "read_file",
+        "search_files",
+    )
     assert parsed.skill_names == ()
     assert parsed.files == ()
     assert parsed.strategy == "general_loop"
@@ -103,19 +111,41 @@ def test_files_infer_bounded_batch_strategy_and_read_file() -> None:
 
 @pytest.mark.parametrize("files", [None, ["input.md"]])
 @pytest.mark.parametrize("skills", [None, ["review"]])
-def test_defaults_include_available_search_and_only_assigned_skill_tools(files, skills) -> None:
+def test_defaults_include_available_search_and_only_assigned_skill_tools(
+    files, skills
+) -> None:
     parsed = _parse(
         files=files,
         skills=skills,
         default_required_tools=(
-            "read_file", "search_files", "query_jsonl", "web_search", "web_extract",
-            "get_skill", "list_skills", "write_file", "bash", "execute_code",
-            "inspect_images", "generate_image", "unknown_mcp",
+            "read_file",
+            "search_files",
+            "grep",
+            "glob",
+            "query_jsonl",
+            "web_search",
+            "web_extract",
+            "get_skill",
+            "list_skills",
+            "write_file",
+            "bash",
+            "execute_code",
+            "inspect_images",
+            "generate_image",
+            "unknown_mcp",
         ),
     )
 
     assert isinstance(parsed, DelegationSpec)
-    expected = {"read_file", "search_files", "query_jsonl", "web_search", "web_extract"}
+    expected = {
+        "read_file",
+        "search_files",
+        "grep",
+        "glob",
+        "query_jsonl",
+        "web_search",
+        "web_extract",
+    }
     if skills:
         expected.update({"get_skill", "list_skills"})
     assert set(parsed.required_tools) == expected
@@ -336,6 +366,21 @@ def test_resolver_returns_exact_scoped_parent_tool_subset() -> None:
     assert result.resolved_tool_names == ("write_file",)
     assert result.tools["write_file"] is write
     assert result.diagnostic_payload()["requested_tools"] == ["write_file"]
+
+
+def test_resolver_treats_ripgrep_tools_as_read_only_capabilities() -> None:
+    spec = _parse(required_tools=["grep", "glob"])
+    assert isinstance(spec, DelegationSpec)
+
+    result = CapabilityResolver().resolve(
+        spec,
+        parent_tools={"grep": NamedTool("grep"), "glob": NamedTool("glob")},
+    )
+
+    assert isinstance(result, ResolvedCapabilityBundle)
+    assert result.resolved_tool_names == ("glob", "grep")
+    assert result.spec.constraints.read_only is True
+    assert result.spec.constraints.network is False
 
 
 def test_missing_required_tool_distinguishes_loading_from_not_found() -> None:

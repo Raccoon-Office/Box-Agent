@@ -262,7 +262,7 @@ def test_review_prep_blocks_stale_chart_font_alias_without_rewriting(isolated_ru
     assert prepare(deck, workspace) == 1
     failure = json.loads(capsys.readouterr().err)
     assert failure["stage"] == "fonts"
-    assert "slides/slide_01.html:2" in failure["error"]
+    assert f"{Path('slides/slide_01.html')}:2" in failure["error"]
     assert "Deck-old-noto" in failure["error"]
     assert "Deck-old-noto" in page.read_text() and "render" not in events
 
@@ -274,7 +274,7 @@ def test_review_prep_reports_linked_chart_alias_and_accepts_current_alias(isolat
     chart = workspace / "assets/chart.js"
     chart.write_text('const labels = {fontFamily: "Deck-old-noto"};')
     assert prepare(deck, workspace) == 1
-    assert "assets/chart.js:1" in json.loads(capsys.readouterr().err)["error"]
+    assert f"{Path('assets/chart.js')}:1" in json.loads(capsys.readouterr().err)["error"]
     chart.write_text('const labels = {fontFamily: "Deck-current-test"};')
     assert prepare(deck, workspace) == 0
 

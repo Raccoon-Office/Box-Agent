@@ -28,7 +28,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
+      - name: Install ripgrep
+        # Code-search tool tests exercise the real rg binary instead of skipping.
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Run pytest
+        env:
+          BOX_AGENT_TEST_REQUIRE_RG: "1"
         # Integration tests that need box_agent/config/config.yaml or mcp.json
         # auto-skip in CI; deselect the network-flaky timeout test.
         run: uv run pytest tests/ -q --tb=short --deselect tests/test_mcp.py::test_connection_timeout_on_unreachable_server

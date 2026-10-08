@@ -110,7 +110,6 @@ config = Config.load()
 assert not config.agent.enable_memory and not config.agent.enable_memory_extraction
 assert not config.tools.enable_mcp and not config.tools.enable_skills and not config.hooks.hooks
 def forbidden(*args, **kwargs): raise AssertionError("Unexpected background or network work")
-socket.socket.connect = forbidden
 acp.MemoryManager = forbidden
 calls = []
 def fake_llm(**kwargs):
@@ -126,16 +125,19 @@ async def tools(*args, **kwargs):
     calls.append("no-background-tools")
     return result
 acp.initialize_base_tools = tools
-async def streams(): return object(), SimpleNamespace(transport=SimpleNamespace(_is_closing=False))
+async def streams(**kwargs): return object(), SimpleNamespace(transport=SimpleNamespace(_is_closing=False))
 acp.stdio_streams_largebuf = streams
 
 async def probe():
     loop = asyncio.get_running_loop()
+    socket.socket.connect = forbidden
     shutdown = []
     loop.add_signal_handler = lambda signal, callback: shutdown.append(callback)
     loop.remove_signal_handler = lambda signal: True
     initialized = []
-    def connected(factory, writer, reader):
+    def connected(factory, writer, reader, *, state_store, sender_factory):
+        assert isinstance(state_store, acp.RequestStateStore)
+        assert sender_factory.__self__ is state_store
         agent = factory(DummyConn())
         async def handshake():
             response = await agent.initialize(SimpleNamespace(field_meta={}))

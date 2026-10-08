@@ -69,7 +69,7 @@ def reject(result, *messages):
     assert result.returncode != 0
     assert not result.stdout.strip(), result.stdout
     for message in messages:
-        assert message.lower() in result.stderr.lower(), result.stderr
+        assert re.sub(r"\\+", "/", message.lower()) in re.sub(r"\\+", "/", result.stderr.lower()), result.stderr
 
 
 def test_full_original_materials_sources_and_absolute_write_scope(case):
@@ -247,14 +247,15 @@ def test_parts_respect_both_limits_preserve_all_lines_and_report_source_ranges(c
     assert len(group["parts"]) >= 4
     chunks = []
     for part in group["parts"]:
-        text = Path(part["path"]).read_text()
+        text = Path(part["path"]).read_bytes().decode("utf-8")
         assert len(text) == part["chars"] <= 40000
         assert len(text.splitlines()) == part["lines"] <= 450
+        text = text.replace("\r\n", "\n")
         for match in re.finditer(r'<!-- source: ([^\n]+) -->\n(.*?)<!-- end-source -->', text, re.S):
             source, raw = json.loads(match[1]), match[2]
             if source["path"] == str(root / "base.css"):
                 lines = original.splitlines(keepends=True)
-                assert raw == "".join(lines[source["start_line"] - 1:source["end_line"]])
+                assert raw.replace("\r\n", "\n") == "".join(lines[source["start_line"] - 1:source["end_line"]])
                 chunks.append(raw)
     assert "".join(chunks) == original
 

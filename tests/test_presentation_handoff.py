@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock
 
+import json
 import pytest
 
 from box_agent.schema import StreamEvent
@@ -37,7 +38,7 @@ async def test_page_plan_is_available_without_reading_only_when_task_contains_or
     )
     assert result.success, result.error
     assert result.raw_output["strategy"] == "general_loop"
-    assert str(plan) in captured[0]
+    assert str(plan) in captured[0] if provided else json.dumps(str(plan), ensure_ascii=False)[1:-1] in captured[0]
     assert (original in captured[0]) is provided
     assert plan.read_text() == original
     assert not (tmp_path / "slides/slide_02.html").exists()

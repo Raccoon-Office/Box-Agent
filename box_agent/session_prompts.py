@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .tools.mcp_sources import configured_mcp_sources, resolve_mcp_sources
+
 GENERAL_DIRECTORY_ORGANIZATION_PROMPT = """## General Task Directory Organization
 - 保持当前会话工作目录（cwd）不变。你创建的任务子目录只是文件组织行为，不是新的 workspace。
 - 在写入独立任务的产物前，先查看 cwd 的顶层结构。修改现有项目时直接在项目树中的合适位置工作，不要另建任务目录。
@@ -50,25 +52,31 @@ def is_playwright_unavailable(
 ) -> bool:
     """Return True when the Playwright MCP server is absent or disabled.
 
-    Missing file or unreadable JSON is treated as "unavailable" — the model
-    is told it cannot rely on a browser tool either way. ``mcp_globally_enabled``
-    short-circuits to True when the runtime has MCP turned off entirely
-    (config ``tools.enable_mcp = false``); in that case no entry in mcp.json
-    is going to load.
+    Resolve the same system/connector/user sources as the MCP loader, including
+    protected-owner precedence. Missing servers or unreadable configuration are
+    treated as unavailable. ``mcp_globally_enabled`` short-circuits when MCP is
+    turned off entirely (config ``tools.enable_mcp = false``).
     """
     if not mcp_globally_enabled:
         return True
-    if mcp_config_path is None or not mcp_config_path.exists():
+    if mcp_config_path is None:
         return True
     try:
-        data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+        sources = configured_mcp_sources(str(mcp_config_path))
+        if len(sources) == 1 and sources[0].path == mcp_config_path:
+            # Preserve the legacy single-file hint format for standalone users.
+            data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return True
+            servers = data.get("mcpServers") or data.get("servers") or {}
+        else:
+            resolved = resolve_mcp_sources(sources)
+            servers = {name: server.config for name, server in resolved.servers.items()}
     except (OSError, ValueError):
         return True
 
-    servers = data.get("mcpServers") or data.get("servers") or {}
     if not isinstance(servers, dict):
         return True
-
     for name, entry in servers.items():
         if not isinstance(entry, dict):
             continue

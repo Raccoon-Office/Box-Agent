@@ -63,6 +63,8 @@ class WindowsJob:
             "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
             "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
             "TerminateJobObject": ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+            "IsProcessInJob": ([wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)], wintypes.BOOL),
+            "WaitForSingleObject": ([wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD),
             "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
         }
         for name, (arguments, result) in signatures.items():
@@ -106,6 +108,52 @@ class WindowsJob:
     def terminate(self):
         if not self.api.TerminateJobObject(self.handle, 1):
             self._raise("TerminateJobObject")
+
+    def retain_processes(self, deadline):
+        """Retain identities from this job before asynchronous termination."""
+        capacity = max(16, self.active_processes())
+        while True:
+            class ProcessList(ctypes.Structure):
+                _fields_ = [("assigned", wintypes.DWORD), ("count", wintypes.DWORD),
+                            ("pids", ctypes.c_size_t * capacity)]
+
+            listing = ProcessList()
+            if self.api.QueryInformationJobObject(self.handle, 3, ctypes.byref(listing),
+                                                 ctypes.sizeof(listing), None):
+                break
+            if ctypes.get_last_error() != 234:  # ERROR_MORE_DATA
+                self._raise("QueryInformationJobObject process list")
+            if time.monotonic() >= deadline:
+                raise RenderCleanupError("render job process enumeration timed out")
+            capacity = max(capacity * 2, listing.assigned)
+        handles = []
+        try:
+            for pid in listing.pids[:listing.count]:
+                handle = self.api.OpenProcess(0x100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+                if not handle:
+                    if ctypes.get_last_error() == 87:  # Process already disappeared.
+                        continue
+                    self._raise("OpenProcess for cleanup")
+                handles.append(handle)
+                member = wintypes.BOOL()
+                if not self.api.IsProcessInJob(handle, self.handle, ctypes.byref(member)):
+                    self._raise("IsProcessInJob")
+                if not member.value:  # PID was reused; never retain an unrelated process.
+                    self.api.CloseHandle(handles.pop())
+            return handles
+        except BaseException:
+            for handle in handles:
+                self.api.CloseHandle(handle)
+            raise
+
+    def wait_processes(self, handles, deadline):
+        for handle in handles:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            outcome = self.api.WaitForSingleObject(handle, min(remaining_ms, 0xFFFFFFFE))
+            if outcome == 0xFFFFFFFF:
+                self._raise("WaitForSingleObject")
+            if outcome != 0:
+                raise RenderCleanupError("render process did not exit before cleanup deadline")
 
     def close(self):
         if self.handle:
@@ -159,6 +207,7 @@ class WindowsSupervisor(_Supervisor):
         self.worker_done = False
         self.cleanup_failed = False
         self.process = None
+        self.launcher_identity = None
         self.job = WindowsJob()
         self.selector = selectors.DefaultSelector()
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -176,6 +225,7 @@ class WindowsSupervisor(_Supervisor):
             self.job.assign(self.process)
             self.worker_identity = psutil.Process(self.process.pid)
             self.worker_identity.create_time()
+            self.launcher_identity = self.worker_identity
         except BaseException:
             # Constructor failure must not lose ownership before run_renderer
             # receives a supervisor object. The unadmitted worker has no children.
@@ -193,8 +243,21 @@ class WindowsSupervisor(_Supervisor):
         event = message.get("event")
         if event == "register" and "identity" not in peer:
             if (message.get("token") != self.token or message.get("role") != "worker"
-                    or message.get("pid") != self.process.pid or not self.worker_identity.is_running()):
+                    or not self.launcher_identity.is_running()):
                 raise RuntimeError("invalid render process registration")
+            import psutil
+
+            pid = message.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                raise RuntimeError("invalid render process registration")
+            identity = psutil.Process(pid)
+            if pid != self.process.pid:
+                # Windows venv launchers spawn the interpreter instead of exec.
+                # Only their direct child may register, before START permits work.
+                if identity.parent() != self.launcher_identity:
+                    raise RuntimeError("invalid render process registration")
+                self.job.assign(identity)
+            self.worker_identity = identity
             peer.update(identity=self.worker_identity, role="worker")
             _send(connection, {"event": "start"})
         elif event == "phase" and peer.get("role") == "worker":
@@ -205,9 +268,13 @@ class WindowsSupervisor(_Supervisor):
             # Job accounting includes orphaned grandchildren, unlike a PID tree
             # walk after the driver/worker exits. The worker waits for RELEASE.
             limit = min(self.force_deadline, time.monotonic() + 1)
-            while self.job.active_processes() > 1 and time.monotonic() < limit:
+            def expected_owners():
+                return 1 + int(self.launcher_identity != self.worker_identity
+                               and self.launcher_identity.is_running())
+
+            while self.job.active_processes() > expected_owners() and time.monotonic() < limit:
                 time.sleep(0.02)
-            if not message.get("clean") or self.job.active_processes() != 1:
+            if not message.get("clean") or self.job.active_processes() != expected_owners():
                 raise RenderCleanupError("render worker retained driver processes")
             self.worker_done = True
             _send(connection, {"event": "release"})
@@ -217,17 +284,22 @@ class WindowsSupervisor(_Supervisor):
 
     def close(self):
         self.listener.close()
+        handles = []
         try:
+            limit = max(time.monotonic() + 0.05, self.deadline)
+            handles = self.job.retain_processes(limit)
             for connection in list(self.peers):
                 self._remove(connection)
             self.job.terminate()
-            limit = max(time.monotonic() + 0.05, self.deadline)
             while self.job.active_processes() and time.monotonic() < limit:
                 time.sleep(0.02)
             if self.job.active_processes():
                 raise RenderCleanupError("render Job Object retained live processes after cleanup")
+            self.job.wait_processes(handles, limit)
             self.process.wait(timeout=max(0.05, self.deadline - time.monotonic()))
         finally:
+            for handle in handles:
+                self.job.api.CloseHandle(handle)
             # The parent exclusively owns this handle. A hard parent exit also
             # invokes KILL_ON_JOB_CLOSE without depending on Python callbacks.
             self.job.close()

@@ -3,6 +3,7 @@
 from hashlib import sha256
 from types import SimpleNamespace
 
+import json
 import pytest
 
 from box_agent.agent import Agent
@@ -333,8 +334,13 @@ async def test_restoration_without_reader_continues_with_bounded_source_across_r
         events = [event async for event in agent.run_events()]
         assert not any(isinstance(event, ErrorEvent) for event in events)
         assert len(provider.requests) == turn + 1
-        request = str(provider.requests[-1])
-        assert "METHOD_BODY" in request and str(path) in request
+        request = "\n".join(
+            message.content if isinstance(message.content, str) else "\n".join(
+                block.get("text", "") for block in message.content
+            ) for message in provider.requests[-1]
+        )
+        assert "METHOD_BODY" in request
+        assert json.dumps(str(path), ensure_ascii=False)[1:-1] in request
         assert '"truncated": true' in request
         assert agent.skill_runtime.turn_deliveries == {}
     assert "get_skill" not in agent.tools

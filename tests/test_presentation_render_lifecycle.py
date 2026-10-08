@@ -60,6 +60,7 @@ def test_batch_cleanup_error_still_stops_driver(tmp_path, monkeypatch):
     assert "stop" in events, events
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group/flock contract; native Job Object cases are in test_presentation_windows_runtime.py")
 def test_full_admission_pool_does_not_bypass_configured_limit(tmp_path, monkeypatch):
     import fcntl
 
@@ -108,6 +109,7 @@ def test_supervised_worker_returns_output_and_releases_its_slot(runtime, tmp_pat
     assert first.stdout == second.stdout == "delivered\n"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group/flock contract; native Job Object cases are in test_presentation_windows_runtime.py")
 def test_timeout_reaps_registered_detached_browser_and_preserves_unrelated_process(runtime, tmp_path):
     pid_file = tmp_path / "browser.pid"
     child_code = f"import os,time;open({str(pid_file)!r},'w').write(str(os.getpid()));time.sleep(30)"
@@ -127,6 +129,7 @@ guard.wait()""")
         unrelated.wait(timeout=5)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group/flock contract; native Job Object cases are in test_presentation_windows_runtime.py")
 def test_guard_cleans_browser_when_supervisor_is_killed(runtime, tmp_path):
     pid_file = tmp_path / "browser.pid"
     child_code = f"import os,time;open({str(pid_file)!r},'w').write(str(os.getpid()));time.sleep(30)"
@@ -157,6 +160,7 @@ subprocess.Popen([sys.executable, render_runtime.__file__, '--browser', sys.exec
 
 
 @pytest.mark.parametrize("fork_on_term", [False, True])
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group/flock contract; native Job Object cases are in test_presentation_windows_runtime.py")
 def test_supervisor_reaps_browser_even_when_guard_alone_is_killed(runtime, tmp_path, fork_on_term):
     pid_file = tmp_path / "orphan.pid"
     helper_pid = tmp_path / "shutdown-helper.pid"
@@ -219,16 +223,14 @@ def test_page_close_error_does_not_allow_next_page(runtime, tmp_path, monkeypatc
 
 def test_retry_waits_until_previous_worker_exits(runtime, tmp_path):
     marker = tmp_path / "attempt.pid"
-    renderer = _fake_renderer(tmp_path, f"""import os
+    renderer = _fake_renderer(tmp_path, f"""import os, psutil
 from pathlib import Path
 marker = Path({str(marker)!r})
 class TargetClosedError(RuntimeError): pass
 if not marker.exists():
     marker.write_text(str(os.getpid()))
     raise TargetClosedError('transient browser crash')
-try:
-    os.kill(int(marker.read_text()), 0)
-except ProcessLookupError:
+if not psutil.pid_exists(int(marker.read_text())):
     print('retry after cleanup')
 else:
     raise RuntimeError('previous worker still alive')""")
@@ -303,6 +305,7 @@ def test_original_page_error_survives_multiple_cleanup_failures(runtime):
     assert events == ["driver"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group/flock contract; native Job Object cases are in test_presentation_windows_runtime.py")
 def test_admission_is_held_until_last_process_owner_releases_it(runtime, tmp_path, monkeypatch):
     import fcntl
     monkeypatch.setenv("RENDER_GLOBAL_LIMIT", "1")
@@ -318,6 +321,7 @@ def test_admission_is_held_until_last_process_owner_releases_it(runtime, tmp_pat
         os.close(guard_fd)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group/flock contract; native Job Object cases are in test_presentation_windows_runtime.py")
 def test_browser_spawn_failure_reports_original_environment_error(runtime, tmp_path):
     executable = tmp_path / "not executable"
     executable.write_text("#!/bin/sh\nexit 0\n")

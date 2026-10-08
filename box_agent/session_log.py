@@ -24,6 +24,14 @@ from .session_projection import SessionProjection
 _log = logging.getLogger(__name__)
 
 
+def _timed_fsync(fd: int) -> None:
+    started = time.perf_counter()
+    try:
+        os.fsync(fd)
+    finally:
+        _log.debug("session/fsync duration_ms=%.3f", (time.perf_counter() - started) * 1000)
+
+
 SESSION_LOG_VERSION = 1
 TOOL_NOT_STARTED = "TOOL_NOT_STARTED"
 TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
@@ -296,7 +304,7 @@ class SessionLog:
             try:
                 handle.write(_encode_record(header))
                 handle.flush()
-                os.fsync(handle.fileno())
+                _timed_fsync(handle.fileno())
             except BaseException:
                 handle.close()
                 raise
@@ -396,7 +404,7 @@ class SessionLog:
                 if committed_end is not None:
                     handle.truncate(committed_end)
                     handle.flush()
-                    os.fsync(handle.fileno())
+                    _timed_fsync(handle.fileno())
                 handle.seek(0, os.SEEK_END)
             except BaseException as exc:
                 handle.close()
@@ -438,12 +446,12 @@ class SessionLog:
         with archive.open("xb") as backup:
             backup.write(raw)
             backup.flush()
-            os.fsync(backup.fileno())
+            _timed_fsync(backup.fileno())
         try:
             with temporary.open("xb") as replacement:
                 replacement.write(_encode_record(header))
                 replacement.flush()
-                os.fsync(replacement.fileno())
+                _timed_fsync(replacement.fileno())
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -494,7 +502,7 @@ class SessionLog:
             raise RuntimeError("session log is closed")
         try:
             self._handle.flush()
-            os.fsync(self._handle.fileno())
+            _timed_fsync(self._handle.fileno())
         except OSError as exc:
             self._failed = True
             raise SessionLogDurabilityError("session log flush failed") from exc
@@ -564,14 +572,14 @@ class SessionLog:
                     # Windows cannot fsync a read-only handle. This immutable
                     # file was already synced before its original publication.
                     with path.open("rb") as handle:
-                        os.fsync(handle.fileno())
+                        _timed_fsync(handle.fileno())
             else:
                 fd, name = tempfile.mkstemp(prefix=".skill-reference-", dir=path.parent)
                 temporary = Path(name)
                 with os.fdopen(fd, "wb") as handle:
                     handle.write(encoded)
                     handle.flush()
-                    os.fsync(handle.fileno())
+                    _timed_fsync(handle.fileno())
                 try:
                     # Linking publishes an already-fsynced inode atomically
                     # without replacing any snapshot that appeared meanwhile.
@@ -580,7 +588,7 @@ class SessionLog:
                     self.read_skill_reference(ref)
                     if os.name != "nt":
                         with path.open("rb") as handle:
-                            os.fsync(handle.fileno())
+                            _timed_fsync(handle.fileno())
                 temporary.unlink()
                 temporary = None
             if os.name != "nt":
@@ -589,7 +597,7 @@ class SessionLog:
                 for directory in (path.parent, self.path.parent):
                     directory_fd = os.open(directory, os.O_RDONLY)
                     try:
-                        os.fsync(directory_fd)
+                        _timed_fsync(directory_fd)
                     finally:
                         os.close(directory_fd)
         except (OSError, SessionLogCorrupted):

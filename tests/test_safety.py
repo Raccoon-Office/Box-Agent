@@ -170,6 +170,7 @@ class TestDetectDangerousCommand:
 
         assert detect_dangerous_command(command) is not None
 
+    @pytest.mark.usefixtures("posix_command_parser")
     def test_depth_limited_nested_shell_danger_fails_closed(self):
         command = "bash -c \"bash -c \\\"bash -c 'rm cache.tmp'\\\"\""
 
@@ -305,6 +306,7 @@ class TestDetectDangerousCommand:
             "find . -name '*.tmp' -exec rm {} +",
         ],
     )
+    @pytest.mark.usefixtures("posix_command_parser")
     def test_dispatched_dangerous_commands_require_approval(self, command):
         assert detect_dangerous_command(command) is not None
 
@@ -545,6 +547,10 @@ class TestValidatePathInWorkspace:
 
 
 class TestBackupFile:
+    @pytest.fixture(autouse=True)
+    def isolated_trash(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("box_agent.tools.safety.TRASH_DIR", tmp_path / "trash")
+
     def test_backup_existing_file(self, tmp_path):
         test_file = tmp_path / "test.txt"
         test_file.write_text("original content")
@@ -553,12 +559,32 @@ class TestBackupFile:
         assert backup_path is not None
         assert backup_path.exists()
         assert backup_path.read_text() == "original content"
-        assert str(TRASH_DIR) in str(backup_path)
+        assert backup_path.is_relative_to(tmp_path / "trash")
+        assert backup_path != test_file
+        assert test_file.read_text() == "original content"
 
     def test_backup_nonexistent_file(self, tmp_path):
         test_file = tmp_path / "nonexistent.txt"
         result = backup_file(test_file)
         assert result is None
+
+    def test_same_named_files_keep_distinct_backups_at_same_timestamp(self, tmp_path, monkeypatch):
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        monkeypatch.setattr("box_agent.tools.safety.datetime", SimpleNamespace(
+            now=lambda: datetime(2026, 1, 1),
+        ))
+        backups = []
+        for name in ("first", "second"):
+            source = tmp_path / name / "report.txt"
+            source.parent.mkdir()
+            source.write_text(name)
+            saved = backup_file(source)
+            assert saved is not None and saved.is_relative_to(tmp_path / "trash")
+            backups.append(saved)
+        assert backups[0] != backups[1]
+        assert [path.read_text() for path in backups] == ["first", "second"]
 
     def test_backup_directory_returns_none(self, tmp_path):
         test_dir = tmp_path / "somedir"

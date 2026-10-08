@@ -122,7 +122,7 @@ def test_selected_overflow_without_paging_reader_is_truncated_with_skill_path(tm
     text = added_text(projection)
     assert not projection.reader_required
     assert projection.blocked_reason is None
-    assert str(path) in text
+    assert json.dumps(str(path), ensure_ascii=False)[1:-1] in text
     assert "LARGE_METHOD_" in text
     assert projection.references[0]["end_offset"] < 20
 
@@ -141,7 +141,7 @@ def test_selected_single_line_without_reader_keeps_body_prefix_and_skill_path(tm
     text = added_text(projection)
     assert not projection.reader_required
     assert projection.blocked_reason is None
-    assert str(path) in text
+    assert json.dumps(str(path), ensure_ascii=False)[1:-1] in text
     assert "SINGLE_LINE_RULE_" in text
     assert body not in text
     assert 0 < added_cost(projection, original) <= 2000
@@ -162,8 +162,8 @@ def test_selected_skills_without_reader_keep_each_path_when_bodies_overflow(tmp_
     text = added_text(projection)
     assert not projection.reader_required
     assert projection.blocked_reason is None
-    assert str(first_path) in text
-    assert str(second_path) in text
+    assert json.dumps(str(first_path), ensure_ascii=False)[1:-1] in text
+    assert json.dumps(str(second_path), ensure_ascii=False)[1:-1] in text
     assert "FIRST_RULE_" in text
     assert 0 < added_cost(projection, original) <= 4000
 
@@ -182,7 +182,7 @@ def test_selected_without_reader_bounds_unicode_and_escaped_body_cost(tmp_path):
     text = added_text(projection)
     assert not projection.reader_required
     assert projection.blocked_reason is None
-    assert str(path) in text
+    assert json.dumps(str(path), ensure_ascii=False)[1:-1] in text
     assert 'UNICODE_RULE_中文"\\' in text
     assert body not in text
     assert 0 < added_cost(projection, original) <= 2500

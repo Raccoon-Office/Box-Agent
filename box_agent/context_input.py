@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
+import logging
+from time import perf_counter
 from typing import Any, Callable
 
 from .kernel.context_engine import (
@@ -15,6 +18,8 @@ from .skill_context import (
 )
 from .tools.base import ToolResult
 from .tools.engine.contracts import PreparedTools
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,19 @@ class DefaultContextEngine:
         if self.references is not None:
             self.references.bind_history(messages)
 
+    async def abind_history(self, messages: list[Message]) -> None:
+        """Bind text now; preparation observes its sources before compaction."""
+        if getattr(self.bind_history, "__func__", None) is not DefaultContextEngine.bind_history:
+            runtime = self.references.runtime if self.references is not None else None
+            validate = getattr(runtime, "avalidate_references", None)
+            validation = (await validate(self.references.source_names(messages)) if callable(validate) else None)
+            with runtime.reference_scope(validation) if validation is not None else nullcontext():
+                self.bind_history(messages)
+            return
+        self._history = messages
+        if self.references is not None:
+            self.references._messages = messages
+
     def project_history(self, messages: list[Message]) -> list[Message]:
         """Effective rules for budgeting/compaction, without reference delivery."""
         suffix = verified_system_suffixes(self.references.runtime) if self.references is not None else ()
@@ -80,6 +98,7 @@ class DefaultContextEngine:
     @property
     def tool_reader(self):
         return self._read_reference if self.references is not None else None
+
 
     def reserve_followup(self, blocks: list[dict[str, Any]]) -> None:
         """Reserve already accepted request-only material during a serial batch."""
@@ -92,7 +111,9 @@ class DefaultContextEngine:
         for name, target in self.prepared_tools.targets.items():
             if not isinstance(target, GetSkillTool) or self.prepared_tools.validate_call(name) is not None:
                 continue
-            if all(target.check_access(skill_name) is None for skill_name in names):
+            validation = getattr(self.references.runtime, "_reference_validation", None) if self.references else None
+            if all(target.check_access(skill_name, catalog=validation.catalog if validation else None,
+                                       refresh=validation is None) is None for skill_name in names):
                 return True
         return False
 
@@ -117,13 +138,54 @@ class DefaultContextEngine:
             0, available - self._request_reference_tokens * 4,
         ))
 
+    def _source_names(self, messages: list[Message], arguments: dict[str, Any]) -> tuple[str, ...]:
+        extra = arguments.get("extra_messages", ())
+        transient = arguments.get("transient_message")
+        return self.references.source_names([*messages, *extra, *((transient,) if transient is not None else ())])
+
+    async def aprepare_request(self, messages: list[Message], **arguments: Any) -> PreparedContext:
+        runtime = self.references.runtime if self.references is not None else None
+        validate = getattr(runtime, "avalidate_references", None)
+        if not callable(validate):
+            return self.prepare_request(messages, **arguments)
+        started = perf_counter()
+        names = self._source_names(messages, arguments)
+        validation = None
+        try:
+            validation = await validate(names)
+            with runtime.reference_scope(validation):
+                return self.prepare_request(messages, **arguments)
+        finally:
+            _log.info("context/prepare duration_ms=%.3f unique_skills=%d validation_timeouts=%d",
+                      (perf_counter() - started) * 1000, len(names), int(getattr(validation, "timed_out", False)))
+
     def prepare_request(
         self, messages: list[Message], *, prepared_tools: PreparedTools,
         token_limit: int, output_tokens: int = 0,
         extra_messages: tuple[Message, ...] = (),
         transient_message: Message | None = None, transient_tokens: int = 0,
     ) -> PreparedContext:
+        arguments = dict(prepared_tools=prepared_tools, token_limit=token_limit, output_tokens=output_tokens,
+                         extra_messages=extra_messages, transient_message=transient_message,
+                         transient_tokens=transient_tokens)
+        runtime = self.references.runtime if self.references is not None else None
+        validate = getattr(runtime, "validate_references", None)
+        validation = getattr(runtime, "_reference_validation", None)
+        if validation is None and callable(validate):
+            validation = validate(self._source_names(messages, arguments))
+        with runtime.reference_scope(validation) if validation is not None else nullcontext():
+            return self._prepare_request(messages, **arguments)
+
+    def _prepare_request(
+        self, messages: list[Message], *, prepared_tools: PreparedTools,
+        token_limit: int, output_tokens: int = 0,
+        extra_messages: tuple[Message, ...] = (),
+        transient_message: Message | None = None, transient_tokens: int = 0,
+    ) -> PreparedContext:
         """Project ordinary reference material using the offered tools unchanged."""
+        restore = getattr(self.references.runtime, "restore_deferred_records", None) if self.references else None
+        if callable(restore):
+            restore()
         self.bind_history(messages)
         self._pending_followup_blocks = []
         self.prepared_tools = prepared_tools

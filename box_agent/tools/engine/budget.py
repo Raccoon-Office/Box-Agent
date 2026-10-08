@@ -28,6 +28,7 @@ class ToolBudgetState:
     tool_call_counts: dict[str, int] = field(default_factory=dict)
     tool_call_total: int = 0
     delegated_tool_call_total: int = 0
+    delegated_reports: set[str] = field(default_factory=set)
     delegated_budget_guidance_injected: bool = False
     tool_budget_wrapup_injected: set[str] = field(default_factory=set)
     search_files_consecutive_empty_results: int = 0
@@ -67,11 +68,11 @@ class ToolBudgetState:
         self,
         tool_name: str,
         raw_output: Any,
+        call_id: str | None = None,
     ) -> None:
         """Record valid positive child tool counts reported by a sub-agent."""
         if (
-            self.max_delegated_tool_calls is None
-            or tool_name != "sub_agent"
+            tool_name != "sub_agent"
             or not isinstance(raw_output, dict)
             or raw_output.get("type") != "sub_agent_delegation"
         ):
@@ -83,10 +84,14 @@ class ToolBudgetState:
             or nested_tool_calls <= 0
         ):
             return
+        if call_id is not None:
+            if call_id in self.delegated_reports:
+                return
+            self.delegated_reports.add(call_id)
         self.delegated_tool_call_total += nested_tool_calls
         if self.logger is not None:
             self.logger.info(
-                "tool_budget/delegated_tool_calls count=%d total=%d limit=%d "
+                "tool_budget/delegated_tool_calls count=%d total=%d limit=%s "
                 "parent_total=%d",
                 nested_tool_calls,
                 self.delegated_tool_call_total,

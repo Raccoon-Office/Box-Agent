@@ -36,12 +36,20 @@ class AgentLogger:
     def start_new_run(self):
         """Start new run, create new log file"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        log_filename = f"agent_run_{timestamp}.log"
-        self.log_file = self.log_dir / log_filename
+        suffix = 0
+        while True:
+            discriminator = f"_{suffix}" if suffix else ""
+            candidate = self.log_dir / f"agent_run_{timestamp}{discriminator}.log"
+            try:
+                handle = candidate.open("x", encoding="utf-8")
+                break
+            except FileExistsError:
+                suffix += 1
+        self.log_file = candidate
         self.log_index = 0
 
         # Write log header
-        with open(self.log_file, "w", encoding="utf-8") as f:
+        with handle as f:
             f.write("=" * 80 + "\n")
             f.write(f"Agent Run Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("=" * 80 + "\n\n")

@@ -1,4 +1,5 @@
 """Task tools cannot rewrite the bundled code they use to validate output."""
+import os
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,7 @@ async def test_bash_blocks_bundled_mutation_but_writes_workspace_output(tmp_path
     assert not denied.success
     assert "BUILTIN_SKILL_READ_ONLY" in denied.error
     assert target.read_text() == "original"
-    allowed = await tool.execute(command="printf 'finished' > result.txt")
+    command = "Set-Content -LiteralPath result.txt -Value finished -NoNewline" if os.name == "nt" else "printf 'finished' > result.txt"
+    allowed = await tool.execute(command=command)
     assert allowed.success
     assert (tmp_path / 'result.txt').read_text() == 'finished'

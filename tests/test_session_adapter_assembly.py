@@ -29,6 +29,127 @@ async def test_legacy_positional_session_profile_starts_without_log_restore(tmp_
 
 
 @pytest.mark.asyncio
+async def test_shared_assembly_passes_session_mode_to_workspace_tools(tmp_path):
+    from box_agent.agent_session import AgentSession
+    from box_agent.session_context import HostBindings, SessionOptions
+
+    received = []
+
+    def workspace_tools(_tools, _config, _workspace, **kwargs):
+        received.append(kwargs)
+        return None
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(
+            workspace_dir=str(tmp_path),
+            enable_memory=False,
+            enable_memory_extraction=False,
+        ),
+        tools=ToolsConfig(
+            enable_mcp=False,
+            enable_skills=False,
+            enable_file_tools=False,
+            enable_bash=False,
+            enable_sub_agent=False,
+        ),
+    )
+    session = await AgentSession.open(
+        config=config,
+        options=SessionOptions(
+            profile="cli",
+            workspace_dir=tmp_path,
+            session_mode="code_agent",
+        ),
+        host=HostBindings(
+            llm_client=DoneLLM(),
+            base_tools=[],
+            workspace_tools_factory=workspace_tools,
+        ),
+    )
+    try:
+        assert received and received[0]["session_mode"] == "code_agent"
+        assert "已知文件路径" in session.agent.system_prompt
+        assert "开放式项目分析" in session.agent.system_prompt
+        assert "截断或超时" in session.agent.system_prompt
+        assert "find . -mindepth 1 -maxdepth 1 -print" in session.agent.system_prompt
+        assert "Get-ChildItem -Name" in session.agent.system_prompt
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("factory_kind", ["legacy", "positional_only", "opaque"])
+async def test_shared_assembly_keeps_legacy_workspace_tools_factories_working(
+    tmp_path, factory_kind
+):
+    from box_agent.agent_session import AgentSession
+    from box_agent.session_context import HostBindings, SessionOptions
+
+    calls = []
+
+    def legacy_workspace_tools(
+        tools, config, workspace_dir, *, sandbox_mode=None, allow_full_access=False,
+        non_interactive=False, output=None, llm=None, permission_engine=None,
+        skill_runtime_context=None, skill_loader=None, skill_access_filter=None,
+        env_context=None, capability_state_provider=None,
+    ):
+        calls.append(workspace_dir)
+        return None
+
+    def positional_only_workspace_tools(
+        tools, config, workspace_dir, session_mode=None, /, *,
+        sandbox_mode=None, allow_full_access=False, non_interactive=False,
+        output=None, llm=None, permission_engine=None, skill_runtime_context=None,
+        skill_loader=None, skill_access_filter=None, env_context=None,
+        capability_state_provider=None,
+    ):
+        calls.append(workspace_dir)
+        return None
+
+    factory = (
+        positional_only_workspace_tools
+        if factory_kind == "positional_only"
+        else legacy_workspace_tools
+    )
+    if factory_kind == "opaque":
+        factory.__signature__ = "unavailable"
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(
+            workspace_dir=str(tmp_path),
+            enable_memory=False,
+            enable_memory_extraction=False,
+        ),
+        tools=ToolsConfig(
+            enable_mcp=False,
+            enable_skills=False,
+            enable_file_tools=False,
+            enable_bash=False,
+            enable_sub_agent=False,
+        ),
+    )
+    session = await AgentSession.open(
+        config=config,
+        options=SessionOptions(
+            profile="cli",
+            workspace_dir=tmp_path,
+            session_mode="code_agent",
+        ),
+        host=HostBindings(
+            llm_client=DoneLLM(),
+            base_tools=[],
+            workspace_tools_factory=factory,
+        ),
+    )
+    try:
+        assert len(calls) == 1
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.asyncio
 async def test_acp_uses_shared_preparation_and_managed_session(tmp_path, monkeypatch):
     config = Config(llm=LLMConfig(api_key="test"), agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False), tools=ToolsConfig(enable_mcp=False, enable_skills=False, enable_file_tools=False, enable_bash=False, enable_sub_agent=False))
     calls = []

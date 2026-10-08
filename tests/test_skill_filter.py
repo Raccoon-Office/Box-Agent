@@ -20,8 +20,7 @@ from box_agent.tools.skill_loader import (
 
 @pytest.fixture
 def loader() -> SkillLoader:
-    inst = SkillLoader.__new__(SkillLoader)
-    inst._sources = []
+    inst = SkillLoader(sources=[])
     inst.loaded_skills = {
         "memory-guide": Skill(
             name="memory-guide",

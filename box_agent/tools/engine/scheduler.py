@@ -18,7 +18,7 @@ from ..base import (
     ToolResult,
 )
 from ...session_log import SessionLogDurabilityError
-from .execution import _approve_tool_permission, invoke_tool_once
+from .execution import invoke_tool_once
 
 
 _log = logging.getLogger("box_agent.core")
@@ -146,25 +146,17 @@ class ToolEngine:
             )
         context = request.invocation_context
         if event_queue is not None:
-            context = ToolInvocationContext(
+            from dataclasses import replace
+            context = replace(
+                context or ToolInvocationContext(parent_tool_call_id=request.call_id),
                 event_queue=event_queue,
-                skill_reader=context.skill_reader if context is not None else None,
-                parent_tool_call_id=(
-                    context.parent_tool_call_id
-                    if context is not None
-                    else request.call_id
-                ),
             )
         tool = self._tools[request.tool_name]
-        if request.approved_permission_request is not None:
-            # Install a one-shot grant only when this attempt actually starts.
-            # There must be no scheduling/await boundary between grant and
-            # invocation, or cancellation could leave it for a later call.
-            _approve_tool_permission(tool, request.approved_permission_request)
-        # 在真正进入调用前登记，排队期间取消或即时拒绝不算执行。
-        if request.on_invoke is not None:
-            request.on_invoke()
-        return await invoke_tool_once(tool, request.arguments, context=context)
+        return await invoke_tool_once(
+            tool, request.arguments, context=context,
+            approved_permission_request=request.approved_permission_request,
+            on_invoke=request.on_invoke,
+        )
 
     async def invoke_serial(
         self,

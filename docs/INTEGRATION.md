@@ -30,6 +30,34 @@ wire 格式，但底层共享 core/tool 行为仍可能一致。
 
 ## 典型对接场景
 
+### 同一产品会话的并发请求
+
+`session/new._meta.session_id` 是宿主的稳定产品会话 ID，与返回的 ACP
+`sessionId` 句柄不同。使用相同产品 ID 重建会话时，旧请求必须已彻底结束，
+包括准备（如图片理解）、执行、取消清理和收尾阶段。
+
+若仍有请求占用，`session/new` 与重复的 `session/prompt` 一样，立即返回
+JSON-RPC 错误 `code=-32010`、`data.code="SESSION_BUSY"`，
+`data.sessionId` 指向原 ACP 句柄。拒绝不会关闭原会话或清空其任务状态；
+宿主应等待原请求返回后再重建，发送 `session/cancel` 本身不代表取消已完成。
+
+会话创建/重绑尚未返回期间，同一产品 ID 的另一个 `session/new`，以及发给
+正在被替换的旧句柄的 `session/prompt`，也会立即返回 `SESSION_BUSY`。
+首次创建尚无旧句柄时，错误中不包含 `data.sessionId`。服务端不会排队或自动重试；
+其他产品会话不受此限制。请求结束后可正常重建并恢复历史。
+
+宿主关闭 stdin 或终止服务时，ACP 先停止接收新的 `session/new` 和
+`session/prompt`，取消并等待在途会话创建/重绑完成回滚，再释放会话资源。
+关闭期间的新请求返回 `code=-32000`、`data.code="AGENT_CLOSING"`；
+宿主需要重新启动服务后再发起任务。已有任务的取消和最终状态发送仍在协议连接关闭前处理。
+
+ACP 连接不保存已完成的入站 RPC 正文、响应或异常历史；单个请求的记录随其
+处理任务释放。多会话状态及恢复历史仍由会话对象和 Session Log 管理。
+权限请求等出站 RPC 仅保留仍在等待回复的记录；宿主回复、取消、超时、发送失败
+或连接关闭后释放对应记录。清理按请求 ID 进行，不影响其他会话仍在等待的请求；
+取消后的迟到回复会被忽略。该生命周期通过 SDK 的 `state_store` 和 `sender_factory`
+扩展接口接入，不改变会话历史、权限等待时限或 ACP 消息格式。
+
 ### 场景 A：用户首次打开应用
 
 1. 宿主侧检测：`MEMORY.md` 是否已存在、各个 CLI 是否已安装、Chromium 是否已通过 `box-agent install-browser` 装好。

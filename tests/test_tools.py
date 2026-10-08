@@ -121,7 +121,7 @@ async def test_read_tool_reports_selected_range_completeness(tmp_path):
     descriptor = result.raw_output["context_resource"]
     assert descriptor == {
         "resource_id": str(path.resolve()),
-        "content_version": hashlib.sha256(b"one\ntwo\nthree\n").hexdigest(),
+        "content_version": hashlib.sha256(path.read_bytes()).hexdigest(),
         "start_line": 2,
         "end_line": 2,
         "total_lines": 3,
@@ -925,6 +925,120 @@ def test_workspace_tools_register_search_files(tmp_path):
     assert "report_execution_result" in tool_names
 
 
+def test_code_workspace_registers_ripgrep_tools_without_removing_search_files(
+    tmp_path,
+    monkeypatch,
+):
+    from box_agent.tools import setup as setup_module
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    monkeypatch.setattr(
+        setup_module,
+        "resolve_ripgrep_executable",
+        lambda _runtime_env: "/injected/rg",
+        raising=False,
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        session_mode="code_agent",
+    )
+
+    assert {"search_files", "grep", "glob"} <= {tool.name for tool in tools}
+
+
+def test_general_workspace_does_not_register_ripgrep_tools(tmp_path, monkeypatch):
+    from box_agent.tools import setup as setup_module
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    monkeypatch.setattr(
+        setup_module,
+        "resolve_ripgrep_executable",
+        lambda _runtime_env: "/injected/rg",
+        raising=False,
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        session_mode="general",
+    )
+
+    tool_names = {tool.name for tool in tools}
+    assert "search_files" in tool_names
+    assert "grep" not in tool_names
+    assert "glob" not in tool_names
+
+
+def test_code_workspace_falls_back_when_ripgrep_is_unavailable(tmp_path, monkeypatch):
+    from box_agent.tools import setup as setup_module
+
+    config = Config(
+        llm=LLMConfig(api_key="test"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_bash=False,
+            enable_todo=False,
+            enable_plan=False,
+            enable_sub_agent=False,
+            enable_skills=False,
+            enable_mcp=False,
+        ),
+    )
+    monkeypatch.setattr(
+        setup_module,
+        "resolve_ripgrep_executable",
+        lambda _runtime_env: None,
+        raising=False,
+    )
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        config,
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        session_mode="code_agent",
+    )
+
+    tool_names = {tool.name for tool in tools}
+    assert "search_files" in tool_names
+    assert "grep" not in tool_names
+    assert "glob" not in tool_names
+
+
 def test_add_workspace_tools_applies_configured_bash_timeouts(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test"),
@@ -1289,6 +1403,7 @@ def test_lark_user_mode_policy_still_blocks_business_commands_with_quoted_execut
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("posix_shell")
 async def test_bash_tool_allows_setting_lark_cli_env_without_invoking_cli():
     tool = BashTool()
 
@@ -1366,6 +1481,7 @@ def test_dingtalk_dws_policy_allows_officev3_bundled_absolute_binary_path():
         "sudo -u root dws auth login",
     ],
 )
+@pytest.mark.usefixtures("posix_command_parser")
 def test_dingtalk_dws_policy_blocks_control_plane_bypasses(command: str):
     assert _detect_dingtalk_workspace_violation(command) is not None
 
@@ -1431,6 +1547,7 @@ def test_dingtalk_dws_policy_checks_commands_near_shell_data(command: str):
         "find . -exec dws auth login {} +",
     ],
 )
+@pytest.mark.usefixtures("posix_command_parser")
 def test_dingtalk_dws_policy_blocks_parameterized_and_dispatched_calls(
     command: str,
 ):

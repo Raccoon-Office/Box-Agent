@@ -25,6 +25,8 @@ class TokenUsageAccumulator:
     completion_tokens: int = 0
     total_tokens: int = 0
     calls: int = 0
+    cached_tokens: int = 0
+    cache_usage_reported_calls: int = 0
 
     def add(self, usage: Any) -> bool:
         """Add one provider usage mapping and report whether it was useful."""
@@ -41,16 +43,22 @@ class TokenUsageAccumulator:
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.total_tokens += total_tokens
+        if "cached_tokens" in usage or "cachedTokens" in usage:
+            self.cached_tokens += _as_int(usage, "cached_tokens", "cachedTokens")
+            self.cache_usage_reported_calls += 1
         self.calls += 1
         return True
 
     def as_payload(self) -> dict[str, int]:
-        return {
+        payload = {
             "promptTokens": self.prompt_tokens,
             "completionTokens": self.completion_tokens,
             "totalTokens": self.total_tokens,
             "calls": self.calls,
         }
+        if self.cache_usage_reported_calls:
+            payload["cachedTokens"] = self.cached_tokens
+        return payload
 
 
 @dataclass(slots=True)

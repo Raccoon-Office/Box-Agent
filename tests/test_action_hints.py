@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from box_agent import session_assembly
 from box_agent.acp.action_hints import (
     ActionHintStreamNormalizer,
     build_action_hints_prompt,
@@ -14,6 +17,18 @@ from box_agent.acp.action_hints import (
     is_playwright_unavailable_from_env_context,
     normalize_action_hint_blocks,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_mcp_sources(monkeypatch) -> None:
+    for name in (
+        "BOX_AGENT_MCP_CONFIG_PATH",
+        "BOX_AGENT_USER_MCP_CONFIG_PATH",
+        "BOX_AGENT_SYSTEM_MCP_CONFIG_PATH",
+        "BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH",
+        "BOX_AGENT_HOME",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 # ── is_memory_scarce ────────────────────────────────────────────
@@ -159,6 +174,115 @@ def test_playwright_available_from_env_context_when_available_true() -> None:
 def test_playwright_env_context_absent_does_not_force_unavailable() -> None:
     assert is_playwright_unavailable_from_env_context(None) is False
     assert is_playwright_unavailable_from_env_context(SimpleNamespace()) is False
+
+
+@pytest.mark.parametrize("user_file_exists", [True, False])
+@pytest.mark.parametrize("host_available", [True, None])
+def test_enabled_system_browser_does_not_request_enablement(
+    monkeypatch, tmp_path: Path, user_file_exists: bool, host_available: bool | None,
+) -> None:
+    user = tmp_path / "mcp.json"
+    system = tmp_path / "mcp.system.json"
+    if user_file_exists:
+        user.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    system.write_text(
+        json.dumps({"mcpServers": {"playwright": {"command": "pw", "disabled": False}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOX_AGENT_MCP_CONFIG_PATH", str(user))
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CONFIG_PATH", str(user))
+    monkeypatch.setenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", str(system))
+    monkeypatch.setattr(session_assembly.Config, "find_config_file", lambda _: None)
+    config = SimpleNamespace(tools=SimpleNamespace(enable_mcp=True, mcp_config_path=str(user)))
+    memory = SimpleNamespace(read_core=lambda: "User name: Alice, prefers concise answers.")
+    host = (
+        SimpleNamespace(browser_tools=SimpleNamespace(available=host_available))
+        if host_available is not None else None
+    )
+
+    assert session_assembly._build_action_hints_prompt(config, memory, host) == ""
+
+
+@pytest.mark.parametrize(
+    "system_disabled,user_disabled,host_available,mcp_enabled,expect_hint",
+    [
+        (False, True, True, True, False),
+        (True, False, True, True, True),
+        (False, False, False, True, True),
+        (False, False, True, False, True),
+    ],
+)
+def test_browser_hint_respects_system_precedence_and_availability_gates(
+    monkeypatch, tmp_path: Path, system_disabled: bool, user_disabled: bool,
+    host_available: bool, mcp_enabled: bool, expect_hint: bool,
+) -> None:
+    user = tmp_path / "mcp.json"
+    system = tmp_path / "mcp.system.json"
+    for path, disabled in ((user, user_disabled), (system, system_disabled)):
+        path.write_text(
+            json.dumps({"mcpServers": {"playwright": {"command": "pw", "disabled": disabled}}}),
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("BOX_AGENT_MCP_CONFIG_PATH", str(user))
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CONFIG_PATH", str(user))
+    monkeypatch.setenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", str(system))
+    config = SimpleNamespace(tools=SimpleNamespace(enable_mcp=mcp_enabled, mcp_config_path=str(user)))
+    memory = SimpleNamespace(read_core=lambda: "User name: Alice, prefers concise answers.")
+    host = SimpleNamespace(browser_tools=SimpleNamespace(available=host_available))
+
+    prompt = session_assembly._build_action_hints_prompt(config, memory, host)
+
+    assert ('"tab": "browser-tools"' in prompt) is expect_hint
+
+
+def test_browser_available_in_connector_source(monkeypatch, tmp_path: Path) -> None:
+    user = tmp_path / "mcp.json"
+    connector = tmp_path / "mcp.connector.json"
+    connector.write_text(
+        json.dumps({"mcpServers": {"browser": {
+            "command": "npx", "args": ["@playwright/mcp"], "_connectorId": "browser",
+        }}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CONFIG_PATH", str(user))
+    monkeypatch.setenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", str(connector))
+
+    assert is_playwright_unavailable(user) is False
+
+
+@pytest.mark.parametrize("key", ["mcpServers", "servers"])
+def test_standalone_browser_hint_keeps_single_file_formats(tmp_path: Path, key: str) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({key: {"playwright": {"command": "pw"}}}), encoding="utf-8")
+
+    assert is_playwright_unavailable(path) is False
+
+
+@pytest.mark.parametrize("disabled", [True, False])
+def test_standalone_browser_hint_uses_configured_file(
+    monkeypatch, tmp_path: Path, disabled: bool,
+) -> None:
+    user = tmp_path / "mcp.json"
+    user.write_text(
+        json.dumps({"mcpServers": {"playwright": {"command": "pw", "disabled": disabled}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_assembly, "state_path", lambda _: tmp_path / "missing.json")
+    monkeypatch.setattr(session_assembly.Config, "find_config_file", lambda _: user)
+    config = SimpleNamespace(tools=SimpleNamespace(enable_mcp=True, mcp_config_path=str(user)))
+    memory = SimpleNamespace(read_core=lambda: "User name: Alice, prefers concise answers.")
+
+    prompt = session_assembly._build_action_hints_prompt(config, memory)
+
+    assert ('"tab": "browser-tools"' in prompt) is disabled
+
+
+@pytest.mark.parametrize("payload", [[], None, {"mcpServers": []}, {"mcpServers": {"playwright": []}}])
+def test_browser_unavailable_with_invalid_config_shape(tmp_path: Path, payload) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert is_playwright_unavailable(path) is True
 
 
 # ── build_action_hints_prompt ───────────────────────────────────

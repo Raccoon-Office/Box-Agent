@@ -40,6 +40,7 @@
 - `read_file`
 - `query_jsonl`
 - `search_files`
+- `grep`、`glob`（仅限父会话中实际可用时）
 - `web_search`、`web_extract`
 
 声明 `skills` 时，还会配备可用的 `get_skill`、`list_skills`，范围限于已分配 Skill

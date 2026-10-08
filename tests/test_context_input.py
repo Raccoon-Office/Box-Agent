@@ -1,6 +1,7 @@
 """Context owns request projection while Skill owns source and read facts."""
 
 import hashlib
+import json
 import inspect
 from dataclasses import FrozenInstanceError
 
@@ -276,7 +277,9 @@ def test_paging_requires_reader_access_to_selected_skills(runtime):
     denied = engine.prepare_request(messages, prepared_tools=prepare_tools([tool]), token_limit=5000)
     assert denied.blocked_reason is None
     assert "METHOD_BODY" in str(denied.messages)
-    assert str(runtime.loader.get_skill("demo").skill_path) in str(denied.messages)
+    reference = denied.messages[-1].content[1]["text"].split("[Skill reference]\n", 1)[1]
+    metadata = json.loads(reference.split("\n", 1)[0])
+    assert metadata["path"] == str(runtime.loader.get_skill("demo").skill_path)
     assert runtime.read_facts == ()
     allowed.add("demo")
     permitted = engine.prepare_request(messages, prepared_tools=prepare_tools([tool]), token_limit=5000)

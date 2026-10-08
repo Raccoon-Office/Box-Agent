@@ -323,7 +323,8 @@ async def test_explicit_replacement_overrides_model_context_even_when_visible_te
     assert [message.content for message in messages if message.role == "tool"] == ["original"]
 
 
-async def test_duplicate_calls_finish_without_running_handlers_twice():
+@pytest.mark.parametrize("deduplicate", [False, True])
+async def test_identical_calls_run_hooks_unless_explicitly_merged(deduplicate):
     seen, finished = [], []
 
     async def before(ctx):
@@ -334,12 +335,14 @@ async def test_duplicate_calls_finish_without_running_handlers_twice():
         finished.append((ctx.tool_call_id, ctx.payload["executed"]))
 
     tool = Echo(True)
+    tool.deduplicate_within_batch = deduplicate
     await run(tool, [
         HookSpec("before", ("tool.before_execution",), "before_tool", before),
         HookSpec("finished", ("tool.finished",), "observer", observer),
     ], arguments=[{"text": "same"}, {"text": "same"}])
-    assert tool.calls == ["same"] and seen == ["call-0"]
-    assert finished == [("call-0", True), ("call-1", False)]
+    assert tool.calls == (["same"] if deduplicate else ["same", "same"])
+    assert seen == (["call-0"] if deduplicate else ["call-0", "call-1"])
+    assert finished == [("call-0", True), ("call-1", not deduplicate)]
 
 
 async def test_run_cleanup_waits_for_timed_out_handler_before_disposing_plugin():

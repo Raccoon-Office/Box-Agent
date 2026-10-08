@@ -8,8 +8,8 @@ from typing import Any
 from .agent import Agent
 from .agent_runtime import AgentFactory, build_agent
 from .agent_run import AgentRunHandle
-from .api import RunRequest
-from .run_control import PermissionBroker, RunControl
+from .api import RunDeliveryOptions, RunRequest
+from .run_control import CancellablePermissionNegotiator, PermissionBroker, RunControl
 
 
 class AgentService:
@@ -48,6 +48,7 @@ class AgentService:
         *,
         session: Any,
         options: Any | None = None,
+        delivery_options: RunDeliveryOptions | None = None,
     ) -> AgentRunHandle:
         """Start one protocol-neutral run over an existing AgentSession.
 
@@ -58,6 +59,11 @@ class AgentService:
 
         if not isinstance(request, RunRequest):
             raise TypeError("request must be a RunRequest")
+        runtime = getattr(session.agent, "skill_runtime", None)
+        validation = (await runtime.avalidate_references(runtime.selected_names)
+                      if runtime is not None and request.user_message is not None else None)
+        # Source I/O happens before the ownership checks. Everything from the
+        # checks through runner reservation remains synchronous.
         if getattr(session, "_closed", False) or getattr(session, "_closing", False):
             raise RuntimeError("agent session is closed")
         current_handle = getattr(session, "_run_handle", None)
@@ -84,8 +90,13 @@ class AgentService:
                 run_id=request.run_id,
                 grant_store=getattr(session, "grant_store", None),
             )
+        elif permission_broker is not None:
+            options = replace(options, permission_negotiator=CancellablePermissionNegotiator(
+                permission_broker, control,
+            ))
 
         handle = AgentRunHandle.for_run(
+            delivery_options=delivery_options,
             state=session,
             run_id=request.run_id,
             events_factory=lambda: session.run_events(options=options),
@@ -101,7 +112,11 @@ class AgentService:
         # No await between the ownership check and runner reservation: another
         # start cannot append history or replace this handle in that interval.
         if request.user_message is not None:
-            session.agent.add_user_message(request.user_message)
+            if validation is not None:
+                with runtime.reference_scope(validation):
+                    session.agent.add_user_message(request.user_message)
+            else:
+                session.agent.add_user_message(request.user_message)
             grant_store = getattr(session, "grant_store", None)
             if grant_store is not None:
                 grant_store.clear_prompt_grants()

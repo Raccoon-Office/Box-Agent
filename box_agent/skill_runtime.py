@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, MutableMapping, MutableSequence
+from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 from hashlib import sha256
 from types import SimpleNamespace
@@ -14,7 +16,7 @@ from .skill_restore import invalid_restore, recover_available_records, validate_
 from .tools.base import ToolResult
 from .skill_context import render_reference, read_reference
 
-from box_agent.tools.skill_loader import SkillLoader
+from box_agent.tools.skill_loader import SkillLoader, SkillValidation, SKILL_VALIDATION_TIMEOUT_SECONDS
 from box_agent.tools.skill_preload import (
     AutoLoadedSkillsPrompt,
     build_auto_loaded_skills_prompt,
@@ -38,6 +40,9 @@ class SkillRuntime:
         self._legacy_system_suffix = ""
         self._legacy_system_suffixes: tuple[str, ...] = ()
         self._restore_generation = 0
+        self._deferred_restore_records: list[dict[str, Any]] = []
+        self._reference_validation: SkillValidation | None = None
+        self.validation_timeout_seconds = SKILL_VALIDATION_TIMEOUT_SECONDS
 
     def begin_turn(self) -> None:
         self.turn_deliveries.clear()
@@ -164,11 +169,13 @@ class SkillRuntime:
         """Withdraw an active or pending host reference without editing history."""
         removed = name in (*self.state.reads, *self.state.selected,
                            *self._restore_pending, *self._restoring)
+        removed = removed or any(row.get("name") == name for row in self._deferred_restore_records)
         self.state.reads.pop(name, None)
         self.select([item for item in self.state.selected if item != name])
         self._restore_pending = tuple(item for item in self._restore_pending if item != name)
         self._restoring = tuple(item for item in self._restoring if item != name)
         self._restore_diagnostics.pop(name, None)
+        self._deferred_restore_records = [row for row in self._deferred_restore_records if row.get("name") != name]
         self.turn_deliveries.pop(name, None)
         return removed
 
@@ -176,18 +183,28 @@ class SkillRuntime:
         self.state = SkillSessionState()
         self._restore_pending = self._restoring = ()
         self._restore_diagnostics.clear()
+        self._deferred_restore_records = []
         self.turn_deliveries.clear()
         # Keep the verified legacy suffix as evidence for request-only
         # stripping; forgetting it could expose old author text as system.
 
     @property
     def active_names(self) -> tuple[str, ...]:
-        if self.loader is not None:
+        return self._active_names(refresh=True)
+
+    @property
+    def current_active_names(self) -> tuple[str, ...]:
+        """Use published source facts for synchronous tool exposure."""
+        return self._active_names(refresh=False)
+
+    def _active_names(self, *, refresh: bool) -> tuple[str, ...]:
+        if refresh and self.loader is not None and self._reference_validation is None:
             self.loader.maybe_reload()
         names = []
         for name in dict.fromkeys((*self.state.reads, *self.state.selected)):
             try:
-                skill = self._resolve(name)
+                skill = (self.resolve_reference(name) if self._reference_validation is not None
+                         else self._resolve(name))
             except SkillDependencyError:
                 continue
             previous = self.state.reads.get(name)
@@ -212,6 +229,7 @@ class SkillRuntime:
                            order: int | None = None, persist: bool = True) -> None:
         """Compatibility for an explicit host-provided reference, never system text."""
         revision = sha256(prompt.encode()).hexdigest()
+        self._deferred_restore_records = [row for row in self._deferred_restore_records if row.get("name") != name]
         previous = self.state.reads.get(name)
         self.select([*self.state.selected, name])
         if previous is not None and previous.revision == revision and previous.prompt == prompt:
@@ -236,12 +254,31 @@ class SkillRuntime:
         not a reason to prevent the session from continuing.
         """
         recovered = False
+        validation = self._reference_validation
+        if not self._allow_partial_restore:
+            validate_restore_records(records)
+        if validation is not None and any(
+            isinstance(error, SkillDependencyError) and error.code == "SKILL_VALIDATION_TIMEOUT"
+            for error in validation.references.values()
+        ):
+            # Temporary I/O unavailability is not evidence that restoration
+            # records are invalid. Retry against the next request's batch.
+            self._deferred_restore_records = [dict(row) for row in records
+                                             if isinstance(row, dict) and isinstance(row.get("name"), str)]
+            return
         if self._allow_partial_restore:
-            available = recover_available_records(records, self.loader)
+            available = recover_available_records(
+                records, validation.catalog if validation is not None else self.loader,
+                refresh=validation is None,
+            )
+            if validation is not None:
+                available = [row for row in available
+                             if not isinstance(validation.references.get(row["name"]), SkillDependencyError)
+                             and row["name"] in validation.references]
             recovered = available != records
             records = available
         validate_restore_records(records)
-        if self.loader is not None:
+        if self.loader is not None and validation is None:
             self.loader.maybe_reload()
         restored: dict[str, SkillRead] = {}
         diagnostics: dict[str, str] = {}
@@ -251,7 +288,8 @@ class SkillRuntime:
             if self.loader is not None:
                 # A prior caller reference must not bypass current source and
                 # required-dependency validity during session restoration.
-                skill = resolve_required_skills(self.loader, [name])[-1]
+                skill = (validation.resolve(name) if validation is not None
+                         else resolve_required_skills(self.loader, [name])[-1])
                 prompt, source, path = skill.to_prompt(), skill.source, str(skill.skill_path or "")
             elif isinstance(record.get("prompt"), str):
                 # The old public tuple API supplies current host text when no
@@ -284,9 +322,51 @@ class SkillRuntime:
         self._restore_pending = tuple(restored)
         self._restoring = ()
         self._restore_generation += 1
+        self._deferred_restore_records = []
         if suffix:
             self._legacy_system_suffix = suffix
             self._legacy_system_suffixes = tuple(dict.fromkeys((*self._legacy_system_suffixes, suffix)))
+
+    async def arestore_records(self, records: list[dict[str, Any]]) -> None:
+        """Validate only sources in a worker; restore session facts on the caller."""
+        if not self._allow_partial_restore:
+            validate_restore_records(records)
+        elif not isinstance(records, list):
+            records = []
+        names = tuple(dict.fromkeys(row["name"] for row in records
+                                    if isinstance(row, dict) and isinstance(row.get("name"), str)))
+        validation = (await self.loader.avalidate_references(names, timeout=self.validation_timeout_seconds,
+                                                            allow_stale=False)
+                      if self.loader is not None and names else SkillValidation({}, None))
+        with self.reference_scope(validation):
+            self.restore_records(records)
+
+    def restore_deferred_records(self) -> None:
+        if self._deferred_restore_records and self._reference_validation is not None:
+            names = {row.get("name") for row in self._deferred_restore_records}
+            current = self.state
+            pending = self._restore_pending
+            diagnostics = self._restore_diagnostics
+            self.restore_records(self._deferred_restore_records)
+            if not self._deferred_restore_records:
+                # Recovery must not roll back references selected/read while
+                # source validation was unavailable, including caller text.
+                preserved = {name: item for name, item in current.reads.items() if name not in names}
+                used_orders = {item.order for item in preserved.values()}
+                sequence = max(current.sequence, self.state.sequence)
+                for name, item in self.state.reads.items():
+                    if item.order in used_orders:
+                        sequence += 1
+                        item = replace(item, order=sequence)
+                    used_orders.add(item.order)
+                    preserved[name] = item
+                self.state = SkillSessionState(preserved, current.selected, sequence)
+                self._restore_pending = tuple(dict.fromkeys((
+                    *(name for name in pending if name not in names), *self._restore_pending,
+                )))
+                self._restore_diagnostics = {**{name: notice for name, notice in diagnostics.items() if name not in names},
+                                             **self._restore_diagnostics}
+                self._restoring = self._restore_pending
 
     @staticmethod
     def _restore_notice(name: str, historical: dict[str, Any], revision: str, source: str, path: str) -> str:
@@ -298,6 +378,7 @@ class SkillRuntime:
 
 
     def _remember(self, skill: Any, prompt: str, reason: str, metadata: dict[str, Any]) -> None:
+        self._deferred_restore_records = [row for row in self._deferred_restore_records if row.get("name") != skill.name]
         revision = sha256(prompt.encode()).hexdigest()
         old = self.state.reads.get(skill.name)
         ranges = set(old.delivered_ranges) if (old is not None and old.revision == revision
@@ -346,20 +427,56 @@ class SkillRuntime:
         """Validate the effective source and return data without recording a read."""
         import json
 
+        if self._reference_validation is not None:
+            return self._reference_validation.resolve(name)
         if self.loader is not None:
             self.loader.maybe_reload()
         skill = self._resolve(name.strip())
         prompt = skill.to_prompt()
-        digest = getattr(skill, "instruction_digest", None)
-        if digest and skill.skill_path:
-            try:
-                if sha256(skill.skill_path.read_bytes()).hexdigest() != digest:
-                    raise SkillDependencyError("SKILL_SOURCE_CHANGED", "Skill source changed during reading. Refresh and retry from offset=0.")
-            except OSError as exc:
-                raise SkillDependencyError("SKILL_SOURCE_UNAVAILABLE", f"Skill source became unreadable: {exc}") from exc
+        if self.loader is not None:
+            self.loader.verify_skill_source(skill)
         metadata = self._metadata(skill, prompt, offset=0, reason="tool")
         return SkillReferenceSnapshot(skill.name, skill.source, str(skill.skill_path or ""),
                                       metadata["revision"], prompt, json.dumps(metadata, ensure_ascii=False))
+
+    def _caller_references(self, names: tuple[str, ...]) -> dict[str, SkillReferenceSnapshot]:
+        references = {}
+        for name in names:
+            record = self.state.reads.get(name)
+            if record is not None and record.source == "caller":
+                metadata = self._metadata(self._resolve(name), record.prompt, offset=0, reason="tool")
+                references[name] = SkillReferenceSnapshot(name, record.source, record.path, record.revision,
+                                                          record.prompt, json.dumps(metadata, ensure_ascii=False))
+        return references
+
+    def validate_references(self, names: tuple[str, ...]) -> SkillValidation:
+        callers = self._caller_references(names)
+        source_names = tuple(name for name in names if name not in callers)
+        result = (self.loader.validate_references(source_names) if self.loader is not None and source_names
+                  else self._unvalidated_references(source_names))
+        return SkillValidation({**result.references, **callers}, result.catalog, result.timed_out)
+
+    async def avalidate_references(self, names: tuple[str, ...], *, allow_stale: bool = True) -> SkillValidation:
+        callers = self._caller_references(names)
+        source_names = tuple(name for name in names if name not in callers)
+        result = (await self.loader.avalidate_references(source_names, timeout=self.validation_timeout_seconds,
+                                                       allow_stale=allow_stale)
+                  if self.loader is not None and source_names else self._unvalidated_references(source_names))
+        return SkillValidation({**result.references, **callers}, result.catalog, result.timed_out)
+
+    def _unvalidated_references(self, names: tuple[str, ...]) -> SkillValidation:
+        error = SkillDependencyError("SKILL_PROVIDER_UNAVAILABLE", "No Skill source is configured.")
+        return SkillValidation(dict.fromkeys(names, error), self.loader._catalog if self.loader else None)
+
+    @contextmanager
+    def reference_scope(self, validation: SkillValidation):
+        """Reuse only source facts during synchronous projection, never across an await."""
+        previous = self._reference_validation
+        self._reference_validation = validation
+        try:
+            yield
+        finally:
+            self._reference_validation = previous
 
     def record_delivery(self, snapshot: SkillReferenceSnapshot, metadata: dict[str, Any], *, reason: str) -> None:
         """Record returned material; this says nothing about current visibility."""

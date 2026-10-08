@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import stat
 import urllib.error
 from pathlib import Path
@@ -10,6 +11,32 @@ from test_workspace.refresh_box_agent_auth import (
     AuthRefreshError,
     ensure_fresh_auth,
 )
+
+
+def test_windows_refresh_write_does_not_require_fchmod(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from test_workspace import refresh_box_agent_auth as auth
+    windows_os = SimpleNamespace(**vars(os))
+    windows_os.name = "nt"
+    windows_os.fchmod = lambda *args: pytest.fail("Windows must not call fchmod")
+    monkeypatch.setattr(auth, "os", windows_os)
+    target = tmp_path / "auth.json"
+    auth._atomic_write_auth(target, {"access_token": "synthetic-token"})
+    assert json.loads(target.read_text())["access_token"] == "synthetic-token"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_failed_atomic_replace_preserves_previous_login(tmp_path, monkeypatch):
+    from test_workspace import refresh_box_agent_auth as auth
+    target = tmp_path / "auth.json"
+    target.write_text('{"access_token":"previous-synthetic"}')
+    def fail_replace(*args):
+        raise OSError("synthetic failure")
+    monkeypatch.setattr(auth.os, "replace", fail_replace)
+    with pytest.raises(AuthRefreshError):
+        auth._atomic_write_auth(target, {"access_token": "new-synthetic"})
+    assert json.loads(target.read_text())["access_token"] == "previous-synthetic"
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def _unsigned_jwt(expiry: int) -> str:
@@ -81,7 +108,8 @@ def test_refreshes_expired_auth_rotates_refresh_token_and_preserves_metadata(
     assert document["access_token"] == _unsigned_jwt(now + 3600)
     assert document["refresh_token"] == "new-secret-refresh-token"
     assert document["office_identity"] == {"user_id": "user-one"}
-    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
     safe_result = json.dumps(result.to_safe_dict())
     assert "old-secret-refresh-token" not in safe_result
     assert "new-secret-refresh-token" not in safe_result

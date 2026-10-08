@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import fields, replace
 from typing import Any
@@ -438,7 +439,10 @@ async def run_agent_loop_with_default_services(
             hook_bus=bus, hook_dispatch=bus, hook_context=bus.context,
         )
         if services.context_engine is not None:
-            services.context_engine.bind_history(run_arguments.get("messages") or [])
+            context = services.context_engine
+            binding = getattr(context, "abind_history", context.bind_history)(run_arguments.get("messages") or [])
+            if inspect.isawaitable(binding):
+                await binding
         kernel = AgentLoopKernel(
             _services=services,
             _runtime_defaults=runtime_defaults,

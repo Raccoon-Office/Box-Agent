@@ -33,13 +33,13 @@ import platform
 import re
 import signal
 import sys
-from contextlib import AsyncExitStack, aclosing
+from contextlib import AsyncExitStack, aclosing, suppress
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
 from typing import Any
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 from acp import (
     PROTOCOL_VERSION,
@@ -51,6 +51,7 @@ from acp import (
     NewSessionResponse,
     PromptRequest,
     PromptResponse,
+    RequestError,
     session_notification,
     start_tool_call,
     text_block,
@@ -65,6 +66,7 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 from box_agent import __version__
 from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
+from box_agent.injections import InjectionManager
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
 from box_agent.session_assembly import create_application_runtime
@@ -77,9 +79,10 @@ from box_agent.agent_runtime import (
     build_permission_engine,
 )
 from box_agent.agent_run import AgentRunHandle
-from box_agent.api import RunRequest
+from box_agent.api import RunRequest, RunStatus
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
 from box_agent.acp.content_safety import safe_acp_reply_for_user_text
+from box_agent.acp.request_state import RequestStateStore
 from box_agent.agent import (
     Agent,
     goal_autopilot_prompt,
@@ -105,6 +108,8 @@ from box_agent.tools.skill_execution_env import bind_user_source_text
 from box_agent.tools.bash_tool import (
     BASH_LIFETIME_TURN,
     BackgroundShellManager,
+    BashKillTool,
+    BashOutputTool,
     BashTool,
 )
 from box_agent.tools.file_tools import WriteTool
@@ -442,20 +447,6 @@ def _injected_marker(text: str, injection_id: str | None = None) -> str:
     if injection_id:
         return f"[Injected:{injection_id}] {text}"
     return f"[Injected] {text}"
-
-
-def _remove_inject_queue_item(queue: asyncio.Queue, injection_id: str) -> bool:
-    kept: list[Any] = []
-    removed = False
-    while not queue.empty():
-        item = queue.get_nowait()
-        if _inject_item_id(item) == injection_id:
-            removed = True
-            continue
-        kept.append(item)
-    for item in kept:
-        queue.put_nowait(item)
-    return removed
 
 
 def _meta_bool(meta: Any, *keys: str) -> bool:
@@ -966,14 +957,28 @@ def _tool_result_raw_output(
     }
 
 
+def _session_busy_error(session_id: str | None, *, rebinding: bool = False) -> RequestError:
+    data = {"code": "SESSION_BUSY"}
+    if session_id is not None:
+        data["sessionId"] = session_id
+    message = (
+        "This session is being created or rebound. Wait for it to finish before retrying."
+        if rebinding else
+        "This session already has an active task. Wait for it to finish, "
+        "or cancel it and wait for cancellation to complete before retrying."
+    )
+    return RequestError(-32010, message, data)
+
+
 @dataclass
 class SessionState(AgentSession):
     """ACP metadata layered over the independent Agent session state."""
 
+    _prompt_in_progress: bool = field(default=False, init=False, repr=False)
     trace_writer: SessionTraceWriter | None = None
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
-    seen_injection_ids: set[str] = field(default_factory=set)
+    inject_queue: InjectionManager = field(default_factory=InjectionManager)
     connector_skill_grants: set[str] = field(default_factory=set)
     selected_connector_ids: set[str] = field(default_factory=set)
     connector_statuses: tuple[tuple[str, str, str], ...] | None = None
@@ -1220,6 +1225,13 @@ class BoxACPAgent:
         self._base_tools = base_tools
         self._system_prompt = system_prompt
         self._sessions: dict[str, SessionState] = {}
+        # Background services belong to a product session within this adapter,
+        # not its replaceable ACP handle. No per-session owner cache is needed.
+        self._process_owner_namespace = uuid4()
+        self._session_bindings_in_progress: dict[str, tuple[str, ...]] = {}
+        self._session_creation_tasks: set[asyncio.Task[NewSessionResponse]] = set()
+        self._closing = False
+        self._close_lock = asyncio.Lock()
         self._client_info: ClientInfo | None = None
         self._memory = memory_manager
         self._hooks = hooks
@@ -1250,6 +1262,20 @@ class BoxACPAgent:
 
     async def aclose(self) -> None:
         """Release sessions and application plugins, retaining interrupted owners."""
+        self._closing = True
+        async with self._close_lock:
+            await self._close_sessions()
+
+    async def _close_sessions(self) -> None:
+        # A creation/rebind can own a close lock or an unpublished plugin session.
+        # Settle it before taking a snapshot of sessions to avoid both waiting on
+        # an initializer and racing its removal of a retired handle. These are
+        # adapter-owned tasks, not SDK request tasks that may still send replies.
+        creating = tuple(self._session_creation_tasks)
+        for task in creating:
+            task.cancel()
+        if creating:
+            await asyncio.gather(*creating, return_exceptions=True)
         errors = []
         if self._memory_bootstrap_task is not None:
             self._memory_bootstrap_task.cancel()
@@ -1262,7 +1288,7 @@ class BoxACPAgent:
             if state._closed:
                 if state.agent.session_log is not None:
                     state.agent.session_log.close()
-                del self._sessions[handle]
+                self._sessions.pop(handle, None)
         if self._mcp_finalize_task is not None:
             self._mcp_finalize_task.cancel()
             await asyncio.gather(self._mcp_finalize_task, return_exceptions=True)
@@ -1277,6 +1303,13 @@ class BoxACPAgent:
             from box_agent.session_assembly import combine_cleanup_errors
 
             raise combine_cleanup_errors(errors)
+
+    def _require_accepting_requests(self) -> None:
+        if self._closing:
+            raise RequestError(
+                -32000, "The agent is shutting down and cannot accept new tasks.",
+                {"code": "AGENT_CLOSING"},
+            )
 
     def _llm_for_binding(self, binding: dict[str, Any] | None) -> LLMClient:
         if binding is None:
@@ -1570,7 +1603,6 @@ class BoxACPAgent:
         if not self._skills_loaded:
             return None
         try:
-            self._skill_loader.maybe_reload()
             return self._skill_loader.list_skills_metadata(include_connector=False)
         except Exception as exc:
             log.warn("skills/meta_error", message=f"Failed to build skills metadata: {exc}")
@@ -1631,6 +1663,45 @@ class BoxACPAgent:
         return resp
 
     async def newSession(self, params: NewSessionRequest) -> NewSessionResponse:
+        self._require_accepting_requests()
+        task = asyncio.create_task(
+            self._new_session_with_binding(params), name="acp-session-create",
+        )
+        self._session_creation_tasks.add(task)
+        # Also release tasks cancelled before their coroutine ever starts.
+        task.add_done_callback(self._session_creation_tasks.discard)
+        return await task
+
+    async def _new_session_with_binding(self, params: NewSessionRequest) -> NewSessionResponse:
+        meta = getattr(params, "field_meta", None) or {}
+        raw_upstream = meta.get("session_id") if isinstance(meta, dict) else None
+        upstream_session_id = raw_upstream.strip() if isinstance(raw_upstream, str) else ""
+        if not upstream_session_id:
+            return await self._new_session(params, upstream_session_id)
+
+        reserved = self._session_bindings_in_progress.get(upstream_session_id)
+        if reserved is not None:
+            raise _session_busy_error(next(iter(reserved), None), rebinding=True)
+        existing = tuple(
+            handle for handle, state in self._sessions.items()
+            if state.upstream_session_id == upstream_session_id
+        )
+        for handle in existing:
+            state = self._sessions[handle]
+            if state._prompt_in_progress or state.turn_active or state.run_handle.is_active:
+                raise _session_busy_error(handle)
+        # No await between checking and reserving. Keep retired handles reserved
+        # through close/open awaits too, so prompt cannot auto-create a session
+        # while the original handle is temporarily absent from _sessions.
+        self._session_bindings_in_progress[upstream_session_id] = existing
+        try:
+            return await self._new_session(params, upstream_session_id)
+        finally:
+            del self._session_bindings_in_progress[upstream_session_id]
+
+    async def _new_session(
+        self, params: NewSessionRequest, upstream_session_id: str,
+    ) -> NewSessionResponse:
         # Skill discovery ran in the background so stdio came up fast; make
         # sure the catalog is present before we build the session's system
         # prompt (SkillSelector.bind reads the sentinel; the metadata block
@@ -1638,6 +1709,10 @@ class BoxACPAgent:
         # session — the task caches its result.
         await self._ensure_skills_loaded()
         session_id = f"sess-{len(self._sessions)}-{uuid4().hex[:8]}"
+        bash_process_owner_id = (
+            f"acp-{uuid5(self._process_owner_namespace, upstream_session_id).hex}"
+            if upstream_session_id else session_id
+        )
         workspace = Path(params.cwd or self._config.agent.workspace_dir).expanduser()
         if not workspace.is_absolute():
             workspace = workspace.resolve()
@@ -1650,7 +1725,6 @@ class BoxACPAgent:
         execution_profile = normalize_execution_profile(None)
         env_context: EnvContext | None = None
         expert_context: ExpertSessionContext | None = None
-        upstream_session_id = ""
         initial_task_id = ""
         upstream_title = _DEFAULT_AGENT_TITLE
         force_plan_start = False
@@ -1722,12 +1796,6 @@ class BoxACPAgent:
                 )
             env_context = EnvContext.from_meta(meta.get("env_context"))
             expert_context = ExpertSessionContext.from_meta(meta)
-            # Caller-owned correlation metadata forwarded to the LLM gateway.
-            # This session id is distinct from the ACP `session_id` above
-            # (``sess-N-xxxx``), which is our own per-connection handle.
-            raw_upstream = meta.get("session_id")
-            if isinstance(raw_upstream, str):
-                upstream_session_id = raw_upstream.strip()
             initial_task_id = normalize_task_id(
                 meta.get("task_id") or meta.get("taskId")
             ) or ""
@@ -1926,7 +1994,7 @@ class BoxACPAgent:
         tools: list = []
         session_skill_loader = self._skill_loader
         if expert_context is not None and session_skill_loader is not None:
-            session_skill_loader = session_skill_loader.with_expert_skill_sources(
+            session_skill_loader = await session_skill_loader.awith_expert_skill_sources(
                 expert_context.skill_names()
             )
         connector_skill_grants: set[str] = set()
@@ -1962,17 +2030,13 @@ class BoxACPAgent:
             for existing_handle, existing_state in list(self._sessions.items()):
                 if existing_state.upstream_session_id != upstream_session_id:
                     continue
-                if existing_state.turn_active:
-                    raise ValueError(
-                        "cannot rebind a product Session while its turn is active"
-                    )
                 existing_log = existing_state.agent.session_log
                 if existing_log is not None:
                     existing_log.assert_workspace(workspace)
                 await existing_state.aclose()
                 if existing_log is not None:
                     existing_log.close()
-                del self._sessions[existing_handle]
+                self._sessions.pop(existing_handle, None)
                 # The retired handle owned a managed BrowserContext (if it ever
                 # used the browser); release it so it does not linger until
                 # the idle reaper or count against the session cap.
@@ -2004,7 +2068,7 @@ class BoxACPAgent:
                     projection = session_log.replay()
                     restore_loader = (session_skill_loader if session_skill_loader is not None
                                       else AgentService.resolve_skill_loader(self._base_tools))
-                    SkillRuntime(restore_loader, allow_partial_restore=True).restore_records(projection.skills)
+                    await SkillRuntime(restore_loader, allow_partial_restore=True).arestore_records(projection.skills)
                     session_log_restored = bool(projection.messages)
                     session_log.prepare_resume()
                 except BaseException:
@@ -2102,6 +2166,11 @@ class BoxACPAgent:
         session_skill_loader = state.skill_loader
         tools = list(agent.tools.values())
         for tool in tools:
+            # Keep Bash ownership across a rebind while other process-backed
+            # tools (notably Python kernels) remain handle-scoped.
+            if (isinstance(tool, (BashTool, BashOutputTool, BashKillTool))
+                    and tool.process_owner_id == session_id):
+                tool.process_owner_id = bash_process_owner_id
             if isinstance(tool, SkillHubInstallTool):
                 tool._skill_loader = session_skill_loader
 
@@ -2349,7 +2418,10 @@ class BoxACPAgent:
         )
 
     async def prompt(self, params: PromptRequest) -> PromptResponse:
+        self._require_accepting_requests()
         session_id = params.sessionId
+        if any(session_id in handles for handles in self._session_bindings_in_progress.values()):
+            raise _session_busy_error(session_id, rebinding=True)
         state = self._sessions.get(session_id)
         if not state:
             # Auto-create session if not found (compatibility with clients that skip newSession)
@@ -2366,6 +2438,21 @@ class BoxACPAgent:
                 log.error("session/prompt", session_id=session_id, message="Failed to auto-create session")
                 return PromptResponse(stopReason="refusal")
 
+        # Reserve the whole ACP request before preparation mutates shared state.
+        # AgentService only guards the inner run; preparation and finalization
+        # also own history, grants, cancellation and the injection queue.
+        # There is no await between checking and claiming this event-loop flag.
+        if state._prompt_in_progress or state.run_handle.is_active:
+            raise _session_busy_error(session_id)
+        state._prompt_in_progress = True
+        try:
+            return await self._prompt_for_session(params, session_id, state)
+        finally:
+            state._prompt_in_progress = False
+
+    async def _prompt_for_session(
+        self, params: PromptRequest, session_id: str, state: SessionState,
+    ) -> PromptResponse:
         self._config_for_session(state)
 
         # Prompt-scoped grants cover both deterministic attachment processing
@@ -2695,7 +2782,7 @@ class BoxACPAgent:
         # Refresh skills so officev3-authored skills are available mid-session
         if state.skill_loader:
             try:
-                state.skill_loader.maybe_reload()
+                await state.skill_loader.areload()
             except Exception as exc:
                 log.warn("skills/reload_error", session_id=session_id, message=str(exc))
 
@@ -2752,7 +2839,7 @@ class BoxACPAgent:
                 current_system = state.agent.messages[0].content
                 if SKILL_SLOT_SENTINEL in current_system:
                     state.skill_selector.bind(current_system)
-                new_prompt = state.skill_selector.update(skill_selection_text)
+                new_prompt = state.skill_selector.update(skill_selection_text, refresh=False)
                 if new_prompt is not None:
                     self._set_agent_system_prompt(state.agent, new_prompt)
                     log.info(
@@ -2790,14 +2877,11 @@ class BoxACPAgent:
 
         if image_attachment_context:
             user_text = f"{user_text}\n\n{image_attachment_context}"
-        state.agent.add_user_message(user_text)
+        await state.agent.aadd_user_message(user_text)
 
         # Drain any stale injections from a previous turn
-        while not state.inject_queue.empty():
-            stale = state.inject_queue.get_nowait()
+        for stale in state.inject_queue.begin_run(discard_pending=True):
             log.warn("session/inject_stale", session_id=session_id, text=_inject_item_text(stale)[:80])
-        # Reset per-turn inject dedup — IDs are only meaningful within a turn.
-        state.seen_injection_ids.clear()
         skillhub_search_tool = state.agent.tools.get("search_skillhub")
         if isinstance(skillhub_search_tool, SkillHubSearchTool):
             skillhub_search_tool.reset_turn()
@@ -2860,7 +2944,7 @@ class BoxACPAgent:
                     continuation=autopilot.continuations,
                     max_continuations=state.config.agent.goal_autopilot_max_turns,
                 )
-                state.agent.add_user_message(continuation)
+                await state.agent.aadd_user_message(continuation)
                 before_signature = goal_autopilot_progress_signature(state.agent.goal)
                 stop_reason = await self._run_turn(
                     state,
@@ -2905,6 +2989,7 @@ class BoxACPAgent:
             raise
         finally:
             state.turn_active = False
+            state.inject_queue.end_run()
             bash_tool = state.agent.tools.get("bash")
             write_tool = state.agent.tools.get("write_file")
 
@@ -2991,18 +3076,21 @@ class BoxACPAgent:
         duration_ms = int((perf_counter() - prompt_start) * 1000)
 
         if state.trace_writer is not None:
+            usage = {
+                "input_tokens": turn_meter.prompt_tokens if turn_meter else 0,
+                "output_tokens": turn_meter.completion_tokens if turn_meter else 0,
+                "total_tokens": turn_total_tokens,
+                "calls": turn_meter.calls if turn_meter else 0,
+            }
+            if turn_meter and turn_meter.cache_usage_reported_calls:
+                usage["cached_tokens"] = turn_meter.cached_tokens
             state.trace_writer.write(
                 "turn.end",
                 turn_id=turn_id,
                 data={
                     "stop_reason": stop_reason,
                     "duration_ms": duration_ms,
-                    "usage": {
-                        "input_tokens": turn_meter.prompt_tokens if turn_meter else 0,
-                        "output_tokens": turn_meter.completion_tokens if turn_meter else 0,
-                        "total_tokens": turn_total_tokens,
-                        "calls": turn_meter.calls if turn_meter else 0,
-                    },
+                    "usage": usage,
                     "goal_autopilot_continuations": autopilot.continuations,
                     "task_id": task_id,
                 },
@@ -3016,6 +3104,10 @@ class BoxACPAgent:
             stop_reason=stop_reason,
             duration_ms=duration_ms,
             total_tokens=turn_total_tokens,
+            cached_tokens=turn_meter.cached_tokens if turn_meter else 0,
+            cache_usage_reported_calls=(
+                turn_meter.cache_usage_reported_calls if turn_meter else 0
+            ),
             goal_autopilot_continuations=autopilot.continuations,
             goal_autopilot_budget_exhausted=autopilot.budget_exhausted,
             goal_autopilot_no_progress_exhausted=autopilot.no_progress_exhausted,
@@ -3222,15 +3314,13 @@ class BoxACPAgent:
             # Idempotency: a host retrying after a lost/timed-out response with the
             # same injectionId must not enqueue (or re-run) the instruction twice.
             # Covers both still-pending and already-consumed items within the turn.
-            if injection_id in state.seen_injection_ids:
+            if not state.inject_queue.submit({"id": injection_id, "content": text}):
                 log.info(
                     "session/inject_dedup",
                     session_id=session_id,
                     injection_id=injection_id,
                 )
                 return {"ok": True, "injectionId": injection_id, "deduplicated": True}
-            state.seen_injection_ids.add(injection_id)
-            state.inject_queue.put_nowait({"id": injection_id, "content": text})
             log.info(
                 "session/inject",
                 session_id=session_id,
@@ -3246,9 +3336,7 @@ class BoxACPAgent:
                 return {"error": "session_not_found"}
             if not injection_id:
                 return {"error": "empty_injection_id"}
-            removed = _remove_inject_queue_item(state.inject_queue, injection_id)
-            # Allow the host to re-inject the same id after an explicit cancel.
-            state.seen_injection_ids.discard(injection_id)
+            removed = state.inject_queue.cancel(injection_id)
             log.info(
                 "session/inject_cancel",
                 session_id=session_id,
@@ -4227,6 +4315,8 @@ class BoxACPAgent:
                 if meter is not None and meter.total_tokens > 0
                 else observer.usage.as_payload()
             )
+            if meter is not None and meter.total_tokens > 0 and meter.cache_usage_reported_calls:
+                token_usage["cachedTokens"] = meter.cached_tokens
             payload: dict[str, Any] = {
                 "type": "turn_usage",
                 "version": 3,
@@ -4838,7 +4928,7 @@ class BoxACPAgent:
                                 else:
                                     _schedule_follow_up_suggestions(final_content)
                             await _send_turn_usage()
-                            return reason.value
+                            break
 
                         case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner, sub_agent_id=sub_agent_id, title=sub_title):
                             if (
@@ -4976,10 +5066,23 @@ class BoxACPAgent:
                             pass  # StepStart, SummarizationEvent, PermissionRequestEvent, etc.
 
                 except Exception as exc:
-                    log.exception("event/error", exc, session_id=session_id, event=type(event).__name__)
+                    if isinstance(exc, TimeoutError):
+                        raise
+                    log.exception("event/error", exc, session_id=session_id, event_type=type(event).__name__)
                     # Don't break the loop — continue processing events
 
-        return "end_turn"
+        # Exiting the stream settles producer cleanup, including cancellation
+        # when the host closes after DoneEvent. Its final result may have been
+        # replaced by a cleanup failure after the terminal event was published.
+        result = await protocol_handle.result()
+        if result.status is RunStatus.FAILED:
+            state.last_error = str(
+                (result.error or {}).get("message")
+                or state.last_error
+                or "Agent execution failed."
+            )
+            return StopReason.ERROR.value
+        return result.stop_reason
 
     async def _send(self, session_id: str, update: Any) -> None:
         try:
@@ -5435,6 +5538,35 @@ class _MemoryProposalNegotiator:
             )
 
 
+async def _close_acp_connection(
+    connection: AgentSideConnection, writer: asyncio.StreamWriter, *, timeout: float = 1.0,
+) -> None:
+    """Allow final messages to drain, then stop a backpressured SDK sender.
+
+    Cancelling the SDK close interrupts its sender wait and lets it continue
+    cancelling request tasks. Aborting the pipe also discards buffered output
+    that a disconnected host may never read. No SDK private tasks are accessed.
+    """
+    closing = asyncio.create_task(connection.close())
+    try:
+        done, _ = await asyncio.wait({closing}, timeout=timeout)
+        if not done:
+            log.warn("server/stdio_close_timeout", timeout=timeout,
+                     message="Host is not draining stdout; aborting protocol output")
+            closing.cancel()
+            writer.transport.abort()
+            with suppress(asyncio.CancelledError):
+                await closing
+        else:
+            await closing
+    finally:
+        # If server shutdown itself is cancelled, retain ownership of this task.
+        if not closing.done():
+            closing.cancel()
+            writer.transport.abort()
+            await asyncio.gather(closing, return_exceptions=True)
+
+
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
     config = config or Config.load()
@@ -5477,6 +5609,7 @@ async def run_acp_server(config: Config | None = None) -> None:
         sys.stderr.flush()
 
     shutdown_event = asyncio.Event()
+    connection: AgentSideConnection | None = None
     server_adapter: BoxACPAgent | None = None
     llm = lite_llm = None
     mcp_task = skill_task = None
@@ -5574,7 +5707,7 @@ async def run_acp_server(config: Config | None = None) -> None:
 
         # Restore real stdout for ACP transport, then re-guard sys.stdout
         sys.stdout = _real_stdout
-        reader, writer = await stdio_streams_largebuf()
+        reader, writer = await stdio_streams_largebuf(on_eof=shutdown_event.set)
 
         # Windows fix: the ACP dependency's _StdoutTransport.write() resolves
         # sys.stdout.buffer dynamically at each call.  After re-guarding
@@ -5609,7 +5742,11 @@ async def run_acp_server(config: Config | None = None) -> None:
             )
             return server_adapter
 
-        AgentSideConnection(create_adapter, writer, reader)
+        request_state = RequestStateStore()
+        connection = AgentSideConnection(
+            create_adapter, writer, reader, state_store=request_state,
+            sender_factory=request_state.create_sender,
+        )
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         _stderr_print("✅ ACP protocol ready; MCP loading continues in background")
@@ -5652,7 +5789,11 @@ async def run_acp_server(config: Config | None = None) -> None:
                 for task in (mcp_task, skill_task):
                     if task is not None:
                         shutdown.push_async_callback(stop_background_task, task)
+                if connection is not None:
+                    shutdown.push_async_callback(_close_acp_connection, connection, writer)
                 if server_adapter is not None:
+                    # Settle owned runs while the SDK sender is still live:
+                    # prompt cancellation can emit final protocol updates.
                     shutdown.push_async_callback(server_adapter.aclose)
         except BaseException as cleanup_error:
             if primary_error is None:

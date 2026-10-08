@@ -1,0 +1,23 @@
+{
+  "bash": [
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "lifetime",
+        "description"
+      ],
+      "before": "Optional background-process lifetime. 'turn' (default) is automatically reclaimed when the current turn ends. Use 'runtime' only when the user explicitly asks for a service or command to remain available after the final response; it remains manageable with bash_output/bash_kill until Box-Agent exits.",
+      "after": "Optional background-process lifetime. 'turn' (default) is automatically reclaimed when the current turn ends. Use 'runtime' only when the user explicitly asks for a service or command to remain available after the final response; it remains manageable with bash_output/bash_kill until Box-Agent exits. Fully consumed, completed shell history is limited to the most recent 128 records per runtime."
+    }
+  ],
+  "bash_output": [
+    {
+      "path": [
+        "description"
+      ],
+      "before": "Retrieves output from a running or completed background bash shell.\n\n        - Takes a bash_id parameter identifying the shell\n        - Always returns only new output since the last check\n        - Returns stdout and stderr output along with shell status\n        - Supports optional regex filtering to show only lines matching a pattern\n        - Use this tool when you need to monitor or check the output of a long-running shell\n        - Shell IDs can be found using the bash tool with run_in_background=true\n        - A `turn` shell is reclaimed when its turn ends; a `runtime` shell remains available until bash_kill or Box-Agent exit\n\n        Process status values:\n          - \"running\": Still executing\n          - \"completed\": Finished successfully\n          - \"failed\": Finished with error\n          - \"terminated\": Was terminated\n          - \"error\": Error occurred\n\n        Example: bash_output(bash_id=\"abc12345\")",
+      "after": "Retrieves output from a running or completed background bash shell.\n\n        - Takes a bash_id parameter identifying the shell\n        - Always returns only new output since the last check\n        - Returns stdout and stderr output along with shell status\n        - Supports optional regex filtering to show only lines matching a pattern\n        - Use this tool when you need to monitor or check the output of a long-running shell\n        - Shell IDs can be found using the bash tool with run_in_background=true\n        - A `turn` shell is reclaimed when its turn ends; active or unread `runtime` shells remain available until bash_kill or Box-Agent exit\n        - Already read output is released; unread output remains available, spilling to a temporary file when large\n        - Fully consumed, completed shell history is limited to 128 records per runtime; expired IDs return Shell not found\n\n        Process status values:\n          - \"running\": Still executing\n          - \"completed\": Finished successfully\n          - \"failed\": Finished with error\n          - \"terminated\": Was terminated\n          - \"error\": Error occurred\n\n        Example: bash_output(bash_id=\"abc12345\")"
+    }
+  ]
+}

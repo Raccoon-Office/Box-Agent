@@ -94,6 +94,53 @@ def run_mode(tmp_path: Path, mode: str, timeout: float = 2.0):
     return result, attempts[0], config, record
 
 
+@pytest.mark.parametrize("mode", ["normal", "malformed"])
+def test_isolated_profile_traces_are_captured_after_process_exit(tmp_path, monkeypatch, mode):
+    profile = tmp_path / "profile"
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    result, attempt, _, _ = run_mode(tmp_path, mode)
+    source = profile / "log" / "acp-eval" / attempt.name
+    files = list(source.glob("*.jsonl"))
+    assert files
+    assert all((attempt / "agent" / path.name).read_bytes() == path.read_bytes() for path in files)
+    assert result.completeness_status == ("complete" if mode == "normal" else "corrupt")
+
+
+def test_trace_copy_failure_keeps_attempt_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "profile"))
+    def fail_copy(*args):
+        raise OSError("synthetic trace copy failure")
+    monkeypatch.setattr(case_runner_module, "_capture_profile_traces", fail_copy)
+    result, attempt, _, _ = run_mode(tmp_path, "normal")
+    assert result.completeness_status != "complete"
+    assert "finalization_error:agent-trace" in read_json(attempt / "completeness.json")["issues"]
+
+
+def test_trace_capture_excludes_unrelated_profile_logs(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    (source / "trace.jsonl").write_text("{}\n")
+    (source / "config.yaml").write_text("private")
+    case_runner_module._capture_profile_traces(source, destination)
+    assert [p.name for p in destination.iterdir()] == ["trace.jsonl"]
+
+
+def test_relative_profile_cannot_redirect_trace_capture(tmp_path):
+    with pytest.raises(ValueError, match="absolute"):
+        case_runner_module._trace_directory(tmp_path, {"BOX_AGENT_HOME": "relative"})
+
+
+def test_repeated_case_uses_distinct_session_identity_for_each_workspace(tmp_path):
+    first = case_runner_module._session_params(tmp_path / "attempt-first/workspace", "same-case")
+    second = case_runner_module._session_params(tmp_path / "attempt-second/workspace", "same-case")
+    assert first["_meta"]["session_id"] != second["_meta"]["session_id"]
+    assert len(first["_meta"]["session_id"]) == 33
+    assert first == case_runner_module._session_params(tmp_path / "attempt-first/workspace", "same-case")
+    assert first["_meta"]["permission_mode"] == second["_meta"]["permission_mode"] == "default"
+
+
 def test_explicit_case_metadata_reaches_acp_without_granting_permissions(tmp_path: Path) -> None:
     config = make_config(tmp_path, "normal")
     external = str(tmp_path / "explicit-reference")
@@ -295,11 +342,13 @@ def test_normal_case_writes_self_contained_complete_attempt(tmp_path: Path) -> N
     )
 
     trace_files = list((attempt / "agent").glob("*.jsonl"))
-    assert [path.name for path in trace_files] == ["eval-acp-normal.jsonl"]
+    upstream_id = next(message["params"]["_meta"]["session_id"] for message in sent
+                       if message.get("method") == "session/new")
+    assert [path.name for path in trace_files] == [f"{upstream_id}.jsonl"]
     trace = read_jsonl(trace_files[0])
-    assert trace[0]["session_id"] == "eval-acp-normal"
+    assert trace[0]["session_id"] == upstream_id
     assert trace[0]["acp_session_id"] == "sess-0-fake"
-    assert not list(config.repo_root.rglob("eval-acp-normal.jsonl"))
+    assert not list(config.repo_root.rglob(f"{upstream_id}.jsonl"))
 
     before = read_json(attempt / "files-before.json")
     after = read_json(attempt / "files-after.json")
@@ -313,7 +362,7 @@ def test_normal_case_writes_self_contained_complete_attempt(tmp_path: Path) -> N
     assert artifacts["final_files"][0]["path"] == "output/answer.txt"
     assert (attempt / "assistant.txt").read_text(encoding="utf-8") == "hello world"
     run_document = read_json(attempt / "run.json")
-    assert run_document["session_id"] == "eval-acp-normal"
+    assert run_document["session_id"] == upstream_id
     assert run_document["acp_session_id"] == "sess-0-fake"
     assert run_document["turn_id"] == "eval-acp-normal-turn-1"
     assert run_document["permission_request_count"] == 1
@@ -343,7 +392,7 @@ def test_normal_case_writes_self_contained_complete_attempt(tmp_path: Path) -> N
     }
     final_response = next(message for message in received if message.get("id") == 3)
     assert final_response["result"]["_meta"]["usage"]["sessionId"] == (
-        "eval-acp-normal"
+        upstream_id
     )
 
 

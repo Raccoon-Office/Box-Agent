@@ -1,0 +1,7 @@
+{"id": "q0-file", "query": "修改附件 settings.json 的 theme 为 dark，其他字段不变；保存回 cwd/settings.json。读取后验证，不创建其他交付物。", "input_files": ["settings.json"]}
+{"id": "q0-source", "query": "只读取附件 source.md，以其中已批准版本为准，写 cwd/answer.json，字段 owner、budget、source_id。不得以草稿或常识补充。", "input_files": ["source.md"]}
+{"id": "q0-skill", "query": "使用当前可用的 xlsx Skill 创建 cwd/report.xlsx，首张表 A1 为 item，B1 为 count，A2 为 apple，B2 为数值 3。读取并校验保存的文件后交付。", "input_files": []}
+{"id": "q0-long", "query": "附件 records.jsonl 是唯一数据源。只查 id=731 的记录，写 cwd/selected.json，保留该记录全部字段。不修改源文件，不整体读取或把全文放进执行代码。", "input_files": ["records.jsonl"]}
+{"id": "q0-wait", "query": "我还没有上传需要汇总的销售表。请等待我上传后再计算总额；现在用可用的输入工具请求上传，不查找或猜测文件，也不要生成 total.json。", "input_files": []}
+{"id": "q0-recover", "query": "请先用 read_file 尝试读取 cwd/missing-source.json。如果不存在，再用 read_file 读取已提供的 recovery-source.json，将其内容原样写入 cwd/recovered.json。不要创建 missing-source.json。", "input_files": ["recovery-source.json"]}
+{"id": "q0-complete", "query": "计算 17×23，将结果作为 JSON 数字写到 cwd/result.json。只有文件实际存在且读回为 391 才算完成，最后回复文件位置。", "input_files": []}

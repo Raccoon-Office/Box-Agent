@@ -123,6 +123,11 @@ async def stream_with_activity(
                 await next_chunk
             except (asyncio.CancelledError, StopAsyncIteration):
                 pass
+        elif next_chunk is not None and not next_chunk.cancelled():
+            # Cancellation can interrupt asyncio.wait after this read finishes
+            # but before result() consumes it. Retain ownership of that outcome,
+            # including normal generator exhaustion, during consumer shutdown.
+            next_chunk.exception()
         closer = getattr(iterator, "aclose", None)
         if closer is not None:
             try:

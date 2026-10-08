@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ from box_agent.session_log import SessionLog
 def isolated_cli_session_home(tmp_path, monkeypatch):
     """Persistent CLI test sessions must never use the developer's profile."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
 
 
@@ -88,6 +90,8 @@ def test_cli_public_path_reaches_plugin_composition_and_agent_loop_kernel(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     config_path = tmp_path / "config.yaml"
     config_path.write_text("api_key: test\n", encoding="utf-8")
     workspace = tmp_path / "workspace"
@@ -215,6 +219,7 @@ def _write_skill(
 
 def test_cli_node_execution_env_preserves_user_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8443")
     monkeypatch.setenv("npm_config_prefix", "/system/npm")
     monkeypatch.setenv("npm_config_cache", "/system/npm-cache")
@@ -257,6 +262,7 @@ class _CaptureStreamLLM:
 
 def test_cli_resumes_messages_from_session_log(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     config_path = tmp_path / "config.yaml"
     config_path.write_text("api_key: test\n", encoding="utf-8")
     system_prompt_path = tmp_path / "system_prompt.md"
@@ -437,6 +443,7 @@ def test_cli_ctrl_d_exits_without_empty_error(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     config_path = tmp_path / "config.yaml"
     config_path.write_text("api_key: test\n", encoding="utf-8")
     system_prompt_path = tmp_path / "system_prompt.md"
@@ -623,6 +630,7 @@ def test_cli_workspace_tools_receive_self_managed_node_runtime(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     node_root = tmp_path / ".box-agent" / "runtimes" / "node"
     node_bin = node_root / "versions" / "node-v22-test-darwin-arm64" / "bin"
     node = node_bin / "node"
@@ -668,15 +676,16 @@ def test_cli_workspace_tools_receive_self_managed_node_runtime(
     assert bash_tool._subprocess_env["BOX_AGENT_NPM"] == str(npm)
     assert bash_tool._subprocess_env["BOX_AGENT_NPX"] == str(npx)
     skill_tools = tmp_path / ".box-agent" / "skill-tools"
-    assert bash_tool._subprocess_env["NODE_PATH"].split(":") == [
-        str(skill_tools / "lib" / "node_modules"),
+    assert bash_tool._subprocess_env["NODE_PATH"].split(os.pathsep) == [
+        str(skill_tools / ("node_modules" if os.name == "nt" else "lib/node_modules")),
         str(node_root / "sandbox" / "node_modules"),
     ]
     assert bash_tool._subprocess_env["NPM_CONFIG_CACHE"] == str(skill_tools / "npm-cache")
     assert bash_tool._subprocess_env["NPM_CONFIG_PREFIX"] == str(skill_tools)
-    path_entries = bash_tool._subprocess_env["PATH"].split(":")
-    assert path_entries[0] == str(skill_tools / "bin")
-    assert path_entries.index(str(node_bin)) < path_entries.index("/usr/bin")
+    path_entries = bash_tool._subprocess_env["PATH"].split(os.pathsep)
+    assert path_entries[0] == str(skill_tools if os.name == "nt" else skill_tools / "bin")
+    inherited = os.environ["PATH"].split(os.pathsep)[0]
+    assert path_entries.index(str(node_bin)) < path_entries.index(inherited)
 
     prompt = build_skill_runtime_prompt(runtime_context)
     assert "- Node:" in prompt
@@ -686,6 +695,7 @@ def test_cli_workspace_tools_receive_self_managed_node_runtime(
 
 def test_cli_uses_saved_code_workspace_mode(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     workspace = tmp_path / "project"
     workspace.mkdir()
     WorkspaceRegistry().set(workspace, "code")
@@ -1003,6 +1013,8 @@ def _exercise_cli_source_binding(
     from box_agent.tools.bash_tool import BashTool
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     config_path = tmp_path / "config.yaml"
     config_path.write_text("api_key: test\n", encoding="utf-8")
     workspace = tmp_path / "workspace"
@@ -1111,10 +1123,12 @@ def test_cli_source_image_optout_reaches_real_pptx_scaffold(tmp_path, monkeypatc
     manifests = []
 
     async def scaffold(bash, workspace):
-        result = await bash.execute(command=shlex.join([
+        args = [
             node, str(script), "cover-hero-v1", "--title", "工作坊主视觉",
             "--out", str(workspace / "deck.json"),
-        ]))
+        ]
+        command = "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in args) if os.name == "nt" else shlex.join(args)
+        result = await bash.execute(command=command)
         assert result.success, result.error or result.content
         manifests.append(json.loads(
             (workspace / "assets/generated/manifest.json").read_text(encoding="utf-8")

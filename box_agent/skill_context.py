@@ -162,6 +162,25 @@ class SkillReferenceContext:
         # commits this bounded snapshot through its existing request/context.
         return {"inlineContent": text, "sha256": sha256(text.encode()).hexdigest()}
 
+    def source_names(self, messages: list[Message]) -> tuple[str, ...]:
+        """Collect source work before observing history or changing session facts."""
+        names = [record.name for record in self.runtime.read_facts]
+        names.extend(self.runtime.selected_names)
+        names.extend(self.runtime.restoring_names)
+        names.extend(row["name"] for row in getattr(self.runtime, "_deferred_restore_records", ())
+                     if isinstance(row.get("name"), str))
+        for message in messages:
+            tool_text = (message.role == "tool" and message.name in {"get_skill", "skill_view"}
+                         and bool(message.tool_call_id))
+            runtime_text = message.role == "user" and message.source == "runtime"
+            if (tool_text or runtime_text) and isinstance(message.content, str):
+                parsed = read_reference(message.content)
+                if parsed is not None and (not runtime_text or parsed[0].get("kind") == "runtime_skill_instructions"):
+                    name = parsed[0].get("name")
+                    if isinstance(name, str):
+                        names.append(name.strip())
+        return tuple(dict.fromkeys(names))
+
     def observe_history(self, messages: list[Message]) -> None:
         """Recover read facts from source-verified real tool text before compaction."""
         for message in messages:

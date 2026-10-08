@@ -28,6 +28,20 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | 0o111)
 
 
+def _write_python_executable(path: Path, body: str, monkeypatch) -> None:
+    """Launch a synthetic executable protocol with the current Python on any OS."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    spawn = jupyter_tool.asyncio.create_subprocess_exec
+
+    async def create_process(executable, *args, **kwargs):
+        if str(executable) == str(path):
+            return await spawn(sys.executable, str(path), *args, **kwargs)
+        return await spawn(executable, *args, **kwargs)
+
+    monkeypatch.setattr(jupyter_tool.asyncio, "create_subprocess_exec", create_process)
+
+
 def _clear_python_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "BOX_AGENT_PYTHON",
@@ -114,7 +128,7 @@ async def test_frozen_host_python_verifies_packages_before_bundled_fallback(
 
     await env.ensure_ready()
 
-    assert called == [python_path]
+    assert called == ([] if sys.platform == "win32" else [python_path])
     assert env._ready is True
 
 
@@ -236,28 +250,24 @@ async def test_host_python_bootstraps_pip_before_installing_missing_packages(
         {"pip": "pip", "ipykernel": "ipykernel"},
     )
     python_path = tmp_path / "runtime" / "python" / "bin" / "python"
-    _write_executable(
-        python_path,
-        """#!/bin/sh
-dir="$(dirname "$0")"
-if [ "$1" = "-c" ]; then
-  case "$2" in
-    *"import pip"*) [ -f "$dir/pip-ready" ] && exit 0 || exit 1 ;;
-    *"import ipykernel"*) [ -f "$dir/ipykernel-ready" ] && exit 0 || exit 1 ;;
-  esac
-fi
-if [ "$1" = "-m" ] && [ "$2" = "ensurepip" ]; then
-  touch "$dir/pip-ready"
-  exit 0
-fi
-if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
-  [ -f "$dir/pip-ready" ] || exit 8
-  touch "$dir/ipykernel-ready"
-  exit 0
-fi
-exit 1
-""",
-    )
+    _write_python_executable(python_path, """
+import sys
+from pathlib import Path
+root = Path(__file__).parent
+args = sys.argv[1:]
+if args[0] == "-c":
+    package = args[1].split()[-1]
+    sys.exit(0 if (root / (package + "-ready")).exists() else 1)
+if args == ["-m", "ensurepip"] or args[:2] == ["-m", "ensurepip"]:
+    (root / "pip-ready").touch()
+    sys.exit(0)
+if args[:2] == ["-m", "pip"]:
+    if not (root / "pip-ready").exists():
+        sys.exit(8)
+    (root / "ipykernel-ready").touch()
+    sys.exit(0)
+sys.exit(1)
+""", monkeypatch)
     env = SandboxEnvironment(
         base_dir=tmp_path / "sandbox",
         runtime_env={"BOX_AGENT_SANDBOX_PYTHON": str(python_path)},
@@ -275,41 +285,30 @@ async def test_sandbox_python_uses_uv_when_ensurepip_is_unavailable(
     tmp_path: Path,
 ) -> None:
     python_path = tmp_path / "sandbox" / "venv" / "bin" / "python"
-    _write_executable(
-        python_path,
-        """#!/bin/sh
-dir="$(dirname "$0")"
-if [ "$1" = "-c" ] && [ "$2" = "import pip" ]; then
-  [ -f "$dir/pip-ready" ] && exit 0 || exit 1
-fi
-if [ "$1" = "-m" ] && [ "$2" = "ensurepip" ]; then
-  echo "No module named ensurepip" >&2
-  exit 1
-fi
-exit 1
-""",
-    )
+    _write_python_executable(python_path, """
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+if args == ["-c", "import pip"]:
+    sys.exit(0 if (Path(__file__).parent / "pip-ready").exists() else 1)
+print("No module named ensurepip", file=sys.stderr)
+sys.exit(1)
+""", monkeypatch)
     uv_path = tmp_path / "bin" / "uv"
-    _write_executable(
-        uv_path,
-        """#!/bin/sh
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--python" ]; then
-    shift
-    python_path="$1"
-    break
-  fi
-  shift
-done
-touch "$(dirname "$python_path")/pip-ready"
-""",
-    )
+    _write_python_executable(uv_path, """
+import sys
+from pathlib import Path
+assert sys.argv[1:3] == ["pip", "install"]
+python = Path(sys.argv[sys.argv.index("--python") + 1])
+(python.parent / "pip-ready").touch()
+""", monkeypatch)
     monkeypatch.setattr(
         jupyter_tool.shutil,
         "which",
         lambda *_args, **_kwargs: str(uv_path),
     )
     env = SandboxEnvironment(base_dir=tmp_path / "sandbox")
+    env.python_path = python_path
 
     await env._ensure_pip_available(None, None)
 
@@ -329,22 +328,16 @@ async def test_host_python_missing_package_install_failure_blocks_sandbox_ready(
         {"pip": "pip", "ipykernel": "ipykernel"},
     )
     python_path = tmp_path / "runtime" / "python" / "bin" / "python"
-    _write_executable(
-        python_path,
-        """#!/bin/sh
-if [ "$1" = "-c" ]; then
-  case "$2" in
-    *"import pip"*) exit 0 ;;
-    *"import ipykernel"*) exit 1 ;;
-  esac
-fi
-if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
-  echo "pip failed" >&2
-  exit 9
-fi
-exit 1
-""",
-    )
+    _write_python_executable(python_path, """
+import sys
+args = sys.argv[1:]
+if args[0] == "-c":
+    sys.exit(0 if args[1] == "import pip" else 1)
+if args[:2] == ["-m", "pip"]:
+    print("pip failed", file=sys.stderr)
+    sys.exit(9)
+sys.exit(1)
+""", monkeypatch)
     env = SandboxEnvironment(
         base_dir=tmp_path / "sandbox",
         runtime_env={"BOX_AGENT_SANDBOX_PYTHON": str(python_path)},

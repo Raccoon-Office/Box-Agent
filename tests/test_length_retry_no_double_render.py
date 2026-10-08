@@ -13,7 +13,7 @@ The loop splits ``length``/`max_tokens`` handling by whether a tool call was
 attempted:
 
 * Any tool-call attempt, parseable or broken: discard it without execution and
-  inject a hidden user recovery instruction. A write_file attempt is told to
+  inject a hidden runtime recovery instruction. A write_file attempt is told to
   use ordered chunks.
 * Visible text present: hand off to the ``truncation_continuation`` machinery
   — the partial is appended as an assistant turn and the next LLM call is
@@ -213,6 +213,13 @@ async def test_stream_dropped_mid_tool_injects_recovery_without_boost():
     assert done.stop_reason == StopReason.END_TURN
     assert llm.calls == 2
     assert len(llm.message_snapshots[1]) > len(llm.message_snapshots[0])
+    feedback = llm.message_snapshots[1][-1]
+    assert feedback.role == "user"
+    assert feedback.source == "runtime"
+    assert "Runtime state update:" in feedback.content
+    assert "The user sent" not in feedback.content
+    from box_agent.kernel.loop import _latest_user_text
+    assert _latest_user_text(llm.message_snapshots[1]) == "q"
     # No boost on a stream-drop.
     assert llm.ephemeral_max_tokens_history == [None, None]
     injected = [e for e in events if isinstance(e, InjectedMessageEvent)]

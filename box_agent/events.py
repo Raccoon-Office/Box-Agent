@@ -344,7 +344,7 @@ class PermissionRequestEvent:
 
 @dataclass(frozen=True)
 class InjectedMessageEvent:
-    """A user message was injected into the running agent loop."""
+    """A user supplement or internal instruction entered the running loop."""
 
     content: str
     injection_id: str | None = None

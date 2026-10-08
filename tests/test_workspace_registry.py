@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -34,8 +35,8 @@ def test_registry_persists_all_workspaces_and_normalizes_paths(tmp_path: Path) -
     payload = json.loads(registry_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 1
     assert {item["path"] for item in payload["workspaces"]} == {
-        str(first),
-        str(second),
+        os.path.normcase(str(first)),
+        os.path.normcase(str(second)),
     }
 
 

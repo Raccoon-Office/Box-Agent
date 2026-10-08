@@ -87,6 +87,35 @@ def test_context_length_error():
     assert classify_llm_error(exc).category == "context_length"
 
 
+def test_unsupported_token_parameter_is_not_context_length_error():
+    message = (
+        "Unsupported parameter: 'max_tokens' is not supported with this model. "
+        "Use 'max_completion_tokens' instead."
+    )
+    for exc in (
+        Exception(message),
+        _FakeAPIError("bad request", status_code=400, body={"error": {
+            "message": message, "code": "unsupported_parameter",
+            "param": "max_tokens", "type": "invalid_request_error",
+        }}),
+    ):
+        details = structured_llm_error(exc, provider="openai", model="gpt-6-sol/azure_L/qwb")
+        assert details["category"] == "unsupported_parameter"
+        assert details["retryable"] is False
+        assert "参数" in details["message"]
+        assert "对话内容过长" not in details["message"]
+
+
+def test_token_parameter_name_alone_does_not_imply_context_overflow():
+    exc = Exception("max_tokens must be a positive integer")
+    assert classify_llm_error(exc).category != "context_length"
+
+
+def test_actual_context_overflow_with_max_tokens_keeps_context_category():
+    exc = Exception("messages + max_tokens exceed the maximum context length")
+    assert classify_llm_error(exc).category == "context_length"
+
+
 def test_sensenova_prompt_token_limit_error_is_concise_and_actionable():
     exc = _FakeAPIError(
         (

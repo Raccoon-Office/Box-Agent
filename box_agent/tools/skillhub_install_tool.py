@@ -136,7 +136,7 @@ class SkillHubInstallTool(Tool):
                 skill_id=normalized_id,
             )
 
-        installed_name = self._installed_skill_name(
+        installed_name = await asyncio.to_thread(self._installed_skill_name,
             normalized_id,
             normalized_candidate["slug"],
         )
@@ -216,7 +216,7 @@ class SkillHubInstallTool(Tool):
         if not installed_name:
             installed_name = normalized_candidate["slug"]
 
-        visible_name = self._refresh_skill(installed_name, normalized_candidate["slug"])
+        visible_name = await asyncio.to_thread(self._refresh_skill, installed_name, normalized_candidate["slug"])
         return self._successful_result(
             normalized_candidate,
             status=status,

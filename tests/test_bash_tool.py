@@ -507,7 +507,12 @@ async def test_blocks_disguised_pptx_image_status_node_tokens(
     assert result.success is False
     assert result.exit_code == 1
     assert "PPTX image-status synchronization blocked" in result.error
-    assert "reason_code=PPTX_IMAGE_STATUS_NODE_FORM" in result.error
+    reason = (
+        "PPTX_IMAGE_STATUS_COMMAND_SHAPE" if os.name == "nt"
+        else "PPTX_IMAGE_STATUS_NODE_FORM"
+    )
+    assert f"reason_code={reason}" in result.error
+    assert result.permission_request is None
 
 
 @pytest.mark.parametrize(
@@ -893,6 +898,22 @@ async def test_background_processes_are_scoped_and_cleaned_by_owner():
     finally:
         await owner_a.cleanup_background_processes()
         await owner_b.cleanup_background_processes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["a", "b", None])
+async def test_bash_kill_missing_shell_lists_only_callers_available_ids(monkeypatch, owner):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(BackgroundShellManager, "_shells", {
+        "a-shell": SimpleNamespace(owner_id="a"),
+        "b-shell": SimpleNamespace(owner_id="b"),
+    })
+    result = await BashKillTool(process_owner_id=owner).execute(bash_id="missing")
+
+    assert not result.success
+    expected = ["a-shell", "b-shell"] if owner is None else [f"{owner}-shell"]
+    assert result.error == f"Shell not found: missing. Available: {expected}"
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1343,8 @@ def test_legacy_output_env_is_removed_from_bash_subprocesses(monkeypatch, tmp_pa
     assert "BOX_AGENT_OUTPUT_DIR" not in supplied._subprocess_env
 
 
-def test_description_uses_injected_python_and_reserved_scratch_directory():
+def test_posix_description_uses_injected_python_and_reserved_scratch_directory(monkeypatch):
+    monkeypatch.setattr(bash_tool_module.platform, "system", lambda: "Linux")
     description = BashTool(
         runtime_env={"BOX_AGENT_PYTHON": "/runtime/python"}
     ).description
@@ -1330,6 +1352,26 @@ def test_description_uses_injected_python_and_reserved_scratch_directory():
     assert '"$BOX_AGENT_PYTHON" -u -m http.server' in description
     assert 'under "$BOX_AGENT_SCRATCH_DIR"' in description
     assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_description_prefers_dedicated_search_tools_over_shell_search(
+    monkeypatch, windows
+):
+    monkeypatch.setattr(
+        bash_tool_module.platform, "system", lambda: "Windows" if windows else "Linux"
+    )
+    monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
+    description = BashTool().description
+
+    assert "use glob/grep when available or search_files" in description
+    assert "Use bash rg only for specialized operations" in description
+    assert "Do NOT use grep/rg/find/ls" not in description
+    expected_listing = (
+        "Get-ChildItem -Name" if windows else "find . -mindepth 1 -maxdepth 1 -print"
+    )
+    assert expected_listing in description
+    assert "Do NOT use grep/find/ls to search or list files" not in description
 
 
 @pytest.mark.asyncio
@@ -1353,9 +1395,12 @@ async def test_reserved_scratch_subdirectory_can_be_removed_without_approval(tmp
     (preview / "frame.png").write_bytes(b"frame")
     tool = BashTool(runtime_env={"BOX_AGENT_SCRATCH_DIR": str(scratch)})
 
-    result = await tool.execute(
-        command='rm -rf "$BOX_AGENT_SCRATCH_DIR/preview_shots"'
+    assert preview.resolve().is_relative_to(tmp_path.resolve())
+    command = (
+        'Remove-Item -LiteralPath "$env:BOX_AGENT_SCRATCH_DIR/preview_shots" -Recurse -Force'
+        if os.name == "nt" else 'rm -rf "$BOX_AGENT_SCRATCH_DIR/preview_shots"'
     )
+    result = await tool.execute(command=command)
 
     assert result.success, result.error
     assert result.permission_request is None
@@ -1363,19 +1408,32 @@ async def test_reserved_scratch_subdirectory_can_be_removed_without_approval(tmp
 
 
 @pytest.mark.asyncio
-async def test_verified_runtime_node_reference_runs_without_approval(tmp_path):
+async def test_verified_runtime_node_reference_uses_shell_permission_policy(tmp_path):
     node_path = tmp_path / "node"
     node_path.write_text("#!/bin/sh\nprintf 'runtime-node-ok\\n'\n", encoding="utf-8")
     node_path.chmod(0o755)
-    tool = BashTool(runtime_env={"BOX_AGENT_NODE": str(node_path)})
+    # Python provides a real executable fixture on Windows, where shell scripts
+    # cannot stand in for node.exe. The contract is trusted executable routing.
+    tool = BashTool(runtime_env={"BOX_AGENT_NODE": sys.executable if os.name == "nt" else str(node_path)})
 
-    result = await tool.execute(command="${BOX_AGENT_NODE:-node}")
+    command = (
+        '& "$env:BOX_AGENT_NODE" -c "print(\'runtime-node-ok\')"'
+        if os.name == "nt" else "${BOX_AGENT_NODE:-node}"
+    )
+    result = await tool.execute(command=command)
+
+    if os.name == "nt":
+        # PowerShell environment invocations still require explicit approval.
+        assert result.permission_request is not None
+        tool.approve_permission_request(result.permission_request)
+        result = await tool.execute(command=command)
 
     assert result.success, result.error
     assert result.stdout.strip() == "runtime-node-ok"
     assert result.permission_request is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable permission bits")
 @pytest.mark.asyncio
 async def test_non_executable_runtime_node_reference_still_requires_approval(tmp_path):
     node_path = tmp_path / "node"
@@ -1586,8 +1644,11 @@ async def test_foreground_timeout_kills_grandchild_windows(tmp_path):
     )
 
     bash_tool = BashTool()
+    permission = await bash_tool.execute(command=command, timeout=5)
+    assert permission.permission_request is not None
+    bash_tool.approve_permission_request(permission.permission_request)
     start = _time.monotonic()
-    result = await bash_tool.execute(command=command, timeout=2)
+    result = await bash_tool.execute(command=command, timeout=5)
     elapsed = _time.monotonic() - start
 
     assert not result.success
@@ -1602,6 +1663,7 @@ async def test_foreground_timeout_kills_grandchild_windows(tmp_path):
         len(sentinel.read_text(encoding="utf-8").splitlines())
         if sentinel.exists() else 0
     )
+    assert count_after_kill > 0, "The grandchild must run before timeout"
     await asyncio.sleep(1.5)
     count_later = (
         len(sentinel.read_text(encoding="utf-8").splitlines())
@@ -1707,7 +1769,7 @@ async def test_foreground_output_truncated_when_oversize():
     import platform
     if platform.system() == "Windows":
         # PowerShell: emit a 60000-char string
-        command = "$s = 'x' * 60000; Write-Output $s"
+        command = "Write-Output ('x' * 60000)"
     else:
         command = "python3 -c \"print('x' * 60000)\""
 
@@ -1777,7 +1839,7 @@ async def test_background_output_truncated_when_oversize():
     # A quick background command that emits a big single line then exits.
     import platform
     if platform.system() == "Windows":
-        command = "$s = 'x' * 60000; Write-Output $s"
+        command = "Write-Output ('x' * 60000)"
     else:
         command = "python3 -c \"print('x' * 60000)\""
 

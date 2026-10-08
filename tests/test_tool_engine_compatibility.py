@@ -1,8 +1,8 @@
 """C1 characterization of the pre-Engine setup and Agent tool contract.
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
-descriptions, PPT entry contracts, tool handoffs and connector search apply
-before exact comparisons.
+descriptions, PPT entry contracts, tool handoffs, background retention and
+connector search apply before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -105,6 +105,9 @@ _PPTX_ENTRY_SCHEMA_CHANGES = json.loads(
 )
 _TOOL_HANDOFF_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/tool_handoff_schema_changes.json").read_text()
+)
+_BACKGROUND_OUTPUT_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/background_output_schema_changes.json").read_text()
 )
 _CONNECTOR_SEARCH_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
@@ -258,7 +261,8 @@ def _normalized_schema(schema, profile):
     # Only the isolated workspace prefix changes between test runs. Preserve
     # descriptions, parameter types, bounds, enums, defaults and array ordering.
     serialized = json.dumps(schema, ensure_ascii=False)
-    return json.loads(serialized.replace(str(profile), "<PROFILE>"))
+    serialized = serialized.replace(json.dumps(str(profile / "workspace"), ensure_ascii=False)[1:-1], "<PROFILE>/workspace")
+    return json.loads(serialized.replace(json.dumps(str(profile), ensure_ascii=False)[1:-1], "<PROFILE>"))
 
 
 def _assert_schema_contract(tools, profile):
@@ -297,6 +301,7 @@ def _assert_schema_contract(tools, profile):
             *_CWD_SCHEMA_CHANGES.get(tool.name, ()),
             *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
             *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
+            *_BACKGROUND_OUTPUT_SCHEMA_CHANGES.get(tool.name, ()),
         ):
             target = entry["schema"]
             *parents, field = change["path"]

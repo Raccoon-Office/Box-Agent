@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -36,6 +37,7 @@ async def test_execute_code_blocks_parent_writes_and_allows_cwd_writes(
     )
     tool = JupyterSandboxTool(
         workspace_dir=str(session_root),
+        runtime_env={"BOX_AGENT_SANDBOX_PYTHON": sys.executable},
     )
     assert "durable writes are confined to the session cwd" in tool.description
     session_id = "cwd-guard"

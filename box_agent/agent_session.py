@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,6 +16,7 @@ from .agent_service import AgentService
 from .config import Config
 from .events import AgentEvent, DoneEvent, StopReason
 from .execution_profile import ExecutionProfile
+from .injections import InjectionManager
 
 if TYPE_CHECKING:
     from .plugins.runtime import PluginRuntime, PluginSession
@@ -50,7 +52,7 @@ class AgentSession:
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None
     memory_extractor: Any | None = None
-    inject_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
+    inject_queue: asyncio.Queue[Any] = field(default_factory=InjectionManager)
     turn_active: bool = False
     memory_block: str | None = None
     thinking_enabled: bool = False
@@ -199,19 +201,31 @@ class AgentSession:
         try:
             plugins = await runtime.open_session(context)
             resources = plugins.resources
-            session = cls.create(
-                config=config,
-                agent_factory=agent_factory,
-                llm_client=resources.llm_client,
-                system_prompt=resources.system_prompt,
-                tools=resources.tools,
-                workspace_dir=context.workspace,
-                token_limit=options.token_limit,
-                hooks=resources.hooks,
-                session_log=context.host.session_log,
-                utility=options.utility,
-                **resources.state,
-            )
+            skill_runtime = resources.state.get("skill_runtime")
+            restore_validation = None
+            session_log = context.host.session_log
+            replay = getattr(session_log, "replay", None)
+            if skill_runtime is not None and skill_runtime.loader is not None and callable(replay):
+                records = replay().skills
+                names = tuple(dict.fromkeys(row["name"] for row in records
+                                            if isinstance(row, dict) and isinstance(row.get("name"), str)))
+                restore_validation = await skill_runtime.loader.avalidate_references(names, allow_stale=False)
+            scope = (skill_runtime.reference_scope(restore_validation)
+                     if restore_validation is not None else nullcontext())
+            with scope:
+                session = cls.create(
+                    config=config,
+                    agent_factory=agent_factory,
+                    llm_client=resources.llm_client,
+                    system_prompt=resources.system_prompt,
+                    tools=resources.tools,
+                    workspace_dir=context.workspace,
+                    token_limit=options.token_limit,
+                    hooks=resources.hooks,
+                    session_log=context.host.session_log,
+                    utility=options.utility,
+                    **resources.state,
+                )
             session.plugin_session = plugins
             session._owns_plugin_runtime = owns_runtime
             plugins.owner = session
@@ -254,6 +268,8 @@ class AgentSession:
         """Request cooperative cancellation through this session's options."""
 
         self.cancelled = True
+        if self._run_handle.is_active:
+            self._run_handle.request_cancel()
 
     async def run_events(
         self,
@@ -275,6 +291,8 @@ class AgentSession:
         self._run_driving = True
         self._external_run_cleanup = None
         enclosing_turn_active = self.turn_active
+        if not enclosing_turn_active and isinstance(self.inject_queue, InjectionManager):
+            self.inject_queue.begin_run()
         self.turn_active = True
         self.agent.last_stop_reason = None
         events = None
@@ -345,6 +363,8 @@ class AgentSession:
                     finished.set_result(None)
                 # ACP can own a wider prompt spanning several continuation runs.
                 self.turn_active = enclosing_turn_active
+                if not enclosing_turn_active and isinstance(self.inject_queue, InjectionManager):
+                    self.inject_queue.end_run()
             if errors:
                 cleanup_error = _combined_cleanup_error(errors)
                 if primary_error is None:

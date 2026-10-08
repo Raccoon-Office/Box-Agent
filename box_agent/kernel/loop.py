@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -37,7 +38,6 @@ from ..events import (
     ContentEvent,
     DoneEvent,
     ErrorEvent,
-    InjectedMessageEvent,
     LLMOutputEvent,
     LLMActivityEvent,
     LogFileEvent,
@@ -62,6 +62,7 @@ from .context_engine import (
 )
 from .ports import KernelServices
 from .tool_messages import ToolMessageCommitter, session_log_messages
+from ..injections import InjectionKind, InjectionManager, MessageInjection, parse_queued_injection
 from ..tools.engine.call_contracts import (
     ToolExecutionOptions, ToolRunContext, ToolStepControl, ToolStepSummary,
 )
@@ -82,7 +83,6 @@ from ..loop_guards import (
     EMPTY_ARGS_LIMIT,
     WEB_SEARCH_TOOL_NAME,
     STREAM_REPEAT_MIN_CHUNKS,
-    format_injected_message,
     format_runtime_context_update,
     looks_like_truncated_output,
     near_limit_wrapup_text,
@@ -737,7 +737,9 @@ async def _run_agent_loop_impl(
         compact_engine = DefaultCompactEngine()
     context_engine = _services.context_engine
     if context_engine is not None:
-        context_engine.bind_history(messages)
+        binding = getattr(context_engine, "abind_history", context_engine.bind_history)(messages)
+        if inspect.isawaitable(binding):
+            await binding
 
     if artifact_root_dir is not None:
         warning_key = session_id or workspace_dir or "<anonymous>"
@@ -1216,40 +1218,16 @@ async def _run_agent_loop_impl(
         # ── Drain inject queue (in-stream injection) ───────
         if inject_queue:
             while not inject_queue.empty():
-                injected_item = inject_queue.get_nowait()
-                injection_id = None
-                user_visible = True
-                injection_source = "user"
-                if isinstance(injected_item, dict):
-                    injected_text = str(injected_item.get("content") or "")
-                    raw_injection_id = injected_item.get("id")
-                    if isinstance(raw_injection_id, str):
-                        injection_id = raw_injection_id
-                    raw_user_visible = injected_item.get("user_visible")
-                    if isinstance(raw_user_visible, bool):
-                        user_visible = raw_user_visible
-                    raw_source = injected_item.get("source")
-                    if raw_source == "runtime":
-                        injection_source = "runtime"
+                if isinstance(inject_queue, InjectionManager):
+                    injection, injected_event = inject_queue.apply_next(messages)
                 else:
-                    injected_text = str(injected_item)
-                if not injected_text:
-                    continue
-                if injection_source == "user":
-                    continuation_user_request = injected_text
-                formatted_injection = (
-                    format_runtime_context_update(injected_text)
-                    if injection_source == "runtime"
-                    else format_injected_message(injected_text)
-                )
-                messages.append(
-                    Message(role="user", source=injection_source, content=formatted_injection)
-                )
-                yield InjectedMessageEvent(
-                    content=injected_text,
-                    injection_id=injection_id,
-                    user_visible=user_visible,
-                )
+                    injection = parse_queued_injection(inject_queue.get_nowait())
+                    if injection is None:
+                        continue
+                    injected_event = injection.apply(messages)
+                if injection.kind is InjectionKind.USER_SUPPLEMENT:
+                    continuation_user_request = injection.content
+                yield injected_event
 
         has_plan_tool = "plan_write" in tools
         latest_user_text = _latest_user_text(messages)
@@ -1268,14 +1246,9 @@ async def _run_agent_loop_impl(
                 if plan_approval_gate_enabled
                 else _FORCED_PLAN_GUIDANCE
             )
-            messages.append(
-                Message(role="user", source="runtime", content=format_injected_message(guidance))
-            )
-            yield InjectedMessageEvent(
-                content=guidance,
-                injection_id=None,
-                user_visible=False,
-            )
+            yield MessageInjection(
+                InjectionKind.PLAN, guidance,
+            ).apply(messages)
 
         if not plan_start_emitted and (
             force_plan_for_turn
@@ -1294,8 +1267,9 @@ async def _run_agent_loop_impl(
             yield PlanSnapshotEvent(payload=_plan_start_payload(approval))
 
         for guidance in tool_engine.budget_guidance():
-            messages.append(Message(role="user", source="runtime", content=format_injected_message(guidance)))
-            yield InjectedMessageEvent(content=guidance, injection_id=None, user_visible=False)
+            yield MessageInjection(
+                InjectionKind.BUDGET, guidance,
+            ).apply(messages)
 
         # ── Fresh tool-result aggregate budget (Layer 1) ───
         # This runs immediately before the next LLM request. Decisions are
@@ -1366,10 +1340,9 @@ async def _run_agent_loop_impl(
         ):
             wrapup_injected = True
             wrapup_text = near_limit_wrapup_text(step, max_steps)
-            messages.append(
-                Message(role="user", source="runtime", content=format_injected_message(wrapup_text))
-            )
-            yield InjectedMessageEvent(content=wrapup_text, injection_id=None, user_visible=False)
+            yield MessageInjection(
+                InjectionKind.BUDGET, wrapup_text,
+            ).apply(messages)
 
         # ── No-progress circuit breaker (one-shot) ──────────
         # The agent has gone no_progress_limit consecutive steps without a
@@ -1383,10 +1356,9 @@ async def _run_agent_loop_impl(
         ):
             wrapup_injected = True
             stall_text = no_progress_wrapup_text(no_progress_steps)
-            messages.append(
-                Message(role="user", source="runtime", content=format_injected_message(stall_text))
-            )
-            yield InjectedMessageEvent(content=stall_text, injection_id=None, user_visible=False)
+            yield MessageInjection(
+                InjectionKind.NO_PROGRESS, stall_text,
+            ).apply(messages)
 
         # ── Step start ──────────────────────────────────────
         yield StepStart(step=step + 1, max_steps=max_steps)
@@ -1417,13 +1389,15 @@ async def _run_agent_loop_impl(
         on_response_received = None
         if context_engine is not None:
             output_budget = getattr(llm, "max_output_tokens", 0)
-            projection = context_engine.prepare_request(
+            projection = getattr(context_engine, "aprepare_request", context_engine.prepare_request)(
                 messages, prepared_tools=prepared_tools, token_limit=token_limit,
                 output_tokens=output_budget if isinstance(output_budget, int) else 0,
                 extra_messages=tuple(request_context_messages),
                 transient_message=transient_message,
                 transient_tokens=pending_transient_followup_tokens,
             )
+            if inspect.isawaitable(projection):
+                projection = await projection
             # A blocked projection means the complete request is over budget.
             # Compact at a slightly tighter history limit to leave room for
             # provider-side framing, then always rebind/reproject the live
@@ -1484,13 +1458,15 @@ async def _run_agent_loop_impl(
             if context_compacted:
                 # Rebinding is mandatory: persistent read facts do not prove
                 # the corresponding tool text survived compaction.
-                projection = context_engine.prepare_request(
+                projection = getattr(context_engine, "aprepare_request", context_engine.prepare_request)(
                     messages, prepared_tools=prepared_tools, token_limit=token_limit,
                     output_tokens=output_budget if isinstance(output_budget, int) else 0,
                     extra_messages=tuple(request_context_messages),
                     transient_message=transient_message,
                     transient_tokens=pending_transient_followup_tokens,
                 )
+                if inspect.isawaitable(projection):
+                    projection = await projection
             if projection.blocked_reason:
                 msg = projection.blocked_reason or "Context remains above the safe input limit after bounded compaction."
                 if hook_mgr.hooks:
@@ -1708,8 +1684,9 @@ async def _run_agent_loop_impl(
                     return
                 recovery_text = repetitive_recovery.request(step=step, max_steps=max_steps)
                 if recovery_text is not None:
-                    messages.append(Message(role="user", source="runtime", content=recovery_text))
-                    yield InjectedMessageEvent(content=recovery_text, injection_id=None, user_visible=False)
+                    yield MessageInjection(
+                        InjectionKind.STREAM_RECOVERY, recovery_text,
+                    ).apply(messages)
                     yield ProgressEvent(step=step + 1, content="模型输出异常重复，正在重新生成（1/1）。")
                     elapsed = perf_counter() - step_start
                     total = perf_counter() - run_start
@@ -1774,13 +1751,7 @@ async def _run_agent_loop_impl(
                 ),
                 finish_reason=response.finish_reason,
                 usage=(
-                    response.usage.model_dump(
-                        include={
-                            "prompt_tokens",
-                            "completion_tokens",
-                            "total_tokens",
-                        }
-                    )
+                    response.usage.reported_usage()
                     if response.usage
                     else None
                 ),
@@ -1815,8 +1786,9 @@ async def _run_agent_loop_impl(
                 pending_transient_followup_tokens = 0
                 request_overlay_tokens = 0
                 request_size_recoveries += 1
-                messages.append(Message(role="user", source="runtime", content=recovery_text))
-                yield InjectedMessageEvent(content=recovery_text, injection_id=None, user_visible=False)
+                yield MessageInjection(
+                    InjectionKind.REQUEST_RECOVERY, recovery_text,
+                ).apply(messages)
                 yield ProgressEvent(step=step + 1, content="本批图片超过请求大小限制，正在调整查看批次。")
                 elapsed, total = perf_counter() - step_start, perf_counter() - run_start
                 if hook_mgr.hooks:
@@ -1848,10 +1820,9 @@ async def _run_agent_loop_impl(
                     return
                 recovery_text = stream_recovery.request(step=step, max_steps=max_steps)
                 if recovery_text is not None:
-                    messages.append(Message(role="user", source="runtime", content=recovery_text))
-                    yield InjectedMessageEvent(
-                        content=recovery_text, injection_id=None, user_visible=False,
-                    )
+                    yield MessageInjection(
+                        InjectionKind.STREAM_RECOVERY, recovery_text,
+                    ).apply(messages)
                     yield ProgressEvent(
                         step=step + 1, content="模型连接中断，正在自动恢复（1/1）。",
                     )
@@ -2030,17 +2001,9 @@ async def _run_agent_loop_impl(
                         "chunk_index/final 分块协议，每块建议不超过 "
                         f"{RECOMMENDED_GENERATED_BODY_CHARS:,} 字符；bash 只传短命令。"
                     )
-                    messages.append(
-                        Message(
-                            role="user",
-                            content=format_injected_message(recovery_text),
-                        )
-                    )
-                    yield InjectedMessageEvent(
-                        content=recovery_text,
-                        injection_id=None,
-                        user_visible=False,
-                    )
+                    yield MessageInjection(
+                        InjectionKind.OUTPUT_RECOVERY, recovery_text,
+                    ).apply(messages)
                 _log.warning(
                     "provider stale recovery %d/%d after %.0fs without new chunks "
                     "consecutive_empty=%d partial_content_len=%d",
@@ -2097,14 +2060,9 @@ async def _run_agent_loop_impl(
                     f"{RECOMMENDED_GENERATED_BODY_CHARS:,} 字符，最后一块设置 final=true，"
                     "然后校验文件。"
                 )
-                messages.append(
-                    Message(role="user", source="runtime", content=format_injected_message(repair_text))
-                )
-                yield InjectedMessageEvent(
-                    content=repair_text,
-                    injection_id=None,
-                    user_visible=False,
-                )
+                yield MessageInjection(
+                    InjectionKind.OUTPUT_RECOVERY, repair_text,
+                ).apply(messages)
                 _log.warning(
                     "tool argument limit repair %d/1: %s request_id=%s",
                     oversized_tool_argument_retries,
@@ -2178,17 +2136,9 @@ async def _run_agent_loop_impl(
                         if "write_file" in tool_names
                         else _OUTPUT_LENGTH_TOOL_RECOVERY
                     )
-                    messages.append(
-                        Message(
-                            role="user",
-                            content=format_injected_message(repair_text),
-                        )
-                    )
-                    yield InjectedMessageEvent(
-                        content=repair_text,
-                        injection_id=None,
-                        user_visible=False,
-                    )
+                    yield MessageInjection(
+                        InjectionKind.OUTPUT_RECOVERY, repair_text,
+                    ).apply(messages)
                     _log.warning(
                         "discarded output-length tool attempt %d/%d: tools=%s "
                         "parseable=%s broken=%s stream_dropped=%s request_id=%s",
@@ -2239,10 +2189,9 @@ async def _run_agent_loop_impl(
                 truncation_continuations += 1
                 tail = response.content.rstrip()[-40:]
                 cont_text = truncation_continuation_text(tail)
-                messages.append(Message(role="user", source="runtime", content=cont_text))
-                yield InjectedMessageEvent(
-                    content=cont_text, injection_id=None, user_visible=False,
-                )
+                yield MessageInjection(
+                    InjectionKind.TEXT_CONTINUATION, cont_text,
+                ).apply(messages)
                 _log.warning(
                     "length-with-visible-text continuation %d/%d: "
                     "has_broken_tool_call=%s stream_dropped=%s "
@@ -2371,17 +2320,9 @@ async def _run_agent_loop_impl(
                 and not forced_plan_retry_injected
             ):
                 forced_plan_retry_injected = True
-                messages.append(
-                    Message(
-                        role="user",
-                        content=format_injected_message(_FORCED_PLAN_RETRY_GUIDANCE),
-                    )
-                )
-                yield InjectedMessageEvent(
-                    content=_FORCED_PLAN_RETRY_GUIDANCE,
-                    injection_id=None,
-                    user_visible=False,
-                )
+                yield MessageInjection(
+                    InjectionKind.PLAN, _FORCED_PLAN_RETRY_GUIDANCE,
+                ).apply(messages)
                 elapsed = perf_counter() - step_start
                 total = perf_counter() - run_start
                 if hook_mgr.hooks:
@@ -2428,8 +2369,9 @@ async def _run_agent_loop_impl(
                 truncation_continuations += 1
                 tail = response.content.rstrip()[-40:]
                 cont_text = truncation_continuation_text(tail)
-                messages.append(Message(role="user", source="runtime", content=cont_text))
-                yield InjectedMessageEvent(content=cont_text, injection_id=None, user_visible=False)
+                yield MessageInjection(
+                    InjectionKind.TEXT_CONTINUATION, cont_text,
+                ).apply(messages)
                 elapsed = perf_counter() - step_start
                 total = perf_counter() - run_start
                 if hook_mgr.hooks:
@@ -2444,14 +2386,9 @@ async def _run_agent_loop_impl(
                 ):
                     empty_final_answer_retry_injected = True
                     retry_text = empty_final_answer_retry_text(visible_tool_call_total)
-                    messages.append(
-                        Message(role="user", source="runtime", content=format_injected_message(retry_text))
-                    )
-                    yield InjectedMessageEvent(
-                        content=retry_text,
-                        injection_id=None,
-                        user_visible=False,
-                    )
+                    yield MessageInjection(
+                        InjectionKind.FINAL_RESPONSE, retry_text,
+                    ).apply(messages)
                     elapsed = perf_counter() - step_start
                     total = perf_counter() - run_start
                     if hook_mgr.hooks:
@@ -2545,12 +2482,9 @@ async def _run_agent_loop_impl(
                 )
                 continue
             if continuation is not None:
-                messages.append(Message(role="user", source="runtime", content=continuation.prompt))
-                yield InjectedMessageEvent(
-                    content=continuation.prompt,
-                    injection_id=None,
-                    user_visible=False,
-                )
+                yield MessageInjection(
+                    InjectionKind.TASK_CONTINUATION, continuation.prompt,
+                ).apply(messages)
                 elapsed = perf_counter() - step_start
                 total = perf_counter() - run_start
                 if hook_mgr.hooks:
@@ -2680,8 +2614,9 @@ async def _run_agent_loop_impl(
         pending_transient_followup_blocks.extend(tool_summary.transient_blocks)
         pending_transient_followup_tokens += tool_summary.transient_tokens
         if tool_summary.repair_guidance:
-            messages.append(Message(role="user", source="runtime", content=format_injected_message(tool_summary.repair_guidance)))
-            yield InjectedMessageEvent(content=tool_summary.repair_guidance, injection_id=None, user_visible=False)
+            yield MessageInjection(
+                InjectionKind.TOOL_FEEDBACK, tool_summary.repair_guidance,
+            ).apply(messages)
 
         if completed_turn_ending_tool is not None:
             elapsed = perf_counter() - step_start
@@ -2728,8 +2663,9 @@ async def _run_agent_loop_impl(
             return
 
         if tool_summary.search_guidance:
-            messages.append(Message(role="user", source="runtime", content=format_injected_message(tool_summary.search_guidance)))
-            yield InjectedMessageEvent(content=tool_summary.search_guidance, injection_id=None, user_visible=False)
+            yield MessageInjection(
+                InjectionKind.TOOL_FEEDBACK, tool_summary.search_guidance,
+            ).apply(messages)
 
         if (
             visible_tool_call_total > final_summary_after_calls
@@ -2740,8 +2676,9 @@ async def _run_agent_loop_impl(
                 visible_tool_call_total,
                 final_summary_after_calls,
             )
-            messages.append(Message(role="user", source="runtime", content=format_injected_message(summary_text)))
-            yield InjectedMessageEvent(content=summary_text, injection_id=None, user_visible=False)
+            yield MessageInjection(
+                InjectionKind.FINAL_RESPONSE, summary_text,
+            ).apply(messages)
 
         # ── Step end ────────────────────────────────────────
         # Update the no-progress counter (only steps that ran tools reach

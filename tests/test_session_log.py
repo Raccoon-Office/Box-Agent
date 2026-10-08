@@ -1,6 +1,7 @@
 """Behavior tests for the durable append-only Session Log."""
 
 import json
+import errno
 import ntpath
 import os
 import posixpath
@@ -172,18 +173,24 @@ def test_session_log_rejects_workspace_change_without_mutating_log(tmp_path):
 
 
 def test_session_log_rejects_symlink_alias_for_same_workspace(tmp_path):
-    if os.name == "nt":
-        pytest.skip("symlink creation is not reliably available on Windows")
     root = tmp_path / "sessions"
     workspace = tmp_path / "workspace"
     alias = tmp_path / "workspace-alias"
     workspace.mkdir()
-    alias.symlink_to(workspace, target_is_directory=True)
+    try:
+        alias.symlink_to(workspace, target_is_directory=True)
+    except OSError as exc:
+        if (getattr(exc, "winerror", None) == 1314
+                or exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}):
+            pytest.skip(f"filesystem cannot create directory symlinks: {exc}")
+        raise
     log = SessionLog.create(root, session_id="fixed-cwd-alias", cwd=workspace)
     log.close()
 
+    before = log.path.read_bytes()
     with pytest.raises(SessionLogWorkspaceMismatch, match="immutable workspace"):
         SessionLog.open(root, session_id="fixed-cwd-alias", cwd=alias)
+    assert log.path.read_bytes() == before
 
 
 def test_session_log_accepts_only_equivalent_cwd_syntax(tmp_path):
@@ -195,7 +202,7 @@ def test_session_log_accepts_only_equivalent_cwd_syntax(tmp_path):
     log.close()
 
     restored = SessionLog.open(root, session_id="normalized-cwd", cwd=workspace)
-    assert restored.header["cwd"] == os.path.abspath(os.fspath(workspace))
+    assert restored.header["cwd"] == os.path.normcase(os.path.abspath(workspace))
     restored.close()
 
 

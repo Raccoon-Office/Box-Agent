@@ -11,16 +11,28 @@ Supports:
   files) but absent from ``_manifest.json`` is ignored as an orphan.
 """
 
+import asyncio
+import copy
 import json
+import logging
 from collections.abc import Collection
 from hashlib import sha256
 import os
 import re
 import sys
+import threading
 import unicodedata
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
+
+from ..skill_dependencies import SkillDependencyError, resolve_required_skills
+from ..skill_state import SkillReferenceSnapshot
+
+_log = logging.getLogger(__name__)
+SKILL_VALIDATION_TIMEOUT_SECONDS = 1.0
 
 import yaml
 
@@ -294,6 +306,34 @@ class _SourceEntry:
     unavailable_skills: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _SkillCatalog:
+    enabled: Dict[str, Skill]
+    all_skills: Dict[str, Skill]
+    sources: List[_SourceEntry]
+    parse_errors: List[Tuple[Path, str]]
+    settings_signature: tuple[str, int, int] | None = None
+
+    def get_skill(self, name: str, *, include_disabled: bool = False) -> Optional[Skill]:
+        pool = (self.all_skills or self.enabled) if include_disabled else self.enabled
+        return pool.get(name)
+
+
+@dataclass(frozen=True)
+class SkillValidation:
+    references: dict[str, SkillReferenceSnapshot | SkillDependencyError]
+    catalog: _SkillCatalog | None
+    timed_out: bool = False
+
+    def resolve(self, name: str) -> SkillReferenceSnapshot:
+        result = self.references.get(name.strip())
+        if result is None:
+            raise SkillDependencyError("SKILL_VALIDATION_TIMEOUT", "Skill validation did not finish; retry later.")
+        if isinstance(result, SkillDependencyError):
+            raise result
+        return result
+
+
 class SkillLoader:
     """Skill loader supporting multiple prioritized sources.
 
@@ -329,7 +369,14 @@ class SkillLoader:
             legacy = skills_dir or "./skills"
             sources = [(legacy, "builtin")]
 
-        self._sources: List[_SourceEntry] = [
+        self._catalog = _SkillCatalog({}, {}, [], [])
+        self._reload_lock = threading.RLock()
+        self._validation_local = threading.local()
+        self._validation_task: asyncio.Task[SkillValidation] | None = None
+        self.validation_timeout_seconds = SKILL_VALIDATION_TIMEOUT_SECONDS
+        self._last_validated: dict[str, SkillReferenceSnapshot | SkillDependencyError] = {}
+        self._force_reload = False
+        self._sources = [
             _SourceEntry(directory=Path(d).expanduser(), source=s) for d, s in sources
         ]
         self._skill_settings_path: Optional[Path] = (
@@ -344,6 +391,173 @@ class SkillLoader:
         # run. Reset at the start of each discovery so callers can react to a
         # single pass without seeing stale data from earlier reloads.
         self.parse_errors: List[Tuple[Path, str]] = []
+
+    # Keep the existing catalog API; discovery publishes all fields together.
+    @property
+    def loaded_skills(self) -> Dict[str, Skill]:
+        return self._catalog.enabled
+
+    @loaded_skills.setter
+    def loaded_skills(self, value: Dict[str, Skill]) -> None:
+        self._catalog = replace(self._catalog, enabled=value)
+
+    @property
+    def _all_skills(self) -> Dict[str, Skill]:
+        return self._catalog.all_skills
+
+    @_all_skills.setter
+    def _all_skills(self, value: Dict[str, Skill]) -> None:
+        self._catalog = replace(self._catalog, all_skills=value)
+
+    @property
+    def _sources(self) -> List[_SourceEntry]:
+        return self._catalog.sources
+
+    @_sources.setter
+    def _sources(self, value: List[_SourceEntry]) -> None:
+        self._catalog = replace(self._catalog, sources=value)
+
+    @property
+    def parse_errors(self) -> List[Tuple[Path, str]]:
+        return getattr(self._validation_local, "parse_errors", self._catalog.parse_errors)
+
+    @parse_errors.setter
+    def parse_errors(self, value: List[Tuple[Path, str]]) -> None:
+        self._catalog = replace(self._catalog, parse_errors=value)
+
+    @property
+    def _skill_settings_signature(self) -> tuple[str, int, int] | None:
+        return self._catalog.settings_signature
+
+    @_skill_settings_signature.setter
+    def _skill_settings_signature(self, value: tuple[str, int, int] | None) -> None:
+        self._catalog = replace(self._catalog, settings_signature=value)
+
+    def _record_time(self, operation: str, started: float) -> None:
+        stats = getattr(self._validation_local, "stats", None)
+        if stats is not None:
+            stats[operation + "_calls"] = stats.get(operation + "_calls", 0) + 1
+            elapsed = (perf_counter() - started) * 1000
+            stats[operation + "_ms"] = stats.get(operation + "_ms", 0.0) + elapsed
+            stats[operation + "_max_ms"] = max(stats.get(operation + "_max_ms", 0.0), elapsed)
+
+    def read_skill_bytes(self, path: Path) -> bytes:
+        started = perf_counter()
+        try:
+            return path.read_bytes()
+        finally:
+            self._record_time("file_read", started)
+
+    def verify_skill_source(self, skill: Skill) -> None:
+        digest = getattr(skill, "instruction_digest", None)
+        if digest and skill.skill_path:
+            try:
+                raw = self.read_skill_bytes(skill.skill_path)
+                current = self._instruction_digest(raw)
+                if current != digest:
+                    raise SkillDependencyError("SKILL_SOURCE_CHANGED", "Skill source changed during reading. Refresh and retry from offset=0.")
+            except OSError as exc:
+                raise SkillDependencyError("SKILL_SOURCE_UNAVAILABLE", f"Skill source became unreadable: {exc}") from exc
+
+    def _instruction_digest(self, raw: bytes) -> str:
+        started = perf_counter()
+        try:
+            return sha256(raw).hexdigest()
+        finally:
+            self._record_time("hash", started)
+
+    @contextmanager
+    def source_transaction(self):
+        """Hold the worker lock through refresh and validation, including cancellation."""
+        queued = perf_counter()
+        with self._reload_lock:
+            self._record_time("lock_wait", queued)
+            self.maybe_reload()
+            previous = getattr(self._validation_local, "in_transaction", False)
+            self._validation_local.in_transaction = True
+            try:
+                yield
+            finally:
+                self._validation_local.in_transaction = previous
+
+    def validate_references(self, names: tuple[str, ...]) -> SkillValidation:
+        """Resolve one source batch without borrowing any session state."""
+        from ..skill_runtime import SkillRuntime
+
+        started = perf_counter()
+        stats: dict[str, float] = {}
+        self._validation_local.stats = stats
+        try:
+            with self.source_transaction():
+                runtime = SkillRuntime(self)
+                results: dict[str, SkillReferenceSnapshot | SkillDependencyError] = {}
+                for name in dict.fromkeys(names):
+                    try:
+                        for skill in resolve_required_skills(self, [name]):
+                            if skill.name not in results:
+                                try:
+                                    results[skill.name] = runtime.resolve_reference(skill.name)
+                                except SkillDependencyError as exc:
+                                    results[skill.name] = exc
+                                    if exc.code in {"SKILL_SOURCE_CHANGED", "SKILL_SOURCE_UNAVAILABLE"}:
+                                        self._force_reload = True
+                            if isinstance(results[skill.name], SkillDependencyError):
+                                raise results[skill.name]
+                    except SkillDependencyError as exc:
+                        results[name] = exc
+                self._last_validated = {**self._last_validated, **results}
+                return SkillValidation(results, self._catalog)
+        finally:
+            self._validation_local.stats = None
+            _log.info("skill/validation duration_ms=%.3f unique_names=%d timings=%s",
+                      (perf_counter() - started) * 1000, len(set(names)), stats)
+
+    def _cached_validation(self, names: tuple[str, ...]) -> SkillValidation:
+        catalog, cached = self._catalog, self._last_validated
+        results: dict[str, SkillReferenceSnapshot | SkillDependencyError] = {}
+        for name in names:
+            try:
+                for skill in resolve_required_skills(catalog, [name]):
+                    snapshot = cached.get(skill.name)
+                    if isinstance(snapshot, SkillDependencyError):
+                        raise snapshot
+                    if (snapshot is None or snapshot.source != skill.source
+                            or snapshot.path != str(skill.skill_path or "")
+                            or json.loads(snapshot.metadata_json).get("instruction_digest") != skill.instruction_digest):
+                        raise SkillDependencyError("SKILL_VALIDATION_TIMEOUT", "Skill validation did not finish and no verified current-source snapshot is available.")
+                    results[skill.name] = snapshot
+            except SkillDependencyError as exc:
+                results[name] = exc
+        return SkillValidation(results, catalog, timed_out=True)
+
+    async def avalidate_references(self, names: tuple[str, ...], *,
+                                   timeout: float | None = None,
+                                   allow_stale: bool = True) -> SkillValidation:
+        """Share one in-flight worker; a timeout never cancels or unlocks it."""
+        timeout = self.validation_timeout_seconds if timeout is None else timeout
+        deadline = asyncio.get_running_loop().time() + timeout
+        prior_task = self._validation_task
+        while True:
+            task = self._validation_task
+            if task is None or task.done():
+                task = asyncio.create_task(asyncio.to_thread(self.validate_references, names))
+                self._validation_task = task
+                task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            try:
+                result = await asyncio.wait_for(asyncio.shield(task), max(0, deadline - asyncio.get_running_loop().time()))
+            except asyncio.TimeoutError:
+                _log.info("skill/validation_timeout timeout_ms=%.3f unique_names=%d", timeout * 1000, len(set(names)))
+                if allow_stale:
+                    return self._cached_validation(names)
+                error = SkillDependencyError("SKILL_VALIDATION_TIMEOUT", "Skill validation did not finish; retry later.")
+                return SkillValidation(dict.fromkeys(names, error), self._catalog, timed_out=True)
+            # A caller may wait for an older transaction, but must not use
+            # source bytes sampled before this call (especially paged reads).
+            if task is not prior_task and all(name in result.references for name in names):
+                return result
+
+    async def areload(self) -> None:
+        await self.avalidate_references(())
 
     @staticmethod
     def _parse_skill_name_list(raw_value: object) -> Optional[List[str]]:
@@ -379,6 +593,13 @@ class SkillLoader:
         return self._sources[0].directory if self._sources else Path("./skills")
 
     def with_expert_skill_sources(self, skill_names: List[str]) -> "SkillLoader":
+        with self._reload_lock:
+            return self._with_expert_skill_sources(skill_names)
+
+    async def awith_expert_skill_sources(self, skill_names: List[str]) -> "SkillLoader":
+        return await asyncio.to_thread(self.with_expert_skill_sources, skill_names)
+
+    def _with_expert_skill_sources(self, skill_names: List[str]) -> "SkillLoader":
         """Clone this loader with uninstalled bundled skills requested by an expert.
 
         Recommended skills intentionally stay out of the builtin manifest until
@@ -477,7 +698,7 @@ class SkillLoader:
         even determine a placeholder name (e.g. path outside a directory).
         """
         try:
-            raw_content = skill_path.read_bytes()
+            raw_content = self.read_skill_bytes(skill_path)
             content = raw_content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         except OSError as e:
             return self._broken_placeholder(skill_path, source, f"unreadable file: {e}")
@@ -571,7 +792,7 @@ class SkillLoader:
                 name=frontmatter["name"],
                 description=frontmatter["description"],
                 content=processed_content,
-                instruction_digest=sha256(raw_content).hexdigest(),
+                instruction_digest=self._instruction_digest(raw_content),
                 source=source,
                 owner_id=owner_id,
                 disabled=source == "connector" and frontmatter.get("disable") is True,
@@ -635,21 +856,40 @@ class SkillLoader:
 
     def discover_skills(self) -> List[Skill]:
         """Discover skills, preserving canonical implementations of reserved runtimes."""
-        self.loaded_skills = {}
-        self._all_skills = {}
-        # Reset per-run parse errors so callers always see the current pass only.
-        self.parse_errors = []
+        with self._reload_lock:
+            previous = getattr(self._validation_local, "parse_errors", None)
+            self._validation_local.parse_errors = []
+            try:
+                return self._discover_skills()
+            finally:
+                if previous is None:
+                    del self._validation_local.parse_errors
+                else:
+                    self._validation_local.parse_errors = previous
+
+    def _discover_skills(self) -> List[Skill]:
+        loaded: Dict[str, Skill] = {}
+        all_skills: Dict[str, Skill] = {}
+        sources = copy.deepcopy(self._sources)
         orphan_count = 0
         reserved_override_count = 0
         discovered: List[Skill] = []
+        settings_signature = self._file_signature(self._skill_settings_path)
         disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path)
+        scanned = getattr(self._validation_local, "signatures", {})
 
         # Reverse order: load lower-priority sources first, then higher-priority
         # ones overwrite by dict assignment.
-        for entry in reversed(self._sources):
+        for entry in reversed(sources):
             entry.unavailable_skills.clear()
             if not entry.directory.exists():
+                entry.signature = ()
+                entry.last_mtime = 0
                 continue
+            # Keep the signature from before parsing: a file/settings edit
+            # during discovery must trigger another refresh on the next call.
+            key = (entry.directory, entry.source)
+            signature = scanned[key] if key in scanned else self._source_signature(entry)
 
             # Manifest only applies to builtin sources. For user skills we
             # never want to hide SKILL.md files the user (or officev3) dropped
@@ -672,7 +912,7 @@ class SkillLoader:
                     orphan_count += 1
                     continue
 
-                current = self._all_skills.get(skill.name)
+                current = all_skills.get(skill.name)
                 if (
                     (entry.source == "user" and skill.name in RESERVED_BUILTIN_SKILL_NAMES)
                     or (
@@ -688,21 +928,22 @@ class SkillLoader:
                     reserved_override_count += 1
                     continue
 
-                self._all_skills[skill.name] = skill
+                all_skills[skill.name] = skill
 
                 if skill.disabled or skill.name in disabled_skill_names:
-                    self.loaded_skills.pop(skill.name, None)
+                    loaded.pop(skill.name, None)
                     continue
 
-                self.loaded_skills[skill.name] = skill
+                loaded[skill.name] = skill
 
             # Cache a cheap signature for reload detection. Keep last_mtime for
             # backward compatibility with older tests/debug code that may read it.
-            entry.signature = self._source_signature(entry)
+            entry.signature = signature
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
-        self._skill_settings_signature = self._file_signature(self._skill_settings_path)
-        discovered = list(self.loaded_skills.values())
+        self._catalog = _SkillCatalog(loaded, all_skills, sources, self.parse_errors,
+                                     settings_signature)
+        discovered = list(loaded.values())
 
         # Aggregate diagnostics: one line total, not one per broken file. The
         # first few offending paths are attached to help operators locate them
@@ -734,9 +975,10 @@ class SkillLoader:
         return discovered
 
     def _skill_pool(self, include_disabled: bool = False) -> Dict[str, Skill]:
+        catalog = self._catalog
         if include_disabled:
-            return getattr(self, "_all_skills", self.loaded_skills) or self.loaded_skills
-        return self.loaded_skills
+            return catalog.all_skills or catalog.enabled
+        return catalog.enabled
 
     def _iter_skill_files(self, entry: _SourceEntry) -> List[Path]:
         """Return candidate SKILL.md files for one source.
@@ -888,6 +1130,13 @@ class SkillLoader:
 
     def _source_signature(self, entry: _SourceEntry) -> Tuple[Tuple[str, int, int], ...]:
         """Return a lightweight signature for files that affect skill loading."""
+        started = perf_counter()
+        try:
+            return self._scan_source_signature(entry)
+        finally:
+            self._record_time("source_scan", started)
+
+    def _scan_source_signature(self, entry: _SourceEntry) -> Tuple[Tuple[str, int, int], ...]:
         if not entry.directory.exists():
             return ()
 
@@ -939,7 +1188,20 @@ class SkillLoader:
         Returns:
             True if a reload was performed, False otherwise.
         """
-        changed = False
+        if getattr(self._validation_local, "in_transaction", False):
+            return False
+        # Synchronous catalog readers may use the last complete publication
+        # while a worker refreshes; never wait for its lock on the event loop.
+        if not self._reload_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._maybe_reload()
+        finally:
+            self._reload_lock.release()
+
+    def _maybe_reload(self) -> bool:
+        changed = self._force_reload
+        scanned = {}
         if hasattr(self, "_skill_settings_path"):
             if (
                 self._file_signature(self._skill_settings_path)
@@ -948,12 +1210,17 @@ class SkillLoader:
                 changed = True
         for entry in self._sources:
             current = self._source_signature(entry)
+            scanned[(entry.directory, entry.source)] = current
             if current != entry.signature:
                 changed = True
-                break
 
         if changed:
-            self.discover_skills()
+            self._validation_local.signatures = scanned
+            try:
+                self.discover_skills()
+                self._force_reload = False
+            finally:
+                del self._validation_local.signatures
         return changed
 
     def get_skill(self, name: str, *, include_disabled: bool = False) -> Optional[Skill]:
@@ -983,9 +1250,10 @@ class SkillLoader:
     def unavailable_skills_metadata(self) -> List[Dict[str, object]]:
         """Return metadata-only diagnostics for manifest-rejected local Skills."""
         diagnostics: Dict[str, Dict[str, object]] = {}
-        for entry in reversed(self._sources):
+        catalog = self._catalog
+        for entry in reversed(catalog.sources):
             diagnostics.update(entry.unavailable_skills)
-        for name in self._skill_pool(include_disabled=True):
+        for name in catalog.all_skills or catalog.enabled:
             diagnostics.pop(name, None)
         return [dict(diagnostics[name]) for name in sorted(diagnostics)]
 
@@ -1257,7 +1525,7 @@ class SkillSelector:
         self._suffix = tail
         self._last_metadata = None
 
-    def update(self, user_input: str) -> Optional[str]:
+    def update(self, user_input: str, *, refresh: bool = True) -> Optional[str]:
         """Update cumulative query and return new system prompt text.
 
         Returns ``None`` when the helper is not bound or the resulting
@@ -1265,7 +1533,8 @@ class SkillSelector:
         """
         if self._prefix is None or self._suffix is None:
             return None
-        self._loader.maybe_reload()
+        if refresh:
+            self._loader.maybe_reload()
         if user_input and user_input.strip():
             self._cumulative.append(user_input.strip())
         query = " ".join(self._cumulative)

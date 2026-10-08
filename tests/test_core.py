@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
@@ -413,7 +414,20 @@ async def test_nested_tool_calls_do_not_consume_parent_tool_budget(
             LLMResponse(content="done", finish_reason="stop"),
         ]
     )
-    nested_tool = NestedDelegationTool(nested_tool_calls=200)
+    class IntegratedDelegationTool(NestedDelegationTool):
+        supports_delegated_budget = True
+        uses_invocation_context = True
+
+        async def _invoke_validated(self, arguments, *, context):
+            from box_agent.tools.delegated_budget import bind_budgets
+            from box_agent.tools.engine.execution import invoke_tool_once
+
+            with bind_budgets(context.child_budgets):
+                for _ in range(self.nested_tool_calls):
+                    assert (await invoke_tool_once(EchoTool(), {"text": "child work"})).success
+            return await super()._invoke_validated(arguments, context=context)
+
+    nested_tool = IntegratedDelegationTool(nested_tool_calls=200)
 
     events = await collect(
         run_agent_loop(
@@ -434,7 +448,7 @@ async def test_nested_tool_calls_do_not_consume_parent_tool_budget(
 
 
 @pytest.mark.asyncio
-async def test_delegated_tool_budget_blocks_only_new_subagents(tmp_path) -> None:
+async def test_hard_delegated_budget_rejects_unintegrated_subagents(tmp_path) -> None:
     messages = _msgs()
     llm = MockLLM(
         [
@@ -481,7 +495,7 @@ async def test_delegated_tool_budget_blocks_only_new_subagents(tmp_path) -> None
         )
     )
 
-    assert nested_tool.calls == 1
+    assert nested_tool.calls == 0
     blocked = next(
         event
         for event in events
@@ -489,12 +503,7 @@ async def test_delegated_tool_budget_blocks_only_new_subagents(tmp_path) -> None
         and event.tool_call_id == "delegated-blocked"
     )
     assert blocked.success is False
-    assert "Delegated tool call budget reached" in (blocked.error or "")
-    assert any(
-        isinstance(event, InjectedMessageEvent)
-        and "子 Agent 内部工具预算已达到上限" in event.content
-        for event in events
-    )
+    assert "DELEGATED_BUDGET_UNSUPPORTED" in (blocked.error or "")
 
 
 
@@ -1341,6 +1350,31 @@ async def test_force_plan_start_snapshot_not_emitted_without_plan_tool():
     )
 
     assert not any(isinstance(event, PlanSnapshotEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_plan_retry_preserves_original_user_request():
+    from box_agent.kernel.loop import _latest_user_text
+
+    llm = CapturingStreamLLM([
+        LLMResponse(content="Preparing the plan.", finish_reason="stop"),
+        LLMResponse(content="", finish_reason="tool", tool_calls=[
+            ToolCall(id="plan-retry", type="function", function=FunctionCall(
+                name="plan_write", arguments={"action": "set", "title": "Plan"},
+            )),
+        ]),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+    await collect(run_agent_loop(
+        llm=llm, messages=_task_msgs(), tools={"plan_write": PlanWriteStubTool()},
+        max_steps=5, force_plan_start=True,
+    ))
+    request = llm.message_calls[1]
+    feedback = [message for message in request if message.source == "runtime"]
+    assert len(feedback) == 2
+    assert all("Runtime state update:" in message.content for message in feedback)
+    assert all("The user sent" not in message.content for message in feedback)
+    assert _latest_user_text(request) == _latest_user_text(_task_msgs())
 
 
 @pytest.mark.asyncio
@@ -3869,7 +3903,7 @@ async def test_total_tool_call_budget_is_a_hard_loop_limit():
 
 
 @pytest.mark.asyncio
-async def test_identical_tool_calls_in_one_response_execute_only_once():
+async def test_explicitly_mergeable_tool_calls_in_one_response_execute_only_once():
     messages = _msgs()
     duplicate_calls = [
         ToolCall(
@@ -3886,6 +3920,7 @@ async def test_identical_tool_calls_in_one_response_execute_only_once():
         ]
     )
     echo = CountingEchoTool()
+    echo.deduplicate_within_batch = True
 
     events = await collect(
         run_agent_loop(
@@ -5288,7 +5323,7 @@ def test_artifact_detect_in_nested_task_dir(tmp_path):
     assert a.mime == "image/png"
     assert a.size == 4
     assert a.rel_path == "output/chart.png"
-    assert a.abs_path.endswith("output/chart.png")
+    assert Path(a.abs_path) == out / "chart.png"
     assert a.uri.startswith("file://")
     assert a.sha256 != ""
     assert a.produced_at != ""
@@ -5435,16 +5470,21 @@ async def test_browser_snapshot_relative_filename_cannot_escape_session_cwd(tmp_
     assert "BROWSER_SNAPSHOT_OUTPUT_PATH_INVALID" in (result.error or "")
 
 
-def test_artifact_detect_data_kind(tmp_path):
-    """CSV under a cwd child directory is classified as data."""
+@pytest.mark.parametrize("mime,kind", [
+    ("text/csv", "data"),
+    ("application/vnd.ms-excel", "spreadsheet"),
+])
+def test_artifact_detect_csv_kind_from_mime(tmp_path, monkeypatch, mime, kind):
+    """Classification follows the detected MIME independently of host mappings."""
+    monkeypatch.setattr(mimetypes, "guess_type", lambda *args, **kwargs: (mime, None))
     out = tmp_path / "output"
     out.mkdir()
     (out / "results.csv").write_text("a,b\n1,2")
     arts = _detect_artifacts("t2", "jupyter", "Saved to [output/results.csv]", str(tmp_path))
     assert len(arts) == 1
-    assert arts[0].kind == "data"
-    assert "csv" in arts[0].mime
-    assert arts[0].rel_path == "output/results.csv"
+    assert arts[0].kind == kind
+    assert arts[0].mime == mime
+    assert Path(arts[0].rel_path) == Path("output/results.csv")
 
 
 def test_browser_screenshot_is_persisted_inside_session_cwd(tmp_path):
@@ -5835,6 +5875,12 @@ async def test_provider_stale_with_partial_content_resumes_once(tmp_path):
     assert injected_messages[0].user_visible is False
     assert "从未完成的动作继续" in injected_messages[0].content
     assert "5,500" in injected_messages[0].content
+    feedback = next(message for message in msgs if "从未完成的动作继续" in str(message.content))
+    assert feedback.source == "runtime"
+    assert "Runtime state update:" in feedback.content
+    assert "The user sent" not in feedback.content
+    from box_agent.kernel.loop import _latest_user_text
+    assert _latest_user_text(msgs) == "hi"
 
 
 @pytest.mark.asyncio
@@ -6046,7 +6092,7 @@ def test_artifact_envelope_shape(tmp_path):
     assert env["kind"] == "spreadsheet"
     assert env["filename"] == "report.xlsx"
     assert env["rel_path"] == "reports/report.xlsx"
-    assert env["abs_path"].endswith("reports/report.xlsx")
+    assert Path(env["abs_path"]) == f
     assert env["uri"].startswith("file://")
     assert env["size"] == 4
     assert env["sha256"]

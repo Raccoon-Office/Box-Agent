@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .api import (
@@ -13,8 +13,10 @@ from .api import (
     EventEnvelope,
     RunResult,
     RunStatus,
+    RunDeliveryOptions,
 )
-from .events import ArtifactEvent, DoneEvent, ErrorEvent, TokenUsageEvent
+from .run_events import RunDeliveryError, RunEventChannel
+from .run_result import RunResultCollector
 from .run_control import PermissionBroker, RunControl
 
 if TYPE_CHECKING:
@@ -39,23 +41,17 @@ class AgentRunHandle:
     )
     _control: RunControl | None = field(default=None, kw_only=True, repr=False)
     _permission_broker: PermissionBroker | None = field(default=None, kw_only=True, repr=False)
-    _event_queue: asyncio.Queue[Any] = field(
-        default_factory=asyncio.Queue, init=False, repr=False,
-    )
+    _channel: RunEventChannel = field(default_factory=RunEventChannel, init=False, repr=False)
+    _collector: RunResultCollector | None = field(default=None, init=False, repr=False)
     _runner_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _result_future: asyncio.Future[RunResult] | None = field(
         default=None, init=False, repr=False,
     )
     _events_consumed: bool = field(default=False, init=False, repr=False)
+    _result_only: bool = field(default=False, init=False, repr=False)
+    _drain_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _runner_error: BaseException | None = field(default=None, init=False, repr=False)
-    _sequence: int = field(default=0, init=False, repr=False)
-    _usage: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-    _artifacts: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
-    _error: dict[str, Any] | None = field(default=None, init=False, repr=False)
-    _result: RunResult | None = field(default=None, init=False, repr=False)
-
-    _END = object()
-
+    _delivery_error: RunDeliveryError | None = field(default=None, init=False, repr=False)
     @classmethod
     def for_run(
         cls,
@@ -66,10 +62,11 @@ class AgentRunHandle:
         command_sink: Callable[[ControlCommand], Awaitable[None] | None] | None = None,
         control: RunControl | None = None,
         permission_broker: PermissionBroker | None = None,
+        delivery_options: RunDeliveryOptions | None = None,
     ) -> "AgentRunHandle":
         """Create a protocol-facing handle while retaining session state access."""
 
-        return cls(
+        handle = cls(
             state,
             _run_id=run_id,
             _events_factory=events_factory,
@@ -77,6 +74,8 @@ class AgentRunHandle:
             _control=control,
             _permission_broker=permission_broker,
         )
+        handle._channel = RunEventChannel(delivery_options)
+        return handle
 
     @property
     def run_id(self) -> str:
@@ -188,6 +187,7 @@ class AgentRunHandle:
         self._require_run()
         if self._runner_task is None:
             loop = asyncio.get_running_loop()
+            self._collector = RunResultCollector(self.run_id)
             self._result_future = loop.create_future()
             self._runner_task = loop.create_task(self._run())
 
@@ -196,97 +196,69 @@ class AgentRunHandle:
             events = self._events_factory()
             try:
                 async for payload in events:
-                    self._sequence += 1
-                    envelope = EventEnvelope(
-                        run_id=self.run_id,
-                        event_id=f"{self.run_id}:{self._sequence}",
-                        sequence=self._sequence,
-                        payload=payload,
-                    )
-                    self._collect(payload)
-                    await self._event_queue.put(envelope)
+                    if self._delivery_error is not None:
+                        raise self._delivery_error
+                    await self._channel.publish(self.run_id, payload)
+                    self._collector.collect(payload)
+                if self._delivery_error is not None:
+                    raise self._delivery_error
             finally:
                 close = getattr(events, "aclose", None)
                 if callable(close):
                     await close()
         except BaseException as exc:
+            exc = self._delivery_error or exc
             self._runner_error = exc
-            if self._result is None:
-                self._result = RunResult(
+            # Closing a handle after DoneEvent may cancel pending cleanup.
+            if (self._collector.result is None
+                    or not isinstance(exc, asyncio.CancelledError)):
+                self._collector.result = RunResult(
                     run_id=self.run_id,
                     status=RunStatus.CANCELLED if isinstance(exc, asyncio.CancelledError)
                     else RunStatus.FAILED,
                     stop_reason="cancelled" if isinstance(exc, asyncio.CancelledError)
                     else "error",
                     final_content="",
-                    usage=self._usage,
-                    artifacts=tuple(self._artifacts),
-                    error={"type": type(exc).__name__, "message": str(exc)},
+                    usage=self._collector.usage,
+                    artifacts=tuple(self._collector.artifacts),
+                    error={"type": type(exc).__name__, "message": str(exc),
+                           **({"code": exc.code} if isinstance(exc, RunDeliveryError) else {})},
                 )
             if isinstance(exc, asyncio.CancelledError):
                 raise
         finally:
             if self._permission_broker is not None:
                 self._permission_broker.cancel()
-            if self._result is None:
-                self._result = RunResult(
+            if self._collector.result is None:
+                self._collector.result = RunResult(
                     run_id=self.run_id,
                     status=RunStatus.FAILED,
                     stop_reason="error",
                     final_content="",
-                    usage=self._usage,
-                    artifacts=tuple(self._artifacts),
+                    usage=self._collector.usage,
+                    artifacts=tuple(self._collector.artifacts),
                     error={
                         "type": "MissingTerminalEvent",
                         "message": "run ended without a DoneEvent",
                     },
                 )
             if self._result_future is not None and not self._result_future.done():
-                self._result_future.set_result(self._result)
-            await self._event_queue.put(self._END)
-
-    def _collect(self, payload: Any) -> None:
-        if isinstance(payload, TokenUsageEvent):
-            self._usage["total_tokens"] = (
-                self._usage.get("total_tokens", 0) + payload.total_tokens
-            )
-        elif isinstance(payload, ArtifactEvent):
-            self._artifacts.append(asdict(payload))
-        elif isinstance(payload, ErrorEvent):
-            self._error = {
-                "message": payload.message,
-                "error_code": payload.error_code,
-                "error_category": payload.error_category,
-                "error_details": payload.error_details,
-            }
-        elif isinstance(payload, DoneEvent):
-            if payload.stop_reason is not None:
-                status = {
-                    "cancelled": RunStatus.CANCELLED,
-                    "waiting_for_user": RunStatus.WAITING_FOR_USER,
-                    "error": RunStatus.FAILED,
-                }.get(payload.stop_reason.value, RunStatus.COMPLETED)
-                self._result = RunResult(
-                    run_id=self.run_id,
-                    status=status,
-                    stop_reason=payload.stop_reason.value,
-                    final_content=payload.final_content,
-                    usage=self._usage,
-                    artifacts=tuple(self._artifacts),
-                    error=self._error,
-                )
+                self._result_future.set_result(self._collector.result)
+            self._channel.close()
 
     async def events(self) -> AsyncIterator[EventEnvelope]:
         """Yield ordered event envelopes for this run."""
 
         self._start()
+        if self._result_only:
+            raise RuntimeError("run uses result-only consumption; events are unavailable")
         if self._events_consumed:
             raise RuntimeError("run events already have a consumer")
         self._events_consumed = True
         try:
             while True:
-                item = await self._event_queue.get()
-                if item is self._END:
+                item = await self._channel.get()
+                if item is self._channel.END:
                     if self._runner_error is not None:
                         raise self._runner_error
                     return
@@ -301,7 +273,7 @@ class AgentRunHandle:
         self._start()
         if not isinstance(command, ControlCommand):
             raise TypeError("command must be a ControlCommand")
-        if (not self.is_active or self._result is not None
+        if (not self.is_active or self._collector.result is not None
                 or getattr(self._state, "_run_handle", self) is not self):
             raise RuntimeError("command does not belong to the active run")
         if command.kind is ControlCommandKind.PERMISSION_RESPONSE:
@@ -310,16 +282,14 @@ class AgentRunHandle:
             if not await self._permission_broker.respond(command):
                 raise ValueError("permission response does not match a pending request")
             return
+        if command.kind is ControlCommandKind.CANCEL:
+            self.request_cancel()
         if self._command_sink is not None:
             result = self._command_sink(command)
             if result is not None:
                 await result
             return
         if command.kind is ControlCommandKind.CANCEL:
-            if self._control is not None:
-                self._control.request_cancel()
-            if self._permission_broker is not None:
-                self._permission_broker.cancel()
             request_cancel = getattr(self._state, "request_cancel", None)
             if callable(request_cancel):
                 request_cancel()
@@ -349,16 +319,26 @@ class AgentRunHandle:
             f"control command {command.kind.value!r} is not supported yet"
         )
 
+    def request_cancel(self) -> None:
+        """Wake delivery and control waits from a synchronous session cancel."""
+        self._channel.interrupt()
+        if self._control is not None:
+            self._control.request_cancel()
+        if self._permission_broker is not None:
+            self._permission_broker.cancel()
+
     async def publish(self, payload: Any) -> None:
         """Publish a host-facing event generated by a run-side broker."""
 
-        self._sequence += 1
-        await self._event_queue.put(EventEnvelope(
-            run_id=self.run_id,
-            event_id=f"{self.run_id}:{self._sequence}",
-            sequence=self._sequence,
-            payload=payload,
-        ))
+        try:
+            await self._channel.publish(self.run_id, payload)
+        except RunDeliveryError as exc:
+            self._delivery_error = exc
+            if self._control is not None:
+                self._control.request_cancel()
+            if self._runner_task is not None and self._runner_task is not asyncio.current_task():
+                self._runner_task.cancel()
+            raise
 
     async def cancel(self) -> None:
         """Request cooperative cancellation of this run."""
@@ -366,17 +346,31 @@ class AgentRunHandle:
         await self.send(ControlCommand.cancel())
 
     async def result(self) -> RunResult:
-        """Wait for and return the single terminal result."""
+        """Wait for the result; without a stream consumer, consume privately.
+
+        Start iterating events first when the caller needs the event stream.
+        Cancelling this waiter never cancels the run or its private consumer.
+        """
 
         self._start()
+        if not self._events_consumed and not self._result_only:
+            self._result_only = True
+            if self._permission_broker is not None:
+                self._permission_broker.use_result_only()
+            self._drain_task = asyncio.create_task(self._drain_events())
         assert self._result_future is not None
         return await asyncio.shield(self._result_future)
+
+    async def _drain_events(self) -> None:
+        while await self._channel.get() is not self._channel.END:
+            pass
 
     async def aclose(self) -> None:
         """Settle the runner and its resources when a host abandons the run."""
 
         if self._runner_task is None:
             return
+        self._channel.interrupt()
         if self._permission_broker is not None:
             self._permission_broker.cancel()
         if not self._runner_task.done():
@@ -384,12 +378,16 @@ class AgentRunHandle:
         await asyncio.gather(self._runner_task, return_exceptions=True)
         # A task cancelled before its first step never enters _run's finally.
         if self._result_future is not None and not self._result_future.done():
-            self._result = RunResult(
+            self._collector.result = RunResult(
                 run_id=self.run_id, status=RunStatus.CANCELLED,
                 stop_reason="cancelled", final_content="",
             )
-            self._result_future.set_result(self._result)
-            self._event_queue.put_nowait(self._END)
+            self._result_future.set_result(self._collector.result)
+            self._channel.close()
+        if self._drain_task is not None:
+            await asyncio.gather(self._drain_task, return_exceptions=True)
+        if self._permission_broker is not None:
+            await self._permission_broker.aclose()
 
     async def __aenter__(self) -> "AgentRunHandle":
         self._start()

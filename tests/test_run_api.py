@@ -47,6 +47,23 @@ class _FakeSession:
 
 
 @pytest.mark.asyncio
+async def test_shared_run_commands_use_the_same_injection_deduplication():
+    from box_agent.injections import InjectionManager
+
+    session = _FakeSession()
+    session.inject_queue = InjectionManager()
+    handle = await AgentService().start(
+        RunRequest(run_id="run-1", session_id="session-1", user_message="work"),
+        session=session,
+    )
+    command = ControlCommand.inject_message("extra", injection_id="same-id")
+    await handle.send(command)
+    await handle.send(command)
+    assert session.inject_queue.qsize() == 1
+    await handle.result()
+
+
+@pytest.mark.asyncio
 async def test_agent_service_start_exposes_events_commands_and_result() -> None:
     session = _FakeSession()
     request = RunRequest(
@@ -171,6 +188,31 @@ async def test_closing_handle_settles_active_run_and_closes_its_stream() -> None
     assert closed.is_set()
     assert not handle.is_active
     assert (await handle.result()).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_closing_handle_after_done_preserves_completed_result() -> None:
+    cleaning = asyncio.Event()
+
+    class ClosingSession(_FakeSession):
+        async def run_events(self, *, options=None):
+            try:
+                yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="finished")
+            finally:
+                cleaning.set()
+                await asyncio.Event().wait()
+
+    handle = await AgentService().start(
+        RunRequest("close-after-done", "session", "Work"), session=ClosingSession(),
+    )
+    result_waiter = asyncio.create_task(handle.result())
+    await cleaning.wait()
+
+    await handle.aclose()
+
+    result = await result_waiter
+    assert result.status == "completed"
+    assert result.final_content == "finished"
 
 
 class _SessionAgent(_FakeAgent):

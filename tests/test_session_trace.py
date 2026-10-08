@@ -293,7 +293,11 @@ async def test_llm_wrapper_records_request_response_tokens_and_ttfb(tmp_path):
             yield StreamEvent(
                 type="finish",
                 finish_reason="stop",
-                usage=TokenUsage(prompt_tokens=7, completion_tokens=2, total_tokens=9),
+                usage=TokenUsage(
+                    prompt_tokens=7, completion_tokens=2, total_tokens=9,
+                    input_tokens=4, cache_read_input_tokens=3,
+                    cache_read_input_tokens_reported=True,
+                ),
                 provider_response_id="chatcmpl-provider-response-1",
                 provider_request_id="provider-request-1",
             )
@@ -335,6 +339,7 @@ async def test_llm_wrapper_records_request_response_tokens_and_ttfb(tmp_path):
         "prompt_tokens": 7,
         "completion_tokens": 2,
         "total_tokens": 9,
+        "cached_tokens": 3,
     }
     assert isinstance(response["data"]["timing"]["ttfb_ms"], int)
     assert response["data"]["timing"]["ttfb_ms"] <= response["data"]["timing"]["duration_ms"]
@@ -473,12 +478,20 @@ async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
 
     class DoneLLM:
         async def generate_stream(self, messages, tools=None, **kwargs):
+            from box_agent.llm.token_meter import record_usage
+
             emit_session_trace("test.producer_started")
             yield StreamEvent(type="text", delta="answer")
+            usage = TokenUsage(
+                prompt_tokens=4, completion_tokens=1, total_tokens=5,
+                input_tokens=2, cache_read_input_tokens=2,
+                cache_read_input_tokens_reported=True,
+            )
+            record_usage(usage)
             yield StreamEvent(
                 type="finish",
                 finish_reason="stop",
-                usage=TokenUsage(prompt_tokens=4, completion_tokens=1, total_tokens=5),
+                usage=usage,
             )
 
     isolated_home = str(tmp_path / "home")
@@ -521,6 +534,8 @@ async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
     }
     turn_records = [record for record in records if record["event"].startswith("turn.")]
     assert all(record["turn_id"] == "turn-current" for record in turn_records)
+    turn_end = next(record for record in turn_records if record["event"] == "turn.end")
+    assert turn_end["data"]["usage"]["cached_tokens"] == 2
     producer = next(record for record in records if record["event"] == "test.producer_started")
     assert producer["turn_id"] == "turn-current"
     emit_session_trace("test.after_prompt")

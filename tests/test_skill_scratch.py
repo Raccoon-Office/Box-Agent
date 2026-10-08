@@ -172,7 +172,7 @@ def test_cleanup_skill_scratch_dir_rejects_replaced_root(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_qa_scratch_outputs_are_reclaimed_without_removing_retained_qa(
-    tmp_path: Path,
+    tmp_path: Path, posix_shell,
 ) -> None:
     config = Config(
         llm=LLMConfig(api_key="test-key"),

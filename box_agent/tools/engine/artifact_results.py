@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -295,6 +296,7 @@ def _detect_changed_files(
         if os.name == "nt":
             paths.add(relative.replace("/", "\\"))
             paths.add(file_path.resolve().as_posix())
+            paths.update(json.dumps(path, ensure_ascii=False)[1:-1] for path in tuple(paths))
         if not any(
             re.search(r"(?<![\w./\\-])" + re.escape(path) + r"(?![\w./\\-])", content)
             for path in paths

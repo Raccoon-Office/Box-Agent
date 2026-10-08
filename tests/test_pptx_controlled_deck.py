@@ -181,11 +181,13 @@ def _mix_hex(foreground: str, background: str, foreground_weight: float) -> str:
     return "#" + "".join(f"{channel:02X}" for channel in channels)
 
 
-def test_layout_manifest_is_generated_from_registry() -> None:
-    result = _run("build_layout_manifest.js", "--check")
+def test_layout_manifest_is_generated_from_registry(tmp_path) -> None:
+    canonical = tmp_path / "manifest.json"
+    canonical.write_text((SKILL_DIR / "layouts/manifest.json").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    result = _run("build_layout_manifest.js", "--out", str(canonical), "--check")
 
     assert result.returncode == 0, result.stderr
-    manifest = json.loads((SKILL_DIR / "layouts" / "manifest.json").read_text())
+    manifest = json.loads((SKILL_DIR / "layouts" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["generated_from"] == "layouts/registry.js + themes/*.json"
 
 

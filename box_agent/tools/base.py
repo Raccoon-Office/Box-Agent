@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from .delegated_budget import BudgetCharge, DelegatedBudget
 
 from .schema_validation import (
     ToolArgumentIssue,
@@ -45,6 +47,8 @@ class ToolInvocationContext:
     event_queue: asyncio.Queue | None = None
     parent_tool_call_id: str = ""
     skill_reader: Callable[..., ToolResult] | None = None
+    child_budgets: tuple[DelegatedBudget, ...] = ()
+    budget_charge: BudgetCharge = field(default_factory=BudgetCharge)
 
 
 class Tool:
@@ -52,6 +56,10 @@ class Tool:
 
     aliases: tuple[str, ...] = ()
     parallel_safe: bool = False
+    # Trusted opt-in: identical calls in one model response may share an
+    # execution and its outcome (including failure). This also skips per-call
+    # execution hooks for duplicates. Read-only or idempotent is not enough.
+    deduplicate_within_batch: bool = False
     # Trusted interactive tools may stop the current Agent turn after a
     # successful invocation. Dynamic/MCP and ordinary tools inherit False.
     ends_turn_on_success: bool = False

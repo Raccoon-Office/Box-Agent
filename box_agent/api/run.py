@@ -27,6 +27,30 @@ class RunStatus(str, Enum):
     WAITING_FOR_USER = "waiting_for_user"
 
 
+class TerminationKind(str, Enum):
+    """Why execution ended; NORMAL does not assert task verification."""
+
+    NORMAL = "normal"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
+    WAITING_FOR_USER = "waiting_for_user"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+def classify_termination(stop_reason: str) -> TerminationKind:
+    return {
+        "end_turn": TerminationKind.NORMAL,
+        "max_steps": TerminationKind.BUDGET_EXHAUSTED,
+        "max_tokens": TerminationKind.BUDGET_EXHAUSTED,
+        "interrupted": TerminationKind.INTERRUPTED,
+        "cancelled": TerminationKind.CANCELLED,
+        "waiting_for_user": TerminationKind.WAITING_FOR_USER,
+        "error": TerminationKind.FAILED,
+    }.get(stop_reason, TerminationKind.UNKNOWN)
+
+
 def _required_text(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
@@ -190,10 +214,12 @@ class RunResult:
     usage: Mapping[str, int] = field(default_factory=dict)
     artifacts: tuple[Mapping[str, Any], ...] = ()
     error: Mapping[str, Any] | None = None
+    termination_kind: TerminationKind = field(init=False)
 
     def __post_init__(self) -> None:
         _required_text(self.run_id, "run_id")
         _required_text(self.stop_reason, "stop_reason")
+        object.__setattr__(self, "termination_kind", classify_termination(self.stop_reason))
         if not isinstance(self.status, RunStatus):
             object.__setattr__(self, "status", RunStatus(self.status))
         object.__setattr__(self, "usage", MappingProxyType(dict(self.usage)))
@@ -218,4 +244,5 @@ __all__ = [
     "RunRequest",
     "RunResult",
     "RunStatus",
+    "TerminationKind",
 ]

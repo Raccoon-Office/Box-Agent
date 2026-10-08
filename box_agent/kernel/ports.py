@@ -384,6 +384,11 @@ class ContextEnginePort(Protocol):
     Prepared results may supply ``on_committed`` for logged request delivery
     and ``on_response`` for a nonempty response without stale/truncation flags.
     Both callbacks are optional; the Kernel does not interpret their state.
+
+    Implementations may add ``abind_history`` and ``aprepare_request`` async
+    variants for source I/O. The Kernel prefers them while preserving the
+    synchronous contract for existing plugins. Async preparation must finish
+    observing history before the Kernel compacts it.
     """
 
     def configure_run(self, *, skill_engine: SkillEnginePort | None = None,

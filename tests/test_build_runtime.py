@@ -41,10 +41,10 @@ def test_relativize_node_manifest_rewrites_paths_under_node_root(tmp_path: Path)
     _relativize_node_manifest(node_root)
 
     active = json.loads((node_root / "manifest.json").read_text(encoding="utf-8"))["active"]
-    assert active["node"] == "versions/node-v24-test-darwin-arm64/bin/node"
-    assert active["npm"] == "versions/node-v24-test-darwin-arm64/bin/npm"
-    assert active["npx"] == "versions/node-v24-test-darwin-arm64/bin/npx"
-    assert active["node_modules"] == "sandbox/node_modules"
+    assert Path(active["node"]) == Path("versions/node-v24-test-darwin-arm64/bin/node")
+    assert Path(active["npm"]) == Path("versions/node-v24-test-darwin-arm64/bin/npm")
+    assert Path(active["npx"]) == Path("versions/node-v24-test-darwin-arm64/bin/npx")
+    assert Path(active["node_modules"]) == Path("sandbox/node_modules")
 
 
 def test_parse_target_accepts_darwin_x64() -> None:

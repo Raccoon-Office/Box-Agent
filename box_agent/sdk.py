@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from .agent_run import AgentRunHandle
 from .agent_service import AgentService
-from .api import RunRequest, RunResult
+from .api import RunDeliveryOptions, RunRequest, RunResult
 
 if TYPE_CHECKING:
     from .agent import AgentRunOptions
@@ -18,6 +18,8 @@ class AgentClient:
 
     The caller retains Session creation and cleanup. ``start`` exposes streaming
     and control through a handle; ``run`` consumes events and returns the result.
+    Use ``RunResult.termination_kind`` to distinguish budgets and interruption
+    from normal turn completion. Legacy ``COMPLETED`` is not task verification.
     """
 
     def __init__(
@@ -28,22 +30,22 @@ class AgentClient:
 
     async def start(
         self, request: RunRequest, *, options: AgentRunOptions | None = None,
+        delivery_options: RunDeliveryOptions | None = None,
     ) -> AgentRunHandle:
         """Start one run and return its event/control/result handle."""
 
         return await self._service.start(
-            request, session=self._session, options=options,
+            request, session=self._session, options=options, delivery_options=delivery_options,
         )
 
     async def run(
         self, request: RunRequest, *, options: AgentRunOptions | None = None,
+        delivery_options: RunDeliveryOptions | None = None,
     ) -> RunResult:
-        """Run to completion, consuming events without rendering them."""
+        """Use result-only delivery, including the host permission callback."""
 
-        handle = await self.start(request, options=options)
+        handle = await self.start(request, options=options, delivery_options=delivery_options)
         async with handle:
-            async for _event in handle.events():
-                pass
             return await handle.result()
 
 
