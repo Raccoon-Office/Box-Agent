@@ -1,10 +1,12 @@
 "use strict";
 
 // The converter picks a declared family, even when Chromium rendered a local
-// fallback. Resolve the actual fonts for the new canvas variants before export
+// fallback. Resolve the actual fonts for every controlled layout before export
 // so a missing display font does not change their geometry in PowerPoint.
 async function resolveExpressiveExportFonts(page) {
-  const selector = '#deck-root > .expressive-slide [data-prop-kind="text"]';
+  // Registered layouts also contain generated text such as timeline indices
+  // and page numbers, which have no editable property marker.
+  const selector = '#deck-root > .slide *';
   if (await page.locator(selector).count() === 0) return { resolved: 0, warnings: [] };
   let client;
   let resolved = 0;

@@ -105,7 +105,7 @@ function makeInput(outline, title, sourceText = "") {
     protocol_version: 2,
     palette_contract_version: 2,
     visual_contract_version: 1,
-    input_hash: hash({ protocol_version: 2, brief_version: 8, outline: contentOutline, source_text: sourceText, title, constraints, catalog_hash: catalogHash }),
+    input_hash: hash({ protocol_version: 2, brief_version: 9, outline: contentOutline, source_text: sourceText, title, constraints, catalog_hash: catalogHash }),
     catalog_hash: catalogHash,
     title, outline: clone(outline), user_constraints: constraints,
     source_text: sourceText, layout_hints_only: layoutHintsOnly,
@@ -135,10 +135,17 @@ function canonicalPlan(decision, input) {
   const issues = [];
   // Metadata supplied accidentally by a model never replaces program bindings.
   unknownFields(decision, ["theme_id", "profile_id", "visual_profile", "palette", "visual_requirements", "slides", "reason", "schema_version", "input_hash", "catalog_hash"], "designer", issues);
+  const inferredProfile = require("./subject_visual_core.js").inferSubjectProfile(
+    { title: input.title, outline: input.outline, source_text: input.source_text });
+  const chosenProfile = decision.visual_profile && normalizeVisualProfile(decision.visual_profile);
+  const profile = object(chosenProfile) && inferredProfile ? { ...inferredProfile, ...chosenProfile,
+    motifs: chosenProfile.motifs !== undefined && !Array.isArray(chosenProfile.motifs) ? chosenProfile.motifs
+      : [...new Set([...inferredProfile.motifs, ...(chosenProfile.motifs || [])])] }
+    : chosenProfile || inferredProfile;
   const plan = { schema_version: 1, layout_hints_only: input.layout_hints_only, input_hash: input.input_hash, catalog_hash: input.catalog_hash,
     theme_id: decision.theme_id,
     ...(decision.profile_id ? { profile_id: decision.profile_id } : {}),
-    ...(decision.visual_profile ? { visual_profile: normalizeVisualProfile(decision.visual_profile) } : {}),
+    ...(profile ? { visual_profile: normalizeVisualProfile(profile) } : {}),
     ...(decision.visual_requirements ? { visual_requirements: clone(decision.visual_requirements) } : {}),
     ...(input.palette_contract_version === 2
       ? { palette: mergePaletteDecision(decision.palette, input.user_constraints?.palette) }
@@ -146,9 +153,10 @@ function canonicalPlan(decision, input) {
     reason: boundedReason(decision.reason),
     slides: Array.isArray(decision.slides) ? decision.slides.map((slide, index) => {
       if (!object(slide)) return slide;
-      unknownFields(slide, ["layout_id", "visual_options", "page"], `designer.slides.${index}`, issues);
+      unknownFields(slide, ["layout_id", "visual_options", "subject_expression", "page"], `designer.slides.${index}`, issues);
       const layout = registry.getLayout(slide.layout_id);
       return { page: index + 1, layout_id: slide.layout_id, visual_options: slide.visual_options || {},
+        ...(slide.subject_expression !== undefined ? { subject_expression: slide.subject_expression } : {}),
         content_bindings: layout ? defaultBindings(layout) : {} };
     }) : [],
   };
@@ -281,10 +289,18 @@ function validatePlan(plan, input) {
   (Array.isArray(plan.slides) ? plan.slides : []).forEach((slide, index) => {
     const prefix = `design_plan.slides.${index}`;
     if (!object(slide)) { issues.push(`${prefix}: expected object`); return; }
-    unknownFields(slide, ["page", "layout_id", "visual_options", "content_bindings"], prefix, issues);
+    unknownFields(slide, ["page", "layout_id", "visual_options", "subject_expression", "content_bindings"], prefix, issues);
+    if (slide.subject_expression !== undefined && (typeof slide.subject_expression !== "string"
+      || slide.subject_expression.trim().length < 12 || slide.subject_expression.length > 240)) {
+      issues.push(`${prefix}.subject_expression: describe the concrete subject-specific image, diagram or spatial layout in 12-240 characters`);
+    }
     if (slide.page !== index + 1) issues.push(`${prefix}.page: expected ${index + 1}`);
     const layout = registry.getLayout(slide.layout_id);
     if (!layout) { issues.push(`${prefix}.layout_id: unknown registered layout`); return; }
+    if (slide.layout_id === "cards-grid-v1" && slide.visual_options?.variant === "featured"
+      && input.outline.slides[index]?.bullets?.length > 4) {
+      issues.push(`${prefix}.visual_options.variant: featured supports at most 4 items; choose balanced for 5 or 6 items`);
+    }
     if (!object(slide.visual_options)) issues.push(`${prefix}.visual_options: expected object, use {} for defaults`);
     else for (const [key, value] of Object.entries(slide.visual_options)) {
       const field = visualFields(layout)[key];

@@ -197,7 +197,7 @@ body[data-deck-theme] .slide.has-background.background-wash-light {
 }
 body[data-deck-theme] .slide.background-wash-light .slide-background::after {
   background: var(--deck-base-bg);
-  opacity: 0.94;
+  opacity: 0.72;
 }
 body[data-deck-theme] .slide.has-background.background-wash-dark {
   --deck-poster-text: #FFFFFF;

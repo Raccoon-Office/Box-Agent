@@ -11640,7 +11640,7 @@ def test_controlled_finalizer_delivers_degraded_html_for_image_manifest_failure(
 
 
 @pytest.mark.parametrize("local_warning_only", [False, True])
-def test_controlled_finalizer_delivers_degraded_html_for_runtime_probe_failure(
+def test_controlled_finalizer_preserves_draft_but_fails_confirmed_unreadable_text(
     tmp_path: Path, local_warning_only: bool,
 ) -> None:
     deck = json.loads(EXAMPLE.read_text(encoding="utf-8"))
@@ -11716,18 +11716,27 @@ childProcess.spawnSync = function(command, args, options) {
         env=env,
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == (1 if local_warning_only else 0), result.stdout + result.stderr
     assert html_path.is_file()
     marker = ("FINALIZE_PASS stage=runtime_probe warnings=1" if local_warning_only
               else "FINALIZE_ADVISORY stage=runtime_probe warnings=2")
     assert marker in result.stdout
     payload = json.loads(result.stdout.strip().splitlines()[-1])
-    assert payload["ok"] is True
+    assert payload["ok"] is (not local_warning_only)
+    assert payload["correction_required"] is local_warning_only
+    quality_report = json.loads((tmp_path / "qa/render_quality.json").read_text())
+    assert quality_report["ok"] is (not local_warning_only)
+    assert quality_report["advisory"] is False
+    assert bool(payload["blocking_issues"]) is local_warning_only
+    if local_warning_only:
+        assert "FINALIZE_FAIL stage=render_quality pages=1" in result.stderr
+        assert "--pages 1" in payload["next"]
+        assert "report partial" in quality_report["next"]
     assert payload["degraded"] is True
     assert payload["delivery_status"] == "degraded"
-    assert payload["degraded_stages"][-1] == "runtime_probe"
+    assert payload["degraded_stages"][-1] == ("render_quality" if local_warning_only else "runtime_probe")
     assert set(payload["degraded_stages"]).issubset(
-        {"html_self_check", "runtime_probe"}
+        {"html_self_check", "runtime_probe", "render_quality"}
     )
     runtime_report = json.loads(
         (tmp_path / "qa" / "runtime_probe.json").read_text(encoding="utf-8")

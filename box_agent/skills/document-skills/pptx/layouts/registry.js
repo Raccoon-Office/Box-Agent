@@ -872,6 +872,12 @@ function renderTechnicalDiagramRoot(props) {
 
 function renderTechnicalDiagram(slide, index) {
   const p = slide.props;
+  // Template authoring help is metadata, not presentation content.
+  const note = [
+    "连接关系来自 DiagramSpec；接口方向、协议和数据边界可在 HTML 中继续调整。",
+    "节点和边可增删；重新布局后自动计算层级、间距和正交连线。",
+    "PPTX 中导出为单个 SVG 矢量对象；节点级编辑保留在 HTML / DiagramSpec。",
+  ].includes(p.note) ? "" : p.note || "";
   return slideFrame(
     slide,
     index,
@@ -883,7 +889,7 @@ function renderTechnicalDiagram(slide, index) {
       editableText("p", "subtitle", p.subtitle || "", "header-note"),
       '</header>',
       `<div class="technical-diagram-stage" data-layout-region="content">${renderTechnicalDiagramRoot(p)}</div>`,
-      editableText("p", "note", p.note || "", "technical-diagram-note"),
+      editableText("p", "note", note, "technical-diagram-note"),
     ].join("\n")
   );
 }

@@ -84,7 +84,10 @@
     visit(props, fields);
     const headerCharacters = ["title", "statement", "subtitle", "eyebrow"]
       .reduce((sum, key) => sum + Array.from(String(props?.[key] || "").replace(/\s+/g, "")).length, 0);
-    const density = total <= 240 && longestBody <= 72 && longestHeading <= 28 && longestItem <= 90 && collectionSize <= 6
+    // Multi-row metrics need room for label, value and detail together, even
+    // when their copy is short. The sparse type scale exceeds that row height.
+    const multiRowMetrics = fields?.items?.itemShape?.value?.role === "metric" && collectionSize >= 4;
+    const density = !multiRowMetrics && total <= 240 && longestBody <= 72 && longestHeading <= 28 && longestItem <= 90 && collectionSize <= 6
       ? "sparse"
       : total <= 520 && longestBody <= 120 && longestHeading <= 40 && longestItem <= 120 && collectionSize <= 7
         ? "regular" : "dense";

@@ -1274,6 +1274,8 @@ function imagePrompt(context, slotRole) {
     slide.title ? `Slide title: ${slide.title}.` : "",
     slide.message ? `Page intent: ${slide.message}.` : "",
     slide.visual ? `Visual direction: ${slide.visual}.` : "",
+    typeof context?.visualProfile?.asset_style === "string"
+      ? `Subject visual identity: ${context.visualProfile.asset_style}` : "",
     textRegionSummary
       ? `Composition contract: keep text-safe region ${textRegionSummary} calm and low-detail.${focusRegionSummary ? ` Place the primary visual focus in ${focusRegionSummary}.` : " Use only atmospheric detail behind the copy."}`
       : "",
@@ -2191,6 +2193,7 @@ function main() {
           opts.imageMode,
           {
             deckTitle: opts.title,
+            visualProfile: independentDesign?.plan.visual_profile,
             briefText: globalBriefText,
             slideText: [
               outlineBinding ? authoringSlides[index].title : "",

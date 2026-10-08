@@ -163,11 +163,19 @@ ${scope} :is(.content-card, .timeline-step):nth-child(4n + ${index}) :is(h3, p, 
 function frozenPaletteCss(contract) {
   if (contract?.palette?.version !== 2) return "";
   const p = contract.palette.tokens;
+  const imageText = [p.inverse, p.text, p.background, p.surface]
+    .filter(Boolean).sort((a, b) => contrastRatio(b, "#0D0E12") - contrastRatio(a, "#0D0E12"))[0];
   const scope = 'body[data-deck-palette-version="2"] #deck-root > .slide';
   return `${scope} { --deck-content-text: ${p.text}; background-color: ${p.background}; color: ${p.text}; }
 ${scope} :is(h1,h2) { color: ${p.heading}; }
+${scope} [data-presentation-surface] { --deck-content-text: var(--presentation-ink); }
 ${scope} [data-deck-text-role="body"], ${scope} [data-deck-text-role="lead"] { color: var(--deck-content-text); }
-${scope}.has-background .slide-background::after { background: ${p.background}; opacity: .94; }
+${scope}.has-background.background-wash-light .slide-background::after { background: ${p.background}; }
+/* A dark image wash is a separate surface, not the light-page palette. */
+${scope}.layout-image-full-bleed .image-full-bleed-copy { --deck-content-text: ${imageText}; color: ${imageText}; }
+${scope}.layout-image-full-bleed .image-full-bleed-copy :is(h1,.eyebrow,.lead,.image-caption) { color: ${imageText}; }
+${scope}.background-wash-dark :is(.open-cover-copy,.cover-copy) { --deck-content-text: ${imageText}; color: ${imageText}; }
+${scope}.background-wash-dark :is(.open-cover-copy,.cover-copy) :is(h1,p) { color: ${imageText}; }
 `;
 }
 
@@ -353,7 +361,8 @@ function renderDocument(deck, theme) {
     && deck.design_contract.palette.accent_usage
     ? ` data-deck-palette-accent-usage="${escapeHtml(deck.design_contract.palette.accent_usage)}"`
     : "";
-  const styleOverrides = styleOverrideAttributes(deck.design_contract) + profileAttributes(deck.visual_profile);
+  const visualProfile = deck.design_plan?.visual_profile || deck.visual_profile;
+  const styleOverrides = styleOverrideAttributes(deck.design_contract) + profileAttributes(visualProfile);
   return [
     "<!doctype html>",
     '<html lang="zh-CN">',
@@ -372,6 +381,7 @@ function renderDocument(deck, theme) {
     themeVariables(theme, deck.design_contract),
     paletteComponentCss(deck.design_contract),
     frozenPaletteCss(deck.design_contract),
+    require("./subject_visual_core.js").profileCss(visualProfile, deck.design_contract?.style_overrides?.decorations === "off", effectivePalette.text),
     "  </style>",
     "</head>",
     `<body data-deck-schema-version="1" data-deck-presentation="${presentation.version}" data-deck-voice="${presentation.voice}" data-deck-rhythm="${presentation.rhythm}" data-deck-theme="${escapeHtml(visualDnaId)}" data-deck-theme-id="${escapeHtml(theme.id)}" data-deck-composition="${escapeHtml(design.family)}" data-deck-composition-variant="${escapeHtml(design.variant)}"${deck.design_contract?.palette ? ' data-deck-palette="custom"' : ""}${deck.design_contract?.palette?.version === 2 ? ' data-deck-palette-version="2"' : ""}${paletteAccentUsage}${styleOverrides}${themeStyleAttributes(theme)}>`,

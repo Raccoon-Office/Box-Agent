@@ -7,7 +7,13 @@ const path = require("path");
 const os = require("os");
 const { createHash } = require("crypto");
 const sha = value => createHash("sha256").update(value).digest("hex");
-const normalizedPath = value => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
+function normalizedPath(value) {
+  let resolved = path.resolve(value);
+  // Session cwd and artifact paths can use different aliases of the same
+  // existing directory (for example /tmp and /private/tmp on macOS).
+  try { resolved = fs.realpathSync.native(resolved); } catch (_error) { /* Keep lexical comparison for missing paths. */ }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
 function workspaceRelated(sessionCwd, root) {
   const sessionPath = normalizedPath(sessionCwd);
   const rootPath = normalizedPath(root);
@@ -80,7 +86,8 @@ function readResponse(file, input, root, strict = true) {
   return { session_id: header.id, created_at: header.createdAt, text, response_hash: sha(text), error,
     ...(advisoryMissing.length ? { warnings: [`designer did not read advisory packets: ${advisoryMissing.map(item=>path.basename(item.path)).join(", ")}`] } : {}),
     ...(correction ? { correction_base: { session_id: correction.base_session_id,
-      response_hash: correction.base_response_hash }, correction_issues: correction.issues } : {}) };
+      response_hash: correction.base_response_hash }, correction_issues: correction.issues,
+      correction_scope: correction.scope } : {}) };
 }
 function findResponses(input, root) {
   if (!fs.existsSync(sessionRoot())) return [];

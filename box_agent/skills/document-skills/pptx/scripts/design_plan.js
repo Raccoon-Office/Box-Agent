@@ -11,15 +11,33 @@ function write(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
+function writeCorrection(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // Keep complete correction decisions within the default read_file page.
+  // One field per line retains valid JSON without expanding nested catalogs.
+  fs.writeFileSync(file, `{\n${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}:${JSON.stringify(item)}`).join(",\n")}\n}\n`);
+}
 function writeInput(file, input, root) {
   const requestDir = path.join(root, "qa", "design", input.input_hash);
   const detailDir = path.join(requestDir, "catalog");
+  const briefPath = path.join(requestDir, "brief.json");
+  const requestMeta = path.join(requestDir, "request.json");
+  const persist = () => {
+    input.request_file = briefPath;
+    if (!fs.existsSync(requestMeta)) write(requestMeta, { created_at: Date.now() });
+    input.request_created_at = JSON.parse(fs.readFileSync(requestMeta, "utf8")).created_at;
+    const { catalog, ...metadata } = input;
+    write(file, metadata);
+    require("./design_recovery.js").fallback(input, root, "Design pending; baseline generated from validated outline", 0);
+  };
+  // These packets are the source-bound snapshot read by the designer. Changing
+  // advisory hints must not rewrite their hashes or reset the attempt budget.
+  if (fs.existsSync(briefPath)) { persist(); return; }
   const directory = input.catalog;
   for (const theme of directory.themes) write(path.join(detailDir, "themes", `${theme.id}.json`), theme);
   for (const layout of directory.layouts) write(path.join(detailDir, "layouts", `${layout.id}.json`), layout);
   for (const palette of directory.palettes || []) write(path.join(detailDir, "palettes", `${palette.id}.json`), palette);
   write(path.join(detailDir, "palettes", "color-harmony-rules.json"), directory.harmony_rules);
-  const briefPath = path.join(requestDir, "brief.json");
   // Independent reads must fit the tool-result context, not just its file limit.
   // One record per line keeps indices searchable and permits line pagination.
   const packets = (kind, records, maxBytes = 7000) => {
@@ -38,12 +56,15 @@ function writeInput(file, input, root) {
   };
   const contentFiles = packets("pages", input.outline.slides.map((slide, index) => ({
     page: index + 1, title: slide.title, message: slide.message, bullets: slide.bullets,
+    visual_hint: slide.visual,
     hard_requirements: slide.hard_requirements,
   })));
   const themeFiles = packets("themes", directory.themes.map(theme => ({
     id: theme.id,
+    description: theme.description,
+    mood_keywords: theme.selection?.mood_keywords || [],
     traits: Object.fromEntries(["canvas", "heading", "shadow", "display_font", "body_font"].map(key => [key, theme.visual_traits?.[key]])),
-    fit: (theme.selection?.industry_fit || [])[0] || "",
+    fit: theme.selection?.industry_fit || [],
   })));
   const layoutFiles = packets("layouts", directory.layouts.map(layout => ({
     id: layout.id, label: layout.label, roles: layout.roles,
@@ -52,9 +73,15 @@ function writeInput(file, input, root) {
   const paletteFiles = packets("palettes", directory.palettes || []);
   const harmonyFiles = packets("harmony", [directory.harmony_rules]);
   const profileFiles = packets("profiles", directory.brand_profiles || []);
+  const recommendation = require("./theme_selection_core.js").inferTheme(directory.themes,
+    { title: input.title, outline: input.outline, source_text: input.source_text });
   const brief = {
     title: input.title, goal: input.outline.deck_goal, audience: input.outline.audience,
     tone: input.outline.tone, source_text: input.source_text, user_constraints: input.user_constraints,
+    theme_recommendation: { theme_id: recommendation.theme_id, confidence: recommendation.confidence,
+      matched_signals: recommendation.matched_signals },
+    subject_profile: require("./subject_visual_core.js").inferSubjectProfile(
+      { title: input.title, outline: input.outline, source_text: input.source_text }),
     page_count: input.outline.slides.length,
     content_files: contentFiles.map(item => item.path),
     theme_index_files: themeFiles.map(item => item.path),
@@ -65,7 +92,7 @@ function writeInput(file, input, root) {
     required_read_files: [...contentFiles, ...themeFiles, ...layoutFiles, ...paletteFiles, ...harmonyFiles, ...profileFiles],
     details_directory: detailDir,
     reading_policy: "Read every listed content/index file completely. Then shortlist at most 3 themes from traits and audience; read only shortlisted themes and chosen layout details using details_directory/themes/<id>.json and details_directory/layouts/<id>.json. Do not search the entire catalog. Final output must have exactly page_count slides.",
-    visual_requirements: { fields: require("./theme_match.js").OPTIONS, allow_plain_fallback: "boolean; false when user-required visual features must not be relaxed", policy: "Preserve explicit user visual constraints as hard filters before choosing a theme. Use audience and inferred style preferences to compare candidates; do not turn your own font preferences into hard constraints. Use any for font categories the user did not constrain; a fixed palette does not constrain fonts. Check all five visual_traits in theme details before returning. Use the registered theme's fonts unchanged. Match traits, not original colors. If no catalog theme matches and fallback is allowed, program selects plain-neutral, preserving exact palette and layouts." },
+    visual_requirements: { fields: require("./theme_match.js").OPTIONS, allow_plain_fallback: "false for explicit user visual requirements", policy: "User constraints are hard filters; inferred preferences are advisory. Use any for unconstrained fonts. Verify all five traits, retaining registered fonts and fixed colors. Allowed no-match fallback uses plain-neutral, preserving palette and layouts. See design-role.md for subject identity and selection policy." },
     palette_contract: { version: 2, required_roles: ["background", "text", "primary", "accent", "secondary"],
       required_usage: "accent_usage: sparse | balanced | dominant",
       policy: "Return exact #RRGGBB values for every role, including theme defaults. User colors remain locked; fill missing roles only. User palettes default to sparse accent usage unless explicitly specified." },
@@ -75,14 +102,8 @@ function writeInput(file, input, root) {
   };
   // The entry point contains the read plan, never the expanded catalog.
   fs.mkdirSync(requestDir, { recursive: true });
-  if (!fs.existsSync(briefPath)) write(briefPath, brief);
-  input.request_file = briefPath;
-  const requestMeta = path.join(requestDir, "request.json");
-  if (!fs.existsSync(requestMeta)) write(requestMeta, { created_at: Date.now() });
-  input.request_created_at = JSON.parse(fs.readFileSync(requestMeta, "utf8")).created_at;
-  const { catalog, ...metadata } = input;
-  write(file, metadata);
-  require("./design_recovery.js").fallback(input, root, "Design pending; baseline generated from validated outline", 0);
+  if (!fs.existsSync(briefPath)) fs.writeFileSync(briefPath, `${JSON.stringify(brief)}\n`);
+  persist();
 }
 function accept(inputPath, planPath) {
   const { input, root } = plans.readInput(inputPath);
@@ -104,15 +125,27 @@ function accept(inputPath, planPath) {
       plan_hash: plans.hash(plan), input_hash: input.input_hash,
       sources: selected.map(item => ({ session_id: item.session_id, response_hash: item.response_hash })) });
     checkScaffold(planPath, inputPath);
-    write(path.join(root,"qa","design_delivery.json"), { ok:true, status:"design_accepted", correction_fields:merged.correction_fields });
+    write(path.join(root,"qa","design_delivery.json"), { ok:true, status:"design_accepted", correction_fields:merged.correction_fields, warnings:merged.warnings || [] });
     return { ok: true, plan: planPath, source_session: response.session_id,
-      plan_hash: plans.hash(plan), theme_match: plan.theme_match, attempts: responses.length };
+      plan_hash: plans.hash(plan), theme_match: plan.theme_match, attempts: responses.length, warnings:merged.warnings || [] };
   } catch (error) {
     if (previousPlan) fs.writeFileSync(planPath, previousPlan);
     else if (fs.existsSync(planPath)) fs.unlinkSync(planPath);
     if (previousReceipt) fs.writeFileSync(receiptPath, previousReceipt);
     else if (fs.existsSync(receiptPath)) fs.unlinkSync(receiptPath);
     if (responses.length >= 2) {
+      if (previousPlan && previousReceipt) {
+        try {
+          plans.readValidatedPlan(planPath, inputPath);
+          const report = { ok: false, status: "correction_failed", terminal: true,
+            retained_plan: planPath, attempts: responses.length, issues: [error.message],
+            next: "Keep the accepted plan, palette and page count. Do not restart design. Apply the retained plan if needed, finalize the existing deck and report remaining visual defects as a degraded draft." };
+          write(path.join(root, "qa", "design_delivery.json"), report);
+          console.error(JSON.stringify(report));
+          process.exitCode = 1;
+          return null;
+        } catch (_error) { /* No valid accepted plan remains; use the content-backed fallback. */ }
+      }
       let count = 0;
       try { count = source.parseDecision(response.text).slides?.length || 0; } catch (_) {}
       return recovery.fallback(input, root, error.message, count);
@@ -125,7 +158,7 @@ function accept(inputPath, planPath) {
     } catch (_) {}
     const correctionFile = path.join(path.dirname(input.request_file), "correction.json");
     const layoutIds = [...new Set((originalDecision?.slides || []).map(slide => slide.layout_id))];
-    write(correctionFile, { brief_file: input.request_file,
+    writeCorrection(correctionFile, { brief_file: input.request_file,
       base_session_id: response.session_id, base_response_hash: response.response_hash,
       // A parsed original decision is sufficient for a bounded correction;
       // require a full reread only when no trustworthy decision exists.
@@ -134,7 +167,7 @@ function accept(inputPath, planPath) {
       editable_fields: fields, issues: [error.message],
       layout_options: plans.catalog().layouts.filter(layout => layoutIds.includes(layout.id))
         .map(layout => ({ id: layout.id, visual_options: layout.visual_options })),
-      instruction: "Read this correction file. For enum errors, use layout_options here and return only editable_fields as JSON. Preserve all unaffected pages and palette. If requires_full_read is true, read brief_file and all its packets before returning a complete decision. Do not search the catalog again." });
+      instruction: "Read this entire correction file, following has_more/next_offset until complete. For enum errors, use layout_options here and return only editable_fields as JSON. Preserve all unaffected pages and palette. If requires_full_read is true, read brief_file and all its packets before returning a complete decision. Do not search the catalog again." });
     const report = { ok: false, can_retry: true, correction_file: correctionFile,
       fallback_artifact: path.join(root,"fallback.html"),
       source_session: response.session_id, attempts: responses.length, issues: [error.message] };
@@ -153,17 +186,42 @@ function checkScaffold(planPath, inputPath) {
 }
 function main() {
   const [action, target, ...args] = process.argv.slice(2);
-  if (!["prepare", "accept", "validate", "apply"].includes(action) || !target) {
-    throw new Error("Usage: design_plan.js prepare outline.json [--out design_input.json] [--research-handoff PATH] | accept design_input.json | validate design_plan.json [--input design_input.json] | apply design_plan.json --deck deck.json [--input design_input.json]");
+  if (!["prepare", "correct", "accept", "validate", "apply"].includes(action) || !target) {
+    throw new Error("Usage: design_plan.js prepare outline.json [--out design_input.json] [--research-handoff PATH] | correct design_input.json --pages 1,2 [--issue TEXT] [--fields theme_id] | accept design_input.json | validate design_plan.json [--input design_input.json] | apply design_plan.json --deck deck.json [--input design_input.json]");
   }
   const opts = {};
   for (let index = 0; index < args.length; index += 2) {
-    if (!["--out", "--input", "--plan", "--report", "--research-handoff", "--deck", "--title"].includes(args[index]) || !args[index + 1]) {
+    if (!["--out", "--input", "--plan", "--report", "--research-handoff", "--deck", "--title", "--pages", "--fields", "--issue"].includes(args[index]) || !args[index + 1]) {
       throw new Error(`Unknown or missing option: ${args[index]}`);
     }
     opts[args[index].slice(2)] = args[index + 1];
   }
   const targetPath = core.resolveArtifactPath(target);
+  if (action === "correct") {
+    const { input, root } = plans.readInput(targetPath);
+    const planPath = core.resolveArtifactPath(opts.plan || path.join(root, "design_plan.json"));
+    plans.readValidatedPlan(planPath, targetPath);
+    const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(input.request_file), "accepted.json"), "utf8"));
+    if (receipt.sources?.length > 1) throw new Error("Design correction already used; keep the accepted design and report remaining issues");
+    const source = require("./design_response_source.js");
+    const response = source.readResponse(source.sessionFile(receipt.session_id), input, root);
+    const original = source.parseDecision(response.text);
+    const pages = opts.pages ? opts.pages.split(",").map(Number) : [];
+    const fields = opts.fields ? opts.fields.split(",") : pages.length ? ["slides"] : [];
+    if (!fields.length || fields.some(field => !["theme_id", "palette", "visual_profile", "profile_id", "visual_requirements", "slides"].includes(field))
+      || pages.some(page => !Number.isInteger(page) || page < 1 || page > input.outline.slides.length)
+      || (fields.includes("slides") && !pages.length)) throw new Error("Correction requires --pages 1,2 or explicit --fields; slides require page scope");
+    const correctionFile = path.join(path.dirname(input.request_file), "correction.json");
+    writeCorrection(correctionFile, { brief_file: input.request_file, base_session_id: response.session_id,
+      base_response_hash: response.response_hash, requires_full_read: false,
+      original_decision: original, page_count: input.outline.slides.length,
+      editable_fields: fields, scope: { pages },
+      issues: fields.map(field => `design_plan.${field}: ${opts.issue || "Revise only the requested scope"}`),
+      layout_options: plans.catalog().layouts.map(layout => ({ id: layout.id, visual_options: layout.visual_options })),
+      instruction: "Read this entire correction file, following has_more/next_offset until complete, including the original decision. Return only editable_fields. For slides, return the complete slide list, changing only scope.pages. Preserve all other pages, palette and subject identity." });
+    console.log(JSON.stringify({ ok: true, correction_file: correctionFile, editable_fields: fields, pages }));
+    return;
+  }
   if (action === "prepare") {
     const root = path.dirname(targetPath);
     require("./artifact_delivery.js").declareScope(root);

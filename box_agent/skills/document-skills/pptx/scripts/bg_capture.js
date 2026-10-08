@@ -8,7 +8,7 @@ const CAPTURE_CSS = `
   visibility: hidden !important;
 }
 /* A decoration SVG is flattened as a complete graphic, including its labels.
- * Content ancestors are hidden above; restore only SVG elements that were
+ * Content ancestors are hidden above; restore only decoration elements that were
  * visible before capture so their inherited visibility cannot erase the
  * graphic. Authored hidden elements, opacity, display and clipping stay intact. */
 .pptx-capture-mode [data-pptx-decoration][data-pptx-capture-visible] {
@@ -129,12 +129,12 @@ async function markDecorationNodes(page) {
           el.setAttribute("data-pptx-decoration", "");
         }
       });
-      // Snapshot before capture-mode hides text-bearing containers. Do not
-      // blanket-show SVG descendants: visibility:hidden can be authored on an
-      // SVG group while one of its children explicitly overrides it to visible.
+      // Snapshot all visible decoration before hiding text-bearing ancestors.
+      // This includes empty timeline rails/dots as well as SVG descendants.
+      // Do not blanket-show authored visibility:hidden elements.
       // Marked diagrams and charts are non-decoration and stay on their own
       // export paths rather than being duplicated in the background bitmap.
-      slide.querySelectorAll("svg[data-pptx-decoration], svg[data-pptx-decoration] *")
+      slide.querySelectorAll("[data-pptx-decoration]")
         .forEach(el => {
           el.removeAttribute("data-pptx-capture-visible");
           if (el.hasAttribute("data-pptx-decoration") &&

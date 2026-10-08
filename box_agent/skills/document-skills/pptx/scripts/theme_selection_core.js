@@ -3,6 +3,7 @@
 const { familyForTheme } = require("./composition_core.js");
 
 const KEYWORD_INDUSTRY_DEDUP_WEIGHT = 18;
+const CLASSICAL_POETRY_RE = /(?:李白|杜甫|苏轼|陶渊明|王维|唐诗|宋词|古诗|古典诗歌|中国诗词|诗仙|classical\s+Chinese\s+poetry|Tang\s+poetry|Li\s+Bai)/i;
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -115,6 +116,12 @@ function profileHas(profile, pattern) {
 }
 
 const THEME_KEYWORD_RULES = Object.freeze([
+  Object.freeze({
+    theme_id: "soft-editorial",
+    signal: "subject rule: classical Chinese poetry",
+    pattern: CLASSICAL_POETRY_RE,
+    weight: 22,
+  }),
   Object.freeze({
     theme_id: "soft-editorial",
     signal: "user intent rule: modern editorial design",
@@ -774,6 +781,7 @@ function inferTheme(themes, content, defaultThemeId = "blue-professional") {
 }
 
 module.exports = {
+  CLASSICAL_POETRY_RE,
   evaluateModelThemeChoice,
   inferPreferences,
   inferTheme,

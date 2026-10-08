@@ -4,11 +4,23 @@ const fs = require("fs");
 const path = require("path");
 const clone = value => JSON.parse(JSON.stringify(value));
 
-function correction(base, update, error) {
+function correction(base, update, error, scope = null) {
   const fields = [...new Set([...String(error).matchAll(/design_plan\.([a-z_]+)/g)].map(m => m[1]))]
     .filter(key => ["theme_id", "profile_id", "visual_profile", "palette", "visual_requirements", "slides", "reason"].includes(key));
   const merged = clone(base);
-  for (const field of fields) if (update && Object.hasOwn(update, field)) merged[field] = clone(update[field]);
+  for (const field of fields) if (update && Object.hasOwn(update, field)) {
+    if (field === "slides") {
+      const pages = scope?.pages || [...String(error).matchAll(/design_plan\.slides\.(\d+)/g)].map(m => Number(m[1]) + 1);
+      if (pages.length && Array.isArray(update.slides)) {
+        if (update.slides.length !== base.slides.length || pages.some(page => !update.slides[page - 1])) {
+          throw new Error("designer correction: slides must contain the complete original page list; only scoped pages may change");
+        }
+        for (const page of pages) if (update.slides[page - 1]) merged.slides[page - 1] = clone(update.slides[page - 1]);
+        continue;
+      }
+    }
+    merged[field] = clone(update[field]);
+  }
   return { decision: merged, fields };
 }
 function normalizeCorrectionUpdate(update, base) {
@@ -69,10 +81,13 @@ function decisionFromResponses(responses, input, plans) {
   if (second.error) throw new Error(second.error);
   const update = normalizeCorrectionUpdate(parse(second.text), base);
   if (second.correction_base) {
-    const merged = correction(base,update,(second.correction_issues || []).join("\n"));
+    const merged = correction(base,update,(second.correction_issues || []).join("\n"), second.correction_scope);
     return { decision:merged.decision, correction_fields:merged.fields };
   }
-  if (!error) return { decision: update, correction_fields: [] };
+  // An already valid decision is frozen. A fresh child reading the same brief
+  // has no authority to replace it without a program-bound correction scope.
+  if (!error) return { decision: base, correction_fields: [],
+    warnings: ["Ignored an unbound replacement of an accepted design; use a scoped correction packet."] };
   const merged = correction(base, update, error);
   return { decision: merged.decision, correction_fields: merged.fields };
 }

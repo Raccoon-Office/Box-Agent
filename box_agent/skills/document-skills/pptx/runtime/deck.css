@@ -1788,6 +1788,8 @@ body[data-deck-palette-accent-usage="dominant"] .timeline-step:nth-child(even)::
 
 .timeline-number {
   position: absolute;
+  min-width: 3ch;
+  text-align: right;
   right: 28px;
   top: 28px;
   color: var(--deck-muted);
@@ -3017,7 +3019,7 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  color: var(--deck-text);
+  color: var(--deck-inverse);
 }
 
 .image-full-bleed-copy h1 {
@@ -3025,6 +3027,10 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
   font-size: 82px;
   line-height: 0.98;
   text-wrap: balance;
+}
+
+.image-full-bleed-copy :is(h1, .eyebrow, .lead, .image-caption) {
+  color: inherit;
 }
 
 .image-full-bleed-copy .lead {

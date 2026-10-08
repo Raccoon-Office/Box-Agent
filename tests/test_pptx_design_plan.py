@@ -33,7 +33,7 @@ def write(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
 
-def record_response(root, decision, *, workspace=None, read_brief=True):
+def record_response(root, decision, *, workspace=None, read_brief=True, correction_file=None):
     data = json.loads((root / "design_input.json").read_text())
     if "palette" not in decision:
         decision = {**decision, "palette": {"background": "#F4EFE4", "text": "#111111", "primary": "#173B63", "accent": "#B45309", "secondary": "#357B75", "accent_usage": "sparse"}}
@@ -49,10 +49,12 @@ def record_response(root, decision, *, workspace=None, read_brief=True):
     rows = [
         {"type": "session", "version": 1, "id": sid, "createdAt": now,
          "cwd": str(workspace or root), "parentSession": "cli-test", "origin": "subagent"},
-        {"type": "user/message", "data": {"content": f"Read the designer role and {brief}"}},
+        {"type": "user/message", "data": {"content": f"Read the designer role and {brief}" + (f" and {correction_file}" if correction_file else "")}},
     ]
     if read_brief:
         resources = [brief, *[Path(item["path"]) for item in json.loads(brief.read_text()).get("required_read_files", [])]]
+        if correction_file:
+            resources.append(Path(correction_file))
         for resource in resources:
             line_count = len(resource.read_text().splitlines())
             rows.append({"type": "tool/result", "data": {"result": {"success": True, "rawOutput": {
@@ -69,7 +71,17 @@ def record_response(root, decision, *, workspace=None, read_brief=True):
 def import_plan(root, plan):
     decision = {key: plan[key] for key in ["theme_id", "palette", "reason"] if key in plan}
     decision["slides"] = [{"layout_id": slide["layout_id"], "visual_options": slide.get("visual_options", {})} for slide in plan["slides"]]
-    record_response(root, decision)
+    correction_file = None
+    existing = root / "design_plan.json"
+    data = json.loads((root / "design_input.json").read_text())
+    if existing.exists():
+        previous = json.loads(existing.read_text())
+        if previous.get("input_hash") == data["input_hash"] and run("design_plan.js", "validate", "design_plan.json", cwd=root).returncode == 0:
+            args = ["correct", "design_input.json", "--fields", "theme_id,palette,slides", "--pages", ",".join(str(i + 1) for i in range(len(plan["slides"])))]
+            corrected = run("design_plan.js", *args, cwd=root)
+            assert corrected.returncode == 0, corrected.stdout + corrected.stderr
+            correction_file = json.loads(corrected.stdout)["correction_file"]
+    record_response(root, decision, correction_file=correction_file)
     return run("design_plan.js", "accept", "design_input.json", cwd=root)
 
 

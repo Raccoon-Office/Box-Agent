@@ -411,8 +411,11 @@ async function readEditorState(page, viewport) {
               property, color: style[property] });
           }
           const role = element.getAttribute("data-deck-text-role");
-          const expectedInk = /^(H1|H2)$/.test(element.tagName) ? fixedPalette.tokens.heading
-            : ["body", "lead"].includes(role) ? style.getPropertyValue("--deck-content-text").trim() || fixedPalette.tokens.text : null;
+          const imageInk = element.closest(".layout-image-full-bleed .image-full-bleed-copy, .background-wash-dark .open-cover-copy, .background-wash-dark .cover-copy")
+            ? [fixedPalette.tokens.inverse, fixedPalette.tokens.text, fixedPalette.tokens.background, fixedPalette.tokens.surface]
+              .filter(Boolean).sort((a, b) => contrast(b, "#0D0E12") - contrast(a, "#0D0E12"))[0] : null;
+          const expectedInk = imageInk || (/^(H1|H2)$/.test(element.tagName) ? fixedPalette.tokens.heading
+            : ["body", "lead"].includes(role) ? style.getPropertyValue("--deck-content-text").trim() || fixedPalette.tokens.text : null);
           if (expectedInk && rgba(style.color)?.join() !== rgba(expectedInk)?.join()) {
             paletteCompliance.failures.push({ slide: index + 1, element: element.getAttribute("data-prop-path") || element.tagName,
               property: "color", color: style.color, expected: expectedInk, role: /^(H1|H2)$/.test(element.tagName) ? "heading" : role });

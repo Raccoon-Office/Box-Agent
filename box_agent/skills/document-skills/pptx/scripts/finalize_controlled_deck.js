@@ -514,6 +514,16 @@ function main() {
   const exportError = pptxPath
     ? exportRequiredPptx(outputPath, pptxPath, deck.slides.length, reportDir)
     : null;
+  const quality = require("./render_quality.js").renderQuality(htmlReport, runtimeReport);
+  reports.quality = path.join(reportDir, "render_quality.json");
+  const qualityNext = quality.ok ? null
+    : `Run design_plan.js correct design_input.json --pages ${quality.affected_pages.join(",")} with these visual defects, then accept, apply and finalize once. If correction is unavailable or still fails, report partial and deliver an explicitly degraded draft. Do not report completed or visual checks passed.`;
+  writeJson(reports.quality, { ...quality, advisory: false,
+    correction_required: !quality.ok, next: qualityNext });
+  if (!quality.ok) {
+    console.error(`FINALIZE_FAIL stage=render_quality pages=${quality.affected_pages.join(",")} report=${reports.quality}`);
+    console.error(qualityNext);
+  }
   const warningCount = Object.values(reports)
     .map(reportSummary)
     .filter(Boolean)
@@ -526,11 +536,12 @@ function main() {
     runtimeReport.advisory === true
       || (runtimeReport.editor?.componentContrast?.failures?.length || 0) > 0
       ? "runtime_probe" : null,
+    !quality.ok ? "render_quality" : null,
   ].filter(Boolean);
   const blockingImageIssues = Array.isArray(imageReport.blockingIssues)
     ? imageReport.blockingIssues
     : [];
-  const degraded = degradedStages.length > 0;
+  const degraded = degradedStages.length > 0 || !quality.ok;
   const deliveryStatus = exportError ? "partial" : blockingImageIssues.length > 0
     ? "incomplete"
     : degraded ? "degraded" : "complete";
@@ -539,7 +550,7 @@ function main() {
   if (pptxPath && !exportError) publishArtifact(pptxPath);
   console.log(
     JSON.stringify({
-      ok: !exportError,
+      ok: !exportError && quality.ok,
       deck: deckPath,
       html: outputPath,
       pptx: exportError ? null : pptxPath,
@@ -549,11 +560,15 @@ function main() {
       warnings: warningCount,
       degraded,
       degraded_stages: degradedStages,
-      blocking_issues: [...blockingImageIssues, ...(exportError ? [`PPTX export failed: ${exportError}`] : [])],
+      render_quality: quality,
+      correction_required: !quality.ok,
+      next: qualityNext,
+      blocking_issues: [...quality.issues.map(issue => `Page ${issue.page}: ${issue.detail}`),
+        ...blockingImageIssues, ...(exportError ? [`PPTX export failed: ${exportError}`] : [])],
       delivery_status: deliveryStatus,
     })
   );
-  if (exportError) process.exitCode = 1;
+  if (exportError || !quality.ok) process.exitCode = 1;
 }
 
 try {

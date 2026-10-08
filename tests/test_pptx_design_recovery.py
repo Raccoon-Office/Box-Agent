@@ -55,7 +55,7 @@ def test_theme_patch_cannot_change_page_count_or_colors(design_case):
     assert scaffold(root).returncode==0
 
 
-def record_correction(root, packet_path, update):
+def record_correction(root, packet_path, update, *, read_result=None):
     sid = record_response(root, {}, read_brief=False)
     log = Path(os.environ['BOX_AGENT_HOME']) / 'sessions' / hashlib.sha256(sid.encode()).hexdigest() / 'session.jsonl'
     rows = [json.loads(line) for line in log.read_text().splitlines()]
@@ -65,11 +65,77 @@ def record_correction(root, packet_path, update):
         if row['type'] == 'assistant/message':
             row['data']['message']['content'] = json.dumps(update)
     count = len(packet_path.read_text().splitlines())
-    rows.insert(2, {'type': 'tool/result', 'data': {'result': {'success': True, 'rawOutput': {
+    receipt = read_result.raw_output if read_result else {
         'context_resource': {'resource_id': str(packet_path),
                              'content_version': hashlib.sha256(packet_path.read_bytes()).hexdigest(),
-                             'start_line': 1, 'end_line': count, 'total_lines': count}}}}})
+                             'start_line': 1, 'end_line': count, 'total_lines': count}}
+    rows.insert(2, {'type': 'tool/result', 'data': {'result': {'success': True, 'rawOutput': receipt}}})
     log.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+
+
+@pytest.mark.asyncio
+async def test_ten_page_correction_is_completely_read_with_default_pagination(design_case):
+    from box_agent.tools.file.read_tool import ReadTool
+    root, outline, _, plan = design_case
+    outline['slides'] = [
+        {**outline['slides'][0], 'page': page, 'title': f'Topic {chr(64 + page)}',
+         'message': f'Main idea for topic {chr(64 + page)}',
+         'bullets': [f'Evidence {kind} for topic {chr(64 + page)}' for kind in ['alpha', 'bravo', 'charlie']]}
+        for page in range(1, 11)
+    ]
+    fresh(root, outline)
+    original = {key: plan[key] for key in ['theme_id', 'palette', 'visual_requirements', 'reason']}
+    original['slides'] = [{'layout_id': 'cards-grid-v1', 'visual_options': {'composition': 'open'},
+                           'subject_expression': f'Show subject relationships on page {page} through its spatial arrangement'}
+                          for page in range(1, 11)]
+    record_response(root, original)
+    initial = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert initial.returncode == 0, initial.stderr
+    before = json.loads((root / 'design_plan.json').read_text())
+    result = run('design_plan.js', 'correct', 'design_input.json', '--pages', '8', '--issue', 'Unreadable hub text', cwd=root)
+    assert result.returncode == 0, result.stderr
+    packet_path = Path(json.loads(result.stdout)['correction_file'])
+    packet = json.loads(packet_path.read_text())
+    assert len(json.dumps(packet, indent=2).splitlines()) > 500  # The previous wire format exceeded one read.
+    read = await ReadTool(str(root)).execute(str(packet_path))
+    assert read.success and not read.raw_output['has_more']
+    assert read.raw_output['selected_line_count'] == read.raw_output['total_lines']
+    changed = {'slides': [dict(slide) for slide in original['slides']]}
+    changed['slides'][7] = {**changed['slides'][7], 'visual_options': {'composition': 'standard'}}
+    record_correction(root, packet_path, changed, read_result=read)
+    accepted = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert accepted.returncode == 0, accepted.stderr
+    after = json.loads((root / 'design_plan.json').read_text())
+    assert after['palette'] == before['palette'] and after['theme_id'] == before['theme_id']
+    assert len(after['slides']) == 10
+    assert after['slides'][:7] == before['slides'][:7] and after['slides'][8:] == before['slides'][8:]
+    assert after['slides'][7]['visual_options']['composition'] == 'standard'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['unread', 'missing_pages'])
+async def test_failed_correction_keeps_valid_accepted_plan_without_neutral_fallback(design_case, failure):
+    from box_agent.tools.file.read_tool import ReadTool
+    root, _, _, _ = design_case
+    assert scaffold(root).returncode == 0
+    original_plan = (root / 'design_plan.json').read_bytes()
+    original_deck = (root / 'deck.json').read_bytes()
+    result = run('design_plan.js', 'correct', 'design_input.json', '--pages', '2', '--issue', 'Unreadable text', cwd=root)
+    packet_path = Path(json.loads(result.stdout)['correction_file'])
+    # Real pagination leaves the current packet incomplete; provenance must reject it.
+    read = await ReadTool(str(root)).execute(str(packet_path), limit=1 if failure == 'unread' else None)
+    assert read.success and read.raw_output['has_more'] == (failure == 'unread')
+    record_correction(root, packet_path, {'slides': [{'page': 2, 'layout_id': 'cards-grid-v1'}]}, read_result=read)
+    failed = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert failed.returncode != 0
+    report = json.loads(failed.stderr)
+    assert report['status'] == 'correction_failed' and report['terminal']
+    assert report['retained_plan'] == str(root / 'design_plan.json')
+    assert ('complete current brief' if failure == 'unread' else 'complete original page list') in report['issues'][0]
+    assert (root / 'design_plan.json').read_bytes() == original_plan
+    assert (root / 'deck.json').read_bytes() == original_deck
+    assert run('design_plan.js', 'validate', 'design_plan.json', cwd=root).returncode == 0
+    assert json.loads((root / 'qa/design_delivery.json').read_text())['status'] == 'correction_failed'
 
 
 @pytest.mark.parametrize('field,invalid,corrected', [

@@ -169,6 +169,19 @@ mappings, then validates the real choices and generates the canonical plan.
 Manually modified plans or responses from another input/workspace are rejected.
 No model needs to copy hashes, page IDs, or JSON content-reference paths.
 
+If a valid accepted design later fails page-level render QA, do not start a fresh
+designer with only the old brief. Bind the original decision and failed pages:
+
+```bash
+${BOX_AGENT_NODE:-node} scripts/design_plan.js correct design_input.json --pages 4 --issue "Page 4 overflows"
+```
+
+Send the returned correction_file to the design role, then run accept and apply.
+The program changes only the named pages, preserving palette, subject profile
+and all other pages. The one-correction limit still applies. A second unbound
+response cannot replace an already valid design. Explicit theme-only revisions
+use --fields theme_id instead; never widen scope just to accept unrelated changes.
+
 Prepare first creates `fallback.html` and, when no existing HTML exists, `index.html`:
 a registered-layout presentation rendered by the normal renderer and full editor,
 containing the supplied outline before checking it.
@@ -202,6 +215,12 @@ existing fallback HTML with its report. Images or unavailable vision must never
 prevent delivery of the files already available.
 
 #### Finish delivery after design failure
+
+If acceptance returns `correction_failed` with `retained_plan`, the correction
+failed but the original accepted plan remains valid. Keep its palette, subject
+identity and page count; apply that retained plan if needed and finalize the
+existing deck. Do not switch to neutral recovery HTML or restart design. Report
+any remaining confirmed visual defects as a degraded draft with partial outcome.
 
 `degraded` / `terminal` ends design retries, not outstanding format delivery.
 Read `qa/design_delivery.json`; keep its actual `primary_artifact` HTML unchanged.
@@ -338,6 +357,11 @@ Use a complete supported subset and preserve isolated facts in another content
 field; incompatible data shape goes back to the design role. Keep optional copy
 empty when the user supplied no text. The patch compiler binds ready media;
 full-slide `background` is a slide field, never `props.background`.
+When the accepted plan includes per-page `subject_expression`, implement that
+expression in the corresponding content/media fields. Before finalization,
+compare each key page with its expression: naming an axis is not a route diagram,
+and naming materials is not a material-detail visual. Report any expression that
+could not be implemented; a profile in JSON is not proof of visible subject fit.
 
 Explicit image-rich briefs may activate `creative_image_mode`; at least one real
 generated asset must be referenced for an image-complete result. If all required
@@ -353,8 +377,27 @@ ${BOX_AGENT_NODE:-node} scripts/finalize_controlled_deck.js deck.json --out inde
 This is the single normal finalization command. Core schema/design-contract and
 render failures block. Outline binding drift blocks by default. Only an explicit
 `BOX_AGENT_ALLOW_DEGRADED_OUTLINE_BINDING=1` permits that semantic-only draft.
-Image, post-render HTML/runtime and source findings are recorded as advisories;
-retain usable HTML and state the actual impact instead of starting repair loops.
+Image, optional inspection and source findings are recorded as advisories.
+On any nonzero finalization result, read `qa/render_quality.json` before
+classifying other advisories. Its `ok: false`, non-advisory issues and the
+finalizer's `blocking_issues` are confirmed visual failures. A local
+`text.status: fit` only describes text sizing and does not clear container
+overflow warnings; package validity and successful image generation also do
+not clear these failures. Follow the report's `next` action, not a guessed
+explanation for the exit status.
+If finalization returns `correction_required: true`, confirmed unreadable text
+or text overflow is a repair request, not a projection disclaimer. Use
+`render_quality.affected_pages` and its concrete issues with the existing
+`design_plan.js correct` page-bound correction, accept and apply once, then
+finalize again. Preserve the accepted palette, theme and all unaffected pages.
+If the correction was already used or the defect persists, retain HTML/PPTX as
+an explicitly degraded editable draft; do not report the deck as fully completed
+or mark visual quality passed. Report execution outcome as `partial`, with the
+failed visual check non-advisory, and describe the artifact as a degraded draft
+in the final response. Finalization returns `ok: false` and a nonzero exit status
+for these confirmed defects even when it preserved usable files.
+Missing optional inspection alone never requests
+this correction. Do not start an unbounded review/repair loop.
 An actual frozen-palette mismatch is a design-contract failure, not an optional
 visual review: report the concrete component/property from QA without replacing
 the accepted colors or patching the compiler. Missing image understanding alone

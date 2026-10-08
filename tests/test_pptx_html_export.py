@@ -786,7 +786,8 @@ def test_background_capture_keeps_svg_chart_preview_out_of_native_chart(
                    for name in archive.namelist())
 
 
-def test_expressive_export_keeps_text_native_and_resolves_missing_font(tmp_path: Path) -> None:
+@pytest.mark.parametrize("slide_class", ["slide", "slide expressive-slide"])
+def test_controlled_export_keeps_text_native_and_resolves_missing_font(tmp_path: Path, slide_class: str) -> None:
     html_path = tmp_path / "index.html"
     html_path.write_text('''<!doctype html><html><head><meta charset="utf-8"><style>
 html,body{margin:0} .slide{position:relative;width:1920px;height:1080px;background:white;color:black;overflow:hidden}
@@ -795,18 +796,20 @@ h1{top:50px;font-size:250px}p{top:550px;font-size:210px}
 </style></head><body><main id="deck-root"><section class="slide expressive-slide">
 <h1 data-prop-kind="text" data-prop-path="title">NOON</h1>
 <p data-prop-kind="text" data-prop-path="value">28</p>
+<span style='position:absolute;left:1300px;top:900px;width:150px;height:80px;font-size:48px;font-family:"Pptx Nonexistent Font Sentinel",Arial,sans-serif'>01</span>
 </section></main></body></html>''', encoding="utf-8")
+    html_path.write_text(html_path.read_text().replace('class="slide expressive-slide"', f'class="{slide_class}"'), encoding="utf-8")
     pptx_path = tmp_path / "editable.pptx"
     result = _run_node(EXPORT_SCRIPT_PATH, str(html_path), str(pptx_path), "--out", str(tmp_path / "slides"))
     assert result.returncode == 0, result.stdout + result.stderr
     report = _last_json_object(result.stdout)
-    assert report["fontResolution"] == {"resolved": 2, "warnings": []}
+    assert report["fontResolution"] == {"resolved": 3, "warnings": []}
     with zipfile.ZipFile(pptx_path) as archive:
         xml = archive.read("ppt/slides/slide1.xml").decode()
     assert "Pptx Nonexistent Font Sentinel" not in xml
     tree = ET.fromstring(xml)
     texts = [node.text for node in tree.findall(".//{http://schemas.openxmlformats.org/drawingml/2006/main}t")]
-    assert texts == ["NOON", "28"]
+    assert texts == ["NOON", "28", "01"]
 
 
 def test_expressive_font_resolution_reports_unavailable_probe_without_blocking(tmp_path: Path) -> None:
