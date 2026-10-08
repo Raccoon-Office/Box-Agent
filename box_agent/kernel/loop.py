@@ -83,6 +83,7 @@ from ..loop_guards import (
     WEB_SEARCH_TOOL_NAME,
     STREAM_REPEAT_MIN_CHUNKS,
     format_runtime_context_update,
+    final_step_wrapup_text,
     looks_like_truncated_output,
     near_limit_wrapup_text,
     no_progress_wrapup_text,
@@ -915,10 +916,8 @@ async def _run_agent_loop_impl(
     empty_args_repeats = 0
 
     # Near-limit wrap-up: when only the configured trailing steps are left, inject a
-    # one-shot instruction telling the model to stop gathering more material
-    # (tool calls / searches) and synthesize a final answer from what it
-    # already has, instead of burning the last steps and exiting with a
-    # "couldn't be completed" failure.
+    # one-shot instruction to prioritize required delivery and verification,
+    # leaving room for a final response within existing permissions and budgets.
     wrapup_injected = False
 
     # No-progress circuit breaker (opt-in via ``no_progress_limit``). Counts
@@ -1327,9 +1326,7 @@ async def _run_agent_loop_impl(
         context_compacted = False
 
         # ── Near-limit wrap-up nudge (one-shot) ─────────────
-        # Reserve the final few steps for synthesis: stop further
-        # research and force a self-contained answer from gathered
-        # material before the step budget is exhausted.
+        # Focus remaining steps on required delivery and a final response.
         if (
             not wrapup_injected
             and max_steps > wrapup_remaining_steps
@@ -1355,6 +1352,12 @@ async def _run_agent_loop_impl(
             stall_text = no_progress_wrapup_text(no_progress_steps)
             yield MessageInjection(
                 InjectionKind.NO_PROGRESS, stall_text,
+            ).apply(messages)
+
+        # The final-step handoff is independent of earlier budget/stall nudges.
+        if step == max_steps - 1:
+            yield MessageInjection(
+                InjectionKind.BUDGET, final_step_wrapup_text(max_steps),
             ).apply(messages)
 
         # ── Step start ──────────────────────────────────────

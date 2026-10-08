@@ -244,12 +244,15 @@ async def test_core_loop_writes_no_protocol_output(capsys) -> None:
     ]
 
     assert [type(event).__name__ for event in events] == [
+        "InjectedMessageEvent",
         "StepStart",
         "ContentEvent",
         "LLMOutputEvent",
         "StepEnd",
         "DoneEvent",
     ]
+    assert events[0].user_visible is False
+    assert "最后一步交付提醒" in events[0].content
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""

@@ -286,7 +286,7 @@ async def test_flush_failure_prevents_provider_call(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["kernel", "agent"])
-@pytest.mark.parametrize("nudge", ["near_limit", "no_progress"])
+@pytest.mark.parametrize("nudge", ["near_limit", "no_progress", "final_step"])
 @pytest.mark.parametrize("interrupt_during", ["provider", "summary"])
 async def test_runtime_wrapup_survives_interruption_before_model_response(
     tmp_path, entrypoint, nudge, interrupt_during,
@@ -298,7 +298,8 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
 
     root = tmp_path / "sessions"
     log = SessionLog.create(root, session_id="wrapup-checkpoint", cwd=tmp_path)
-    marker = "步数预算即将用尽" if nudge == "near_limit" else "没有取得有效进展"
+    marker = {"near_limit": "步数预算提醒", "no_progress": "没有取得有效进展",
+              "final_step": "最后一步交付提醒"}[nudge]
     recovered = []
     expected = []
 
@@ -366,7 +367,7 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
     agent = Agent(
         llm_client=Provider(), tools=[FailingTool()], system_prompt="system",
         workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False,
-        session_log=log, max_steps=11 if nudge == "near_limit" else 300,
+        session_log=log, max_steps={"near_limit": 11, "no_progress": 300, "final_step": 2}[nudge],
         token_limit=8000 if interrupt_during == "summary" else 100000,
     )
     agent.add_user_message("Complete the task")

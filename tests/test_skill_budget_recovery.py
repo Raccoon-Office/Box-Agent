@@ -199,8 +199,10 @@ async def test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts
         return result
 
     monkeypatch.setattr(DefaultContextEngine, "prepare_request", prepare)
+    # Leave a later step so the final-step handoff does not change this
+    # fixture's precisely sized context budget before its first request.
     events = [event async for event in run_agent_loop(llm=provider, messages=history, tools={tool.name:tool},
-        skill_engine=runtime, token_limit=limit, max_steps=1, hooks=[hook])]
+        skill_engine=runtime, token_limit=limit, max_steps=2, hooks=[hook])]
     assert len(provider.requests) == 1
     assert projections[0].blocked_reason
     assert projections[-1].references and not projections[-1].blocked_reason

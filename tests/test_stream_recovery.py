@@ -134,7 +134,10 @@ async def test_recovery_does_not_exceed_step_budget():
         llm=llm, messages=messages(), tools={}, max_steps=1,
     )]
     assert len(llm.requests) == 1
-    assert not any(isinstance(event, InjectedMessageEvent) for event in events)
+    injected = [event for event in events if isinstance(event, InjectedMessageEvent)]
+    assert len(injected) == 1
+    assert "最后一步交付提醒" in injected[0].content
+    assert injected[0].user_visible is False
     assert next(event for event in events if isinstance(event, DoneEvent)).stop_reason is StopReason.INTERRUPTED
 
 

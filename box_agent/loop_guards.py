@@ -227,17 +227,30 @@ def search_files_empty_result_guidance(limit: int) -> str:
 
 
 def near_limit_wrapup_text(step: int, max_steps: int) -> str:
-    """Reserve the final steps for synthesis: stop gathering, answer now.
+    """Focus remaining steps on required delivery within existing limits.
 
     ``step`` is the 0-based loop index (as in ``run_agent_loop``).
     """
     remaining = max_steps - step
     return (
-        f"⚠️ 步数预算即将用尽（已到第 {step + 1}/{max_steps} 步，约剩 {remaining} 步）。"
-        "现在请停止调用任何工具、停止继续搜索或探索。"
-        "仅基于你已经收集到的信息，在本轮直接给出完整、可独立阅读的最终答案/总结："
-        "包含关键结论、数据、以及已产出的文件路径；若有未覆盖的缺口，简要标注即可，"
-        "不要再去调查。"
+        f"步数预算提醒：当前第 {step + 1}/{max_steps} 步，含当前步还可用 {remaining} 步。"
+        "请将剩余步骤用于完成用户要求的必要交付，减少额外探索。"
+        "在现有权限和工具预算内，继续执行尚缺的必要操作，包括保存产物、读回校验和交付；"
+        "为最终回复留出步骤。任务已完成时直接交付结果，无需用满剩余步骤。"
+        "缺少必要的用户输入或授权时，请求后等待，不猜测输入或擅自继续。"
+        "若预算不足或执行受阻，如实说明已完成内容、未完成部分及阻碍；"
+        "仅提供实际已产出的文件路径，不将未完成的任务声明为完成。"
+    )
+
+
+def final_step_wrapup_text(max_steps: int) -> str:
+    """Request an evidence-based status handoff on the last loop step."""
+    return (
+        f"最后一步交付提醒：当前为第 {max_steps}/{max_steps} 步，已无后续执行步骤。"
+        "现在请停止调用任何工具，直接基于已有结果回复当前任务状态。"
+        "说明已完成内容和必要结论，仅提供实际已产出的文件路径及已完成的校验结果；"
+        "明确列出尚未完成或未验证的部分、阻碍及需要用户补充的输入或授权。"
+        "不要承诺继续执行，不将未完成的任务声明为完成。"
     )
 
 

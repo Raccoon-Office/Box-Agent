@@ -124,6 +124,56 @@ uv run --no-sync python -m pytest tests/ -q --tb=short -rs --deselect tests/test
 
 ## 提前收尾的归属
 
+### T14a：必要交付优先的收尾提示（2026-10-08）
+
+near_limit 提示准确报告包含当前步的剩余步数，引导模型在现有权限与工具预算内完成必要操作、保存产物、读回校验和交付，并为最终回复留出步骤。任务已完成时直接交付；缺少必要输入或授权时请求后等待；预算不足或执行受阻时如实说明未完成部分，只提供实际产物路径。
+
+收尾采用两阶段注入：第一次沿用 near_limit 的触发时机；进入最后一步时独立追加一次当前状态交付提示，要求停止工具调用，基于已有证据交付结果、实际文件路径、校验状态、未完成部分和阻碍。最后一步提示不受先前预算／无进展提醒抑制；常规提醒禁用或总步数小于预留窗口时仍会触发。两者同一步触发时，最后一步提示排在后面。提前结束或等待用户的运行不为发送提示继续执行。
+
+硬预算、来源包装和无进展判断保持；评估配置仍为 12 步、预留 10 步，运行到上限时分别在第 3 步和第 12 步收到预算提示。模型忽略最后一步提示继续调用工具时，仍按原规则执行并以 MAX_STEPS 结束，不追加步数。确定性回归覆盖请求内容、12/300 步及禁用边界、提醒后继续工具操作、等待用户和持久化。真实 ACP 对照、沙箱环境复核和新 runtime 部署尚未进行，不能据此声称工作簿交付失败已解决。
+
+第一阶段（仅文案）的源码验证：
+
+```text
+uv run --no-sync python -m pytest tests/test_inject.py tests/test_agent_session_persistence.py tests/test_message_injections.py tests/test_core.py tests/test_acp.py -q --tb=short --basetemp=workspace/t14a-focused
+465 passed, 1 skipped in 177.35s
+```
+
+该阶段修改文件的 Python 语法检查、路线图文档链接及 `git diff --check` 通过；未运行全量套件或验证真实模型遵循效果。
+
+两阶段注入最终源码验证：
+
+```text
+uv run --no-sync python -m pytest tests/test_inject.py tests/test_agent_session_persistence.py tests/test_message_injections.py tests/test_core.py tests/test_acp.py tests/test_kernel_compatibility.py -q --tb=short -rs --basetemp=workspace/t14a-two-stage-final
+547 passed, 1 skipped in 172.12s
+
+uv run --no-sync python -m pytest tests/test_context_input.py tests/test_turn_continuation.py tests/test_stream_recovery.py tests/test_length_retry_no_double_render.py tests/test_sub_agent_tool.py tests/test_run_api.py tests/test_run_control.py tests/test_sdk.py -q --tb=short -rs --basetemp=workspace/t14a-two-stage-contracts-final
+187 passed in 5.30s
+```
+
+跳过项为 Windows 不适用的 POSIX shell 引号测试。单步 ACP、协议事件及流中断测试的断言已更新为包含隐藏的最后一步提示，同时保留原用户内容、无协议输出污染和调用次数约束。Python 语法、文档路径和 `git diff --check` 检查通过。上述相关回归之后补充全量验证如下；边界止于源码测试，未构建、安装或运行真实模型评估。
+
+提交前全量验证（Windows、现有锁定依赖环境）：
+
+```text
+uv run --no-sync python -m pytest tests/ -q --tb=short -rs --deselect tests/test_mcp.py::test_connection_timeout_on_unreachable_server --basetemp=workspace/t14a-full-final --junitxml=workspace/t14a-full-final.xml
+3 failed, 5857 passed, 318 skipped, 1 deselected, 3 warnings in 1509.00s
+```
+
+- `test_skill_budget_recovery.py::test_loop_compacts_once_and_reprojects_without_trusting_old_read_facts` 的精确预算场景原本只允许一步；新增最终提示改变了压缩路径。将该场景的上限设为两步，使第一步不注入最终提示，仍要求只执行一次模型请求、一次压缩、零摘要请求并满足输入预算和 Skill 重投影约束。运行时代码未修改。
+- `test_build_macos_runtimes.py::test_build_environment_does_not_inherit_host_python_or_pyinstaller_cache` 和 `test_dual_build_isolates_caches_and_promotes_only_after_both_pass` 在 Windows 上因断言固定 POSIX 路径分隔符失败。将 HEAD 的原版测试与两个构建脚本复制到本地 `workspace/t14a-macos-baseline/`，通过 `uv run --no-sync python workspace/t14a-macos-baseline/run_baseline.py` 仅运行这两项，复现相同错误：2 failed、34 deselected。相关构建脚本与测试保持原样，不将基线失败记作通过。
+
+预算场景调整后的直接复测：
+
+```text
+uv run --no-sync python -m pytest tests/test_skill_budget_recovery.py tests/test_context_input.py tests/test_inject.py tests/test_agent_session_persistence.py -q --tb=short -rs --basetemp=workspace/t14a-budget-final
+105 passed in 28.75s
+```
+
+最后只调整了上述测试场景，未重跑第二次全量；不能将第一次全量标记为全绿。318 项跳过涉及未启用 live、平台适用性及缺失浏览器／Canvas／字体依赖，排除项沿用 preflight；警告为 requests 依赖版本及 tar.extractall 弃用提示。`compileall` 与差异检查通过。完整日志和 XML 保存在本地 `workspace/t14a-full-final.log`、`workspace/t14a-full-final.xml`，不纳入提交。
+
+### T14 原始边界
+
 默认 `wrapup_remaining_steps=10`，在 `max_steps=12` 的评估 profile 下，第 3 步触发；源码 Agent 默认 `max_steps=300`，对应第 291 步。不能把评估配置的第 3 步误称为产品默认行为。触发条件和“停止工具”的正文属于 P0-S2，本项保留，另立 T14a 方案；沙箱启动超时另列运行故障。
 
 ## 来源修正阶段的验收与对照

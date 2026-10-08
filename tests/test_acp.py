@@ -5033,7 +5033,9 @@ async def test_presentation_resume_reports_actions_without_reconfirming_mode(tmp
         prompt=[{"text": "请按选择继续原任务"}], field_meta={"userDecision": response, "ui_language": "zh"}))
     assert len(llm.calls) == 1
     user_messages = [content for role, content in llm.calls[0] if role == "user"]
-    assert len(user_messages) == 1
+    assert len(user_messages) == 2
+    assert "Runtime state update:" in user_messages[1]
+    assert "最后一步交付提醒" in user_messages[1]
     text = user_messages[0]
     assert ("Host presentation progress guidance:" in text) == has_guidance
     if has_guidance:
@@ -5095,7 +5097,10 @@ async def test_acp_skill_filter_ignores_host_ui_language_instruction(tmp_path):
     assert state.preloaded_skill_names == []
     assert "## Auto-Loaded Skill Instructions" not in llm.calls[0][0][1]
     user_messages = [content for role, content in llm.calls[0] if role == "user"]
-    assert user_messages == [
+    assert len(user_messages) == 2
+    assert "Runtime state update:" in user_messages[1]
+    assert "最后一步交付提醒" in user_messages[1]
+    assert user_messages[:1] == [
         "[Host UI language: Chinese. Use this language for user-visible "
         "intermediate summaries, progress updates, and the final response unless the user "
         "explicitly requests another language.]\n\n"

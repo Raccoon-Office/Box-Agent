@@ -148,7 +148,8 @@ async def test_hidden_runtime_injection_updates_context_without_user_message():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("max_steps,reserve,expected_step", [
-    (12, 10, 3), (300, 10, 291), (10, 10, None), (12, 0, None),
+    (12, 10, 3), (300, 10, 291), (10, 10, None), (6, 10, None),
+    (12, 0, None), (12, 1, 12),
 ])
 async def test_budget_feedback_reaches_model_as_runtime_at_existing_threshold(
     max_steps, reserve, expected_step,
@@ -180,22 +181,143 @@ async def test_budget_feedback_reaches_model_as_runtime_at_existing_threshold(
         }),
     ))
     nudges = [event for event in events if isinstance(event, InjectedMessageEvent)
-              and "步数预算即将用尽" in event.content]
+              and "步数预算提醒" in event.content]
     assert _latest_user_text(msgs) == "hi"
     if expected_step is None:
         assert not nudges
         return
     assert len(nudges) == 1
     assert nudges[0].user_visible is False
-    assert not any("步数预算即将用尽" in str(message.content)
+    assert not any("步数预算提醒" in str(message.content)
                    for request in calls[:-1] for message in request)
     feedback = next(message for message in calls[-1]
-                    if "步数预算即将用尽" in str(message.content))
+                    if "步数预算提醒" in str(message.content))
     assert feedback.role == "user"
     assert feedback.source == "runtime"
     assert "Runtime state update:" in feedback.content
     assert "The user sent" not in feedback.content
     assert feedback.content.endswith(nudges[0].content)
+    assert f"含当前步还可用 {max_steps - expected_step + 1} 步" in feedback.content
+    assert "继续执行尚缺的必要操作，包括保存产物、读回校验和交付" in feedback.content
+    assert "在现有权限和工具预算内" in feedback.content
+    assert "请求后等待，不猜测输入或擅自继续" in feedback.content
+    assert "不将未完成的任务声明为完成" in feedback.content
+    assert "停止调用任何工具" not in feedback.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_steps,reserve,near_step", [
+    (12, 10, 3), (300, 10, 291), (6, 10, None),
+    (12, 0, None), (12, 1, 12), (1, 10, None),
+])
+@pytest.mark.parametrize("answer_on_last_step", [True, False])
+async def test_final_step_handoff_is_independent_and_does_not_extend_budget(
+    max_steps, reserve, near_step, answer_on_last_step,
+):
+    from box_agent.config import ToolLimitsConfig
+
+    requests = []
+
+    class CapturingLLM:
+        async def generate_stream(self, messages, **kwargs):
+            requests.append([message.model_copy(deep=True) for message in messages])
+            if len(requests) == max_steps and answer_on_last_step:
+                yield StreamEvent(type="text", delta="Current status: incomplete")
+                yield StreamEvent(type="finish", finish_reason="stop")
+            else:
+                yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+                    ToolCall(id=f"echo-{len(requests)}", type="function",
+                             function=FunctionCall(name="echo", arguments={"text": "progress"})),
+                ])
+
+    events = await collect(run_agent_loop(
+        llm=CapturingLLM(), messages=_msgs(), tools={"echo": EchoTool()},
+        max_steps=max_steps, tool_limits=ToolLimitsConfig(general={
+            "wrapup_remaining_steps": reserve, "final_summary_after_calls": 512,
+        }),
+    ))
+    assert len(requests) == max_steps
+    for marker, expected_step in (("步数预算提醒", near_step), ("最后一步交付提醒", max_steps)):
+        injections = [event for event in events if isinstance(event, InjectedMessageEvent)
+                      and marker in event.content]
+        assert len(injections) == (0 if expected_step is None else 1)
+        observed_steps = [index + 1 for index, request in enumerate(requests)
+                          if any(marker in str(message.content) for message in request)]
+        assert observed_steps == ([] if expected_step is None else list(range(expected_step, max_steps + 1)))
+        assert all(not event.user_visible for event in injections)
+    feedback = requests[-1][-1]
+    assert "最后一步交付提醒" in feedback.content
+    assert feedback.source == "runtime"
+    assert "停止调用任何工具" in feedback.content
+    assert "尚未完成或未验证的部分" in feedback.content
+    assert "不将未完成的任务声明为完成" in feedback.content
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.stop_reason is (StopReason.END_TURN if answer_on_last_step else StopReason.MAX_STEPS)
+
+
+@pytest.mark.asyncio
+async def test_no_progress_reminder_does_not_suppress_final_step_handoff():
+    class FailingTool(EchoTool):
+        async def execute(self, text: str = ""):
+            return ToolResult(success=False, content="", error="unavailable")
+
+    llm = MockLLM([
+        LLMResponse(content="", tool_calls=[ToolCall(
+            id=f"failed-{index}", type="function",
+            function=FunctionCall(name="echo", arguments={"text": "try"}),
+        )], finish_reason="tool") for index in range(2)
+    ] + [LLMResponse(content="Incomplete: tool unavailable", finish_reason="stop")])
+    events = await collect(run_agent_loop(
+        llm=llm, messages=_msgs(), tools={"echo": FailingTool()},
+        max_steps=3, no_progress_limit=1,
+    ))
+    reminders = [event.content for event in events if isinstance(event, InjectedMessageEvent)]
+    assert len(reminders) == 2
+    assert "没有取得有效进展" in reminders[0]
+    assert "最后一步交付提醒" in reminders[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wait_for_user", [False, True])
+async def test_budget_reminder_allows_required_action_and_respects_waiting(wait_for_user):
+    from box_agent.config import ToolLimitsConfig
+
+    class RequiredAction(EchoTool):
+        ends_turn_on_success = wait_for_user
+
+    class Preparation(EchoTool):
+        @property
+        def name(self):
+            return "prepare"
+
+    responses = [
+        LLMResponse(content="", tool_calls=[ToolCall(
+            id=f"action-{index}", type="function",
+            function=FunctionCall(name="echo", arguments={"text": "required action"}),
+        )], finish_reason="tool")
+        for index in range(2)
+    ]
+    # The first action is preparation; the second happens after the reminder.
+    responses[0].tool_calls[0].function.name = "prepare"
+    responses.append(LLMResponse(content="delivered", finish_reason="stop"))
+    llm = MockLLM(responses)
+    events = await collect(run_agent_loop(
+        llm=llm, messages=_msgs(),
+        tools={"prepare": Preparation(), "echo": RequiredAction()}, max_steps=12,
+        tool_limits=ToolLimitsConfig(general={"wrapup_remaining_steps": 11}),
+    ))
+    reminder_index = next(i for i, event in enumerate(events)
+                          if isinstance(event, InjectedMessageEvent)
+                          and "步数预算提醒" in event.content)
+    action_index = next(i for i, event in enumerate(events)
+                        if isinstance(event, ToolCallResult) and event.tool_name == "echo")
+    assert reminder_index < action_index
+    assert events[action_index].success
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.stop_reason is (StopReason.WAITING_FOR_USER if wait_for_user else StopReason.END_TURN)
+    assert llm._idx == (2 if wait_for_user else 3)
+    assert not any(isinstance(event, InjectedMessageEvent)
+                   and "最后一步交付提醒" in event.content for event in events)
 
 
 @pytest.mark.asyncio
