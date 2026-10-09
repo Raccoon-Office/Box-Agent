@@ -1,6 +1,7 @@
 """记忆后端的协议、身份隔离和完整用户轮次回归。"""
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -21,6 +22,7 @@ from box_agent.memory import (
     create_memory_backend, memory_user_turn, place_memory_block,
 )
 from box_agent.session_context import HostBindings, SessionOptions
+from box_agent.schema import FunctionCall, StreamEvent, ToolCall
 from box_agent.tools.memory_tool import create_memory_tools
 from tests.test_agent_session import session_config
 from tests.test_session_plugins import RecordingLLM
@@ -47,7 +49,16 @@ def memory_http(monkeypatch):
         if request.url.path.endswith("/files/read"):
             path = payload["path"]
             files = {"memory://user.md": server.profile, "memory://memory.md": "长期项目资料", **server.files}
-            data = {"content": files.get(path, ""), "exists": path in files}
+            content = files.get(path)
+            data = core_file_response(path, content or "", exists=isinstance(content, str))
+        elif request.url.path.endswith("/files/write"):
+            path = payload["path"]
+            files = {"memory://user.md": server.profile, "memory://memory.md": "长期项目资料", **server.files}
+            current = files.get(path)
+            if isinstance(current, str) and payload.get("base_revision") != core_file_response(path, current)["revision"]:
+                return httpx.Response(409, json={"ok": False, "error": {"code": "MEMORY_REVISION_CONFLICT"}})
+            server.files[path] = payload["content"]
+            data = core_file_response(path, payload["content"])
         elif request.url.path.endswith("/resource_search"):
             data = {"results": [{"resource_type": "qa_chunk", "content": "历史问答", "path": "memory://qa/example"}]}
         else:
@@ -57,6 +68,12 @@ def memory_http(monkeypatch):
     client = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs))
     return server
+
+
+def core_file_response(path, content, *, exists=True):
+    """构造与 MemSense 文件协议一致的可核实版本。"""
+    return {"path": path, "content": content, "exists": exists,
+            "revision": "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()}
 
 
 def backend_settings(tmp_path, **kwargs):
@@ -121,9 +138,9 @@ def test_yaml_loads_backend_configuration_and_defaults_empty_identity(tmp_path):
 async def test_memsense_read_search_and_save_use_distinct_protocols(tmp_path, memory_http):
     backend = create_memory_backend(backend_settings(tmp_path, memory_tenant_id="tenant", memory_user_id="user"))
     tools = {tool.name: tool for tool in create_memory_tools(backend)}
-    assert "memory_write" not in tools and "memory_edit" not in tools
+    assert "memory_write" in tools and "memory_edit" in tools
     assert "memory_write_correction" in tools
-    assert (await tools["memory_read"].execute(path="memory://user.md")).success
+    assert (await tools["memory_read"].execute(path="user.md")).success
     assert (await tools["memory_search"].execute(query="历史项目", limit=4)).success
     session_id = "674d479c-940f-47f5-b314-5eecb8495d17"
     await backend.save_turn("${tenant_id}", "最终答复", session_id=session_id, turn_id="turn", timestamp=123)
@@ -167,6 +184,7 @@ async def test_generic_and_placeholder_types_do_not_force_memsense_protocol(tmp_
     backend = create_memory_backend(settings)
     assert backend.capabilities == {"search", "save"}
     assert "memory_read" not in {tool.name for tool in create_memory_tools(backend)}
+    assert not {"memory_write", "memory_edit"} & {tool.name for tool in create_memory_tools(backend)}
     assert await backend.load_context(query="任意") == ""
     assert await backend.search_memory("问题", 2) == ["通用结果"]
     await backend.save_turn("用户", "答复", session_id="s", turn_id="t")
@@ -207,9 +225,9 @@ async def test_memsense_prompt_and_read_tool_keep_entries_without_storage_attrib
         await run(session, "我叫什么")
         prompt = llm.requests[0]["messages"][0].content
         tools = {tool.name: tool for tool in create_memory_tools(session.memory_manager)}
-        result = await tools["memory_read"].execute(path="memory://user.md")
+        result = await tools["memory_read"].execute(path="user.md")
         assert result.success
-        assert '<mem>称呼 <p>W</p> &lt;用户&gt;。\n第二行</mem>' in result.content
+        assert json.loads(result.content)["content"] == '<mem>称呼 <p>W</p> &lt;用户&gt;。\n第二行</mem>'
         assert '<mem>称呼 <p>W</p> &lt;用户&gt;。\n第二行</mem>' in prompt
         assert "## User Profile" in prompt and "## Long-term Memory" in prompt
         assert "## Recent Date Memory" not in prompt
@@ -494,7 +512,7 @@ async def test_session_identity_rebinds_borrowed_memory_tools(tmp_path, memory_h
                 options=SessionOptions(profile="acp", workspace_dir=tmp_path, memory_user_id=user))
             sessions.append(session)
             assert session.memory_extractor is None
-            assert "memory_write" not in session.agent.tools
+            assert "memory_write" in session.agent.tools and "memory_edit" in session.agent.tools
             await session.agent.tools["memory_search"].execute(query="test")
         assert config.agent.memory_user_id == "default"
         searches = [body for path, body in memory_http.calls if path.endswith("/resource_search")]
@@ -534,7 +552,7 @@ async def test_malformed_external_response_reports_failure(tmp_path, memory_http
             await backend.save_turn("问题", "回答", session_id="s", turn_id="t", timestamp=1)
     else:
         tool = next(tool for tool in create_memory_tools(backend) if tool.name == "memory_" + operation)
-        result = await tool.execute(**({"query": "项目"} if operation == "search" else {"path": "memory://user.md"}))
+        result = await tool.execute(**({"query": "项目"} if operation == "search" else {"path": "user.md"}))
         assert not result.success
     expected = "invalid_file_response" if operation == "read" else f"invalid_{operation}_response"
     assert expected in caplog.text
@@ -640,7 +658,12 @@ async def test_generic_optional_recall_read_identity_mapping_and_error_flag(tmp_
     backend = create_memory_backend(settings)
     assert await backend.load_context(query="q") == "通用内容"
     assert await backend.read_memory("profile-key") == "通用内容"
-    assert memory_http.calls == [("/context", {"owner": "user-a"}), ("/get", {"key": "profile-key"})]
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    assert "required" not in tools["memory_read"].parameters
+    assert (await tools["memory_read"].invoke({})).content == "通用内容"
+    assert "memory_write" not in tools and "memory_edit" not in tools
+    assert memory_http.calls == [("/context", {"owner": "user-a"}), ("/get", {"key": "profile-key"}),
+                                 ("/get", {"key": ""})]
     memory_http.handler = lambda request, payload: httpx.Response(200, json={"success": False, "value": "失败"})
     with pytest.raises(MemoryBackendError):
         await backend.read_memory("profile-key")
@@ -650,10 +673,323 @@ async def test_generic_optional_recall_read_identity_mapping_and_error_flag(tmp_
 async def test_read_tool_reports_failure_and_missing_core_file_is_empty(tmp_path, memory_http):
     backend = create_memory_backend(backend_settings(tmp_path))
     tool = next(tool for tool in create_memory_tools(backend) if tool.name == "memory_read")
-    memory_http.handler = lambda request, payload: httpx.Response(200, json={"ok": True, "data": {"content": "", "exists": False}})
-    assert (await tool.execute()).success
+    memory_http.handler = lambda request, payload: httpx.Response(200, json={
+        "ok": True, "data": core_file_response(payload["path"], "", exists=False)})
+    result = await tool.execute(path="user.md")
+    assert result.success and json.loads(result.content)["exists"] is False
     memory_http.handler = lambda request, payload: httpx.Response(400, json={"ok": False})
-    assert not (await tool.execute()).success
+    assert not (await tool.execute(path="user.md")).success
+
+
+@pytest.mark.asyncio
+async def test_memsense_core_tools_require_two_short_paths_and_block_other_resources(tmp_path, memory_http):
+    """参数枚举和直接执行均不能访问其他记忆资源，也不能省略路径。"""
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    for name, arguments in (
+        ("memory_read", {}), ("memory_write", {"content": "<mem>新记忆</mem>"}),
+        ("memory_edit", {"old_text": "", "new_text": "<mem>新记忆</mem>"}),
+    ):
+        tool = tools[name]
+        assert "path" in tool.parameters["required"]
+        assert tool.parameters["properties"]["path"]["enum"] == ["user.md", "memory.md"]
+        assert "user.md" in tool.description and "memory.md" in tool.description
+        if name != "memory_read":
+            assert "memory_read" in tool.description
+        assert not (await tool.invoke(arguments)).success
+        for path in ("", "memory://user.md", "date-memory/2026-10-09.md", "../user.md", "user.md/", "qa/chunk"):
+            assert not (await tool.invoke({"path": path, **arguments})).success
+            result = await tool.execute(path=path, **arguments)
+            assert not result.success and "只允许" in result.error
+    assert memory_http.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,rule_field", [("user.md", "user_profile_update_rules"),
+                                          ("memory.md", "long_term_memory_update_rules")])
+async def test_memsense_read_returns_separate_model_visible_rules_without_storage_metadata(tmp_path, memory_http, path, rule_field):
+    """规则与正文分字段返回，不能泄漏原始属性或混进记忆条目。"""
+    raw = '<mem time="2026-10-07 11:24:33" priority="2">称呼 <p>W</p> &lt;用户&gt;。\n第二行</mem>'
+    memory_http.files["memory://" + path] = raw
+    tool = next(tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))
+                if tool.name == "memory_read")
+    result = await tool.invoke({"path": path})
+    data = json.loads(result.content)
+    assert result.success and data == result.raw_output == json.loads(result.model_context)
+    assert data["path"] == path and data["exists"] is True
+    assert data["content"] == "<mem>称呼 <p>W</p> &lt;用户&gt;。\n第二行</mem>"
+    assert "完整重写" in data["memory_edit_write_rules"] and data[rule_field]
+    assert set(data) == {"path", "exists", "content", "memory_edit_write_rules", rule_field}
+    assert memory_http.files["memory://" + path] == raw
+
+
+@pytest.mark.asyncio
+async def test_memsense_modifications_require_explicit_read_of_same_file(tmp_path, memory_http):
+    """自动预载不解锁修改，读取另一文件也不能解锁目标文件。"""
+    backend = create_memory_backend(backend_settings(tmp_path))
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    await backend.load_context(query="记住偏好")
+    for name, arguments in (("memory_write", {"content": "<mem>新记忆</mem>"}),
+                            ("memory_edit", {"old_text": "", "new_text": "<mem>新记忆</mem>"})):
+        assert "必须先" in (await tools[name].invoke({"path": "user.md", **arguments})).error
+    await tools["memory_read"].invoke({"path": "memory.md"})
+    assert not (await tools["memory_write"].invoke({"path": "user.md", "content": "<mem>新记忆</mem>"})).success
+    assert not [call for call in memory_http.calls if call[0].endswith("/write")]
+
+
+@pytest.mark.asyncio
+async def test_memsense_create_after_missing_read_then_append_replace_and_delete(tmp_path, memory_http):
+    """创建与连续编辑复用成功版本，真实请求只携带存储条目和身份。"""
+    backend = create_memory_backend(backend_settings(tmp_path, memory_tenant_id="tenant", memory_user_id="user"))
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    memory_http.files["memory://user.md"] = None
+    read = json.loads((await tools["memory_read"].invoke({"path": "user.md"})).content)
+    assert read["exists"] is False and read["memory_edit_write_rules"]
+    assert not (await tools["memory_edit"].invoke({"path": "user.md", "old_text": "", "new_text": "<mem>新增</mem>"})).success
+    assert (await tools["memory_write"].invoke({"path": "user.md", "content": "<mem>用户姓名为 W</mem>"})).success
+    created = memory_http.files["memory://user.md"]
+    first = [body for path, body in memory_http.calls if path.endswith("/write")][0]
+    assert set(first) == {"tenant_id", "user_id", "path", "content"}
+    assert first["tenant_id"] == "tenant" and first["user_id"] == "user"
+    assert 'priority="1"' in created and 'time="' in created
+    assert "rules" not in created
+    edits = [
+        ("", "<mem>用户偏好简洁回答</mem><mem>用户喜欢先讨论方案</mem>"),
+        ("<mem>用户偏好简洁回答</mem><mem>用户喜欢先讨论方案</mem>",
+         "<mem>用户偏好简洁回答</mem><mem>改代码前需要确认</mem>"),
+        ("<mem>改代码前需要确认</mem>", ""),
+    ]
+    for old_text, new_text in edits:
+        before = memory_http.files["memory://user.md"]
+        result = await tools["memory_edit"].invoke({"path": "user.md", "old_text": old_text, "new_text": new_text})
+        assert result.success, result.error
+        request_path, body = memory_http.calls[-1]
+        assert request_path == "/v1/memory/files/write"
+        assert body["base_revision"] == core_file_response("memory://user.md", before)["revision"]
+        assert created in body["content"]
+    assert json.loads(result.content)["content"] == "<mem>用户姓名为 W</mem>\n<mem>用户偏好简洁回答</mem>\n"
+
+
+@pytest.mark.asyncio
+async def test_memsense_full_rewrite_preserves_unchanged_entry_metadata(tmp_path, memory_http):
+    """完整重写保留未变条目属性，替换条目按新记忆生成普通优先级。"""
+    old = '<mem time="2026-10-07 11:24:33" priority="3">原样保留</mem>'
+    memory_http.files["memory://memory.md"] = old + '\n<mem time="2026-10-06 08:00:00" priority="2">被替换</mem>'
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    await tools["memory_read"].invoke({"path": "memory.md"})
+    result = await tools["memory_write"].invoke({"path": "memory.md", "content": "<mem>原样保留</mem><mem>新条目</mem>"})
+    assert result.success
+    stored = memory_http.files["memory://memory.md"]
+    assert stored.startswith(old + "\n")
+    assert 'priority="1">新条目</mem>' in stored and "被替换" not in stored
+
+
+@pytest.mark.asyncio
+async def test_memsense_edit_preserves_protected_entries_and_rejects_ambiguous_blocks(tmp_path, memory_http):
+    """保护条目保持原样，重复内容必须用连续完整块消除歧义。"""
+    protected = '<mem time="2026-10-07 11:24:33" priority="0">保护条目</mem>'
+    repeated = '<mem time="2026-10-07 11:24:33" priority="1">重复</mem>'
+    marker = '<mem time="2026-10-07 11:24:33" priority="2">定位</mem>'
+    raw = protected + "\n" + repeated + "\n" + marker + "\n" + repeated
+    memory_http.files["memory://user.md"] = raw
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    await tools["memory_read"].invoke({"path": "user.md"})
+    for old_text, new_text in (("<mem>保护条目</mem>", ""), ("<mem>保护条目</mem>", "<mem>改保护</mem>"),
+                              ("<mem>重复</mem>", "<mem>替换</mem>"), ("<mem>不存在</mem>", ""),
+                              ("重复", "<mem>替换</mem>")):
+        assert not (await tools["memory_edit"].invoke({"path": "user.md", "old_text": old_text, "new_text": new_text})).success
+    assert not (await tools["memory_write"].invoke({"path": "user.md", "content": "<mem>保护条目</mem>"})).success
+    assert not [call for call in memory_http.calls if call[0].endswith("/write")]
+    result = await tools["memory_edit"].invoke({"path": "user.md", "old_text": "<mem>重复</mem><mem>定位</mem>",
+                                              "new_text": "<mem>替换</mem><mem>定位</mem>"})
+    assert result.success
+    stored = memory_http.files["memory://user.md"]
+    assert stored.startswith(protected) and marker in stored
+    assert stored.count(">重复</mem>") == 1 and ">替换</mem>" in stored
+    assert (await tools["memory_edit"].invoke({"path": "user.md", "old_text": "", "new_text": "<mem>额外条目</mem>"})).success
+    assert memory_http.files["memory://user.md"].startswith(protected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["普通文本", "<mem></mem>", '<mem priority="1">伪造属性</mem>',
+                                     "<mem>未闭合", "<mem>嵌套<mem>内容</mem></mem>", "<mem>条目</mem>尾随文本"])
+async def test_memsense_write_rejects_malformed_entries_without_requests(tmp_path, memory_http, content):
+    """模型不能绕过完整条目约束或自行填写存储属性。"""
+    memory_http.profile = '<mem time="2026-10-07 11:24:33" priority="1">旧记忆</mem>'
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    await tools["memory_read"].invoke({"path": "user.md"})
+    assert not (await tools["memory_write"].invoke({"path": "user.md", "content": content})).success
+    assert not (await tools["memory_edit"].invoke({"path": "user.md", "old_text": "", "new_text": content})).success
+    assert not [call for call in memory_http.calls if call[0].endswith("/write")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["conflict", "timeout", "server_error", "malformed"])
+async def test_memsense_write_failure_never_retries_and_requires_new_read(tmp_path, memory_http, caplog, failure):
+    """结果不确定或版本冲突时不能重复提交，也不能复用旧读取记录。"""
+    memory_http.profile = '<mem time="2026-10-07 11:24:33" priority="1">旧记忆</mem>'
+    backend = create_memory_backend(backend_settings(tmp_path))
+    backend.config.max_retries = 3
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    await tools["memory_read"].invoke({"path": "user.md"})
+
+    def fail(request, payload):
+        if not request.url.path.endswith("/write"):
+            return None
+        if failure == "timeout":
+            raise httpx.ReadTimeout("敏感凭证和请求正文", request=request)
+        if failure == "malformed":
+            return httpx.Response(200, json={"ok": True, "data": {"content": "响应损坏"}})
+        return httpx.Response(409 if failure == "conflict" else 500,
+                              json={"ok": False, "error": "敏感凭证和请求正文"})
+
+    memory_http.handler = fail
+    failed = await tools["memory_write"].invoke({"path": "user.md", "content": "<mem>新记忆</mem>"})
+    assert not failed.success and "memory_read" in failed.error
+    retry = await tools["memory_edit"].invoke({"path": "user.md", "old_text": "", "new_text": "<mem>新记忆</mem>"})
+    assert not retry.success and "必须先" in retry.error
+    assert len([call for call in memory_http.calls if call[0].endswith("/write")]) == 1
+    assert "敏感凭证" not in caplog.text and "新记忆" not in caplog.text
+    memory_http.handler = None
+    await tools["memory_read"].invoke({"path": "user.md"})
+    assert (await tools["memory_write"].invoke({"path": "user.md", "content": "<mem>新记忆</mem>"})).success
+
+
+@pytest.mark.asyncio
+async def test_memsense_failed_read_revokes_previous_read_record(tmp_path, memory_http):
+    """读取失败不使用上一次成功缓存，也不能把失败当成不存在。"""
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    assert (await tools["memory_read"].invoke({"path": "user.md"})).success
+    memory_http.handler = lambda request, payload: httpx.Response(400, json={"ok": False})
+    assert not (await tools["memory_read"].invoke({"path": "user.md"})).success
+    result = await tools["memory_write"].invoke({"path": "user.md", "content": "<mem>新记忆</mem>"})
+    assert not result.success and "必须先" in result.error
+    assert not [call for call in memory_http.calls if call[0].endswith("/write")]
+
+
+@pytest.mark.asyncio
+async def test_memsense_core_read_records_are_isolated_even_for_same_identity(tmp_path, memory_http):
+    """宿主借用同一后端与工具目录时，会话之间也不共享先读权限。"""
+    config = session_config(tmp_path)
+    config.agent = backend_settings(tmp_path)
+    memory_http.profile = '<mem time="2026-10-07 11:24:33" priority="1">旧记忆</mem>'
+    backend = create_memory_backend(config.agent)
+    host = HostBindings(llm_client=RecordingLLM(), system_prompt="system", tools=create_memory_tools(backend),
+                        memory_manager=backend)
+    first = await AgentSession.open(config=config, host=host, options=SessionOptions(workspace_dir=tmp_path))
+    second = await AgentSession.open(config=config, host=host, options=SessionOptions(workspace_dir=tmp_path))
+    try:
+        await first.agent.tools["memory_read"].invoke({"path": "user.md"})
+        request = {"path": "user.md", "old_text": "", "new_text": "<mem>新记忆</mem>"}
+        assert not (await second.agent.tools["memory_edit"].invoke(request)).success
+        assert (await first.agent.tools["memory_edit"].invoke(request)).success
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+
+@pytest.mark.asyncio
+async def test_memsense_read_rules_reach_model_tool_message_but_not_system_prompt(tmp_path, memory_http):
+    """使用真实工具消息管线证明规则字段可见，并且不会加入系统提示。"""
+    class ReadThenAnswerLLM(RecordingLLM):
+        async def generate_stream(self, **kwargs):
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                    id="read-core", type="function",
+                    function=FunctionCall(name="memory_read", arguments={"path": "user.md"}))])
+            else:
+                yield StreamEvent(type="text", delta="已读取")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    session, _ = await managed_session(tmp_path)
+    llm = ReadThenAnswerLLM()
+    try:
+        activated = await session.agent.tools["tool_search"].execute(tool_names=["memory_read", "memory_write", "memory_edit"])
+        assert activated.success
+        session.agent.add_user_message("读取用户画像")
+        events = [item async for item in session.run_events(options=session.build_run_options(llm=llm, logger=None))]
+        messages = llm.requests[-1]["messages"]
+        tool_message = next(message for message in messages if message.role == "tool" and message.name == "memory_read")
+        assert tool_message.content.startswith("{"), tool_message.content
+        payload = json.loads(tool_message.content)
+        assert payload["memory_edit_write_rules"] and payload["user_profile_update_rules"]
+        assert payload["content"] == "用户偏好中文"
+        assert "memory_edit_write_rules" not in messages[0].content
+        assert "完整重写" not in messages[0].content
+        schema = next(tool for tool in llm.requests[0]["tools"] if tool.name == "memory_read")
+        assert schema.parameters["properties"]["path"]["enum"] == ["user.md", "memory.md"]
+        assert events
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.asyncio
+async def test_memsense_concurrent_edits_use_successive_revisions_without_losing_entries(tmp_path, memory_http):
+    """同会话并发追加按文件串行，第二次提交基于第一次成功版本。"""
+    memory_http.profile = '<mem time="2026-10-07 11:24:33" priority="1">原条目</mem>'
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    await tools["memory_read"].invoke({"path": "user.md"})
+    results = await asyncio.gather(*(tools["memory_edit"].invoke({
+        "path": "user.md", "old_text": "", "new_text": f"<mem>{body}</mem>"}) for body in ("追加甲", "追加乙")))
+    assert all(result.success for result in results)
+    stored = memory_http.files["memory://user.md"]
+    assert all(body in stored for body in ("原条目", "追加甲", "追加乙"))
+    requests = [body for path, body in memory_http.calls if path.endswith("/write")]
+    assert requests[1]["base_revision"] == core_file_response("memory://user.md", requests[0]["content"])["revision"]
+
+
+@pytest.mark.asyncio
+async def test_memsense_cancelled_modification_requires_new_read(tmp_path, memory_http, monkeypatch):
+    """取消可能发生在服务端提交后，因此也撤销旧版本的继续修改资格。"""
+    memory_http.profile = '<mem time="2026-10-07 11:24:33" priority="1">原条目</mem>'
+    backend = create_memory_backend(backend_settings(tmp_path))
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    await tools["memory_read"].invoke({"path": "user.md"})
+
+    async def cancel(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(backend, "_post", cancel)
+    request = {"path": "user.md", "old_text": "", "new_text": "<mem>新增</mem>"}
+    with pytest.raises(asyncio.CancelledError):
+        await tools["memory_edit"].invoke(request)
+    result = await tools["memory_edit"].invoke(request)
+    assert not result.success and "必须先" in result.error
+
+
+@pytest.mark.asyncio
+async def test_memsense_external_update_conflicts_until_file_is_read_again(tmp_path, memory_http):
+    """后台整理改变内容后，旧版本修改不得覆盖新条目，重新读取后才能更新。"""
+    raw = '<mem time="2026-10-07 11:24:33" priority="1">原条目</mem>'
+    memory_http.profile = raw
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    await tools["memory_read"].invoke({"path": "user.md"})
+    memory_http.files["memory://user.md"] = raw + '\n<mem time="2026-10-09 08:00:00" priority="1">后台新条目</mem>'
+    request = {"path": "user.md", "old_text": "", "new_text": "<mem>工具新条目</mem>"}
+    conflict = await tools["memory_edit"].invoke(request)
+    assert not conflict.success and "版本冲突" in conflict.error
+    assert "后台新条目" in memory_http.files["memory://user.md"]
+    assert "工具新条目" not in memory_http.files["memory://user.md"]
+    assert not (await tools["memory_edit"].invoke(request)).success
+    await tools["memory_read"].invoke({"path": "user.md"})
+    assert (await tools["memory_edit"].invoke(request)).success
+    assert all(body in memory_http.files["memory://user.md"] for body in ("后台新条目", "工具新条目"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["revision", "exists", "path", "content"])
+async def test_memsense_unverifiable_read_never_unlocks_modification(tmp_path, memory_http, fault):
+    """损坏或指向其他文件的读取结果不能成为修改依据。"""
+    def malformed(request, payload):
+        data = core_file_response("memory://user.md", "")
+        data[fault] = {"revision": "sha256:wrong", "exists": "true", "path": "memory://memory.md", "content": None}[fault]
+        return httpx.Response(200, json={"ok": True, "data": data})
+
+    memory_http.handler = malformed
+    tools = {tool.name: tool for tool in create_memory_tools(create_memory_backend(backend_settings(tmp_path)))}
+    assert not (await tools["memory_read"].invoke({"path": "user.md"})).success
+    assert not (await tools["memory_write"].invoke({"path": "user.md", "content": "<mem>新条目</mem>"})).success
+    assert not [call for call in memory_http.calls if call[0].endswith("/write")]
 
 
 @pytest.mark.asyncio

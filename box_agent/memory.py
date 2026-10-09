@@ -2968,6 +2968,25 @@ def create_memory_backend(settings: AgentConfig, *, manager_factory: Any = Memor
 class MemoryBackendError(RuntimeError):
     """可对用户展示的错误摘要，不携带服务地址、认证信息或响应正文。"""
 
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class MemoryEditError(ValueError):
+    """核心记忆工具可直接返回给模型的参数和修改约束错误。"""
+
+
+@dataclass(frozen=True)
+class _MemsenseCoreEntry:
+    """保留条目位置，便于编辑时原样保留未修改的存储内容。"""
+
+    start: int
+    end: int
+    body: str
+    time: str = ""
+    priority: str = "1"
+
 
 class ExternalMemoryBackend:
     """可配置的通用 HTTP 后端，mem0/memu 占位类型复用此实现。"""
@@ -3042,11 +3061,12 @@ class ExternalMemoryBackend:
         )
 
     async def _invoke(self, operation: str, spec: MemoryHttpOperation, *, request_payload: dict[str, Any] | None = None,
+                      allow_retries: bool = True,
                       **variables: Any) -> Any:
         """有限超时重试；HTTP 和协议错误均由后端记录，调用者决定如何降级。"""
         import httpx
 
-        attempts = self.config.max_retries + 1
+        attempts = self.config.max_retries + 1 if allow_retries else 1
         for attempt in range(1, attempts + 1):
             status = None
             retryable = False
@@ -3085,7 +3105,7 @@ class ExternalMemoryBackend:
             self.log_failure(operation, reason, attempt=attempt, status=status, **variables)
             if not retryable or attempt == attempts:
                 self.log_failure(operation, "abandoned", attempt=attempt, status=status, **variables)
-                raise MemoryBackendError(f"{self.backend_type} {operation} 失败（{reason}）")
+                raise MemoryBackendError(f"{self.backend_type} {operation} 失败（{reason}）", status=status)
             await asyncio.sleep(min(0.25 * 2 ** (attempt - 1), 2))
 
     @staticmethod
@@ -3120,9 +3140,38 @@ class MemsenseMemoryBackend(ExternalMemoryBackend):
     """MemSense 的核心文件、历史资源搜索及 QA 保存协议。"""
 
     _CORE_PATHS = ("memory://user.md", "memory://memory.md")
+    core_tool_paths = ("user.md", "memory.md")
     # 只识别 mem 起始标签，保留正文里的 HTML、转义字符和换行。
     _ENTRY_OPEN_RE = re.compile(r'''<mem(?:\s+[\w:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*>''')
     _ENTRY_RE = re.compile(r"<mem>.*?</mem>", re.DOTALL)
+    _STORAGE_ENTRY_RE = re.compile(r"<mem(?P<attrs>\s[^>]*|)>(?P<body>.*?)</mem>", re.DOTALL)
+    _ATTRIBUTE_RE = re.compile(r'''(?P<name>[\w:-]+)\s*=\s*(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)')''')
+    _EDIT_WRITE_RULES = (
+        "必须先用 memory_read 显式读取同一路径，并遵守该文件的内容更新规则。\n"
+        "每条记忆必须使用完整的 <mem>...</mem>，标签不带属性，正文非空；"
+        "正文允许 HTML 和原始 <、>，但不能嵌套 mem 标签。time、priority 由工具维护。\n"
+        "优先使用 memory_edit：old_text 为空、new_text 为完整条目时追加；"
+        "new_text 为空时删除；否则用一个或多个连续完整条目进行唯一匹配和替换。\n"
+        "memory_write 用于创建或完整重写，content 必须包含全部条目，不能只提交新增条目。\n"
+        "read 返回 exists=false 时只能用 memory_write 创建，不能 edit。"
+        "受保护条目不能修改或删除，含受保护条目的文件不能完整重写。\n"
+        "冲突或写入结果不确定时必须重新 memory_read，再决定是否修改；不要绕过保护或版本检查。"
+    )
+    _PROFILE_UPDATE_RULES = (
+        "user.md 保存长期稳定、可复用的用户身份事实、偏好、边界和协作习惯。"
+        "必须来自用户明确表达或多轮稳定重复的信息，不得推断用户身份或偏好。"
+        "不保存一次性任务要求、临时状态、今日安排、外部资料或工具输出。"
+        "用户只是使用某种语言或临时要求某种语言，不据此更新画像。"
+        "敏感隐私细节仅在用户明确要求记录时考虑保存。"
+        "用户要求忘记某项时，读取后用 edit 删除对应的非保护条目。"
+    )
+    _LONG_TERM_UPDATE_RULES = (
+        "memory.md 保存用户明确确认的长期规则、明确要求长期保存的工作上下文，"
+        "以及未来会持续影响协作的已确认结论。"
+        "不保存一次性查询、临时任务内容、中间工具输出或模型推断。"
+        "仅修改与本次已确认信息相关的条目，避免重复，不得把临时事实升级为长期规则。"
+        "用户要求忘记某项时，读取后用 edit 删除对应的非保护条目。"
+    )
     _CONTEXT_RULES = (
         "## 使用规则\n"
         "- 当前用户明确要求优先于历史记忆。\n"
@@ -3135,13 +3184,184 @@ class MemsenseMemoryBackend(ExternalMemoryBackend):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.capabilities = frozenset({"recall", "read", "search", "save"})
+        self.capabilities = frozenset({"recall", "read", "search", "save", "write", "edit"})
+        # 会话装配会复制后端；记录仅用于显式先读校验，不成为新的持久化状态源。
+        self._core_read_records: dict[str, dict[str, Any]] = {}
+        self._core_file_locks = {path: asyncio.Lock() for path in self.core_tool_paths}
 
     async def _post(self, operation: str, endpoint: str, payload: dict[str, Any], **context: Any) -> Any:
         from .config import MemoryHttpOperation
 
         spec = MemoryHttpOperation(path=endpoint, success_path="ok", response_path="data")
-        return await self._invoke(operation, spec, request_payload=payload, **context)
+        return await self._invoke(operation, spec, request_payload=payload,
+                                  allow_retries=operation not in {"write", "edit"}, **context)
+
+    @classmethod
+    def _validate_core_tool_path(cls, path: str) -> None:
+        """工具路径只接受两个短名称，不能借前缀或相对路径绕过范围。"""
+        if not isinstance(path, str) or path not in cls.core_tool_paths:
+            raise MemoryEditError("path 必填，只允许 user.md 或 memory.md。")
+
+    @classmethod
+    def _core_rule_fields(cls, path: str) -> dict[str, str]:
+        """规则只进入显式 read 的返回字段，不进入正文或系统提示。"""
+        field = "user_profile_update_rules" if path == "user.md" else "long_term_memory_update_rules"
+        return {"memory_edit_write_rules": cls._EDIT_WRITE_RULES,
+                field: cls._PROFILE_UPDATE_RULES if path == "user.md" else cls._LONG_TERM_UPDATE_RULES}
+
+    def _core_file_record(self, data: Any, *, path: str, operation: str = "read") -> dict[str, Any]:
+        """只有明确的存在状态和可核实的内容版本才能解锁后续修改。"""
+        if (not isinstance(data, dict) or not isinstance(data.get("content"), str)
+                or data.get("path") != "memory://" + path
+                or not isinstance(data.get("exists"), bool)
+                or data.get("revision") != "sha256:" + hashlib.sha256(data["content"].encode("utf-8")).hexdigest()
+                or (not data["exists"] and data["content"])):
+            self.log_failure(operation, "invalid_file_response")
+            raise MemoryBackendError("MemSense 返回的文件状态或版本格式无效，请重新 memory_read。")
+        return {"content": data["content"], "exists": data["exists"],
+                "revision": data["revision"] if data["exists"] else None}
+
+    async def read_core_memory(self, path: str) -> dict[str, Any]:
+        """显式读取完整文件并保存原始版本；自动预载不调用此入口。"""
+        self._validate_core_tool_path(path)
+        async with self._core_file_locks[path]:
+            self._core_read_records.pop(path, None)
+            data = await self._post("read", "/v1/memory/files/read",
+                                    {**self._identity_payload(), "path": "memory://" + path})
+            record = self._core_file_record(data, path=path)
+            self._core_read_records[path] = record
+            return {"path": path, "exists": record["exists"],
+                    "content": self._ENTRY_OPEN_RE.sub("<mem>", record["content"]),
+                    **self._core_rule_fields(path)}
+
+    @classmethod
+    def _parse_core_entries(cls, text: str, *, storage: bool) -> list[_MemsenseCoreEntry]:
+        """解析完整条目并验证属性；正文里的其他标签和转义文本保持原样。"""
+        error = ("当前存储不是合法的核心记忆格式，无法修改。" if storage else
+                 "记忆必须使用一个或多个完整的 <mem>...</mem> 条目，标签不能带属性，正文不能为空。")
+        entries = []
+        position = 0
+        for match in cls._STORAGE_ENTRY_RE.finditer(text):
+            body = match.group("body").strip()
+            if (text[position:match.start()].strip() or not body
+                    or re.search(r"</?\s*mem(?=$|[\s>/])", body, re.IGNORECASE)):
+                raise MemoryEditError(error)
+            attrs = match.group("attrs")
+            values: dict[str, str] = {}
+            if storage:
+                offset = 0
+                for attr in cls._ATTRIBUTE_RE.finditer(attrs):
+                    name = attr.group("name")
+                    if attrs[offset:attr.start()].strip() or name in values:
+                        raise MemoryEditError(error)
+                    values[name] = attr.group("double") if attr.group("double") is not None else attr.group("single")
+                    offset = attr.end()
+                if (attrs[offset:].strip() or set(values) != {"time", "priority"}
+                        or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", values["time"])
+                        or not re.fullmatch(r"-?\d+", values["priority"])):
+                    raise MemoryEditError(error)
+                try:
+                    datetime.strptime(values["time"], "%Y-%m-%d %H:%M:%S")
+                except ValueError as exc:
+                    raise MemoryEditError(error) from exc
+            elif attrs:
+                raise MemoryEditError(error)
+            entries.append(_MemsenseCoreEntry(match.start(), match.end(), body,
+                                            values.get("time", ""), values.get("priority", "1")))
+            position = match.end()
+        if text[position:].strip() or (not storage and not entries):
+            raise MemoryEditError(error)
+        return entries
+
+    @staticmethod
+    def _render_core_entries(entries: list[_MemsenseCoreEntry], prior: list[_MemsenseCoreEntry]) -> str:
+        """按正文继承未变条目的属性，新条目生成时间和普通优先级。"""
+        from collections import defaultdict, deque
+
+        by_body = defaultdict(deque)
+        for entry in prior:
+            by_body[entry.body].append(entry)
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        rendered = []
+        for entry in entries:
+            old = by_body[entry.body].popleft() if by_body[entry.body] else None
+            rendered.append(f'<mem time="{old.time if old else timestamp}" '
+                            f'priority="{old.priority if old else "1"}">{entry.body}</mem>')
+        return "\n".join(rendered)
+
+    @classmethod
+    def _rewrite_core_content(cls, raw: str, content: str) -> str:
+        """完整重写遵循 agent-v3 的保护约束，不能覆盖含保护条目的文件。"""
+        prior = cls._parse_core_entries(raw, storage=True)
+        if any(int(entry.priority) < 1 for entry in prior):
+            raise MemoryEditError("文件含受保护条目，不能完整重写；请用 memory_edit 修改其他非保护条目。")
+        return cls._render_core_entries(cls._parse_core_entries(content, storage=False), prior)
+
+    @classmethod
+    def _edit_core_content(cls, raw: str, old_text: str, new_text: str) -> str:
+        """按唯一连续完整块编辑，未命中的内容连同原始空白一起保留。"""
+        old_text, new_text = old_text.strip(), new_text.strip()
+        if not old_text and not new_text:
+            raise MemoryEditError("old_text 和 new_text 不能同时为空。")
+        prior = cls._parse_core_entries(raw, storage=True)
+        replacement = cls._parse_core_entries(new_text, storage=False) if new_text else []
+        if not old_text:
+            appended = cls._render_core_entries(replacement, [])
+            separator = "" if not raw or raw.endswith("\n") else "\n"
+            return raw + separator + appended
+        targets = cls._parse_core_entries(old_text, storage=False)
+        bodies = [entry.body for entry in targets]
+        matches = [prior[index:index + len(targets)] for index in range(len(prior) - len(targets) + 1)
+                   if [entry.body for entry in prior[index:index + len(targets)]] == bodies]
+        if not matches:
+            raise MemoryEditError("old_text 的连续完整条目未找到，请重新 memory_read。")
+        if any(int(entry.priority) < 1 for match in matches for entry in match):
+            raise MemoryEditError("目标条目受保护，不允许修改或删除。")
+        if len(matches) != 1:
+            raise MemoryEditError("old_text 命中多个位置，请提供更多连续完整条目以唯一匹配。")
+        block = matches[0]
+        if [entry.body for entry in replacement] == bodies:
+            return raw
+        return raw[:block[0].start] + cls._render_core_entries(replacement, block) + raw[block[-1].end:]
+
+    async def write_core_memory(self, path: str, content: str) -> dict[str, Any]:
+        """创建或完整重写已显式读取的核心文件。"""
+        return await self._update_core_memory(path, "write", content=content)
+
+    async def edit_core_memory(self, path: str, old_text: str, new_text: str) -> dict[str, Any]:
+        """编辑已显式读取且存在的核心文件。"""
+        return await self._update_core_memory(path, "edit", old_text=old_text, new_text=new_text)
+
+    async def _update_core_memory(self, path: str, operation: str, *, content: str = "",
+                                  old_text: str = "", new_text: str = "") -> dict[str, Any]:
+        """以读取版本提交；发送前撤销旧记录，不确定的结果必须重新读取。"""
+        self._validate_core_tool_path(path)
+        async with self._core_file_locks[path]:
+            prior = self._core_read_records.get(path)
+            if prior is None:
+                raise MemoryEditError(f"必须先调用 memory_read 读取 {path}，再调用 memory_{operation}。")
+            if operation == "edit" and not prior["exists"]:
+                raise MemoryEditError("文件不存在，请用 memory_write 创建。")
+            updated = (self._rewrite_core_content(prior["content"], content) if operation == "write" else
+                       self._edit_core_content(prior["content"], old_text, new_text))
+            payload = {**self._identity_payload(), "path": "memory://" + path, "content": updated}
+            if prior["exists"]:
+                payload["base_revision"] = prior["revision"]
+            self._core_read_records.pop(path, None)
+            try:
+                data = await self._post(operation, "/v1/memory/files/write", payload)
+            except MemoryBackendError as exc:
+                if exc.status == 409:
+                    raise MemoryBackendError("文件版本冲突，请重新 memory_read 后再修改。", status=409) from exc
+                raise MemoryBackendError("修改结果无法确认，请重新 memory_read 后再决定是否重试。",
+                                         status=exc.status) from exc
+            record = self._core_file_record(data, path=path, operation=operation)
+            if not record["exists"] or record["content"] != updated:
+                self.log_failure(operation, "invalid_write_response")
+                raise MemoryBackendError("修改响应与提交内容不一致，请重新 memory_read。")
+            self._core_read_records[path] = record
+            return {"path": path, "operation": operation, "exists": True,
+                    "content": self._ENTRY_OPEN_RE.sub("<mem>", record["content"])}
 
     def _identity_payload(self) -> dict[str, str]:
         return {"tenant_id": self.tenant_id, "user_id": self.user_id}
@@ -3181,7 +3401,8 @@ class MemsenseMemoryBackend(ExternalMemoryBackend):
         """截断以完整条目为边界，并保留显式读取完整文件的提示。"""
         if len(content) <= budget:
             return content
-        suffix = f"\n[内容已截断，完整内容请用 memory_read 读取 {path}]"
+        suffix = (f"\n[内容已截断，完整内容请用 memory_read 读取 {path.removeprefix('memory://')}]"
+                  if path in cls._CORE_PATHS else "\n[日期摘要内容已截断]")
         if budget <= len(suffix):
             return ""
         cutoff = budget - len(suffix)

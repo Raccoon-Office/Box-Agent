@@ -27,16 +27,63 @@ memory_external:
 | 核心上下文 | 会话开始加载本地核心和目录摘要 | 每个真实用户轮次开始读取两个核心文件及近期日期摘要 |
 | 搜索 | 本地 topic/关键词检索 | `/v1/memory/resource_search`，检索会话标题和历史记忆 |
 | 保存 | 原有工具写入及本地 LLM 提取 | 整轮结束后，后台调用 `/v1/memory/save` 保存用户输入和最终回答 |
-| 文件修改 | 保留 `memory_write` | 不开放文件 write/edit |
+| 文件修改 | 保留 `memory_write` | `memory_write` / `memory_edit`，仅两个核心文件 |
 
-MemSense 的 `memory_read(path=...)` 可读取核心文件或检索返回的资源路径；省略
-path 时读取两个核心文件。`memory_search(query, limit=6)` 使用外部搜索协议。
+MemSense 的 `memory_read`、`memory_write`、`memory_edit` 都要求必填 `path`，
+只接受 `user.md`（用户画像）和 `memory.md`（长期记忆）。模型参数不使用
+`memory://` 前缀，后端内部转换为服务端路径。三个工具不开放日期、会话、事实
+或原始 QA 路径；`memory_search(query, limit=6)` 保留外部搜索协议和结果。
 核心文件交给模型前保留 `<mem>...</mem>` 条目及正文，去掉 `time`、`priority`
-等存储属性；自动注入和 `memory_read` 使用同一转换，远端存储不变。
+等存储属性；自动注入和显式读取使用同一视图转换。
 当前 MemSense 服务将 `qa_chunk` 搜索类型兼容映射到事实记忆；原始 QA 仍通过
 save 保存，搜索结果保留服务实际返回的类型和资源路径。
 `enable_memory_extraction` 和维护、晋升配置只作用于 local。纠错工具仍保存到
 同身份的本地存储，不修改远端文件。
+
+### MemSense 核心文件工具
+
+修改前必须在同一会话显式 `memory_read` 目标文件；自动 system prompt
+预载不解锁修改，读取另一文件也不能解锁目标文件。工具描述说明这一要求，
+执行时同样强制校验。read 的完整 JSON 结构进入模型的工具消息，例如：
+
+```json
+{
+  "path": "user.md",
+  "exists": true,
+  "content": "<mem>用户希望被称呼为刀客塔。</mem>",
+  "memory_edit_write_rules": "条目格式和追加、替换、删除、完整重写规则",
+  "user_profile_update_rules": "用户画像的内容更新规则"
+}
+```
+
+读取 `memory.md` 时，最后一个字段是 `long_term_memory_update_rules`。
+规则不混入 content，不写入远端文件，不加入 system prompt；只在显式 read
+返回。raw_output 保留同一结构供宿主查看，规则也真实进入模型消息。
+
+```json
+{"name": "memory_read", "arguments": {"path": "user.md"}}
+{"name": "memory_edit", "arguments": {"path": "user.md", "old_text": "", "new_text": "<mem>用户偏好先讨论方案，再确认修改。</mem>"}}
+```
+
+`memory_edit(path, old_text, new_text)` 的空 old_text 表示追加；空 new_text
+表示删除；非空 old_text 必须是一个或多个连续完整条目并唯一匹配。重复
+条目要用更多连续条目消除歧义。`memory_write(path, content)` 创建或完整
+重写文件，content 必须包含全部条目，不能只提交新增部分。read 明确返回
+exists=false 时只允许 write 创建，不允许 edit。
+
+模型只能提交不带属性的完整 `<mem>...</mem>`；time/priority 由后端转换维护。
+未变条目继承原属性，新条目生成时间和 priority=1。priority<1 的条目不能
+修改或删除；含保护条目的文件拒绝完整重写，但可 edit 其他非保护条目。
+核心 edit 转换后也通过 `/v1/memory/files/write` 提交完整存储内容。
+
+现有文件携带内部保存的 base_revision，不暴露覆盖开关。成功修改更新内部
+版本，后续编辑可继续使用；冲突、失败、取消或无法验证的响应清除读取记录，
+必须重新 read。修改请求不自动重试；read/search/save 保留配置的有限重试。
+读取记录仅保存在独立会话后端中，重开会话需要重新读取。
+
+此版本收紧了 MemSense 模型工具接口：旧的省略 path、带 memory:// 前缀或读取
+任意搜索资源的 memory_read 调用需改为两个必填短路径。后端内部资源读取
+和日期自动预载保留，local/generic 的工具参数和行为不变。
 
 ### System prompt 的记忆位置
 
@@ -49,14 +96,14 @@ local 保留原有内容和加载时机，generic 保留服务返回格式。
 
 MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
 三个非空分区及使用规则，全部位于 system prompt 中。日期按旧到新排列，
-自动注入只保留日期标题和摘要正文，显式 `memory_read` 仍返回完整日期文件。
+自动注入只保留日期标题和摘要正文；模型工具不开放日期文件的显式读取或修改。
 `date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31；读取
 `memory://date-memory/YYYY-MM-DD.md`。日期依据本轮时间戳和 MemSense 服务端
 的 UTC 日分区计算，包含当天和此前若干天，每个新 query 重新计算和读取。
 服务端不存在或为空的文件不生成分区；失败文件单独记录日志，其他文件继续使用。
 日期预载只读取已有摘要，不会等待后台保存或代替服务端生成摘要。
 `context_max_chars` 限制后端上下文总长度；MemSense 截断保留完整 mem 条目
-边界，并提示通过 memory_read 获取完整内容。
+边界；核心文件截断时提示通过 memory_read 获取完整内容，日期只标记摘要截断。
 
 MemSense 的会话文件路径要求 UUID。已有 UUID 会话标识保持不变，CLI/ACP 等
 非 UUID 标识在后端内结合 tenant/user 稳定映射为 UUID；本地 Session Log 和
