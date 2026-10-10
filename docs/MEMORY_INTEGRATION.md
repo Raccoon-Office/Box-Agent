@@ -43,9 +43,10 @@ save 保存，搜索结果保留服务实际返回的类型和资源路径。
 子代理按实际工具实例检查权限：外部 `memory_read/search` 要求网络权限，
 MemSense `memory_write/edit` 还要求外部副作用权限。现有公开委派协议不授予
 外部副作用权限，因此不会向子代理开放远端修改；本地记忆和纠错工具维持原策略。
+MCP 等第三方工具即使注册为同名 memory 工具，也不能借用本地记忆的委派权限。
 `box-agent config --set` 默认隐藏 `memory_external.headers` 的所有值，包括
 设置整个 headers 或后端对象时的回显；只有显式 `--show-secrets` 才展示原值。
-校验和 YAML 错误不回显原始输入，配置写入失败仍回滚。
+校验、YAML 和普通类型转换错误不回显原始输入，配置写入失败仍回滚。
 
 ### MemSense 核心文件工具
 

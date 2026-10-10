@@ -273,7 +273,7 @@ def _config_error_details(error: Exception) -> str:
         )
     if isinstance(error, yaml.YAMLError):
         return f"{type(error).__name__}: invalid configuration YAML"
-    return str(error)
+    return f"{type(error).__name__}: invalid configuration value"
 
 
 def _normalize_config_path(key: str) -> list[str]:

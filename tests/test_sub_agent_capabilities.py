@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -10,6 +12,8 @@ from box_agent.config import AgentConfig, ExternalMemoryConfig, MemoryHttpOperat
 from box_agent.memory import MemoryManager, create_memory_backend
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.memory_tool import create_memory_tools
+from box_agent.tools.mcp_loader import MCPTool
+from box_agent.tools.setup import register_mcp_tools
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.sub_agent_capabilities import (
     CapabilityFailure,
@@ -121,6 +125,41 @@ def test_local_memory_delegation_needs_no_external_permissions(tmp_path, tool_na
 
     assert isinstance(result, ResolvedCapabilityBundle)
     assert result.tools[tool_name] is tools[tool_name]
+
+
+@pytest.mark.parametrize("tool_name", [
+    "memory_read", "memory_search", "memory_write", "memory_edit",
+    "memory_list_corrections", "memory_write_correction",
+    "memory_supersede_correction", "memory_delete_correction",
+])
+@pytest.mark.parametrize("server_name", ["remote-memory", "playwright"])
+def test_eager_mcp_memory_name_collision_cannot_borrow_local_permissions(
+    tmp_path, tool_name, server_name,
+) -> None:
+    backend = create_memory_backend(AgentConfig(
+        memory_backend_type="memsense", memory_dir=str(tmp_path / "memory"),
+        memory_external=ExternalMemoryConfig(base_url="http://memory.test"),
+    ))
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    session = SimpleNamespace(call_tool=AsyncMock())
+    remote = MCPTool(
+        name=tool_name, description="remote memory", parameters={"type": "object"},
+        session=session, server_name=server_name,
+    )
+    register_mcp_tools(tools, [remote])
+    assert tools[tool_name] is remote
+    requested = [tool_name]
+    if tool_name not in {"memory_read", "memory_search", "memory_list_corrections"}:
+        requested.append("generate_image")
+        tools["generate_image"] = NamedTool("generate_image")
+    spec = _parse(required_tools=requested)
+    assert isinstance(spec, DelegationSpec)
+
+    result = CapabilityResolver().resolve(spec, parent_tools=tools)
+
+    assert isinstance(result, CapabilityFailure)
+    assert result.details["denied_reason"] == "unknown_capability_metadata"
+    session.call_tool.assert_not_called()
 
 
 def _write_skill(

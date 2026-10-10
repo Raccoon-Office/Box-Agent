@@ -233,6 +233,21 @@ def test_cmd_config_invalid_file_does_not_echo_header_values(
     assert "private-header-value" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cmd_config_plain_conversion_error_rolls_back_without_echoing_value(
+    tmp_path, monkeypatch, capsys, json_output,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    original = config_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
+
+    assert cli.cmd_config(set_pair=("timeout", "private-header-value"), json_output=json_output) == 1
+
+    assert "private-header-value" not in capsys.readouterr().out
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_config_parses_goal_autopilot_settings(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     _write_config(config_path)
