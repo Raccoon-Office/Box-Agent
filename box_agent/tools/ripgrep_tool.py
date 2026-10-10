@@ -618,6 +618,9 @@ class GlobTool(_RipgrepTool):
 class GrepTool(_RipgrepTool):
     """Search non-ignored file contents with ripgrep regular expressions."""
 
+    # Let shared result storage bound model history and preserve recoverable output.
+    max_result_size_chars = None
+
     @property
     def name(self) -> str:
         return "grep"
@@ -845,7 +848,6 @@ class GrepTool(_RipgrepTool):
                 "\n\n[Warning: non-UTF-8 paths were skipped because replacing bytes "
                 "would identify a different file; results are incomplete.]"
             )
-        model_context = None
         if truncated or timed_out or partial or undecodable_paths or oversized_record:
             reason = (
                 "timed out"
@@ -858,17 +860,16 @@ class GrepTool(_RipgrepTool):
                 if undecodable_paths
                 else "oversized matching lines were skipped"
             )
-            model_context = (
+            content = (
                 f"[Incomplete grep results: {reason}; pattern={pattern}; "
                 f"path={search_path}; include={include}; returned={len(matches)}. "
-                "These are examples, not all matches. Narrow path or pattern and "
+                "Search coverage is incomplete. Narrow path or pattern and "
                 "search again before drawing conclusions.]\n"
-                + "\n".join(rendered[:10])
+                + content
             )
         return ToolResult(
             success=True,
             content=content,
-            model_context=model_context,
             raw_output={
                 "path": str(search_path),
                 "returned_matches": len(matches),
