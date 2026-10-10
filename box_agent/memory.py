@@ -11,23 +11,27 @@ Directory layout::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import aclosing, asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator
 
 from .llm.model_routing import resolve_model_client
 from .user_paths import configured_box_agent_home, default_memory_dir, state_path
 
 if TYPE_CHECKING:
+    from .config import AgentConfig, ExternalMemoryConfig, MemoryHttpOperation
+    from .events import AgentEvent
     from .schema import Message
 
 logger = logging.getLogger(__name__)
@@ -2886,3 +2890,738 @@ class MemoryExtractor:
 
         if operations:
             self._mgr.apply_context_operations(operations)
+
+
+# 外部后端仍属于现有 memory 能力；生命周期和传输不进入稳定内核。
+_MEMORY_HTTP_REQUEST: ContextVar[bool] = ContextVar("memory_http_request", default=False)
+MEMORY_CONTEXT_SLOT = "{MEMORY_CONTEXT}"
+_MEMORY_START = "--- MEMORY START ---"
+_MEMORY_END = "--- MEMORY END ---"
+_MEMORY_BLOCK_RE = re.compile(
+    r"--- (?:EXTERNAL )?MEMORY START ---.*?--- (?:EXTERNAL )?MEMORY END ---", re.DOTALL,
+)
+
+
+def place_memory_block(prompt: str, block: str, *, reserve: bool = False) -> str:
+    """在模板指定位置更新记忆；空槽保留边界，旧模板仍可自动追加。"""
+    replacement = block or (f"{_MEMORY_START}\n{_MEMORY_END}" if reserve else "")
+    if MEMORY_CONTEXT_SLOT in prompt:
+        # 显式占位优先，清除旧块和重复占位，避免记忆不断累积。
+        prompt = _MEMORY_BLOCK_RE.sub("", prompt)
+        before, _, after = prompt.partition(MEMORY_CONTEXT_SLOT)
+        return before + replacement + after.replace(MEMORY_CONTEXT_SLOT, "")
+    replaced = False
+
+    def replace_block(match: re.Match) -> str:
+        nonlocal replaced
+        value = "" if replaced else replacement
+        replaced = True
+        return value
+
+    updated = _MEMORY_BLOCK_RE.sub(replace_block, prompt)
+    if replaced or not replacement:
+        return updated
+    return prompt.rstrip() + "\n\n" + replacement
+
+
+class _MemoryHTTPLogFilter(logging.Filter):
+    """通用 GET 可能携带记忆正文，保留本能力的脱敏日志而跳过请求 URL 日志。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _MEMORY_HTTP_REQUEST.get()
+
+
+_MEMORY_HTTP_LOG_FILTER = _MemoryHTTPLogFilter()
+
+
+def memory_identity(tenant_id: Any = None, user_id: Any = None) -> tuple[str, str]:
+    """独立解析租户和用户，空值使用 default。"""
+    return str(tenant_id or "").strip() or "default", str(user_id or "").strip() or "default"
+
+
+def scoped_memory_dir(directory: str, tenant_id: str, user_id: str) -> str:
+    """默认身份保留旧目录，其余身份使用不会被路径字符干扰的独立目录。"""
+    if (tenant_id, user_id) == ("default", "default"):
+        return directory
+    digest = hashlib.sha256(json.dumps([tenant_id, user_id], ensure_ascii=False).encode()).hexdigest()
+    return str(Path(directory).expanduser() / "identities" / digest)
+
+
+def uses_local_memory(manager: Any) -> bool:
+    """兼容现有自定义本地 manager，仅外部后端关闭本地提取和维护。"""
+    return manager is not None and not isinstance(manager, ExternalMemoryBackend)
+
+
+def create_memory_backend(settings: AgentConfig, *, manager_factory: Any = MemoryManager) -> Any:
+    """统一构造后端，本地存储同时承载独立的纠错记忆能力。"""
+    tenant_id, user_id = memory_identity(settings.memory_tenant_id, settings.memory_user_id)
+    local = manager_factory(
+        memory_dir=scoped_memory_dir(settings.memory_dir, tenant_id, user_id),
+        dedup_jaccard_threshold=settings.memory_dedup_jaccard,
+    )
+    if settings.memory_backend_type == "local":
+        return local
+    backend_class = MemsenseMemoryBackend if settings.memory_backend_type == "memsense" else ExternalMemoryBackend
+    return backend_class(settings.memory_backend_type, settings.memory_external, tenant_id, user_id, local)
+
+
+class MemoryBackendError(RuntimeError):
+    """可对用户展示的错误摘要，不携带服务地址、认证信息或响应正文。"""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class MemoryEditError(ValueError):
+    """核心记忆工具可直接返回给模型的参数和修改约束错误。"""
+
+
+@dataclass(frozen=True)
+class _MemsenseCoreEntry:
+    """保留条目位置，便于编辑时原样保留未修改的存储内容。"""
+
+    start: int
+    end: int
+    body: str
+    time: str = ""
+    priority: str = "1"
+
+
+class ExternalMemoryBackend:
+    """可配置的通用 HTTP 后端，mem0/memu 占位类型复用此实现。"""
+
+    def __init__(self, backend_type: str, config: ExternalMemoryConfig, tenant_id: str,
+                 user_id: str, corrections: MemoryManager) -> None:
+        self.backend_type = backend_type
+        self.config = config
+        self.tenant_id, self.user_id = tenant_id, user_id
+        self.corrections = corrections
+        self.log_context: dict[str, str] = {}
+        self.capabilities = frozenset(name for name in ("recall", "read", "search", "save")
+                                      if getattr(config, name, None) is not None)
+        if backend_type in {"mem0", "memu"}:
+            logger.warning("memory backend=%s 使用 generic 映射，尚未提供原生协议适配", backend_type)
+
+    @property
+    def correction_curator(self) -> Any:
+        """远端模式继续使用同身份的本地纠错机制。"""
+        return self.corrections.correction_curator
+
+    def recall_corrections(self, *args: Any, **kwargs: Any) -> Any:
+        """纠错记录不发送到远端。"""
+        return self.corrections.recall_corrections(*args, **kwargs)
+
+    def auto_match_context(self, query: str, *, limit: int = 3) -> list[dict[str, str]]:
+        """外部自动召回由轮次入口负责，避免复用本地经验匹配。"""
+        return []
+
+    def recall(self, **kwargs: Any) -> str:
+        """会话装配时不访问网络；核心记忆在真实用户轮次开始时读取。"""
+        return ""
+
+    def read_core(self) -> str:
+        """同步的本地引导提示入口不触发远端读取。"""
+        return ""
+
+    def _variables(self, **values: Any) -> dict[str, Any]:
+        return {"tenant_id": self.tenant_id, "user_id": self.user_id,
+                "agent_id": "box-agent", **self.log_context, **values}
+
+    @staticmethod
+    def _render(value: Any, variables: dict[str, Any]) -> Any:
+        """仅替换完整的 ${变量} 值，保留对象类型且不执行模板代码。"""
+        if isinstance(value, dict):
+            return {key: ExternalMemoryBackend._render(item, variables) for key, item in value.items()}
+        if isinstance(value, list):
+            return [ExternalMemoryBackend._render(item, variables) for item in value]
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            key = value[2:-1]
+            if key not in variables:
+                raise ValueError("unknown_template_variable")
+            return variables[key]
+        return value
+
+    @staticmethod
+    def _select(value: Any, path: str) -> Any:
+        """点分路径选择 JSON 字段，数字段可选择数组元素。"""
+        for key in path.split(".") if path else ():
+            value = value[int(key)] if isinstance(value, list) else value[key]
+        return value
+
+    def log_failure(self, operation: str, reason: str, *, attempt: int = 0,
+                    status: int | None = None, **context: Any) -> None:
+        """记录定位字段，避免记录请求正文及可能包含凭证的异常字符串。"""
+        fields = self._variables(**context)
+        logger.warning(
+            "memory backend=%s operation=%s tenant=%s user=%s session=%s turn=%s "
+            "attempt=%s status=%s reason=%s",
+            self.backend_type, operation, self.tenant_id, self.user_id,
+            fields.get("session_id", ""), fields.get("turn_id", ""), attempt, status, reason,
+        )
+
+    async def _invoke(self, operation: str, spec: MemoryHttpOperation, *, request_payload: dict[str, Any] | None = None,
+                      allow_retries: bool = True,
+                      **variables: Any) -> Any:
+        """有限超时重试；HTTP 和协议错误均由后端记录，调用者决定如何降级。"""
+        import httpx
+
+        attempts = self.config.max_retries + 1 if allow_retries else 1
+        for attempt in range(1, attempts + 1):
+            status = None
+            retryable = False
+            try:
+                if not self.config.base_url.startswith(("http://", "https://")):
+                    raise ValueError("missing_or_invalid_base_url")
+                payload = (request_payload if request_payload is not None
+                           else self._render(spec.request, self._variables(**variables)))
+                logging.getLogger("httpx").addFilter(_MEMORY_HTTP_LOG_FILTER)
+                token = _MEMORY_HTTP_REQUEST.set(True)
+                try:
+                    async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                        response = await asyncio.wait_for(client.request(
+                            spec.method, self.config.base_url.rstrip("/") + spec.path,
+                            headers=self.config.headers,
+                            **({"params": payload} if spec.method == "GET" else {"json": payload}),
+                        ), timeout=self.config.timeout_seconds)
+                finally:
+                    _MEMORY_HTTP_REQUEST.reset(token)
+                status = response.status_code
+                response.raise_for_status()
+                if not response.content and spec.success_path is None and not spec.response_path:
+                    return None
+                data = response.json()
+                if spec.success_path is not None and self._select(data, spec.success_path) != spec.success_value:
+                    raise ValueError("service_rejected_request")
+                return self._select(data, spec.response_path)
+            except httpx.HTTPStatusError:
+                retryable = status == 429 or (status is not None and status >= 500)
+                reason = "http_error"
+            except (httpx.TransportError, asyncio.TimeoutError) as exc:
+                retryable = True
+                reason = type(exc).__name__
+            except Exception as exc:
+                reason = type(exc).__name__
+            self.log_failure(operation, reason, attempt=attempt, status=status, **variables)
+            if not retryable or attempt == attempts:
+                self.log_failure(operation, "abandoned", attempt=attempt, status=status, **variables)
+                raise MemoryBackendError(f"{self.backend_type} {operation} 失败（{reason}）", status=status)
+            await asyncio.sleep(min(0.25 * 2 ** (attempt - 1), 2))
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+    async def load_context(self, *, query: str, **context: Any) -> str:
+        """通用预加载是可选操作，不假定远端有核心文件。"""
+        if "recall" not in self.capabilities:
+            return ""
+        return self._text(await self._invoke("recall", self.config.recall, query=query, **context))
+
+    async def read_memory(self, path: str = "") -> str:
+        """按 read 映射读取资源；资源名称完全由配置和服务约定。"""
+        return self._text(await self._invoke("read", self.config.read, path=path))
+
+    async def search_memory(self, query: str, limit: int = 6) -> list[Any]:
+        """将查询交给后端，保留原始结果字段供模型使用。"""
+        data = await self._invoke("search", self.config.search, query=query, limit=limit)
+        return data if isinstance(data, list) else ([] if data is None else [data])
+
+    async def save_turn(self, user: str, assistant: str, **context: Any) -> None:
+        """按模板保存最终 QA；只有显式使用身份变量的服务才接收身份字段。"""
+        await self._invoke("save", self.config.save, user=user, assistant=assistant,
+                           messages=[{"role": "user", "content": user},
+                                     {"role": "assistant", "content": assistant}], **context)
+
+
+class MemsenseMemoryBackend(ExternalMemoryBackend):
+    """MemSense 的核心文件、历史资源搜索及 QA 保存协议。"""
+
+    _CORE_PATHS = ("memory://user.md", "memory://memory.md")
+    core_tool_paths = ("user.md", "memory.md")
+    # 只识别 mem 起始标签，保留正文里的 HTML、转义字符和换行。
+    _ENTRY_OPEN_RE = re.compile(r'''<mem(?:\s+[\w:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*>''')
+    _ENTRY_RE = re.compile(r"<mem>.*?</mem>", re.DOTALL)
+    _STORAGE_ENTRY_RE = re.compile(r"<mem(?P<attrs>\s[^>]*|)>(?P<body>.*?)</mem>", re.DOTALL)
+    _ATTRIBUTE_RE = re.compile(r'''(?P<name>[\w:-]+)\s*=\s*(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)')''')
+    _EDIT_WRITE_RULES = (
+        "必须先用 memory_read 显式读取同一路径，并遵守该文件的内容更新规则。\n"
+        "每条记忆必须使用完整的 <mem>...</mem>，标签不带属性，正文非空；"
+        "正文允许 HTML 和原始 <、>，但不能嵌套 mem 标签。time、priority 由工具维护。\n"
+        "优先使用 memory_edit：old_text 为空、new_text 为完整条目时追加；"
+        "new_text 为空时删除；否则用一个或多个连续完整条目进行唯一匹配和替换。\n"
+        "memory_write 用于创建或完整重写，content 必须包含全部条目，不能只提交新增条目。\n"
+        "read 返回 exists=false 时只能用 memory_write 创建，不能 edit。"
+        "受保护条目不能修改或删除，含受保护条目的文件不能完整重写。\n"
+        "冲突或写入结果不确定时必须重新 memory_read，再决定是否修改；不要绕过保护或版本检查。"
+    )
+    _PROFILE_UPDATE_RULES = (
+        "user.md 保存长期稳定、可复用的用户身份事实、偏好、边界和协作习惯。"
+        "必须来自用户明确表达或多轮稳定重复的信息，不得推断用户身份或偏好。"
+        "不保存一次性任务要求、临时状态、今日安排、外部资料或工具输出。"
+        "用户只是使用某种语言或临时要求某种语言，不据此更新画像。"
+        "敏感隐私细节仅在用户明确要求记录时考虑保存。"
+        "用户要求忘记某项时，读取后用 edit 删除对应的非保护条目。"
+    )
+    _LONG_TERM_UPDATE_RULES = (
+        "memory.md 保存用户明确确认的长期规则、明确要求长期保存的工作上下文，"
+        "以及未来会持续影响协作的已确认结论。"
+        "不保存一次性查询、临时任务内容、中间工具输出或模型推断。"
+        "仅修改与本次已确认信息相关的条目，避免重复，不得把临时事实升级为长期规则。"
+        "用户要求忘记某项时，读取后用 edit 删除对应的非保护条目。"
+    )
+    _CONTEXT_RULES = (
+        "## 使用规则\n"
+        "- 当前用户明确要求优先于历史记忆。\n"
+        "- 用户画像用于调整称呼、沟通方式、解释深度和协作偏好。\n"
+        "- 长期记忆用于参考已确认的长期规则和工作背景。\n"
+        "- 日期记忆用于理解近期进展，不代表当前任务指令；日期按 UTC 分区。\n"
+        "- 当前环境、文件状态、权限和实时事实需要重新核实。\n"
+        "- 不主动使用“根据记忆”“根据用户画像”等措辞；用户询问记忆来源时如实说明。"
+    )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.capabilities = frozenset({"recall", "read", "search", "save", "write", "edit"})
+        # 会话装配会复制后端；记录仅用于显式先读校验，不成为新的持久化状态源。
+        self._core_read_records: dict[str, dict[str, Any]] = {}
+        self._core_file_locks = {path: asyncio.Lock() for path in self.core_tool_paths}
+
+    async def _post(self, operation: str, endpoint: str, payload: dict[str, Any], **context: Any) -> Any:
+        from .config import MemoryHttpOperation
+
+        spec = MemoryHttpOperation(path=endpoint, success_path="ok", response_path="data")
+        return await self._invoke(operation, spec, request_payload=payload,
+                                  allow_retries=operation not in {"write", "edit"}, **context)
+
+    @classmethod
+    def _validate_core_tool_path(cls, path: str) -> None:
+        """工具路径只接受两个短名称，不能借前缀或相对路径绕过范围。"""
+        if not isinstance(path, str) or path not in cls.core_tool_paths:
+            raise MemoryEditError("path 必填，只允许 user.md 或 memory.md。")
+
+    @classmethod
+    def _core_rule_fields(cls, path: str) -> dict[str, str]:
+        """规则只进入显式 read 的返回字段，不进入正文或系统提示。"""
+        field = "user_profile_update_rules" if path == "user.md" else "long_term_memory_update_rules"
+        return {"memory_edit_write_rules": cls._EDIT_WRITE_RULES,
+                field: cls._PROFILE_UPDATE_RULES if path == "user.md" else cls._LONG_TERM_UPDATE_RULES}
+
+    def _core_file_record(self, data: Any, *, path: str, operation: str = "read") -> dict[str, Any]:
+        """只有明确的存在状态和可核实的内容版本才能解锁后续修改。"""
+        if (not isinstance(data, dict) or not isinstance(data.get("content"), str)
+                or data.get("path") != "memory://" + path
+                or not isinstance(data.get("exists"), bool)
+                or data.get("revision") != "sha256:" + hashlib.sha256(data["content"].encode("utf-8")).hexdigest()
+                or (not data["exists"] and data["content"])):
+            self.log_failure(operation, "invalid_file_response")
+            raise MemoryBackendError("MemSense 返回的文件状态或版本格式无效，请重新 memory_read。")
+        return {"content": data["content"], "exists": data["exists"],
+                "revision": data["revision"] if data["exists"] else None}
+
+    async def read_core_memory(self, path: str) -> dict[str, Any]:
+        """显式读取完整文件并保存原始版本；自动预载不调用此入口。"""
+        self._validate_core_tool_path(path)
+        async with self._core_file_locks[path]:
+            self._core_read_records.pop(path, None)
+            data = await self._post("read", "/v1/memory/files/read",
+                                    {**self._identity_payload(), "path": "memory://" + path})
+            record = self._core_file_record(data, path=path)
+            self._core_read_records[path] = record
+            return {"path": path, "exists": record["exists"],
+                    "content": self._ENTRY_OPEN_RE.sub("<mem>", record["content"]),
+                    **self._core_rule_fields(path)}
+
+    @classmethod
+    def _parse_core_entries(cls, text: str, *, storage: bool) -> list[_MemsenseCoreEntry]:
+        """解析完整条目并验证属性；正文里的其他标签和转义文本保持原样。"""
+        error = ("当前存储不是合法的核心记忆格式，无法修改。" if storage else
+                 "记忆必须使用一个或多个完整的 <mem>...</mem> 条目，标签不能带属性，正文不能为空。")
+        entries = []
+        position = 0
+        for match in cls._STORAGE_ENTRY_RE.finditer(text):
+            body = match.group("body").strip()
+            if (text[position:match.start()].strip() or not body
+                    or re.search(r"</?\s*mem(?=$|[\s>/])", body, re.IGNORECASE)):
+                raise MemoryEditError(error)
+            attrs = match.group("attrs")
+            values: dict[str, str] = {}
+            if storage:
+                offset = 0
+                for attr in cls._ATTRIBUTE_RE.finditer(attrs):
+                    name = attr.group("name")
+                    if attrs[offset:attr.start()].strip() or name in values:
+                        raise MemoryEditError(error)
+                    values[name] = attr.group("double") if attr.group("double") is not None else attr.group("single")
+                    offset = attr.end()
+                if (attrs[offset:].strip() or set(values) != {"time", "priority"}
+                        or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", values["time"])
+                        or not re.fullmatch(r"-?\d+", values["priority"])):
+                    raise MemoryEditError(error)
+                try:
+                    datetime.strptime(values["time"], "%Y-%m-%d %H:%M:%S")
+                except ValueError as exc:
+                    raise MemoryEditError(error) from exc
+            elif attrs:
+                raise MemoryEditError(error)
+            entries.append(_MemsenseCoreEntry(match.start(), match.end(), body,
+                                            values.get("time", ""), values.get("priority", "1")))
+            position = match.end()
+        if text[position:].strip() or (not storage and not entries):
+            raise MemoryEditError(error)
+        return entries
+
+    @staticmethod
+    def _render_core_entries(entries: list[_MemsenseCoreEntry], prior: list[_MemsenseCoreEntry]) -> str:
+        """按正文继承未变条目的属性，新条目生成时间和普通优先级。"""
+        from collections import defaultdict, deque
+
+        by_body = defaultdict(deque)
+        for entry in prior:
+            by_body[entry.body].append(entry)
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        rendered = []
+        for entry in entries:
+            old = by_body[entry.body].popleft() if by_body[entry.body] else None
+            rendered.append(f'<mem time="{old.time if old else timestamp}" '
+                            f'priority="{old.priority if old else "1"}">{entry.body}</mem>')
+        return "\n".join(rendered)
+
+    @classmethod
+    def _rewrite_core_content(cls, raw: str, content: str) -> str:
+        """完整重写遵循 agent-v3 的保护约束，不能覆盖含保护条目的文件。"""
+        prior = cls._parse_core_entries(raw, storage=True)
+        if any(int(entry.priority) < 1 for entry in prior):
+            raise MemoryEditError("文件含受保护条目，不能完整重写；请用 memory_edit 修改其他非保护条目。")
+        return cls._render_core_entries(cls._parse_core_entries(content, storage=False), prior)
+
+    @classmethod
+    def _edit_core_content(cls, raw: str, old_text: str, new_text: str) -> str:
+        """按唯一连续完整块编辑，未命中的内容连同原始空白一起保留。"""
+        old_text, new_text = old_text.strip(), new_text.strip()
+        if not old_text and not new_text:
+            raise MemoryEditError("old_text 和 new_text 不能同时为空。")
+        prior = cls._parse_core_entries(raw, storage=True)
+        replacement = cls._parse_core_entries(new_text, storage=False) if new_text else []
+        if not old_text:
+            appended = cls._render_core_entries(replacement, [])
+            separator = "" if not raw or raw.endswith("\n") else "\n"
+            return raw + separator + appended
+        targets = cls._parse_core_entries(old_text, storage=False)
+        bodies = [entry.body for entry in targets]
+        matches = [prior[index:index + len(targets)] for index in range(len(prior) - len(targets) + 1)
+                   if [entry.body for entry in prior[index:index + len(targets)]] == bodies]
+        if not matches:
+            raise MemoryEditError("old_text 的连续完整条目未找到，请重新 memory_read。")
+        if any(int(entry.priority) < 1 for match in matches for entry in match):
+            raise MemoryEditError("目标条目受保护，不允许修改或删除。")
+        if len(matches) != 1:
+            raise MemoryEditError("old_text 命中多个位置，请提供更多连续完整条目以唯一匹配。")
+        block = matches[0]
+        if [entry.body for entry in replacement] == bodies:
+            return raw
+        return raw[:block[0].start] + cls._render_core_entries(replacement, block) + raw[block[-1].end:]
+
+    async def write_core_memory(self, path: str, content: str) -> dict[str, Any]:
+        """创建或完整重写已显式读取的核心文件。"""
+        return await self._update_core_memory(path, "write", content=content)
+
+    async def edit_core_memory(self, path: str, old_text: str, new_text: str) -> dict[str, Any]:
+        """编辑已显式读取且存在的核心文件。"""
+        return await self._update_core_memory(path, "edit", old_text=old_text, new_text=new_text)
+
+    async def _update_core_memory(self, path: str, operation: str, *, content: str = "",
+                                  old_text: str = "", new_text: str = "") -> dict[str, Any]:
+        """以读取版本提交；发送前撤销旧记录，不确定的结果必须重新读取。"""
+        self._validate_core_tool_path(path)
+        async with self._core_file_locks[path]:
+            prior = self._core_read_records.get(path)
+            if prior is None:
+                raise MemoryEditError(f"必须先调用 memory_read 读取 {path}，再调用 memory_{operation}。")
+            if operation == "edit" and not prior["exists"]:
+                raise MemoryEditError("文件不存在，请用 memory_write 创建。")
+            updated = (self._rewrite_core_content(prior["content"], content) if operation == "write" else
+                       self._edit_core_content(prior["content"], old_text, new_text))
+            payload = {**self._identity_payload(), "path": "memory://" + path, "content": updated}
+            if prior["exists"]:
+                payload["base_revision"] = prior["revision"]
+            self._core_read_records.pop(path, None)
+            try:
+                data = await self._post(operation, "/v1/memory/files/write", payload)
+            except MemoryBackendError as exc:
+                if exc.status == 409:
+                    raise MemoryBackendError("文件版本冲突，请重新 memory_read 后再修改。", status=409) from exc
+                raise MemoryBackendError("修改结果无法确认，请重新 memory_read 后再决定是否重试。",
+                                         status=exc.status) from exc
+            record = self._core_file_record(data, path=path, operation=operation)
+            if not record["exists"] or record["content"] != updated:
+                self.log_failure(operation, "invalid_write_response")
+                raise MemoryBackendError("修改响应与提交内容不一致，请重新 memory_read。")
+            self._core_read_records[path] = record
+            return {"path": path, "operation": operation, "exists": True,
+                    "content": self._ENTRY_OPEN_RE.sub("<mem>", record["content"])}
+
+    def _identity_payload(self) -> dict[str, str]:
+        return {"tenant_id": self.tenant_id, "user_id": self.user_id}
+
+    def _session_id(self, session_id: str) -> str:
+        """会话文件路径要求 UUID；稳定映射宿主标识，不改变本地会话或日志。"""
+        value = str(session_id)
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            identity = json.dumps(
+                ["box-agent", "memsense", self.tenant_id, self.user_id, value],
+                ensure_ascii=False,
+            )
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
+
+    async def _read_file(self, path: str, **context: Any) -> str:
+        data = await self._post("read", "/v1/memory/files/read",
+                                {**self._identity_payload(), "path": path}, **context)
+        if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+            self.log_failure("read", "invalid_file_response", **context)
+            raise MemoryBackendError("memsense read 返回的文件内容格式无效")
+        content = data["content"]
+        if path in self._CORE_PATHS:
+            return self._ENTRY_OPEN_RE.sub("<mem>", content)
+        return content
+
+    def _date_paths(self, timestamp: int | None) -> list[str]:
+        """与 MemSense 的 UTC 日分区一致，本轮内部续跑不会改变日期窗口。"""
+        now = (datetime.now(timezone.utc) if timestamp is None
+               else datetime.fromtimestamp(timestamp / 1000, timezone.utc))
+        return [f"memory://date-memory/{(now.date() - timedelta(days=offset)).isoformat()}.md"
+                for offset in reversed(range(self.config.date_memory_load_days))]
+
+    @classmethod
+    def _clip_context_file(cls, content: str, path: str, budget: int) -> str:
+        """截断以完整条目为边界，并保留显式读取完整文件的提示。"""
+        if len(content) <= budget:
+            return content
+        suffix = (f"\n[内容已截断，完整内容请用 memory_read 读取 {path.removeprefix('memory://')}]"
+                  if path in cls._CORE_PATHS else "\n[日期摘要内容已截断]")
+        if budget <= len(suffix):
+            return ""
+        cutoff = budget - len(suffix)
+        for entry in cls._ENTRY_RE.finditer(content):
+            if entry.start() < cutoff < entry.end():
+                cutoff = entry.start()
+                break
+        return content[:cutoff].rstrip() + suffix
+
+    def _format_context(self, files: list[tuple[str, str]]) -> str:
+        """后端拥有分区语义；模板和通用后端不感知 MemSense 文件布局。"""
+        sections: list[tuple[str, str, str]] = []
+        for path, content in files:
+            if path in self._CORE_PATHS:
+                title = "## User Profile" if path == self._CORE_PATHS[0] else "## Long-term Memory"
+            else:
+                # 日期已经由分区标题给出，自动注入只取摘要正文。
+                content = re.sub(r"\A---\r?\n.*?\r?\n---(?:\r?\n|$)", "", content.strip(),
+                                 count=1, flags=re.DOTALL)
+                title = f"### {path.rsplit('/', 1)[-1][:-3]}"
+            if content.strip():
+                sections.append((title, path, content.strip()))
+        if not sections:
+            return ""
+        prefix = "# Memory Context\n\n以下是历史记忆，仅作为背景信息使用。"
+        date_heading = "## Recent Date Memory"
+        has_dates = any(path not in self._CORE_PATHS for _, path, _ in sections)
+        overhead = (len(prefix) + len(self._CONTEXT_RULES) + 4
+                    + sum(len(title) + 3 for title, _, _ in sections)
+                    + (len(date_heading) + 2 if has_dates else 0))
+        budget = max(0, (self.config.context_max_chars - overhead) // len(sections))
+        parts = [prefix]
+        date_started = False
+        for title, path, content in sections:
+            clipped = self._clip_context_file(content, path, budget)
+            if not clipped:
+                continue
+            if path not in self._CORE_PATHS and not date_started:
+                parts.append(date_heading)
+                date_started = True
+            parts.append(f"{title}\n{clipped}")
+        if len(parts) == 1:
+            return ""
+        parts.append(self._CONTEXT_RULES)
+        return "\n\n".join(parts)
+
+    async def load_context(self, *, query: str, **context: Any) -> str:
+        paths = [*self._CORE_PATHS, *self._date_paths(context.get("timestamp"))]
+        # 每个文件独立降级，单个文件故障不丢弃其他成功结果。
+        values = await asyncio.gather(*(self._read_file(path, **context) for path in paths), return_exceptions=True)
+        return self._format_context([(path, value) for path, value in zip(paths, values)
+                                     if isinstance(value, str)])
+
+    async def read_memory(self, path: str = "") -> str:
+        if not path:
+            paths = self._CORE_PATHS
+            values = await asyncio.gather(*(self._read_file(item) for item in paths))
+            return "\n\n".join(f"[{item}]\n{value}" for item, value in zip(paths, values) if value)
+        if not path.startswith("memory://"):
+            raise MemoryBackendError("MemSense 读取路径须使用 memory://")
+        return await self._read_file(path)
+
+    async def search_memory(self, query: str, limit: int = 6) -> list[Any]:
+        data = await self._post("search", "/v1/memory/resource_search", {
+            **self._identity_payload(), "query": query, "resource_types": ["date_session_title", "qa_chunk"],
+            "filters": {}, "top_k": limit, "mode": "hybrid", "scope": "user",
+        })
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            self.log_failure("search", "invalid_search_response")
+            raise MemoryBackendError("memsense search 返回的结果格式无效")
+        return data["results"]
+
+    async def save_turn(self, user: str, assistant: str, **context: Any) -> None:
+        # 时间戳由轮次固定，传输重试复用同一份请求；不伪造服务端幂等能力。
+        data = await self._post("save", "/v1/memory/save", {
+            **self._identity_payload(), "scope": "user", "session_id": self._session_id(context["session_id"]),
+            "agent_id": "box-agent", "source": "box_agent_auto", "type_hint": "qa_chunk",
+            "timestamp": context["timestamp"], "content": {"user": user, "assistant": assistant},
+        }, **context)
+        if not isinstance(data, dict):
+            self.log_failure("save", "invalid_save_response", **context)
+            raise MemoryBackendError("memsense save 返回的确认格式无效")
+
+
+@dataclass
+class _MemoryTurn:
+    user: str
+    session_id: str
+    turn_id: str
+    timestamp: int
+    handle: Any = None
+
+
+class MemoryRuntime:
+    """现有 memory 插件的会话资源，拥有上下文刷新和后台保存任务。"""
+
+    def __init__(self, backend: ExternalMemoryBackend) -> None:
+        self.backend = backend
+        self.active: _MemoryTurn | None = None
+        self.tasks: set[asyncio.Task] = set()
+        self._save_slots = asyncio.Semaphore(2)
+        self._closed = False
+        self._refresh_task: asyncio.Task | None = None
+        self._refresh_cancel: asyncio.Event | None = None
+
+    def request_cancel(self) -> None:
+        """Wake a remote preload without cancelling the host's prompt task."""
+        if self._refresh_cancel is not None:
+            self._refresh_cancel.set()
+
+    async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
+        if getattr(session, "cancelled", False):
+            return
+        self.backend.log_context = {"session_id": turn.session_id, "turn_id": turn.turn_id}
+        self._refresh_cancel = asyncio.Event()
+        self._refresh_task = asyncio.create_task(self.backend.load_context(
+            query=turn.user, timestamp=turn.timestamp, **self.backend.log_context,
+        ), name="memory-refresh")
+        cancelled = asyncio.create_task(self._refresh_cancel.wait())
+        try:
+            await asyncio.wait((self._refresh_task, cancelled), return_when=asyncio.FIRST_COMPLETED)
+            content = "" if self._refresh_cancel.is_set() else await self._refresh_task
+        except Exception as exc:
+            self.backend.log_failure("recall", type(exc).__name__)
+            content = ""
+        finally:
+            for task in (self._refresh_task, cancelled):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(self._refresh_task, cancelled, return_exceptions=True)
+            self._refresh_task = None
+            self._refresh_cancel = None
+        content = content[:self.backend.config.context_max_chars]
+        # 外部内容不能伪装成槽位或块边界，避免下一轮替换时误删其他提示。
+        for marker in (_MEMORY_START, _MEMORY_END, MEMORY_CONTEXT_SLOT,
+                       "--- EXTERNAL MEMORY START ---", "--- EXTERNAL MEMORY END ---"):
+            content = content.replace(marker, "[记忆边界]")
+        block = (f"{_MEMORY_START}\n"
+                 "以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
+                 + content + f"\n{_MEMORY_END}") if content.strip() else ""
+        # 只替换本能力拥有的块；失败时清除旧值，避免身份或内容过期后仍被使用。
+        session.agent.set_system_prompt(place_memory_block(session.agent.system_prompt, block, reserve=True))
+        session.memory_block = block or None
+
+    def schedule(self, turn: _MemoryTurn) -> None:
+        if not turn.user.strip() or turn.handle is None or "save" not in self.backend.capabilities:
+            return
+        if self._closed or len(self.tasks) >= self.backend.config.save_queue_limit:
+            self.backend.log_failure("save", "abandoned_queue_full_or_closed",
+                                     session_id=turn.session_id, turn_id=turn.turn_id)
+            return
+        task = asyncio.create_task(self._save(turn), name="memory-save")
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _save(self, turn: _MemoryTurn) -> None:
+        context = {"session_id": turn.session_id, "turn_id": turn.turn_id, "timestamp": turn.timestamp}
+        try:
+            # 结算可能在 DoneEvent 后因清理或传输失败而变更，必须等待最终结果。
+            result = await turn.handle.result(consume_events=False)
+            if result.status.value != "completed" or not result.final_content.strip():
+                return
+            async with self._save_slots:
+                await self.backend.save_turn(turn.user, result.final_content, **context)
+            logger.info("memory backend=%s operation=save session=%s turn=%s saved=true",
+                        self.backend.backend_type, turn.session_id, turn.turn_id)
+        except asyncio.CancelledError:
+            self.backend.log_failure("save", "abandoned_shutdown", **context)
+            raise
+        except Exception as exc:
+            self.backend.log_failure("save", type(exc).__name__, **context)
+
+    async def aclose(self) -> None:
+        """关闭时有限等待已接收的任务，保证失败和放弃都有日志。"""
+        self._closed = True
+        self.request_cancel()
+        if self._refresh_task is not None:
+            await asyncio.gather(self._refresh_task, return_exceptions=True)
+        pending = tuple(self.tasks)
+        if not pending:
+            return
+        _, unfinished = await asyncio.wait(pending, timeout=self.backend.config.shutdown_timeout_seconds)
+        for task in unfinished:
+            task.cancel()
+        if unfinished:
+            await asyncio.gather(*unfinished, return_exceptions=True)
+
+
+@asynccontextmanager
+async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
+                           turn_id: str) -> AsyncIterator[_MemoryTurn | None]:
+    """宿主声明真实用户轮次，内部续跑复用同一边界。"""
+    runtime = getattr(session, "memory_runtime", None)
+    if runtime is None:
+        yield None
+        return
+    if runtime.active is not None:
+        yield runtime.active
+        return
+    turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000))
+    runtime.active = turn
+    try:
+        await runtime.refresh(session, turn)
+        yield turn
+    except BaseException:
+        raise
+    else:
+        runtime.schedule(turn)
+    finally:
+        runtime.active = None
+
+
+async def memory_run_events(session: Any, request: Any, options: Any) -> AsyncIterator[AgentEvent]:
+    """共享服务运行包装器，普通运行和 CLI/ACP 外层轮次使用同一策略。"""
+    user_text = request.user_message if request.user_message is not None else (getattr(options, "current_turn_text", None) or "")
+    async with memory_user_turn(session, user_text=user_text, session_id=request.session_id,
+                                turn_id=getattr(options, "turn_id", "") or request.run_id) as turn:
+        if turn is not None:
+            turn.handle = session._run_handle
+        async with aclosing(session.run_events(options=options)) as events:
+            async for event in events:
+                yield event

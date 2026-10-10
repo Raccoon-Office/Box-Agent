@@ -177,9 +177,14 @@ def build_memory_manager(
     memory_dir: str,
     dedup_jaccard_threshold: float,
     manager_factory: MemoryManagerFactory = MemoryManager,
-) -> MemoryManager:
+    settings: Any = None,
+) -> Any:
     """Construct a memory manager with the existing storage parameters."""
 
+    if settings is not None:
+        from .memory import create_memory_backend
+
+        return create_memory_backend(settings, manager_factory=manager_factory)
     return manager_factory(
         memory_dir=memory_dir,
         dedup_jaccard_threshold=dedup_jaccard_threshold,

@@ -1,5 +1,184 @@
 # Memory System Integration Guide
 
+## 后端选择与外部接入
+
+默认 `memory_backend_type: local` 使用原有本地记忆。`memsense` 提供原生接入；
+`generic` 提供可配置 HTTP 映射；`mem0`、`memu` 当前是使用 generic 的占位类型，
+需要自己配置对应服务的操作，尚不支持它们的完整原生工作流。
+
+```yaml
+enable_memory: true
+memory_backend_type: memsense
+memory_tenant_id: default
+memory_user_id: default
+memory_external:
+  base_url: "http://127.0.0.1:8787"
+  timeout_seconds: 30
+  max_retries: 1
+  context_max_chars: 16000
+  date_memory_load_days: 3 # 仅 MemSense；0 关闭日期预载
+  save_queue_limit: 128
+  shutdown_timeout_seconds: 45
+  # headers: {} # 按部署要求配置认证头，凭证只保存在本地配置中
+```
+
+| 行为 | local | memsense |
+| --- | --- | --- |
+| 核心上下文 | 会话开始加载本地核心和目录摘要 | 每个真实用户轮次开始读取两个核心文件及近期日期摘要 |
+| 搜索 | 本地 topic/关键词检索 | `/v1/memory/resource_search`，检索会话标题和历史记忆 |
+| 保存 | 原有工具写入及本地 LLM 提取 | 整轮结束后，后台调用 `/v1/memory/save` 保存用户输入和最终回答 |
+| 文件修改 | 保留 `memory_write` | `memory_write` / `memory_edit`，仅两个核心文件 |
+
+MemSense 的 `memory_read`、`memory_write`、`memory_edit` 都要求必填 `path`，
+只接受 `user.md`（用户画像）和 `memory.md`（长期记忆）。模型参数不使用
+`memory://` 前缀，后端内部转换为服务端路径。三个工具不开放日期、会话、事实
+或原始 QA 路径；`memory_search(query, limit=6)` 保留外部搜索协议和结果。
+核心文件交给模型前保留 `<mem>...</mem>` 条目及正文，去掉 `time`、`priority`
+等存储属性；自动注入和显式读取使用同一视图转换。
+当前 MemSense 服务将 `qa_chunk` 搜索类型兼容映射到事实记忆；原始 QA 仍通过
+save 保存，搜索结果保留服务实际返回的类型和资源路径。
+`enable_memory_extraction` 和维护、晋升配置只作用于 local。纠错工具仍保存到
+同身份的本地存储，不修改远端文件。
+
+### MemSense 核心文件工具
+
+修改前必须在同一会话显式 `memory_read` 目标文件；自动 system prompt
+预载不解锁修改，读取另一文件也不能解锁目标文件。工具描述说明这一要求，
+执行时同样强制校验。read 的完整 JSON 结构进入模型的工具消息，例如：
+
+```json
+{
+  "path": "user.md",
+  "exists": true,
+  "content": "<mem>用户希望被称呼为刀客塔。</mem>",
+  "memory_edit_write_rules": "条目格式和追加、替换、删除、完整重写规则",
+  "user_profile_update_rules": "用户画像的内容更新规则"
+}
+```
+
+读取 `memory.md` 时，最后一个字段是 `long_term_memory_update_rules`。
+规则不混入 content，不写入远端文件，不加入 system prompt；只在显式 read
+返回。raw_output 保留同一结构供宿主查看，规则也真实进入模型消息。
+
+```json
+{"name": "memory_read", "arguments": {"path": "user.md"}}
+{"name": "memory_edit", "arguments": {"path": "user.md", "old_text": "", "new_text": "<mem>用户偏好先讨论方案，再确认修改。</mem>"}}
+```
+
+`memory_edit(path, old_text, new_text)` 的空 old_text 表示追加；空 new_text
+表示删除；非空 old_text 必须是一个或多个连续完整条目并唯一匹配。重复
+条目要用更多连续条目消除歧义。`memory_write(path, content)` 创建或完整
+重写文件，content 必须包含全部条目，不能只提交新增部分。read 明确返回
+exists=false 时只允许 write 创建，不允许 edit。
+
+模型只能提交不带属性的完整 `<mem>...</mem>`；time/priority 由后端转换维护。
+未变条目继承原属性，新条目生成时间和 priority=1。priority<1 的条目不能
+修改或删除；含保护条目的文件拒绝完整重写，但可 edit 其他非保护条目。
+核心 edit 转换后也通过 `/v1/memory/files/write` 提交完整存储内容。
+
+现有文件携带内部保存的 base_revision，不暴露覆盖开关。成功修改更新内部
+版本，后续编辑可继续使用；冲突、失败、取消或无法验证的响应清除读取记录，
+必须重新 read。修改请求不自动重试；read/search/save 保留配置的有限重试。
+读取记录仅保存在独立会话后端中，重开会话需要重新读取。
+
+此版本收紧了 MemSense 模型工具接口：旧的省略 path、带 memory:// 前缀或读取
+任意搜索资源的 memory_read 调用需改为两个必填短路径。后端内部资源读取
+和日期自动预载保留，local/generic 的工具参数和行为不变。
+
+### System prompt 的记忆位置
+
+模板可以使用 `{MEMORY_CONTEXT}` 指定记忆位置；默认模板已预留该位置。
+旧模板没有占位符时自动追加，禁用记忆和 utility 会话移除占位符。
+local 保留原有内容和加载时机，generic 保留服务返回格式。
+外部后端每个真实用户轮次原位替换一个 `--- MEMORY START ---` 块；
+同轮工具调用和自动续跑不重复读取。读取失败清除旧数据、保留空块位置，
+不影响后续恢复或其他系统提示。
+
+MemSense 块包含 `User Profile`、`Long-term Memory`、`Recent Date Memory`
+三个非空分区及使用规则，全部位于 system prompt 中。日期按旧到新排列，
+自动注入只保留日期标题和摘要正文；模型工具不开放日期文件的显式读取或修改。
+`date_memory_load_days` 仅用于 MemSense，默认 3，范围 0～31；读取
+`memory://date-memory/YYYY-MM-DD.md`。日期依据本轮时间戳和 MemSense 服务端
+的 UTC 日分区计算，包含当天和此前若干天，每个新 query 重新计算和读取。
+服务端不存在或为空的文件不生成分区；失败文件单独记录日志，其他文件继续使用。
+日期预载只读取已有摘要，不会等待后台保存或代替服务端生成摘要。
+`context_max_chars` 限制后端上下文总长度；MemSense 截断保留完整 mem 条目
+边界；核心文件截断时提示通过 memory_read 获取完整内容，日期只标记摘要截断。
+
+MemSense 的会话文件路径要求 UUID。已有 UUID 会话标识保持不变，CLI/ACP 等
+非 UUID 标识在后端内结合 tenant/user 稳定映射为 UUID；本地 Session Log 和
+日志继续使用原始标识。generic 不执行此映射。切换前已用非 UUID 保存的远端
+数据不会自动迁移。
+
+tenant/user 为空时分别取 `default`。本地 `default/default` 使用旧目录；其余
+身份使用 `memory_dir/identities/<身份摘要>/`。Python 管理会话可以通过
+`SessionOptions(memory_tenant_id=..., memory_user_id=...)` 覆盖身份；ACP 可在
+`session/new` 的 `_meta` 中指定：
+
+```json
+{"memory": {"tenant_id": "tenant-a", "user_id": "user-a"}}
+```
+
+未提供的会话字段继承配置，空字符串使用 default。身份在会话创建时绑定，
+记忆工具、纠错存储和上下文均使用该身份。身份字段是宿主提供的路由上下文，
+不是认证授权机制；远端服务仍需按实际部署执行访问控制。
+
+通用协议示例（外部服务不需要 tenant/user 字段）：
+
+```yaml
+memory_backend_type: generic
+memory_external:
+  base_url: "http://memory-service.example"
+  search:
+    path: /lookup
+    method: POST
+    request:
+      query: "${query}"
+      count: "${limit}"
+    response_path: results
+  save:
+    path: /conversations
+    request:
+      messages: "${messages}"
+    response_path: ""
+```
+
+`recall`、`read`、`search`、`save` 都是可选操作；缺省的操作不发送请求，对应
+工具不注册。每项操作支持 GET（query params）或 POST（JSON），默认 POST。
+请求模板仅替换完整的 `${变量名}` 值，支持嵌套对象和数组，不执行代码。
+可用变量包括 `tenant_id`、`user_id`、`agent_id`、`session_id`、`turn_id`，以及
+操作相关的 `query`、`limit`、`path`、`user`、`assistant`、`messages`、`timestamp`。
+`messages` 是 user/assistant 两条消息。generic 不默认发送任何身份字段；
+需要跨身份隔离的服务，应在请求中映射其身份字段，或为不同身份使用独立实例
+及连接配置。内部身份不会自动赋予不支持身份的外部协议隔离能力。
+
+`response_path` 使用点分字段路径（如 `data.results`，数组下标也可用），空串
+表示整个响应。HTTP 非成功状态始终视为错误；如服务有应用层状态，还可配置
+`success_path: ok`、`success_value: true`。read/recall 将选定内容渲染为文本，
+search 保留结果对象。不要把 MemSense 的 `{ok,data}` 格式当作 generic 默认。
+未配置响应字段或成功标记时，也接受 HTTP 204 等无正文的成功响应。
+
+CLI 和 ACP 的自动续跑共享外层用户轮次：开始时刷新一次，最后只调度一次 QA
+保存。单次 Python `AgentService.start()` 对应一轮；需要组合多次运行时可用
+`box_agent.memory.memory_user_turn(session, user_text=..., session_id=..., turn_id=...)`
+作为异步上下文管理器。底层 `Agent.run_events`/`AgentSession.run_events` 不会
+自行推断宿主的真实用户轮次，外部保存应通过共享服务边界调用。
+
+取消、失败、等待用户或无最终回答的运行不保存。远端失败记录日志，
+取消会中断正在等待的远端预载，并等待请求清理后沿用宿主的取消结果；下一轮可重新刷新。
+不改变主任务结果；日志不记录 QA 正文和认证头。CLI 将 memory 日志写入
+`~/.box-agent/log/memory_<进程号>.log`（设置 `BOX_AGENT_HOME` 时使用该目录下
+的 `log/`），按 5 MiB 轮转，保留 3 个备份。重试、最终失败和退出
+清理均不向终端显示提示。日志目录或磁盘不可写时无法保留相关记录，但仍不会
+打断输入或主任务。ACP 和 Python 宿主继续使用其原有日志路由。
+连接使用有限超时、重试，后台保存有队列上限，会话关闭时有限等待。进程崩溃
+可能丢失尚未完成的保存，本期
+没有额外持久队列；MemSense 的传输重试复用请求内容和时间戳，仍受服务端现有
+去重语义约束。以下章节描述 `local` 的原有行为。
+
+兼容既有 Python 宿主：显式通过 `HostBindings` 借用本地 manager 时，仍保留
+宿主提供的能力；`enable_memory` 控制自动创建的本地记忆及外部后端访问。
+
 Box-Agent provides persistent cross-session memory with core memory plus topic-sharded context memory:
 
 | Type | Purpose | Recall behavior | Storage |

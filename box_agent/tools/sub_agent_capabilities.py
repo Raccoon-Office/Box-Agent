@@ -81,6 +81,7 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "memory_read": ToolCapabilityMetadata(read=True),
     "memory_search": ToolCapabilityMetadata(read=True),
     "memory_write": ToolCapabilityMetadata(write=True),
+    "memory_edit": ToolCapabilityMetadata(write=True),
     "memory_list_corrections": ToolCapabilityMetadata(read=True),
     "memory_write_correction": ToolCapabilityMetadata(write=True),
     "memory_supersede_correction": ToolCapabilityMetadata(write=True),

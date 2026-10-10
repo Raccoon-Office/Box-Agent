@@ -22,6 +22,9 @@ class SessionOptions:
     utility: bool = False
     resume_session_log: bool = field(default=False, kw_only=True)
     profile: str = "python"
+    # 会话级记忆身份覆盖；None 表示继承进程配置，空字符串表示 default。
+    memory_tenant_id: str | None = field(default=None, kw_only=True)
+    memory_user_id: str | None = field(default=None, kw_only=True)
     sandbox_mode: bool = False
     non_interactive: bool = True
     session_mode: str | None = None

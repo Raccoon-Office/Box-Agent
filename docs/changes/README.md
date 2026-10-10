@@ -81,6 +81,15 @@ Release, provider API, and ACP compatibility have their own sources under
 
 ## Pending material changes
 
+### 2026-10-11 — optional external memory backends (PR #191)
+
+- **Change:** [PR #191](https://github.com/Raccoon-Office/Box-Agent/pull/191) adds MemSense and explicitly mapped generic HTTP backends through the existing memory capability and shared session assembly.
+- **Compatibility:** The default remains local; default/default uses the existing directory. External preload and background QA saving require explicit external-backend selection and enabled memory. A borrowed local manager remains local when session identity is overridden, including with memory disabled.
+- **Identity and writes:** Hosts own tenant/user routing and service authentication; omitted identities use shared default/default. MemSense core edits require an explicit same-session read and verified revision; local/generic tool contracts remain unchanged.
+- **Lifecycle:** One real user turn refreshes once and saves only the final successful answer. Automatic continuations share that boundary. Cooperative cancellation interrupts remote preload, waits for its cleanup, and preserves the host's cancelled result; cancelled/failed turns are not saved.
+- **Proof anchors:** `tests/test_memory_backends.py`, `tests/test_session_adapter_assembly.py`, memory/config tests, and CLI/ACP lifecycle tests. Source tests and Python distribution probes do not prove an installed standalone runtime or live host.
+- **Risk and rollback:** The save queue is in memory, retries are not exactly-once, and service authorization remains a deployment responsibility. Switch back to local or disable memory, or revert the PR and update the host runtime; remote data is not migrated or deleted.
+
 ### 2026-09-24 — code-agent ripgrep search (PR #175)
 
 - **Change:** [PR #175](https://github.com/Raccoon-Office/Box-Agent/pull/175), merged as `f017c6f`. `box_agent/tools/ripgrep_tool.py` adds bounded `grep` and `glob` tools.

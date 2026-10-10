@@ -95,11 +95,13 @@ class AgentService:
                 permission_broker, control,
             ))
 
+        from .memory import memory_run_events
+
         handle = AgentRunHandle.for_run(
             delivery_options=delivery_options,
             state=session,
             run_id=request.run_id,
-            events_factory=lambda: session.run_events(options=options),
+            events_factory=lambda: memory_run_events(session, request, options),
             control=control,
             permission_broker=(
                 permission_broker

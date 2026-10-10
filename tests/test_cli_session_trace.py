@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
+import httpx
 import pytest
 
 import box_agent.cli as cli
-from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.config import AgentConfig, Config, ExternalMemoryConfig, LLMConfig, ToolsConfig
 from box_agent.agent_session import AgentSession
 from box_agent.events import DoneEvent, StopReason
 from box_agent.hooks import BaseHook
 from box_agent.llm.llm_wrapper import LLMClient
+from box_agent.memory import MemoryRuntime
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
 from box_agent.session_trace import (
     SessionTraceWriter,
@@ -113,6 +116,81 @@ async def run_task(workspace, **kwargs):
         workspace, task="echo ping", sandbox_mode=False, verify_api=False,
         goal_autopilot_enabled=False, **kwargs,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["typing", "shutdown"])
+async def test_cli_background_memory_failure_is_file_only(
+    cli_trace_setup, monkeypatch, capsys, failure_phase,
+):
+    """真实 CLI 保存重试在下一次输入或退出时失败，诊断仍仅写入文件。"""
+    workspace, _ = cli_trace_setup
+    config = cli.Config.from_yaml(None)
+    config.agent.enable_memory = True
+    config.agent.memory_backend_type = "memsense"
+    config.agent.memory_external = ExternalMemoryConfig(base_url="http://memory.test")
+    release_save = asyncio.Event()
+    save_finished = asyncio.Event()
+    attempts = []
+    private_question = "测试提问不能出现在后台诊断中"
+
+    async def respond(request):
+        if request.url.path.endswith("/save"):
+            await release_save.wait()
+            attempts.append(request)
+            raise asyncio.TimeoutError()
+        return httpx.Response(200, json={"ok": True, "data": {"content": ""}})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(respond), **kwargs,
+    ))
+    original_save = MemoryRuntime._save
+
+    async def track_save(self, turn):
+        try:
+            await original_save(self, turn)
+        finally:
+            save_finished.set()
+
+    monkeypatch.setattr(MemoryRuntime, "_save", track_save)
+    original_close = AgentSession.aclose
+
+    async def close_session(self):
+        if failure_phase == "shutdown":
+            release_save.set()
+        await original_close(self)
+
+    monkeypatch.setattr(AgentSession, "aclose", close_session)
+
+    class Prompts:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+
+        async def prompt_async(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return private_question
+            if failure_phase == "typing":
+                release_save.set()
+                await asyncio.wait_for(save_finished.wait(), timeout=3)
+            return "/exit"
+
+    monkeypatch.setattr(cli, "PromptSession", Prompts)
+    assert await cli.run_agent(
+        workspace, sandbox_mode=False, verify_api=False, goal_autopilot_enabled=False,
+    ) == 0
+    assert save_finished.is_set() and len(attempts) == 2
+    captured = capsys.readouterr()
+    assert "native trace answer" in captured.out
+    assert "memory backend=" not in captured.out + captured.err
+    assert "TimeoutError" not in captured.out + captured.err
+    diagnostic = (cli.get_log_directory() / f"memory_{os.getpid()}.log").read_text(encoding="utf-8")
+    assert "operation=save" in diagnostic
+    assert "attempt=1" in diagnostic and "attempt=2" in diagnostic
+    assert "reason=TimeoutError" in diagnostic and "reason=abandoned" in diagnostic
+    assert "tenant=default user=default session=cli-" in diagnostic
+    assert private_question not in diagnostic and "native trace answer" not in diagnostic
 
 
 @pytest.mark.asyncio

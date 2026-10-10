@@ -84,3 +84,6 @@ box_agent/skills/raccoon-ppt-skill
 # Keep the bundled presentation exporter libraries in source/runtime archives.
 !box_agent/skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/
 !box_agent/skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/**
+
+# temp
+tmp/
