@@ -31,6 +31,7 @@ from box_agent.llm.debug_logging import (
     log_image_generation_response_meta,
 )
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.file_change_receipts import FileChangeReceiptMixin
 from box_agent.tools.safety import validate_path_in_workspace
 from box_agent.tools.watermark import apply_text_watermark
 
@@ -404,7 +405,7 @@ def _derive_edit_endpoint(endpoint: str) -> str:
     return f"{trimmed}/edits"
 
 
-class GenerateImageTool(Tool):
+class GenerateImageTool(FileChangeReceiptMixin, Tool):
     """Generate an image through a configured HTTP service and save it locally."""
 
     aliases = ("image_generate",)
@@ -715,6 +716,14 @@ class GenerateImageTool(Tool):
             )
         except Exception as exc:
             return ToolResult(success=False, error=f"Image generation failed: {exc}")
+
+    def _additional_file_change_targets(self, arguments: dict) -> tuple[Path, ...]:
+        target = self._resolve_output_path(arguments['output_path'])
+        if target.suffix:
+            return (target,)
+        # The service selects the extension. Include existing aliases at every
+        # possible final path, so their referents also participate in the lease.
+        return (target, *(target.with_suffix(ext) for ext in sorted(set(_MIME_EXTENSIONS.values()))))
 
     def _resolve_output_path(self, output_path: str) -> Path:
         path = Path(output_path).expanduser()

@@ -942,6 +942,9 @@ def _tool_result_raw_output(
             if session_id:
                 payload.setdefault("session_id", session_id)
                 payload.setdefault("sessionId", session_id)
+        if session_id and payload.get("file_changes_version") == 1:
+            payload.setdefault("session_id", session_id)
+            payload.setdefault("sessionId", session_id)
         if task_id:
             payload.setdefault("task_id", task_id)
             payload.setdefault("taskId", task_id)
@@ -4736,7 +4739,13 @@ class BoxACPAgent:
                                     if isinstance(args, dict) else ""
                                 )
                                 label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
-                            await self._send(session_id, start_tool_call(tid, label, kind="execute", raw_input=args))
+                            start_update = start_tool_call(tid, label, kind="execute", raw_input=args)
+                            start_update.field_meta = {
+                                "tool_name": name,
+                                "task_id": task_context.task_id,
+                                "turn_id": task_context.turn_id,
+                            }
+                            await self._send(session_id, start_update)
 
                         case ToolCallResultEvent(
                             tool_call_id=tid,
@@ -4986,10 +4995,17 @@ class BoxACPAgent:
                                 case ToolCallStartEvent(tool_name=name):
                                     progress["event"] = "tool_start"
                                     progress["tool_name"] = name
-                                case ToolCallResultEvent(tool_name=name, success=ok):
+                                case ToolCallResultEvent(tool_name=name, success=ok, raw_output=child_output):
                                     progress["event"] = "tool_result"
                                     progress["tool_name"] = name
                                     progress["success"] = ok
+                                    if isinstance(child_output, dict) and child_output.get("file_changes_version") == 1:
+                                        receipt = _tool_result_raw_output(
+                                            {"file_changes_version": 1, "file_changes": child_output.get("file_changes")},
+                                            "", None, session_id=state.upstream_session_id,
+                                            task_id=task_context.task_id, turn_id=task_context.turn_id,
+                                        )
+                                        progress.update(receipt)
                                 case ArtifactEvent() as art:
                                     progress["event"] = "artifact"
                                     artifact_observation = artifact_observer.observe(art)

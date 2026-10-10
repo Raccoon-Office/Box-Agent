@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from ..events import ProgressEvent
 from ..model_history import is_model_history_placeholder
+from .file_change_receipts import FileChangeReceiptMixin
 from .base import EventEmittingTool, Tool, ToolResult
 from .argument_limits import MAX_GENERATED_BODY_CHARS
 from .file.path_candidates import home_relative_path_candidates
@@ -697,7 +698,7 @@ class _CommittedTextWrite:
     result: ToolResult
 
 
-class WriteTool(Tool):
+class WriteTool(FileChangeReceiptMixin, Tool):
     """Atomically write a UTF-8 file in one call or ordered chunks."""
 
     aliases = ("write",)
@@ -1319,7 +1320,7 @@ class WriteTool(Tool):
         return cleaned
 
 
-class AppendTool(Tool):
+class AppendTool(FileChangeReceiptMixin, Tool):
     """Append content to a file."""
 
     def __init__(
@@ -1426,7 +1427,7 @@ class AppendTool(Tool):
             return ToolResult(success=False, content="", error=str(e))
 
 
-class EditTool(Tool):
+class EditTool(FileChangeReceiptMixin, Tool):
     """Edit file by replacing text."""
 
     aliases = ("edit",)

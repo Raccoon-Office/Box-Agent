@@ -143,7 +143,8 @@ def _warn_scan_limit(root: Path, reason: str) -> None:
     )
 
 
-def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: bool = False) -> set[Path] | None:
+def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: bool = False,
+                        include_all_regular_files: bool = False) -> set[Path] | None:
     """Return a bounded recursive file snapshot rooted at the session cwd.
 
     An incomplete walk returns None, distinct from a valid empty snapshot, so
@@ -193,7 +194,10 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
                     return None
                 entry = current / filename
                 is_metadata = entry.name.startswith(".") and entry.name.endswith(SUFFIX) and len(entry.name) > len(SUFFIX) + 1
-                if (entry.name.startswith(".") and not (include_publication_metadata and is_metadata)) or entry.suffix == ".tmp":
+                if not include_all_regular_files and (
+                    (entry.name.startswith(".") and not (include_publication_metadata and is_metadata))
+                    or entry.suffix == ".tmp"
+                ):
                     continue
                 if not entry.is_file():
                     continue

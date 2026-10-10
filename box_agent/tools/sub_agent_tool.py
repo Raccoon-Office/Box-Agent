@@ -38,6 +38,7 @@ from ..schema import Message
 from ..skill_dependencies import SkillDependencyError
 from ..session_log import SessionLog, SessionLogDurabilityError
 from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
+from .file_change_receipts import FileWriteInvocationContext
 from .schema_validation import ToolArgumentIssue
 from .safety import detect_dangerous_command
 from .skill_catalog_tool import ListSkillsTool
@@ -150,6 +151,13 @@ class _WriteScopedTool(Tool):
         if not target.is_absolute():
             target = self._workspace / target
         target = target.resolve()
+        if error := self._write_scope_error(target):
+            return error
+        return await self._tool.invoke(
+            kwargs, context=FileWriteInvocationContext(validate_write_target=self._write_scope_error),
+        )
+
+    def _write_scope_error(self, target: Path) -> ToolResult | None:
         if not any(target == root or root in target.parents for root in self._roots):
             return ToolResult(
                 success=False,
@@ -160,7 +168,7 @@ class _WriteScopedTool(Tool):
                     "allowed_roots": [str(root) for root in self._roots],
                 },
             )
-        return await self._tool.execute(**kwargs)
+        return None
 
 
 class _PermissionGatedBashTool(Tool):
@@ -241,7 +249,7 @@ class _PermissionGatedBashTool(Tool):
                         "risk": danger_reason,
                     }
                 )
-        return await self._tool.execute(**kwargs)
+        return await self._tool.invoke(kwargs)
 
 
 class SubAgentTool(EventEmittingTool):
