@@ -641,7 +641,8 @@ async def test_expert_skill_rejects_external_symlink_without_blocking_other_skil
     assert (await tool.execute("healthy")).success
     broken = await tool.execute("shared")
     assert not broken.success
-    assert "outside the expert skill" in str(broken.raw_output)
+    assert broken.raw_output["code"] == "SKILL_BROKEN"
+    assert "outside the expert skill" in loader.get_skill("shared").broken_reason
     assert loader.get_skill("shared").broken
     link.unlink()
     if replace_directory:
@@ -682,7 +683,8 @@ async def test_expert_symlink_change_with_identical_stat_is_detected_and_keeps_i
     result = await GetSkillTool(scoped).execute("actual-name")
     if outside_root:
         assert not result.success
-        assert "outside the expert skill" in str(result.raw_output)
+        assert result.raw_output["code"] == "SKILL_BROKEN"
+        assert "outside the expert skill" in scoped.get_skill("actual-name").broken_reason
         assert scoped.get_skill("actual-name").broken
     else:
         assert result.success
@@ -835,6 +837,104 @@ async def test_team_prefers_owning_package_binding_over_unbound_same_name(tmp_pa
     assert scoped.get_skill("pptx").broken
     assert scoped.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") is None
     assert loader.get_skill("pptx") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("package_kind", ["expert", "expert_team"])
+async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(tmp_path, package_kind):
+    builtin, package = tmp_path / "builtin", tmp_path / "package"
+    builtin.mkdir()
+    package.mkdir()
+    _write_skill(builtin, "pptx", "builtin")
+    builtin_file = builtin / "pptx/SKILL.md"
+    builtin_file.write_text(builtin_file.read_text().replace(
+        "description:", "metadata:\n  allow_override: false\ndescription:",
+    ))
+    skills = []
+    for key in ("decoy", "selected"):
+        _write_skill(package, key, key)
+        skill_file = package / key / "SKILL.md"
+        skill_file.write_text(skill_file.read_text().replace(f"name: {key}", "name: pptx"))
+        script = package / key / "scripts/sync_image_manifest_status.js"
+        script.parent.mkdir()
+        script.write_text("// " + key)
+        skills.append({"key": key, "slug": "pptx", "directory": str(package / key)})
+    member = {
+        "id": "writer", "name": "writer", "defaultSkills": ["pptx"],
+        "skillBindings": [{"key": "selected", "slug": "pptx", "source": "BUNDLED"}],
+    }
+    snapshot = {"directory": str(package), "skills": skills}
+    if package_kind == "expert":
+        profile = {**member, "packageSnapshot": snapshot}
+    else:
+        profile = {
+            "id": "team", "name": "team", "packageSnapshot": snapshot,
+            "leader": {"id": "lead", "name": "lead"}, "members": [member],
+        }
+    loader = SkillLoader(sources=[(builtin, "builtin")])
+    loader.discover_skills()
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_mcp=False))
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [GetSkillTool(loader)],
+                        SKILL_SLOT_SENTINEL, skill_loader=loader)
+    session = await agent.newSession(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={package_kind: profile},
+    ))
+    state = agent._sessions[session.sessionId]
+    skill = state.skill_loader.get_skill("pptx")
+    assert skill.source == "expert"
+    assert skill.skill_path == package / "selected/SKILL.md"
+    assert state.skill_loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") == (
+        package / "selected/scripts/sync_image_manifest_status.js"
+    ).resolve()
+    result = await state.agent.tools["get_skill"].execute("pptx")
+    assert result.success and "selected content" in result.content
+    assert loader.get_skill("pptx").source == "builtin"
+    normal = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    assert agent._sessions[normal.sessionId].skill_loader.get_skill("pptx").source == "builtin"
+    (package / "selected/SKILL.md").unlink()
+    result = await state.agent.tools["get_skill"].execute("pptx")
+    assert not result.success
+    assert state.skill_loader.get_skill("pptx").broken
+    assert state.skill_loader.get_skill("pptx").skill_path == package / "selected/SKILL.md"
+
+
+@pytest.mark.parametrize("binding", [
+    {"key": "missing", "slug": "pptx", "source": "BUNDLED"},
+    {"slug": "pptx", "source": "BUNDLED"},
+    {"key": "ppt", "slug": "pptx", "source": "TOOL"},
+    {"key": "ppt", "slug": "pptx", "source": "MARKET"},
+    {"key": "ppt", "slug": "other", "source": "BUNDLED"},
+])
+def test_lab_package_binding_does_not_authorize_same_name_with_wrong_identity(tmp_path, binding):
+    package = tmp_path / "package"
+    profile = {
+        "id": "writer", "name": "writer", "defaultSkills": ["pptx", "other"],
+        "skillBindings": [binding],
+        "packageSnapshot": {"directory": str(package), "skills": [
+            {"key": "ppt", "slug": "pptx", "directory": str(package / "pptx")},
+        ]},
+    }
+    context = ExpertSessionContext.from_meta({"expert": profile})
+    assert not context.skill_bindings_by_directory[(package / "pptx").resolve()]
+
+
+def test_team_member_own_snapshot_takes_precedence_over_inherited_snapshot(tmp_path):
+    root, own = tmp_path / "team", tmp_path / "member"
+    binding = {"key": "ppt", "slug": "pptx", "source": "BUNDLED"}
+    def snapshot(directory):
+        return {"directory": str(directory), "skills": [
+            {"key": "ppt", "slug": "pptx", "directory": str(directory / "pptx")},
+        ]}
+    context = ExpertSessionContext.from_meta({"expert_team": {
+        "id": "team", "name": "team", "packageSnapshot": snapshot(root),
+        "leader": {"id": "lead", "name": "lead"},
+        "members": [{"id": "writer", "name": "writer", "defaultSkills": ["pptx"],
+                     "skillBindings": [binding], "packageSnapshot": snapshot(own)}],
+    }})
+    assert not context.skill_bindings_by_directory[(root / "pptx").resolve()]
+    assert context.skill_bindings_by_directory[(own / "pptx").resolve()] == {"pptx"}
 
 
 def test_equally_bound_team_packages_preserve_existing_order(tmp_path):

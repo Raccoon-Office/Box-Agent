@@ -716,6 +716,8 @@ class ExpertSessionContext:
                 if not isinstance(profile, dict):
                     continue
                 snapshot = profile.get("packageSnapshot")
+                if snapshot is None:
+                    snapshot = container.get("packageSnapshot")
                 if not isinstance(snapshot, dict):
                     continue
                 # 绑定属于当前包的专家，不能套用专家团合并后的技能名单。
@@ -736,7 +738,22 @@ class ExpertSessionContext:
                     directory = directory.resolve()
                     if directory not in directories:
                         directories.append(directory)
-                    bindings[directory] = bindings.get(directory, frozenset()) | names
+                    bound_names = names
+                    if "skillBindings" in profile:
+                        # Lab 按 key 绑定随包技能；同名的其他版本或 TOOL/MARKET 不获得包绑定。
+                        declared = profile.get("skillBindings")
+                        bound_names = frozenset(
+                            binding["slug"] for binding in (declared if isinstance(declared, list) else [])
+                            if isinstance(binding, dict)
+                            and binding.get("source") == "BUNDLED"
+                            and isinstance(skill.get("key"), str) and skill["key"]
+                            and binding.get("key") == skill["key"]
+                            and isinstance(binding.get("slug"), str)
+                            and binding["slug"] == skill.get("slug")
+                            and binding["slug"] in names
+                        )
+                    # 未携带 skillBindings 的旧宿主保留按当前专家技能名称绑定的行为。
+                    bindings[directory] = bindings.get(directory, frozenset()) | bound_names
         return cls(expert=expert, team=team, skill_directories=directories,
                    skill_bindings_by_directory=bindings)
 
