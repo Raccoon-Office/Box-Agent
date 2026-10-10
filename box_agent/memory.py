@@ -3505,15 +3505,36 @@ class MemoryRuntime:
         self.tasks: set[asyncio.Task] = set()
         self._save_slots = asyncio.Semaphore(2)
         self._closed = False
+        self._refresh_task: asyncio.Task | None = None
+        self._refresh_cancel: asyncio.Event | None = None
+
+    def request_cancel(self) -> None:
+        """Wake a remote preload without cancelling the host's prompt task."""
+        if self._refresh_cancel is not None:
+            self._refresh_cancel.set()
 
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
+        if getattr(session, "cancelled", False):
+            return
         self.backend.log_context = {"session_id": turn.session_id, "turn_id": turn.turn_id}
+        self._refresh_cancel = asyncio.Event()
+        self._refresh_task = asyncio.create_task(self.backend.load_context(
+            query=turn.user, timestamp=turn.timestamp, **self.backend.log_context,
+        ), name="memory-refresh")
+        cancelled = asyncio.create_task(self._refresh_cancel.wait())
         try:
-            content = await self.backend.load_context(query=turn.user, timestamp=turn.timestamp,
-                                                      **self.backend.log_context)
+            await asyncio.wait((self._refresh_task, cancelled), return_when=asyncio.FIRST_COMPLETED)
+            content = "" if self._refresh_cancel.is_set() else await self._refresh_task
         except Exception as exc:
             self.backend.log_failure("recall", type(exc).__name__)
             content = ""
+        finally:
+            for task in (self._refresh_task, cancelled):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(self._refresh_task, cancelled, return_exceptions=True)
+            self._refresh_task = None
+            self._refresh_cancel = None
         content = content[:self.backend.config.context_max_chars]
         # 外部内容不能伪装成槽位或块边界，避免下一轮替换时误删其他提示。
         for marker in (_MEMORY_START, _MEMORY_END, MEMORY_CONTEXT_SLOT,
@@ -3557,6 +3578,9 @@ class MemoryRuntime:
     async def aclose(self) -> None:
         """关闭时有限等待已接收的任务，保证失败和放弃都有日志。"""
         self._closed = True
+        self.request_cancel()
+        if self._refresh_task is not None:
+            await asyncio.gather(self._refresh_task, return_exceptions=True)
         pending = tuple(self.tasks)
         if not pending:
             return

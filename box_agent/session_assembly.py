@@ -119,6 +119,8 @@ async def prepare_memory(resources: SessionResources) -> None:
         if isinstance(resources.memory_manager, ExternalMemoryBackend):
             settings.memory_backend_type = resources.memory_manager.backend_type
             settings.memory_external = resources.memory_manager.config
+        elif uses_local_memory(resources.memory_manager):
+            settings.memory_backend_type = "local"
         settings.memory_tenant_id, settings.memory_user_id = memory_identity(
             settings.memory_tenant_id, settings.memory_user_id,
         )

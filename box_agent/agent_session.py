@@ -272,6 +272,8 @@ class AgentSession:
         """Request cooperative cancellation through this session's options."""
 
         self.cancelled = True
+        if self.memory_runtime is not None:
+            self.memory_runtime.request_cancel()
         if self._run_handle.is_active:
             self._run_handle.request_cancel()
 

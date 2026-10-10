@@ -526,6 +526,27 @@ async def test_session_identity_rebinds_borrowed_memory_tools(tmp_path, memory_h
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("profile", ["cli", "acp", "python"])
+async def test_identity_override_preserves_borrowed_local_backend(tmp_path, memory_http, enabled, profile):
+    config = session_config(tmp_path)
+    config.agent = backend_settings(tmp_path, enable_memory=enabled, enable_memory_extraction=False)
+    backend = MemoryManager(config.agent.memory_dir)
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=RecordingLLM(), system_prompt="system", base_tools=create_memory_tools(backend),
+        memory_manager=backend, output=lambda _: None), options=SessionOptions(
+            profile=profile, workspace_dir=tmp_path, memory_user_id="alice"))
+    try:
+        assert isinstance(session.memory_manager, MemoryManager)
+        assert session.memory_manager.memory_dir != backend.memory_dir
+        assert session.memory_runtime is None
+        await run(session, "只使用本地记忆")
+    finally:
+        await session.aclose()
+    assert memory_http.calls == []
+
+
+@pytest.mark.asyncio
 async def test_disabled_memory_removes_borrowed_tools_and_performs_no_http(tmp_path, memory_http):
     config = session_config(tmp_path)
     config.agent = backend_settings(tmp_path, enable_memory=False)
@@ -573,6 +594,85 @@ async def test_shutdown_cancels_pending_save_with_diagnostic(tmp_path, caplog):
     await runtime.aclose()
     assert not runtime.tasks
     assert "abandoned_shutdown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_acp_cancel_stops_memory_preload_and_next_turn_recovers(tmp_path, memory_http, monkeypatch):
+    from box_agent.acp import BoxACPAgent
+    from tests.test_acp import DoneLLM, DummyConn
+
+    config = session_config(tmp_path)
+    config.agent = backend_settings(tmp_path, enable_memory_extraction=False)
+    llm = DoneLLM()
+    host = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    info = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    state = host._sessions[info.sessionId]
+    original = state.memory_manager.load_context
+    started, cleaned = asyncio.Event(), asyncio.Event()
+
+    async def blocked_context(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    monkeypatch.setattr(state.memory_manager, "load_context", blocked_context)
+    prompt = asyncio.create_task(host.prompt(SimpleNamespace(
+        sessionId=info.sessionId, field_meta={}, prompt=[{"text": "取消本轮"}])))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        await host.cancel(SimpleNamespace(sessionId=info.sessionId))
+        response = await asyncio.wait_for(asyncio.shield(prompt), 0.5)
+        assert response.stopReason == "cancelled"
+        assert cleaned.is_set()
+        assert llm.calls == 0
+        assert not [call for call in memory_http.calls if call[0].endswith("/save")]
+        monkeypatch.setattr(state.memory_manager, "load_context", original)
+        response = await host.prompt(SimpleNamespace(
+            sessionId=info.sessionId, field_meta={}, prompt=[{"text": "恢复请求"}]))
+        assert response.stopReason == "end_turn"
+        assert llm.calls == 1
+    finally:
+        prompt.cancel()
+        await asyncio.gather(prompt, return_exceptions=True)
+        await host.aclose()
+    saves = [body for path, body in memory_http.calls if path.endswith("/save")]
+    assert len(saves) == 1
+    assert saves[0]["content"]["user"] == "恢复请求"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hard_cancel", [False, True])
+async def test_sdk_cancel_during_preload_settles_remote_cleanup(tmp_path, memory_http, monkeypatch, hard_cancel):
+    session, llm = await managed_session(tmp_path)
+    started, cleaned = asyncio.Event(), asyncio.Event()
+
+    async def blocked_context(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    monkeypatch.setattr(session.memory_manager, "load_context", blocked_context)
+    handle = await AgentService().start(RunRequest("cancel-preload", "s", "取消"), session=session,
+                                        options=session.build_run_options(logger=None))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        if hard_cancel:
+            handle._runner_task.cancel()
+        else:
+            await handle.cancel()
+        result = await asyncio.wait_for(handle.result(), 0.5)
+        assert result.status.value == "cancelled"
+        assert cleaned.is_set()
+        assert not llm.requests
+    finally:
+        await session.aclose()
+    assert not memory_http.calls
 
 
 @pytest.mark.asyncio

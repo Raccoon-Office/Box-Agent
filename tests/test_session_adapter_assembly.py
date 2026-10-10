@@ -293,9 +293,11 @@ async def test_cli_shared_prompt_controls_model_and_session_closes(tmp_path, mon
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
-    # Python 3.10 has exc_info(), but not exception().
-    monkeypatch.delattr(sys, "exception", raising=False)
     import box_agent.cli as cli
+    # Simulate the CLI's Python 3.10 API without changing the stdlib's sys module.
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(**{
+        key: value for key, value in vars(sys).items() if key != "exception"
+    }))
     from tests.test_cli_runtime import _CaptureStreamLLM
     from box_agent.events import DoneEvent, StopReason
     config_path = tmp_path / "config.yaml"
