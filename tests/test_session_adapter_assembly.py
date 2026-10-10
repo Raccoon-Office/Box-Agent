@@ -200,14 +200,16 @@ async def test_acp_preparation_preserves_direct_prompt_and_tool_contract(tmp_pat
     state = adapter._sessions[result.sessionId]
     resources = state.plugin_session.resources
     options = resources.context.options
+    available_tools = None if utility else frozenset(tool.name for tool in resources.tools)
     expected = adapter._build_session_prompt(
         options.session_mode, workspace=tmp_path, policy=options.effective_policy,
         env_context=state.env_context, skill_runtime_context=state.skill_runtime_context,
         enable_general_directory_policy=(not utility and options.session_mode in {None, "general"}),
+        available_tools=available_tools,
     )
     if not utility:
         expected = append_prompt_segment(expected, "MEMORY BLOCK")
-        expected = f"{expected.rstrip()}\n\n{build_image_generation_prompt(config)}"
+        expected = f"{expected.rstrip()}\n\n{build_image_generation_prompt(config, tools=available_tools)}"
         assert recorded and recorded[0][0] == recorded[0][1]
         assert [tool.to_schema() for tool in resources.tools] == recorded[0][0]
     else:
