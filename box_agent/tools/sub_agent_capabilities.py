@@ -111,6 +111,20 @@ def _is_managed_browser_tool(name: str) -> bool:
 
 
 def _tool_capability_metadata(name: str, tool: Tool) -> ToolCapabilityMetadata | None:
+    from .memory_tool import (
+        ExternalMemoryReadTool, ExternalMemorySearchTool,
+        MemsenseMemoryMutationTool, is_memory_tool,
+    )
+
+    # Local and remote memory share names, but have different permission boundaries.
+    if isinstance(tool, (ExternalMemoryReadTool, ExternalMemorySearchTool)):
+        return ToolCapabilityMetadata(read=True, network=True)
+    if isinstance(tool, MemsenseMemoryMutationTool):
+        return ToolCapabilityMetadata(write=True, network=True, external_side_effect=True)
+    if name.startswith("memory_") and not is_memory_tool(tool):
+        # An eager MCP tool can replace a built-in; its name cannot confer local trust.
+        return None
+
     metadata = BUILTIN_TOOL_CAPABILITIES.get(name)
     if metadata is not None:
         return metadata

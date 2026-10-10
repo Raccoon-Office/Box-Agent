@@ -36,6 +36,7 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
+from pydantic import ValidationError
 import yaml
 
 from box_agent import LLMClient, __version__
@@ -251,6 +252,28 @@ def _mask_secret(value: Any) -> Any:
 
 def _is_secret_path(parts: list[str]) -> bool:
     return bool(parts) and parts[-1] in SECRET_KEY_NAMES
+
+
+def _config_display_value(value: Any, parts: list[str]) -> Any:
+    """Redact secrets even when setting their containing configuration object."""
+    if isinstance(value, dict):
+        return {key: _config_display_value(item, [*parts, key]) for key, item in value.items()}
+    normalized = parts[1:] if parts[:1] == ["agent"] else parts
+    if normalized[:2] == ["memory_external", "headers"]:
+        return "****" if value else value
+    return _mask_secret(value) if _is_secret_path(parts) else value
+
+
+def _config_error_details(error: Exception) -> str:
+    """Keep validation context without echoing secret inputs or YAML excerpts."""
+    if isinstance(error, ValidationError):
+        return "; ".join(
+            f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
+            for item in error.errors(include_input=False, include_context=False, include_url=False)
+        )
+    if isinstance(error, yaml.YAMLError):
+        return f"{type(error).__name__}: invalid configuration YAML"
+    return f"{type(error).__name__}: invalid configuration value"
 
 
 def _normalize_config_path(key: str) -> list[str]:
@@ -1352,11 +1375,9 @@ def cmd_config(
         except Exception as e:
             if old_text is not None:
                 config_path.write_text(old_text, encoding="utf-8")
-            return _config_exit_error(f"Failed to update config: {e}", json_output)
+            return _config_exit_error(f"Failed to update config: {_config_error_details(e)}", json_output)
 
-        display_value = value
-        if _is_secret_path(yaml_parts) and not show_secrets:
-            display_value = _mask_secret(value)
+        display_value = value if show_secrets else _config_display_value(value, yaml_parts)
         if json_output:
             _json_print({
                 "ok": True,
@@ -1372,7 +1393,7 @@ def cmd_config(
     try:
         config = Config.from_yaml(config_path)
     except Exception as e:
-        return _config_exit_error(f"Could not parse config: {e}", json_output)
+        return _config_exit_error(f"Could not parse config: {_config_error_details(e)}", json_output)
 
     summary = _config_summary(config, config_path, show_secrets=show_secrets)
     if get_key:
