@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field, model_validator
 
 from ..config import ToolsConfig
+from .file_change_receipts import FileChangeReceiptMixin, CHANGED_FILES_PARAMETER, register_shell_writer
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
 from .pptx_safety import (
@@ -906,7 +907,7 @@ class BackgroundShellManager:
         return terminated
 
 
-class BashTool(Tool):
+class BashTool(FileChangeReceiptMixin, Tool):
     """Execute shell commands in foreground or background.
 
     Automatically detects OS and uses appropriate shell:
@@ -1131,26 +1132,26 @@ class BashTool(Tool):
                     spawn_env.get("PATH", "")[:200],
                 )
                 guarded_command = f"set -o pipefail\n{command}"
-                return await asyncio.create_subprocess_exec(
+                return await self._register_subprocess(await asyncio.create_subprocess_exec(
                     self._bundled_win_bash, "-c", guarded_command,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=stderr,
                     cwd=self.workspace_dir,
                     env=spawn_env,
-                )
+                ))
             log.info(
                 "bash/spawn shell=powershell cmd=%r cwd=%s merge_stderr=%s",
                 command[:500], self.workspace_dir, merge_stderr,
             )
-            return await asyncio.create_subprocess_exec(
+            return await self._register_subprocess(await asyncio.create_subprocess_exec(
                 "powershell.exe", "-NoProfile", "-Command", command,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
                 env=self._subprocess_env,
-            )
+            ))
         else:
             args = [self._login_shell]
             if self._use_login_shell:
@@ -1163,14 +1164,22 @@ class BashTool(Tool):
             # group so a timeout can kill the *whole* tree (shell + any children
             # it spawned, e.g. ``python server.py``) via killpg, not just the
             # shell — otherwise grandchildren are orphaned and keep running.
-            return await asyncio.create_subprocess_exec(
+            return await self._register_subprocess(await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
                 env=self._subprocess_env,
                 start_new_session=True,
-            )
+            ))
+
+    async def _register_subprocess(self, process: asyncio.subprocess.Process) -> asyncio.subprocess.Process:
+        try:
+            register_shell_writer(str(self.workspace_dir or os.getcwd()), process.pid)
+        except (OSError, ValueError):
+            await self._kill_process_tree(process)
+            raise
+        return process
 
     @staticmethod
     def _process_tree_rss_bytes(process: asyncio.subprocess.Process) -> int | None:
@@ -1461,6 +1470,7 @@ Examples:
         return {
             "type": "object",
             "properties": {
+                "changed_files": CHANGED_FILES_PARAMETER,
                 "command": {
                     "type": "string",
                     "maxLength": MAX_BASH_COMMAND_CHARS,
@@ -1819,6 +1829,7 @@ Examples:
                     owner_id=self.process_owner_id,
                     lifetime=lifetime,
                 )
+                bg_shell.workspace_dir = str(Path(self.workspace_dir or os.getcwd()).expanduser().resolve())
                 BackgroundShellManager.add(bg_shell)
 
                 # Start monitoring task

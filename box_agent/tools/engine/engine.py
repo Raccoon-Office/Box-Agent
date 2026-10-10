@@ -23,6 +23,7 @@ from ...schema import Message, ToolCall
 from ...session_log import SessionLogDurabilityError
 from ...session_trace import emit_session_trace
 from ..base import Tool, ToolResult, ToolInvocationContext
+from ..file_change_receipts import persist_file_change
 from ..delegated_budget import DelegatedBudget, current_budgets
 from ..bash_tool import BashTool
 from ..file_tools import WriteTool
@@ -376,8 +377,10 @@ class DefaultToolEngine:
         )
         if control.result_transform is not None:
             result = control.result_transform(call.name, result)
-        result = _persist_browser_snapshot_output(result, call.snapshot_target)
-        result = _persist_browser_screenshot_output(result, call.screenshot_target)
+        result = await persist_file_change(context.workspace_dir, call.snapshot_target,
+                                          lambda target: _persist_browser_snapshot_output(result, target))
+        result = await persist_file_change(context.workspace_dir, call.screenshot_target,
+                                          lambda target: _persist_browser_screenshot_output(result, target))
         published_output = apply_delivery_policy(result.raw_output, context.workspace_dir)
         if published_output is not result.raw_output:
             result = result.model_copy(update={"raw_output": published_output})

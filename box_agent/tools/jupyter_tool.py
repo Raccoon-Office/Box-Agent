@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ._win_job import assign_pid_to_job
+from .file_change_receipts import FileChangeReceiptMixin, CHANGED_FILES_PARAMETER
 from .base import Tool, ToolResult
 
 from box_agent.user_paths import state_path
@@ -1357,7 +1358,7 @@ except ImportError:
             self._km = None
 
 
-class JupyterSandboxTool(Tool):
+class JupyterSandboxTool(FileChangeReceiptMixin, Tool):
     """Execute Python code in a persistent Jupyter kernel sandbox.
 
     This tool provides:
@@ -1437,6 +1438,20 @@ class JupyterSandboxTool(Tool):
             status["venv_path"] = str(env.venv_dir)
             status["venv_exists"] = env.is_created
         return status
+
+    async def _discard_execution(self, session_id: str, worker: asyncio.Future) -> None:
+        async def stop_and_join():
+            await self._discard_session(session_id)
+            await asyncio.gather(worker, return_exceptions=True)
+
+        cleanup = asyncio.create_task(stop_and_join())
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # Repeated cancellation must not orphan a still-writing worker.
+                continue
+        cleanup.result()
 
     async def _discard_session(self, session_id: str) -> None:
         """Tear down and forget a kernel session.
@@ -1538,6 +1553,7 @@ Output formats:
         return {
             "type": "object",
             "properties": {
+                "changed_files": CHANGED_FILES_PARAMETER,
                 "code": {
                     "type": "string",
                     "maxLength": MAX_EXECUTE_CODE_CHARS,
@@ -1693,15 +1709,9 @@ Output formats:
         _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
         loop = asyncio.get_event_loop()
         try:
+            worker = loop.run_in_executor(None, self._execute_session_code, session, code, timeout)
             stdout, images, error = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    self._execute_session_code,
-                    session,
-                    code,
-                    timeout,
-                ),
-                timeout=_EXEC_TIMEOUT,
+                asyncio.shield(worker), timeout=_EXEC_TIMEOUT,
             )
 
             # Auto-install missing modules and retry once
@@ -1712,15 +1722,9 @@ Output formats:
                     pip_name = self._MODULE_TO_PIP.get(pkg, pkg)
                     ok, _ = await env.install_packages([pip_name])
                     if ok:
+                        worker = loop.run_in_executor(None, self._execute_session_code, session, code, timeout)
                         stdout, images, error = await asyncio.wait_for(
-                            loop.run_in_executor(
-                                None,
-                                self._execute_session_code,
-                                session,
-                                code,
-                                timeout,
-                            ),
-                            timeout=_EXEC_TIMEOUT,
+                            asyncio.shield(worker), timeout=_EXEC_TIMEOUT,
                         )
 
             # Hard kernel timeout: the session's IOPub idle never arrived within
@@ -1768,12 +1772,17 @@ Output formats:
             content = "\n".join(content_parts) if content_parts else "(No output)"
             return ToolResult(success=True, content=content)
 
+        except asyncio.CancelledError:
+            # Cancellation does not stop an executor thread. Keep the workspace
+            # writer barrier until the kernel is stopped and that worker exits.
+            await self._discard_execution(session_id, worker)
+            raise
         except (asyncio.TimeoutError, TimeoutError):
             # The kernel is still blocked executing this code in a thread-pool
             # worker we cannot cancel. Discard the session so it is NOT reused
             # (a busy kernel would interleave IOPub output on the next call);
             # stopping it also unblocks the orphaned worker thread.
-            await self._discard_session(session_id)
+            await self._discard_execution(session_id, worker)
             return ToolResult(
                 success=False,
                 content="",

@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .argument_limits import MAX_GENERATED_BODY_CHARS, RECOMMENDED_GENERATED_BODY_CHARS
-from .base import Tool, ToolResult
+from .base import Tool, ToolInvocationContext, ToolResult
+from .file_change_receipts import capture_file_change, _workspace_execution_lock
 from .file_tools import _resolve_from_active_root
 from .safety import backup_file, builtin_skill_write_error, validate_path_in_workspace
 
@@ -113,6 +114,28 @@ class StagedFileWriteTool(Tool):
             "required": ["action"],
             "additionalProperties": False,
         }
+
+    async def _invoke_validated(
+        self, arguments: dict[str, Any], *, context: ToolInvocationContext | None,
+    ) -> ToolResult:
+        roots = [self._staging_dir]
+        target_paths = ()
+        if arguments["action"] == "commit":
+            resolved = self._get_write(arguments.get("write_id"))
+            if not isinstance(resolved, ToolResult):
+                target_paths = (resolved[1].target,)
+                # os.replace replaces a final symlink rather than its referent.
+                roots.append(resolved[1].target.parent)
+        async with _workspace_execution_lock(
+            self.workspace_dir, *roots, target_paths=target_paths,
+        ):
+            if target_paths:
+                target = target_paths[0]
+                return await capture_file_change(
+                    self.workspace_dir.resolve(), target.parent.resolve() / target.name,
+                    lambda: self.execute(**arguments),
+                )
+            return await super()._invoke_validated(arguments, context=context)
 
     async def execute(
         self,

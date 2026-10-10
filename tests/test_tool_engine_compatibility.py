@@ -314,6 +314,22 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
+        if tool.name in {"bash", "execute_code"}:
+            entry["schema"]["input_schema"]["properties"]["changed_files"] = {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "maxItems": 256,
+                "uniqueItems": True,
+                "description": (
+                    "Optional optimization for large workspaces: declare ALL exact target file paths "
+                    "before execution (both paths for a rename). Omit for automatic workspace capture. "
+                    "Paths are relative to the session workspace, regardless of inline cd. "
+                    "Include script-generated outputs of any file type; never list read-only inputs, "
+                    "directories, glob patterns, or another task's files. Use [] for read-only calls. "
+                    "Only files whose bytes change receive task-bound file change receipts. "
+                    "Background execution cannot produce these receipts."
+                ),
+            }
         if tool.name == "bash":
             anchor = (
                 '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
