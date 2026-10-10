@@ -6,6 +6,13 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-10-11 — External memory delegation and config-output safety
+
+- Follow-up to PR #191: classify same-named memory tools by their live implementation. Remote reads/searches require network; remote core mutations also require external-side-effect permission. Preserve local memory/correction permissions and the fail-closed public delegation policy.
+- Config CLI recursively masks external header values even when setting a parent object, preserves explicit `--show-secrets`, and removes input/context excerpts from validation/YAML errors. Stored configuration and failed-write rollback remain unchanged.
+- Direct regressions cover permission combinations, image-tool permission borrowing, local compatibility, nested header output, explicit reveal, and failed-write/read diagnostics. Runtime evidence remains source/distribution validation until a consuming host is rebuilt, installed and restarted.
+- No dependency, config migration or persistence-format change. Reverting this follow-up restores the unsafe permission/output behavior; disable the external backend before such a rollback.
+
 ## How reviewers use this history
 
 1. Determine the current merge base and inspect the complete target-branch and

@@ -158,6 +158,81 @@ def test_cmd_config_human_summary_uses_generic_tool_limits(
     assert "presentation" not in output
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("key,raw_value", [
+    ("agent.memory_external.headers.Authorization", "Bearer private-header-value"),
+    ("memory_external.headers.Cookie", "session=private-header-value"),
+    ("agent.memory_external.headers.X-Custom-Credential", "private-header-value"),
+    ("agent.memory_external.headers", '{"Authorization": "Bearer private-header-value", "Cookie": "private-header-value"}'),
+    ("agent.memory_external", '{"base_url": "http://memory.test", "headers": {"Authorization": "Bearer private-header-value"}}'),
+])
+def test_cmd_config_set_masks_external_headers_at_every_parent_path(
+    tmp_path, monkeypatch, capsys, json_output, key, raw_value,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
+
+    assert cli.cmd_config(set_pair=(key, raw_value), json_output=json_output) == 0
+
+    output = capsys.readouterr().out
+    assert "private-header-value" not in output
+    assert "****" in output
+    assert "private-header-value" in config_path.read_text(encoding="utf-8")
+    if key == "agent.memory_external":
+        assert "http://memory.test" in output
+
+
+def test_cmd_config_show_secrets_explicitly_reveals_external_headers(tmp_path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
+
+    assert cli.cmd_config(
+        set_pair=("agent.memory_external.headers.Authorization", "Bearer private-header-value"),
+        json_output=True, show_secrets=True,
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out)["value"] == "Bearer private-header-value"
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("raw_value", [
+    '{"Authorization": ["private-header-value"]}',
+    '{"Authorization": "private-header-value"',
+])
+def test_cmd_config_invalid_external_headers_roll_back_without_echoing_input(
+    tmp_path, monkeypatch, capsys, json_output, raw_value,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    original = config_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
+
+    assert cli.cmd_config(
+        set_pair=("agent.memory_external.headers", raw_value), json_output=json_output,
+    ) == 1
+
+    assert "private-header-value" not in capsys.readouterr().out
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("get_key", [None, "llm.model"])
+def test_cmd_config_invalid_file_does_not_echo_header_values(
+    tmp_path, monkeypatch, capsys, json_output, get_key,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    with config_path.open("a", encoding="utf-8") as config_file:
+        config_file.write('memory_external:\n  headers:\n    Authorization: [private-header-value]\n')
+    monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
+
+    assert cli.cmd_config(get_key=get_key, json_output=json_output) == 1
+
+    assert "private-header-value" not in capsys.readouterr().out
+
+
 def test_config_parses_goal_autopilot_settings(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     _write_config(config_path)
