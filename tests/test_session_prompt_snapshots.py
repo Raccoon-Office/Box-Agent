@@ -32,6 +32,7 @@ from box_agent.env_context import EnvContext
 from box_agent.plugins.builtins import SessionResources
 from box_agent.session_context import HostBindings, SessionContext, SessionOptions
 from box_agent.tools.image_generation_tool import _API_KEY_ENV, _ENDPOINT_ENV
+from box_agent.tools.permissions import CapabilityPolicy
 
 SNAPSHOT_DIR = Path(__file__).parent / "fixtures" / "session_prompts"
 UPDATE = os.environ.get("BOX_AGENT_UPDATE_PROMPT_SNAPSHOTS") == "1"
@@ -68,7 +69,11 @@ CASES = {
     "python_code_agent": ("python", "code_agent", False, False, False, FULL_TOOLS - {"execute_code"}),
     "acp_general_minimal_tools": ("acp", None, False, True, False, MINIMAL_TOOLS),
     "acp_code_agent_minimal_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS),
+    "acp_general_with_policy": ("acp", None, False, True, False, FULL_TOOLS),
 }
+# Cases assembled with an officev3-style filesystem policy (the ACP main path).
+POLICY_CASES = {"acp_general_with_policy"}
+EXTRA_ALLOWED_DIRECTORY = "/Users/demo/Documents"
 
 
 class _Memory:
@@ -115,8 +120,17 @@ async def _assemble(name: str, workspace: Path) -> str:
         "cli": {"git": "/usr/bin/git"},
         "browser_tools": {"installed": True, "enabled": True, "available": True},
     })
+    policy = None
+    if name in POLICY_CASES:
+        policy = CapabilityPolicy().with_filesystem_overrides(
+            session_workspace_root=str(workspace),
+            allowed_directories=[EXTRA_ALLOWED_DIRECTORY],
+            filesystem_scope="session_workspace",
+            replace_allowed_directories=True,
+        )
     options = SessionOptions(
         profile=profile,
+        effective_policy=policy,
         workspace_dir=workspace,
         utility=utility,
         sandbox_mode=sandbox_mode,
