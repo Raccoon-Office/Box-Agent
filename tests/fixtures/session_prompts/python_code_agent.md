@@ -94,14 +94,12 @@
 - Treat file edits, generated source files, tests, and build results in the project tree as the deliverable.
 
 ## File Access Context
-- Current workspace: `<WORKSPACE>`
+- Current workspace: `<WORKSPACE>`. This is the stable session cwd and default working root: relative tool paths resolve from it, and task subdirectories you create organize files without changing it.
 - File tools and bash may access paths allowed by the active runtime policy.
 - If a file is outside the allowed scope, the tool will return a permission error; try the tool instead of assuming denial.
 
 ## Workspace Layout
-- 工作区（selected workspace root）：`<WORKSPACE>`
-- 当前会话工作目录（cwd）：`<WORKSPACE>`。工具相对路径和 artifact 扫描都从该目录开始；会话生命周期内不得改变它。
-- 模型为整理产物而创建的子目录只是普通文件组织，不成为新的 workspace，也不改变 cwd。
+- 工作区（selected workspace root）就是当前会话工作目录（cwd，见 File Access Context 中的 Current workspace）。工具相对路径和 artifact 扫描都从该目录开始；会话生命周期内不得改变它。
 - 判空规则：必须先使用目标目录的绝对路径实际查询其内容，只有查询成功且确认无内容时，才可判断该目标目录为空。查询失败、权限不足或结果被过滤、截断时，不得据此判空。
 
 ## Project Startup Context

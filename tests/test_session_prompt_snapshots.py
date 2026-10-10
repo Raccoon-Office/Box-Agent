@@ -201,3 +201,32 @@ async def test_session_prompt_only_instructs_registered_tools(name, tmp_path, pi
 
     dangling = {tool: clause for tool, clause in _instructed_tools(prompt).items() if tool not in tools}
     assert not dangling, f"prompt instructs tools this session lacks: {dangling}"
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+async def test_session_prompt_states_the_workspace_once(name, tmp_path, pinned_environment):
+    """One cwd statement; every by-name reference to it must resolve."""
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prompt = await _assemble(name, workspace)
+
+    assert prompt.count(str(workspace)) == 1
+    assert prompt.count(f"{WORKSPACE_STATEMENT_PREFIX}{workspace}`") == 1
+    assert "## Current Workspace" not in prompt
+
+
+async def test_agent_does_not_restate_a_workspace_the_prompt_already_states(tmp_path):
+    from box_agent.agent import Agent
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    stated = Agent(
+        llm_client=object(), tools=[], workspace_dir=str(tmp_path),
+        system_prompt=f"base\n\n## File Access Context\n{WORKSPACE_STATEMENT_PREFIX}{tmp_path}`. cwd",
+    )
+    unstated = Agent(llm_client=object(), tools=[], workspace_dir=str(tmp_path), system_prompt="base")
+
+    assert "## Current Workspace" not in stated.messages[0].content
+    assert stated.messages[0].content.count(str(tmp_path)) == 1
+    assert "## Current Workspace" in unstated.messages[0].content

@@ -11,6 +11,10 @@ _GIT_TIMEOUT_SECONDS = 1.5
 _MAX_STATUS_LINES = 40
 _MAX_AGENTS_CHARS = 12000
 
+# Line prefix of the one session-cwd statement (File Access Context). Agent
+# checks for it before appending its own "## Current Workspace" section.
+WORKSPACE_STATEMENT_PREFIX = "- Current workspace: `"
+
 PROJECT_WORKSPACE_MODE_PROMPT = (
     "## Project Workspace Mode\n"
     "- This session is editing an existing code/project workspace.\n"
@@ -205,6 +209,7 @@ def build_project_startup_context_prompt(workspace: Path) -> str:
 
 __all__ = [
     "PROJECT_WORKSPACE_MODE_PROMPT",
+    "WORKSPACE_STATEMENT_PREFIX",
     "append_prompt_segment",
     "build_project_startup_context_prompt",
     "compose_prompt_segments",
