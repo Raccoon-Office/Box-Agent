@@ -169,8 +169,14 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 - 用户语境不契合时不要输出，避免打扰。
 - 正文先正常回答用户的问题，再追加这个块；不要把它放在正文中间。
 
-## Memory
-<memory block>
+--- MEMORY START ---
+
+[Core Memory]
+# Core Memory
+- 姓名：快照用户
+- 偏好：中文回复
+
+--- MEMORY END ---
 
 ## Native Image Generation
 

@@ -184,8 +184,14 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 - 简单问候、仅确认/致谢、任务失败、正在执行、需要用户确认或补充信息时不要输出该块。
 - 围栏块是宿主读取的元数据，不要在可见正文解释它，也不要输出其他字段。
 
-## Memory
-<memory block>
+--- MEMORY START ---
+
+[Core Memory]
+# Core Memory
+- 姓名：快照用户
+- 偏好：中文回复
+
+--- MEMORY END ---
 
 ## Native Image Generation
 

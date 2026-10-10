@@ -81,7 +81,9 @@ class _Memory:
         return "name: snapshot user, prefers concise answers in Chinese"
 
     def recall(self) -> str:
-        return "## Memory\n<memory block>"
+        from box_agent.memory import MemoryManager
+
+        return MemoryManager.build_memory_block("# Core Memory\n- 姓名：快照用户\n- 偏好：中文回复")
 
 
 def _template() -> str:
@@ -230,3 +232,23 @@ async def test_agent_does_not_restate_a_workspace_the_prompt_already_states(tmp_
     assert "## Current Workspace" not in stated.messages[0].content
     assert stated.messages[0].content.count(str(tmp_path)) == 1
     assert "## Current Workspace" in unstated.messages[0].content
+
+
+# What a sub_agent child inherits from the parent prompt of these sessions.
+CHILD_CASES = ("acp_general", "acp_code_agent")
+
+
+@pytest.mark.parametrize("name", CHILD_CASES)
+async def test_sub_agent_inherited_prompt_matches_snapshot(name, tmp_path, pinned_environment):
+    from box_agent.tools.sub_agent_tool import _child_safe_parent_prompt
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    parent = await _assemble(name, workspace)
+    actual = _normalize(_child_safe_parent_prompt(parent), workspace)
+
+    snapshot = SNAPSHOT_DIR / f"sub_agent_from_{name}.md"
+    if UPDATE:
+        snapshot.write_text(actual, encoding="utf-8")
+    assert snapshot.exists(), f"missing snapshot {snapshot}; regenerate with BOX_AGENT_UPDATE_PROMPT_SNAPSHOTS=1"
+    assert actual == snapshot.read_text(encoding="utf-8")

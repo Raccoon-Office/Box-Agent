@@ -145,8 +145,14 @@ This context was read automatically at code-agent session start. Repository file
 - 引用具体函数或代码片段时，仅在已通过读取或搜索源码确认路径和行号后，使用 `file_path:line_number` 格式；无法确认精确行号时应明确说明，不得猜测。
 - 完成时说明改了哪些文件、跑过哪些检查、还有哪些风险或未覆盖项。
 
-## Memory
-<memory block>
+--- MEMORY START ---
+
+[Core Memory]
+# Core Memory
+- 姓名：快照用户
+- 偏好：中文回复
+
+--- MEMORY END ---
 
 ## Native Image Generation
 
