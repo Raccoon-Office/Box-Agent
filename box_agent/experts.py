@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -694,6 +695,9 @@ class ExpertTeamProfile:
 class ExpertSessionContext:
     expert: ExpertProfile | None = None
     team: ExpertTeamProfile | None = None
+    skill_directories: list[Path] = field(default_factory=list)
+    skill_bindings_by_directory: dict[Path, frozenset[str]] = field(default_factory=dict)
+    skill_bindings_by_path: dict[Path, str] = field(default_factory=dict)
 
     @classmethod
     def from_meta(cls, raw_meta: Any) -> "ExpertSessionContext | None":
@@ -703,7 +707,60 @@ class ExpertSessionContext:
         team = ExpertTeamProfile.from_meta(raw_meta.get("expert_team") or raw_meta.get("expertTeam"))
         if expert is None and team is None:
             return None
-        return cls(expert=expert, team=team)
+        directories: list[Path] = []
+        bindings: dict[Path, frozenset[str]] = {}
+        bound_paths: dict[Path, str] = {}
+        for container in (raw_meta.get("expert"), raw_meta.get("expert_team") or raw_meta.get("expertTeam")):
+            if not isinstance(container, dict):
+                continue
+            profiles = [container, container.get("leader"), *(container.get("members") or [])]
+            for profile in profiles:
+                if not isinstance(profile, dict):
+                    continue
+                snapshot = profile.get("packageSnapshot")
+                if snapshot is None:
+                    snapshot = container.get("packageSnapshot")
+                if not isinstance(snapshot, dict):
+                    continue
+                # 绑定属于当前包的专家，不能套用专家团合并后的技能名单。
+                names = frozenset(
+                    name for camel, snake in (
+                        ("requiredSkills", "required_skills"),
+                        ("defaultSkills", "default_skills"),
+                        ("optionalSkills", "optional_skills"),
+                    ) for name in _clean_list(profile.get(camel) or profile.get(snake))
+                )
+                root = Path(snapshot.get("directory", "")).resolve()
+                for skill in snapshot.get("skills") or []:
+                    if not isinstance(skill, dict) or not isinstance(skill.get("directory"), str):
+                        continue
+                    directory = Path(skill["directory"])
+                    if not directory.is_absolute() or not directory.resolve().is_relative_to(root):
+                        raise ValueError("Skill directory is outside the expert package")
+                    directory = directory.resolve()
+                    if directory not in directories:
+                        directories.append(directory)
+                    bound_names = names
+                    if "skillBindings" in profile:
+                        # Lab 按 key 绑定随包技能；同名的其他版本或 TOOL/MARKET 不获得包绑定。
+                        declared = profile.get("skillBindings")
+                        bound_names = frozenset(
+                            binding["slug"] for binding in (declared if isinstance(declared, list) else [])
+                            if isinstance(binding, dict)
+                            and binding.get("source") == "BUNDLED"
+                            and isinstance(skill.get("key"), str) and skill["key"]
+                            and binding.get("key") == skill["key"]
+                            and isinstance(binding.get("slug"), str)
+                            and binding["slug"] == skill.get("slug")
+                            and binding["slug"] in names
+                        )
+                    # 未携带 skillBindings 的旧宿主保留按当前专家技能名称绑定的行为。
+                    bindings[directory] = bindings.get(directory, frozenset()) | bound_names
+                    slug = skill.get("slug")
+                    if isinstance(slug, str) and slug in bound_names:
+                        bound_paths[directory / "SKILL.md"] = slug
+        return cls(expert=expert, team=team, skill_directories=directories,
+                   skill_bindings_by_directory=bindings, skill_bindings_by_path=bound_paths)
 
     def render_prompt(self) -> str:
         sections: list[str] = []
