@@ -32,6 +32,7 @@ from box_agent.env_context import EnvContext
 from box_agent.plugins.builtins import SessionResources
 from box_agent.session_context import HostBindings, SessionContext, SessionOptions
 from box_agent.tools.image_generation_tool import _API_KEY_ENV, _ENDPOINT_ENV
+from box_agent.tools.permissions import CapabilityPolicy
 
 SNAPSHOT_DIR = Path(__file__).parent / "fixtures" / "session_prompts"
 UPDATE = os.environ.get("BOX_AGENT_UPDATE_PROMPT_SNAPSHOTS") == "1"
@@ -68,7 +69,11 @@ CASES = {
     "python_code_agent": ("python", "code_agent", False, False, False, FULL_TOOLS - {"execute_code"}),
     "acp_general_minimal_tools": ("acp", None, False, True, False, MINIMAL_TOOLS),
     "acp_code_agent_minimal_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS),
+    "acp_general_with_policy": ("acp", None, False, True, False, FULL_TOOLS),
 }
+# Cases assembled with an officev3-style filesystem policy (the ACP main path).
+POLICY_CASES = {"acp_general_with_policy"}
+EXTRA_ALLOWED_DIRECTORY = "/Users/demo/Documents"
 
 
 class _Memory:
@@ -115,8 +120,17 @@ async def _assemble(name: str, workspace: Path) -> str:
         "cli": {"git": "/usr/bin/git"},
         "browser_tools": {"installed": True, "enabled": True, "available": True},
     })
+    policy = None
+    if name in POLICY_CASES:
+        policy = CapabilityPolicy().with_filesystem_overrides(
+            session_workspace_root=str(workspace),
+            allowed_directories=[EXTRA_ALLOWED_DIRECTORY],
+            filesystem_scope="session_workspace",
+            replace_allowed_directories=True,
+        )
     options = SessionOptions(
         profile=profile,
+        effective_policy=policy,
         workspace_dir=workspace,
         utility=utility,
         sandbox_mode=sandbox_mode,
@@ -187,3 +201,32 @@ async def test_session_prompt_only_instructs_registered_tools(name, tmp_path, pi
 
     dangling = {tool: clause for tool, clause in _instructed_tools(prompt).items() if tool not in tools}
     assert not dangling, f"prompt instructs tools this session lacks: {dangling}"
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+async def test_session_prompt_states_the_workspace_once(name, tmp_path, pinned_environment):
+    """One cwd statement; every by-name reference to it must resolve."""
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prompt = await _assemble(name, workspace)
+
+    assert prompt.count(str(workspace)) == 1
+    assert prompt.count(f"{WORKSPACE_STATEMENT_PREFIX}{workspace}`") == 1
+    assert "## Current Workspace" not in prompt
+
+
+async def test_agent_does_not_restate_a_workspace_the_prompt_already_states(tmp_path):
+    from box_agent.agent import Agent
+    from box_agent.project_context import WORKSPACE_STATEMENT_PREFIX
+
+    stated = Agent(
+        llm_client=object(), tools=[], workspace_dir=str(tmp_path),
+        system_prompt=f"base\n\n## File Access Context\n{WORKSPACE_STATEMENT_PREFIX}{tmp_path}`. cwd",
+    )
+    unstated = Agent(llm_client=object(), tools=[], workspace_dir=str(tmp_path), system_prompt="base")
+
+    assert "## Current Workspace" not in stated.messages[0].content
+    assert stated.messages[0].content.count(str(tmp_path)) == 1
+    assert "## Current Workspace" in unstated.messages[0].content

@@ -30,7 +30,7 @@ from .tools.setup import (
 )
 from .prompt_capabilities import resolve_capability_placeholders
 from .project_context import (
-    PROJECT_WORKSPACE_MODE_PROMPT, append_prompt_segment, compose_prompt_segments,
+    PROJECT_WORKSPACE_MODE_PROMPT, WORKSPACE_STATEMENT_PREFIX, append_prompt_segment, compose_prompt_segments,
     build_project_startup_context_prompt,
 )
 from .session_prompts import (
@@ -437,17 +437,22 @@ def _workspace_layout_prompt(
         "selected_root_dir",
         "selectedRootDir",
     ) or workspace
+    cwd_rule = "工具相对路径和 artifact 扫描都从该目录开始；会话生命周期内不得改变它。"
+    if Path(selected_root) == Path(workspace):
+        # Same directory: point at the File Access Context statement instead of
+        # repeating the path.
+        root_lines = [
+            "- 工作区（selected workspace root）就是当前会话工作目录（cwd，见 File Access Context "
+            "中的 Current workspace）。" + cwd_rule,
+        ]
+    else:
+        root_lines = [
+            f"- 工作区（selected workspace root）：`{selected_root}`",
+            f"- 当前会话工作目录（cwd）：`{workspace}`。" + cwd_rule,
+        ]
     lines = [
         "## Workspace Layout",
-        f"- 工作区（selected workspace root）：`{selected_root}`",
-        (
-            f"- 当前会话工作目录（cwd）：`{workspace}`。工具相对路径和 artifact 扫描都从"
-            "该目录开始；会话生命周期内不得改变它。"
-        ),
-        (
-            "- 模型为整理产物而创建的子目录只是普通文件组织，不成为新的 workspace，"
-            "也不改变 cwd。"
-        ),
+        *root_lines,
         (
             "- 判空规则：必须先使用目标目录的绝对路径实际查询其内容，"
             "只有查询成功且确认无内容时，才可判断该目标目录为空。"
@@ -464,22 +469,30 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
     from assuming workspace-only access when officev3 has granted extra
     roots such as ~/Documents.
     """
+    # The single statement of the session cwd: sandbox/attachment rules point
+    # here by name, and Agent skips its own "## Current Workspace" tail when it
+    # sees this line (WORKSPACE_STATEMENT_PREFIX).
+    workspace_line = (
+        f"{WORKSPACE_STATEMENT_PREFIX}{workspace}`. This is the stable session cwd and default "
+        "working root: relative tool paths resolve from it, and task subdirectories you "
+        "create organize files without changing it.\n"
+    )
     if policy is None:
         return (
             "## File Access Context\n"
-            f"- Current workspace: `{workspace}`\n"
-            "- File tools and bash may access paths allowed by the active runtime policy.\n"
+            + workspace_line
+            + "- File tools and bash may access paths allowed by the active runtime policy.\n"
             "- If a file is outside the allowed scope, the tool will return a permission error; "
             "try the tool instead of assuming denial."
         )
 
-    allowed_roots = [workspace]
+    allowed_roots = []
     if policy.session_workspace_root:
         allowed_roots.append(Path(policy.session_workspace_root).expanduser())
     for directory in policy.allowed_directories:
         allowed_roots.append(Path(directory).expanduser())
 
-    seen: set[str] = set()
+    seen: set[str] = {str(workspace)}
     root_lines: list[str] = []
     for root in allowed_roots:
         root_s = str(root)
@@ -497,11 +510,17 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
     else:
         scope_line = f"- Active filesystem scope: `{policy.filesystem_scope}`; unknown scopes fail closed in tools."
 
+    roots = (
+        "- Allowed filesystem roots for this session include the current workspace and:\n"
+        + "\n".join(root_lines)
+        if root_lines
+        else "- Allowed filesystem roots for this session include the current workspace."
+    )
     return (
         "## File Access Context\n"
-        f"{scope_line}\n"
-        "- Allowed filesystem roots for this session include:\n"
-        + "\n".join(root_lines)
+        + workspace_line
+        + f"{scope_line}\n"
+        + roots
         + "\n- These are currently pre-authorized roots, not the complete set of paths that may be requested."
         + "\n- When the task requires it, you may try a specific, narrow path outside these roots; "
         "the runtime will request permission when appropriate."
