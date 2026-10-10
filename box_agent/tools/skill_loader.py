@@ -621,25 +621,30 @@ class SkillLoader:
     def with_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
+        skill_bindings_by_path: Mapping[Path, str] | None = None,
     ) -> "SkillLoader":
         with self._reload_lock:
             return self._with_expert_skill_sources(
                 skill_names, skill_directories=skill_directories,
                 skill_bindings_by_directory=skill_bindings_by_directory,
+                skill_bindings_by_path=skill_bindings_by_path,
             )
 
     async def awith_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
+        skill_bindings_by_path: Mapping[Path, str] | None = None,
     ) -> "SkillLoader":
         return await asyncio.to_thread(
             self.with_expert_skill_sources, skill_names, skill_directories=skill_directories,
             skill_bindings_by_directory=skill_bindings_by_directory,
+            skill_bindings_by_path=skill_bindings_by_path,
         )
 
     def _with_expert_skill_sources(
         self, skill_names: List[str], *, skill_directories: Optional[List[Path]] = None,
         skill_bindings_by_directory: Mapping[Path, Collection[str]] | None = None,
+        skill_bindings_by_path: Mapping[Path, str] | None = None,
     ) -> "SkillLoader":
         """Clone this loader with session-local expert skills.
 
@@ -696,6 +701,11 @@ class SkillLoader:
             )
             if entry.directory.name in entry.bound_skill_names:
                 entry.bound_skill_paths[entry.directory / "SKILL.md"] = entry.directory.name
+            # 宿主确认的路径/slug 身份先于正文解析登记，目录名不必等于技能名。
+            skill_path = entry.directory / "SKILL.md"
+            bound_name = (skill_bindings_by_path or {}).get(skill_path)
+            if isinstance(bound_name, str) and bound_name in entry.bound_skill_names:
+                entry.bound_skill_paths[skill_path] = bound_name
         for original, entry in zip(self._sources, loader._sources[len(package_directories):]):
             entry.containment_root = original.containment_root
             entry.bound_skill_names = original.bound_skill_names

@@ -841,7 +841,10 @@ async def test_team_prefers_owning_package_binding_over_unbound_same_name(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("package_kind", ["expert", "expert_team"])
-async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(tmp_path, package_kind):
+@pytest.mark.parametrize("initial_failure", [None, "missing", "malformed", "escaped"])
+async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
+    tmp_path, package_kind, initial_failure,
+):
     builtin, package = tmp_path / "builtin", tmp_path / "package"
     builtin.mkdir()
     package.mkdir()
@@ -859,6 +862,16 @@ async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
         script.parent.mkdir()
         script.write_text("// " + key)
         skills.append({"key": key, "slug": "pptx", "directory": str(package / key)})
+    selected_file = package / "selected/SKILL.md"
+    if initial_failure == "missing":
+        selected_file.unlink()
+    elif initial_failure == "malformed":
+        selected_file.write_text("invalid skill")
+    elif initial_failure == "escaped":
+        outside = tmp_path / "outside.md"
+        outside.write_text(selected_file.read_text())
+        selected_file.unlink()
+        selected_file.symlink_to(outside)
     member = {
         "id": "writer", "name": "writer", "defaultSkills": ["pptx"],
         "skillBindings": [{"key": "selected", "slug": "pptx", "source": "BUNDLED"}],
@@ -885,14 +898,20 @@ async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
     skill = state.skill_loader.get_skill("pptx")
     assert skill.source == "expert"
     assert skill.skill_path == package / "selected/SKILL.md"
+    assert loader.get_skill("pptx").source == "builtin"
+    normal = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    assert agent._sessions[normal.sessionId].skill_loader.get_skill("pptx").source == "builtin"
+    if initial_failure:
+        assert skill.broken
+        assert state.skill_loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") is None
+        result = await state.agent.tools["get_skill"].execute("pptx")
+        assert not result.success and result.raw_output["code"] == "SKILL_BROKEN"
+        return
     assert state.skill_loader.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") == (
         package / "selected/scripts/sync_image_manifest_status.js"
     ).resolve()
     result = await state.agent.tools["get_skill"].execute("pptx")
     assert result.success and "selected content" in result.content
-    assert loader.get_skill("pptx").source == "builtin"
-    normal = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
-    assert agent._sessions[normal.sessionId].skill_loader.get_skill("pptx").source == "builtin"
     (package / "selected/SKILL.md").unlink()
     result = await state.agent.tools["get_skill"].execute("pptx")
     assert not result.success

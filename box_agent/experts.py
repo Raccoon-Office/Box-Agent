@@ -697,6 +697,7 @@ class ExpertSessionContext:
     team: ExpertTeamProfile | None = None
     skill_directories: list[Path] = field(default_factory=list)
     skill_bindings_by_directory: dict[Path, frozenset[str]] = field(default_factory=dict)
+    skill_bindings_by_path: dict[Path, str] = field(default_factory=dict)
 
     @classmethod
     def from_meta(cls, raw_meta: Any) -> "ExpertSessionContext | None":
@@ -708,6 +709,7 @@ class ExpertSessionContext:
             return None
         directories: list[Path] = []
         bindings: dict[Path, frozenset[str]] = {}
+        bound_paths: dict[Path, str] = {}
         for container in (raw_meta.get("expert"), raw_meta.get("expert_team") or raw_meta.get("expertTeam")):
             if not isinstance(container, dict):
                 continue
@@ -754,8 +756,11 @@ class ExpertSessionContext:
                         )
                     # 未携带 skillBindings 的旧宿主保留按当前专家技能名称绑定的行为。
                     bindings[directory] = bindings.get(directory, frozenset()) | bound_names
+                    slug = skill.get("slug")
+                    if isinstance(slug, str) and slug in bound_names:
+                        bound_paths[directory / "SKILL.md"] = slug
         return cls(expert=expert, team=team, skill_directories=directories,
-                   skill_bindings_by_directory=bindings)
+                   skill_bindings_by_directory=bindings, skill_bindings_by_path=bound_paths)
 
     def render_prompt(self) -> str:
         sections: list[str] = []
