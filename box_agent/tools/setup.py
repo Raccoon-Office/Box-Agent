@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Collection
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Mapping, Optional
@@ -169,8 +170,15 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 """
 
 
-def build_file_delivery_prompt() -> str:
-    """Build file-delivery guidance for a cwd-rooted session."""
+def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
+    """Build file-delivery guidance for a cwd-rooted session.
+
+    ``tools`` is the session's registered tool names (``None`` = unknown, full
+    text). Mentions of ``generate_image`` and the background-shell preview
+    recipe are dropped when the session lacks those tools.
+    """
+    image = tools is None or "generate_image" in tools
+    background_shell = tools is None or {"bash", "bash_output", "bash_kill"} <= set(tools)
     preview_directory = '"$PWD"'
     preview_guidance = (
         "\n- **本地 HTML 预览**：Playwright MCP 不要打开 `file://`。用 bash 后台启动仅监听 "
@@ -182,7 +190,7 @@ def build_file_delivery_prompt() -> str:
         "并说明服务会持续到显式 `bash_kill`、Box-Agent 重启或客户端退出。"
     )
     return (
-        "- **目录**：bash、文件工具、`generate_image`、视觉检查和 Python 沙箱的相对路径"
+        "- **目录**：bash、文件工具、" + ("`generate_image`、" if image else "") + "视觉检查和 Python 沙箱的相对路径"
         "均从当前会话工作目录开始。交付物位置由用户要求和当前任务决定；不要默认创建或使用 `output/`，"
         "也不要写到 `~/.box-agent/` 等内部目录。\n"
         "- **命名与覆盖**：遵循现有项目约定；独立产物使用简短、语义明确的名称。"
@@ -194,14 +202,15 @@ def build_file_delivery_prompt() -> str:
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。\n"
         "- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，"
         "需要把尚未发布的文件作为独立交付结果时调用 `publish_artifact`；可登记多个。"
-        "构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
-        "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
+        + ("构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
+           if image else "构建器已登记的成品已发布，无需重复登记。")
+        + "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
         "也不调用 `publish_artifact`；保留文件并说明位置。若用户将其中某个文件作为另一项"
         "独立交付结果，则也应登记。"
         "完成后说明文件名和工作目录内相对位置即可；CLI 与宿主以共享 ArtifactEvent 展示文件。\n"
         "- **多文件交付**：用户需要单一下载包时才将多文件打包为 ZIP，"
         "例如 `zip -r bundle.zip 文件1 文件2`。"
-        + preview_guidance
+        + (preview_guidance if background_shell else "")
     )
 
 
@@ -218,8 +227,22 @@ def image_generation_service_configured(
 def build_image_generation_prompt(
     config: Config,
     env: Mapping[str, str] | None = None,
+    *,
+    tools: Collection[str] | None = None,
 ) -> str:
-    """Build the image-generation policy shared by CLI and ACP sessions."""
+    """Build the image-generation policy shared by CLI and ACP sessions.
+
+    With ``tools`` known and no ``generate_image`` registered, the model gets
+    a short "not available" note instead of instructions to call a tool that
+    does not exist in this session.
+    """
+    if tools is not None and "generate_image" not in tools:
+        return (
+            "## Native Image Generation\n\n"
+            "- 当前会话没有生图工具（Box-Agent 未配置 `image_generation.endpoint` 或对应环境变量）。"
+            "用户要求生成位图时不要尝试调用生图工具；用户未禁止时可改用 HTML/SVG、PIL 等方式，"
+            "并说明这是替代方案；用户明确禁止这些回退时如实报告阻塞，不得假装已生成图片。"
+        )
     configured = image_generation_service_configured(config, env)
     status = (
         "已配置，可以调用 `generate_image`。"

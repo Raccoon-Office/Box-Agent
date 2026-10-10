@@ -20,6 +20,7 @@ import datetime as dt
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,18 +39,35 @@ CONFIG_DIR = Path(__file__).resolve().parents[1] / "box_agent" / "config"
 FIXED_DATE = dt.date(2026, 1, 2)
 SKILL_RUNTIME_MARKER = "## Skill Runtime Context\n<skill runtime facts>"
 
-# name -> (profile, session_mode, utility, sandbox_mode, follow_up)
+# Tool names a default session registers (plus ripgrep-backed grep/glob and a
+# configured image service). Prompts only mention tools the session has.
+FULL_TOOLS = frozenset("""
+    append_file bash bash_kill bash_output create_scheduled_task edit_file execute_code generate_image
+    get_skill glob goal_read goal_write grep inspect_images list_skills mcp_config memory_read memory_search
+    memory_write plan_read plan_write publish_artifact query_jsonl read_file report_execution_result
+    request_user_decision request_user_input sandbox_status search_files sub_agent todo_read todo_write
+    tool_search write_file
+""".split())
+# No image service, no ripgrep, planning/delegation and bash disabled by config.
+MINIMAL_TOOLS = FULL_TOOLS - {
+    "generate_image", "glob", "grep", "plan_read", "plan_write", "todo_read", "todo_write",
+    "sub_agent", "bash", "bash_output", "bash_kill",
+}
+
+# name -> (profile, session_mode, utility, sandbox_mode, follow_up, tools)
 CASES = {
-    "acp_general": ("acp", None, False, True, False),
-    "acp_general_follow_up": ("acp", None, False, True, True),
-    "acp_code_agent": ("acp", "code_agent", False, True, False),
-    "acp_data_analysis": ("acp", "data_analysis", False, True, False),
-    "acp_utility": ("acp", None, True, True, False),
-    "cli_general": ("cli", None, False, True, False),
-    "cli_general_no_sandbox": ("cli", None, False, False, False),
-    "cli_code_agent": ("cli", "code_agent", False, True, False),
-    "python_general": ("python", None, False, False, False),
-    "python_code_agent": ("python", "code_agent", False, False, False),
+    "acp_general": ("acp", None, False, True, False, FULL_TOOLS),
+    "acp_general_follow_up": ("acp", None, False, True, True, FULL_TOOLS),
+    "acp_code_agent": ("acp", "code_agent", False, True, False, FULL_TOOLS),
+    "acp_data_analysis": ("acp", "data_analysis", False, True, False, FULL_TOOLS),
+    "acp_utility": ("acp", None, True, True, False, frozenset()),
+    "cli_general": ("cli", None, False, True, False, FULL_TOOLS),
+    "cli_general_no_sandbox": ("cli", None, False, False, False, FULL_TOOLS - {"execute_code"}),
+    "cli_code_agent": ("cli", "code_agent", False, True, False, FULL_TOOLS),
+    "python_general": ("python", None, False, False, False, FULL_TOOLS - {"execute_code"}),
+    "python_code_agent": ("python", "code_agent", False, False, False, FULL_TOOLS - {"execute_code"}),
+    "acp_general_minimal_tools": ("acp", None, False, True, False, MINIMAL_TOOLS),
+    "acp_code_agent_minimal_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS),
 }
 
 
@@ -81,7 +99,7 @@ def pinned_environment(monkeypatch):
 
 
 async def _assemble(name: str, workspace: Path) -> str:
-    profile, session_mode, utility, sandbox_mode, follow_up = CASES[name]
+    profile, session_mode, utility, sandbox_mode, follow_up, tools = CASES[name]
     config = Config(
         llm=LLMConfig(api_key="test"),
         agent=AgentConfig(
@@ -109,6 +127,7 @@ async def _assemble(name: str, workspace: Path) -> str:
     host = HostBindings(system_prompt=_template() if profile == "acp" else None)
     resources = SessionResources(context=SessionContext(config=config, options=options, host=host))
     resources.memory_manager = _Memory()
+    resources.tools = [SimpleNamespace(name=tool) for tool in sorted(tools)]
     await session_assembly.prepare_prompt(resources)
     return resources.system_prompt
 
@@ -139,3 +158,32 @@ async def test_session_prompt_has_no_unrendered_placeholders(name, tmp_path, pin
     prompt = await _assemble(name, workspace)
 
     assert not re.findall(r"\{[A-Z_]{3,}\}|\{\{\.[A-Za-z]+\}\}", prompt)
+
+
+# Every tool name a session could have. A backticked mention of one of these is
+# an instruction to use it, unless the clause is a prohibition ("不要用 X").
+KNOWN_TOOL_NAMES = FULL_TOOLS | {"install_skillhub_skill", "search_skillhub", "web_extract", "web_search"}
+_NEGATION = re.compile(r"不要|禁止|不得|勿|Do not|Do NOT|don't", re.IGNORECASE)
+
+
+def _instructed_tools(prompt: str) -> dict[str, str]:
+    """Map tool name -> first clause that tells the model to use it."""
+    found: dict[str, str] = {}
+    for clause in re.split(r"[。；\n]", prompt):
+        if _NEGATION.search(clause):
+            continue
+        for name in re.findall(r"`([a-z_]+)", clause):
+            if name in KNOWN_TOOL_NAMES:
+                found.setdefault(name, clause.strip())
+    return found
+
+
+@pytest.mark.parametrize("name", sorted(name for name, case in CASES.items() if not case[2]))
+async def test_session_prompt_only_instructs_registered_tools(name, tmp_path, pinned_environment):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tools = CASES[name][5]
+    prompt = await _assemble(name, workspace)
+
+    dangling = {tool: clause for tool, clause in _instructed_tools(prompt).items() if tool not in tools}
+    assert not dangling, f"prompt instructs tools this session lacks: {dangling}"

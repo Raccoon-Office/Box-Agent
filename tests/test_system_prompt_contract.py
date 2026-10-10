@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from box_agent.prompt_capabilities import resolve_capability_placeholders
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.setup import render_system_prompt_template
 
@@ -15,6 +16,7 @@ def test_system_prompt_keeps_the_stable_template_compact():
     assert prompt.count("{SKILLS_METADATA}") == 1
     assert prompt.count("{SANDBOX_INFO}") == 1
     assert prompt.count("{FILE_DELIVERY_INFO}") == 1
+    assert prompt.count("{PLANNING_TOOLS}") == 1
 
 
 def test_system_prompt_renders_current_date_without_leaving_legacy_tokens():
@@ -65,7 +67,8 @@ def test_system_prompt_distinguishes_missing_attachments_from_explicit_paths():
 
 
 def test_system_prompt_keeps_workflow_policy_without_duplicating_tool_schemas():
-    prompt = _prompt()
+    # Planning-tool guidance is capability-rendered; a full session gets all of it.
+    prompt = resolve_capability_placeholders(_prompt(), None)
 
     assert "Plan 表达方法，Todo 只记录进度" in prompt
     assert "不是事实证据或结论来源" in prompt

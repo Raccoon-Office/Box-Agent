@@ -28,6 +28,7 @@ from .tools.setup import (
     build_file_delivery_prompt, build_image_generation_prompt, build_sandbox_info_prompt,
     render_system_prompt_template,
 )
+from .prompt_capabilities import resolve_capability_placeholders
 from .project_context import (
     PROJECT_WORKSPACE_MODE_PROMPT, append_prompt_segment, compose_prompt_segments,
     build_project_startup_context_prompt,
@@ -344,6 +345,10 @@ async def prepare_prompt(resources: SessionResources) -> None:
         memory=resources.memory_manager,
         memory_block=memory_block,
         prompt_suffix=host.prompt_suffix,
+        available_tools=(
+            None if options.utility
+            else frozenset(tool.name for tool in resources.tools)
+        ),
     )
 
 
@@ -557,8 +562,14 @@ def _compose_session_prompt(
     enable_general_directory_policy: bool,
     follow_up_suggestions_enabled: bool,
     host_ui_hints: bool,
+    available_tools: frozenset[str] | None = None,
 ) -> str:
-    """Template plus the ordered session overlays shared by every adapter."""
+    """Template plus the ordered session overlays shared by every adapter.
+
+    ``available_tools`` (the session's registered tool names, ``None`` when
+    unknown) gates tool-specific guidance so the prompt never instructs the
+    model to call a tool this session lacks.
+    """
     if skills_slot:
         from .tools.skill_loader import SKILL_SLOT_SENTINEL
 
@@ -566,10 +577,10 @@ def _compose_session_prompt(
     else:
         template = template.replace("{SKILLS_METADATA}", "")
     base_prompt = compose_prompt_segments(
-        render_system_prompt_template(template),
+        resolve_capability_placeholders(render_system_prompt_template(template), available_tools),
         replacements={
             "{SANDBOX_INFO}": build_sandbox_info_prompt() if sandbox_mode else "",
-            "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(),
+            "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(available_tools),
         },
         segments=(
             PROJECT_WORKSPACE_MODE_PROMPT
@@ -631,7 +642,9 @@ def _compose_session_prompt(
         if prompt_filename:
             mode_path = Config.find_config_file(prompt_filename)
             if mode_path and mode_path.exists():
-                mode_prompt = mode_path.read_text(encoding="utf-8").strip()
+                mode_prompt = resolve_capability_placeholders(
+                    mode_path.read_text(encoding="utf-8").strip(), available_tools,
+                )
                 base_prompt = append_prompt_segment(
                     base_prompt,
                     mode_prompt,
@@ -663,6 +676,7 @@ def build_session_prompt(
     memory=None,
     memory_block: str | None = None,
     prompt_suffix: str | None = None,
+    available_tools: frozenset[str] | None = None,
 ) -> str:
     """The one system-prompt builder for CLI, ACP and Python SDK sessions."""
     prompt = _compose_session_prompt(
@@ -680,11 +694,14 @@ def build_session_prompt(
         ),
         follow_up_suggestions_enabled=follow_up_suggestions_enabled,
         host_ui_hints=host_ui_hints,
+        available_tools=available_tools,
     )
     if memory_block and not utility:
         prompt = append_prompt_segment(prompt, memory_block)
     if not utility:
-        prompt = append_prompt_segment(prompt, build_image_generation_prompt(config))
+        prompt = append_prompt_segment(
+            prompt, build_image_generation_prompt(config, tools=available_tools),
+        )
     if prompt_suffix and prompt_suffix.strip():
         prompt = append_prompt_segment(prompt, prompt_suffix.strip())
     return prompt
@@ -701,6 +718,7 @@ def build_acp_session_prompt(
     workspace_layout: Any = None,
     enable_general_directory_policy: bool = False,
     follow_up_suggestions_enabled: bool = False,
+    available_tools: frozenset[str] | None = None,
 ) -> str:
     """Compatibility view: the ACP overlays without memory/image/suffix tails."""
     return _compose_session_prompt(
@@ -716,6 +734,7 @@ def build_acp_session_prompt(
         enable_general_directory_policy=enable_general_directory_policy,
         follow_up_suggestions_enabled=follow_up_suggestions_enabled,
         host_ui_hints=True,
+        available_tools=available_tools,
     )
 
 
