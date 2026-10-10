@@ -268,8 +268,14 @@ Report rules:
 3. Reference images with `sandbox:/mnt/data/<filename>` format, for example `![分析图](sandbox:/mnt/data/analysis.png)`. Do not use `./x.png`, bare `x.png`, or real absolute filesystem paths in the report.
 4. Only output the `<report>` once, after all analysis steps are complete; do not output intermediate reports.
 
-## Memory
-<memory block>
+--- MEMORY START ---
+
+[Core Memory]
+# Core Memory
+- 姓名：快照用户
+- 偏好：中文回复
+
+--- MEMORY END ---
 
 ## Native Image Generation
 

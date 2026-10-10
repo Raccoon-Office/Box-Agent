@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -34,6 +35,7 @@ from ..events import (
     WebSearchEvent,
 )
 from ..llm.model_routing import resolve_model_client
+from ..project_context import WORKSPACE_STATEMENT_PREFIX
 from ..schema import Message
 from ..skill_dependencies import SkillDependencyError
 from ..session_log import SessionLog, SessionLogDurabilityError
@@ -63,8 +65,52 @@ _CHILD_MCP_BOUNDARY = (
 )
 
 
+# Blocks of a session-assembled parent prompt that only serve the user-facing
+# parent: its identity, the ask-the-user / plan / delegate workflow, host UI
+# output contracts, private memory, and catalogs the child cannot use. A block
+# is (start marker, end) where end is a closing marker or the heading level that
+# closes it. Everything else — safety, privacy, language, evidence, workspace,
+# permission and project rules — is inherited unchanged.
+_PARENT_ONLY_BLOCKS: tuple[tuple[str, str | int], ...] = (
+    ("--- MEMORY START ---\n", "--- MEMORY END ---"),
+    ("<workflow>\n", "</workflow>"),
+    ("# Role\n", 2),
+    ("## 用户引导提示 (Action Hint)\n", 2),
+    ("## 后续建议（仅供本地 Agent 输入框使用）\n", 2),
+    ("## Native Image Generation\n", 2),
+    ("## Available Skills\n", 2),
+)
+
+
+def _block_end(text: str, start: int, marker: str, end: str | int) -> int:
+    if isinstance(end, str):
+        close = text.find(end, start + len(marker))
+        return len(text) if close < 0 else close + len(end)
+    heading = re.compile(rf"^#{{1,{end}}} ", re.MULTILINE)
+    match = heading.search(text, start + len(marker))
+    return match.start() if match else len(text)
+
+
+def _drop_parent_only_blocks(system_prompt: str) -> str:
+    """Remove parent-only blocks from a prompt built by session assembly.
+
+    Caller-supplied prompts (no session cwd statement) are returned unchanged,
+    so their own sections are never guessed at.
+    """
+    if WORKSPACE_STATEMENT_PREFIX not in system_prompt:
+        return system_prompt
+    text = system_prompt
+    for marker, end in _PARENT_ONLY_BLOCKS:
+        start = text.find(marker)
+        if start < 0 or (start > 0 and text[start - 1] != "\n"):
+            continue
+        text = text[:start] + text[_block_end(text, start, marker, end):]
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _child_safe_parent_prompt(system_prompt: str) -> str:
     """Keep caller constraints; the owning Agent removes verified Skill bodies."""
+    system_prompt = _drop_parent_only_blocks(system_prompt)
     # Arbitrary caller text is not proof of a framework-managed Skill block.
     # New Agents provide a system prompt without Skill bodies; legacy block
     # migration belongs to their verified session state, not heading guesses.

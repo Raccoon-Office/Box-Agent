@@ -81,7 +81,9 @@ class _Memory:
         return "name: snapshot user, prefers concise answers in Chinese"
 
     def recall(self) -> str:
-        return "## Memory\n<memory block>"
+        from box_agent.memory import MemoryManager
+
+        return MemoryManager.build_memory_block("# Core Memory\n- 姓名：快照用户\n- 偏好：中文回复")
 
 
 def _template() -> str:
@@ -230,3 +232,91 @@ async def test_agent_does_not_restate_a_workspace_the_prompt_already_states(tmp_
     assert "## Current Workspace" not in stated.messages[0].content
     assert stated.messages[0].content.count(str(tmp_path)) == 1
     assert "## Current Workspace" in unstated.messages[0].content
+
+
+# What a sub_agent child inherits from the parent prompt of these sessions.
+CHILD_CASES = ("acp_general", "acp_code_agent")
+
+
+@pytest.mark.parametrize("name", CHILD_CASES)
+async def test_sub_agent_inherited_prompt_matches_snapshot(name, tmp_path, pinned_environment):
+    from box_agent.tools.sub_agent_tool import _child_safe_parent_prompt
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    parent = await _assemble(name, workspace)
+    actual = _normalize(_child_safe_parent_prompt(parent), workspace)
+
+    snapshot = SNAPSHOT_DIR / f"sub_agent_from_{name}.md"
+    if UPDATE:
+        snapshot.write_text(actual, encoding="utf-8")
+    assert snapshot.exists(), f"missing snapshot {snapshot}; regenerate with BOX_AGENT_UPDATE_PROMPT_SNAPSHOTS=1"
+    assert actual == snapshot.read_text(encoding="utf-8")
+
+
+INHERITED_CONSTRAINTS = (
+    "<safety_guardrails>", "<language_principles>", "### Factual & Search Reliability", "### Safety",
+    "### File & Bash Operations", "## File Access Context", "- Current workspace: `", "## Skill Runtime Context",
+)
+
+
+@pytest.mark.parametrize("name", ("acp_general_follow_up", "acp_code_agent"))
+async def test_sub_agent_drops_parent_only_blocks_and_keeps_constraints(name, tmp_path, pinned_environment):
+    from box_agent.tools.sub_agent_tool import _PARENT_ONLY_BLOCKS, _child_safe_parent_prompt
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    parent = await _assemble(name, workspace) + "\n\n## Available Skills\n- demo: parent-only catalog"
+    child = _child_safe_parent_prompt(parent)
+
+    # The markers must still be produced by assembly; a renamed heading would
+    # otherwise leak silently into every child.
+    present = [marker for marker, _ in _PARENT_ONLY_BLOCKS if marker in parent]
+    expected = {marker for marker, _ in _PARENT_ONLY_BLOCKS}
+    if name != "acp_general_follow_up":
+        expected.discard("## 后续建议（仅供本地 Agent 输入框使用）\n")
+    assert set(present) == expected
+    for marker in present:
+        assert marker not in child
+    # (The Attention rule's conditional "若 `request_user_input` 可用" stays; a
+    # child never has that tool, so the condition is simply false.)
+    parent_only_text = ["request_user_decision", "action_hint", "快照用户", "商汤小浣熊，由商汤科技研发，定位为",
+                        "parent-only catalog"]
+    if name == "acp_general_follow_up":
+        parent_only_text.append("follow_up_suggestions")
+    for text in parent_only_text:
+        assert text in parent and text not in child, text
+    for constraint in INHERITED_CONSTRAINTS:
+        assert constraint in child, constraint
+    if name == "acp_code_agent":
+        assert "## Project Startup Context" in child
+        assert "## Software Engineering Mode (code_agent)" in child
+
+
+def test_sub_agent_keeps_caller_supplied_prompts_unchanged():
+    from box_agent.tools.sub_agent_tool import _child_safe_parent_prompt
+
+    caller = "# Role\nYou are a caller-defined agent.\n\n<workflow>\nCaller step\n</workflow>\n\n## Available Skills\n- x"
+
+    assert _child_safe_parent_prompt(caller) == caller
+
+
+async def test_agent_hands_sub_agent_the_projected_parent_prompt(tmp_path, pinned_environment):
+    """Real wiring: Agent → SubAgentTool.set_parent_system_prompt → child system message."""
+    from unittest.mock import AsyncMock
+
+    from box_agent.agent import Agent
+    from box_agent.tools.sub_agent_tool import SubAgentTool
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    parent = await _assemble("acp_general", workspace)
+    tool = SubAgentTool(llm=AsyncMock(), parent_tools={})
+    agent = Agent(llm_client=AsyncMock(), system_prompt=parent, tools=[tool], workspace_dir=str(workspace))
+
+    assert "<workflow>" in agent.messages[0].content
+    inherited = tool._parent_system_prompt
+    assert inherited is not None
+    assert "<workflow>" not in inherited and "--- MEMORY START ---" not in inherited
+    assert "<safety_guardrails>" in inherited and f"- Current workspace: `{workspace}`" in inherited
+    assert len(inherited) < 0.75 * len(agent.messages[0].content)

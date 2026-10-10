@@ -121,8 +121,14 @@
 ## Skill Runtime Context
 <skill runtime facts>
 
-## Memory
-<memory block>
+--- MEMORY START ---
+
+[Core Memory]
+# Core Memory
+- 姓名：快照用户
+- 偏好：中文回复
+
+--- MEMORY END ---
 
 ## Native Image Generation
 
