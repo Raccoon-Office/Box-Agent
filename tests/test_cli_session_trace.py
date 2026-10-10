@@ -391,6 +391,9 @@ async def test_cli_interactive_cancellation_settles_run_before_ending_trace(cli_
         owner.cancel()
         try:
             await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            emit_session_trace("test.child_cancelled")
+            raise
         finally:
             emit_session_trace("test.child_settled")
         yield DoneEvent(stop_reason=StopReason.END_TURN, final_content="should not finish normally")
@@ -403,8 +406,12 @@ async def test_cli_interactive_cancellation_settles_run_before_ending_trace(cli_
         await asyncio.gather(*children, return_exceptions=True)
     records = read_records(next(trace_dir.glob("*.jsonl")))
     events = [record["event"] for record in records]
-    assert events.index("test.child_settled") < events.index("turn.end")
-    assert children[0].cancelled()
+    assert (
+        events.index("test.child_cancelled")
+        < events.index("test.child_settled")
+        < events.index("turn.end")
+    )
+    assert children[0].done()
     assert records[-1]["data"]["stop_reason"] == "cancelled"
     assert "turn.error" not in events
 
