@@ -189,7 +189,10 @@ from box_agent.session_trace import (
 )
 from box_agent.session_log import SessionLog
 from box_agent.task_context import TaskContext, normalize_task_id
-from box_agent.session_continuation import HISTORY_EDIT_SCHEMA_VERSION, parse_session_continuation
+from box_agent.session_continuation import parse_session_continuation
+from box_agent.session_history import (
+    current_revision, prompt_fingerprint, revision_request, revise_agent_history,
+)
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -990,6 +993,10 @@ class SessionState(AgentSession):
     """ACP metadata layered over the independent Agent session state."""
 
     _prompt_in_progress: bool = field(default=False, init=False, repr=False)
+    _prompt_finished: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
+    _history_edit_in_progress: bool = field(default=False, init=False, repr=False)
+    _history_cancel_requested: bool = field(default=False, init=False, repr=False)
+    _history_restore_failed: bool = field(default=False, init=False, repr=False)
     trace_writer: SessionTraceWriter | None = None
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
@@ -1705,7 +1712,8 @@ class BoxACPAgent:
         )
         for handle in existing:
             state = self._sessions[handle]
-            if state._prompt_in_progress or state.turn_active or state.run_handle.is_active:
+            if (state._prompt_in_progress or state.turn_active or state.run_handle.is_active
+                    or state._history_edit_in_progress):
                 raise _session_busy_error(handle)
         # No await between checking and reserving. Keep retired handles reserved
         # through close/open awaits too, so prompt cannot auto-create a session
@@ -2289,9 +2297,11 @@ class BoxACPAgent:
         kwargs: dict[str, Any] = {"sessionId": session_id}
         response_meta: dict[str, Any] = {}
         response_meta["capabilities"] = {
-            "session_continuation_versions": [1, 2],
+            "session_continuation_versions": [1],
+            "history_revision_versions": [1],
             "managed_mcp_config_versions": [1],
         }
+        response_meta["history_revision_id"] = current_revision(list(session_log.events)) if session_log else "initial"
         if skillhub_search_enabled:
             response_meta["capabilities"]["skillhub_search_versions"] = [
                 SKILLHUB_SEARCH_CAPABILITY_VERSION
@@ -2504,6 +2514,27 @@ class BoxACPAgent:
                 log.error("session/prompt", session_id=session_id, message="Failed to auto-create session")
                 return PromptResponse(stopReason="refusal")
 
+        meta = getattr(params, "field_meta", None) or {}
+        continuation = meta.get("session_continuation") or meta.get("sessionContinuation")
+        if isinstance(continuation, dict) and continuation.get("schema_version") == "officev3-session-continuation/v2":
+            raise RequestError(-32011, "HISTORY_EDIT_UNSUPPORTED_CONTINUATION", {
+                "code": "HISTORY_EDIT_UNSUPPORTED_CONTINUATION",
+            })
+        edit = meta.get("history_edit")
+        if state._history_edit_in_progress:
+            raise _session_busy_error(session_id)
+        if edit is not None:
+            try:
+                await self._revise_session_history(params, state, edit)
+            except Exception as exc:
+                history = state.agent.session_log
+                raise RequestError(-32011, str(exc), {
+                    "code": str(exc),
+                    "history_revision_id": current_revision(list(history.events)) if history else "initial",
+                }) from exc
+        elif state._history_restore_failed:
+            raise ValueError("HISTORY_RESTORE_REQUIRED")
+
         # Reserve the whole ACP request before preparation mutates shared state.
         # AgentService only guards the inner run; preparation and finalization
         # also own history, grants, cancellation and the injection queue.
@@ -2511,10 +2542,104 @@ class BoxACPAgent:
         if state._prompt_in_progress or state.run_handle.is_active:
             raise _session_busy_error(session_id)
         state._prompt_in_progress = True
+        finished = asyncio.get_running_loop().create_future()
+        state._prompt_finished = finished
         try:
+            log_store = state.agent.session_log
+            turn_id = _meta_string(meta, "turn_id", "turnId")
+            if log_store is not None and turn_id:
+                if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
+                       for event in log_store.events):
+                    raise ValueError("TURN_ALREADY_ACCEPTED")
+                log_store.append("turn/binding", {
+                    "turn_id": turn_id,
+                    "prompt_fingerprint": prompt_fingerprint(params.prompt),
+                })
+                log_store.flush()
             return await self._prompt_for_session(params, session_id, state)
+        except Exception as exc:
+            if edit is not None:
+                history = state.agent.session_log
+                raise RequestError(-32011, str(exc), {
+                    "code": str(exc),
+                    "history_revision_id": current_revision(list(history.events)) if history else "initial",
+                }) from exc
+            raise
         finally:
             state._prompt_in_progress = False
+            if not finished.done():
+                finished.set_result(None)
+
+    async def _revise_session_history(
+        self, params: PromptRequest, state: SessionState, edit: Any,
+    ) -> None:
+        if not isinstance(edit, dict) or set(edit) != {"target_turn_id", "expected_revision_id"}:
+            raise ValueError("INVALID_HISTORY_REVISION")
+        log_store = state.agent.session_log
+        if log_store is None:
+            raise ValueError("HISTORY_LOG_UNAVAILABLE")
+        turn_id = _meta_string(getattr(params, "field_meta", None) or {}, "turn_id", "turnId")
+        def checked_revision():
+            return revision_request(
+                list(log_store.events), target_turn_id=edit["target_turn_id"], turn_id=turn_id,
+                expected_revision_id=edit["expected_revision_id"],
+                fingerprint=prompt_fingerprint(params.prompt),
+            )
+        checked_revision()
+        if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
+               for event in log_store.events):
+            raise ValueError("TURN_ALREADY_ACCEPTED")
+        state._history_edit_in_progress = True
+        state._history_cancel_requested = False
+        try:
+            if state._prompt_in_progress:
+                state.request_cancel()
+                finished = state._prompt_finished
+                if finished is None:
+                    raise ValueError("HISTORY_CANCEL_UNCONFIRMED")
+                try:
+                    await asyncio.wait_for(asyncio.shield(finished), timeout=30)
+                except asyncio.TimeoutError as exc:
+                    raise ValueError("HISTORY_CANCEL_TIMEOUT") from exc
+            if state.turn_active or state.run_handle.is_active:
+                raise ValueError("HISTORY_CANCEL_UNCONFIRMED")
+            if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
+                   for event in log_store.events):
+                raise ValueError("TURN_ALREADY_ACCEPTED")
+            suggestions = state.follow_up_suggestions_task
+            if suggestions is not None and not suggestions.done():
+                suggestions.cancel()
+                await asyncio.gather(suggestions, return_exceptions=True)
+            state.follow_up_suggestions_task = None
+            # Close mutable session browser resources before restoring durable facts.
+            await close_browser_session(params.sessionId)
+            for tool in state.agent.tools.values():
+                shutdown = getattr(tool, "shutdown_owned_sessions", None)
+                if callable(shutdown) and getattr(tool, "process_owner_id", ""):
+                    await shutdown()
+            state._history_restore_failed = True
+            await revise_agent_history(
+                state.agent, checked_revision(), cancelled=lambda: state._history_cancel_requested,
+            )
+            state.source_text = ""
+            state.pending_plan_approval = None
+            state.waiting_for_user_input = False
+            state.preloaded_skill_names.clear()
+            state.preloaded_skill_hashes.clear()
+            state.preloaded_skill_attributions.clear()
+            state.connector_skill_grants.clear()
+            state.inject_queue.begin_run(discard_pending=True)
+            state.inject_queue.end_run()
+            state.continuation_applied = True
+            state._history_restore_failed = False
+        except BaseException:
+            state._history_restore_failed = any(
+                event["type"] == "history/revise" and event["data"].get("turn_id") == turn_id
+                for event in log_store.events
+            )
+            raise
+        finally:
+            state._history_edit_in_progress = False
 
     async def _prompt_for_session(
         self, params: PromptRequest, session_id: str, state: SessionState,
@@ -2638,13 +2763,6 @@ class BoxACPAgent:
                 "sessionContinuation"
             )
             continuation = parse_session_continuation(raw_continuation)
-            if (
-                isinstance(raw_continuation, dict)
-                and raw_continuation.get("schema_version") == HISTORY_EDIT_SCHEMA_VERSION
-                and continuation is not None
-                and continuation.product_session_id != state.upstream_session_id
-            ):
-                raise ValueError("HISTORY_EDIT_SESSION_MISMATCH")
             state.continuation_applied = True
             if (
                 continuation is not None
@@ -3255,6 +3373,7 @@ class BoxACPAgent:
         # 只在最外层用户请求结束时发布一次最终回答回执，不在每个内部 DoneEvent 时发布。
         # 自动续跑可能替换阶段性回答，资源清理失败也可能改变最终状态。
         # 因此必须在这些步骤完成后确认；等待审批、失败或预算耗尽都不触发成功折叠。
+        response_meta["history_revision_id"] = current_revision(list(state.agent.session_log.events)) if state.agent.session_log else "initial"
         response_meta["messageDisplay"] = message_display.receipt(
             completed=(
                 not failed
@@ -3295,6 +3414,8 @@ class BoxACPAgent:
     async def cancel(self, params: CancelNotification) -> None:
         state = self._sessions.get(params.sessionId)
         if state:
+            if state._history_edit_in_progress:
+                state._history_cancel_requested = True
             if state.trace_writer is not None:
                 state.trace_writer.write(
                     "turn.cancel_requested",

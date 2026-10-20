@@ -38,6 +38,8 @@ TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
 KNOWN_EVENT_TYPES = frozenset(
     {
         "turn/start",
+        "turn/binding",
+        "history/revise",
         "turn/end",
         "step/start",
         "step/end",
@@ -64,6 +66,10 @@ KNOWN_EVENT_TYPES = frozenset(
 
 class SessionLogCorrupted(ValueError):
     """The stored JSONL is not a valid committed Session Log prefix."""
+
+
+class SessionLogRevisionCorrupted(SessionLogCorrupted):
+    """A revision cannot be safely replayed or replaced with an empty log."""
 
 
 class SessionLogDurabilityError(OSError):
@@ -418,7 +424,8 @@ class SessionLog:
                 handle.seek(0, os.SEEK_END)
             except BaseException as exc:
                 handle.close()
-                if recover and workspace_verified and isinstance(exc, SessionLogCorrupted):
+                if (recover and workspace_verified and isinstance(exc, SessionLogCorrupted)
+                        and not isinstance(exc, SessionLogRevisionCorrupted)):
                     return cls._recover_log(
                         path, original_raw, session_id, cwd, lock_handle
                     )
@@ -714,7 +721,7 @@ class SessionLog:
 
     def _surface_nodes(self) -> list[tuple[int, Message]]:
         surface: list[tuple[int, Message]] = []
-        for event in self._events:
+        for event in self._active_events():
             if event["type"] == "surface/reset":
                 surface.clear()
                 continue
@@ -822,13 +829,23 @@ class SessionLog:
         self.flush()
         return event
 
-    def replay(self) -> SessionProjection:
+    def _active_events(self, *, through_seq: int | None = None) -> list[dict[str, Any]]:
+        """Return the effective timeline, optionally at an earlier checkpoint."""
+        from .session_history import effective_events
+
+        events = self._events if through_seq is None else self._events[:through_seq + 1]
+        try:
+            return effective_events(events)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionLogRevisionCorrupted("invalid history revision") from exc
+
+    def replay(self, *, through_seq: int | None = None) -> SessionProjection:
         surface: list[tuple[int, Message]] = []
         goal: dict[str, Any] | None = None
         plan: dict[str, Any] | None = None
         todos: list[dict[str, Any]] = []
         skills: list[dict[str, Any]] = []
-        for event in self._events:
+        for event in self._active_events(through_seq=through_seq):
             event_type = event.get("type")
             data = event["data"]
             if event_type == "surface/reset":
@@ -908,7 +925,7 @@ class SessionLog:
         open_turn: int | None = None
         open_step: int | None = None
         pending_calls: dict[str, dict[str, Any]] = {}
-        for event in self._events:
+        for event in self._active_events():
             event_type = event.get("type")
             data = event.get("data", {})
             if event_type == "turn/start":
