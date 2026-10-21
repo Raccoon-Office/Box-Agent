@@ -192,11 +192,14 @@ async def test_edit_waits_for_old_prompt_to_stop(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_retry_after_revision_commit_and_restart_does_not_revise_twice(tmp_path):
+@pytest.mark.parametrize("workspace_name", ["workspace", "folders"])
+async def test_retry_after_revision_commit_and_restart_does_not_revise_twice(tmp_path, workspace_name):
+    workspace = tmp_path / workspace_name
+    workspace.mkdir()
     llm = CaptureLLM()
-    host = adapter(tmp_path, llm)
+    host = adapter(workspace, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "retry"}))
+        session = await host.newSession(SimpleNamespace(cwd=str(workspace), field_meta={"session_id": "retry"}))
         await host.prompt(request(session, "old", "t1"))
         state = host._sessions[session.sessionId]
         req = request(session, "new", "t2", edit("t1"))
@@ -204,11 +207,14 @@ async def test_retry_after_revision_commit_and_restart_does_not_revise_twice(tmp
                                     turn_id="t2", expected_revision_id="initial",
                                     fingerprint=prompt_fingerprint(req.prompt))
         await revise_agent_history(state.agent, revision)
-        resumed = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "retry"}))
+        resumed = await host.newSession(SimpleNamespace(cwd=str(workspace), field_meta={"session_id": "retry"}))
         await host.prompt(request(resumed, "new", "t2", edit("t1")))
         events = host._sessions[resumed.sessionId].agent.session_log.events
         assert sum(e["type"] == "history/revise" for e in events) == 1
-        assert "old" not in str(llm.requests[-1])
+        messages = llm.requests[-1]
+        assert [message.role for message in messages] == ["system", "user"]
+        assert messages[-1].content.splitlines()[0] == "new"
+        assert "old" not in messages[-1].content
         assert len(llm.requests) == 2
     finally:
         await host.aclose()
