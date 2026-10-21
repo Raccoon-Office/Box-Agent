@@ -147,6 +147,57 @@ async def test_invalid_image_does_not_fail_the_desktop_action():
     assert out.raw_output["mcp_inline_images"][0]["data"] == "not base64"
 
 
+@pytest.mark.parametrize("capability", [True, False, None])
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_audit_images_survive_disabled_feeding_and_tool_errors(
+    tmp_path, capability, is_error,
+):
+    import hashlib
+
+    result = _result(is_error=is_error)
+    binding = build_cua_bindings(
+        llm=SimpleNamespace(capabilities={"image_input": capability}),
+        config=CuaConfig(server_name="desktop", feed_screenshots=False),
+        sidecar_dir=tmp_path / "images",
+    )
+    with bind_mcp_result_adapter(binding):
+        out = await _make_tool(result).execute()
+
+    assert out.success is (not is_error)
+    assert out.transient_followup_content is None
+    reference = out.raw_output["mcp_image_references"][0]
+    saved = (tmp_path / reference["contentRef"]).read_bytes()
+    assert saved == base64.b64decode(result.content[1].data)
+    assert reference["sha256"] == hashlib.sha256(saved).hexdigest()
+    assert Path(reference["path"]).is_absolute()
+    assert reference["path"] in out.content
+    assert "mcp_inline_images" not in out.raw_output
+
+
+async def test_screenshot_return_path_can_be_reloaded_from_another_workspace(tmp_path):
+    from box_agent.tools.image_inspection_tool import ImageInspectionTool
+
+    binding = build_cua_bindings(
+        llm=SimpleNamespace(capabilities={"image_input": True}),
+        config=CuaConfig(server_name="desktop"),
+        sidecar_dir=tmp_path / "session" / "images",
+    )
+    with bind_mcp_result_adapter(binding):
+        out = await _make_tool(_result()).execute()
+    path = out.content.splitlines()[-1]
+    assert Path(path).is_absolute()
+    assert path == out.raw_output["mcp_image_references"][0]["path"]
+    inspector = ImageInspectionTool(
+        llm=None, workspace_dir=str(tmp_path / "different-workspace"),
+        native_supported=True,
+    )
+    loaded = await inspector.execute(
+        image_paths=[path], instruction="Inspect this screenshot", strategy="native",
+    )
+    assert loaded.success, loaded.error
+    assert any(b["type"] == "input_image" for b in loaded.transient_followup_content)
+
+
 def _image_messages(messages):
     return [
         message for message in messages

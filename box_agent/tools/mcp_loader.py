@@ -1191,7 +1191,7 @@ class MCPTool(Tool):
             if image_references:
                 raw_output["mcp_image_references"] = image_references
                 paths = [
-                    str(block["contentRef"]) for block in image_references
+                    str(block.get("path") or block["contentRef"]) for block in image_references
                     if isinstance(block, dict) and isinstance(block.get("contentRef"), str)
                 ]
                 content_str = "\n".join([content_str, *paths]).strip()
