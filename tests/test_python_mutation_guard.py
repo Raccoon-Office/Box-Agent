@@ -130,6 +130,28 @@ print(sys.argv[1])
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_dir_fd", [False, True], ids=["python310", "python311plus"])
+async def test_rmtree_audit_signatures_preserve_retention_checks(tmp_path, retained, include_dir_fd):
+    target, guard = retained
+    script = tmp_path / "audit_cleanup.py"
+    script.write_text(
+        "import sys\n"
+        + "sys.audit('shutil.rmtree', sys.argv[1]"
+        + (", None" if include_dir_fd else "")
+        + ")\nprint('allowed')\n"
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    allowed = await run_script(tmp_path, guard, script, scratch)
+    assert allowed.success, allowed.error
+    blocked = await run_script(tmp_path, guard, script, target.parent)
+    assert not blocked.success
+    assert "CHAT_REFERENCE_PROTECTED" in blocked.error
+    assert "IndexError" not in blocked.error
+    assert target.read_text() == "published"
+
+
+@pytest.mark.asyncio
 async def test_inline_python_checks_executed_io_instead_of_unexecuted_functions(tmp_path, retained):
     target, guard = retained
     code = f"import os\ndef unused_cleanup():\n    os.unlink({str(target)!r})\nprint('help')"

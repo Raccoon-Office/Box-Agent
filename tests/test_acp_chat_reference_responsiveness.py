@@ -110,7 +110,15 @@ async def test_cancelled_reference_check_never_executes_pending_cleanup(tmp_path
     try:
         assert await asyncio.to_thread(entered.wait, 1)
         task.cancel()
-        await asyncio.sleep(0)
+        if python_script:
+            # Keep the runtime scan blocked until its subprocess has stopped;
+            # one event-loop tick does not complete process termination.
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+        else:
+            # The pre-execution scan joins its worker before cancellation
+            # completes, so it needs to be released before awaiting the task.
+            await asyncio.sleep(0)
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
