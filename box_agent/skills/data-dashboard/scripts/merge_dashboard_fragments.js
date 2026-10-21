@@ -6,6 +6,7 @@
  */
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
 
 const PAGE_ID = /^P[1-9]\d*$/;
 const FORBIDDEN_HTML = /<\/?\s*(?:html|head|body|style|script|link|meta|title|base|iframe|object|embed)\b/i;
@@ -66,6 +67,15 @@ function isPlainObject(value) {
 function requireString(value, label) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
   return value.trim();
+}
+
+function validateJavaScript(source, label) {
+  try {
+    // Compile only: generated renderers must never run during assembly.
+    new vm.Script(source, { filename: label });
+  } catch (error) {
+    throw new Error(`${label}: invalid JavaScript syntax (${error.message})`);
+  }
 }
 
 function escapeHtml(value) {
@@ -163,9 +173,11 @@ function validateFragment(raw, filePath, pageIds) {
   if (!/^(?:function\b|(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/.test(renderer)) {
     throw new Error(`${filePath}.renderer must be a function expression, without the page key`);
   }
-  if (/(?:<\/script|\bconst\s+(?:D|renderers)\b|\b(?:D|renderers)(?:\.[\w$]+|\[[^\]]+\])?\s*=)/i.test(renderer)) {
+  if (/<\/script/i.test(renderer)
+      || /(?:\bconst\s+(?:D|renderers)\b|\b(?:D|renderers)(?:\.[\w$]+|\[[^\]]+\])?\s*=)/.test(renderer)) {
     throw new Error(`${filePath}.renderer must not declare shared dashboard state`);
   }
+  validateJavaScript(`(${renderer}\n)`, `${filePath}.renderer`);
   if (css && (FORBIDDEN_CSS.test(css) || !css.startsWith(`#page-${pageId}`))) {
     throw new Error(`${filePath}.css must start with #page-${pageId} and cannot change shared selectors`);
   }
@@ -229,6 +241,9 @@ function main() {
     throw new Error(`Expected ${contract.pages.length} fragments, received ${fragments.length}`);
   }
   const output = merge(readText(options.template), contract, fragments);
+  for (const [index, match] of Array.from(output.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)).entries()) {
+    validateJavaScript(match[1], `${options.out}.script-${index + 1}`);
+  }
   fs.mkdirSync(path.dirname(path.resolve(options.out)), { recursive: true });
   fs.writeFileSync(options.out, output, "utf8");
   console.log(`Merged ${fragments.length} dashboard page(s) into ${options.out}`);

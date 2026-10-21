@@ -17,7 +17,6 @@ from box_agent.tools.request_user_input_tool import RequestUserInputTool
 from box_agent.tools.skill_tool import GetSkillTool
 from box_agent.tools.sub_agent_tool import (
     SubAgentTool,
-    _PermissionGatedBashTool,
     _WriteScopedTool,
 )
 
@@ -138,16 +137,6 @@ def test_aliases_are_not_serialized_in_provider_tool_schemas() -> None:
 
 def test_write_scoped_tool_preserves_wrapped_tool_aliases(tmp_path) -> None:
     wrapped = _WriteScopedTool(RecordingTool(), str(tmp_path), (".",))
-
-    assert build_tool_name_index([wrapped])["legacy_echo"] is wrapped
-
-
-def test_permission_gated_tool_preserves_wrapped_tool_aliases() -> None:
-    wrapped = _PermissionGatedBashTool(
-        RecordingTool(),
-        title=None,
-        scopes=None,
-    )
 
     assert build_tool_name_index([wrapped])["legacy_echo"] is wrapped
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 
 import pytest
@@ -55,6 +56,17 @@ def test_4k_input_is_downsampled_to_cap():
     # aspect ratio preserved (16:9)
     assert block["width"] == _MAX_LONG_EDGE_PX
     assert block["height"] == round(2160 * (_MAX_LONG_EDGE_PX / 3840))
+
+
+def test_preserve_geometry_keeps_driver_bytes_and_coordinate_dimensions():
+    data = _png_b64(3840, 2160)
+    raw = base64.b64decode(data)
+    block = encode_canonical_cua_image(data, "image/png", preserve_geometry=True)
+    assert block is not None
+    assert block["data"] == data
+    assert (block["width"], block["height"]) == (3840, 2160)
+    assert block["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert block["source_bytes"] == len(raw)
 
 
 def test_declared_mime_ignored_in_favor_of_decoded_format():

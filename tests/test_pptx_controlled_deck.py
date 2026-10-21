@@ -10347,7 +10347,8 @@ def test_pptx_missing_facts_use_placeholders_without_pausing() -> None:
     assert "Do not use `request_user_input` for a missing fact" in text
     assert "without pausing delivery" in text
     assert "`暂无可验证公开数据`" in text
-    assert "retain usable HTML" in text or "retain usable HTML" in text.lower()
+    # Main reworded the finalization advisory paragraph; source findings must stay advisories.
+    assert "source findings are recorded as advisories" in text
 
 
 def test_pptx_framing_choices_use_recommended_decision_with_countdown() -> None:

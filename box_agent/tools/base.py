@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from .delegated_budget import BudgetCharge, DelegatedBudget
 
@@ -20,6 +22,11 @@ from .schema_validation import (
 
 class ToolResult(BaseModel):
     """Tool execution result."""
+
+    # Trusted invocation state, never inferred from tool-supplied raw output or
+    # serialized into protocol/session-log payloads.
+    _invocation_rejected: bool = PrivateAttr(default=False)
+    _written_file_sha256: str | None = PrivateAttr(default=None)
 
     success: bool
     content: str = ""
@@ -40,6 +47,42 @@ class ToolResult(BaseModel):
         exclude=True,
     )
 
+
+class ToolInvocationRejected(RuntimeError):
+    """Stop an invocation before its side effects and return a structured failure."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+    def to_result(self) -> ToolResult:
+        result = ToolResult(success=False, error=str(self), raw_output={"code": self.code})
+        result._invocation_rejected = True
+        return result
+
+
+_cancel_checker: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "tool_cancel_checker", default=None,
+)
+
+
+@contextmanager
+def bind_tool_cancellation(is_cancelled: Callable[[], bool]) -> Iterator[None]:
+    """Carry cancellation through ordinary and delegated invocation wrappers."""
+    parent = _cancel_checker.get()
+    token = _cancel_checker.set(lambda: is_cancelled() or (parent is not None and parent()))
+    try:
+        yield
+    finally:
+        _cancel_checker.reset(token)
+
+
+def check_tool_cancellation() -> None:
+    checker = _cancel_checker.get()
+    if checker is not None and checker():
+        raise ToolInvocationRejected("TOOL_EXECUTION_CANCELLED", "Tool execution cancelled before writing.")
+
+
 @dataclass(frozen=True, slots=True)
 class ToolInvocationContext:
     """Optional runtime context hidden behind the tool invocation interface."""
@@ -49,6 +92,7 @@ class ToolInvocationContext:
     skill_reader: Callable[..., ToolResult] | None = None
     child_budgets: tuple[DelegatedBudget, ...] = ()
     budget_charge: BudgetCharge = field(default_factory=BudgetCharge)
+    chat_references: Any = None
 
 
 class Tool:
@@ -111,7 +155,10 @@ class Tool:
             return self._invalid_schema_result()
         if issues:
             return self._invalid_arguments_result(issues)
-        return await self._invoke_validated(arguments, context=context)
+        try:
+            return await self._invoke_validated(arguments, context=context)
+        except ToolInvocationRejected as exc:
+            return exc.to_result()
 
     def _invalid_schema_result(self) -> ToolResult:
         message = "tool parameter schema is invalid"

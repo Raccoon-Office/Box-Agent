@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Any
 
 from box_agent.llm.capabilities import image_input_support
 from box_agent.llm.image_payload import RequestBodyTooLargeError
+from box_agent.llm.task_budgets import (
+    LONG_TASK_MAX_OUTPUT_TOKENS, SMALL_TASK_MAX_OUTPUT_TOKENS,
+    cap_auxiliary_client, require_complete_response,
+)
 from box_agent.schema import Message
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.safety import validate_path_in_workspace
@@ -229,8 +233,13 @@ class ImageInspectionTool(Tool):
                 ),
             ]
             try:
+                inspection_llm = cap_auxiliary_client(
+                    self.llm,
+                    LONG_TASK_MAX_OUTPUT_TOKENS
+                    if self._thinking_enabled else SMALL_TASK_MAX_OUTPUT_TOKENS,
+                )
                 response = await asyncio.wait_for(
-                    self.llm.generate(
+                    inspection_llm.generate(
                         messages=messages,
                         tools=None,
                         thinking_enabled=self._thinking_enabled,
@@ -238,6 +247,7 @@ class ImageInspectionTool(Tool):
                     ),
                     timeout=_IMAGE_INSPECTION_TIMEOUT,
                 )
+                require_complete_response(response)
                 break
             except asyncio.TimeoutError as exc:
                 last_timeout = exc

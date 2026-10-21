@@ -7,6 +7,7 @@ failing the desktop action that produced them.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 from typing import Any
 
@@ -51,14 +52,18 @@ def resize_and_encode(image: Any, mime_type: str) -> tuple[bytes, int, int]:
     return buffer.getvalue(), image.width, image.height
 
 
-def encode_canonical_cua_image(data_b64: str, mime_type: str) -> dict[str, Any] | None:
+def encode_canonical_cua_image(
+    data_b64: str, mime_type: str, *, preserve_geometry: bool = False,
+) -> dict[str, Any] | None:
     """Normalize a base64 screenshot into a canonical ``input_image`` block.
 
     Accepts only PNG/JPEG. Decodes the bytes, honors EXIF orientation, and
     downsamples anything above the long-edge cap. Returns a canonical block
     carrying ``width``/``height`` (required for pixel-based token estimation),
     or ``None`` for any unsupported type, bad base64, or decode/encode failure.
-    Never raises.
+    With ``preserve_geometry``, retain the driver's bytes, orientation and
+    dimensions. GUI coordinates must refer to that exact observation. Never
+    raises.
     """
     normalized_mime = (mime_type or "").strip().lower()
     if normalized_mime not in _SUPPORTED_MIME:
@@ -82,11 +87,14 @@ def encode_canonical_cua_image(data_b64: str, mime_type: str) -> dict[str, Any] 
             expected_mime = "image/png" if image_format == "PNG" else "image/jpeg"
             orientation = opened.getexif().get(274, 1)
             opened.load()
-            normalized = ImageOps.exif_transpose(opened)
-            if max(normalized.size) <= _MAX_LONG_EDGE_PX and orientation == 1:
+            if preserve_geometry:
                 encoded = raw
-                width, height = normalized.size
+                width, height = opened.size
+            elif max(opened.size) <= _MAX_LONG_EDGE_PX and orientation == 1:
+                encoded = raw
+                width, height = opened.size
             else:
+                normalized = ImageOps.exif_transpose(opened)
                 encoded, width, height = resize_and_encode(normalized, expected_mime)
     except Exception:
         return None
@@ -96,4 +104,6 @@ def encode_canonical_cua_image(data_b64: str, mime_type: str) -> dict[str, Any] 
         "data": base64.b64encode(encoded).decode("ascii"),
         "width": width,
         "height": height,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "source_bytes": len(encoded),
     }

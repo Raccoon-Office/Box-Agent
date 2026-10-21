@@ -43,6 +43,7 @@ from .context_resources import ContextResourceLedger
 from .config import AgentConfig, ToolLimitsConfig
 from .llm import LLMClient
 from .logger import AgentLogger
+from .project_context import WORKSPACE_STATEMENT_PREFIX
 from .kernel.ports import KernelServices
 from .injections import InjectionManager
 from .runtime import run_agent_loop
@@ -544,7 +545,14 @@ class Agent:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
         caller_system_prompt = system_prompt
-        if "Current Workspace" not in system_prompt:
+        # Session-assembled prompts already state the cwd once in File Access
+        # Context; only caller-supplied prompts without it get this section.
+        workspace_statement = f"{WORKSPACE_STATEMENT_PREFIX}{self.workspace_dir.absolute()}`"
+        has_workspace_statement = any(
+            line.startswith(workspace_statement)
+            for line in system_prompt.splitlines()
+        )
+        if "Current Workspace" not in system_prompt and not has_workspace_statement:
             workspace_info = (
                 f"\n\n## Current Workspace\n"
                 f"You are currently working in: `{self.workspace_dir.absolute()}`\n"
@@ -581,6 +589,7 @@ class Agent:
 
         # Only this host knows the exact rules it appended after caller input.
         self._system_prompt_tail = system_prompt[len(caller_system_prompt.rstrip()):]
+        self._child_system_prompt: str | None = None
         self.system_prompt = system_prompt
         from .plugins.defaults import _bind_skill_store, skill_loader_from_catalog
         loader = skill_loader_from_catalog(self.tools)
@@ -690,6 +699,10 @@ class Agent:
     def _next_session_turn(self) -> int:
         if self.session_log is None:
             raise RuntimeError("session log is not configured")
+        next_turn_number = getattr(self.session_log, "next_turn_number", None)
+        if callable(next_turn_number):
+            return next_turn_number()
+        # Custom stores may only expose the existing events snapshot interface.
         turns = [
             event["data"].get("turn")
             for event in self.session_log.events
@@ -729,9 +742,16 @@ class Agent:
             return self.tools
         return self.mcp_tool_exposure.inherited_tools(self.tools)
 
-    def set_system_prompt(self, system_prompt: str) -> None:
+    def set_child_system_prompt(self, system_prompt: str) -> None:
+        """Bind a child view produced by shared session assembly."""
+        self._child_system_prompt = system_prompt
+        self._sync_child_system_prompt()
+
+    def set_system_prompt(self, system_prompt: str, *, preserve_child_prompt: bool = False) -> None:
         """Replace system rules; Skill reference text is projected separately."""
         self.system_prompt = system_prompt
+        if not preserve_child_prompt:
+            self._child_system_prompt = None
         if self.messages and self.messages[0].role == "system":
             self.messages[0] = Message(role="system", content=system_prompt)
         self._sync_child_system_prompt()
@@ -748,10 +768,18 @@ class Agent:
         return effective_system_prompt(prompt, suffixes)
 
     def _sync_child_system_prompt(self) -> None:
-        system_prompt = self._project_system_prompt(self.system_prompt, self.skill_runtime.legacy_system_suffixes)
+        suffixes = self.skill_runtime.legacy_system_suffixes
+        system_prompt = self._project_system_prompt(self.system_prompt, suffixes)
+        child_prompt = (
+            self._project_system_prompt(self._child_system_prompt + self._system_prompt_tail, suffixes)
+            if self._child_system_prompt is not None else system_prompt
+        )
         for tool in self.tools.values():
             if hasattr(tool, "set_parent_system_prompt"):
-                tool.set_parent_system_prompt(system_prompt)
+                tool.set_parent_system_prompt(
+                    child_prompt if getattr(tool, "accepts_child_prompt_projection", False) is True
+                    else system_prompt
+                )
 
     def activate_skill_instructions(self, skill_name: str, skill_prompt: str) -> None:
         """Deprecated host API: select ordinary reference material for this turn."""
@@ -1349,6 +1377,13 @@ class Agent:
                 if callable(close):
                     await close()
             finally:
+                for name in ("staged_file_write", "publish_artifact"):
+                    cleanup = getattr(self.tools.get(name), "cleanup_pending_writes", None)
+                    if callable(cleanup):
+                        try:
+                            cleanup()
+                        except Exception as exc:
+                            _log.warning("%s pending write cleanup failed: %s", name, exc)
                 if own_injections is not None:
                     own_injections.end_run()
                 if (

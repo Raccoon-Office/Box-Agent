@@ -159,6 +159,38 @@ async def test_modified_arguments_are_validated_before_execution(parallel):
     assert "INVALID_TOOL_ARGUMENTS" in next(event.error for event in events if isinstance(event, ToolCallResult))
 
 
+@pytest.mark.parametrize('trusted', [False, True])
+async def test_hooks_distinguish_pre_execution_rejection_from_reported_error(trusted):
+    from box_agent.tools.base import ToolInvocationRejected
+
+    class RejectingEcho(Echo):
+        async def _invoke_validated(self, arguments, *, context):
+            if trusted:
+                raise ToolInvocationRejected('NESTED_FILE_CHANGE_INVOCATION', 'Nested write rejected')
+            return await super()._invoke_validated(arguments, context=context)
+
+        async def execute(self, text):
+            await super().execute(text)
+            return ToolResult(success=False, raw_output={'code': 'NESTED_FILE_CHANGE_INVOCATION'})
+
+    observed = []
+
+    async def observe(ctx):
+        observed.append(ctx.payload['executed'])
+
+    async def after(ctx):
+        await observe(ctx)
+        return ResultTextDecision.keep()
+
+    tool = RejectingEcho()
+    await run(tool, [
+        HookSpec('after', ('tool.after_execution',), 'result_text', after),
+        HookSpec('finished', ('tool.finished',), 'observer', observe),
+    ])
+    assert observed == ([False] if trusted else [True, True])
+    assert tool.calls == ([] if trusted else ['original'])
+
+
 @pytest.mark.parametrize("granted", [False, True])
 async def test_permission_retry_uses_final_arguments_without_repeating_hooks(granted):
     seen, finished = [], []

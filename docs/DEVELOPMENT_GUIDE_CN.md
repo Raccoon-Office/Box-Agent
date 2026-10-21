@@ -491,6 +491,13 @@ skill catalog 中的路由元数据；子 Agent 选择该 Skill 时不会自动�
 
 完成修改后，请重启 Agent 以使新配置生效。
 
+定制 `system_prompt.md`、`analysis_prompt.md` 或 `code_prompt.md` 时，请保留包内
+模板随版本管理的占位符；`agent.*_prompt_path` 指定的改名文件或绝对路径也会检查。
+占位符缺失或未知时会在 stderr 告警，仍使用原覆盖文件。`box-agent doctor`
+（含 `--json`）会报告差异，以及不可读或非 UTF-8 的模板。请对照报告中的包内文件，
+保留团队规则并更新占位符。恢复包内模板时，删除默认文件名的覆盖文件；若配置了
+自定义路径，还需把对应配置恢复为默认文件名。
+
 ## 4. 故障排查
 
 ### 4.1 常见问题
@@ -564,3 +571,11 @@ logger.debug(f"工具调用: {tool_call.name}")
 logger.debug(f"工具参数: {tool_call.arguments}")
 logger.debug(f"工具结果: {result.content[:200]}")
 ```
+
+交付文件默认跟随当前用户提问的语种，资料语种不改变交付语种，用户明确指定的
+输出语种优先。对话回复和进度说明跟随宿主的界面语种（如 ACP `ui_language`）。
+CLI、Python SDK 和 ACP 共用回合提醒生成器；只有有足够英文线索的原始请求触发
+额外提醒。其他语言和混合语言请求沿用系统语言规则，避免参考正文触发日语覆盖；
+utility 会话和自动续跑不添加提醒。
+宿主若把内部生成的续跑文字作为 `RunRequest.user_message` 传入，应设置
+`metadata={"synthetic_continuation": True}`；普通 SDK 用户请求不设置此标记。

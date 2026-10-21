@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from box_agent.llm import LLMClient
+from box_agent.llm.capabilities import image_input_support
 from box_agent.llm.model_profiles import (
     ModelProfileUnavailable,
     client_for_model_profile,
@@ -103,6 +104,145 @@ def test_profile_revision_must_exist(tmp_path, monkeypatch):
 
     with pytest.raises(ModelProfileUnavailable, match="revision is unavailable"):
         load_model_profile_revision("missing")
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_profile_image_input_overrides_matching_config(tmp_path, monkeypatch, declared):
+    registry = tmp_path / "model-profiles.json"
+    _write_registry(registry)
+    data = json.loads(registry.read_text())
+    data["profiles"]["rev-hosted"]["imageInput"] = declared
+    registry.write_text(json.dumps(data))
+    monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
+    fallback = LLMClient(
+        api_key="fallback-key", provider=LLMProvider.OPENAI,
+        api_base="https://hosted.example/v1", model="hosted-default",
+        image_input=not declared,
+    )
+
+    client = client_for_model_profile(
+        {"profileId": "hosted", "profileRevision": "rev-hosted", "model": "hosted-default"},
+        fallback_client=fallback,
+    )
+
+    assert image_input_support(client) is declared
+    assert image_input_support(client.for_model("hosted-default")) is declared
+
+
+@pytest.mark.parametrize("declared", [True, False, None])
+def test_matching_profile_preserves_config_image_input(tmp_path, monkeypatch, declared):
+    registry = tmp_path / "model-profiles.json"
+    _write_registry(registry)
+    monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
+    fallback = LLMClient(
+        api_key="fallback-key", provider=LLMProvider.OPENAI,
+        api_base="https://hosted.example/v1/", model="hosted-default",
+        image_input=declared,
+    )
+
+    client = client_for_model_profile(
+        {"profileId": "hosted", "profileRevision": "rev-hosted", "model": "hosted-default"},
+        fallback_client=fallback,
+    )
+
+    assert image_input_support(client) is declared
+
+
+@pytest.mark.parametrize("change", [
+    {"provider": LLMProvider.ANTHROPIC},
+    {"api_base": "https://different.example/v1"},
+    {"model": "another-model"},
+])
+def test_profile_does_not_inherit_image_capability_from_another_route(
+    tmp_path, monkeypatch, change,
+):
+    registry = tmp_path / "model-profiles.json"
+    _write_registry(registry)
+    monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
+    fallback = LLMClient(**{
+        "api_key": "fallback-key", "provider": LLMProvider.OPENAI,
+        "api_base": "https://hosted.example/v1", "model": "hosted-default",
+        "image_input": True, **change,
+    })
+
+    client = client_for_model_profile(
+        {"profileId": "hosted", "profileRevision": "rev-hosted", "model": "hosted-default"},
+        fallback_client=fallback,
+    )
+
+    assert image_input_support(client) is None
+
+
+def test_profile_default_model_image_capability_does_not_enable_other_models(tmp_path, monkeypatch):
+    registry = tmp_path / "model-profiles.json"
+    _write_registry(registry)
+    data = json.loads(registry.read_text())
+    data["profiles"]["rev-hosted"]["imageInput"] = True
+    registry.write_text(json.dumps(data))
+    monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
+
+    client = client_for_model_profile(
+        {"profileId": "hosted", "profileRevision": "rev-hosted", "model": "text-only-model"},
+        fallback_client=_fallback_client(),
+    )
+
+    assert image_input_support(client) is None
+
+
+@pytest.mark.parametrize("invalid", ["true", 1, 0, [], {}])
+def test_profile_rejects_non_boolean_image_input(tmp_path, invalid):
+    registry = tmp_path / "model-profiles.json"
+    _write_registry(registry)
+    data = json.loads(registry.read_text())
+    data["profiles"]["rev-hosted"]["imageInput"] = invalid
+    registry.write_text(json.dumps(data))
+
+    with pytest.raises(ModelProfileUnavailable, match="imageInput is invalid"):
+        load_model_profile_revision("rev-hosted", registry_path=registry)
+
+
+@pytest.mark.asyncio
+async def test_acp_profile_session_enables_cua_images_for_matching_config(tmp_path, monkeypatch):
+    import box_agent.acp as acp_module
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from box_agent.plugins.cua.config import CuaConfig
+    from box_agent.plugins.cua.wiring import build_cua_bindings
+    from tests.test_acp import DummyConn
+
+    registry = tmp_path / "model-profiles.json"
+    _write_registry(registry)
+    monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
+    monkeypatch.setattr(acp_module, "state_path", lambda relative: tmp_path / "profile" / relative)
+    fallback = LLMClient(
+        api_key="fallback-key", provider=LLMProvider.OPENAI,
+        api_base="https://hosted.example/v1", model="hosted-default", image_input=True,
+    )
+    config = Config(
+        llm=LLMConfig(api_key="fallback-key", image_input=True),
+        agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    adapter = acp_module.BoxACPAgent(DummyConn(), config, fallback, [], "system")
+    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "llm_binding": {
+            "source": "profile", "version": 2, "profileId": "hosted",
+            "profileRevision": "rev-hosted", "routingMode": "manual",
+            "model": "hosted-default",
+        },
+    }))
+    state = adapter._sessions[session.sessionId]
+    try:
+        llm = state.agent.llm
+        assert image_input_support(llm) is True
+        cua = build_cua_bindings(llm=llm, config=CuaConfig(server_name="cua-computer-use"))
+        assert cua.allows_transient_followup(
+            server_name="cua-computer-use", remote_name="get_window_state",
+        )
+    finally:
+        if state.agent.session_log is not None:
+            state.agent.session_log.close()
+        await llm.aclose()
+        await fallback.aclose()
 
 
 def test_profile_id_must_match_revision(tmp_path, monkeypatch):

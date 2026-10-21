@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from time import perf_counter
 
 from ..schema import StreamEvent
@@ -76,18 +76,27 @@ async def stream_with_activity(
     *,
     stale_seconds: float,
     activity_interval_seconds: float,
+    wait_cancelled: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    """Add bounded host heartbeats and stop a provider stream that is stale."""
+    """Wake on cancellation as well as provider data, heartbeats, and staleness."""
     iterator = stream.__aiter__()
     next_chunk: asyncio.Task[StreamEvent] | None = None
+    cancel_wait: asyncio.Future[None] | None = None
     last_provider_chunk = perf_counter()
     try:
+        if wait_cancelled is not None:
+            cancel_wait = asyncio.ensure_future(wait_cancelled())
         next_chunk = asyncio.create_task(iterator.__anext__())
         while True:
-            done, _ = await asyncio.wait(
-                {next_chunk}, timeout=activity_interval_seconds
+            await asyncio.wait(
+                {next_chunk} if cancel_wait is None else {next_chunk, cancel_wait},
+                timeout=activity_interval_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            if not done:
+            if cancel_wait is not None and cancel_wait.done():
+                cancel_wait.result()
+                return
+            if not next_chunk.done():
                 stale_seconds_elapsed = perf_counter() - last_provider_chunk
                 if stale_seconds_elapsed >= stale_seconds:
                     yield StreamEvent(
@@ -117,17 +126,27 @@ async def stream_with_activity(
             yield chunk
             next_chunk = asyncio.create_task(iterator.__anext__())
     finally:
-        if next_chunk is not None and not next_chunk.done():
-            next_chunk.cancel()
-            try:
-                await next_chunk
-            except (asyncio.CancelledError, StopAsyncIteration):
-                pass
-        elif next_chunk is not None and not next_chunk.cancelled():
-            # Cancellation can interrupt asyncio.wait after this read finishes
-            # but before result() consumes it. Retain ownership of that outcome,
-            # including normal generator exhaustion, during consumer shutdown.
-            next_chunk.exception()
+        try:
+            if cancel_wait is not None:
+                cancel_wait.cancel()
+                await asyncio.gather(cancel_wait, return_exceptions=True)
+            if next_chunk is not None and not next_chunk.done():
+                next_chunk.cancel()
+                try:
+                    await next_chunk
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
+            elif next_chunk is not None and not next_chunk.cancelled():
+                # Cancellation can interrupt asyncio.wait after this read finishes
+                # but before result() consumes it. Retain ownership of that outcome,
+                # including normal generator exhaustion, during consumer shutdown.
+                next_chunk.exception()
+        finally:
+            # A completed read owns its exception traceback, which can point
+            # back to this frame and its caller's session. Do not retain it here
+            # (or in asyncio.wait's result sets) after settling the read.
+            next_chunk = None
+            cancel_wait = None
         closer = getattr(iterator, "aclose", None)
         if closer is not None:
             try:

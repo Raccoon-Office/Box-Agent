@@ -454,8 +454,28 @@ it displays existing internal presets without requiring main-agent family choice
 
 ## Research and image evidence boundaries
 
-For a factual public deck without supplied evidence, load `research-synthesis`
-before searching. `prepare` records `research_status`; if it is
+For a factual public deck without supplied evidence (people, organizations,
+events, products, data), research happens **before** `outline.json`, never after:
+load `research-synthesis` when available; when it is unavailable or hidden in
+this session (fast mode), call the search tools yourself — open with general
+queries without `site:`, then `web_extract` the specific pages you will cite.
+Writing `outline.json` for such a deck before any search or page read is a
+process error. Only write `source_mode=public_authoritative_research` when the
+outline's facts come from sources you actually opened in this task, and put the
+exact page URL (not a homepage or a bare site name) plus the exact figure or
+date into that slide's `evidence`: every number or date in a slide's title,
+message or bullets must appear literally in that same slide's evidence text
+(e.g. `2013年加盟巴塞罗那 | FC Barcelona | https://…`), one fact per item. If nothing was searched, do not claim that
+mode: use only supplied facts, omit optional claims and disclose required gaps.
+If `prepare` answers `repair_required: true`, design has not started and the
+outline must be fixed now: work through every `checklist` item in one rewrite of
+`outline.json` — copy the exact figure/date from a page you already opened into
+that slide's evidence next to its URL; otherwise run at most two targeted
+searches for it; otherwise reword the line without the number (or use
+`暂无可验证公开数据`). Then re-run the same `prepare` command. Anything left
+unfixed is cut from the slides before design, leaving them short or empty, so do
+not re-run `prepare` without editing. If a later `prepare` reports
+`auto_degraded` or `unverified_claims`, name those items in the final reply. `prepare` records `research_status`; if it is
 `handoff_unverified`, do not claim verified research or hide this limitation.
 Use only supported facts, omit optional claims or disclose required gaps, and
 continue production without treating research gaps as a rendering failure.

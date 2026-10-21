@@ -124,8 +124,8 @@ async def test_tool_returns_short_extracted_page_without_summarization(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_output_tokens", [63_999, 100_000])
-async def test_summary_uses_session_model_output_tokens(max_output_tokens: int) -> None:
+@pytest.mark.parametrize("max_output_tokens", [2_048, 8_192, 63_999, 100_000])
+async def test_summary_caps_injected_session_output_tokens(max_output_tokens: int) -> None:
     llm = _SummaryLLM()
     tool = web_extract.WebExtractTool(llm=llm)
 
@@ -140,7 +140,7 @@ async def test_summary_uses_session_model_output_tokens(max_output_tokens: int) 
     assert summary == "Summary"
     assert llm.selected == (
         "sn-sensenova-6-8-flash-lite",
-        max_output_tokens,
+        min(max_output_tokens, 8_192),
     )
 
 

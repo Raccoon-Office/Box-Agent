@@ -124,6 +124,28 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ),
 )
 
+# Semantic provider/business codes only; HTTP status numbers and prose tokens
+# remain in the legacy text fallback rather than overriding specific causes.
+_BUSINESS_ERROR_CATEGORIES: dict[str, str] = {
+    "request_body_too_large": "request_body_too_large",
+    "content_filter": "content_filter",
+    "data_inspection_failed": "content_filter",
+    "risk_control": "content_filter",
+    "invalid_api_key": "auth",
+    "permission_denied": "permission",
+    "permissiondenied": "permission",
+    "rate_limit": "rate_limit",
+    "insufficient_quota": "quota",
+    "insufficient_points": "quota",
+    "1000007": "quota",
+    "arrearage": "quota",
+    "unsupported_parameter": "unsupported_parameter",
+    "context_length_exceeded": "context_length",
+    "model_not_found": "model_not_found",
+    "internal_error": "server_error",
+    "server_error": "server_error",
+}
+
 _MODEL_CONFIGURATION_MESSAGE = (
     "当前配置的模型不受支持。请检查 model 名称及其与 provider 的兼容性。"
 )
@@ -170,6 +192,18 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
         if _safe_http_status_code(root) == 413:
             return FriendlyError(message="本次请求超过接口大小限制。请减少每次查看的图片，或缩小单张图片的查看范围。",
                                  category="request_body_too_large")
+        # Recognized business codes are more specific than generic prose.
+        # Keep unknown codes, including HTTP numbers, on the text fallback.
+        code = extract_llm_error_code(root)
+        if code is not None:
+            code_category = _BUSINESS_ERROR_CATEGORIES.get(str(code).lower())
+            for category, _, message in _RULES:
+                if category == code_category:
+                    return FriendlyError(
+                        message=message,
+                        category=category,
+                        is_soft=category in _SOFT_CATEGORIES,
+                    )
         if _looks_like_unsupported_model(haystack):
             return FriendlyError(
                 message=_MODEL_CONFIGURATION_MESSAGE,

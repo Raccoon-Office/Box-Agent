@@ -27,6 +27,7 @@ from ..file_result_adapter import (
     _tool_message_content_for_model,
 )
 from ..web_search_runtime import (
+    _bind_web_search_citations,
     _dedupe_web_search_content,
     _extract_web_search_payload,
     _log_web_search_model_results,
@@ -146,6 +147,9 @@ def process_tool_result(
                 "guidance. Do not retry the unchanged call."
             )
     if result.success and pipeline_input.tool_name == "web_search":
+        visible_content, model_content = _bind_web_search_citations(
+            visible_content, model_content,
+        )
         _log_web_search_model_results(
             pipeline_input.arguments,
             visible_content,

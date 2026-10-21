@@ -3,7 +3,7 @@
 
 任何有 shell / 代码执行能力的脚手架都能直接跑它来渲染一页幻灯片,**不依赖宿主提供 render 工具**:
 
-    python render.py <html路径> <输出png路径> [宽=1600] [高=900]
+    python render.py <html路径> <输出png路径> [宽] [高]（默认读取工作区 base.css）
     python render.py --batch <workspace> [--pages 1,2,7] [--width 1600] [--height 900]
 
 成功时把输出 png 的绝对路径打到 stdout;失败打到 stderr 并以非 0 退出。
@@ -1317,9 +1317,15 @@ def _workspace_from_render_paths(slide, target):
     return source_root if source_root == output_root else None
 
 
-def render_batch(root, pages=None, width=1600, height=900):
+def render_batch(root, pages=None, width=None, height=None):
     """Render selected deck pages while reusing one Playwright/Chromium process."""
     root = os.path.abspath(root)
+    from deck import _detect_canvas
+    if (width is None) != (height is None):
+        raise ValueError("--width and --height must be supplied together")
+    width, height = _detect_canvas(root) if width is None else (width, height)
+    if width <= 0 or height <= 0:
+        raise ValueError("canvas dimensions must be positive")
     wanted = None
     if pages:
         wanted = {int(item.strip()) for item in pages.split(",") if item.strip()}
@@ -1364,7 +1370,7 @@ def render_batch(root, pages=None, width=1600, height=900):
         skill_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         return {
             "status": "rendered", "qa": "not-run", "rendered_pages": rendered_pages,
-            "images": images, "deck_dir": os.path.realpath(root), "skill_root": skill_root,
+            "images": images, "canvas": {"width": width, "height": height, "device_scale": 2}, "deck_dir": os.path.realpath(root), "skill_root": skill_root,
             "next_instructions": os.path.join(skill_root, "subagents", "slide.md"),
             "review_ledger": os.path.realpath(os.path.join(root, "_trace", "review-issues.md")),
         }
@@ -1469,8 +1475,8 @@ def _batch_cli(argv):
     parser = argparse.ArgumentParser(prog="render.py --batch")
     parser.add_argument("root", nargs="?", default=".")
     parser.add_argument("--pages", help="comma-separated page numbers; default renders all")
-    parser.add_argument("--width", type=int, default=1600)
-    parser.add_argument("--height", type=int, default=900)
+    parser.add_argument("--width", type=int, help="override together; default reads base.css canvas")
+    parser.add_argument("--height", type=int, help="override together; default reads base.css canvas")
     args = parser.parse_args(argv)
     try:
         receipt = render_batch(args.root, args.pages, args.width, args.height)
@@ -1503,8 +1509,17 @@ def main():
         sys.exit(2)
     html = os.path.abspath(sys.argv[1])
     out = os.path.abspath(sys.argv[2])
-    w = int(sys.argv[3]) if len(sys.argv) > 3 else 1600
-    h = int(sys.argv[4]) if len(sys.argv) > 4 else 900
+    from deck import _detect_canvas
+    canvas_root = os.path.dirname(html)
+    if os.path.basename(canvas_root) == "slides":
+        canvas_root = os.path.dirname(canvas_root)
+    w, h = _detect_canvas(canvas_root)
+    if len(sys.argv) > 3:
+        if len(sys.argv) != 5:
+            raise ValueError("supply both width and height")
+        w, h = int(sys.argv[3]), int(sys.argv[4])
+    if w <= 0 or h <= 0:
+        raise ValueError("canvas dimensions must be positive")
     if not os.path.exists(html):
         print(f"渲染失败:找不到 HTML {html}", file=sys.stderr)
         sys.exit(1)

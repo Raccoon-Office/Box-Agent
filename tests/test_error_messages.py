@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from box_agent.llm.error_messages import (
     classify_llm_error,
     extract_llm_error_code,
@@ -76,6 +78,99 @@ def test_points_insufficient_error_preserves_structured_business_code():
 
     assert classify_llm_error(exc).category == "quota"
     assert extract_llm_error_code(exc) == 1000007
+
+
+@pytest.mark.parametrize("body", [
+    {"code": "Arrearage", "message": "Access denied"},
+    {"error": {"code": "Arrearage", "type": "Arrearage", "message": "Access denied"}},
+    '{"error": {"code": "Arrearage", "message": "Access denied"}}',
+])
+def test_arrearage_code_reports_quota_despite_access_denied_message(body):
+    exc = _FakeAPIError("Access denied, please make sure your account is in good standing.",
+                        status_code=400, body=body)
+    details = structured_llm_error(exc, provider="openai", model="qwen-plus")
+
+    assert details["category"] == "quota"
+    assert details["reason"] == "quota"
+    assert details["code"] == "Arrearage"
+    assert details["httpStatus"] == 400
+    assert details["retryable"] is False
+    assert "欠费" in details["message"]
+    assert "403" not in details["message"]
+
+
+@pytest.mark.parametrize("code", ["Arrearage", " arrearage ", "insufficient_quota", 1000007])
+def test_structured_quota_code_overrides_generic_permission_text(code):
+    exc = _FakeAPIError("Access denied", code=code, status_code=400)
+    assert classify_llm_error(exc).category == "quota"
+
+
+def test_wrapped_arrearage_preserves_quota_and_request_id():
+    inner = _FakeAPIError("Access denied", status_code=400, body={
+        "error": {"code": "Arrearage", "type": "Arrearage"},
+        "request_id": "arrearage-request-1",
+    })
+    details = structured_llm_error(RetryExhaustedError(inner, attempts=3))
+
+    assert details["category"] == "quota"
+    assert details["code"] == "Arrearage"
+    assert details["type"] == "Arrearage"
+    assert details["httpStatus"] == 400
+    assert details["requestId"] == "arrearage-request-1"
+    assert details["retryable"] is False
+
+
+@pytest.mark.parametrize("code", ["permission_denied", "PermissionDenied", 403])
+def test_structured_permission_code_overrides_generic_billing_text(code):
+    exc = _FakeAPIError("Access denied; check billing permissions", code=code, status_code=403)
+    assert classify_llm_error(exc).category == "permission"
+
+
+@pytest.mark.parametrize("code", [None, "unknown_error", "not_arrearage"])
+def test_unrecognized_code_keeps_permission_before_quota_text(code):
+    exc = _FakeAPIError("Access denied; check billing", code=code, status_code=403)
+    assert classify_llm_error(exc).category == "permission"
+
+
+@pytest.mark.parametrize("code, status", [(403, 403), ("403", 403), (500, 500), ("500", 500)])
+def test_http_style_code_keeps_content_filter_as_soft_refusal(code, status):
+    exc = _FakeAPIError("data_inspection_failed: inappropriate content",
+                        code=code, status_code=status)
+    friendly = classify_llm_error(exc)
+    details = structured_llm_error(exc)
+
+    assert friendly.category == "content_filter"
+    assert friendly.is_soft is True
+    assert details["httpStatus"] == status
+    assert details["code"] == int(code)
+
+
+@pytest.mark.parametrize("code, status, message, category", [
+    ("403", 403, "model qwen3.7-plus1 is not supported", "model_configuration"),
+    ("500", 500, "maximum context length exceeded", "context_length"),
+])
+def test_http_style_code_keeps_specific_text_classification(code, status, message, category):
+    exc = _FakeAPIError(message, code=code, status_code=status)
+    assert classify_llm_error(exc).category == category
+
+
+@pytest.mark.parametrize("code", ["billing", "balance"])
+def test_generic_billing_words_are_not_prioritized_as_business_codes(code):
+    exc = _FakeAPIError("Access denied", code=code, status_code=400)
+    assert classify_llm_error(exc).category == "permission"
+
+
+@pytest.mark.parametrize("code, category", [
+    ("data_inspection_failed", "content_filter"),
+    ("insufficient_points", "quota"),
+    ("model_not_found", "model_not_found"),
+    ("unsupported_parameter", "unsupported_parameter"),
+])
+def test_recognized_business_code_overrides_generic_access_denied(code, category):
+    exc = _FakeAPIError("Access denied", code=code, status_code=400)
+    friendly = classify_llm_error(exc)
+    assert friendly.category == category
+    assert friendly.is_soft is (category == "content_filter")
 
 
 def test_error_code_extraction_does_not_parse_unstructured_message_text():

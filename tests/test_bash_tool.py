@@ -56,7 +56,8 @@ async def test_cancelled_foreground_command_reaps_process_before_returning(tmp_p
     task = asyncio.create_task(tool.invoke({"command": "python waiting.py"}))
 
     async def wait_started():
-        while not started.exists():
+        # Child readiness can precede create_subprocess_exec returning to us.
+        while not processes or not started.exists():
             await asyncio.sleep(0.01)
 
     try:
@@ -174,6 +175,49 @@ async def test_rejects_oversized_command_before_execution():
     assert result.error.startswith("BASH_ARGUMENT_TOO_LARGE")
     assert bash_tool.parameters["properties"]["command"]["maxLength"] == MAX_BASH_COMMAND_CHARS
     assert bash_tool.parameters["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_windows_existing_tool_refreshes_shell_after_host_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(bash_tool_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
+    binary = tmp_path / "PortableGit" / "usr" / "bin" / "bash.exe"
+    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={
+        "BOX_AGENT_BUNDLED_BASH": str(binary), "PATH": "",
+    })
+    spawn = unittest.mock.AsyncMock()
+    monkeypatch.setattr(bash_tool_module.asyncio, "create_subprocess_exec", spawn)
+    await tool._create_subprocess("Write-Output OK")
+    assert spawn.call_args.args[0].lower().endswith(r"\windowspowershell\v1.0\powershell.exe")
+    assert bash_tool_module.ntpath.isabs(spawn.call_args.args[0])
+    assert tool.shell_name == "PowerShell"
+
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test fixture; never executed")
+    tool.update_runtime_env({"BOX_AGENT_BUNDLED_BASH": str(binary), "PATH": "new-path"})
+    assert tool.shell_name == "bash"
+    assert "bash command" in tool.parameters["properties"]["command"]["description"].lower()
+    await tool._create_subprocess("printf OK")
+    assert spawn.call_args.args[:2] == (str(binary), "-c")
+    assert str(binary.parent) in spawn.call_args.kwargs["env"]["PATH"]
+    assert "new-path" in spawn.call_args.kwargs["env"]["PATH"]
+
+    # A host refresh reporting a missing executable must not retain the old selection.
+    tool.update_runtime_env({"BOX_AGENT_BUNDLED_BASH": str(tmp_path / "missing.exe")})
+    assert tool.shell_name == "PowerShell"
+    await tool._create_subprocess("Write-Output OK")
+    assert spawn.call_args.args[0] == tool._powershell_executable
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell integration")
+@pytest.mark.asyncio
+async def test_windows_powershell_starts_with_empty_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
+    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={"PATH": "", "BOX_AGENT_BUNDLED_BASH": ""})
+    process = await tool._create_subprocess("Write-Output 'POWERSHELL_OK'")
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+    assert process.returncode == 0, stderr
+    assert b"POWERSHELL_OK" in stdout
 
 
 @pytest.mark.asyncio
@@ -445,7 +489,9 @@ def test_powershell_image_status_runs_only_after_successful_directory_switch(
     result = subprocess.run(
         [shell, "-NoProfile", "-NonInteractive", "-Command", command],
         cwd=tmp_path, env={**os.environ, "BOX_AGENT_NODE": sys.executable},
-        capture_output=True, text=True, timeout=15, check=False,
+        # This checks shell semantics, not startup latency. Shared CI runners
+        # can take over 15 seconds to launch PowerShell and the child Python.
+        capture_output=True, text=True, timeout=60, check=False,
     )
 
     if directory_exists:
@@ -1231,7 +1277,7 @@ async def test_unix_login_shell_execution():
 
 
 def test_resolve_login_shell_posix():
-    """Known POSIX shells that exist should be used directly."""
+    """An interactive shell never changes the advertised Bash contract."""
     import os
     import platform
     if platform.system() == "Windows":
@@ -1243,7 +1289,7 @@ def test_resolve_login_shell_posix():
     for shell in ("/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/sh", "/bin/dash"):
         if os.access(shell, os.X_OK):
             with unittest.mock.patch.dict(os.environ, {"SHELL": shell}):
-                assert _resolve_login_shell() == shell
+                assert Path(_resolve_login_shell()).name == "bash"
 
 
 def test_resolve_login_shell_non_posix_falls_back():
@@ -1345,12 +1391,16 @@ def test_legacy_output_env_is_removed_from_bash_subprocesses(monkeypatch, tmp_pa
 
 def test_posix_description_uses_injected_python_and_reserved_scratch_directory(monkeypatch):
     monkeypatch.setattr(bash_tool_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(bash_tool_module, "_resolve_login_shell", lambda: "/bin/bash")
     description = BashTool(
         runtime_env={"BOX_AGENT_PYTHON": "/runtime/python"}
     ).description
 
     assert '"$BOX_AGENT_PYTHON" -u -m http.server' in description
     assert 'under "$BOX_AGENT_SCRATCH_DIR"' in description
+    assert "Use only application-managed Python, Node and Git" in description
+    assert "otherwise prepare the managed Python through local_environment" in description
+    assert "otherwise check for an available Python executable" not in description
     assert '"${BOX_AGENT_PYTHON:-python3}" -u -m http.server' not in description
 
 
@@ -1362,6 +1412,8 @@ def test_description_prefers_dedicated_search_tools_over_shell_search(
         bash_tool_module.platform, "system", lambda: "Windows" if windows else "Linux"
     )
     monkeypatch.setattr(bash_tool_module, "bundled_win_bash", lambda: None)
+    # Only inspect wording; the simulated Unix branch must not need host Bash.
+    monkeypatch.setattr(bash_tool_module, "_resolve_login_shell", lambda: "/bin/bash")
     description = BashTool().description
 
     assert "use glob/grep when available or search_files" in description
@@ -1393,7 +1445,7 @@ async def test_reserved_scratch_subdirectory_can_be_removed_without_approval(tmp
     preview = scratch / "preview_shots"
     preview.mkdir(parents=True)
     (preview / "frame.png").write_bytes(b"frame")
-    tool = BashTool(runtime_env={"BOX_AGENT_SCRATCH_DIR": str(scratch)})
+    tool = BashTool(workspace_dir=str(tmp_path), runtime_env={"BOX_AGENT_SCRATCH_DIR": str(scratch)})
 
     assert preview.resolve().is_relative_to(tmp_path.resolve())
     command = (
@@ -1491,6 +1543,39 @@ def test_login_shell_reapplies_box_agent_skill_path_prefix():
     assert wrapped.endswith("command -v npm")
     assert "npm_config_prefix" not in tool._subprocess_env
     assert "npm_config_cache" not in tool._subprocess_env
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX login shell")
+@pytest.mark.asyncio
+async def test_host_path_refresh_survives_login_profile_path_reset(tmp_path, monkeypatch):
+    runtime_bin = tmp_path / "managed" / "bin"
+    runtime_bin.mkdir(parents=True)
+    node = runtime_bin / "node"
+    node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    node.chmod(0o755)
+    login = tmp_path / "login-shell"
+    login.write_text(
+        '#!/bin/sh\nif [ "$1" = "-l" ]; then shift; fi\n'
+        'PATH=/usr/bin:/bin\nexport PATH\nexec /bin/bash "$@"\n',
+        encoding="utf-8",
+    )
+    login.chmod(0o755)
+    tool = BashTool(runtime_env={"BOX_AGENT_SKILL_PATH_PREFIX": str(tmp_path / "old-bin")})
+    monkeypatch.setattr(tool, "_login_shell", str(login))
+    monkeypatch.setattr(tool, "_use_login_shell", True)
+    tool.update_runtime_env({
+        "PATH": str(runtime_bin) + os.pathsep + "/usr/bin:/bin",
+        "BOX_AGENT_NODE": str(node),
+    })
+    proc = await tool._create_subprocess("command -v node")
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        assert proc.returncode == 0
+        assert stdout.decode().strip() == str(node)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
 
 @pytest.mark.asyncio
@@ -1873,3 +1958,16 @@ async def test_background_output_truncated_when_oversize():
         except Exception:
             pass
         _ = bg_shell_cls  # silence unused
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix Bash contract")
+async def test_zsh_login_does_not_change_bash_syntax(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    tool = BashTool(workspace_dir=str(tmp_path), allow_full_access=True)
+    result = await tool.execute(command="echo ===\nprintf '%s' \"$BASH_VERSION\"")
+    assert result.success, result.error
+    assert result.stdout.startswith("===\n")
+    assert result.stdout.strip().splitlines()[1]
+    missing = await tool.execute(command="printf 'abc\n' | grep no_such_pattern | head -20")
+    assert not missing.success  # pipefail remains part of the tool contract.

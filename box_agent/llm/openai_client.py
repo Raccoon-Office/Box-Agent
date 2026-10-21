@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 # cutting JSON mid-string and triggering empty-arguments retry loops). Pin a
 # generous default; users can override via ``LLMConfig.max_output_tokens``.
 _DEFAULT_MAX_TOKENS = 64000
+_EMPTY_ASSISTANT_CONTENT_PLACEHOLDER = "（该轮模型未返回可见回复。）"
 _DEEP_THINK_REASONING_EFFORT = "high"
 _DEFAULT_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
 # This deployed model accepts low/medium/high, but rejects none (HTTP 422).
@@ -812,6 +813,21 @@ class OpenAIClient(LLMClientBase):
                     else:
                         assistant_msg["reasoning_details"] = [{"text": msg.thinking}]
 
+                # Fill only the request copy; preserve tool/reasoning-only turns
+                # and the original transcript, including historical empty replies.
+                if not msg.tool_calls and not (msg.thinking or "").strip():
+                    if isinstance(msg.content, str):
+                        is_empty_content = not msg.content.strip()
+                    else:
+                        is_empty_content = all(
+                            block.get("type") == "text"
+                            and isinstance(block.get("text"), str)
+                            and not block["text"].strip()
+                            for block in msg.content
+                        )
+                    if is_empty_content:
+                        assistant_msg["content"] = _EMPTY_ASSISTANT_CONTENT_PLACEHOLDER
+
                 api_messages.append(assistant_msg)
 
             # For tool result messages
@@ -1272,9 +1288,6 @@ class OpenAIClient(LLMClientBase):
                                     finish_reason = "tool_argument_limit"
                                     break
                         if oversized_info:
-                            closer = getattr(response_stream, "aclose", None)
-                            if closer is not None:
-                                await closer()
                             break
             except Exception as exc:
                 log_llm_error_meta(provider="openai", mode="stream", exc=exc)
@@ -1311,6 +1324,19 @@ class OpenAIClient(LLMClientBase):
             else:
                 # Successful consume — break out of the retry loop.
                 break
+            finally:
+                # The SDK stream is not a context manager here. Cancellation
+                # while awaiting a chunk must also release its HTTP response.
+                closer = getattr(response_stream, "close", None) or getattr(
+                    response_stream, "aclose", None
+                )
+                if closer is not None:
+                    try:
+                        await _await_if_needed(closer())
+                    except Exception as exc:
+                        # Cleanup must not replace cancellation, the provider's
+                        # original error, or its normal completion/retry path.
+                        logger.warning("OpenAI stream cleanup failed (%s)", type(exc).__name__)
 
         if oversized_info:
             logger.warning(

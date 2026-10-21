@@ -124,7 +124,15 @@ research**. Pick the branch that fits:
    If `research-synthesis` is unavailable in this session, use available
    search/browser tools for at most two targeted official-source attempts per
    unresolved slide-relevant claim and never repeat an equivalent failed
-   search. If those tools are unavailable or insufficient, omit optional claims
+   search. This search is mandatory for a public-fact topic: do not write
+   `outline.json` from memory. Start with plain queries (no `site:` operator —
+   club/federation domains often return zero results), then `web_extract` the
+   pages you will cite, and record each fact with its exact page URL and the
+   exact figure/date it supports; every number in the slide's title, message or
+   bullets must appear literally in that slide's evidence text. When `prepare`
+   returns a `checklist`, fix each listed line before re-running it (cite the
+   exact figure from a page already read, search for it, or reword the line
+   without the number); unfixed lines are cut from the slides. If those tools are unavailable or insufficient, omit optional claims
    and use explicit placeholders for required facts — never pause the deck or
    present unsourced content as fact. Keep the boundary clear: this skill turns
    researched/supplied content into a slide plan; it does not itself perform

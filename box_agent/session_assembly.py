@@ -24,9 +24,13 @@ from .tools.permissions import CapabilityPolicy
 from .tools.runtime import (
     SkillRuntimeContext, build_skill_runtime_context, build_skill_runtime_prompt,
 )
-from .tools.setup import build_sandbox_info_prompt, build_file_delivery_prompt
+from .tools.setup import (
+    build_file_delivery_prompt, build_image_generation_prompt, build_sandbox_info_prompt,
+    render_system_prompt_template,
+)
+from .prompt_capabilities import resolve_capability_placeholders
 from .project_context import (
-    PROJECT_WORKSPACE_MODE_PROMPT, append_prompt_segment, compose_prompt_segments,
+    PROJECT_WORKSPACE_MODE_PROMPT, WORKSPACE_STATEMENT_PREFIX, append_prompt_segment, compose_prompt_segments,
     build_project_startup_context_prompt,
 )
 from .session_prompts import (
@@ -88,24 +92,65 @@ async def prepare_model(resources: SessionResources) -> None:
 
 
 async def prepare_memory(resources: SessionResources) -> None:
+    from .memory import ExternalMemoryBackend, MemoryRuntime, memory_identity, uses_local_memory
+
     context = resources.context
     config = context.config
     resources.memory_manager = context.host.memory_manager
-    if _prepared(resources) or context.options.utility:
+    if context.options.utility:
+        # 工具型会话保留宿主提供的引导信息，仍不创建提取或外部保存资源。
+        resources.state.update(memory_manager=None, memory_runtime=None, memory_extractor=None)
         return
-    if (resources.memory_manager is None and config.agent.enable_memory
-            and context.options.profile != "acp"):
+    if not config.agent.enable_memory and not uses_local_memory(resources.memory_manager):
+        # 兼容旧宿主显式借用本地 manager 的约定；配置开关控制自动装配和远端访问。
+        resources.memory_manager = None
+        resources.state.update(memory_manager=None, memory_runtime=None, memory_extractor=None)
+        return
+    overrides = {
+        name: getattr(context.options, name)
+        for name in ("memory_tenant_id", "memory_user_id")
+        if getattr(context.options, name) is not None
+    }
+    should_create = (resources.memory_manager is None
+                     and (context.options.profile != "acp" or config.agent.memory_backend_type != "local"))
+    if (not _prepared(resources) and should_create) or overrides:
         from .agent_runtime import build_memory_manager
 
+        settings = config.agent.model_copy(update=overrides)
+        if isinstance(resources.memory_manager, ExternalMemoryBackend):
+            settings.memory_backend_type = resources.memory_manager.backend_type
+            settings.memory_external = resources.memory_manager.config
+        elif uses_local_memory(resources.memory_manager):
+            settings.memory_backend_type = "local"
+        settings.memory_tenant_id, settings.memory_user_id = memory_identity(
+            settings.memory_tenant_id, settings.memory_user_id,
+        )
         resources.memory_manager = build_memory_manager(
             memory_dir=config.agent.memory_dir,
             dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
+            settings=settings,
         )
-    if resources.memory_manager is not None and context.options.profile == "cli":
-        try:
-            await resources.memory_manager.import_openclaw(resources.llm_client)
-        except Exception:
-            pass
+    elif isinstance(resources.memory_manager, ExternalMemoryBackend):
+        # ACP 可借用进程后端配置，但每个会话的请求上下文必须独立。
+        manager = resources.memory_manager
+        resources.memory_manager = type(manager)(
+            manager.backend_type, manager.config, manager.tenant_id, manager.user_id, manager.corrections,
+        )
+    resources.state["memory_manager"] = resources.memory_manager
+    if isinstance(resources.memory_manager, ExternalMemoryBackend):
+        runtime = MemoryRuntime(resources.memory_manager)
+        resources.state["memory_runtime"] = runtime
+        resources.state["memory_extractor"] = None
+        resources.cleanup.push_async_callback(runtime.aclose)
+    if _prepared(resources):
+        return
+    local = uses_local_memory(resources.memory_manager)
+    if local and context.options.profile == "cli":
+        if memory_identity(config.agent.memory_tenant_id, config.agent.memory_user_id) == ("default", "default") and not overrides:
+            try:
+                await resources.memory_manager.import_openclaw(resources.llm_client)
+            except Exception:
+                pass
         if config.agent.memory_maintainer_enabled:
             from .memory_maintainer import MemoryMaintainer
             async def maintain():
@@ -115,7 +160,7 @@ async def prepare_memory(resources: SessionResources) -> None:
                     pass
             task = asyncio.create_task(maintain(), name="memory-maintainer")
             resources.cleanup.push_async_callback(_stop_task, task)
-    if resources.memory_manager is not None and config.agent.enable_memory_extraction:
+    if local and config.agent.enable_memory_extraction:
         from .agent_runtime import build_memory_extractor
 
         resources.state.setdefault("memory_extractor", build_memory_extractor(
@@ -174,6 +219,11 @@ async def prepare_tools(resources: SessionResources) -> None:
     resources.mcp_task, resources.skill_task = host.mcp_task, host.skill_task
     if host.tools is not None:
         resources.tools = host.tools
+        if resources.memory_manager is not host.memory_manager:
+            from .tools.memory_tool import rebind_memory_tools
+
+            # 预装配目录只替换已有的记忆工具，不扩大宿主显式提供的工具集合。
+            resources.tools = rebind_memory_tools(host.tools, resources.memory_manager, resources.llm_client)
         await _bind_skill_runtime(resources)
         return
     expert = resources.state.get("expert_context")
@@ -207,6 +257,11 @@ async def prepare_tools(resources: SessionResources) -> None:
                 resources.cleanup.push_async_callback(_stop_task, task)
     else:
         resources.tools = list(host.base_tools)
+        if resources.memory_manager is not host.memory_manager:
+            # 进程工具目录可能绑定其他身份，按本会话替换已有记忆工具。
+            from .tools.memory_tool import rebind_memory_tools
+
+            resources.tools = rebind_memory_tools(resources.tools, resources.memory_manager, resources.llm_client)
 
     grant_store = resources.state.get("grant_store")
     permission_engine = resources.state.get("permission_engine")
@@ -281,43 +336,35 @@ async def prepare_tools(resources: SessionResources) -> None:
         resources.cleanup.callback(cleanup_skill_scratch_dir, scratch)
 
 
+async def _prepare_memory_prompt(resources: SessionResources, prompt: str) -> str:
+    """共享槽位装配只负责位置，具体内容仍由现有 memory 能力提供。"""
+    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
+
+    manager = resources.memory_manager
+    if resources.context.options.utility or manager is None:
+        return prompt.replace(MEMORY_CONTEXT_SLOT, "")
+    external = isinstance(manager, ExternalMemoryBackend)
+    if _prepared(resources) and not external and MEMORY_CONTEXT_SLOT not in prompt:
+        # 已装配宿主继续拥有本地提示，仅在显式给出新槽位时填充。
+        return prompt
+    memory = await asyncio.to_thread(manager.recall)
+    resources.state["memory_block"] = memory or None
+    return place_memory_block(prompt, memory, reserve=external)
+
+
 async def prepare_prompt(resources: SessionResources) -> None:
+    """Load the profile's template, then compose it with the shared builder.
+
+    Adapters only differ in where the template comes from and in host-provided
+    inputs (policy, layout, expert, suffix, UI hints); composition and order
+    are owned by ``build_session_prompt`` for CLI, ACP and the Python SDK.
+    """
     context = resources.context
     host, options, config = context.host, context.options, context.config
     if _prepared(resources):
-        resources.system_prompt = host.system_prompt
+        resources.system_prompt = await _prepare_memory_prompt(resources, host.system_prompt)
         return
     from .config import Config
-    from .project_context import append_prompt_segment, compose_prompt_segments
-    from .tools.setup import (build_file_delivery_prompt, build_image_generation_prompt,
-                              build_sandbox_info_prompt, render_system_prompt_template)
-    from .tools.runtime import build_skill_runtime_prompt
-
-    if options.profile == "acp":
-        prompt = build_acp_session_prompt(
-            config, host.system_prompt or "You are a helpful AI assistant.",
-            resources.memory_manager, options.session_mode,
-            workspace=context.workspace, policy=options.effective_policy,
-            env_context=resources.state.get("env_context"),
-            skill_runtime_context=resources.state.get("skill_runtime_context"),
-            expert_context=resources.state.get("expert_context"),
-            workspace_layout=options.workspace_layout,
-            enable_general_directory_policy=(
-                not options.utility and options.session_mode in {None, "general"}
-            ),
-            follow_up_suggestions_enabled=options.follow_up_suggestions_enabled,
-        )
-        if resources.memory_manager is not None and not options.utility:
-            memory = await asyncio.to_thread(resources.memory_manager.recall)
-            resources.state["memory_block"] = memory or None
-            if memory:
-                prompt = append_prompt_segment(prompt, memory)
-        if not options.utility:
-            prompt = f"{prompt.rstrip()}\n\n{build_image_generation_prompt(config)}"
-        if host.prompt_suffix:
-            prompt = f"{prompt.rstrip()}\n\n{host.prompt_suffix.strip()}"
-        resources.system_prompt = prompt
-        return
 
     def status(message: str, *, success: bool = True) -> None:
         if options.profile == "cli" and host.output is not None:
@@ -325,52 +372,54 @@ async def prepare_prompt(resources: SessionResources) -> None:
             color = Colors.GREEN if success else Colors.YELLOW
             host.output(f"{color}{message}{Colors.RESET}")
 
-    prompt = host.system_prompt
-    if prompt is None:
-        path = Config.find_config_file(config.agent.system_prompt_path)
-        prompt = (render_system_prompt_template(path.read_text(encoding="utf-8"))
-                  if path and path.exists() else
-                  "You are Box-Agent, an intelligent assistant that can help users complete various tasks.")
+    template = host.system_prompt
+    if template is None and options.profile == "acp":
+        template = "You are a helpful AI assistant."
+    elif template is None:
+        path = Config.find_prompt_file(config.agent.system_prompt_path, "system_prompt.md")
         if path and path.exists():
+            template = path.read_text(encoding="utf-8")
             status(f"✅ Loaded system prompt (from: {path})")
         else:
+            template = "You are Box-Agent, an intelligent assistant that can help users complete various tasks."
             status("⚠️  System prompt not found, using default", success=False)
-    if resources.skill_loader is not None:
-        from .tools.skill_loader import SKILL_SLOT_SENTINEL
-
-        prompt = prompt.replace("{SKILLS_METADATA}", SKILL_SLOT_SENTINEL)
-    else:
-        prompt = prompt.replace("{SKILLS_METADATA}", "")
-    prompt = compose_prompt_segments(prompt, replacements={
-        "{SANDBOX_INFO}": build_sandbox_info_prompt() if options.sandbox_mode else "",
-        "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(),
-    })
     if options.profile == "cli" and options.session_mode == "code_agent":
-        prompt = compose_prompt_segments(prompt, segments=(
-            PROJECT_WORKSPACE_MODE_PROMPT,
-            build_project_startup_context_prompt(context.workspace),
-        ))
-        code_path = Config.find_config_file(config.agent.code_prompt_path)
+        code_path = Config.find_prompt_file(config.agent.code_prompt_path, "code_prompt.md")
         if code_path and code_path.exists():
-            code_prompt = code_path.read_text(encoding="utf-8").strip()
-            prompt = append_prompt_segment(prompt, code_prompt)
-            if code_prompt:
-                status(f"✅ Loaded code workspace prompt (from: {code_path})")
+            status(f"✅ Loaded code workspace prompt (from: {code_path})")
         else:
             status("⚠️  Code workspace prompt not found", success=False)
-    if not options.utility:
-        prompt = append_prompt_segment(prompt, build_image_generation_prompt(config))
-    runtime_context = resources.state.get("skill_runtime_context")
-    if runtime_context is not None:
-        prompt = append_prompt_segment(prompt, build_skill_runtime_prompt(runtime_context))
-    if options.profile == "cli":
-        prompt = append_prompt_segment(prompt, build_env_context_prompt(resources.state.get("env_context")))
+
+    memory_block = None
     if resources.memory_manager is not None and not options.utility:
-        memory = await asyncio.to_thread(resources.memory_manager.recall)
-        resources.state["memory_block"] = memory
-        if memory:
-            prompt = append_prompt_segment(prompt, memory)
-    resources.system_prompt = prompt
+        memory_block = await asyncio.to_thread(resources.memory_manager.recall) or None
+        resources.state["memory_block"] = memory_block
+
+    child_segments: list[str] = []
+    resources.system_prompt = build_session_prompt(
+        config, template,
+        child_prompt_segments=child_segments,
+        session_mode=options.session_mode,
+        workspace=context.workspace,
+        utility=options.utility,
+        sandbox_mode=options.sandbox_mode,
+        skills_slot=resources.skill_loader is not None,
+        policy=options.effective_policy,
+        env_context=resources.state.get("env_context"),
+        skill_runtime_context=resources.state.get("skill_runtime_context"),
+        expert_context=resources.state.get("expert_context"),
+        workspace_layout=options.workspace_layout,
+        follow_up_suggestions_enabled=options.follow_up_suggestions_enabled,
+        host_ui_hints=options.profile == "acp",
+        memory=resources.memory_manager,
+        memory_block=memory_block,
+        prompt_suffix=host.prompt_suffix,
+        available_tools=frozenset(tool.name for tool in resources.tools),
+    )
+
+    resources.state["child_system_prompt"] = compose_prompt_segments(
+        child_segments[0], segments=child_segments[1:],
+    )
 
 
 async def prepare_hooks(resources: SessionResources) -> None:
@@ -385,6 +434,11 @@ async def prepare_hooks(resources: SessionResources) -> None:
 
 async def finish_session(session: Any, resources: SessionResources) -> None:
     """Restore and bind shared Skills only after the Agent owns its prompt."""
+    from .memory import ExternalMemoryBackend
+
+    # 同时关闭 Agent 的旧晋升开关，保持公共运行参数与插件绑定一致。
+    if isinstance(resources.memory_manager, ExternalMemoryBackend):
+        session.agent.memory_promotion_enabled = False
     if _prepared(resources):
         return
     agent = session.agent
@@ -403,7 +457,7 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
 
         relocated_prompt = move_skill_slot_to_end(agent.messages[0].content)
         if relocated_prompt != agent.messages[0].content:
-            agent.set_system_prompt(relocated_prompt)
+            agent.set_system_prompt(relocated_prompt, preserve_child_prompt=True)
         selector = SkillSelector(
             session_skill_loader,
             include_disabled=False,
@@ -418,7 +472,7 @@ async def finish_session(session: Any, resources: SessionResources) -> None:
         if expert_context:
             expert_skill_prompt = selector.update(expert_context.skill_query(), refresh=False)
             if expert_skill_prompt is not None:
-                agent.set_system_prompt(expert_skill_prompt)
+                agent.set_system_prompt(expert_skill_prompt, preserve_child_prompt=True)
         session.skill_selector = selector
 
 
@@ -458,17 +512,22 @@ def _workspace_layout_prompt(
         "selected_root_dir",
         "selectedRootDir",
     ) or workspace
+    cwd_rule = "工具相对路径和 artifact 扫描都从该目录开始；会话生命周期内不得改变它。"
+    if selected_root.resolve() == workspace.resolve():
+        # Same directory: point at the File Access Context statement instead of
+        # repeating the path.
+        root_lines = [
+            "- 工作区（selected workspace root）就是当前会话工作目录（cwd，见 File Access Context "
+            "中的 Current workspace）。" + cwd_rule,
+        ]
+    else:
+        root_lines = [
+            f"- 工作区（selected workspace root）：`{selected_root}`",
+            f"- 当前会话工作目录（cwd）：`{workspace.absolute()}`。" + cwd_rule,
+        ]
     lines = [
         "## Workspace Layout",
-        f"- 工作区（selected workspace root）：`{selected_root}`",
-        (
-            f"- 当前会话工作目录（cwd）：`{workspace}`。工具相对路径和 artifact 扫描都从"
-            "该目录开始；会话生命周期内不得改变它。"
-        ),
-        (
-            "- 模型为整理产物而创建的子目录只是普通文件组织，不成为新的 workspace，"
-            "也不改变 cwd。"
-        ),
+        *root_lines,
         (
             "- 判空规则：必须先使用目标目录的绝对路径实际查询其内容，"
             "只有查询成功且确认无内容时，才可判断该目标目录为空。"
@@ -485,25 +544,33 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
     from assuming workspace-only access when officev3 has granted extra
     roots such as ~/Documents.
     """
+    # The single statement of the session cwd: sandbox/attachment rules point
+    # here by name, and Agent skips its own "## Current Workspace" tail when it
+    # sees this line (WORKSPACE_STATEMENT_PREFIX).
+    workspace_line = (
+        f"{WORKSPACE_STATEMENT_PREFIX}{workspace.absolute()}`. This is the stable session cwd and default "
+        "working root: relative tool paths resolve from it, and task subdirectories you "
+        "create organize files without changing it.\n"
+    )
     if policy is None:
         return (
             "## File Access Context\n"
-            f"- Current workspace: `{workspace}`\n"
-            "- File tools and bash may access paths allowed by the active runtime policy.\n"
+            + workspace_line
+            + "- File tools and bash may access paths allowed by the active runtime policy.\n"
             "- If a file is outside the allowed scope, the tool will return a permission error; "
             "try the tool instead of assuming denial."
         )
 
-    allowed_roots = [workspace]
+    allowed_roots = []
     if policy.session_workspace_root:
         allowed_roots.append(Path(policy.session_workspace_root).expanduser())
     for directory in policy.allowed_directories:
         allowed_roots.append(Path(directory).expanduser())
 
-    seen: set[str] = set()
+    seen: set[str] = {str(workspace.absolute())}
     root_lines: list[str] = []
     for root in allowed_roots:
-        root_s = str(root)
+        root_s = str(root.absolute())
         if root_s not in seen:
             seen.add(root_s)
             root_lines.append(f"- `{root_s}`")
@@ -518,11 +585,17 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
     else:
         scope_line = f"- Active filesystem scope: `{policy.filesystem_scope}`; unknown scopes fail closed in tools."
 
+    roots = (
+        "- Allowed filesystem roots for this session include the current workspace and:\n"
+        + "\n".join(root_lines)
+        if root_lines
+        else "- Allowed filesystem roots for this session include the current workspace."
+    )
     return (
         "## File Access Context\n"
-        f"{scope_line}\n"
-        "- Allowed filesystem roots for this session include:\n"
-        + "\n".join(root_lines)
+        + workspace_line
+        + f"{scope_line}\n"
+        + roots
         + "\n- These are currently pre-authorized roots, not the complete set of paths that may be requested."
         + "\n- When the task requires it, you may try a specific, narrow path outside these roots; "
         "the runtime will request permission when appropriate."
@@ -536,7 +609,10 @@ def _filesystem_access_prompt(workspace: Path, policy: CapabilityPolicy | None) 
 
 def _build_action_hints_prompt(config, memory, env_context: EnvContext | None = None) -> str:
     """Detect onboarding / browser-tools scenarios and build the hint contract."""
-    memory_scarce = is_memory_scarce(memory.read_core() if memory else None)
+    from .memory import ExternalMemoryBackend
+
+    memory_scarce = (not isinstance(memory, ExternalMemoryBackend)
+                     and is_memory_scarce(memory.read_core() if memory else None))
 
     try:
         _host_mcp = os.environ.get("BOX_AGENT_MCP_CONFIG_PATH", "").strip()
@@ -562,6 +638,217 @@ def _build_action_hints_prompt(config, memory, env_context: EnvContext | None = 
     )
 
 
+_MODE_PROMPT_MAP = {
+    "data_analysis": "analysis_prompt_path",
+    "code_agent": "code_prompt_path",
+}
+
+
+def _child_prompt_template(template: str) -> str:
+    """Project only the packaged template before mixing in caller content."""
+    from .tools.skill_loader import SKILL_SLOT_SENTINEL
+
+    packaged = Path(__file__).with_name("config").joinpath("system_prompt.md").read_text(encoding="utf-8")
+    template = template.replace(SKILL_SLOT_SENTINEL, "{SKILLS_METADATA}")
+    if template in (packaged, packaged.replace("{SKILLS_METADATA}", "")):
+        template = template[template.index("## Working Guidelines\n"):]
+        start = template.index("<workflow>\n")
+        end = template.index("</workflow>", start) + len("</workflow>")
+        template = template[:start] + template[end:]
+    # These are builder-owned insertion slots, never a search over user data.
+    return template.replace("{SKILLS_METADATA}", "").replace("{MEMORY_CONTEXT}", "")
+
+
+def _compose_session_prompt(
+    config, template: str, memory,
+    session_mode: str | None,
+    *,
+    workspace: Path | None,
+    sandbox_mode: bool,
+    skills_slot: bool,
+    policy: CapabilityPolicy | None,
+    env_context: EnvContext | None,
+    skill_runtime_context: SkillRuntimeContext | None,
+    expert_context: ExpertSessionContext | None,
+    workspace_layout: Any,
+    enable_general_directory_policy: bool,
+    follow_up_suggestions_enabled: bool,
+    host_ui_hints: bool,
+    available_tools: frozenset[str] | None = None,
+    child_prompt_segments: list[str] | None = None,
+    skill_sourcing_provided: bool = False,
+) -> str:
+    """Template plus the ordered session overlays shared by every adapter.
+
+    ``available_tools`` (the session's registered tool names, ``None`` when
+    unknown) gates tool-specific guidance so the prompt never instructs the
+    model to call a tool this session lacks.
+    """
+    child_template = _child_prompt_template(template) if child_prompt_segments is not None else ""
+    if skills_slot:
+        from .tools.skill_loader import SKILL_SLOT_SENTINEL
+
+        template = template.replace("{SKILLS_METADATA}", SKILL_SLOT_SENTINEL)
+    else:
+        template = template.replace("{SKILLS_METADATA}", "")
+    base_prompt = compose_prompt_segments(
+        resolve_capability_placeholders(render_system_prompt_template(template), available_tools,
+                                       skill_sourcing_provided=skill_sourcing_provided),
+        replacements={
+            "{SANDBOX_INFO}": build_sandbox_info_prompt(available_tools) if sandbox_mode else "",
+            "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(available_tools),
+        },
+        segments=(
+            PROJECT_WORKSPACE_MODE_PROMPT
+            if session_mode == "code_agent"
+            else None,
+        ),
+    )
+    if child_prompt_segments is not None:
+        child_prompt_segments.append(compose_prompt_segments(
+            resolve_capability_placeholders(render_system_prompt_template(child_template), available_tools,
+                                           skill_sourcing_provided=skill_sourcing_provided),
+            replacements={
+                "{SANDBOX_INFO}": build_sandbox_info_prompt(available_tools) if sandbox_mode else "",
+                "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(available_tools),
+            },
+            segments=(PROJECT_WORKSPACE_MODE_PROMPT if session_mode == "code_agent" else None,),
+        ))
+
+    def append(segment: str | None, *, inherit: bool = True, skip_empty: bool = True) -> str:
+        if child_prompt_segments is not None and inherit and (segment or not skip_empty):
+            child_prompt_segments.append(segment or "")
+        return append_prompt_segment(base_prompt, segment, skip_empty=skip_empty)
+
+    if workspace is not None:
+        base_prompt = append(
+            _filesystem_access_prompt(workspace, policy),
+        )
+        layout_prompt = _workspace_layout_prompt(
+            workspace=workspace,
+            layout=workspace_layout,
+        )
+        base_prompt = append(layout_prompt)
+
+    if enable_general_directory_policy:
+        base_prompt = append(
+            GENERAL_DIRECTORY_ORGANIZATION_PROMPT,
+        )
+
+    if session_mode == "code_agent" and workspace is not None:
+        base_prompt = append(
+            build_project_startup_context_prompt(workspace),
+        )
+
+    env_prompt = build_env_context_prompt(env_context)
+    if env_prompt:
+        base_prompt = append(env_prompt)
+
+    runtime_context = skill_runtime_context or build_skill_runtime_context(
+        sandbox_mode=sandbox_mode,
+        env_context=env_context,
+    )
+    base_prompt = append(
+        build_skill_runtime_prompt(runtime_context),
+    )
+
+    # Action hints steer the user to host settings UI (e.g. officev3 tabs);
+    # only hosts that render ``action_hint`` blocks opt in.
+    if host_ui_hints:
+        hints_prompt = _build_action_hints_prompt(config, memory, env_context)
+        if hints_prompt:
+            base_prompt = append(hints_prompt, inherit=False)
+
+    if follow_up_suggestions_enabled:
+        base_prompt = append(
+            build_follow_up_suggestions_prompt(), inherit=False,
+        )
+
+    attr = _MODE_PROMPT_MAP.get(session_mode or "")
+    if attr:
+        prompt_filename = getattr(config.agent, attr, None)
+        if prompt_filename:
+            template_name = {"analysis_prompt_path": "analysis_prompt.md", "code_prompt_path": "code_prompt.md"}[attr]
+            mode_path = Config.find_prompt_file(prompt_filename, template_name)
+            if mode_path and mode_path.exists():
+                mode_prompt = resolve_capability_placeholders(
+                    mode_path.read_text(encoding="utf-8").strip(), available_tools,
+                )
+                base_prompt = append(
+                    mode_prompt,
+                    skip_empty=False,
+                )
+
+    if expert_context:
+        expert_prompt = expert_context.render_prompt()
+        if expert_prompt:
+            base_prompt = append(expert_prompt)
+    return base_prompt
+
+
+def build_session_prompt(
+    config, template: str,
+    *,
+    session_mode: str | None,
+    workspace: Path | None,
+    utility: bool = False,
+    sandbox_mode: bool = True,
+    skills_slot: bool = False,
+    policy: CapabilityPolicy | None = None,
+    env_context: EnvContext | None = None,
+    skill_runtime_context: SkillRuntimeContext | None = None,
+    expert_context: ExpertSessionContext | None = None,
+    workspace_layout: Any = None,
+    follow_up_suggestions_enabled: bool = False,
+    host_ui_hints: bool = False,
+    memory=None,
+    memory_block: str | None = None,
+    prompt_suffix: str | None = None,
+    available_tools: frozenset[str] | None = None,
+    child_prompt_segments: list[str] | None = None,
+) -> str:
+    """The one system-prompt builder for CLI, ACP and Python SDK sessions."""
+    from .tools.skillhub_search_tool import SKILL_SOURCE_DISCOVERY_PROMPT
+
+    prompt = _compose_session_prompt(
+        config, template, memory, session_mode,
+        workspace=workspace,
+        sandbox_mode=sandbox_mode,
+        skills_slot=skills_slot,
+        policy=policy,
+        env_context=env_context,
+        skill_runtime_context=skill_runtime_context,
+        expert_context=expert_context,
+        workspace_layout=workspace_layout,
+        enable_general_directory_policy=(
+            not utility and session_mode in {None, "general"}
+        ),
+        follow_up_suggestions_enabled=follow_up_suggestions_enabled,
+        host_ui_hints=host_ui_hints,
+        available_tools=available_tools,
+        child_prompt_segments=child_prompt_segments,
+        skill_sourcing_provided=SKILL_SOURCE_DISCOVERY_PROMPT in (prompt_suffix or ""),
+    )
+    from .memory import ExternalMemoryBackend, MEMORY_CONTEXT_SLOT, place_memory_block
+
+    # 统一装配器使用后端已有的槽位规则，避免各入口重复召回或追加记忆。
+    if utility or (memory is None and not memory_block):
+        prompt = prompt.replace(MEMORY_CONTEXT_SLOT, "")
+    else:
+        prompt = place_memory_block(
+            prompt, memory_block or "", reserve=isinstance(memory, ExternalMemoryBackend),
+        )
+    if not utility:
+        prompt = append_prompt_segment(
+            prompt, build_image_generation_prompt(config, tools=available_tools),
+        )
+    if prompt_suffix and prompt_suffix.strip():
+        prompt = append_prompt_segment(prompt, prompt_suffix.strip())
+        if child_prompt_segments is not None:
+            child_prompt_segments.append(prompt_suffix.strip())
+    return prompt
+
+
 def build_acp_session_prompt(
     config, system_prompt, memory,
     session_mode: str | None,
@@ -573,90 +860,24 @@ def build_acp_session_prompt(
     workspace_layout: Any = None,
     enable_general_directory_policy: bool = False,
     follow_up_suggestions_enabled: bool = False,
+    available_tools: frozenset[str] | None = None,
 ) -> str:
-    """Build system prompt with conditional mode-specific injection."""
-    _MODE_PROMPT_MAP = {
-        "data_analysis": "analysis_prompt_path",
-        "code_agent": "code_prompt_path",
-    }
-
-    base_prompt = compose_prompt_segments(
-        system_prompt,
-        replacements={
-            "{SANDBOX_INFO}": build_sandbox_info_prompt(),
-            "{FILE_DELIVERY_INFO}": build_file_delivery_prompt(),
-        },
-        segments=(
-            PROJECT_WORKSPACE_MODE_PROMPT
-            if session_mode == "code_agent"
-            else None,
-        ),
-    )
-    if workspace is not None:
-        base_prompt = append_prompt_segment(
-            base_prompt,
-            _filesystem_access_prompt(workspace, policy),
-        )
-        layout_prompt = _workspace_layout_prompt(
-            workspace=workspace,
-            layout=workspace_layout,
-        )
-        base_prompt = append_prompt_segment(base_prompt, layout_prompt)
-
-    if enable_general_directory_policy:
-        base_prompt = append_prompt_segment(
-            base_prompt, GENERAL_DIRECTORY_ORGANIZATION_PROMPT,
-        )
-
-    if session_mode == "code_agent" and workspace is not None:
-        base_prompt = append_prompt_segment(
-            base_prompt,
-            build_project_startup_context_prompt(workspace),
-        )
-
-    env_prompt = build_env_context_prompt(env_context)
-    if env_prompt:
-        base_prompt = append_prompt_segment(base_prompt, env_prompt)
-
-    runtime_context = skill_runtime_context or build_skill_runtime_context(
+    """Compatibility view: the ACP overlays without memory/image/suffix tails."""
+    return _compose_session_prompt(
+        config, system_prompt, memory, session_mode,
+        workspace=workspace,
         sandbox_mode=True,
+        skills_slot=False,
+        policy=policy,
         env_context=env_context,
+        skill_runtime_context=skill_runtime_context,
+        expert_context=expert_context,
+        workspace_layout=workspace_layout,
+        enable_general_directory_policy=enable_general_directory_policy,
+        follow_up_suggestions_enabled=follow_up_suggestions_enabled,
+        host_ui_hints=True,
+        available_tools=available_tools,
     )
-    base_prompt = append_prompt_segment(
-        base_prompt,
-        build_skill_runtime_prompt(runtime_context),
-    )
-
-    hints_prompt = _build_action_hints_prompt(config, memory, env_context)
-    if hints_prompt:
-        base_prompt = append_prompt_segment(base_prompt, hints_prompt)
-
-    if follow_up_suggestions_enabled:
-        base_prompt = append_prompt_segment(
-            base_prompt,
-            build_follow_up_suggestions_prompt(),
-        )
-
-    attr = _MODE_PROMPT_MAP.get(session_mode or "")
-    if attr:
-        prompt_filename = getattr(config.agent, attr, None)
-        if prompt_filename:
-            mode_path = Config.find_config_file(prompt_filename)
-            if mode_path and mode_path.exists():
-                mode_prompt = mode_path.read_text(encoding="utf-8").strip()
-                base_prompt = append_prompt_segment(
-                    base_prompt,
-                    mode_prompt,
-                    skip_empty=False,
-                )
-            else:
-                pass  # Missing optional mode prompt.
-
-    if expert_context:
-        expert_prompt = expert_context.render_prompt()
-        if expert_prompt:
-            base_prompt = append_prompt_segment(base_prompt, expert_prompt)
-    return base_prompt
 
 
 def create_application_runtime():

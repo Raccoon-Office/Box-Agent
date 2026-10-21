@@ -35,3 +35,26 @@ def test_search_result_without_url_does_not_register_a_clickable_source():
     assert _extract_web_search_payload("web_search", json.dumps({
         "Result": {"WebResults": [{"Id": "opaque-id", "SortId": 2}]},
     })) is None
+
+
+def test_citation_binding_preserves_model_summary_and_rejects_numeric_aliases():
+    from box_agent.tools.web_search_runtime import _bind_web_search_citations
+
+    content = json.dumps({"type": "web_search", "refs": [{
+        "title": "Source", "url": "https://example.com/one", "reference_tag": "ref_1",
+        "reference_aliases": ["ref_1", "ref_source"],
+    }]})
+    visible, model = _bind_web_search_citations(content, "Condensed summary")
+    ref = json.loads(visible)["refs"][0]
+    assert ref["reference_tag"].startswith("ref_web_")
+    assert ref["reference_aliases"] == ["ref_source"]
+    assert model.startswith("Condensed summary")
+    assert ref["reference_tag"] in model
+    assert ref["url"] in model
+
+
+@pytest.mark.parametrize("content", ["not JSON", "[]", '{"refs": []}', '{"refs": [null, {"url": "invalid"}]}'])
+def test_citation_binding_leaves_unusable_results_unchanged(content):
+    from box_agent.tools.web_search_runtime import _bind_web_search_citations
+
+    assert _bind_web_search_citations(content, content) == (content, content)

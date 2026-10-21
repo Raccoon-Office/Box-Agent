@@ -335,25 +335,30 @@ async def _cleanup_hook_run(
 async def _wait_for_hook_cleanup(task: asyncio.Task, *, settle: bool) -> None:
     """Managed runs cannot release their session resources before hooks finish."""
     cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            cleanup_error = await asyncio.shield(task)
-            break
-        except asyncio.CancelledError as error:
-            if not settle or task.cancelled():
-                if task.done() and not task.cancelled():
-                    completed_error = task.result()
-                    if completed_error is not None:
-                        raise _combined_cleanup_error([completed_error, error])
-                raise
-            if cancellation is None:
-                cancellation = error
-    if cancellation is not None:
+    try:
+        while True:
+            try:
+                cleanup_error = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as error:
+                if not settle or task.cancelled():
+                    if task.done() and not task.cancelled():
+                        completed_error = task.result()
+                        if completed_error is not None:
+                            raise _combined_cleanup_error([completed_error, error])
+                    raise
+                if cancellation is None:
+                    cancellation = error
+        if cancellation is not None:
+            if cleanup_error is not None:
+                raise _combined_cleanup_error([cleanup_error, cancellation])
+            raise cancellation
         if cleanup_error is not None:
-            raise _combined_cleanup_error([cleanup_error, cancellation])
-        raise cancellation
-    if cleanup_error is not None:
-        raise cleanup_error
+            raise cleanup_error
+    finally:
+        # A saved exception points back to this frame. Drop only our local
+        # references after propagation; leave the caller's traceback intact.
+        cancellation = cleanup_error = completed_error = task = None
 
 
 def _cleanup_task_finished(task: asyncio.Task) -> None:
@@ -458,25 +463,30 @@ async def run_agent_loop_with_default_services(
         raise
     finally:
         cleanup_errors: list[BaseException] = []
-        if events is not None:
+        try:
+            if events is not None:
+                try:
+                    await events.aclose()
+                except BaseException as error:
+                    cleanup_errors.append(error)
             try:
-                await events.aclose()
+                cleanup_task = asyncio.create_task(_cleanup_hook_run(bus, activation, host))
+                _HOOK_CLEANUP_TASKS.add(cleanup_task)
+                cleanup_task.add_done_callback(_cleanup_task_finished)
+                await _wait_for_hook_cleanup(
+                    cleanup_task, settle=managed_services is not None,
+                )
             except BaseException as error:
                 cleanup_errors.append(error)
-        try:
-            cleanup_task = asyncio.create_task(_cleanup_hook_run(bus, activation, host))
-            _HOOK_CLEANUP_TASKS.add(cleanup_task)
-            cleanup_task.add_done_callback(_cleanup_task_finished)
-            await _wait_for_hook_cleanup(
-                cleanup_task, settle=managed_services is not None,
-            )
-        except BaseException as error:
-            cleanup_errors.append(error)
-        if cleanup_errors:
-            cleanup_error = _combined_cleanup_error(cleanup_errors)
-            if primary_error is None:
-                raise cleanup_error
-            _attach_cleanup_error(primary_error, cleanup_error)
+            if cleanup_errors:
+                cleanup_error = _combined_cleanup_error(cleanup_errors)
+                if primary_error is None:
+                    raise cleanup_error
+                _attach_cleanup_error(primary_error, cleanup_error)
+        finally:
+            # Exception -> traceback -> these locals must not retain a run.
+            primary_error = cleanup_error = cleanup_task = None
+            cleanup_errors.clear()
 
 
 __all__ = [

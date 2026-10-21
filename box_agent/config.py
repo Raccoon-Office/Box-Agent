@@ -3,13 +3,15 @@
 Provides unified configuration loading and management functionality
 """
 
+import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, field_validator, model_validator
 
 from .auth import should_attach_auth_header
 from .user_paths import (
@@ -208,6 +210,44 @@ class ToolLimitsConfig(ToolLimitsModel):
     sub_agent: SubAgentToolLimitsConfig = Field(default_factory=SubAgentToolLimitsConfig)
 
 
+class MemoryHttpOperation(BaseModel):
+    """通用记忆后端的单项协议映射；请求只发送模板明确声明的字段。"""
+
+    path: str
+    method: Literal["GET", "POST"] = "POST"
+    request: dict[str, Any] = Field(default_factory=dict)
+    response_path: str = ""
+    success_path: str | None = None
+    success_value: Any = True
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        """操作路径始终相对于显式配置的服务地址。"""
+        if not value.startswith("/") or value.startswith("//"):
+            raise ValueError("memory operation path must start with a single /")
+        return value
+
+
+class ExternalMemoryConfig(BaseModel):
+    """外部记忆连接及能力配置，具体协议由 memory 插件解释。"""
+
+    base_url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict, repr=False)
+    timeout_seconds: float = Field(default=5, gt=0, le=60)
+    max_retries: int = Field(default=1, ge=0, le=3)
+    context_max_chars: int = Field(default=16000, ge=1)
+    # 仅 MemSense 使用，按服务端 UTC 日期读取近期摘要；0 表示关闭日期预载。
+    date_memory_load_days: int = Field(default=3, ge=0, le=31)
+    save_queue_limit: int = Field(default=128, ge=1)
+    shutdown_timeout_seconds: float = Field(default=20, gt=0, le=60)
+    # 以下操作均可省略；mem0/memu 占位类型使用相同映射。
+    recall: MemoryHttpOperation | None = None
+    read: MemoryHttpOperation | None = None
+    search: MemoryHttpOperation | None = None
+    save: MemoryHttpOperation | None = None
+
+
 class AgentConfig(BaseModel):
     """Agent configuration"""
 
@@ -269,6 +309,12 @@ class AgentConfig(BaseModel):
     # Memory
     enable_memory: bool = True
     memory_dir: str = Field(default_factory=default_memory_dir)
+    # 后端选择和内部身份；是否向远端发送身份由具体协议决定。
+    memory_backend_type: Literal["local", "memsense", "generic", "mem0", "memu"] = "local"
+    memory_tenant_id: str = "default"
+    memory_user_id: str = "default"
+    memory_external: ExternalMemoryConfig = Field(default_factory=ExternalMemoryConfig)
+
     # Memory auto-extraction
     enable_memory_extraction: bool = True
     memory_extraction_cooldown: int = 300  # seconds between extractions
@@ -288,6 +334,12 @@ class AgentConfig(BaseModel):
     memory_promotion_proposal_enabled: bool = True  # suggest v2 experience → core
     memory_promotion_hit_threshold: int = 5  # min explicit-search hits before suggesting promotion
     memory_promotion_cooldown_days: int = 14  # skip re-proposing for this long
+
+    @field_validator("memory_tenant_id", "memory_user_id", mode="before")
+    @classmethod
+    def normalize_memory_identity(cls, value: Any) -> str:
+        """未填写的租户和用户分别使用 default。"""
+        return str(value or "").strip() or "default"
 
 
 class MCPConfig(BaseModel):
@@ -710,6 +762,21 @@ class Config(BaseModel):
 
     @classmethod
     def find_config_file(cls, filename: str) -> Path | None:
+        path = cls._find_config_file(filename)
+        if path is not None and filename in PROMPT_TEMPLATE_FILES:
+            _warn_prompt_override_drift(path, filename)
+        return path
+
+    @classmethod
+    def find_prompt_file(cls, filename: str, template: str) -> Path | None:
+        """Resolve configured prompt paths while preserving the generic lookup API."""
+        path = cls.find_config_file(filename)
+        if path is not None and filename != template:
+            _warn_prompt_override_drift(path, template)
+        return path
+
+    @classmethod
+    def _find_config_file(cls, filename: str) -> Path | None:
         """Find configuration file with priority order
 
         Search for config file in the following order of priority:
@@ -802,3 +869,61 @@ class Config(BaseModel):
             )
 
         return target
+
+
+# Prompt templates a user may override in ~/.box-agent/config (or BOX_AGENT_HOME).
+PROMPT_TEMPLATE_FILES = ("system_prompt.md", "analysis_prompt.md", "code_prompt.md")
+_PROMPT_PLACEHOLDER = re.compile(r"\{[A-Z][A-Z_]{2,}\}|\{\{\.[A-Za-z]+\}\}")
+_warned_prompt_overrides: set[tuple[str, int, str]] = set()
+
+
+def prompt_override_drift(path: Path, filename: str) -> dict[str, Any] | None:
+    """Compare a prompt template override with the packaged one.
+
+    Placeholders are how the session builder injects version-specific,
+    capability-gated sections. An override copied from an older release lacks
+    new placeholders (those sections silently stay stale) or carries ones this
+    version no longer fills (they would leak verbatim into the prompt).
+    Returns ``None`` when ``path`` is the packaged file or matches it.
+    """
+    bundled = Config.get_package_dir() / "config" / filename
+    try:
+        if not bundled.is_file() or path.resolve() == bundled.resolve():
+            return None
+        expected = set(_PROMPT_PLACEHOLDER.findall(bundled.read_text(encoding="utf-8")))
+        actual = set(_PROMPT_PLACEHOLDER.findall(path.read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError) as error:
+        return {"path": str(path), "bundled": str(bundled), "missing": [], "unknown": [],
+                "error": type(error).__name__}
+    missing, unknown = sorted(expected - actual), sorted(actual - expected)
+    if not missing and not unknown:
+        return None
+    return {"path": str(path), "bundled": str(bundled), "missing": missing, "unknown": unknown}
+
+
+def _warn_prompt_override_drift(path: Path, filename: str) -> None:
+    """Warn once per file version and template role; never change the file used."""
+    try:
+        key = (str(path.resolve()), path.stat().st_mtime_ns, filename)
+    except OSError:
+        return
+    if key in _warned_prompt_overrides:
+        return
+    _warned_prompt_overrides.add(key)
+    drift = prompt_override_drift(path, filename)
+    if drift is None:
+        return
+    parts = []
+    if drift.get("error"):
+        parts.append(f"cannot read template: {drift['error']}")
+    if drift["missing"]:
+        parts.append(f"missing {', '.join(drift['missing'])}")
+    if drift["unknown"]:
+        parts.append(f"unknown {', '.join(drift['unknown'])}")
+    # stderr only: ACP reserves stdout for protocol frames.
+    print(
+        f"[box-agent] warning: prompt override {path} differs from this version's {filename} "
+        f"({'; '.join(parts)}); it was probably copied from an older release. "
+        f"Update it from {drift['bundled']} or delete it to use the packaged prompt.",
+        file=sys.stderr,
+    )

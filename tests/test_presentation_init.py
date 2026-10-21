@@ -53,7 +53,7 @@ def test_init_copies_exact_template_from_any_cwd_without_producing_plans(skill, 
     receipt = json.loads(result.stdout)
     assert receipt == {
         "deck_dir": str(root.resolve()), "base_css": str(root / "base.css"),
-        "created": True, "qa": "not-run",
+        "created": True, "canvas": [1600, 900], "qa": "not-run",
     }
     assert (root / "base.css").read_bytes() == (skill / "references/base-template.css").read_bytes()
     assert sorted(p.name for p in root.iterdir()) == ["base.css"]

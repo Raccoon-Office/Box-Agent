@@ -56,6 +56,26 @@ class TestSplitInlineThink:
 
 
 class TestUnwrapThinkTags:
+    async def test_iterator_without_aclose_remains_supported(self) -> None:
+        class Stream:
+            def __init__(self):
+                self.events = iter([
+                    StreamEvent(type="text", delta="<think>reason</think>answer"),
+                ])
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.events)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        events = await _drain(unwrap_think_tags(Stream()))
+        assert _combine(events, "text") == "answer"
+        assert _combine(events, "thinking") == "reason"
+
     async def test_text_without_tags_passes_through(self) -> None:
         events = await _drain(unwrap_think_tags(_from_deltas([("text", "hello world")])))
         assert _combine(events, "text") == "hello world"

@@ -16,6 +16,7 @@ from ..base import (
     Tool,
     ToolInvocationContext,
     ToolResult,
+    bind_tool_cancellation,
 )
 from ...session_log import SessionLogDurabilityError
 from .execution import invoke_tool_once
@@ -152,11 +153,12 @@ class ToolEngine:
                 event_queue=event_queue,
             )
         tool = self._tools[request.tool_name]
-        return await invoke_tool_once(
-            tool, request.arguments, context=context,
-            approved_permission_request=request.approved_permission_request,
-            on_invoke=request.on_invoke,
-        )
+        with bind_tool_cancellation(self._is_cancelled):
+            return await invoke_tool_once(
+                tool, request.arguments, context=context,
+                approved_permission_request=request.approved_permission_request,
+                on_invoke=request.on_invoke,
+            )
 
     async def invoke_serial(
         self,

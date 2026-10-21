@@ -1,11 +1,15 @@
 {
   "schema_version": 1,
-  "box_agent_version": "0.9.8",
-  "generated_at": "2026-10-08T03:02:42Z",
+  "box_agent_version": "1.0.0",
+  "generated_at": "2026-10-21T12:06:27Z",
   "skills": [
     {
       "name": "browser-use",
       "path": "browser-use/SKILL.md"
+    },
+    {
+      "name": "computer-use",
+      "path": "computer-use/SKILL.md"
     },
     {
       "name": "data-dashboard",

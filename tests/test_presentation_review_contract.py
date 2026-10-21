@@ -58,6 +58,8 @@ def test_standard_exports_unique_ready_contract_despite_historical_block_text(de
 @pytest.mark.parametrize("contract", [
     READY.replace("status: ready", "status: pending_parent_verification"),
     READY.replace("status: ready", "status: blocked"),
+    READY.replace("status: ready", "status: visual_unverified"),
+    READY.replace("status: ready", "status: partial"),
     READY.replace("inspected: yes", "inspected: no"),
     READY.replace("remaining: none", "remaining: P7 cropped"),
     READY.replace("final_pixels_inspected: yes\n", ""),

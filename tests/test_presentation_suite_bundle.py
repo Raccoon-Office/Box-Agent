@@ -48,7 +48,7 @@ def test_entry_routes_static_and_dynamic_without_missing_methods():
 
 def test_provenance_covers_every_file_and_records_integration_changes():
     source = json.loads((SUITE / "source.json").read_text())
-    assert source["revision"] == "ed82b4ae0238dfa5be108c41271e887876f0f9d8"
+    assert source["revision"] == "e82cdb296b880a79a50711bc2937bf70b2222dc3"
     assert source["modules"] == sorted(NAMES)
     assert "entry-two-outputs" in source["overlays"]
     assert "/Users/" not in json.dumps(source)
@@ -164,6 +164,7 @@ def source_repo(tmp_path, monkeypatch):
     monkeypatch.setitem(sync.__globals__, "_host_playwright_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_image_inspection_recovery_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_windows_compat_overlay", lambda _, data: data)
+    monkeypatch.setitem(sync.__globals__, "_canvas_dimensions_overlay", lambda _, data: data)
     repo = tmp_path / "upstream"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)

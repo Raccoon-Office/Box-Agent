@@ -10,6 +10,55 @@ from box_agent.acp import _artifact_envelope
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["commit", "abort"])
+async def test_transaction_inputs_never_become_artifacts_or_registry_entries(tmp_path, action):
+    from box_agent.artifact_publication import apply_delivery_policy
+    from box_agent.task_context import TaskContext
+    from box_agent.task_registry import register_artifact_revision
+    from box_agent.tools.file_tools import WriteTool
+    from box_agent.tools.engine.artifact_results import _snapshot_workspace
+
+    publisher = PublishArtifactTool(tmp_path)
+    started = await publisher.execute(path="result.md", action="begin")
+    assert started.success
+    staging = started.raw_output["staging_path"]
+    written = await WriteTool(str(tmp_path)).execute(staging, "# Final result\n")
+    assert written.success
+    raw = apply_delivery_policy(written.raw_output, str(tmp_path))
+    assert raw["type"] == "intermediate_asset"
+    # Neither exact structured paths, explicit text references, nor workspace
+    # discovery can surface transaction inputs, even with a publication sidecar.
+    from pathlib import Path
+    staged_path = Path(staging)
+    write_metadata(staged_path, {"type": "artifact"})
+    relative = staged_path.relative_to(tmp_path).as_posix()
+    assert staged_path not in _snapshot_workspace(str(tmp_path))
+    assert _detect_tool_artifacts("write", "write_file", f"[{relative}]", raw,
+                                  {}, {}, str(tmp_path)) == []
+    assert _detect_tool_artifacts("shell", "bash", f"[{relative}]", None,
+                                  {}, {}, str(tmp_path)) == []
+    ended = await publisher.execute(action=action, write_id=started.raw_output["write_id"])
+    assert ended.success
+    assert not staged_path.exists()
+    events = _detect_tool_artifacts("publish", "publish_artifact", ended.content,
+                                   ended.raw_output, {}, {}, str(tmp_path))
+    assert [e.rel_path for e in events] == (["result.md"] if action == "commit" else [])
+    for event in events:
+        assert event.placement == "primary"
+        register_artifact_revision(tmp_path, TaskContext(
+            session_id="s", task_id="task", turn_id="turn",
+        ), event)
+    registry = tmp_path / ".box-agent/task-registry/tasks/task.json"
+    if action == "commit":
+        import json
+        artifacts = json.loads(registry.read_text())["artifacts"]
+        assert [a["rel_path"] for a in artifacts] == ["result.md"]
+        assert artifacts[0]["revisions"][0]["turn_id"] == "turn"
+    else:
+        assert not registry.exists()
+
+
+@pytest.mark.asyncio
 async def test_promoted_intermediate_reaches_cli_and_acp(tmp_path, capsys):
     file = tmp_path / "review.png"
     file.write_bytes(b"image")

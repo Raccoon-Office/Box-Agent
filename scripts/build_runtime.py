@@ -1098,8 +1098,8 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default=os.environ.get("BOX_AGENT_RUNTIME_OUTPUT", "dist/runtime"),
-        help="Output directory (default: BOX_AGENT_RUNTIME_OUTPUT or dist/runtime)",
+        default=os.environ.get("BOX_AGENT_RUNTIME_OUTPUT"),
+        help="Output directory (default: BOX_AGENT_RUNTIME_OUTPUT, Lab dist/runtime for --mac-all-lab, otherwise dist/runtime)",
     )
     parser.add_argument(
         "--target",
@@ -1112,22 +1112,34 @@ def main():
         default=None,
         help="Shortcut for --target <current-platform>-<arch>, e.g. --arch x64",
     )
-    parser.add_argument(
+    mac_modes = parser.add_mutually_exclusive_group()
+    mac_modes.add_argument(
         "--mac-all",
         action="store_true",
         help="Build both macOS architectures from one source snapshot; requires separate ARM/Intel Python environments.",
     )
+    mac_modes.add_argument(
+        "--mac-all-lab",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Build both macOS runtime archives into raccoon-lab/apps/office-desktop/dist/runtime. "
+            "Omit DIR to use BOX_AGENT_LAB_DIR or auto-detect the checkout."
+        ),
+    )
     parser.add_argument(
         "--arm-python", metavar="PATH",
-        help="--mac-all only: ARM Python (default: .venv/bin/python).",
+        help="Dual macOS build only: ARM Python (default: .venv/bin/python).",
     )
     parser.add_argument(
         "--intel-python", metavar="PATH",
-        help="--mac-all only: Intel Python (default: .venv-x64/bin/python).",
+        help="Dual macOS build only: Intel Python (default: .venv-x64/bin/python).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="--mac-all only: check both Python environments and print the plan without building.",
+        help="Dual macOS build only: check both Python environments and print the plan without building.",
     )
     parser.add_argument(
         "--external-python-sandbox",
@@ -1163,15 +1175,20 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.mac_all:
+    if args.mac_all or args.mac_all_lab is not None:
+        mode = "--mac-all-lab" if args.mac_all_lab is not None else "--mac-all"
         if args.target or args.arch or args.install_officev3 is not None or args.install_lab is not None:
-            parser.error("--mac-all cannot be combined with --target/--arch or host installation options")
+            parser.error(f"{mode} cannot be combined with --target/--arch or host installation options")
         if not args.version:
-            parser.error("--mac-all requires --version X.Y.Z (or BOX_AGENT_RUNTIME_VERSION)")
+            parser.error(f"{mode} requires --version X.Y.Z (or BOX_AGENT_RUNTIME_VERSION)")
         from scripts.build_macos_runtimes import build_macos_runtimes
         try:
+            default_output = Path("dist/runtime")
+            if args.mac_all_lab is not None:
+                lab_dir = resolve_lab_dir(args.mac_all_lab or None)
+                default_output = lab_dir / "apps/office-desktop/dist/runtime"
             build_macos_runtimes(
-                PROJECT_ROOT, args.version, Path(args.output),
+                PROJECT_ROOT, args.version, Path(args.output) if args.output else default_output,
                 arm_python=args.arm_python, intel_python=args.intel_python, dry_run=args.dry_run,
             )
         except (OSError, RuntimeError, ValueError, tarfile.TarError, subprocess.SubprocessError) as exc:
@@ -1179,7 +1196,7 @@ def main():
             sys.exit(1)
         return
     if args.arm_python or args.intel_python or args.dry_run:
-        parser.error("--arm-python/--intel-python/--dry-run require --mac-all")
+        parser.error("--arm-python/--intel-python/--dry-run require --mac-all or --mac-all-lab")
 
     if args.target and args.arch:
         print("Error: use either --target or --arch, not both", file=sys.stderr)
@@ -1198,7 +1215,7 @@ def main():
         from box_agent import __version__
         version = __version__
 
-    output_dir = Path(args.output).resolve()
+    output_dir = Path(args.output or "dist/runtime").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     target = args.target

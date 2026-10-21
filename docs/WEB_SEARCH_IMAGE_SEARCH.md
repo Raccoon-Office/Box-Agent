@@ -34,7 +34,7 @@ Box-Agent normalizes common result shapes, including Custom `Result.ImageResults
   "type": "web_search",
   "refs": [
     {
-      "reference_tag": "ref_1",
+      "reference_tag": "ref_web_2e687bfad6ab06937257ec13",
       "title": "Shandong University",
       "url": "https://example.com/shandong-university",
       "domain": "example.com",
@@ -55,6 +55,8 @@ Box-Agent normalizes common result shapes, including Custom `Result.ImageResults
   ]
 }
 ```
+
+`reference_tag` is a URL-stable `ref_web_…` identifier shared by model-visible results and source events. The model must cite the exact tag in square brackets; the host assigns readable display numbers. The same source URL keeps its identifier across searches. Provider `SortId`, `Rank`, and numeric result IDs are not cross-search citation identifiers. Opaque upstream result IDs may remain as compatibility aliases; numeric aliases are not retained for these stable tags.
 
 Use `image_details` when available; `images` is the compatibility URL list. `image_details` can retain provider width, height, alt, shape, clarity, category, watermark, description, and style metadata. `url` prefers the source or landing page and falls back to the image URL when the provider supplies no landing page. Download from `image_details[].url`. Missing optional fields are omitted. Hosts consuming ACP updates should dispatch `rawOutput.type == "web_search"` and correlate the event with the original call by `toolCallId`.
 

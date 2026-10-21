@@ -182,7 +182,7 @@ async def test_write_file_conflict_discards_pending_write_and_can_restart(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_write_file_final_chunk_retry_returns_committed_receipt(tmp_path):
+async def test_write_file_final_chunk_retry_acknowledges_commit_without_new_write(tmp_path):
     tool = WriteTool(workspace_dir=str(tmp_path))
 
     first = await tool.execute(
@@ -197,7 +197,12 @@ async def test_write_file_final_chunk_retry_returns_committed_receipt(tmp_path):
 
     assert first.success is True
     assert committed.success is True
-    assert retried == committed
+    assert retried.success and retried.content == committed.content
+    assert retried.raw_output["transaction_state"] == "committed"
+    assert retried.raw_output["replayed"] is True
+    assert "file_changes" not in retried.raw_output
+    original_fields = {k: v for k, v in committed.raw_output.items() if k not in {"file_changes", "file_changes_version"}}
+    assert {k: v for k, v in retried.raw_output.items() if k != "replayed"} == original_fields
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "first-last"
 
 

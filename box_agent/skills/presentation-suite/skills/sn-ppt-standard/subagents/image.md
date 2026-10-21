@@ -10,6 +10,8 @@
 
 完成意味着：每个 `asset_id` 都有一个确认可用的本地文件，或有明确失败原因和可执行降级建议；全组素材共享同一视觉配方。只有正式素材已写入 `assets/catalog.json`、状态为 `ready` 且实际路径存在时，才能返回 `status: ready`。自然语言总结只说明结果，不能承担路径映射或素材清单职责。
 
+Box-Agent 的 Image 子任务没有 `bash`，也不能暂停等待父级执行再续跑。已取得真实候选、仅待父级登记、抠图、联系表或验收时，以既有 `pending_parent_verification` 一次交回候选与待办，不将这种工具分工记为 `blocked`，也不要求重新委派。父级完成下面的确定性操作、素材验收和计划回填后才可进入 Slide；候选交接不等于素材 ready。真实缺少素材或工具失败仍按原有有限恢复处理，无法完成时返回 `blocked`。其他环境保留原分工。
+
 ## 2. 输入、读取与写入边界
 
 goal 会给出稳定的 `group_id`，以及每项素材的 `asset_id`、用途、主体、媒介倾向、宽高比、主色/色调/情绪、是否需要主体透明和需要读取的逐页计划路径。对承担识别、证据或主视觉职责的图片，计划还应给出 `crop_contract`：焦点、必须保留的主体部位/图内信息、允许裁掉的背景与推荐 fit。brief 可能只通过计划中的 `image:` / `asset:` 行给出，必须按指定路径读取。
@@ -31,6 +33,8 @@ goal 会给出稳定的 `group_id`，以及每项素材的 `asset_id`、用途�
 - 对具备可见主体的普通内容页，优先提供能承担 hero、图字分屏或主要证据职责的高质量位图，不用微型图标或抽象 SVG 代替人物、地点、产品、作品、活动与场景。复杂主视觉若不适合位图，由 Slide 使用 Canvas + HTML；SVG 只用于小型辅助图形。
 
 ## 4. 工作流
+
+Box-Agent 子任务执行自身可用的 `generate_image`、`inspect_images` 与读取操作；以下需要 `bash` 的登记、Figure 裁图、抠图、联系表和状态回写均列入父级待办，不调用无权限命令或等待父子交错续跑。需要 Figure 裁图但已有可定位的真实页图时可交回候选与裁图参数；缺少真实源图、无法定位完整 Figure 或候选本身不可用，仍是实际阻塞。
 
 1. 先为整个分片固定一条视觉配方：媒介、主色、色温、饱和度、光线和构图气质。同时逐项核对计划的 `presentation`：`subject-only` 必须生成/下载易分离的独立主体并最终交付 Alpha cutout；`framed-scene` / `full-bleed` / `evidence-crop` 才允许保留原图背景。不得把“站在奶油色背景上”的场景图返回给悬浮角色槽位。
 2. 真实图片：用精确查询找一个最优候选；多人集合在同一检索回合提交互不重复的姓名查询，避免逐人形成串行搜索链。由父级通过 `web_search` 或 `serper_images.py` 获取并下载到 `$DECK_DIR/assets/`；生成图片由 `generate_image` 写入同一目录，随后由父级检查身份、主体、清晰度、水印、比例和裁切安全。候选必须能在计划槽位中保住 `protected_parts`；若需要大幅 `cover` 才能匹配、并会切掉人脸/头顶/双手、完整产品轮廓、Logo、作品主体或证据标签，换更合适比例的候选，或建议 Slide 改用 `contain` / 调整槽位，不能把不可用裁切交给下游。图片直链不得交给 `web_extract`，也不要用 terminal 的 curl/wget、自造 Wikimedia API 或反复改写同一 URL。某个主机返回 403/429、HTML 或无效图片后立即换独立来源；具体真实主体不得用“看起来像”的生成图冒充。多人集合无法全部取得时，返回已核实人物、缺失人物和可执行的团队合影/关键人物版式建议，不伪造齐套结果。 父级将每个正式素材登记到 `assets/catalog.json`，子 Agent 不自行改写来源。
@@ -99,16 +103,18 @@ goal 会给出稳定的 `group_id`，以及每项素材的 `asset_id`、用途�
 ## 6. 返回合同
 
 ```text
-status: ready | blocked
+status: ready | blocked | pending_parent_verification
 assets:
   - asset_id: <id>
     path: assets/<actual-file>
     origin: downloaded | generated | material | derived
     source: <下载 URL | 用户附件路径 | parent asset | generator model>
+    prompt: <生成素材的原始 prompt；非生成素材省略>
     use: <页面用途>
     treatment: none | cutout | <CSS 调和建议>
     crop_contract: fit=<cover|contain|cutout>; focal=<位置>; protect=<主体部位/图内信息>; allowed=<可裁背景>; object_position=<x% y%>
 missing: none | <asset_id + 原因 + 降级建议>
+pending_parent_operations: <仅 pending_parent_verification 时列 asset_id 与待登记/裁图/抠图/联系表/验收操作；其他状态省略>
 ```
 
 > **仅透明任务才输出 `transparent_assets`。** 上面的返回合同**不含** `transparent_assets` 字段。只有当 goal 真实要求 `subject_only: true` / `presentation: subject-only` / 透明背景 / 主体透明 / 抠图 / 去背时，才在合同末尾**追加一行**：
@@ -117,4 +123,4 @@ missing: none | <asset_id + 原因 + 降级建议>
 > ```
 > 且其中只列已通过 Alpha 检查与 Vision 的最终派生 cutout。非透明任务**完全不输出这个 key**——不写 `transparent_assets: not-required`，不留占位。
 
-一个分片只有全部计划 `asset_id` 均在 `assets/catalog.json` 中达到 `ready`、实际路径存在时才能返回 `status: ready`；否则返回 `blocked` 并逐项列出缺口，不用 `partial` 掩盖未完成素材。候选、被替换文件和 `needs_review` 不得计入已准备素材。
+一个分片只有全部计划 `asset_id` 均在 `assets/catalog.json` 中达到 `ready`、实际路径存在时才能返回 `status: ready`。Box-Agent 仅待父级操作时返回 `pending_parent_verification`，逐项保留真实候选路径、原始 prompt / 来源、裁切要求与父级待办；不伪造 catalog 或 ready。缺素材、不可用候选或工具失败造成的实际缺口返回 `blocked` 并列明原因，不用 `partial` 掩盖。其他环境不使用该中间状态。候选、被替换文件和 `needs_review` 不得计入已准备素材。

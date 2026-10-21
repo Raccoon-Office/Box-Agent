@@ -4,6 +4,7 @@ Provides dangerous command detection, path validation, file backup,
 and user confirmation for destructive operations.
 """
 
+import glob
 import os
 import re
 import shutil
@@ -700,7 +701,12 @@ def extract_rm_targets(command: str, cwd: str | None = None) -> list[Path]:
     """
     targets: list[Path] = []
     seen: set[Path] = set()
+    current_dir = Path(cwd or Path.cwd())
     for invocation in inspect_shell_command(command).invocations:
+        if _normalized_executable(invocation.executable) in {"cd", "set-location"} and invocation.arguments:
+            path = Path(invocation.arguments[-1]).expanduser()
+            current_dir = path if path.is_absolute() else current_dir / path
+            continue
         if _normalized_executable(invocation.executable) not in {"rm", "rmdir"}:
             continue
         options_finished = False
@@ -713,11 +719,15 @@ def extract_rm_targets(command: str, cwd: str | None = None) -> list[Path]:
             if re.match(r"^\d*(?:>|>>|<)", token):
                 continue
             path = Path(token)
-            if not path.is_absolute() and cwd:
-                path = Path(cwd) / path
-            resolved = path.resolve()
-            if resolved not in seen:
-                seen.add(resolved)
-                targets.append(resolved)
+            if not path.is_absolute():
+                path = current_dir / path
+            # Inspection strips quotes, so keep a literal candidate as well:
+            # a quoted filename such as "QA [1].png" is not a shell glob.
+            matches = [path, *glob.glob(str(path))] if glob.has_magic(str(path)) else [path]
+            for match in matches:
+                resolved = Path(match).resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    targets.append(resolved)
 
     return targets

@@ -100,6 +100,21 @@ async def test_entered_failed_or_cancelled_execution_keeps_charge(failure):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('code', ['TOOL_EXECUTION_CANCELLED', 'NESTED_FILE_CHANGE_INVOCATION'])
+async def test_reported_rejection_code_cannot_refund_executed_tool_quota(code):
+    class ReportingTool(CountingTool):
+        async def execute(self):
+            await super().execute()
+            return ToolResult(success=False, raw_output={'code': code})
+
+    tool, quota = ReportingTool(), DelegatedBudget(1)
+    with bind_budgets((quota,)):
+        assert not (await invoke_tool_once(tool, {})).success
+        assert not (await invoke_tool_once(tool, {})).success
+    assert quota.used == tool.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_invalid_arguments_and_unsupported_delegation_do_not_execute():
     quota, tool = DelegatedBudget(2), CountingTool()
     tool.parameters = {"type": "object", "required": ["value"]}

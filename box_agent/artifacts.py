@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+from .artifact_publication import is_publication_metadata
 from .events import ArtifactEvent
 from .roadmap_artifacts import roadmap_metadata_for_html_artifact
 
@@ -194,7 +195,7 @@ def _artifact_metadata(path: Path) -> tuple[bool, str, str]:
 
 def is_intermediate_artifact(path: Path) -> bool:
     """Whether a producer marked this file as internal to its workflow."""
-    return _artifact_metadata(path)[0]
+    return is_publication_metadata(path) or _artifact_metadata(path)[0]
 
 
 def make_artifact(

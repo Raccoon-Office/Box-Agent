@@ -377,8 +377,10 @@ def test_legacy_tool_result_helper_is_reexported_from_kernel(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("coalesced_wakeups", [False, True])
 async def test_runtime_core_facade_reads_monkeypatched_timing_defaults(
     monkeypatch,
+    coalesced_wakeups,
 ) -> None:
     """Runtime's Core facade reads timing defaults at first iteration."""
     import box_agent.core as core
@@ -425,10 +427,8 @@ async def test_runtime_core_facade_reads_monkeypatched_timing_defaults(
                 )
                 return
             if self.calls == 2:
-                await asyncio.sleep(0.05)
-                yield StreamEvent(type="text", delta="late provider output")
-                yield StreamEvent(type="finish", finish_reason="stop")
-                return
+                # Model a stalled provider, independently of timer scheduling.
+                await asyncio.Event().wait()
             yield StreamEvent(type="text", delta="recovered")
             yield StreamEvent(type="finish", finish_reason="stop")
 
@@ -438,6 +438,15 @@ async def test_runtime_core_facade_reads_monkeypatched_timing_defaults(
     monkeypatch.setattr(core, "LLM_PROVIDER_STALE_SECONDS", 1.0)
 
     llm = TimedLLM()
+    real_wait = asyncio.wait
+
+    async def wait_with_coalesced_wakeups(tasks, **kwargs):
+        if coalesced_wakeups and llm.calls == 2:
+            # Reproduce a busy event loop where data and timer wake together.
+            await asyncio.sleep(0.08)
+        return await real_wait(tasks, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", wait_with_coalesced_wakeups)
     event_stream = run_agent_loop(
         llm=llm,
         messages=[Message(role="user", content="run the slow tool")],

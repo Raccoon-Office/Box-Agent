@@ -38,6 +38,7 @@ MANIFEST_PATH = SKILLS_DIR / "_manifest.json"
 BUILTIN_SKILL_NAMES: frozenset[str] = frozenset(
     {
         "browser-use",
+        "computer-use",
         "data-dashboard",
         "docx",
         "html-templates",

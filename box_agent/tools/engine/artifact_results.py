@@ -15,7 +15,9 @@ from ...artifacts import (
     make_artifact as _make_artifact,
 )
 from ...events import ArtifactEvent
-from ...artifact_publication import SUFFIX, intermediate_fingerprints, is_intermediate
+from ...artifact_publication import (
+    STAGING_DIRECTORY, intermediate_fingerprints, is_intermediate, is_publication_sidecar,
+)
 
 _log = logging.getLogger("box_agent.core")
 
@@ -98,6 +100,7 @@ _IGNORE_DIRS = frozenset(
     {
         ".box-agent",
         ".box-agent-scratch",
+        STAGING_DIRECTORY,
         ".git",
         ".hg",
         ".ipynb_checkpoints",
@@ -192,7 +195,7 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
                     _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
                     return None
                 entry = current / filename
-                is_metadata = entry.name.startswith(".") and entry.name.endswith(SUFFIX) and len(entry.name) > len(SUFFIX) + 1
+                is_metadata = is_publication_sidecar(entry)
                 if (entry.name.startswith(".") and not (include_publication_metadata and is_metadata)) or entry.suffix == ".tmp":
                     continue
                 if not entry.is_file():
@@ -209,7 +212,7 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
 def _publication_fingerprints(workspace_dir: str) -> dict[int, set[str]]:
     files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
     return intermediate_fingerprints(
-        path for path in (files or ()) if path.name.startswith(".") and path.name.endswith(SUFFIX)
+        path for path in (files or ()) if is_publication_sidecar(path)
     )
 
 

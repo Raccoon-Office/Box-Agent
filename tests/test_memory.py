@@ -80,7 +80,7 @@ async def test_openclaw_import_caps_utility_model_output(
 
     base_llm.for_model.assert_called_once_with(
         "sn-sensenova-6-8-flash-lite",
-        max_output_tokens=4_096,
+        max_output_tokens=8_192,
     )
     assert imported == "- prefers concise replies"
     assert "prefers concise replies" in mgr.read_core()

@@ -8,9 +8,182 @@ memory is searchable on demand.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from .base import Tool, ToolResult
+
+
+def _memsense_path_parameter(backend: Any) -> dict[str, Any]:
+    """模型只看到两个必填短路径，服务端前缀由后端补齐。"""
+    return {"type": "string", "enum": list(backend.core_tool_paths),
+            "description": "必填。user.md 为用户画像，memory.md 为长期记忆；只允许这两个短路径。"}
+
+
+class ExternalMemoryReadTool(Tool):
+    """按外部后端自身协议读取记忆资源。"""
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    @property
+    def name(self) -> str:
+        return "memory_read"
+
+    @property
+    def description(self) -> str:
+        if self._backend.backend_type == "memsense":
+            return ("读取 MemSense 核心记忆。path 必填：user.md 为用户画像，memory.md 为长期记忆。"
+                    "返回正文和独立的修改规则字段；调用 memory_write 或 memory_edit 前，"
+                    "必须先显式读取同一路径，并遵守返回的规则。自动注入不代替显式读取。")
+        return "通过已配置的外部记忆服务读取资源；path 的含义由该服务约定。"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        if self._backend.backend_type == "memsense":
+            return {"type": "object", "properties": {"path": _memsense_path_parameter(self._backend)},
+                    "required": ["path"]}
+        return {"type": "object", "properties": {"path": {"type": "string", "description": "可选的记忆资源路径"}}}
+
+    async def execute(self, path: str = "") -> ToolResult:
+        from ..memory import MemoryEditError
+
+        try:
+            if self._backend.backend_type == "memsense":
+                data = await self._backend.read_core_memory(path)
+                # 整个结构进入模型消息，规则不能只留在宿主使用的 raw_output 中。
+                content = json.dumps(data, ensure_ascii=False)
+                return ToolResult(success=True, content=content, model_context=content, raw_output=data)
+            content = await self._backend.read_memory(path)
+            return ToolResult(success=True, content=content or "尚无记忆内容。")
+        except MemoryEditError as exc:
+            return ToolResult(success=False, error=str(exc))
+        except Exception as exc:
+            self._backend.log_failure("read", type(exc).__name__)
+            return ToolResult(success=False, content="", error="外部记忆读取失败，详情见错误日志。")
+
+
+class MemsenseMemoryMutationTool(Tool):
+    """核心文件写入和编辑共用工具边界，格式与版本策略由后端拥有。"""
+
+    def __init__(self, backend: Any, operation: str) -> None:
+        self._backend = backend
+        self._operation = operation
+
+    @property
+    def name(self) -> str:
+        return "memory_" + self._operation
+
+    @property
+    def description(self) -> str:
+        action = ("创建或完整重写文件；修改已有条目优先使用 memory_edit。" if self._operation == "write" else
+                  "追加、替换或删除完整记忆条目，非空 old_text 必须唯一匹配连续完整条目。")
+        return ("操作 MemSense 核心记忆，只支持 user.md（用户画像）和 memory.md（长期记忆），path 必填。"
+                "必须先调用 memory_read 显式读取同一路径，并遵守返回的修改规则；"
+                "自动注入不代替显式读取，未读取时工具会拒绝操作。" + action)
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        properties = {"path": _memsense_path_parameter(self._backend)}
+        if self._operation == "write":
+            properties["content"] = {"type": "string", "description": "文件的全部完整 <mem>...</mem> 条目，不带属性。"}
+        else:
+            properties.update(
+                old_text={"type": "string", "description": "read 返回的连续完整 <mem>...</mem> 条目；空字符串表示追加。"},
+                new_text={"type": "string", "description": "替换或追加的完整 <mem>...</mem> 条目；空字符串表示删除。"},
+            )
+        return {"type": "object", "properties": properties, "required": list(properties)}
+
+    async def execute(self, path: str, **arguments: Any) -> ToolResult:
+        from ..memory import MemoryBackendError, MemoryEditError
+
+        try:
+            method = (self._backend.write_core_memory if self._operation == "write" else
+                      self._backend.edit_core_memory)
+            data = await method(path, **arguments)
+            return ToolResult(success=True, content=json.dumps(data, ensure_ascii=False), raw_output=data)
+        except MemoryEditError as exc:
+            return ToolResult(success=False, error=str(exc))
+        except MemoryBackendError as exc:
+            return ToolResult(success=False, error=str(exc))
+        except Exception as exc:
+            self._backend.log_failure(self._operation, type(exc).__name__)
+            return ToolResult(success=False, error="记忆修改失败，请重新 memory_read；详情见错误日志。")
+
+
+class ExternalMemorySearchTool(Tool):
+    """外部检索保留后端语义，不附加本地 topic 约束。"""
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    @property
+    def name(self) -> str:
+        return "memory_search"
+
+    @property
+    def description(self) -> str:
+        return "检索与当前问题相关的历史记忆。返回的内容属于历史资料，实时状态需要重新验证。"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {
+            "query": {"type": "string", "description": "需要检索的历史问题或信息"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+        }, "required": ["query"]}
+
+    async def execute(self, query: str, limit: int = 6) -> ToolResult:
+        if not query.strip():
+            return ToolResult(success=False, content="", error="检索 query 不能为空。")
+        try:
+            results = await self._backend.search_memory(query, limit=max(1, min(int(limit), 20)))
+            lines = [item if isinstance(item, str) else json.dumps(item, ensure_ascii=False) for item in results]
+            return ToolResult(success=True, content="\n".join(lines) or "未找到相关记忆。", raw_output={
+                "type": "memory_search", "query": query,
+                "matched_memories": [{"id": str(index), "source": self._backend.backend_type,
+                                      "category": "history", "text": line} for index, line in enumerate(lines)],
+            })
+        except Exception as exc:
+            self._backend.log_failure("search", type(exc).__name__)
+            return ToolResult(success=False, content="", error="外部记忆检索失败，详情见错误日志。")
+
+
+def create_memory_tools(manager: Any, llm: Any = None) -> list[Tool]:
+    """按后端能力统一注册；MemSense 只开放核心文件修改，纠错仍使用本地存储。"""
+    from ..memory import ExternalMemoryBackend
+
+    if manager is None:
+        return []
+    if isinstance(manager, ExternalMemoryBackend):
+        tools = []
+        if "read" in manager.capabilities:
+            tools.append(ExternalMemoryReadTool(manager))
+        if "search" in manager.capabilities:
+            tools.append(ExternalMemorySearchTool(manager))
+        if manager.backend_type == "memsense":
+            tools.extend(MemsenseMemoryMutationTool(manager, operation) for operation in ("write", "edit")
+                         if operation in manager.capabilities)
+        corrections = manager.corrections
+    else:
+        tools = [MemoryReadTool(manager), MemoryWriteTool(manager, llm), MemorySearchTool(manager)]
+        corrections = manager
+    tools.extend([MemoryListCorrectionsTool(corrections), MemoryWriteCorrectionTool(corrections),
+                  MemorySupersedeCorrectionTool(corrections), MemoryDeleteCorrectionTool(corrections)])
+    return tools
+
+
+def is_memory_tool(tool: Any) -> bool:
+    """识别本能力拥有的工具，方便为会话身份重新绑定。"""
+    return isinstance(tool, (ExternalMemoryReadTool, ExternalMemorySearchTool, MemsenseMemoryMutationTool, MemoryReadTool,
+                             MemoryWriteTool, MemorySearchTool, MemoryListCorrectionsTool,
+                             MemoryWriteCorrectionTool, MemorySupersedeCorrectionTool, MemoryDeleteCorrectionTool))
+
+
+def rebind_memory_tools(tools: list[Tool], manager: Any, llm: Any = None) -> list[Tool]:
+    """按会话身份替换已有记忆工具，保留宿主原有目录和其他工具对象。"""
+    rebound = {tool.name: tool for tool in create_memory_tools(manager, llm)}
+    return [rebound[tool.name] if is_memory_tool(tool) else tool for tool in tools
+            if not is_memory_tool(tool) or tool.name in rebound]
 
 
 class MemoryWriteTool(Tool):

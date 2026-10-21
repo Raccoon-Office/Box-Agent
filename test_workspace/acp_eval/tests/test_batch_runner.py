@@ -747,3 +747,10 @@ def test_cli_selects_exact_case_and_exposes_retry_terminal(tmp_path: Path) -> No
         ]
     ) == 0
     assert len(list((output / "cases" / "two" / "attempts").iterdir())) == 2
+
+
+@pytest.mark.parametrize('setup', [{'root': '../escape'}, {'root': 'x', 'files': ['.git/config']}, {'root': 'x', 'files': ['missing.txt']}])
+def test_load_dataset_rejects_invalid_workspace_setup(tmp_path, setup):
+    dataset = write_dataset(tmp_path / 'pack', [{**record('bad-setup'), 'workspace_setup': setup}])
+    with pytest.raises(ValueError, match='workspace_setup'):
+        load_dataset(dataset)

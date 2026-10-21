@@ -17,6 +17,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING
 
 from ..schema import Message
+from .task_budgets import require_complete_response
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from .llm_wrapper import LLMClient
@@ -151,6 +152,10 @@ async def run_lightweight_prompt(
         raise LightweightPromptError(friendly.message) from exc
 
     duration_ms = int((perf_counter() - started) * 1000)
+    try:
+        require_complete_response(response)
+    except ValueError as exc:
+        raise LightweightPromptError(str(exc), code="output_truncated") from exc
     text = getattr(response, "content", "") or ""
     finish_reason = getattr(response, "finish_reason", "") or ""
     usage = getattr(response, "usage", None)

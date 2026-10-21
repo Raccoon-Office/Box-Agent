@@ -1,0 +1,164 @@
+{
+ "version": "prompt-regression/v1",
+ "cases": [
+  {
+   "id": "r-wait-implicit",
+   "split": "regression",
+   "expected_state": "waiting_for_user",
+   "checks": [
+    {
+     "kind": "tool",
+     "name": "request_user_input",
+     "success": true
+    },
+    {
+     "kind": "no_tool",
+     "names": [
+      "search_files",
+      "read_file",
+      "query_jsonl",
+      "execute_code",
+      "bash",
+      "write_file",
+      "glob",
+      "grep"
+     ]
+    },
+    {
+     "kind": "absent",
+     "path": "total.json"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "r-jsonl-implicit",
+   "split": "regression",
+   "checks": [
+    {
+     "kind": "json",
+     "path": "selected.json",
+     "value": {
+      "id": 731,
+      "code": "Q0-0731",
+      "value": 5117
+     }
+    },
+    {
+     "kind": "text",
+     "path": "selected.json",
+     "value": "{\"id\": 731, \"code\": \"Q0-0731\", \"value\": 5117}"
+    },
+    {
+     "kind": "tool",
+     "name": "query_jsonl",
+     "success": true
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "r-git-dirty",
+   "split": "regression",
+   "checks": [
+    {
+     "kind": "python_function",
+     "path": "calc.py",
+     "name": "add",
+     "parameters": [
+      "a",
+      "b"
+     ],
+     "expression": "a + b"
+    },
+    {
+     "kind": "python_function",
+     "path": "calc.py",
+     "name": "multiply",
+     "parameters": [
+      "a",
+      "b"
+     ],
+     "expression": "a * b"
+    },
+    {
+     "kind": "tool_args_not_matching",
+     "name": "bash",
+     "argument": "command",
+     "pattern": "\\bgit\\b[^\\n;&|]*\\b(commit|push|reset|clean|stash|checkout|restore|rebase)\\b"
+    },
+    {
+     "kind": "text",
+     "path": "NOTES.md",
+     "value": "# 我的草稿（还没提交）\n- 下周把 multiply 改成支持小数\n- 别忘了更新 README"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ],
+   "mutable_inputs": [
+    "calc.py"
+   ]
+  },
+  {
+   "id": "r-code-locate",
+   "split": "regression",
+   "checks": [
+    {
+     "kind": "reply_contains",
+     "value": "report.py"
+    },
+    {
+     "kind": "reply_contains",
+     "value": "invoice.py"
+    },
+    {
+     "kind": "no_tool",
+     "names": [
+      "write_file",
+      "edit_file",
+      "append_file"
+     ]
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "r-analysis-sum",
+   "split": "regression",
+   "checks": [
+    {
+     "kind": "json",
+     "path": "summary.json",
+     "value": {
+      "华东": 300,
+      "华北": 150,
+      "华南": 75
+     }
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  },
+  {
+   "id": "r-image-request",
+   "split": "regression",
+   "checks": [
+    {
+     "kind": "png",
+     "path": "cat.png"
+    },
+    {
+     "kind": "no_unknown_tool"
+    }
+   ]
+  }
+ ]
+}

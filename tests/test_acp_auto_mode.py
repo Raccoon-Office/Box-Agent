@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,21 +184,23 @@ def test_code_agent_prompt_reads_workspace_agents_md(tmp_path):
     assert "project instructions apply only when they do not conflict" in code_prompt
 
 
-def test_code_agent_prompt_includes_git_status_summary(tmp_path):
-    if not shutil.which("git"):
-        pytest.skip("git is not installed")
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
+def test_code_agent_prompt_skips_git_processes_and_keeps_project_instructions(monkeypatch, tmp_path):
+    (tmp_path / "AGENTS.md").write_text("Preserve unrelated changes.\n", encoding="utf-8")
 
     llm = _TrackingLLM(mode_label="general")
     agent, _ = _make_agent(tmp_path, llm)
     agent._system_prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    def unexpected_subprocess(*_args, **_kwargs):
+        raise AssertionError("Session prompt creation must not start Git processes")
+
+    monkeypatch.setattr("box_agent.project_context.subprocess.run", unexpected_subprocess)
 
     code_prompt = agent._build_session_prompt(
         "code_agent",
         workspace=tmp_path,
     )
 
-    assert "Git repository: yes" in code_prompt
-    assert "Status: 1 changed entry" in code_prompt
-    assert "?? README.md" in code_prompt
+    assert "Git state was not checked at session start." in code_prompt
+    assert "Preserve unrelated changes." in code_prompt
+    assert "Status: clean" not in code_prompt

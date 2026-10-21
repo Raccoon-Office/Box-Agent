@@ -302,12 +302,13 @@ async def test_parallel_batch_caps_concurrency_and_is_addressable_in_call_order(
 
 
 @pytest.mark.asyncio
-async def test_parallel_timeout_keeps_completed_result_and_synthesizes_missing() -> None:
+async def test_parallel_timeout_keeps_completed_result_and_synthesizes_missing(monkeypatch) -> None:
     class PartlyHangingTool(_TestTool):
         parallel_safe = True
 
         def __init__(self) -> None:
             self.cancelled = False
+            self.fast_completed = False
 
         @property
         def name(self) -> str:
@@ -324,9 +325,16 @@ async def test_parallel_timeout_keeps_completed_result_and_synthesizes_missing()
                 finally:
                     self.cancelled = True
             await asyncio.sleep(delay)
+            self.fast_completed = True
             return ToolResult(success=True, content=f"ok:{value}")
 
     tool = PartlyHangingTool()
+    # Advance past the deadline only after the fast sibling has completed.
+    # Real event-loop delays must not turn the intended success into a timeout.
+    monkeypatch.setattr(
+        "box_agent.tools.engine.scheduler.perf_counter",
+        lambda: 0.03 if tool.fast_completed else 0.0,
+    )
     records = [
         record
         async for record in _engine(

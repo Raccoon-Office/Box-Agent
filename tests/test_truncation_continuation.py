@@ -63,6 +63,8 @@ def test_looks_like_truncated_true(text):
         "/path/to/file",
         r"C:\temp\file.txt",
         "https://example.com/a?id=1",
+        "```text\n001 alpha\n```\nQA211-D-END",
+        "Result:\noutput/report.md",
         "",
         "   \n  ",
     ],
@@ -76,6 +78,8 @@ def test_truncation_continuation_text_mentions_tail_and_rules():
     assert "手里的牌太" in txt
     assert "不要重复" in txt
     assert "重新开头" in txt
+    assert "系统提示" not in txt
+    assert "实际收到" in txt
 
 
 # ── Loop wiring ─────────────────────────────────────────────────
@@ -110,6 +114,46 @@ def _msgs():
 
 async def _collect(gen):
     return [ev async for ev in gen]
+
+
+@pytest.mark.asyncio
+async def test_length_continuation_preserves_partial_code_and_runtime_source():
+    first = "```text\n001 alpha\n002 bet"
+    suffix = "a\n```\nDONE"
+    llm = MockLLM([
+        LLMResponse(content=first, finish_reason="length", usage=TokenUsage(completion_tokens=512)),
+        LLMResponse(content=suffix, finish_reason="stop"),
+    ])
+    messages = _msgs()
+    events = await _collect(run_agent_loop(
+        llm=llm, messages=messages, tools={}, max_steps=3,
+    ))
+    assert llm.calls == 2
+    assert "".join(m.content or "" for m in messages if m.role == "assistant") == first + suffix
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert len(injected) == 1
+    assert injected[0].kind == "text_continuation"
+    assert injected[0].user_visible is False
+    continuation = next(m for m in messages if m.source == "runtime")
+    assert continuation.role == "user"
+    assert "系统提示" not in continuation.content
+    assert first.rstrip()[-40:] in continuation.content
+    assert [e for e in events if isinstance(e, DoneEvent)][-1].stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.asyncio
+async def test_length_continuation_stops_at_a_complete_multiline_end_marker():
+    first = "```text\n001 alpha\n002 bet"
+    suffix = "a\n```\nQA211-D-END"
+    llm = MockLLM([
+        LLMResponse(content=first, finish_reason="length", usage=TokenUsage(completion_tokens=512)),
+        LLMResponse(content=suffix, finish_reason="stop", usage=TokenUsage(completion_tokens=170)),
+    ])
+    messages = _msgs()
+    await _collect(run_agent_loop(llm=llm, messages=messages, tools={}, max_steps=4,
+                                 truncation_continuation_enabled=True))
+    assert llm.calls == 2
+    assert "".join(m.content or "" for m in messages if m.role == "assistant") == first + suffix
 
 
 def _truncated(content: str, completion_tokens: int = 200) -> LLMResponse:

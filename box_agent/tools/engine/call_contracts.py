@@ -63,6 +63,7 @@ class ToolRunContext:
     hook_context: HookContext | None = None
     skill_reader: Callable[..., ToolResult] | None = None
     correction_observer: Callable[[str, ToolResult, str | None, str, dict, bool], CorrectionNotice | None] | None = None
+    session_log: Any = None
 
 
 @dataclass(frozen=True, slots=True)

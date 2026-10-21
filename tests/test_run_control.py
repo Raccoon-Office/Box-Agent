@@ -81,6 +81,45 @@ async def test_kernel_does_not_start_until_a_paused_run_is_resumed() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("partial_output", [False, True])
+async def test_cancel_interrupts_provider_wait_without_a_chunk_or_heartbeat(partial_output):
+    started, closed = asyncio.Event(), asyncio.Event()
+
+    class Model:
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            try:
+                if partial_output:
+                    yield StreamEvent(type="text", delta="partial")
+                started.set()
+                await asyncio.Event().wait()
+                yield StreamEvent(type="finish", finish_reason="stop")
+            finally:
+                closed.set()
+
+    control = RunControl()
+
+    async def collect():
+        return [event async for event in run_agent_loop(
+            llm=Model(), messages=[Message(role="user", content="go")],
+            tools={}, max_steps=1, run_control=control,
+        )]
+
+    task = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        control.request_cancel()
+        # Production heartbeat is 15 seconds; cancellation must wake the read.
+        events = await asyncio.wait_for(asyncio.shield(task), 1)
+        done = [event for event in events if isinstance(event, DoneEvent)]
+        assert len(done) == 1
+        assert done[0].stop_reason == StopReason.CANCELLED
+        assert closed.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_permission_broker_matches_response_by_request_id() -> None:
     requests: asyncio.Queue[dict[str, object]] = asyncio.Queue()
     broker = PermissionBroker(

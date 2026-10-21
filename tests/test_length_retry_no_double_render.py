@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import pytest
 
+from box_agent.acp.message_display import MessageDisplay
 from box_agent.core import run_agent_loop
 from box_agent.events import (
     ContentEvent,
@@ -36,6 +37,7 @@ from box_agent.events import (
     LLMOutputEvent,
     StopReason,
 )
+from box_agent.injections import InjectionKind
 from box_agent.schema import (
     FunctionCall,
     Message,
@@ -102,6 +104,37 @@ def _msgs() -> list[Message]:
 
 async def _collect(gen) -> list:
     return [ev async for ev in gen]
+
+
+async def test_budget_nudge_keeps_truncated_answer_under_one_display_identity():
+    partial = "```text\nHello wor"
+    completion = "ld\n```"
+    llm = _ScriptedLLM([
+        {"text": partial, "finish_reason": "length"},
+        {"text": completion, "finish_reason": "stop"},
+    ])
+    display = MessageDisplay()
+    events = []
+    identities = []
+    async for event in run_agent_loop(llm=llm, messages=_msgs(), tools={}, max_steps=11):
+        events.append(event)
+        identity = display.observe(event)
+        if isinstance(event, ContentEvent) and not event._header and event.content:
+            identities.append(identity)
+
+    injections = [event.kind for event in events if isinstance(event, InjectedMessageEvent)]
+    assert injections == [InjectionKind.TEXT_CONTINUATION.value, InjectionKind.BUDGET.value]
+    assert len(identities) == 2
+    assert identities[0]["messageId"] == identities[1]["messageId"]
+    assert identities[0]["outputId"] != identities[1]["outputId"]
+    assert "".join(
+        event.content for event in events
+        if isinstance(event, ContentEvent) and not event._header
+    ) == partial + completion
+    assert events[-1].stop_reason == StopReason.END_TURN
+    assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == [
+        identities[0]["messageId"],
+    ]
 
 
 # ── Case 3 (P1 regression): visible text + length → NO double stream ──

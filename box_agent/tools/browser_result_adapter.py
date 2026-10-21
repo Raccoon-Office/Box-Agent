@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -80,9 +82,11 @@ def _persist_browser_snapshot_output(
                 "error": f"Could not persist browser snapshot at {target_path}: {exc}",
             }
         )
-    return result.model_copy(
+    saved = result.model_copy(
         update={"content": f"{content.rstrip()}\n\nSnapshot persisted to {target_path}"}
     )
+    saved._written_file_sha256 = hashlib.sha256(content.replace("\n", os.linesep).encode("utf-8")).hexdigest()
+    return saved
 
 
 def _prepare_browser_screenshot_output(
@@ -146,9 +150,11 @@ def _persist_browser_screenshot_output(
             "Visual QA may be skipped."
         )
         return result.model_copy(update={"content": f"{content}\n\n{warning}".strip()})
-    return result.model_copy(
+    saved = result.model_copy(
         update={"content": f"{content}\n\nScreenshot persisted to {target_path}".strip()}
     )
+    saved._written_file_sha256 = hashlib.sha256(payload).hexdigest()
+    return saved
 
 
 def _trace_safe_tool_raw_output(raw_output: Any) -> Any:

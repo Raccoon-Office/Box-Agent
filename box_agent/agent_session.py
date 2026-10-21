@@ -52,6 +52,9 @@ class AgentSession:
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None
     memory_extractor: Any | None = None
+    memory_manager: Any | None = field(default=None, kw_only=True)
+    memory_runtime: Any | None = field(default=None, kw_only=True)
+    utility_session: bool = field(default=False, kw_only=True)
     inject_queue: asyncio.Queue[Any] = field(default_factory=InjectionManager)
     turn_active: bool = False
     memory_block: str | None = None
@@ -167,6 +170,10 @@ class AgentSession:
             **({"plugins": plugins} if plugins else {}),
             **capabilities,
         )
+        child_system_prompt = state.pop("child_system_prompt", None)
+        if child_system_prompt is not None and hasattr(agent, "set_child_system_prompt"):
+            agent.set_child_system_prompt(child_system_prompt)
+        state.setdefault("utility_session", utility)
         return cls(agent=agent, config=config, **state)
 
     @classmethod
@@ -261,6 +268,8 @@ class AgentSession:
         }
         if self.memory_extractor is not None:
             values["memory_extractor"] = self.memory_extractor
+        if self.memory_runtime is not None and self.memory_manager is not None:
+            values["memory_manager"] = self.memory_manager
         values.update(overrides)
         return replace(self.agent.default_run_options(), **values)
 
@@ -268,6 +277,8 @@ class AgentSession:
         """Request cooperative cancellation through this session's options."""
 
         self.cancelled = True
+        if self.memory_runtime is not None:
+            self.memory_runtime.request_cancel()
         if self._run_handle.is_active:
             self._run_handle.request_cancel()
 
@@ -344,32 +355,38 @@ class AgentSession:
 
             errors = []
             try:
-                if self._external_run_cleanup is not None:
-                    error = await asyncio.shield(self._external_run_cleanup)
-                    if error is not None:
-                        errors.append(error)
-                else:
-                    try:
-                        await self._close_run_stream(events, activation)
-                    except BaseException as error:
-                        errors.append(error)
+                try:
+                    if self._external_run_cleanup is not None:
+                        error = await asyncio.shield(self._external_run_cleanup)
+                        if error is not None:
+                            errors.append(error)
+                    else:
+                        try:
+                            await self._close_run_stream(events, activation)
+                        except BaseException as error:
+                            errors.append(error)
+                finally:
+                    self._active_events = None
+                    self._active_activation = None
+                    self._active_run_task = None
+                    self._active_run_finished = None
+                    self._run_driving = False
+                    if not finished.done():
+                        finished.set_result(None)
+                    # ACP can own a wider prompt spanning several continuation runs.
+                    self.turn_active = enclosing_turn_active
+                    if not enclosing_turn_active and isinstance(self.inject_queue, InjectionManager):
+                        self.inject_queue.end_run()
+                if errors:
+                    cleanup_error = _combined_cleanup_error(errors)
+                    if primary_error is None:
+                        raise cleanup_error
+                    _attach_cleanup_error(primary_error, cleanup_error)
             finally:
-                self._active_events = None
-                self._active_activation = None
-                self._active_run_task = None
-                self._active_run_finished = None
-                self._run_driving = False
-                if not finished.done():
-                    finished.set_result(None)
-                # ACP can own a wider prompt spanning several continuation runs.
-                self.turn_active = enclosing_turn_active
-                if not enclosing_turn_active and isinstance(self.inject_queue, InjectionManager):
-                    self.inject_queue.end_run()
-            if errors:
-                cleanup_error = _combined_cleanup_error(errors)
-                if primary_error is None:
-                    raise cleanup_error
-                _attach_cleanup_error(primary_error, cleanup_error)
+                # Keep propagated exceptions intact without retaining them
+                # through their own traceback's finished run frame.
+                primary_error = cleanup_error = error = None
+                errors.clear()
 
     async def _close_run_stream(self, events: Any, activation: Any) -> None:
         from .composition import _combined_cleanup_error

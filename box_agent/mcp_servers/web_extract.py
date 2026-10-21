@@ -16,6 +16,9 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from box_agent.schema import Message
+from box_agent.llm.task_budgets import (
+    SMALL_TASK_MAX_OUTPUT_TOKENS, require_complete_response,
+)
 from box_agent.tools.base import Tool, ToolResult
 
 
@@ -235,6 +238,13 @@ class WebExtractTool(Tool):
             summary_max_output_tokens = _positive_int(
                 getattr(self.llm, "max_output_tokens", None)
             )
+        summary_max_output_tokens = min(
+            summary_max_output_tokens or SMALL_TASK_MAX_OUTPUT_TOKENS,
+            SMALL_TASK_MAX_OUTPUT_TOKENS,
+        )
+        configured_limit = _positive_int(getattr(self.llm, "max_output_tokens", None))
+        if configured_limit is not None:
+            summary_max_output_tokens = min(summary_max_output_tokens, configured_limit)
         if summary_model:
             for_model = getattr(self.llm, "for_model", None)
             if not callable(for_model):
@@ -277,6 +287,7 @@ class WebExtractTool(Tool):
                 ),
                 timeout=_SUMMARY_TIMEOUT_SECONDS,
             )
+            require_complete_response(response)
         except asyncio.TimeoutError:
             return None, f"Summarization timed out after {_SUMMARY_TIMEOUT_SECONDS:.0f}s"
         except Exception as exc:  # pragma: no cover - provider errors vary

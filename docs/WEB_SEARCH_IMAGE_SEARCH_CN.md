@@ -46,7 +46,7 @@ Box-Agent 会将常见网页搜索结果、Custom `Result.ImageResults[]` 以及
   "type": "web_search",
   "refs": [
     {
-      "reference_tag": "ref_1",
+      "reference_tag": "ref_web_2e687bfad6ab06937257ec13",
       "title": "山东大学",
       "url": "https://example.com/shandong-university",
       "domain": "example.com",
@@ -73,7 +73,8 @@ Box-Agent 会将常见网页搜索结果、Custom `Result.ImageResults[]` 以及
 - `images` 是兼容现有宿主的图片 URL 列表。
 - `image_details` 是图片消费者的首选字段，包含原始 URL，以及上游可能提供的宽、高、替代文本、形状、清晰度、分类、水印和视觉描述。
 - `url` 优先是图片来源或落地页；上游没有落地页时回退为图片 URL。实际图片下载始终使用 `image_details[].url`。
-- `reference_tag` 用于把最终说明与来源卡片关联。
+- `reference_tag` 是基于来源 URL 的稳定 `ref_web_…` 标识，模型结果与来源事件使用同一标识。同一来源 URL 在多次搜索中保持相同标识。
+- 模型必须在方括号中原样引用 `reference_tag`；宿主负责显示可读编号。上游 `SortId`、`Rank` 和数字结果 ID 不作为跨搜索引用标识。不透明的上游结果 ID 可保留为兼容别名，数字别名不再保留。
 - 上游未提供的宽、高、替代文本会省略；调用方不得臆造。
 
 宿主通过 ACP 消费时，监听 `WebSearchEvent` 对应的 `tool_call_update`，按 `rawOutput.type == "web_search"` 分发，并用 `toolCallId` 与原始工具调用关联。直接消费工具结果时仍可能看到上游原始 JSON：Custom 图片位于 `Result.ImageResults[].Image.Url`；Global 图片位于 `Result.Documents[].Snippet[]` 中，`Type == "image"` 的条目使用 `Image.ImageUrl`。

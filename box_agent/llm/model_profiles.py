@@ -12,8 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from box_agent.schema import LLMProvider
 
@@ -120,6 +121,9 @@ def _validate_model_profile(revision: str, profile: Mapping[str, Any]) -> dict[s
     request_body_limit = profile.get("maxRequestBodyBytes")
     if request_body_limit is not None:
         request_body_limit = _positive_int(request_body_limit, field="maxRequestBodyBytes")
+    image_input = profile.get("imageInput")
+    if image_input is not None and not isinstance(image_input, bool):
+        raise ModelProfileUnavailable("model profile imageInput is invalid")
 
     return {
         "profileId": profile_id,
@@ -137,8 +141,31 @@ def _validate_model_profile(revision: str, profile: Mapping[str, Any]) -> dict[s
         ),
         "timeout": float(profile.get("timeout") or 1200.0),
         "maxRequestBodyBytes": request_body_limit,
+        **({"imageInput": image_input} if image_input is not None else {}),
         **({"reasoningEffortWhenDisabled": disabled_effort} if disabled_effort is not None else {}),
     }
+
+
+def _profile_image_input(
+    profile: Mapping[str, Any], model: str, fallback_client: LLMClient,
+) -> bool | None:
+    # A profile's declaration belongs to its default model, not every model
+    # an auto-routing binding might choose on the same endpoint.
+    if model == profile["defaultModel"] and "imageInput" in profile:
+        return profile["imageInput"]
+    # Preserve an existing explicit config declaration only for the same
+    # provider, endpoint and model. Never infer another model's capability.
+    if (
+        getattr(fallback_client, "provider", None) == LLMProvider(profile["provider"])
+        and str(getattr(fallback_client, "api_base", "")).rstrip("/") == profile["apiBase"]
+        and getattr(fallback_client, "model", None) == model
+    ):
+        capabilities = getattr(fallback_client, "capabilities", None)
+        if isinstance(capabilities, Mapping):
+            declared = capabilities.get("image_input")
+            if isinstance(declared, bool):
+                return declared
+    return None
 
 
 def client_for_model_profile(
@@ -169,6 +196,7 @@ def client_for_model_profile(
         max_request_body_bytes=profile["maxRequestBodyBytes"],
         auth_file=profile["authFile"],
         timeout=profile["timeout"],
+        image_input=_profile_image_input(profile, model, fallback_client),
         **(
             {"reasoning_effort_when_disabled": profile["reasoningEffortWhenDisabled"]}
             if profile.get("reasoningEffortWhenDisabled") is not None

@@ -80,7 +80,9 @@ async def test_matching_server_normalizes_only_supported_images():
 
     assert out.success
     assert out.content == "captured desktop"
-    assert len(out.transient_followup_content) == 1
+    assert len([b for b in out.transient_followup_content if b["type"] == "input_image"]) == 1
+    assert any(b["type"] == "text" and "tool invocation" in b["text"]
+               for b in out.transient_followup_content)
     assert out.transient_followup_content[0]["type"] == "input_image"
     assert out.transient_followup_content[0]["media_type"] == "image/png"
     assert out.raw_output["mcp_inline_images"] == [
@@ -217,12 +219,57 @@ async def test_managed_mcp_loop_persists_sidecar_and_sends_latest_image(
             assert not _image_messages(session.agent.messages)
         session_log.flush()
         replay_text = [str(message.content) for message in session_log.replay().messages]
-        if capability is True:
-            assert any("images/" in content for content in replay_text)
-        else:
-            assert not any("images/" in content for content in replay_text)
+        assert any("images/" in content for content in replay_text)
+        assert list((session_log.path.parent / "images").glob("*.png"))
         assert current_mcp_result_adapters() == ()
         assert "run_events" not in vars(session.agent)
     finally:
         await session.aclose()
         session_log.close()
+
+
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_structured_driver_state_reaches_context_and_persistence(is_error):
+    result = _result(is_error=is_error)
+    result.structuredContent = {"snapshot_id": "s12345678", "pid": 17, "window_id": 22}
+    with bind_mcp_result_adapter(_binding()):
+        out = await _make_tool(result).execute()
+    assert out.success is (not is_error)
+    assert out.raw_output["mcp_structured_content"] == result.structuredContent
+    assert '"snapshot_id":"s12345678"' in out.content
+    if is_error:
+        assert out.transient_followup_content is None
+
+
+@pytest.mark.parametrize("state", [{"screenshot_frame_valid": False}, {"screenshot_error": "capture_failed"}])
+async def test_invalid_driver_screenshot_is_not_injected(state):
+    result = _result()
+    result.structuredContent = state
+    with bind_mcp_result_adapter(_binding()):
+        out = await _make_tool(result).execute()
+    assert out.success
+    assert out.transient_followup_content is None
+    assert out.raw_output["mcp_structured_content"] == state
+
+
+async def test_observation_context_distinguishes_image_pixels_and_screen_coordinates():
+    result = _result()
+    result.structuredContent = {
+        "capture_id": "capture-live", "snapshot_id": "snapshot-live",
+        "window_bounds": {"x": 138, "y": 439, "width": 230, "height": 408},
+        "screenshot_scale": 2.0,
+        "elements": [{
+            "element_token": "snapshot-live:2", "label": "Clear",
+            "frame": {"x": 202, "y": 572, "w": 48, "h": 48},
+            "screenshot_frame": {"x": 128, "y": 266, "w": 96, "h": 96},
+        }],
+    }
+    with bind_mcp_result_adapter(_binding()):
+        out = await _make_tool(result).execute()
+    assert out.success
+    assert out.raw_output["mcp_structured_content"] == result.structuredContent
+    assert "image pixels and screen points are different spaces" in out.content
+    assert "move_cursor" in out.content
+    assert "never both" in out.content
+    assert "capture_id is consumed" in out.content
+    assert "inspect fresh state" in out.content

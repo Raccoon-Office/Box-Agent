@@ -216,6 +216,16 @@ class SessionLog:
 
         return tuple(deepcopy(self._events))
 
+    def next_turn_number(self) -> int:
+        """Inspect recorded starts without copying history or reserving a turn."""
+
+        turns = (
+            event["data"].get("turn")
+            for event in self._events
+            if event["type"] == "turn/start"
+        )
+        return max((turn for turn in turns if isinstance(turn, int)), default=0) + 1
+
     @property
     def failed(self) -> bool:
         return self._failed

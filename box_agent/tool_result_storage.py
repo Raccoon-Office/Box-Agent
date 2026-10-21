@@ -333,6 +333,13 @@ class ToolResultStorage:
                         "\nRe-read the original path from the matching read_file call with "
                         "a smaller offset/limit to recover exact content."
                     )
+                if value is not None and message.name == "read_email":
+                    value += (
+                        "\nThis email page is incomplete in this preview. Do not advance next_offset "
+                        "until the full page is recovered. Re-read the original email at the same "
+                        "offset with a smaller limit and expected_sha256 from the matching call/result, "
+                        "or read the complete persisted output."
+                    )
                 return value
 
             replacement = build_replacement(preview_limit)

@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 from acp_eval import SCHEMA_VERSION
 from acp_eval.case_runner import CaseConfig, run_case
 from acp_eval.ids import new_run_id
-from acp_eval.models import CaseMetadata, RunResult
+from acp_eval.models import CaseMetadata, RunResult, WorkspaceSetup
 from acp_eval.storage import atomic_write_json, sha256_file
 
 
@@ -281,6 +281,11 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
         if not isinstance(query, str) or not query:
             raise ValueError(f"case {case_id} query must be a non-empty string")
         CaseMetadata.from_record(value)
+        setup = WorkspaceSetup.from_record(value)
+        for item in (*setup.files, *setup.dirty_files):
+            source = (path.parent / setup.source(item)).resolve()
+            if not source.is_relative_to(path.parent.resolve()) or not source.is_file():
+                raise ValueError(f"case {case_id}: workspace_setup file missing or outside pack")
         normalized = dict(value)
         normalized["input_files"] = _validate_input_files(
             path.parent,

@@ -1,8 +1,74 @@
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Mapping
 
 from acp_eval import SCHEMA_VERSION
+
+
+SESSION_MODES = frozenset({"general", "code_agent", "data_analysis"})
+
+
+@dataclass(frozen=True)
+class WorkspaceSetup:
+    """Project files placed in the workspace before the turn, never attached.
+
+    ``files`` are copied (by basename) and, with ``git_commit``, committed as
+    the repository baseline; ``dirty_files`` are copied afterwards so the tree
+    starts with uncommitted user work. With ``root`` (a directory in the case
+    pack), paths are relative to it and keep their subdirectories, so nested
+    project layouts such as ``pkg/AGENTS.md`` can be staged.
+    """
+
+    files: tuple[str, ...] = ()
+    git_commit: bool = False
+    dirty_files: tuple[str, ...] = ()
+    root: str | None = None
+
+    def destination(self, path: str) -> str:
+        """Workspace-relative destination of a staged path."""
+        destination = path if self.root is not None else Path(path).name
+        parts = PureWindowsPath(destination).parts
+        if any(part.lower().rstrip(' .') == '.git' or part.lower().startswith('git~') for part in parts):
+            raise ValueError("workspace_setup: Git control paths are forbidden")
+        return destination
+
+    def source(self, path: str) -> str:
+        """Pack-relative source of a staged path."""
+        return f"{self.root}/{path}" if self.root is not None else path
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "WorkspaceSetup":
+        value = record.get("workspace_setup", {})
+        if not isinstance(value, dict) or set(value) - {"files", "git_commit", "dirty_files", "root"}:
+            raise ValueError("workspace_setup: unsupported fields or type")
+
+        def paths(key: str) -> tuple[str, ...]:
+            items = value.get(key, [])
+            if not isinstance(items, list) or not all(
+                isinstance(item, str) and item and "\x00" not in item for item in items
+            ):
+                raise ValueError(f"workspace_setup: {key} must be a list of paths")
+            return tuple(items)
+
+        git_commit = value.get("git_commit", False)
+        if not isinstance(git_commit, bool):
+            raise ValueError("workspace_setup: git_commit must be a boolean")
+        root = value.get("root")
+        if root is not None and (not isinstance(root, str) or not root or "\x00" in root
+                                 or PureWindowsPath(root).is_absolute() or Path(root).is_absolute()
+                                 or "\\" in root or ".." in Path(root).parts):
+            raise ValueError("workspace_setup: root must be a relative directory in the pack")
+        files, dirty = paths("files"), paths("dirty_files")
+        if root is not None and any(Path(item).is_absolute() or PureWindowsPath(item).drive
+                                    or "\\" in item or ".." in Path(item).parts
+                                    for item in (*files, *dirty)):
+            raise ValueError("workspace_setup: rooted paths must stay inside root")
+        setup = cls(files=files, git_commit=git_commit, dirty_files=dirty, root=root)
+        for item in (*files, *dirty):
+            setup.destination(item)
+        if setup.git_commit and not setup.files:
+            raise ValueError("workspace_setup: git_commit needs files to commit")
+        return setup
 
 
 @dataclass(frozen=True)
@@ -25,9 +91,11 @@ class CaseMetadata:
             if key in values and not isinstance(values[key], bool):
                 raise ValueError(f"case metadata: {key} must be a boolean")
 
-        session = metadata("session_meta", {"deep_think"})
+        session = metadata("session_meta", {"deep_think", "session_mode"})
         prompt = metadata("prompt_meta", {"auto_approve_plan", "selected_skill_names"})
         boolean(session, "deep_think")
+        if "session_mode" in session and session["session_mode"] not in SESSION_MODES:
+            raise ValueError(f"case metadata: session_mode must be one of {sorted(SESSION_MODES)}")
         boolean(prompt, "auto_approve_plan")
         if "selected_skill_names" in prompt:
             names = prompt["selected_skill_names"]

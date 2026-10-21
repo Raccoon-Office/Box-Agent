@@ -24,7 +24,7 @@ def test_injection_type_selects_framing_source_and_visibility(kind):
     assert message.role == "user"
     assert "source" not in message.model_dump()
     assert asdict(event) == {
-        "content": content, "injection_id": "receipt-1",
+        "content": content, "injection_id": "receipt-1", "kind": kind.value,
         "user_visible": kind is InjectionKind.USER_SUPPLEMENT,
     }
     if kind is InjectionKind.USER_SUPPLEMENT:

@@ -1,4 +1,5 @@
 import asyncio
+from copy import copy
 from types import SimpleNamespace
 
 import pytest
@@ -47,14 +48,24 @@ class _FollowUpLLM:
 
 
 class _DedicatedFollowUpLLM:
+    model = "follow-up-model"
+    max_output_tokens = 100_000
+
     def __init__(self) -> None:
         self.generate_calls = []
         self.release_suggestions = asyncio.Event()
 
+    def for_model(self, model, *, max_output_tokens=None):
+        cloned = copy(self)
+        cloned.model = model
+        if max_output_tokens is not None:
+            cloned.max_output_tokens = max_output_tokens
+        return cloned
+
     async def generate(self, messages, tools=None, **_):
         if _.get("call_kind") == "turn_continuation_judge":
             return LLMResponse(content='{"continue":false}', finish_reason="stop")
-        self.generate_calls.append(_)
+        self.generate_calls.append({**_, "max_tokens": self.max_output_tokens})
         await self.release_suggestions.wait()
         return LLMResponse(
             content='{"suggestions":["核对项目当前的 React 版本", "查看 React 19.2 的新增内容"]}',
@@ -271,6 +282,8 @@ async def test_acp_generates_suggestions_in_background_without_blocking_prompt(
 
     llm.release_suggestions.set()
     await suggestion_task
+    assert llm.generate_calls[-1]["max_tokens"] == 8_192
+    assert llm.max_output_tokens == 100_000
     suggestion_updates = [
         update.update.rawOutput
         for update in conn.updates

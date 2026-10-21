@@ -8,6 +8,7 @@ environment, so user-installed packages don't pollute the tool's dependencies.
 
 import asyncio
 import json
+import logging
 import os
 import platform
 import re
@@ -16,11 +17,13 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
+from .python_environment import probe_python
 
 from box_agent.user_paths import state_path
 
@@ -99,15 +102,17 @@ async def _start_sandbox_kernel(
     kernel_manager: Any,
     *,
     timeout: float = 30,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     """Start a Jupyter kernel without blocking the host event loop forever."""
     async_start = getattr(kernel_manager, "_async_start_kernel", None)
+    start_kwargs = {"env": dict(env)} if env is not None else {}
     try:
         if callable(async_start):
-            await asyncio.wait_for(async_start(), timeout=timeout)
+            await asyncio.wait_for(async_start(**start_kwargs), timeout=timeout)
         else:
             await asyncio.wait_for(
-                asyncio.to_thread(kernel_manager.start_kernel),
+                asyncio.to_thread(kernel_manager.start_kernel, **start_kwargs),
                 timeout=timeout,
             )
     except asyncio.TimeoutError as exc:
@@ -124,7 +129,7 @@ async def _start_sandbox_kernel(
         raise RuntimeError(f"Sandbox kernel startup failed: {exc}") from exc
 
 
-def _kernel_write_guard_setup_code(workspace: Path) -> str:
+def _kernel_write_guard_setup_code(workspace: Path, reference_policy=None, command_guard="") -> str:
     """Build kernel code that confines user writes to artifact/internal roots."""
     roots = (
         workspace.resolve(),
@@ -133,10 +138,12 @@ def _kernel_write_guard_setup_code(workspace: Path) -> str:
         RUNTIME_PACKAGES_DIR.resolve(),
     )
     encoded_roots = json.dumps([str(root) for root in roots])
+    protected, allowed_deletions = reference_policy or ([], [])
     return f"""
 import os as _box_guard_os
 import sys as _box_guard_sys
-
+import json as _box_guard_json
+{command_guard}
 if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
     def _box_agent_path_is_writable(path):
         try:
@@ -156,13 +163,52 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
                 continue
         return False
 
-    def _box_agent_require_writable(path):
+    def _box_agent_require_writable(path, operation="write"):
         if not _box_agent_path_is_writable(path):
             raise PermissionError(
                 "EXECUTE_CODE_WRITE_OUTSIDE_WORKSPACE: writes are limited to "
                 f"{{getattr(_box_guard_sys, '_box_agent_write_roots', ())}}; "
                 f"rejected {{path!r}}"
             )
+        if operation == "write":
+            return
+        if isinstance(path, (str, bytes, _box_guard_os.PathLike)):
+            resolved = _box_guard_os.path.realpath(_box_guard_os.path.abspath(path))
+            if isinstance(resolved, bytes):
+                resolved = _box_guard_os.fsdecode(resolved)
+            if resolved.endswith(".artifact.json"):
+                folder, name = _box_guard_os.path.split(resolved)
+                if name.startswith("."):
+                    resolved = _box_guard_os.path.join(folder, name[1:-len(".artifact.json")])
+            # Recreated kernels also honor caches written by other chats.
+            candidates = [resolved]
+            parent = _box_guard_os.path.dirname(resolved)
+            while parent and parent != _box_guard_os.path.dirname(parent):
+                candidates.append(parent)
+                parent = _box_guard_os.path.dirname(parent)
+            if _box_guard_os.path.isdir(resolved):
+                for folder, _, files in _box_guard_os.walk(resolved):
+                    candidates.extend(_box_guard_os.path.join(folder, name[1:-len(".artifact.json")]) for name in files if name.startswith(".") and name.endswith(".artifact.json"))
+            for candidate in candidates:
+                folder, name = _box_guard_os.path.split(candidate)
+                marker = _box_guard_os.path.join(folder, "." + name + ".artifact.json")
+                try:
+                    if _box_guard_os.path.getsize(marker) > 4096:
+                        continue
+                    with open(marker, encoding="utf-8") as stream:
+                        retained = _box_guard_json.load(stream).get("retain_for_chat") is True
+                except (OSError, ValueError, AttributeError):
+                    continue
+                if retained and not (operation == "delete" and resolved in getattr(_box_guard_sys, "_box_agent_chat_delete", ())):
+                    raise PermissionError(f"CHAT_REFERENCE_PROTECTED: {{resolved}} is used by chat; preserve it and its dependencies")
+            for retained in getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                try:
+                    common = _box_guard_os.path.commonpath((retained, resolved))
+                    affected = retained == resolved or common == resolved or _box_guard_os.path.isdir(retained) and common == retained
+                except ValueError:
+                    affected = False
+                if affected and not (operation == "delete" and resolved in getattr(_box_guard_sys, "_box_agent_chat_delete", ())):
+                    raise PermissionError(f"CHAT_REFERENCE_PROTECTED: {{resolved}} is used by chat; preserve it and its dependencies")
 
     def _box_agent_write_audit(event, args):
         if not getattr(_box_guard_sys, "_box_agent_write_guard_enabled", False):
@@ -189,17 +235,30 @@ if not getattr(_box_guard_sys, "_box_agent_write_guard_installed", False):
                 _box_agent_require_writable(args[0])
         elif event in {{
             "os.mkdir",
-            "os.remove",
-            "os.rmdir",
-            "os.truncate",
-            "os.unlink",
         }} and args:
-            _box_agent_require_writable(args[0])
+            # mkdir cannot destroy an existing reference. Libraries routinely
+            # call mkdir(exist_ok=True) on a deliverable's parent directory.
+            if not _box_agent_path_is_writable(args[0]):
+                _box_agent_require_writable(args[0])
+        elif event in {{"os.remove", "os.rmdir", "os.unlink", "os.truncate"}} and args:
+            if event != "os.truncate" and len(args) > 1 and isinstance(args[-1], int) and args[-1] >= 0 and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                raise PermissionError("CHAT_REFERENCE_PROTECTED: descriptor-relative mutations require an explicit path")
+            _box_agent_require_writable(args[0], "write" if event == "os.truncate" else "delete")
         elif event in {{"os.rename", "os.replace"}} and len(args) >= 2:
-            _box_agent_require_writable(args[0])
+            if any(isinstance(fd, int) and fd >= 0 for fd in args[2:]) and getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                raise PermissionError("CHAT_REFERENCE_PROTECTED: descriptor-relative mutations require an explicit path")
+            _box_agent_require_writable(args[0], "move")
             _box_agent_require_writable(args[1])
         elif event in {{"shutil.copyfile", "shutil.copymode", "shutil.copystat"}} and len(args) >= 2:
             _box_agent_require_writable(args[1])
+        elif event == "shutil.rmtree" and args:
+            _box_agent_require_writable(args[0], "delete")
+        elif event in {{"os.system", "subprocess.Popen", "os.exec", "os.posix_spawn"}}:
+            guard = getattr(_box_guard_sys, "_box_agent_command_guard", None)
+            if guard is not None:
+                guard["_audit_command"](event, args)
+            elif getattr(_box_guard_sys, "_box_agent_chat_paths", ()):
+                raise PermissionError("CHAT_REFERENCE_PROTECTED: child command check unavailable; preserve files")
 
     _box_guard_sys.addaudithook(_box_agent_write_audit)
     _box_guard_sys._box_agent_write_guard_installed = True
@@ -208,12 +267,21 @@ _box_guard_sys._box_agent_write_roots = tuple(
     _box_guard_os.path.realpath(root) for root in {encoded_roots}
 )
 _box_guard_sys._box_agent_write_guard_enabled = True
+_box_guard_sys._box_agent_chat_paths = {protected!r}
+_box_guard_sys._box_agent_chat_delete = {allowed_deletions!r}
 """
 
 
 _KERNEL_WRITE_GUARD_DISABLE_CODE = """
 import sys as _box_guard_sys
 _box_guard_sys._box_agent_write_guard_enabled = False
+_box_guard_sys._box_agent_command_guard = None
+for _box_key, _box_value in getattr(_box_guard_sys, "_box_agent_command_env", {}).items():
+    if _box_value is None:
+        _box_guard_sys.modules["os"].environ.pop(_box_key, None)
+    else:
+        _box_guard_sys.modules["os"].environ[_box_key] = _box_value
+_box_guard_sys._box_agent_command_env = {}
 """
 
 
@@ -221,17 +289,24 @@ def _execute_with_kernel_write_guard(
     session: "JupyterKernelSession",
     code: str,
     timeout: int,
+    reference_policy=None,
 ) -> tuple[str, list[str], Optional[str]]:
-    setup_result = session.execute(
-        _kernel_write_guard_setup_code(session.workspace),
-        timeout=min(timeout, 10),
-    )
-    if setup_result[2] is not None:
-        return setup_result
+    from .python_mutation_guard import PythonMutationGuard
+
+    guard = PythonMutationGuard(None)
     try:
+        setup_result = session.execute(
+            _kernel_write_guard_setup_code(session.workspace, reference_policy, guard.kernel_setup_code()),
+            timeout=min(timeout, 10),
+        )
+        if setup_result[2] is not None:
+            return setup_result
         return session.execute(code, timeout)
     finally:
-        session.execute(_KERNEL_WRITE_GUARD_DISABLE_CODE, timeout=5)
+        try:
+            session.execute(_KERNEL_WRITE_GUARD_DISABLE_CODE, timeout=5)
+        finally:
+            guard.close()
 
 # Whitelist of pip package names allowed for on-demand installation in
 # frozen/runtime mode.  Packages NOT in this set are rejected with a clear
@@ -272,6 +347,7 @@ class SandboxEnvironment:
         self,
         base_dir: Path | None = None,
         runtime_env: Mapping[str, str] | None = None,
+        python_path: Path | None = None,
     ):
         self.base_dir = base_dir or SANDBOX_BASE_DIR
         self.runtime_env = dict(runtime_env or {})
@@ -283,7 +359,9 @@ class SandboxEnvironment:
         else:
             self.python_path = self.venv_dir / "bin" / "python"
         self._ready = False
+        self._ready_lock = asyncio.Lock()
         self._bundled_override = False
+        self._explicit_python = python_path is not None
         self.python_override_path: Path | None = None
 
         # Host/runtime override: point at an already-prepared interpreter
@@ -295,7 +373,7 @@ class SandboxEnvironment:
         # Do NOT set _ready=True here — let ensure_ready() run _verify_packages
         # so we can fall back to RUNTIME_PACKAGES_DIR when the external
         # interpreter is missing one of our defaults.
-        override_path = self._resolve_python_override(self.runtime_env)
+        override_path = python_path if python_path is not None else self._resolve_python_override(self.runtime_env)
         if override_path is not None:
             self.python_path = override_path
             self.python_override_path = override_path
@@ -315,7 +393,20 @@ class SandboxEnvironment:
         Args:
             on_progress: Optional callback(message: str) for progress updates.
         """
+        async with self._ready_lock:
+            await self._ensure_ready(on_progress)
+
+    async def _ensure_ready(self, on_progress: Any = None) -> None:
+        if self._explicit_python and not self.python_path.is_file():
+            raise RuntimeError(f"PYTHON_NOT_FOUND: {self.python_path}")
         if self._ready:
+            return
+
+        if self._explicit_python:
+            result = await probe_python(str(self.python_path))
+            if result.get("status") != "ready":
+                raise RuntimeError(json.dumps(result, ensure_ascii=False))
+            self._ready = True
             return
 
         if self._bundled_override:
@@ -480,20 +571,27 @@ class SandboxEnvironment:
         "pip": "pip",
     }
 
-    def _subprocess_env(self) -> dict[str, str] | None:
+    def _subprocess_env(self, *, for_kernel: bool = False) -> dict[str, str] | None:
         """Build env for subprocess pip/import checks.
 
         When a host python override is in use we prepend RUNTIME_PACKAGES_DIR
         to PYTHONPATH so fallback-installed packages are importable.
+        Kernel launches reuse runtime values while leaving fallback packages
+        to the kernel spec.
         """
-        if not self._bundled_override:
+        if not self._bundled_override and not for_kernel:
             return None
         env = os.environ.copy()
         env.pop("BOX_AGENT_OUTPUT_DIR", None)
         env.update({key: value for key, value in self.runtime_env.items() if isinstance(value, str)})
-        extra = str(RUNTIME_PACKAGES_DIR)
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = extra + (os.pathsep + existing if existing else "")
+        if self._explicit_python:
+            env.pop("PYTHONPATH", None)
+            env.pop("PYTHONHOME", None)
+            return env
+        if not for_kernel:
+            extra = str(RUNTIME_PACKAGES_DIR)
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = extra + (os.pathsep + existing if existing else "")
         return env
 
     async def _verify_packages(self, on_progress: Any = None) -> None:
@@ -710,6 +808,7 @@ class SandboxEnvironment:
         spec: dict = {
             "argv": [
                 str(self.python_path),
+                *(["-E"] if self._explicit_python else []),
                 "-m", "ipykernel_launcher",
                 "-f", "{connection_file}",
             ],
@@ -719,7 +818,7 @@ class SandboxEnvironment:
         # In bundled-override mode the kernel subprocess won't inherit our
         # patched sys.path, so expose RUNTIME_PACKAGES_DIR via PYTHONPATH on
         # the kernel spec instead.
-        if self._bundled_override and RUNTIME_PACKAGES_DIR.exists():
+        if self._bundled_override and not self._explicit_python and RUNTIME_PACKAGES_DIR.exists():
             spec["env"] = {"PYTHONPATH": str(RUNTIME_PACKAGES_DIR)}
         return spec
 
@@ -749,14 +848,14 @@ class SandboxEnvironment:
         Returns:
             (success, message) tuple.
         """
-        if self._bundled_override:
+        if self._bundled_override and not self._explicit_python:
             return await self._runtime_python_install(packages, enforce_allowlist=IS_FROZEN)
 
-        if IS_FROZEN:
+        if IS_FROZEN and not self._explicit_python:
             return await self._frozen_install(packages)
 
         proc = await asyncio.create_subprocess_exec(
-            str(self.python_path), "-m", "pip", "install",
+            str(self.python_path), *(["-E"] if self._explicit_python else []), "-m", "pip", "install",
             *packages,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -942,8 +1041,8 @@ class JupyterKernelSession:
         # Create KernelManager with our custom spec
         km = jupyter_client.KernelManager()
         km._kernel_spec = kernel_spec  # Override the kernel spec
-        await _start_sandbox_kernel(km)
         self._km = km
+        await _start_sandbox_kernel(km, env=self.sandbox_env._subprocess_env(for_kernel=True))
         # Register the kernel subprocess PID with the Windows kill-on-close Job
         # Object (no-op off-Windows). jupyter_client 8.x exposes the PID via
         # km.provisioner.pid (populated after start_kernel); older releases used
@@ -1391,6 +1490,58 @@ class JupyterSandboxTool(Tool):
         self.runtime_env.pop("BOX_AGENT_OUTPUT_DIR", None)
         self.process_owner_id = (process_owner_id or "").strip()
         self._session_id: Optional[str] = None
+        self._requires_subprocess = False
+        # Optional ACP host binding. CLI and older hosts retain their existing behavior.
+        self.runtime_preparer: Callable[[], Awaitable[None]] | None = None
+
+    def fork_for_child(self, child_id: str) -> "JupyterSandboxTool":
+        """Reuse runtime settings while isolating a trusted child's kernels."""
+        child = JupyterSandboxTool(
+            workspace_dir=self.workspace_dir,
+            runtime_env=self.runtime_env,
+            process_owner_id=f"{self.process_owner_id or '__default__'}:{child_id}",
+        )
+        child._requires_subprocess = True
+        if self.runtime_preparer is not None:
+            prepare_runtime = self.runtime_preparer
+
+            async def prepare_child_runtime() -> None:
+                await prepare_runtime()
+                child.update_runtime_env(self.runtime_env)
+
+            child.runtime_preparer = prepare_child_runtime
+        return child
+
+    async def shutdown_owned_sessions(self) -> None:
+        """Stop only kernels in this tool's trusted owner namespace."""
+        if not self.process_owner_id:
+            raise ValueError("Kernel cleanup requires a trusted process owner.")
+        prefix = f"{self.process_owner_id}::"
+        for key in list(self._sessions):
+            if not key.startswith(prefix):
+                continue
+            session = self._sessions.pop(key)
+            try:
+                await session.stop()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Child kernel cleanup failed: %s", key, exc_info=True,
+                )
+        self._session_id = None
+    def update_runtime_env(self, values: Mapping[str, str]) -> None:
+        self.runtime_env.update(values)
+        self.runtime_env.pop("BOX_AGENT_OUTPUT_DIR", None)
+        cached = self.__class__._sandbox_env
+        if cached is not None and (
+            self.__class__._sandbox_env_key != self._sandbox_env_cache_key()
+            or cached.runtime_env != self.runtime_env
+            or (
+                not cached._bundled_override
+                and SandboxEnvironment._resolve_python_override(self.runtime_env)
+            )
+        ):
+            self.__class__._sandbox_env = None
+            self.__class__._sandbox_env_key = None
 
     @property
     def session_id(self) -> str | None:
@@ -1476,17 +1627,42 @@ class JupyterSandboxTool(Tool):
         if env._bundled_override:
             return JupyterKernelSession(session_id, workspace, env)
         if IS_FROZEN:
+            if self._requires_subprocess:
+                raise RuntimeError(
+                    "ISOLATED_KERNEL_UNAVAILABLE: child Python execution requires "
+                    "a standalone runtime Python (BOX_AGENT_SANDBOX_PYTHON)."
+                )
             return InProcessKernelSession(session_id, workspace)
         return JupyterKernelSession(session_id, workspace, env)
+
+    async def _start_session(
+        self, session_key: str, workspace: Path, env: SandboxEnvironment
+    ) -> "JupyterKernelSession | InProcessKernelSession":
+        session = self._create_session(session_key, workspace, env)
+        try:
+            await session.start()
+        except BaseException:
+            try:
+                await session.stop()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Kernel cleanup after startup failure failed: %s", session_key, exc_info=True,
+                )
+            raise
+        self._sessions[session_key] = session
+        return session
 
     @staticmethod
     def _execute_session_code(
         session: "JupyterKernelSession | InProcessKernelSession",
         code: str,
         timeout: int,
+        reference_policy=None,
     ) -> tuple[str, list[str], Optional[str]]:
         if isinstance(session, JupyterKernelSession):
-            return _execute_with_kernel_write_guard(session, code, timeout)
+            return _execute_with_kernel_write_guard(session, code, timeout, reference_policy)
+        if reference_policy and reference_policy[0]:
+            return "", [], "CHAT_REFERENCE_PROTECTED: an isolated kernel is required when chat references are active"
         return session.execute(code, timeout)
 
     @property
@@ -1497,15 +1673,23 @@ class JupyterSandboxTool(Tool):
     def description(self) -> str:
         return f"""Execute Python code in a persistent Jupyter kernel sandbox.
 
-This tool runs Python code in a **real Jupyter kernel** with its own isolated environment:
+This tool runs Python code in a **real Jupyter kernel**:
+- Use only application-managed Python, normally the default host-prepared sandbox.
+  If it is not ready, use local_environment(action="ensure", capability="python") when available
+  to install or wait for the managed environment. Do not duplicate an active installation.
+  Do not use or install alternate runtimes or ask the user to switch environments.
+- Omit python_path unless specifying a verified application-managed interpreter with working
+  ipykernel. Its path is retained for the kernel session. A path change requires a new
+  session_id; variables cannot migrate.
 - Variables, functions, classes, imports all persist between calls
 - Reads may use allowed input paths, but durable writes are confined to the session cwd;
   runtime-managed temporary/internal roots remain available
-- Pre-installed packages: pandas, numpy, matplotlib, seaborn, scikit-learn, requests,
+- The default managed environment prepares: pandas, numpy, matplotlib, seaborn, scikit-learn, requests,
   openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx,
   beautifulsoup4, lxml, pillow, pyyaml, python-dateutil, chardet
-- Do NOT %pip install any pre-installed package — it just wastes time and can hit the timeout
-- Only %pip install when you hit an actual ModuleNotFoundError for a non-listed package
+- Check actual imports before installing missing packages into the managed interpreter.
+  For missing Python/ipykernel, use the managed installer via local_environment when available.
+  If preparation fails, use returned diagnostics to retry or report the cause, not switch runtimes.
 - Ideal for data analysis: load once, analyze many times
 
 Example workflow:
@@ -1524,8 +1708,8 @@ Best practices:
   Use ordered write_file chunks with chunk_index/final unless Python processing
   is actually required.
 - Use print() to see intermediate results
-- Never use the bash tool's `pip install` for sandbox packages — bash runs against the
-  host Python and the sandbox kernel will not see those packages
+- Install missing task packages only into the managed interpreter that executes the code.
+  When using a shell, use that interpreter's `-m pip`; do not modify it while the managed installer is running.
 
 Output formats:
 - Text output (print statements, repr)
@@ -1565,6 +1749,10 @@ Output formats:
                     "description": "Execution timeout in seconds (default: 60, max: 300)",
                     "default": 60,
                 },
+                "python_path": {
+                    "type": "string",
+                    "description": "Optional absolute path to a verified application-managed Python with ipykernel. Prefer omitting this to use the default managed environment. Do not use this parameter to switch to a system, project or third-party runtime. Retained for this kernel session; a path change requires a new session_id.",
+                },
             },
             "required": ["code"],
         }
@@ -1574,6 +1762,7 @@ Output formats:
         code: str,
         session_id: Optional[str] = None,
         timeout: int = 60,
+        python_path: str | None = None,
     ) -> ToolResult:
         """Execute Python code in sandbox with persistent kernel.
 
@@ -1581,6 +1770,7 @@ Output formats:
             code: Python code to execute
             session_id: Session ID for persistent kernel
             timeout: Execution timeout in seconds
+            python_path: Optional absolute interpreter path for this kernel session
 
         Returns:
             ToolResult with execution output, images, or errors
@@ -1631,8 +1821,53 @@ Output formats:
                 ),
             )
 
-        # Ensure sandbox environment is ready
-        env = self._get_sandbox_env()
+        # A live session owns its interpreter. Never silently migrate variables
+        # or switch a user-selected environment back to the host default.
+        requested_session_id = session_id or self._session_id
+        previous = (
+            self._sessions.get(self._session_key(requested_session_id))
+            if requested_session_id else None
+        )
+        previous_env = getattr(previous, "sandbox_env", None)
+        selected_env = previous_env if getattr(previous_env, "_explicit_python", False) else None
+        if python_path is not None:
+            candidate = Path(python_path).expanduser()
+            if not candidate.is_absolute() or not candidate.is_file():
+                return ToolResult(success=False, error=f"PYTHON_NOT_FOUND: {python_path}")
+            # Do not resolve symlinks: a venv's python may link to a base interpreter.
+            if previous is not None and (
+                not getattr(previous_env, "_explicit_python", False)
+                or os.path.normcase(str(previous_env.python_path)) != os.path.normcase(str(candidate))
+            ):
+                return ToolResult(
+                    success=False,
+                    error="PYTHON_ENVIRONMENT_CHANGED: a managed Python path change requires "
+                          "a new session_id; existing variables remain in the old kernel.",
+                )
+            selected_env = SandboxEnvironment(
+                runtime_env=self.runtime_env, python_path=candidate,
+            )
+
+        # Default execution checks host state; the model chooses when to prepare or retry.
+        if selected_env is None and self.runtime_preparer is not None:
+            try:
+                await self.runtime_preparer()
+                if SandboxEnvironment._resolve_python_override(self.runtime_env) is None:
+                    raise RuntimeError(
+                        "Host reported ready but supplied no usable sandbox Python path."
+                    )
+            except RuntimeError as exc:
+                return ToolResult(
+                    success=False,
+                    content=str(exc),
+                    error=f"RUNTIME_NOT_READY: {exc}\n"
+                          "Report the current preparation state if relevant. Choose "
+                          "local_environment(capability='python', action='ensure') to wait/install, "
+                          "then retry with the managed Python. Do not duplicate an active installation. "
+                          "If preparation fails, use returned logs to retry or report the cause. "
+                          "Do not use or install alternate runtimes or ask the user to switch environments.",
+                )
+        env = selected_env or self._get_sandbox_env()
         try:
             await env.ensure_ready(on_progress=lambda msg: None)
         except RuntimeError as e:
@@ -1658,9 +1893,10 @@ Output formats:
             self._session_id = session_id
             session_key = self._session_key(session_id)
             workspace = self._get_workspace(session_key)
-            session = self._create_session(session_key, workspace, env)
-            await session.start()
-            self._sessions[session_key] = session
+            try:
+                await self._start_session(session_key, workspace, env)
+            except RuntimeError as e:
+                return ToolResult(success=False, error=f"KERNEL_START_FAILED: {e}")
             return ToolResult(
                 success=False,
                 content="",
@@ -1670,16 +1906,14 @@ Output formats:
         # Get or create kernel session
         if session_key not in self._sessions:
             workspace = self._get_workspace(session_key)
-            session = self._create_session(session_key, workspace, env)
             try:
-                await session.start()
+                await self._start_session(session_key, workspace, env)
             except RuntimeError as e:
                 return ToolResult(
                     success=False,
                     content="",
                     error=f"KERNEL_START_FAILED: {e}",
                 )
-            self._sessions[session_key] = session
 
         session = self._sessions[session_key]
 
@@ -1691,12 +1925,16 @@ Output formats:
         # blocking the event loop (pip installs inside %pip or auto-install can
         # take minutes).  Wrap with an overall timeout as a safety net.
         _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
-        loop = asyncio.get_event_loop()
+        from .chat_references import current_chat_policy
+        reference_policy = current_chat_policy()
+        execute_code = self._execute_session_code
+        if reference_policy[0]:
+            from functools import partial
+            execute_code = partial(execute_code, reference_policy=reference_policy)
         try:
             stdout, images, error = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    self._execute_session_code,
+                asyncio.to_thread(
+                    execute_code,
                     session,
                     code,
                     timeout,
@@ -1705,17 +1943,15 @@ Output formats:
             )
 
             # Auto-install missing modules and retry once
-            if error and "ModuleNotFoundError" in error:
+            if error and "ModuleNotFoundError" in error and not env._explicit_python:
                 pkg = self._extract_missing_module(error)
                 if pkg:
-                    env = self._get_sandbox_env()
                     pip_name = self._MODULE_TO_PIP.get(pkg, pkg)
                     ok, _ = await env.install_packages([pip_name])
                     if ok:
                         stdout, images, error = await asyncio.wait_for(
-                            loop.run_in_executor(
-                                None,
-                                self._execute_session_code,
+                            asyncio.to_thread(
+                                execute_code,
                                 session,
                                 code,
                                 timeout,

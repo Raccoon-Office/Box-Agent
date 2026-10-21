@@ -16,7 +16,7 @@ import inspect
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -155,6 +155,7 @@ async def _stream_with_activity(
     stream: AsyncIterator[StreamEvent],
     *,
     stale_seconds: float | None = None,
+    wait_cancelled: Callable[[], Awaitable[None]] | None = None,
     _runtime_defaults: _LoopRuntimeDefaults = _DEFAULT_LOOP_RUNTIME_DEFAULTS,
 ) -> AsyncIterator[StreamEvent]:
     """Add bounded host heartbeats and stop a provider stream that is stale."""
@@ -163,12 +164,14 @@ async def _stream_with_activity(
     # explicit per-turn value.
     if stale_seconds is None:
         stale_seconds = _runtime_defaults.llm_provider_stale_seconds
-    async for event in _kernel_stream_with_activity(
+    async with aclosing(_kernel_stream_with_activity(
         stream,
         stale_seconds=stale_seconds,
         activity_interval_seconds=_runtime_defaults.llm_activity_interval_seconds,
-    ):
-        yield event
+        wait_cancelled=wait_cancelled,
+    )) as events:
+        async for event in events:
+            yield event
 from ..schema import LLMResponse, Message, StreamEvent
 from ..tools.base import (
     Tool,
@@ -749,7 +752,11 @@ async def _run_agent_loop_impl(
                 "artifact_root_dir is deprecated and ignored; artifact discovery uses workspace_dir"
             )
 
-    cancelled = is_cancelled or (lambda: False)
+    def cancelled() -> bool:
+        return bool(
+            (run_control is not None and run_control.cancelled)
+            or (is_cancelled is not None and is_cancelled())
+        )
     # Capture before memory, repair and continuation messages can change history.
     continuation_user_request = (
         current_turn_text if current_turn_text is not None else _latest_user_text(messages)
@@ -1014,6 +1021,7 @@ async def _run_agent_loop_impl(
             commit_result=tool_messages.commit_result,
             validate_followup=validate_followup,
             policy_error=browser_intent_policy.tool_call_error,
+            session_log=session_log,
             workspace_dir=workspace_dir,
             session_id=session_id, turn_id=turn_id,
             permission_negotiator=permission_negotiator, logger=logger,
@@ -1618,46 +1626,48 @@ async def _run_agent_loop_impl(
                 stream_kwargs["call_kind"] = call_kind
             request_only_input_tokens = request_overlay_tokens
             llm_stream = llm.generate_stream(**stream_kwargs)
-            async for chunk in _stream_with_activity(
+            async with aclosing(_stream_with_activity(
                 llm_stream,
                 stale_seconds=effective_provider_stale_seconds,
+                wait_cancelled=run_control.wait_cancelled if run_control is not None else None,
                 _runtime_defaults=_runtime_defaults,
-            ):
-                if cancelled():
-                    break
-                if chunk.type == "thinking":
-                    thinking_chunk_count += 1
-                    candidate = thinking_content + (chunk.delta or "")
-                    stream_repeat_pattern = (
-                        repeated_stream_pattern(candidate)
-                        if thinking_chunk_count >= STREAM_REPEAT_MIN_CHUNKS
-                        else None
-                    )
-                    if stream_repeat_pattern is not None:
+            )) as chunks:
+                async for chunk in chunks:
+                    if cancelled():
                         break
-                    if not thinking_header_yielded:
-                        yield ThinkingEvent(content="", _streaming=True, _header=True)
-                        thinking_header_yielded = True
-                    thinking_content = candidate
-                    yield ThinkingEvent(content=chunk.delta or "", _streaming=True)
-                elif chunk.type == "text":
-                    text_chunk_count += 1
-                    visible_delta = signed_image_url_rewriter.feed(chunk.delta or "")
-                    candidate = text_content + visible_delta
-                    stream_repeat_pattern = (
-                        repeated_stream_pattern(candidate)
-                        if text_chunk_count >= STREAM_REPEAT_MIN_CHUNKS
-                        else None
-                    )
-                    if stream_repeat_pattern is not None:
-                        break
-                    text_content = candidate
-                    if visible_delta:
-                        yield ContentEvent(content=visible_delta, _streaming=True)
-                elif chunk.type == "activity" and chunk.activity:
-                    yield LLMActivityEvent(step=step + 1, payload=dict(chunk.activity))
-                elif chunk.type == "finish":
-                    finish_event = chunk
+                    if chunk.type == "thinking":
+                        thinking_chunk_count += 1
+                        candidate = thinking_content + (chunk.delta or "")
+                        stream_repeat_pattern = (
+                            repeated_stream_pattern(candidate)
+                            if thinking_chunk_count >= STREAM_REPEAT_MIN_CHUNKS
+                            else None
+                        )
+                        if stream_repeat_pattern is not None:
+                            break
+                        if not thinking_header_yielded:
+                            yield ThinkingEvent(content="", _streaming=True, _header=True)
+                            thinking_header_yielded = True
+                        thinking_content = candidate
+                        yield ThinkingEvent(content=chunk.delta or "", _streaming=True)
+                    elif chunk.type == "text":
+                        text_chunk_count += 1
+                        visible_delta = signed_image_url_rewriter.feed(chunk.delta or "")
+                        candidate = text_content + visible_delta
+                        stream_repeat_pattern = (
+                            repeated_stream_pattern(candidate)
+                            if text_chunk_count >= STREAM_REPEAT_MIN_CHUNKS
+                            else None
+                        )
+                        if stream_repeat_pattern is not None:
+                            break
+                        text_content = candidate
+                        if visible_delta:
+                            yield ContentEvent(content=visible_delta, _streaming=True)
+                    elif chunk.type == "activity" and chunk.activity:
+                        yield LLMActivityEvent(step=step + 1, payload=dict(chunk.activity))
+                    elif chunk.type == "finish":
+                        finish_event = chunk
 
             if stream_repeat_pattern is None and not cancelled():
                 final_visible_delta = signed_image_url_rewriter.flush()

@@ -264,6 +264,11 @@ def test_outline_validation_failure_still_produces_an_artifact(design_case):
     root,outline,_,_=design_case
     outline['slides'][0]['message']=''
     write(root/'outline.json',outline)
+    first=run('design_plan.js','prepare','outline.json',cwd=root)
+    assert first.returncode==0,first.stderr
+    # Hard issues get one non-terminal repair round before the fallback delivery.
+    repair=json.loads(first.stdout)
+    assert repair['status']=='outline_needs_fixes' and repair['repair_required'] is True and repair['issues']
     result=run('design_plan.js','prepare','outline.json',cwd=root)
     assert result.returncode==0,result.stderr
     report=json.loads(result.stdout)

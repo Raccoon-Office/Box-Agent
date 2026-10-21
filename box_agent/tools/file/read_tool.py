@@ -124,7 +124,9 @@ class ReadTool(Tool):
                 return workspace_candidate
         return file_path
 
-    def _validate_readable_file(self, file_path: Path, requested_path: str) -> ToolResult | None:
+    def _validate_readable_file(
+        self, file_path: Path, requested_path: str, *, text_only: bool = True,
+    ) -> ToolResult | None:
         if self._perm:
             decision = self._perm.check(
                 capability="filesystem.read",
@@ -162,9 +164,10 @@ class ReadTool(Tool):
                     "target='files' to inspect a directory."
                 ),
             )
-        binary_error = _binary_file_error(file_path)
-        if binary_error:
-            return ToolResult(success=False, content="", error=binary_error)
+        if text_only:
+            binary_error = _binary_file_error(file_path)
+            if binary_error:
+                return ToolResult(success=False, content="", error=binary_error)
         return None
 
     @property
@@ -180,6 +183,7 @@ class ReadTool(Tool):
             "maximum is 2000; use offset and limit to continue through large files. "
             "For JSONL logs, especially those with large records, use query_jsonl to filter "
             "and project fields instead of returning raw records. "
+            "For .eml emails use read_email to decode MIME bodies and attachments. "
             "Binary and structured document files are rejected with an actionable error. "
             "Call it repeatedly to read different files or page through one file."
         )
@@ -267,6 +271,8 @@ class ReadTool(Tool):
                     key=lambda item: len(item[1]),
                 )
                 retry_hint = f"Retry with a smaller limit from offset={offset}."
+                if file_path.suffix.casefold() == ".eml":
+                    retry_hint = "Use read_email to decode the email instead of reading raw MIME data."
                 if file_path.suffix.casefold() == ".jsonl":
                     retry_hint = (
                         f"JSONL record at line {largest_index} contains "
@@ -301,6 +307,10 @@ class ReadTool(Tool):
                 numbered_lines.insert(
                     0,
                     "[Warning: File contains non-UTF-8 bytes; invalid bytes were replaced with \ufffd.]",
+                )
+            if file_path.suffix.casefold() == ".eml":
+                numbered_lines.insert(
+                    0, "[Raw email source: use read_email to decode headers, body and attachments for analysis.]",
                 )
             content = "\n".join(numbered_lines)
             has_more = end < total_lines

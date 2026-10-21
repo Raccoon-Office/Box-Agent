@@ -49,6 +49,20 @@ Most agent frameworks are either too simple (no sandbox, no tools) or too comple
 
 ## Key Features
 
+### Local Email Analysis
+
+`read_email` decodes local `.eml` headers, plain/HTML bodies and attachment
+metadata offline, without a Python sandbox or additional packages. Prefer it
+over `read_file` for emails. The body supports character pagination; continue
+with `next_offset` and `expected_sha256=source_sha256` to detect a changed source.
+To inspect an attachment, call the separate `extract_email_attachment` tool
+with its `attachment_index` and a new `output_path` inside the workspace, then
+use the appropriate document or image tool. Reading creates no files;
+extraction checks write permissions and never overwrites a file. Read-only
+sub-agents can read emails; delegated extraction requires an explicit write scope.
+Messages are limited to 50 MiB, 256 MIME parts, 30 nesting levels and 100
+attachments. Encrypted messages are not decrypted.
+
 ### Sub-Agent Parallelism
 
 Delegate isolated work through a flat task contract with optional tools, Skills,
@@ -335,6 +349,13 @@ box-agent install-browser   # install Chromium for Playwright MCP (~200MB)
 box-agent install-node      # install managed Node.js runtime for skills (macOS)
 ```
 
+### Code-mode startup context
+
+Code-mode sessions load the workspace-root `AGENTS.md` into the startup prompt.
+They do not run Git commands during prompt assembly; the prompt states that Git
+state has not been checked. The agent can inspect Git through tools when needed
+and must still protect existing user changes.
+
 ### Agent Trace diagnostics
 
 Run `box-agent trace-viewer` to open the packaged, offline developer viewer. Open `~/.box-agent/log/sessions/` for a newest-first overview of every trace, then select one run to inspect per-turn metrics, LLM/tool waterfalls, raw events, and the complete system → user → assistant/tool → final-response chain. You can still open one `.jsonl` file directly.
@@ -405,6 +426,13 @@ In non-interactive `--task` mode and ACP sessions, active goals also use bounded
 
 ## ACP & Editor Integration
 
+ACP `session/cancel` interrupts a pending primary model stream read without
+waiting for the next HTTP chunk or activity heartbeat, then closes the stream
+and finishes the turn with `stopReason: cancelled`. This does not restart the
+shared runtime or cancel other sessions. Tool execution retains its existing
+cooperative cancellation behavior; cancelling a turn does not roll back tool
+side effects that have already occurred.
+
 Box Agent supports the [Agent Communication Protocol](https://github.com/nichochar/agent-client-protocol) for embedding in editors and apps.
 
 **Zed Editor** — add to `settings.json`:
@@ -433,6 +461,10 @@ uv run box-agent-build-runtime
 uv run box-agent-build-runtime --mac-all --version 0.9.13 --dry-run
 uv run box-agent-build-runtime --mac-all --version 0.9.13
 
+# Build both archives directly into Lab's desktop dist/runtime (no host runtime replacement).
+uv run box-agent-build-runtime --mac-all-lab --version 1.0.0 --dry-run
+uv run box-agent-build-runtime --mac-all-lab --version 1.0.0
+
 # Build macOS Intel/x64 runtime from Apple Silicon
 # Requires a separate x86_64 venv because PyInstaller cannot bundle arm64 wheels into an x64 binary.
 # One-time setup:
@@ -458,6 +490,13 @@ without building. This mode requires an explicit stable version and cannot be co
 with `--target`, `--arch`, `--install-officev3` or `--install-lab`.
 See the [dual-architecture workflow](docs/PRODUCTION_GUIDE_CN.md#macos-双架构一次构建).
 
+`--mac-all-lab [DIR]` reuses the same dual build and writes to
+`<Lab>/apps/office-desktop/dist/runtime/` by default. It locates Lab using
+`BOX_AGENT_LAB_DIR` or the neighboring checkout; `--output` / `BOX_AGENT_RUNTIME_OUTPUT`
+can override the destination. Then run
+`pnpm desktop:release:mac -- --agent-version 1.0.0 --runtime-dir apps/office-desktop/dist/runtime`
+from the Lab root to build both clients. Neither command uploads artifacts.
+
 ## Testing
 
 ```bash
@@ -467,6 +506,8 @@ uv run pytest --cov              # with coverage
 ```
 
 ## Troubleshooting
+
+**Model quota or arrearage**: Recognized business error codes such as `Arrearage` determine the error category before generic message text. HTTP status remains a separate diagnostic and retry signal; unknown codes fall back to the existing text rules. Check the account balance and billing status for the configured model provider before retrying.
 
 **SSL Certificate Error**: `pip install --upgrade certifi` or set `verify=False` for testing.
 

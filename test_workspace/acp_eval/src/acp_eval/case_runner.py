@@ -10,6 +10,7 @@ import os
 import re
 import signal
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ from acp_eval import SCHEMA_VERSION
 from acp_eval.effect_client import EffectEvaluationConfig, evaluate_attempt
 from acp_eval.ids import new_attempt_id
 from acp_eval.lifecycle import ProcessRecorder, drain_stream, stop_process
-from acp_eval.models import AttemptManifest, CaseMetadata, RunResult
+from acp_eval.models import AttemptManifest, CaseMetadata, RunResult, WorkspaceSetup
 from acp_eval.protocol import ACPAccumulator, ProtocolRecorder
 from acp_eval.snapshots import build_artifact_inventory, write_snapshot
 from acp_eval.stderr_scan import scan_stderr, summarize_stderr
@@ -128,6 +129,45 @@ def _copy_inputs(dataset_root: Path, workspace: Path, paths: Sequence[str]) -> l
         staged.append(workspace / source.name)
         destination_names.add(source.name)
     return staged
+
+
+_GIT_IDENTITY = ("-c", "user.name=acp-eval", "-c", "user.email=acp-eval@example.invalid",
+                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+                 "-c", f"core.hooksPath={os.devnull}")
+
+
+def _prepare_workspace(dataset_root: Path, workspace: Path, setup: WorkspaceSetup) -> None:
+    """Stage project files (not attachments), optionally as a git baseline plus dirty work."""
+    if not setup.files and not setup.dirty_files:
+        return
+    # Validate both phases before any copy or Git invocation.
+    for path in (*setup.files, *setup.dirty_files):
+        setup.destination(path)
+    _stage(dataset_root, workspace, setup, setup.files)
+    if setup.git_commit:
+        git = shutil.which("git")
+        if git is None:
+            raise RuntimeError("workspace_setup.git_commit requires git on PATH")
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "baseline"]):
+            subprocess.run([git, *_GIT_IDENTITY, *args], cwd=workspace, check=True,
+                           capture_output=True, timeout=30)
+    _stage(dataset_root, workspace, setup, setup.dirty_files)
+
+
+def _stage(dataset_root: Path, workspace: Path, setup: WorkspaceSetup, paths: Sequence[str]) -> None:
+    if setup.root is None:
+        _copy_inputs(dataset_root, workspace, paths)
+        return
+    root = dataset_root.resolve()
+    for relative_path in paths:
+        source = (root / setup.source(relative_path)).resolve()
+        target = (workspace / setup.destination(relative_path)).resolve()
+        source.relative_to(root)
+        target.relative_to(workspace.resolve())
+        if not source.is_file():
+            raise FileNotFoundError(f"missing workspace_setup file: {source}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _new_attempt_dir(case_dir: Path) -> tuple[str, Path]:
@@ -1188,6 +1228,7 @@ def run_case(record: Mapping[str, Any], config: CaseConfig) -> RunResult:
     state = _AttemptState()
 
     try:
+        _prepare_workspace(Path(config.dataset_root), workspace, WorkspaceSetup.from_record(record))
         input_files = _copy_inputs(Path(config.dataset_root), workspace, _input_paths(record))
         write_snapshot(workspace, attempt_dir / "files-before.json")
         asyncio.run(

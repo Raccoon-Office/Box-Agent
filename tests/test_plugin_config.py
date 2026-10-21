@@ -68,6 +68,8 @@ def test_cua_config_validates_only_the_cua_namespace() -> None:
     assert CuaConfig.model_validate({}).model_dump() == {
         "server_name": "computer-use",
         "feed_screenshots": True,
+        "persist_images": True,
+        "runtime": None,
     }
     assert CuaConfig.model_validate(
         {"server_name": "  my-computer-use  ", "feed_screenshots": False}

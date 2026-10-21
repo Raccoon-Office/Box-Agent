@@ -370,6 +370,52 @@ def test_cli_keeps_existing_single_target_build_and_install(
     assert calls[1][0][0] == archive
 
 
+@pytest.mark.parametrize("explicit_path", [False, True])
+def test_cli_builds_both_archives_directly_into_lab_without_installing_host_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_path: bool,
+) -> None:
+    lab = tmp_path / "raccoon-lab"
+    desktop = lab / "apps/office-desktop"
+    desktop.mkdir(parents=True)
+    (desktop / "package.json").write_text("{}")
+    monkeypatch.setenv("BOX_AGENT_LAB_DIR", str(lab))
+    monkeypatch.delenv("BOX_AGENT_RUNTIME_OUTPUT", raising=False)
+    calls = []
+    monkeypatch.setattr(dual, "build_macos_runtimes", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr("sys.argv", [
+        "build_runtime", "--mac-all-lab", *([str(lab)] if explicit_path else []),
+        "--version", "1.0.0", "--dry-run",
+    ])
+    build_runtime.main()
+    assert calls[0][0][1:] == ("1.0.0", desktop / "dist/runtime")
+    assert calls[0][1]["dry_run"] is True
+    assert not (desktop / "dist").exists()
+    assert not (desktop / "build-resources").exists()
+
+
+@pytest.mark.parametrize("extra", [
+    ["--mac-all"], ["--arch", "x64"], ["--target", "darwin-arm64"],
+    ["--install-officev3"], ["--install-lab"],
+])
+def test_cli_rejects_lab_dual_build_with_another_mode(extra, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["build_runtime", "--mac-all-lab", "--version", "1.0.0", *extra])
+    with pytest.raises(SystemExit) as exc:
+        build_runtime.main()
+    assert exc.value.code == 2
+
+
+def test_cli_lab_dual_build_requires_a_valid_lab_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.argv", [
+        "build_runtime", "--mac-all-lab", str(tmp_path), "--version", "1.0.0", "--dry-run",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        build_runtime.main()
+    assert exc.value.code == 1
+    assert not (tmp_path / "apps").exists()
+
+
 def test_cli_rejects_dry_run_for_legacy_single_target(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["build_runtime", "--dry-run"])
     with pytest.raises(SystemExit) as exc:

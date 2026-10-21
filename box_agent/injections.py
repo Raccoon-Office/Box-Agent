@@ -72,6 +72,8 @@ class MessageInjection:
         ))
         return InjectedMessageEvent(
             content=self.content,
+            # 透传已有语义，不改变注入的正文、来源或用户可见性。
+            kind=self.kind.value,
             injection_id=self.injection_id,
             user_visible=from_user if self.user_visible is None else self.user_visible,
         )

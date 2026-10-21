@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.artifact_publication import metadata_path, retain_chat_file
 from box_agent.tools.setup import add_workspace_tools
 from box_agent.tools.skill_scratch import (
     SKILL_SCRATCH_DIR_NAME,
@@ -83,6 +84,37 @@ def test_prepare_skill_scratch_dir_accepts_session_private_root(tmp_path: Path) 
     assert scratch.path == scratch_root.resolve()
     assert scratch.path.is_dir()
     assert not (workspace / SKILL_SCRATCH_DIR_NAME).exists()
+
+
+def test_scratch_cleanup_preserves_images_already_referenced_by_chat(tmp_path: Path) -> None:
+    scratch = prepare_skill_scratch_dir(tmp_path)
+    folder = scratch.path / "qa"
+    folder.mkdir()
+    image = folder / "shown.png"
+    image.write_bytes(b"shown QA")
+    retain_chat_file(image)
+    disposable = scratch.path / "unshown.png"
+    disposable.write_bytes(b"temporary QA")
+
+    removed = cleanup_skill_scratch_dir(scratch)
+
+    assert str(disposable) in removed
+    assert not disposable.exists()
+    assert image.read_bytes() == b"shown QA"
+    assert metadata_path(image).exists()
+
+
+def test_scratch_cleanup_preserves_directories_with_incomplete_retention_checks(tmp_path, monkeypatch):
+    import box_agent.artifact_publication as publication
+
+    scratch = prepare_skill_scratch_dir(tmp_path)
+    folder = scratch.path / "cache"
+    folder.mkdir()
+    for i in range(4):
+        (folder / str(i)).write_text("keep")
+    monkeypatch.setattr(publication, "_REFERENCE_SCAN_MAX_ENTRIES", 2)
+    assert cleanup_skill_scratch_dir(scratch) == []
+    assert len(list(folder.iterdir())) == 4
 
 
 def test_prepare_skill_scratch_dir_rejects_root_outside_workspace(

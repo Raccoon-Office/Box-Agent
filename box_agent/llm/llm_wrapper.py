@@ -16,7 +16,7 @@ from ..retry import RetryConfig
 from ..schema import LLMProvider, LLMResponse, Message, StreamEvent
 from ..session_trace import emit_session_trace
 from .anthropic_client import AnthropicClient
-from .base import LLMClientBase
+from .base import LLMClientBase, closing_llm_stream
 from .openai_client import OpenAIClient
 from .think_tag_splitter import split_inline_think, unwrap_think_tags
 from .token_meter import record_usage
@@ -443,42 +443,43 @@ class LLMClient:
                 title=title,
                 call_kind=call_kind,
             )
-            async for event in unwrap_think_tags(upstream):
-                observed_at = perf_counter()
-                if first_event_at is None and not _is_provider_wait_activity(event):
-                    first_event_at = observed_at
-                if first_content_at is None and _is_meaningful_stream_event(event):
-                    first_content_at = observed_at
-                if event.type == "text":
-                    text_content += event.delta or ""
-                elif event.type == "thinking":
-                    thinking_content += event.delta or ""
-                elif event.type == "finish":
-                    finish_seen = True
-                    record_usage(event.usage)
-                    emit_session_trace(
-                        "llm.response",
-                        turn_id=turn_id,
-                        llm_call_id=llm_call_id,
-                        data={
-                            "provider": trace_provider,
-                            "model": trace_model,
-                            "content": text_content,
-                            "thinking": thinking_content or None,
-                            "tool_calls": event.tool_calls,
-                            "finish_reason": event.finish_reason,
-                            "raw_finish_reason": event.raw_finish_reason,
-                            "provider_response_id": event.provider_response_id,
-                            "provider_request_id": event.provider_request_id,
-                            "usage": event.usage.reported_usage() if event.usage else None,
-                            "timing": _trace_timing(
-                                started_at=started_at,
-                                first_event_at=first_event_at,
-                                first_content_at=first_content_at,
-                            ),
-                        },
-                    )
-                yield event
+            async with closing_llm_stream(unwrap_think_tags(upstream)) as events:
+                async for event in events:
+                    observed_at = perf_counter()
+                    if first_event_at is None and not _is_provider_wait_activity(event):
+                        first_event_at = observed_at
+                    if first_content_at is None and _is_meaningful_stream_event(event):
+                        first_content_at = observed_at
+                    if event.type == "text":
+                        text_content += event.delta or ""
+                    elif event.type == "thinking":
+                        thinking_content += event.delta or ""
+                    elif event.type == "finish":
+                        finish_seen = True
+                        record_usage(event.usage)
+                        emit_session_trace(
+                            "llm.response",
+                            turn_id=turn_id,
+                            llm_call_id=llm_call_id,
+                            data={
+                                "provider": trace_provider,
+                                "model": trace_model,
+                                "content": text_content,
+                                "thinking": thinking_content or None,
+                                "tool_calls": event.tool_calls,
+                                "finish_reason": event.finish_reason,
+                                "raw_finish_reason": event.raw_finish_reason,
+                                "provider_response_id": event.provider_response_id,
+                                "provider_request_id": event.provider_request_id,
+                                "usage": event.usage.reported_usage() if event.usage else None,
+                                "timing": _trace_timing(
+                                    started_at=started_at,
+                                    first_event_at=first_event_at,
+                                    first_content_at=first_content_at,
+                                ),
+                            },
+                        )
+                    yield event
         except BaseException as exc:
             emit_session_trace(
                 "llm.error",
@@ -635,11 +636,11 @@ class SessionBoundLLM:
         effective_call_kind = call_kind.strip() or self._call_kind
         if effective_call_kind:
             kwargs["call_kind"] = effective_call_kind
-        stream = client.generate_stream(messages, tools, **kwargs)
-        while True:
-            try:
-                with scoped_client_info(self._client_info):
-                    event = await anext(stream)
-            except StopAsyncIteration:
-                return
-            yield event
+        async with closing_llm_stream(client.generate_stream(messages, tools, **kwargs)) as stream:
+            while True:
+                try:
+                    with scoped_client_info(self._client_info):
+                        event = await anext(stream)
+                except StopAsyncIteration:
+                    return
+                yield event

@@ -13,6 +13,7 @@ from ...session_log import SessionLogDurabilityError
 from ..base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
 from ..delegated_budget import current_budgets
 from ..schema_validation import validate_tool_arguments, ToolSchemaValidationError
+from ..chat_references import bind_chat_references
 
 if TYPE_CHECKING:
     from .scheduler import ToolEngineRecord
@@ -43,6 +44,20 @@ async def invoke_tool_once(
 ) -> ToolResult:
     """Invoke the validated tool interface once, preserving legacy overrides."""
     context = context or ToolInvocationContext()
+    guard = context.chat_references
+    allowed_deletions = frozenset()
+    if guard is not None:
+        try:
+            issues = validate_tool_arguments(tool.parameters, arguments)
+        except ToolSchemaValidationError:
+            return tool._invalid_schema_result()
+        if issues:
+            return tool._invalid_arguments_result(issues)
+        denied, allowed_deletions = await guard.acheck(tool.name, arguments, approved_permission_request)
+        if denied is not None:
+            denied._invocation_rejected = True
+            context.budget_charge.release_unexecuted()
+            return denied
     ledgers = current_budgets()
     if getattr(tool, "name", "") == "sub_agent" and (ledgers or context.child_budgets):
         if not (getattr(tool, "supports_delegated_budget", False) and (
@@ -68,11 +83,14 @@ async def invoke_tool_once(
     except BaseException:
         context.budget_charge.release_unexecuted()
         raise
-    if isinstance(tool, EventEmittingTool) or getattr(tool, "uses_invocation_context", False):
-        result = await tool.invoke(arguments, context=context)
-    else:
-        result = await tool.invoke(arguments)
-    if result.permission_request:
+    with bind_chat_references(guard, allowed_deletions):
+        if isinstance(tool, EventEmittingTool) or getattr(tool, "uses_invocation_context", False):
+            result = await tool.invoke(arguments, context=context)
+        else:
+            result = await tool.invoke(arguments)
+    if guard is not None and allowed_deletions:
+        guard.deleted(allowed_deletions)
+    if result.permission_request or result._invocation_rejected:
         context.budget_charge.release_unexecuted()
     return result
 

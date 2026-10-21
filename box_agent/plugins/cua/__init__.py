@@ -28,7 +28,9 @@ def _create_bindings(context: PluginFactoryContext):
         llm=run.options.llm,
         config=settings,
         sidecar_dir=sidecar_dir,
-        enabled=raw_settings is not None,
+        enabled=raw_settings is not None and (
+            settings.runtime is None or settings.runtime.enabled
+        ),
     )
 
 

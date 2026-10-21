@@ -1181,11 +1181,21 @@ async def test_permission_stream_relays_progress_and_activity_before_final_resul
             replace(request, approved_permission_request=approval)
         ), on_retry=retried.append,
     )
+
+    async def wait_for_live_records():
+        expected = {
+            ToolEngineProgress(event="original-parent"),
+            ToolEngineActivity(tool_name=tool.name),
+        }
+        seen = set()
+        while seen != expected:
+            record = await anext(stream)
+            assert record in expected
+            assert not tool.finished
+            seen.add(record)
+
     try:
-        assert await asyncio.wait_for(anext(stream), 0.5) == ToolEngineProgress(event="original-parent")
-        assert not tool.finished
-        assert await asyncio.wait_for(anext(stream), 0.5) == ToolEngineActivity(tool_name=tool.name)
-        assert not tool.finished
+        await asyncio.wait_for(wait_for_live_records(), 1)
         tool.release.set()
         remaining = [record async for record in stream]
     finally:

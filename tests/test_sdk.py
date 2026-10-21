@@ -261,3 +261,45 @@ async def test_sdk_handle_routes_permission_response_to_pending_request() -> Non
     done = await stream.__anext__()
     assert done.payload.final_content == "approved"
     await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('utility', [False, True])
+async def test_sdk_adds_language_hint_without_changing_request_or_routing(utility):
+    class Session(_Session):
+        def build_run_options(self, **overrides):
+            self.routing_text = overrides['current_turn_text']
+            return _Options()
+
+    session = Session()
+    session.utility_session = utility
+    text = 'Write a short product blurb based on product.md and save it as blurb.md.'
+    request = RunRequest('hint-run', 'hint-session', text)
+    await AgentClient(session).run(request)
+    assert request.user_message == session.routing_text == text
+    assert ('[Deliverable language: English.' in session.agent.messages[0]) is (not utility)
+
+
+@pytest.mark.asyncio
+async def test_sdk_synthetic_continuation_preserves_message_without_language_hint():
+    session = _Session()
+    text = 'Please continue this task and save the completed report in the workspace.'
+    await AgentClient(session).run(RunRequest(
+        'continuation-run', 'hint-session', text, metadata={'synthetic_continuation': True},
+    ))
+    assert session.agent.messages == [text]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('utility', [False, True])
+@pytest.mark.parametrize('synthetic_continuation', [False, True])
+async def test_sdk_credential_notice_respects_utility_and_continuation_opt_out(utility, synthetic_continuation):
+    session = _Session()
+    session.utility_session = utility
+    text = 'password: fixture-password-not-real'
+    await AgentClient(session).run(RunRequest(
+        'credential-run', 'session', text,
+        metadata={'synthetic_continuation': synthetic_continuation},
+    ))
+    assert ('[敏感信息' in session.agent.messages[0]) is (not utility and not synthetic_continuation)
+    assert session.agent.messages[0].startswith(text)

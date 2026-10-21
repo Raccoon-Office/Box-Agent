@@ -31,6 +31,8 @@ from box_agent.llm.debug_logging import (
     log_image_generation_response_meta,
 )
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.file_change_receipts import before_write, destination_lock, file_change_result
+from box_agent.tools.base import check_tool_cancellation
 from box_agent.tools.safety import validate_path_in_workspace
 from box_agent.tools.watermark import apply_text_watermark
 
@@ -656,15 +658,23 @@ class GenerateImageTool(Tool):
                     "font": "",
                 }
 
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Persist before the image becomes discoverable. The digest survives
-            # arbitrary shell renames/copies and later tool calls or restarts.
-            write_metadata(target, {
-                "type": "artifact" if publish_artifact else "intermediate_asset",
-                "size_bytes": len(image_bytes),
-                "sha256": hashlib.sha256(image_bytes).hexdigest(),
-            })
-            target.write_bytes(image_bytes)
+            async with destination_lock(target):
+                # Re-resolve and re-authorize after waiting; aliases can change.
+                target = target.resolve()
+                permission_error = self._check_write_permission(target)
+                if permission_error:
+                    return permission_error
+                check_tool_cancellation()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # Persist before the image becomes discoverable. The digest survives
+                # arbitrary shell renames/copies and later tool calls or restarts.
+                write_metadata(target, {
+                    "type": "artifact" if publish_artifact else "intermediate_asset",
+                    "size_bytes": len(image_bytes),
+                    "sha256": hashlib.sha256(image_bytes).hexdigest(),
+                })
+                before = before_write(target)
+                target.write_bytes(image_bytes)
 
             rel_path = self._display_path(target)
             artifact_rel_path = self._artifact_display_path(target)
@@ -693,7 +703,7 @@ class GenerateImageTool(Tool):
                 "metadata": metadata or {},
                 "watermark": watermark_status,
             }
-            return ToolResult(
+            result = ToolResult(
                 success=True,
                 content=(
                     (
@@ -713,8 +723,11 @@ class GenerateImageTool(Tool):
                 raw_output=info,
                 model_context=json.dumps(info, ensure_ascii=False),
             )
+            return file_change_result(result, self.workspace_dir.resolve(), target, before,
+                                      hashlib.sha256(image_bytes).hexdigest(), verify_current=True)
         except Exception as exc:
             return ToolResult(success=False, error=f"Image generation failed: {exc}")
+
 
     def _resolve_output_path(self, output_path: str) -> Path:
         path = Path(output_path).expanduser()

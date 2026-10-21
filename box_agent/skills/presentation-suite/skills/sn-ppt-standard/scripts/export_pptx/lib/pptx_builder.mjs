@@ -638,7 +638,7 @@ export function buildBackground(bgIR, bodyBgColor, deckDir) {
       result.bgElements.push({
         type: 'shape',
         data: {
-          x: 0, y: 0, w: 10, h: 5.625,
+          x: 0, y: 0, w: 10, h: 10 * _currentCanvasH / _currentCanvasW,
           fill: { color: overlayColor, transparency },
         }
       });
@@ -664,7 +664,7 @@ export function buildBackground(bgIR, bodyBgColor, deckDir) {
           result.bgElements.push({
             type: 'shape',
             data: {
-              x: 0, y: 0, w: 10, h: 5.625,
+              x: 0, y: 0, w: 10, h: 10 * _currentCanvasH / _currentCanvasW,
               fill: { color: '000000', transparency: 100 - overlayOpacity },
             }
           });
@@ -678,7 +678,7 @@ export function buildBackground(bgIR, bodyBgColor, deckDir) {
         result.bgElements.push({
           type: 'shape',
           data: {
-            x: 0, y: 0, w: 10, h: 5.625,
+            x: 0, y: 0, w: 10, h: 10 * _currentCanvasH / _currentCanvasW,
             fill: { color: baseHex, transparency },
           }
         });
@@ -738,7 +738,7 @@ export function buildBackground(bgIR, bodyBgColor, deckDir) {
           result.bgElements.push({
             type: 'shape',
             data: {
-              x: 0, y: 0, w: 10, h: 5.625,
+              x: 0, y: 0, w: 10, h: 10 * _currentCanvasH / _currentCanvasW,
               fill: { color: visibleStops[0].color, transparency: Math.round((1 - firstAlpha * 0.5) * 100) },
             }
           });
@@ -788,7 +788,7 @@ export function buildBackground(bgIR, bodyBgColor, deckDir) {
         result.bgElements.push({
           type: 'shape',
           data: {
-            x: 0, y: 0, w: 10, h: 5.625,
+            x: 0, y: 0, w: 10, h: 10 * _currentCanvasH / _currentCanvasW,
             fill: { color: hex, transparency },
           }
         });
@@ -1865,7 +1865,7 @@ export function buildSlideFromIR(pptx, ir, deckDir) {
           if (Math.max(...stops.map(s => s.alpha)) >= 0.3) {
             const tok = _currentGradientHandler.registerLinear({ angle: linear.angle, stops });
             slide.addShape(pptx.ShapeType.rect, {
-              x: 0, y: 0, w: 10, h: 5.625,
+              x: 0, y: 0, w: 10, h: 10 * _currentCanvasH / _currentCanvasW,
               fill: { color: tok },
               line: { type: 'none' },
             });
@@ -1890,7 +1890,7 @@ export function buildSlideFromIR(pptx, ir, deckDir) {
       //      → 角落光晕，叠在底色上）
       // 类型 A 应该把最后 stop 作为 slide.background（不画 ellipse 装饰，避免重影）；
       // 类型 B 走原 ellipse glow 路径。
-      const SLIDE_W = 10, SLIDE_H = 5.625;  // inch
+      const SLIDE_W = 10, SLIDE_H = 10 * _currentCanvasH / _currentCanvasW;  // inch
       for (const rl of radialLayers) {
         const r = parseRadialGradient(rl);
         if (!r || !r.stops || r.stops.length < 1) continue;
@@ -2128,7 +2128,14 @@ export async function buildPptx(pages, deckDir, outputPath) {
     ? { ...page, ir: withSourceFontFamilies(page.ir, sourceFontFamilies) } : page);
 
   // 设置 16:9 画布（10" × 5.625"）
-  pptx.defineLayout({ name: 'HTML_SLIDE', width: 10, height: 5.625 });
+  const canvas = exportPages.find(page => page.ir)?.ir;
+  const canvasWidth = canvas?.canvasWidth || 1280;
+  const canvasHeight = canvas?.canvasHeight || 720;
+  if (!(canvasWidth > 0 && canvasHeight > 0) || exportPages.some(page => page.ir &&
+      ((page.ir.canvasWidth || 1280) !== canvasWidth || (page.ir.canvasHeight || 720) !== canvasHeight))) {
+    throw new Error('All pages must use the same positive canvas dimensions.');
+  }
+  pptx.defineLayout({ name: 'HTML_SLIDE', width: 10, height: 10 * canvasHeight / canvasWidth });
   pptx.layout = 'HTML_SLIDE';
 
   // 渐变后处理 handler：在 buildShape 阶段注册渐变定义、得到 token 占位色，

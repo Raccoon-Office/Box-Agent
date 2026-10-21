@@ -354,6 +354,8 @@ def looks_like_truncated_output(text: str) -> bool:
     if stripped[-1] in _CLEAN_ENDING_CHARS:
         return False
     last_line = stripped.rsplit("\n", 1)[-1].strip()
+    if _looks_like_atomic_ascii_reply(last_line):
+        return False
     if last_line.startswith("```"):
         return False
     if _TABLE_ROW_RE.match(last_line):
@@ -378,15 +380,14 @@ def reply_is_substantial(content_len: int, completion_tokens: int | None) -> boo
 def truncation_continuation_text(tail: str) -> str:
     """One-shot continuation prompt for a suspected mid-sentence cutoff.
 
-    Deliberately NOT wrapped by ``format_injected_message``: this is not
-    a user interjection but a system-detected continuation instruction,
-    so it must carry its own framing. ``tail`` is a short slice of where
-    the previous reply stopped, to anchor the model.
+    Keep this an ordinary continuation request, without claiming a higher
+    message role. ``tail`` anchors the request in the text actually received;
+    the same wording also works for a suspected cutoff with a normal finish.
     """
     return (
-        "（系统提示）你上一条回复似乎在生成过程中被意外中断了，"
-        f"结尾停在：“…{tail}”。\n"
-        "请直接接着上面的结尾继续写完剩余内容，保持原有的格式、结构与语气；"
+        "请继续完成原任务。"
+        f"实际收到的上一条回复结尾是：“…{tail}”。\n"
+        "请从这段文字的最后一个字符之后继续写完剩余内容，保持原有的格式、结构与语气；"
         "不要重复任何已经输出过的内容，也不要重新开头或重述前面已说过的部分，"
         "从断点处自然衔接即可。如果上一条其实已经表达完整，只需补一句简短收尾。"
     )

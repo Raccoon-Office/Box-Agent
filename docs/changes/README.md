@@ -6,6 +6,64 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-10-14 — Transaction staging and truncation continuation (PR #212)
+
+- Change: [PR #212](https://github.com/Raccoon-Office/Box-Agent/pull/212),
+  merge `2fa4e969`, hardens the shared publication policy and loop guards.
+- Delivery boundary: inputs under the workspace-root `.box-agent-staging/`
+  stay internal across structured results, text references and workspace
+  discovery, even with a `type: artifact` sidecar. Only the transaction's
+  committed final destination is eligible for normal delivery and task/turn
+  registration; abort produces no artifact. See the [artifact contract](../ARTIFACT_PROTOCOL.md#explicit-publication-tool).
+- Continuation boundary: the existing runtime user-role request anchors to the
+  received tail without claiming to be a system message. A complete ASCII
+  marker or path on the last line suppresses the normal-stop truncation
+  heuristic; explicit `length` recovery and continuation limits are unchanged.
+- Compatibility: no ACP schema, configuration, dependency or data migration.
+  Historical task records are not repaired. Consuming hosts must rebuild,
+  install and restart their runtime; source proof alone is not desktop proof.
+- Proof anchors: `tests/test_publish_artifact_tool.py` (commit/abort, sidecar,
+  discovery and final task/turn ownership) and `tests/test_truncation_continuation.py`
+  (partial code, runtime injection and length-to-stop end markers).
+- Rollback: revert the PR's runtime fixes and protocol clarification, then
+  rebuild the consuming runtime; no data migration is required.
+
+## 2026-10-12 — Shared credential turn reminders
+
+- [Credential reminder behavior and limits](2026-10-12-turn-credential-hints.md): shared CLI/ACP/SDK generation, fully masked passwords, environment-reference exclusion, utility opt-out and the plaintext input/log boundary. Default enabled; source validation does not update installed hosts.
+
+## 2026-10-11 — Child prompt projection with explicit ownership
+
+- Shared session assembly produces the child view before combining generated memory, image guidance and host UI overlays. Only the exact packaged template's role/workflow is omitted; custom templates, project instructions and recovery suffixes remain caller-owned. The parent prompt is unchanged.
+- Agent binds that explicit child view through AgentSession. Owned Skill-catalog and external-memory updates preserve it; an ordinary set_system_prompt replacement returns ownership to the caller. Prepared host prompts retain their compatibility passthrough. Child tools, policy, selected Skills and execution rules are unchanged.
+- No new configuration, dependencies or migration. Source tests and Python distributions do not update a consuming host; runtime rebuild/install/restart and live model quality remain separate. Roll back this projection change to restore the prior inheritance behavior.
+
+## 2026-10-11 — One authoritative session workspace statement
+
+- File Access Context states the session cwd with and without a host policy. Workspace Layout compares resolved directory identity and references that statement when the selected root matches, including relative cwd inputs; distinct selected roots remain explicit. Relative paths and task subdirectories keep their existing cwd semantics.
+- Agent omits its fallback workspace tail only for a matching cwd statement, preserving the fallback for custom prompts with another path or a quoted example. Relative workspace and policy-root paths are displayed as absolute paths so equivalent roots do not repeat. Filesystem permissions, runtime cwd and artifact scanning are unchanged.
+- Source tests and Python distribution validation do not update a consuming desktop runtime. No new configuration, dependencies or migration; revert this prompt change to restore prior wording.
+
+## 2026-10-11 — Prompt guidance follows registered session capabilities
+
+- Shared prompt assembly renders owned placeholders from the actual registered tool names. File reads/searches, chunked writes, code-mode directory inspection, analysis execution, publishing and user-decision guidance degrade when their tools are unavailable. Sandbox guidance also respects restricted file and shell capabilities.
+- A missing image tool is reported as unavailable in this session without claiming its service endpoint is unconfigured. Full-capability and compatibility (`available_tools=None`) text remains unchanged; restricted-session snapshots and real registration/assembly tests cover the changed behavior.
+- Caller-supplied prepared prompts and legacy templates without these placeholders remain caller-owned; no heading-based or regex filtering is applied. No new dependency, configuration default or persistence migration. External memory slot placement and cancellation are unchanged.
+- Validation stops at source and Python distribution build until a consuming host is rebuilt, installed and restarted. Revert the prompt capability change to roll back the generated guidance.
+
+## 2026-10-11 — Explicit JSON Pointer examples for query_jsonl
+
+- Tool and parameter descriptions explicitly require a leading `/` for both projections and filters, reject plain/hash/dotted field syntax, and include an executable example. Query execution, schema constraints, pagination and source-file safety are unchanged.
+- Parsed query results are not original source text. For source lines within `read_file`'s 100,000-character output limit (including the newline), verbatim-copy tasks are directed to `read_file(offset=<record line>, limit=1)` instead of reserializing parsed values. Larger lines need another permitted file-copy method or an honest limit report; regressions cover both sides of the limit, whitespace, Unicode escapes and unchanged source bytes.
+- Regression tests exercise the documented call and existing invalid-pointer rejection. Real-model ACP comparisons report intermediate pointer errors separately from final task success; small samples do not establish a general cost improvement.
+
+## 2026-10-11 — External memory delegation and config-output safety
+
+- Follow-up to PR #191: classify same-named memory tools by their live implementation. Remote reads/searches require network; remote core mutations also require external-side-effect permission. Same-named MCP/foreign tools cannot borrow local memory traits. Preserve local memory/correction permissions and the fail-closed public delegation policy.
+- Config CLI recursively masks external header values even when setting a parent object, preserves explicit `--show-secrets`, and removes raw inputs from validation/YAML/conversion errors. Stored configuration and failed-write rollback remain unchanged.
+- Direct regressions cover permission combinations, image-tool permission borrowing, local compatibility, nested header output, explicit reveal, and failed-write/read diagnostics. Runtime evidence remains source/distribution validation until a consuming host is rebuilt, installed and restarted.
+- No dependency, config migration or persistence-format change. Reverting this follow-up restores the unsafe permission/output behavior; disable the external backend before such a rollback.
+
 ## How reviewers use this history
 
 1. Determine the current merge base and inspect the complete target-branch and
@@ -50,6 +108,7 @@ decision, read those entries together.
 | Area | Affected paths or keywords | Current effective decision | Relationship | Details |
 | --- | --- | --- | --- | --- |
 | Session/output directories | `params.cwd`, `artifact_mode`, `artifact_root_dir`, `BOX_AGENT_OUTPUT_DIR`, artifact scan, PPT, research | Session cwd is stable; legacy path selectors warn and are ignored; General-mode task folders are model-created file organization only. | Supersedes fixed per-session output-root behavior. | [2026-09-09 cwd-owned task organization](#2026-09-09--cwd-owned-task-organization-and-legacy-output-root-deprecation) |
+| Artifact transaction inputs and truncated replies | `artifact_publication.py`, `tools/engine/artifact_results.py`, `publish_artifact_tool.py`, `.box-agent-staging`, `loop_guards.py`, `truncation_continuation_text` | Root staging inputs never become deliverables; final committed paths use normal ownership rules. Runtime user-role continuation follows the received tail; complete last-line ASCII markers/paths suppress normal-stop truncation retries. | Hardens existing publication and truncation recovery; explicit length recovery remains unchanged. | [PR #212 boundaries and proof](#2026-10-14--transaction-staging-and-truncation-continuation-pr-212) |
 | Tool name aliases | `Tool.aliases`, `build_tool_name_index`, OpenClaw, Hermes | Compatibility names are execution-only, use canonical Box-Agent argument schemas, and fail closed on conflicts. | Built-in mappings complete the generic alias mechanism in `fad2436`. | [2026-08-20 built-in aliases](#2026-08-20--built-in-tool-name-compatibility-aliases) |
 | Filesystem path resolution | `SearchFilesTool`, `path_candidates.py`, `PATH_NOT_FOUND`, ACP file-access prompt | Missing paths may return bounded structural candidates, but the model must retry a specific path and the permission engine remains final authority. | Hardens the broad-Home-search block without adding aliases or automatic authorization. | [2026-08-20 path candidates](#2026-08-20--bounded-structural-candidates-for-missing-filesystem-paths) |
 | Code-agent search | `ripgrep_tool.py`, `setup.py`, `session_mode`, `BOX_AGENT_RG`, `grep`, `glob` | In code-agent sessions with an available `rg`, bounded code search adds `grep`/`glob`; `search_files` remains available, including when `rg` is missing. | Additive tool contract; the consuming host must provide ripgrep separately. | [PR #175 code search](#2026-09-24--code-agent-ripgrep-search-pr-175) |
@@ -81,10 +140,20 @@ Release, provider API, and ACP compatibility have their own sources under
 
 ## Pending material changes
 
+### 2026-10-11 — optional external memory backends (PR #191)
+
+- **Change:** [PR #191](https://github.com/Raccoon-Office/Box-Agent/pull/191) adds MemSense and explicitly mapped generic HTTP backends through the existing memory capability and shared session assembly.
+- **Compatibility:** The default remains local; default/default uses the existing directory. External preload and background QA saving require explicit external-backend selection and enabled memory. A borrowed local manager remains local when session identity is overridden, including with memory disabled.
+- **Identity and writes:** Hosts own tenant/user routing and service authentication; omitted identities use shared default/default. MemSense core edits require an explicit same-session read and verified revision; local/generic tool contracts remain unchanged.
+- **Lifecycle:** One real user turn refreshes once and saves only the final successful answer. Automatic continuations share that boundary. Cooperative cancellation interrupts remote preload, waits for its cleanup, and preserves the host's cancelled result; cancelled/failed turns are not saved.
+- **Proof anchors:** `tests/test_memory_backends.py`, `tests/test_session_adapter_assembly.py`, memory/config tests, and CLI/ACP lifecycle tests. Source tests and Python distribution probes do not prove an installed standalone runtime or live host.
+- **Risk and rollback:** The save queue is in memory, retries are not exactly-once, and service authorization remains a deployment responsibility. Switch back to local or disable memory, or revert the PR and update the host runtime; remote data is not migrated or deleted.
+
 ### 2026-09-24 — code-agent ripgrep search (PR #175)
 
 - **Change:** [PR #175](https://github.com/Raccoon-Office/Box-Agent/pull/175), merged as `f017c6f`. `box_agent/tools/ripgrep_tool.py` adds bounded `grep` and `glob` tools.
 - **Durable behavior:** With file tools enabled, `add_workspace_tools(session_mode="code_agent")` registers them only if `rg` is available. Resolution prefers a usable `BOX_AGENT_RG` path, then `rg` on `PATH`. Other sessions do not get these tools; `search_files` stays registered even without ripgrep.
+- **Grep result recovery:** Model history keeps all returned grep matches within the shared output budget, including when search coverage is incomplete. Oversized results use the shared persisted-output preview and full-output path; they are not reduced to a fixed ten-match sample. Search limits still apply, and incomplete searches must be narrowed to discover further matches.
 - **Delegation and safety:** The two tools are eligible for the sub-agent's implicit read/search set only when available to the parent. Searches retain workspace permission checks, output bounds, ignore rules, and exclusion of Git metadata; they do not grant file-write permission.
 - **Host boundary:** Box-Agent does not package or download ripgrep. A consuming host must provide the executable and expose it to the Box-Agent process. Source tests do not prove a packaged OfficeV3 install or a live host session.
 - **Proof and rollback:** `tests/test_ripgrep_tool.py`, `tests/test_tools.py`, `tests/test_sub_agent_capabilities.py`, `tests/test_sub_agent_tool.py`, and `tests/test_session_adapter_assembly.py` cover the source contract. Revert the tool registration, prompt guidance, and sub-agent classification together to restore the old tool set; no data migration is required.

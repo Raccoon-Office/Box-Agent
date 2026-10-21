@@ -540,10 +540,10 @@ async def test_source_revocation_waits_for_reconnect_without_blocking_other_serv
         other_started.set()
         return True
 
-    connection = SimpleNamespace(name="law", connect=connect, disconnect=AsyncMock(), tools=[
+    connection = SimpleNamespace(name="law", last_error=None, connect=connect, disconnect=AsyncMock(), tools=[
         FakeMCPTool("legal_lookup", "law", connector_id="law"),
     ])
-    other = SimpleNamespace(name="other", connect=connect_other, disconnect=AsyncMock(), tools=[])
+    other = SimpleNamespace(name="other", last_error=None, connect=connect_other, disconnect=AsyncMock(), tools=[])
     monkeypatch.setattr(mcp_loader, "_build_connection", lambda definition: connection if definition.name == "law" else other)
     reconnect = asyncio.create_task(mcp_loader.reconnect_mcp_server("law"))
     await asyncio.wait_for(started.wait(), timeout=1)
@@ -651,10 +651,10 @@ async def test_source_update_waits_for_cold_discovery_before_replacing_its_conne
         return True
 
     old = SimpleNamespace(name="law", url=server["url"], command=None, connect=connect_old,
-                          transport_label=server["url"],
+                          transport_label=server["url"], last_error=None,
                           disconnect=AsyncMock(), tools=[FakeMCPTool("old_lookup", "law", connector_id="law")])
     new = SimpleNamespace(name="law", url="https://new.example.test/mcp", command=None,
-                          transport_label="https://new.example.test/mcp",
+                          transport_label="https://new.example.test/mcp", last_error=None,
                           connect=AsyncMock(return_value=True), disconnect=AsyncMock(),
                           tools=[FakeMCPTool("new_lookup", "law", connector_id="law")])
     monkeypatch.setattr(mcp_loader, "_build_connection", lambda definition: old if definition.config["url"] == old.url else new)

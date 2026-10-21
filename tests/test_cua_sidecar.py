@@ -45,7 +45,7 @@ def test_cua_transient_image_is_inline_and_durable_result_is_only_a_path(tmp_pat
     assert "data" not in durable[0]
 
 
-def test_text_models_receive_neither_cua_image_projection(tmp_path):
+def test_text_models_persist_images_without_visual_input(tmp_path):
     binding = build_cua_bindings(
         llm=SimpleNamespace(capabilities={"image_input": False}),
         config=CuaConfig(server_name="desktop"), sidecar_dir=tmp_path / "images",
@@ -57,6 +57,24 @@ def test_text_models_receive_neither_cua_image_projection(tmp_path):
     assert binding.transient_followup_content(
         server_name="desktop", remote_name="screenshot", inline_images=[image],
     ) is None
-    assert binding.persist_image_references(
+    references = binding.persist_image_references(
         server_name="desktop", remote_name="screenshot", inline_images=[image],
-    ) is None
+    )
+    assert references and references[0]["contentRef"].startswith("images/")
+    assert (tmp_path / references[0]["contentRef"]).is_file()
+
+
+def test_image_persistence_can_be_disabled_independently(tmp_path):
+    binding = build_cua_bindings(
+        llm=SimpleNamespace(capabilities={"image_input": True}),
+        config=CuaConfig(server_name="desktop", persist_images=False),
+        sidecar_dir=tmp_path / "images",
+    )
+    image = {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "mime_type": "image/png",
+    }
+    kwargs = dict(server_name="desktop", remote_name="screenshot", inline_images=[image])
+    assert binding.transient_followup_content(**kwargs)
+    assert binding.persist_image_references(**kwargs) is None
+    assert not (tmp_path / "images").exists()

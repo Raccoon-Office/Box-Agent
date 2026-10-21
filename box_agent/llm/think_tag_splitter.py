@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from ..schema import StreamEvent
+from .base import closing_llm_stream
 
 OPEN_TAG = "<think>"
 CLOSE_TAG = "</think>"
@@ -103,17 +104,18 @@ async def unwrap_think_tags(
     re-emitted as ``thinking`` events. Tags themselves are stripped.
     """
     state = _SplitterState()
-    async for event in stream:
-        if event.type != "text":
-            yield event
-            continue
+    async with closing_llm_stream(stream):
+        async for event in stream:
+            if event.type != "text":
+                yield event
+                continue
 
-        delta = event.delta or ""
-        text_out, thinking_out = _process_text(state, delta)
-        if thinking_out:
-            yield StreamEvent(type="thinking", delta=thinking_out)
-        if text_out:
-            yield StreamEvent(type="text", delta=text_out)
+            delta = event.delta or ""
+            text_out, thinking_out = _process_text(state, delta)
+            if thinking_out:
+                yield StreamEvent(type="thinking", delta=thinking_out)
+            if text_out:
+                yield StreamEvent(type="text", delta=text_out)
 
     text_out, thinking_out = _flush(state)
     if thinking_out:

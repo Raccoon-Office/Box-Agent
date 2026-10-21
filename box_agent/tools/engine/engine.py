@@ -8,11 +8,13 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from ...events import AgentEvent, LLMActivityEvent, ToolCallResult, ToolCallStart
+from ...events import AgentEvent, ArtifactEvent, LLMActivityEvent, ToolCallResult, ToolCallStart
 from ...artifact_publication import apply_delivery_policy
+from ..chat_references import ChatReferences
 from ...kernel.hook_types import HookContext, ResultText, copy_data
 from ...loop_guards import (
     FINAL_SUMMARY_EXCLUDED_TOOLS, delegated_tool_call_budget_wrapup_text,
@@ -22,7 +24,8 @@ from ...loop_guards import (
 from ...schema import Message, ToolCall
 from ...session_log import SessionLogDurabilityError
 from ...session_trace import emit_session_trace
-from ..base import Tool, ToolResult, ToolInvocationContext
+from ..base import Tool, ToolResult, ToolInvocationContext, bind_tool_cancellation
+from ..file_change_receipts import persist_file_change
 from ..delegated_budget import DelegatedBudget, current_budgets
 from ..bash_tool import BashTool
 from ..file_tools import WriteTool
@@ -103,6 +106,10 @@ class DefaultToolEngine:
                 "artifact_root_dir is deprecated and ignored; artifact discovery uses workspace_dir"
             )
         self._context, self._options = context, options
+        self._references = (
+            ChatReferences(context.workspace_dir, context.messages, context.session_log)
+            if context.workspace_dir else None
+        )
         self._ancestor_budgets = current_budgets()
         self._delegated_budget = (
             DelegatedBudget(options.max_delegated_tool_calls)
@@ -318,6 +325,7 @@ class DefaultToolEngine:
         return ToolInvocationContext(
             parent_tool_call_id=call.call_id, skill_reader=self._context.skill_reader,
             child_budgets=self._child_budgets, budget_charge=call.budget_charge,
+            chat_references=self._references,
         )
 
     def _log_result(self, call: ToolCallRecord, result: ToolResult) -> None:
@@ -329,6 +337,10 @@ class DefaultToolEngine:
                 raw_output=_trace_safe_tool_raw_output(result.raw_output),
                 tool_id=call.tool_id, server_name=call.server_name,
             )
+
+    def _retain_displayed_file(self, artifact: ArtifactEvent) -> None:
+        if self._references is not None:
+            self._references.retain(Path(artifact.abs_path))
 
     async def _finish_call(self, call: ToolCallRecord, result: ToolResult,
                            prepared: PreparedTools, control: ToolStepControl,
@@ -355,6 +367,8 @@ class DefaultToolEngine:
                     async for record in records:
                         if isinstance(record, PermissionChainCompleted):
                             result, call.policy_decision = record.result, record.policy_decision
+                            if self._references is not None and call.policy_decision and call.policy_decision.get("decision") == "denied":
+                                self._references.denied(result.permission_request or {})
                         else:
                             yield self._event(record, control.step)
             else:
@@ -372,12 +386,16 @@ class DefaultToolEngine:
                     bash.owned_file_cleanup.record(raw["path"], sha256=raw["sha256"])
         call.executed = bool(
             call.invoked and not result.permission_request
+            and not result._invocation_rejected
             and (result.raw_output or {}).get("code") not in {"INVALID_TOOL_SCHEMA", "INVALID_TOOL_ARGUMENTS"}
         )
         if control.result_transform is not None:
             result = control.result_transform(call.name, result)
-        result = _persist_browser_snapshot_output(result, call.snapshot_target)
-        result = _persist_browser_screenshot_output(result, call.screenshot_target)
+        with bind_tool_cancellation(context.is_cancelled):
+            result = await persist_file_change(context.workspace_dir, call.snapshot_target,
+                                              lambda target: _persist_browser_snapshot_output(result, target))
+            result = await persist_file_change(context.workspace_dir, call.screenshot_target,
+                                              lambda target: _persist_browser_screenshot_output(result, target))
         published_output = apply_delivery_policy(result.raw_output, context.workspace_dir)
         if published_output is not result.raw_output:
             result = result.model_copy(update={"raw_output": published_output})
@@ -443,9 +461,9 @@ class DefaultToolEngine:
                 hook_source=text_resolution.source if text_resolution else None,
                 hook_rejection=call.hook_rejection,
             ))
-        for event in outcome.events:
-            yield event
-        if self._options.artifact_detection_enabled and result.success and context.workspace_dir:
+        artifacts = []
+        temporary = (result.raw_output or {}).get("temporary") is True
+        if self._options.artifact_detection_enabled and result.success and context.workspace_dir and not temporary:
             if call.parallel:
                 if call.user_visible:
                     artifacts, paths = _detect_regex_artifacts(
@@ -453,15 +471,23 @@ class DefaultToolEngine:
                         context.workspace_dir,
                     )
                     emitted_paths.update(paths)
-                    for artifact in artifacts:
-                        yield artifact
             else:
                 after = _snapshot_workspace_signatures(context.workspace_dir)
-                for artifact in _detect_tool_artifacts(
+                artifacts = _detect_tool_artifacts(
                     call.call_id, call.name, outcome.visible_content, result.raw_output,
                     call.before_files, after, context.workspace_dir,
-                ):
-                    yield artifact
+                )
+        # Commit retention before exposing either the structured result or its
+        # artifact events. A consumer may render a file from either channel.
+        if self._references is not None and call.user_visible and result.success and not temporary:
+            self._references.retain_text(outcome.visible_content)
+            self._references.retain_output(result.raw_output)
+        for artifact in artifacts:
+            self._retain_displayed_file(artifact)
+        for event in outcome.events:
+            yield event
+        for artifact in artifacts:
+            yield artifact
 
     async def execute_calls(self, prepared: PreparedTools, calls: list[ToolCall],
                             control: ToolStepControl) -> AsyncIterator[AgentEvent | ToolStepSummary]:
@@ -555,7 +581,7 @@ class DefaultToolEngine:
                     async for event in events:
                         if isinstance(event, ToolCallResult):
                             outcomes[call.call_id] = event.success
-                            if call.user_visible:
+                            if call.user_visible and not (event.raw_output or {}).get("temporary"):
                                 artifact_results[call.call_id] = event.content
                         yield event
             if self._options.artifact_detection_enabled and context.workspace_dir:
@@ -565,6 +591,7 @@ class DefaultToolEngine:
                         call_id, before, after, emitted, context.workspace_dir, content=content,
                     ):
                         emitted.add(artifact.abs_path)
+                        self._retain_displayed_file(artifact)
                         yield artifact
             if context.is_cancelled():
                 return

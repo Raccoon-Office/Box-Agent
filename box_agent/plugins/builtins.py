@@ -127,6 +127,8 @@ def _initializer_factory(plugin_id: str, function_name: str) -> Callable:
 
 
 def _run_services(context: PluginFactoryContext) -> KernelServices:
+    from ..memory import uses_local_memory
+
     run: RunContext = context.context
     agent, options = run.agent, run.options
     return KernelServices(
@@ -135,7 +137,8 @@ def _run_services(context: PluginFactoryContext) -> KernelServices:
         permission_gateway=options.permission_negotiator,
         memory_lookup=options.memory_manager,
         memory_extraction=options.memory_extractor,
-        memory_promotion=options.memory_manager if agent.memory_promotion_enabled else None,
+        memory_promotion=(options.memory_manager if agent.memory_promotion_enabled
+                          and uses_local_memory(options.memory_manager) else None),
         session_store=agent.session_log,
         hook_bus=HookManager(options.hooks),
         tool_catalog=agent.tools,

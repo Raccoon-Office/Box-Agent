@@ -241,6 +241,7 @@ def detect_pptx_image_status_command_bypass(
     workspace_dir: str | None,
     runtime_env: Mapping[str, str] | None,
     shell_style: Literal["posix", "powershell"] = "posix",
+    expert_sync_script: Path | None = None,
 ) -> str | None:
     """Fail closed for shell calls to the image-status manifest synchronizer.
 
@@ -347,11 +348,13 @@ def detect_pptx_image_status_command_bypass(
     ):
         return _image_status_command_error("PPTX_IMAGE_STATUS_COMMAND_SHAPE")
 
+    allowed_scripts = {_SYNC_IMAGE_STATUS_SCRIPT.resolve(strict=False)}
+    if expert_sync_script is not None:
+        allowed_scripts.add(expert_sync_script)
     script_path = Path(script_token.replace("\\", "/")).expanduser()
     if (
         not script_path.is_absolute()
-        or script_path.resolve(strict=False)
-        != _SYNC_IMAGE_STATUS_SCRIPT.resolve(strict=False)
+        or script_path.resolve(strict=False) not in allowed_scripts
     ):
         return _image_status_command_error("PPTX_IMAGE_STATUS_SCRIPT_IDENTITY")
 

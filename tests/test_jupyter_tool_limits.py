@@ -23,6 +23,13 @@ def test_execute_code_limit_is_not_looser_than_file_chunk_limit():
     assert MAX_EXECUTE_CODE_CHARS <= MAX_FILE_TOOL_CONTENT_CHARS
 
 
+def test_execute_code_description_does_not_ban_shell_package_installation():
+    description = JupyterSandboxTool().description
+
+    assert "use that interpreter's `-m pip`" in description
+    assert "Never use the bash tool" not in description
+
+
 @pytest.mark.asyncio
 async def test_execute_code_rejects_oversized_code_before_kernel_start(monkeypatch):
     def fail_if_sandbox_requested(self):

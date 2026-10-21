@@ -260,6 +260,12 @@ deferred behavior. Moving preparation to session plugins does not eagerly load
 every Skill body or connect every MCP server at session start. Host callbacks
 and product workflows stay in their owning adapters/capability modules.
 
+ACP delivers mid-turn MCP state notifications only after that turn starts
+`tool_search`, `mcp_config` or an MCP tool, including delegated tool use. This
+interest resets at the next prompt. Background discovery and tool registration
+continue independently; unrelated replies do not restart just because a server
+connects, while active discovery can still retry after a readiness notification.
+
 ## Verification
 
 `test_session_plugins.py`, `test_plugin_runtime_lifecycle.py`,

@@ -42,6 +42,7 @@ async def test_proxy_inherits_current_parent_thinking_before_loop_and_across_tur
         llm = LLMClient(
             api_key="test", provider=LLMProvider.OPENAI,
             api_base="https://inference.example/v1", model=model,
+            max_output_tokens=100_000,
             reasoning_effort_when_disabled=policy,
         )
         await llm.aclose()
@@ -90,6 +91,8 @@ async def test_proxy_inherits_current_parent_thinking_before_loop_and_across_tur
             result = await image_tool.execute(["slide.png"], "Check readability.")
             assert result.success, result.error
             main_request, image_request = requests[-2:]
+            assert main_request["max_tokens"] == 100_000
+            assert image_request["max_tokens"] == (16_384 if enabled else 8_192)
             assert main_request["reasoning_effort"] == (
                 "high" if enabled else disabled_effort or "none"
             )
@@ -103,6 +106,8 @@ async def test_proxy_inherits_current_parent_thinking_before_loop_and_across_tur
                 for block in message["content"]
             )
         assert main.reasoning_effort_when_disabled == disabled_effort
+        assert main.max_output_tokens == 100_000
+        assert image_tool.llm.max_output_tokens == 100_000
         assert image_tool.llm.reasoning_effort_when_disabled == vision_policy
         assert image_tool.llm.model == (
             "SenseNova-Main" if binding == "same" else "SenseNova-Vision"

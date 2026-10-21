@@ -127,10 +127,8 @@ def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
             f"- Python: {python.provider}，标准 `python`/`python3` 已指向受管运行时"
             "（也可用 `$BOX_AGENT_PYTHON`）"
         )
-    elif ctx.sandbox_mode:
-        py_line = "- Python: 仅 `execute_code` 沙箱可用，无 shell python"
     else:
-        py_line = "- Python: 本 session 不可用；不要调用 `execute_code` 或 shell python"
+        py_line = "- Python: 初始化时未确认可用的 shell Python；当前可用性以实际检测和工具执行结果为准"
     if python.notes:
         py_line += f" — {'; '.join(python.notes)}"
     lines.append(py_line)
@@ -147,11 +145,19 @@ def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
             f"（内部路径：{via}）"
         )
     else:
-        node_line = "- Node: 不可用——skill 若依赖 Node 应直接报告依赖缺失，不要回退系统 node"
+        node_line = "- Node: 初始化时未确认可用的 Node；当前可用性以实际检测和工具执行结果为准"
     if node.notes:
         node_line += f" — {'; '.join(node.notes)}"
     lines.append(node_line)
 
+    lines.append(
+        "- Runtime policy: Python / Node / Git 仅使用应用内置或受管运行时，"
+        "不要切换到系统安装、项目虚拟环境或第三方软件自带的运行时，也不要让用户换环境。"
+        "需要的运行时缺失或未就绪时，若提供 local_environment，调用对应 capability 的 "
+        "action=ensure 补装或等待现有安装；不要重复下载或另装一套运行时。"
+        "安装失败时根据返回日志重试或说明失败原因；未提供安装工具时如实说明，"
+        "不要要求用户自行安装另一套环境。普通聊天不需要检查或等待这些运行时。"
+    )
     lines.append(
         "- Rules: 第三方 skill 可使用标准运行时命令；仅在确认依赖缺失时安装。"
         "`npm install -g` 已被重定向到 `$BOX_AGENT_SKILL_TOOLS_ROOT`，"

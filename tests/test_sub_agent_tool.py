@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
@@ -719,7 +720,7 @@ async def test_general_loop_uses_parent_permission_negotiator_and_retries(tmp_pa
     assert len(negotiator.requests) == 1
 
 
-async def test_explicit_bash_with_write_scope_uses_parent_permission_boundary(
+async def test_explicit_bash_with_write_scope_does_not_add_approval(
     tmp_path,
 ):
     from box_agent.schema import FunctionCall, ToolCall
@@ -805,10 +806,7 @@ async def test_explicit_bash_with_write_scope_uses_parent_permission_boundary(
     assert result.raw_output["resolved_tools"] == ["bash", "write_file"]
     assert result.raw_output["constraints"]["write_scope"] == ["assets/hero.jpg"]
     assert bash_tool.calls == 1
-    assert len(negotiator.requests) == 1
-    assert negotiator.requests[0]["scope"] == "safety"
-    assert negotiator.requests[0]["requested_scope"] == "delegated_bash_command"
-    assert negotiator.requests[0]["persistent_supported"] is False
+    assert negotiator.requests == []
 
 
 async def test_files_with_write_tools_stay_in_general_loop(tmp_path):
@@ -1013,7 +1011,7 @@ async def test_omitted_required_tools_with_scope_reports_missing_parent_writers(
     assert result.raw_output["retryable"] is False
     assert "no available file-write tools" in result.raw_output["message"].lower()
     assert result.raw_output["required_any_of"] == [
-        "append_file", "edit_file", "write_file"
+        "append_file", "edit_file", "extract_email_attachment", "write_file"
     ]
     llm.generate.assert_not_called()
     llm.generate_stream.assert_not_called()
@@ -1383,6 +1381,39 @@ async def test_child_delegation_cannot_read_parent_profile_blocked_skill(tmp_pat
     llm.generate_stream.assert_not_called()
 
 
+@pytest.mark.parametrize("reader", ["get_skill", "list_skills"])
+@pytest.mark.parametrize("bound", [True, False])
+async def test_child_delegation_preserves_profile_for_expert_package(tmp_path, reader, bound):
+    from box_agent.execution_profile import FAST_OPTIONAL_SKILLS
+    from box_agent.tools.skill_catalog_tool import ListSkillsTool
+    from box_agent.tools.skill_tool import GetSkillTool
+
+    name = "research-synthesis"
+    directory = tmp_path / name
+    directory.mkdir()
+    (directory / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Research method\n---\nEXPERT_RESEARCH_METHOD\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(sources=[]).with_expert_skill_sources(
+        [name] if bound else [], skill_directories=[directory],
+    )
+    parent_get = GetSkillTool(loader, blocked_skill_names=FAST_OPTIONAL_SKILLS)
+    parent_reader = parent_get if reader == "get_skill" else ListSkillsTool(
+        loader, blocked_skill_names=FAST_OPTIONAL_SKILLS,
+    )
+    llm = AsyncMock()
+    tool = SubAgentTool(llm=llm, parent_tools={reader: parent_reader}, workspace_dir=str(tmp_path))
+    tool.set_skill_provider(lambda: loader)
+
+    assert not (await parent_get.execute(name)).success
+    result = await tool.execute(task="Use the research method", required_tools=[], skills=[name])
+
+    assert not result.success
+    assert result.raw_output["code"] == "SKILL_PROFILE_BLOCKED"
+    llm.generate_stream.assert_not_called()
+
+
 async def test_child_skill_tool_clones_preserve_profile_and_narrow_parent_scope(tmp_path, monkeypatch):
     from box_agent.tools.skill_catalog_tool import ListSkillsTool
     from box_agent.tools.skill_tool import GetSkillTool
@@ -1519,9 +1550,10 @@ async def test_web_search_tool_emits_reference_event():
     from box_agent.schema import FunctionCall, ToolCall
 
     call_num = 0
+    model_reference = None
 
     async def fake_stream(*, messages, tools, **kwargs):
-        nonlocal call_num
+        nonlocal call_num, model_reference
         call_num += 1
         if call_num == 1:
             yield StreamEvent(
@@ -1536,7 +1568,12 @@ async def test_web_search_tool_emits_reference_event():
                 ],
             )
         else:
-            yield StreamEvent(type="text", delta="summary [ref_1]")
+            tool_message = next(
+                message for message in messages
+                if message.role == "tool" and message.tool_call_id == "search-1"
+            )
+            model_reference = json.loads(tool_message.content)["refs"][0]["reference_tag"]
+            yield StreamEvent(type="text", delta=f"summary [{model_reference}]")
             yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
 
     llm = AsyncMock()
@@ -1554,7 +1591,12 @@ async def test_web_search_tool_emits_reference_event():
     web_events = [event for event in events if isinstance(event, WebSearchEvent)]
     assert len(web_events) == 1
     assert web_events[0].tool_call_id == "search-1"
-    assert web_events[0].payload["refs"][0]["reference_tag"] == "ref_1"
+    reference = web_events[0].payload["refs"][0]
+    assert reference["reference_tag"].startswith("ref_web_")
+    assert reference["reference_tag"] == model_reference
+    assert reference["url"] == "https://example.com"
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.final_content == f"summary [{model_reference}]"
 
 
 async def test_sub_agent_forwards_web_search_reference_event():
@@ -1562,9 +1604,10 @@ async def test_sub_agent_forwards_web_search_reference_event():
     from box_agent.schema import FunctionCall, ToolCall
 
     call_num = 0
+    model_reference = None
 
     async def fake_stream(*, messages, tools, **kwargs):
-        nonlocal call_num
+        nonlocal call_num, model_reference
         call_num += 1
         if call_num == 1:
             yield StreamEvent(
@@ -1579,7 +1622,12 @@ async def test_sub_agent_forwards_web_search_reference_event():
                 ],
             )
         else:
-            yield StreamEvent(type="text", delta="child summary [ref_1]")
+            tool_message = next(
+                message for message in messages
+                if message.role == "tool" and message.tool_call_id == "child-search-1"
+            )
+            model_reference = json.loads(tool_message.content)["refs"][0]["reference_tag"]
+            yield StreamEvent(type="text", delta=f"child summary [{model_reference}]")
             yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
 
     llm = AsyncMock()
@@ -1609,7 +1657,11 @@ async def test_sub_agent_forwards_web_search_reference_event():
     assert len(web_events) == 1
     assert web_events[0].parent_tool_call_id == "parent-sub-agent"
     assert web_events[0].sub_agent_id.startswith("subagent-")
-    assert web_events[0].event.payload["refs"][0]["url"] == "https://example.com"
+    reference = web_events[0].event.payload["refs"][0]
+    assert reference["url"] == "https://example.com"
+    assert reference["reference_tag"].startswith("ref_web_")
+    assert reference["reference_tag"] == model_reference
+    assert result.content == f"child summary [{model_reference}]"
 
 
 async def test_sub_agent_web_extract_uses_child_model_context(monkeypatch):
@@ -1780,6 +1832,8 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(
     from box_agent.config import ToolLimitsConfig
     from box_agent.tools.file_tools import SearchFilesTool
 
+    # A cold tokenizer may download its vocabulary; exclude test setup from batch timing.
+    encoding = tiktoken.get_encoding("cl100k_base")
     paths = []
     for index in range(20):
         path = tmp_path / f"project-{index:02d}.md"
@@ -1808,7 +1862,6 @@ async def test_batch_files_reads_twenty_files_once_and_calls_generate_once(
             self.messages = messages
             self.tools = tools
             self.generate_kwargs = kwargs
-            encoding = tiktoken.get_encoding("cl100k_base")
             prompt_tokens = sum(
                 len(encoding.encode(str(message.content))) for message in messages
             )

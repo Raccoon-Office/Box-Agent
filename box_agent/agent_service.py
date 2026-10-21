@@ -95,11 +95,13 @@ class AgentService:
                 permission_broker, control,
             ))
 
+        from .memory import memory_run_events
+
         handle = AgentRunHandle.for_run(
             delivery_options=delivery_options,
             state=session,
             run_id=request.run_id,
-            events_factory=lambda: session.run_events(options=options),
+            events_factory=lambda: memory_run_events(session, request, options),
             control=control,
             permission_broker=(
                 permission_broker
@@ -112,11 +114,17 @@ class AgentService:
         # No await between the ownership check and runner reservation: another
         # start cannot append history or replace this handle in that interval.
         if request.user_message is not None:
+            from .turn_hints import with_turn_hints
+
+            skip_hint = (getattr(session, "utility_session", False)
+                         or request.metadata.get("synthetic_continuation") is True)
+            message = (request.user_message if skip_hint
+                       else with_turn_hints(request.user_message))
             if validation is not None:
                 with runtime.reference_scope(validation):
-                    session.agent.add_user_message(request.user_message)
+                    session.agent.add_user_message(message)
             else:
-                session.agent.add_user_message(request.user_message)
+                session.agent.add_user_message(message)
             grant_store = getattr(session, "grant_store", None)
             if grant_store is not None:
                 grant_store.clear_prompt_grants()

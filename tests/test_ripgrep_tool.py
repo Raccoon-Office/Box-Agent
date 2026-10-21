@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from box_agent.tools.permissions import CapabilityPolicy, PermissionEngine
+from box_agent.tool_result_storage import ToolResultStorage
+from box_agent.tools.engine.results import ToolResultPipelineInput, process_tool_result
 from box_agent.tools.file_result_adapter import _tool_message_content_for_model
+from box_agent.tools.permissions import CapabilityPolicy, PermissionEngine
 from box_agent.tools.ripgrep_tool import (
     GlobTool,
     GrepTool,
@@ -514,7 +516,7 @@ async def test_grep_reports_truncation_after_bounded_matches(tmp_path: Path) -> 
         visible_content=result.content,
         visible_error=None,
     )
-    assert model_content == result.model_context
+    assert model_content == result.content
     assert model_content.startswith("[Incomplete grep results:")
     assert "pattern=needle" in model_content
     assert "returned=1" in model_content
@@ -522,21 +524,86 @@ async def test_grep_reports_truncation_after_bounded_matches(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_grep_truncation_keeps_returned_matches_for_host_but_limits_model_sample(
-    tmp_path: Path,
+@pytest.mark.parametrize("limit", [11, 100])
+async def test_grep_truncation_keeps_all_returned_matches_in_model_history(
+    tmp_path: Path, limit: int
 ) -> None:
     (tmp_path / "app.py").write_text(
-        "".join(f"needle {index:02}\n" for index in range(12)), encoding="utf-8"
+        "".join(f"needle {index:03}\n" for index in range(limit + 1)), encoding="utf-8"
     )
 
     result = await GrepTool(
         workspace_dir=str(tmp_path), executable=require_rg()
-    ).execute(pattern="needle", limit=11)
+    ).execute(pattern="needle", limit=limit)
 
-    assert result.raw_output["returned_matches"] == 11
+    assert result.raw_output["returned_matches"] == limit
     assert all(match["text"] in result.content for match in result.raw_output["matches"])
-    assert result.model_context is not None
-    assert len(result.model_context.splitlines()) < len(result.content.splitlines())
+    model_content = _tool_message_content_for_model(
+        tool_name="grep",
+        arguments={"pattern": "needle", "limit": limit},
+        result=result,
+        visible_content=result.content,
+        visible_error=None,
+    )
+    assert all(match["text"] in model_content for match in result.raw_output["matches"])
+    assert f"needle {limit:03}" not in model_content
+    assert model_content.startswith("[Incomplete grep results:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncated", [False, True])
+@pytest.mark.parametrize("aggregate", [False, True])
+async def test_large_grep_output_is_recoverable_from_model_history(
+    tmp_path: Path, truncated: bool, aggregate: bool
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "".join(f"needle {index:03} {'x' * 500}\n" for index in range(20 + truncated)),
+        encoding="utf-8",
+    )
+    tool = GrepTool(workspace_dir=str(tmp_path), executable=require_rg())
+    arguments = {"pattern": "needle", "limit": 20}
+    result = await tool.execute(**arguments)
+    assert result.raw_output["truncated"] is truncated
+
+    storage = ToolResultStorage(
+        tmp_path / "stored",
+        default_result_limit=100_000 if aggregate else 1_000,
+        aggregate_budget=1_000,
+    )
+    messages = []
+    outcome = process_tool_result(
+        ToolResultPipelineInput(
+            messages=messages,
+            tool_call_id="grep-1",
+            tool_name="grep",
+            arguments=arguments,
+            result=result,
+            visible_content=result.content,
+            visible_error=None,
+            result_storage=storage,
+            tool=tool,
+            session_id="session-a",
+        )
+    )
+    if aggregate:
+        assert messages[-1].content == result.content
+        budget = storage.enforce_fresh_budget(
+            messages, tools={"grep": tool}, session_id="session-a"
+        )
+        assert budget.persisted_count == 1
+        assert len(messages[-1].content) <= storage.aggregate_budget
+
+    path = tmp_path / "stored" / "session-a" / "tool-results" / "grep-1.txt"
+    model_content = messages[-1].content
+    assert model_content.startswith("<persisted-output>")
+    assert str(path) in model_content
+    assert outcome.visible_content == result.content
+    recovered = path.read_text(encoding="utf-8")
+    assert recovered == result.content
+    assert "needle 019" in recovered
+    if truncated:
+        assert "Incomplete grep results" in model_content
+        assert "needle 020" not in recovered
 
 
 @pytest.mark.asyncio
@@ -648,8 +715,14 @@ async def test_search_keeps_results_when_some_paths_are_unreadable(
     assert len(result.raw_output[result_key]) == 1
     assert result.raw_output["truncated"] is True
     assert "could not be read" in result.content
-    assert result.model_context is not None
-    assert "some paths could not be read" in result.model_context
+    model_content = _tool_message_content_for_model(
+        tool_name="grep" if tool_cls is GrepTool else "glob",
+        arguments={"pattern": pattern},
+        result=result,
+        visible_content=result.content,
+        visible_error=None,
+    )
+    assert "some paths could not be read" in model_content
 
 
 @pytest.mark.asyncio
@@ -698,7 +771,7 @@ async def test_grep_marks_non_utf8_paths_incomplete_without_fabricating_names(
     assert result.raw_output["matches"] == []
     assert result.raw_output["truncated"] is True
     assert "non-UTF-8 paths" in result.content
-    assert "Incomplete grep results" in result.model_context
+    assert "Incomplete grep results" in result.content
 
 
 @pytest.mark.asyncio
@@ -720,7 +793,7 @@ async def test_search_marks_undecodable_paths_incomplete(
     assert result.raw_output["truncated"] is True
     assert result.raw_output.get("matches", result.raw_output.get("files")) == []
     assert "non-UTF-8 paths" in result.content
-    assert "Incomplete" in result.model_context
+    assert "Incomplete" in (result.model_context or result.content)
 
 
 @pytest.mark.asyncio
@@ -734,7 +807,7 @@ async def test_grep_marks_skipped_oversized_matching_lines_incomplete(tmp_path: 
     assert result.success is True
     assert result.raw_output["truncated"] is True
     assert "oversized" in result.content
-    assert "Incomplete grep results" in result.model_context
+    assert "Incomplete grep results" in result.content
 
 
 @pytest.mark.asyncio
@@ -845,4 +918,4 @@ async def test_grep_marks_results_incomplete_when_oversized_lines_are_skipped(
     assert result.success is True
     assert [match["path"] for match in result.raw_output["matches"]] == ["small.txt"]
     assert result.raw_output["truncated"] is True
-    assert "oversized matching lines were skipped" in (result.model_context or "")
+    assert "oversized matching lines were skipped" in result.content

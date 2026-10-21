@@ -922,6 +922,8 @@ def test_workspace_tools_register_search_files(tmp_path):
     tool_names = {tool.name for tool in tools}
     assert "search_files" in tool_names
     assert "query_jsonl" in tool_names
+    assert "read_email" in tool_names
+    assert "extract_email_attachment" in tool_names
     assert "report_execution_result" in tool_names
 
 

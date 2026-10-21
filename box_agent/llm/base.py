@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -25,6 +26,19 @@ HOSTED_AUTH_API_KEY_PLACEHOLDERS = {
     "box-agent-no-auth",
     "YOUR_API_KEY_HERE",
 }
+
+
+@asynccontextmanager
+async def closing_llm_stream(
+    stream: AsyncIterator[StreamEvent],
+) -> AsyncIterator[AsyncIterator[StreamEvent]]:
+    """Close an owned model stream when supported by the iterator."""
+    try:
+        yield stream
+    finally:
+        closer = getattr(stream, "aclose", None)
+        if closer is not None:
+            await closer()
 
 
 class LLMClientBase(ABC):

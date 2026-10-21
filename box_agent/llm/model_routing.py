@@ -348,13 +348,16 @@ def resolve_model_client(
     if selected is None and max_output_tokens_cap is None:
         return llm, diagnostic
 
-    current_model = str(getattr(llm, "model", "") or "").strip()
+    raw_model = getattr(llm, "model", "")
+    current_model = raw_model.strip() if isinstance(raw_model, str) else ""
     target_model = str((selected or {}).get("model") or current_model).strip()
     selected_limit = (selected or {}).get("maxTokens")
     target_limit = selected_limit if isinstance(selected_limit, int) else None
     if max_output_tokens_cap is not None:
         if max_output_tokens_cap <= 0:
             raise ValueError("max_output_tokens_cap must be positive")
+        if target_limit is None:
+            target_limit = _positive_int(getattr(llm, "max_output_tokens", None))
         target_limit = (
             min(target_limit, max_output_tokens_cap)
             if target_limit is not None

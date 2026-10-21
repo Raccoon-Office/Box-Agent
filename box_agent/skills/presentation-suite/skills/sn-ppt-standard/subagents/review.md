@@ -21,7 +21,7 @@ Box-Agent 静态新建按根 `SKILL.md` 的“Box-Agent 静态新建的执行方
 
 ## 2. 读取与修改边界
 
-`simple_edit` 读取 Style Lock、`base.css`、overview、目标页计划/HTML/PNG 和对应讲稿。`final_review` 完整读取 `plan/design-brief.md`、`plan/deck.md`、全部逐页计划、`base.css`、`speech.md`，再按根 SKILL 的 Review 路由读取质量参考。存在 `plan/grounded-knowledge.md` 或 Research 产物时必须读取并核对；存在附件时读取 `<DECK_DIR>/info_pack.json`，沿 `info_pack.raw_documents` 的绝对路径读取 `raw_documents.json`，并核对其中 `documents[].inherited_images[].path`、`page_visuals[].path` 和 `<DECK_DIR>/assets/catalog.json`。不得假设 `materials/attachments.json`、`research/materials/material_NN.md` 或分片 Material catalog 存在。
+`simple_edit` 读取 Style Lock、`base.css`、overview、目标页计划/HTML/PNG 和对应讲稿。`final_review` 完整读取 `plan/design-brief.md`、`plan/deck.md`、全部逐页计划、`base.css`、`speech.md`，并掌握 deck 引用的已确认大纲与任务原文，再按根 SKILL 的 Review 路由读取质量参考。存在 `plan/grounded-knowledge.md` 或 Research 产物时必须读取并核对；Box-Agent 静态新建不因缺少 `grounded-knowledge.md` 补建汇总，直接核对已交接的原始证据。存在附件时读取 `<DECK_DIR>/info_pack.json`，沿 `info_pack.raw_documents` 的绝对路径读取 `raw_documents.json`，并核对其中 `documents[].inherited_images[].path`、`page_visuals[].path` 和 `<DECK_DIR>/assets/catalog.json`。不得假设 `materials/attachments.json`、`research/materials/material_NN.md` 或分片 Material catalog 存在。
 
 任何选中的文件或章节若出现续读 offset 或截断提示，必须续读到结束。
 
@@ -64,15 +64,17 @@ Box-Agent 静态新建中，以上输入必须完整掌握，但主 Agent 可复
 
 **Box-Agent 静态新建：**本阶段只检查 `review-prep` 成功返回 `prepared / qa: not-run` 的正式版本；若尚未准备，由主 Agent 先运行 `python "$SKILL_ROOT/scripts/deck.py" review-prep "$DECK_DIR" --expected <总页数>`。消费成功回执的 `review_contact`、`images` 与 `review_ledger`，不另生成 contact，不先对构建前版本做一轮完整 Review。以下全册诊断同时承担最终像素验收。制作期覆盖与问题保留在原账本，不能冒充正式版本已检查。
 
+同一主 Agent 已完成全册制作期逐页检查及必要修复复验、随即进入本阶段时，在本次正式全册检查中承接尚未执行的组末关系检查：对照各组 Production group 与边界，检查亲缘、节奏、重复几何和突兀漂移，记录沿用原账本。这不替代任何单页、特殊页或修后复验，也不减少本阶段的最终全册像素覆盖；其他环境及已有编辑沿用原组末检查。
+
 1. 若存在附件或 Research，先做内容保真核验：
    - 有附件且已交接 `info_pack.raw_documents` 时，沿其路径读取原始解析内容，核对附件覆盖和解析错误；有附件却缺少必需解析产物时返回 Entry 补齐。无附件的 Research 任务直接核对已交接的研究报告；已有 Material catalog、摘要或 Coverage ledger 时作为辅证核对，不要求当前 Entry/Story 未约定生产的旧分片文件或字段；
-   - 按页列出屏显数字、名称、日期、单位、原话和关键关系，逐条对照逐页计划、`grounded-knowledge.md` 与已交接的原始材料/Research；高风险或冲突项必须回到对应原始 chunk/扫描页复核，不能用同一份下游摘要自证。表格、排行榜、消融和多系列图按原始表头逐格核对 `对象 × 指标 × 值`；摘要里的“最佳/提升率”与表格行冲突时直接判 fail。
+   - 按页列出屏显数字、名称、日期、单位、原话和关键关系，沿逐页计划的 `## 来源` 定位已交接的原始材料/Research，并核对已有的 `grounded-knowledge.md` 补充或历史汇总；高风险或冲突项必须回到对应原始 chunk/扫描页复核，不能用同一份下游摘要自证。表格、排行榜、消融和多系列图按原始表头逐格核对 `对象 × 指标 × 值`；摘要里的“最佳/提升率”与表格行冲突时直接判 fail。
    - 数据页同时核对最终实现和最终像素，而不只核对计划文案：检查 ECharts 的类别、series、图例、标签和值是否完整映射，Vision 必须复述它实际看到的柱/点/行。计划或 JS 有 7 项、像素只有 4 项，或值挂到错误类别下，都属于内容保真硬伤。
    - 把结果写入 `_trace/content-fidelity.md`，包含页码、屏显 claim、证据位置和 verdict；未覆盖、误写或无法追溯即为硬伤。
    - 保真核验只判断事实与引用，不把附件原版式、字号或信息密度当成视觉标准；计划中明确标为概念/氛围/愿景的表达性图片不承担事实证明，不得因附件没有同款图片而删除。
    - 对照 `attachment_visual_map`：must-show 图片必须在目标页实际引用已登记的 material/derived asset，并在最终像素中可辨认；“已读懂后重画”“借用了附件配色”或讲稿提及不能代替上屏。reuse/reference-only/omit 按计划理由核验，不要求机械展示所有附件。
    - 页面声称展示论文 `Figure/Fig./图 N` 时，核对实际引用资产的 catalog：必须是由`raw_documents.documents[].page_visuals[].path` 生成的 `material_figure_crop`，或明确登记为已完整面板的 `attachment-image`；并在像素中完整保留该 Figure 的面板、坐标轴、图例和图内标签。若仍看得到无关摘要/正文、论文页眉页脚、页码或大面积整页边距，属于素材粒度错误，不能以“保持论文原貌”放行。只有计划明确为 `page-facsimile` 时才允许展示整页，且不得把整页误称为 Figure。
-   无附件但使用了 Research 时，同样把具体数字、具名产品/人物/案例和外部结论逐页对照 `grounded-knowledge.md`，并把 `content_fidelity` 记为 `pass` 或 `fail`。生成图若承担真实产品或品牌识别，必须在页面明确标为概念示意，否则属于事实呈现硬伤。只有既无附件、又无 Research 和高风险外部事实时才记 `not-applicable`；Review 不自行新增研究。
+   无附件但使用了 Research 时，同样把具体数字、具名产品/人物/案例和外部结论逐页对照原始研究报告及已有补充记录，并把 `content_fidelity` 记为 `pass` 或 `fail`；没有知识汇总文件不等于无需事实核验。生成图若承担真实产品或品牌识别，必须在页面明确标为概念示意，否则属于事实呈现硬伤。只有既无附件、又无 Research 和高风险外部事实时才记 `not-applicable`；Review 不自行新增研究。
 2. Box-Agent 静态新建直接使用上述 `review_contact`；其他环境及已有编辑保留生成全册联系表的步骤：
 
    ```bash
@@ -101,7 +103,7 @@ Box-Agent 静态新建的集中修复由主 Agent 在所有写页子任务返回
    修改前在原条目的修法中简记需保留的视觉优点（主体尺度、留白、阅读路径、域证据），不另写整页报告。`render.py` 的 overlap/abs 是线索，不是需要“消分”的目标；只有新鲜 PNG/DOM 证明确有可见问题时才改，禁止靠 `overlap-ok`、删信息或压缩主视觉仅为让 lint 变 clean。若像素中没有遮挡而报告来自折行行内元素的联合 bbox，记录 `checker mismatch` 并保留原页；不得把短语拆成块级元素、把逗号/顿号留在块外，或制造孤立标点来迎合告警。
    裁切、底部消失或页脚冲突先检查外层正文区的高度所有权，再检查内层轨道和子元素：absolute 的 `.slide-body` 已由 `top + bottom` 定高时删除额外 `height`；flex 的 `.slide-body` 已由 `flex:1` 占满时同样不叠加 `height:100%`。图片主体裁切则先查 `object-fit / object-position` 与槽位比例：优先移动焦点、改变槽位或改用 `contain`，不得用进一步放大和 `overflow:hidden` 隐藏残缺主体。不得靠缩字号、连续压 gap、固定一个偶然 px 高度或给主容器加 `overflow:hidden` 掩盖父级几何错误。Canvas、SVG 与 HTML 标签叠加的页面还必须把共享几何当作一个坐标系统修复：外层 CSS 尺寸、`canvas` 的 width/height 属性、SVG `viewBox`、JavaScript 中的 W/H 与节点锚点需同时一致。局部遮挡不能只靠加高外容器，也不能用注释冒充修复；应移动冲突对象、调整局部锚点或简化稳定构图。
    语义视觉问题优先恢复逐页计划：修正矛盾标签与方向、补足箭头/图例、扩大解释主体、用已有事实重构为领域可辨认的图。若页面原计划并不需要该装饰图，删除它并让主表/主证据正确占满；若修复必须新增未规划事实或获取新素材，返回 `blocked`，不得虚构。
-2. 屏显文案或字体 token 改变后，先同步对应计划，再运行 `deck.py prepare`。
+2. 屏显文案或字体 token 改变后，先同步对应计划。**Box-Agent 静态新建：**不单独运行 `deck.py prepare`，直接进入步骤 3 的 `review-prep`，它在全册渲染前同步讲稿并准备字体。**其他环境及已有编辑：**再运行 `deck.py prepare`，保留原准备顺序。
 3. **Box-Agent 静态新建：**集中修复与计划/讲稿同步完成后，主 Agent 执行一次 `deck.py review-prep "$DECK_DIR" --expected N`，先完成字体、资源、全册渲染、build/audit，再进入复验；不先局部 render/focus 确认一遍再做正式待审。即使只改一页，本版也保持全册最终渲染，不引入缓存。**其他环境及已有编辑：**保留批量渲染：改过 `base.css` 或字体包则全册 batch，否则只渲变化页；命令成功且目标 PNG 新于源文件后进入修复确认。
 4. **Box-Agent 静态新建：**按成功回执的 manifest 覆盖全部最终像素；变化页按原问题的页码、问题对象与成立条件复验，同时检查受影响区域及跨页结构。其余页仍需确认最终呈现和明显回归，但不重启开放式审美诊断；计划要求的语义与视觉不能漏检。复用本次最终联系表，必要时打开单页，不额外生成一套 focus。**其他环境及已有编辑：**保留一次新 focus 联系表与必要单页的修复确认，该次不是最终交付证据。所有路径都比较备份版中应保留的构图优点：若只是警告减少，但主体被压扁、信息被删、留白/重心/语义更差，仍属退化。恢复后也须按所属路径重新准备新像素并检查，不直接用旧 PNG 交付。
 5. 最多只做 1 轮 refine：把所有已确认硬伤合并为一批修复并复验，不再开启第二轮，也不为 advisory 开启修改。复验后仍有真实硬伤则 `blocked`；只有 advisory 时记录后返回 `ready`。

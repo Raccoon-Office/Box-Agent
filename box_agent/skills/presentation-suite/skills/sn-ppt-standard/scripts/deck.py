@@ -398,7 +398,7 @@ def _ensure_runtime_assets(root: Path) -> None:
         shutil.copy2(source, target)
 
 
-def _init_workspace(root: Path) -> None:
+def _init_workspace(root: Path, width=None, height=None) -> None:
     """Copy only missing base CSS; leave planning, fonts and QA to their stages."""
     skill_root = Path(__file__).resolve().parent.parent
     if not root.is_dir() or root.is_relative_to(skill_root):
@@ -406,10 +406,21 @@ def _init_workspace(root: Path) -> None:
     target = root / "base.css"
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise ValueError(f"base.css must be a regular file, not a link or directory: {target}")
+    if (width is None) != (height is None) or (width is not None and (width <= 0 or height <= 0)):
+        raise ValueError("--width and --height must both be positive integers")
+    if target.exists() and width is not None and _detect_canvas(root) != (width, height):
+        raise ValueError("existing base.css has different canvas dimensions; edit the workspace CSS explicitly")
     created = False
     if not target.exists():
         template = skill_root / "references/base-template.css"
         data = template.read_bytes()
+        if width is not None:
+            css = data.decode("utf-8")
+            for name, value in (("--canvas-w", width), ("--canvas-h", height)):
+                css, count = re.subn(rf"({name}:\s*)[0-9.]+px", rf"\g<1>{value}px", css)
+                if count != 1:
+                    raise ValueError(f"base template must define {name} exactly once")
+            data = css.encode("utf-8")
         try:
             with target.open("xb") as stream:
                 stream.write(data)
@@ -418,7 +429,7 @@ def _init_workspace(root: Path) -> None:
             if target.is_symlink() or not target.is_file():
                 raise ValueError(f"base.css must be a regular file: {target}")
     print(json.dumps({"deck_dir": str(root), "base_css": str(target),
-                      "created": created, "qa": "not-run"}, ensure_ascii=False))
+                      "created": created, "canvas": list(_detect_canvas(root)), "qa": "not-run"}, ensure_ascii=False))
 
 
 def _ensure_canvas_reset(root: Path) -> None:
@@ -1408,6 +1419,9 @@ def main(argv=None):
             command.add_argument("root", type=_absolute_deck_root)
         else:
             command.add_argument("root", nargs="?", default=".")
+        if name == "init":
+            command.add_argument("--width", type=int)
+            command.add_argument("--height", type=int)
         if name in {"sync", "prepare", "contact", "build", "audit"}:
             command.add_argument("--expected", type=int)
         if name == "review-prep":
@@ -1452,7 +1466,7 @@ def main(argv=None):
     # delivery-scope setup), which may create files before command dispatch.
     if args.command == "init":
         try:
-            _init_workspace(Path(args.root).resolve())
+            _init_workspace(Path(args.root).resolve(), args.width, args.height)
         except (OSError, ValueError) as exc:
             print(f"init:FAIL\n{exc}", file=sys.stderr)
             return 1
@@ -1506,6 +1520,17 @@ def main(argv=None):
             print("delivery-audit:PASS")
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"{args.command}:FAIL\n{exc}", file=sys.stderr)
+        if args.command == "prepare":
+            script = Path(__file__).resolve()
+            retry = ["python", str(script), "prepare", str(root)]
+            if args.expected is not None:
+                retry.extend(["--expected", str(args.expected)])
+            print(json.dumps({
+                "deck_dir": str(root),
+                "plan_dir": str(root / "plan"),
+                "planning_reference": str(script.parent.parent / "references/planning-contract.md"),
+                "retry_after_fix": retry,
+            }, ensure_ascii=False), file=sys.stderr)
         return 1
     return 0
 

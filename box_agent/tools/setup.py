@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Collection
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Mapping, Optional
@@ -23,6 +24,7 @@ from box_agent.tools.argument_limits import RECOMMENDED_GENERATED_BODY_CHARS
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.execution_result_tool import ReportExecutionResultTool
 from box_agent.tools.file import JsonlQueryTool, ReadTool
+from box_agent.tools.file.email_tool import ExtractEmailAttachmentTool, ReadEmailTool
 from box_agent.tools.file_tools import (
     AppendTool,
     EditTool,
@@ -48,6 +50,7 @@ from box_agent.tools.mcp_loader import (
 from box_agent.tools.mcp_bootstrap import bootstrap_managed_mcp_config
 from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
 from box_agent.tools.memory_tool import (
+    create_memory_tools,
     MemoryDeleteCorrectionTool,
     MemoryListCorrectionsTool,
     MemoryReadTool,
@@ -128,8 +131,10 @@ def _image_capable_llm(llm: Any | None) -> Any | None:
     return None if current_support is False else llm
 
 
-def build_sandbox_info_prompt() -> str:
-    """Build the sandbox prompt block for a cwd-rooted session."""
+def build_sandbox_info_prompt(tools: Collection[str] | None = None) -> str:
+    """Build the sandbox prompt block for the registered session tools."""
+    if tools is not None and "execute_code" not in tools:
+        return ""
     location_line = (
         "沙箱有独立 `sys.executable`，cwd 是当前会话工作目录；"
         "存盘路径由当前任务和用户要求决定，不要默认创建或使用 `output/` 目录；"
@@ -141,7 +146,7 @@ def build_sandbox_info_prompt() -> str:
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。"
     )
 
-    return f"""
+    prompt = f"""
 ## Python Sandbox (execute_code)
 
 Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 host Python 独立：
@@ -149,11 +154,11 @@ Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 
 - **运行位置**：{location_line}
 - **状态持久**：同会话内变量、import、已加载数据保留到下一次调用；保持分步执行避免错误。
 - **预装包**：pandas、numpy、matplotlib、seaborn、scikit-learn、openpyxl、xlrd、python-docx、pypdf、pdfplumber、reportlab、python-pptx、beautifulsoup4、lxml、pillow、requests、pyyaml、python-dateutil、chardet + 标准库——**不要重装**，会拖慢首次执行。
-- **装新包**：仅在确认缺失时，在 `execute_code` 内用 `%pip install <pkg>` / `!pip install <pkg>`（走当前 kernel 的 pip，落沙箱 venv）。**绝对禁止** `bash` 跑 `pip install`——会装到 host，沙箱仍 `ModuleNotFoundError`。
+- **装新包**：仅在确认缺失时安装，并确认目标解释器。kernel 可用时，可在 `execute_code` 内用 `%pip install <pkg>`；使用 shell 时，应通过目标解释器的 `-m pip` 安装，不能假定其他环境的包会被当前 kernel 使用。
 - **用 execute_code**：数据分析、可视化、CSV/Excel/JSON/图片读写、Word/PDF/PPT 处理、多步计算、需保留状态的脚本。
 - **单次代码大小**：每次 `execute_code(code=...)` 控制在 {MAX_EXECUTE_CODE_CHARS} 字符以内；大脚本/模板/数据要预先分段执行，最后再读取校验；不要等到 `EXECUTE_CODE_TOO_LARGE` 后才拆，也不要把大段内容塞进一个工具参数。生成静态内容（共享样式/HTML/CSS/JS/JSON manifest/base64/生成文件正文）时，除非必须用 Python 处理，否则不要把正文塞进 `execute_code`。
 - **大文件落盘**：小文件用 `write_file(path, content)` 一次写完；若预计单次模型输出容纳不下，就对同一路径按顺序调用 `write_file`，首块用 `chunk_index=0, final=false`，后续逐次递增索引，最后一块用 `final=true`。每个生成块建议不超过 {RECOMMENDED_GENERATED_BODY_CHARS:,} 字符。禁止把文件正文、heredoc 或 base64 载荷塞进 `bash`；最后用 `read_file` 或渲染检查校验。
-- **必须执行**：用户要求“用/使用/运行 Python”得到一个具体结果（如生成随机数、计算数值、处理数据/文件、运行脚本）时，必须调用 `execute_code` 返回真实执行结果；不要只给代码示例。只有用户明确问“怎么写/示例代码/解释代码”时才只返回代码。
+- **必须执行**：用户要求“用/使用/运行 Python”得到一个具体结果（如生成随机数、计算数值、处理数据/文件、运行脚本）时，必须实际运行 Python 并返回真实执行结果；可使用 `execute_code` 或可用的 shell Python，不限定执行入口；不要只给代码示例。只有用户明确问“怎么写/示例代码/解释代码”时才只返回代码。
 - **用 bash**：仓库代码编辑、测试/构建、系统命令、git——与沙箱无关。
 
 ### 文档处理优先级
@@ -167,10 +172,30 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 
 **Skill vs Sandbox**：数据抽取/格式转换/表格处理 → 沙箱；复杂版式/OOXML 精操作/模板化生成/公式重算 → 先加载 skill。
 """
+    if tools is not None:
+        if "search_files" not in tools:
+            prompt = prompt.replace(location_line,
+                location_line.split("读取用户上传文件时", 1)[0]
+                + "读取用户上传文件时优先使用 host 提供的完整路径，缺少路径时请求确认，不猜测目录层级。")
+        lines = prompt.splitlines(keepends=True)
+        if not {"write_file", "read_file"} <= set(tools):
+            lines = [line for line in lines if not line.startswith("- **大文件落盘**")]
+        if "bash" not in tools:
+            lines = [line for line in lines if not line.startswith("- **用 bash**")]
+        prompt = "".join(lines)
+    return prompt
 
 
-def build_file_delivery_prompt() -> str:
-    """Build file-delivery guidance for a cwd-rooted session."""
+
+def build_file_delivery_prompt(tools: Collection[str] | None = None) -> str:
+    """Build file-delivery guidance for a cwd-rooted session.
+
+    ``tools`` is the session's registered tool names (``None`` = unknown, full
+    text). Mentions of ``generate_image`` and the background-shell preview
+    recipe are dropped when the session lacks those tools.
+    """
+    image = tools is None or "generate_image" in tools
+    background_shell = tools is None or {"bash", "bash_output", "bash_kill"} <= set(tools)
     preview_directory = '"$PWD"'
     preview_guidance = (
         "\n- **本地 HTML 预览**：Playwright MCP 不要打开 `file://`。用 bash 后台启动仅监听 "
@@ -181,8 +206,8 @@ def build_file_delivery_prompt() -> str:
         "使用 `lifetime=\"runtime\"`，验证后只关闭自动化浏览器，不停止服务，最终回复提供链接、`bash_id`，"
         "并说明服务会持续到显式 `bash_kill`、Box-Agent 重启或客户端退出。"
     )
-    return (
-        "- **目录**：bash、文件工具、`generate_image`、视觉检查和 Python 沙箱的相对路径"
+    prompt = (
+        "- **目录**：bash、文件工具、" + ("`generate_image`、" if image else "") + "视觉检查和 Python 沙箱的相对路径"
         "均从当前会话工作目录开始。交付物位置由用户要求和当前任务决定；不要默认创建或使用 `output/`，"
         "也不要写到 `~/.box-agent/` 等内部目录。\n"
         "- **命名与覆盖**：遵循现有项目约定；独立产物使用简短、语义明确的名称。"
@@ -194,15 +219,29 @@ def build_file_delivery_prompt() -> str:
         "拼接为绝对路径再重试；无结果或有多个同名结果时停止并请用户确认。\n"
         "- **桌面交付**：按文件在任务中的交付用途而非文件名或扩展名判断。生成并验证后，"
         "需要把尚未发布的文件作为独立交付结果时调用 `publish_artifact`；可登记多个。"
-        "构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
-        "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
+        "脚本生成自包含的单文件交付物时，可先用 `publish_artifact(action=\"begin\", path=最终路径)` 获取 staging_path，"
+        "生成并验证该临时文件后用返回的 write_id 调用 commit；最终路径不变，提交凭证确认归属；依赖相对资源目录的 HTML 或多文件构建器继续原有生成和发布流程。"
+        + ("构建器已登记的成品和 `generate_image(publish_artifact=True)` 已发布，无需重复登记。"
+           if image else "构建器已登记的成品已发布，无需重复登记。")
+        + "大纲、补丁、素材、QA 或可复现源文件等配套文件即使要求保留或在最终回复中提及，"
         "也不调用 `publish_artifact`；保留文件并说明位置。若用户将其中某个文件作为另一项"
         "独立交付结果，则也应登记。"
         "完成后说明文件名和工作目录内相对位置即可；CLI 与宿主以共享 ArtifactEvent 展示文件。\n"
         "- **多文件交付**：用户需要单一下载包时才将多文件打包为 ZIP，"
         "例如 `zip -r bundle.zip 文件1 文件2`。"
-        + preview_guidance
+        + (preview_guidance if background_shell else "")
     )
+    if tools is not None:
+        lines = prompt.splitlines(keepends=True)
+        if "search_files" not in tools:
+            lines = [line for line in lines if not line.startswith("- **附件定位**")]
+            lines.insert(2, "- **附件定位**：使用 host 提供的完整路径；路径缺失或读取失败时请用户确认，不猜测目录层级。\n")
+        if "publish_artifact" not in tools:
+            lines = [line for line in lines if not line.startswith("- **桌面交付**")]
+            lines.insert(3, "- **桌面交付**：说明已验证文件的位置；缺少登记能力时不要声称已发布。\n")
+        prompt = "".join(lines)
+    return prompt
+
 
 
 def image_generation_service_configured(
@@ -218,8 +257,22 @@ def image_generation_service_configured(
 def build_image_generation_prompt(
     config: Config,
     env: Mapping[str, str] | None = None,
+    *,
+    tools: Collection[str] | None = None,
 ) -> str:
-    """Build the image-generation policy shared by CLI and ACP sessions."""
+    """Build the image-generation policy shared by CLI and ACP sessions.
+
+    With ``tools`` known and no ``generate_image`` registered, the model gets
+    a short "not available" note instead of instructions to call a tool that
+    does not exist in this session.
+    """
+    if tools is not None and "generate_image" not in tools:
+        return (
+            "## Native Image Generation\n\n"
+            "- 当前会话没有生图工具，不能通过该工具生成图片。"
+            "用户要求生成位图时不要尝试调用生图工具；用户未禁止时可改用 HTML/SVG、PIL 等方式，"
+            "并说明这是替代方案；用户明确禁止这些回退时如实报告阻塞，不得假装已生成图片。"
+        )
     configured = image_generation_service_configured(config, env)
     status = (
         "已配置，可以调用 `generate_image`。"
@@ -301,18 +354,11 @@ async def initialize_base_tools(
 
     # 0. Memory tools (cross-session, workspace-independent)
     if memory_manager is not None:
-        tools.append(MemoryReadTool(memory_manager))
-        tools.append(MemoryWriteTool(memory_manager, llm=llm))
-        tools.append(MemorySearchTool(memory_manager))
-        tools.append(MemoryListCorrectionsTool(memory_manager))
-        tools.append(MemoryWriteCorrectionTool(memory_manager))
-        tools.append(MemorySupersedeCorrectionTool(memory_manager))
-        tools.append(MemoryDeleteCorrectionTool(memory_manager))
+        memory_tools = create_memory_tools(memory_manager, llm)
+        tools.extend(memory_tools)
         _out(
             f"{Colors.GREEN}✅ Loaded memory tools "
-            f"(memory_read, memory_write, memory_search, "
-            f"memory_list_corrections, memory_write_correction, "
-            f"memory_supersede_correction, memory_delete_correction)"
+            f"({', '.join(tool.name for tool in memory_tools)})"
             f"{Colors.RESET}"
         )
 
@@ -441,6 +487,13 @@ async def initialize_base_tools(
     # 3. MCP tools (loaded with priority search, in background to avoid blocking startup)
     mcp_task: Optional[asyncio.Task] = None
     if config.tools.enable_mcp:
+        from box_agent.plugins.cua.ready_tool import create_cua_service, EnsureCuaReadyTool
+        from box_agent.tools.mcp_loader import register_cua_service
+
+        cua_service = create_cua_service(config)
+        if cua_service is not None:
+            cua_service = register_cua_service(cua_service)
+            tools.append(EnsureCuaReadyTool(cua_service))
         mcp_config = config.tools.mcp
         set_mcp_timeout_config(
             connect_timeout=mcp_config.connect_timeout,
@@ -663,7 +716,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
     relative_root = workspace_dir
-    tools.append(PublishArtifactTool(workspace_dir))
+    tools.append(PublishArtifactTool(workspace_dir, permission_engine=permission_engine))
 
     # Relative tool paths always use the stable session cwd.
     runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
@@ -687,6 +740,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             sandbox_venv_path=sandbox_venv_path,
             permission_engine=permission_engine,
             runtime_env=runtime_env,
+            pptx_sync_script_provider=(
+                lambda: skill_loader.get_bound_expert_resource(
+                    "pptx", "scripts/sync_image_manifest_status.js"
+                )
+            ) if skill_loader is not None else None,
             process_owner_id=process_owner_id,
             bypass_dangerous_command_approval=bypass_dangerous_command_approval,
             default_timeout_seconds=config.tools.bash_default_timeout_seconds,
@@ -703,6 +761,18 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     # File tools resolve relative paths from relative_root and retain workspace scope.
     if config.tools.enable_file_tools:
         file_tools: list[Tool] = [
+            ExtractEmailAttachmentTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            ReadEmailTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
             ReadTool(
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,

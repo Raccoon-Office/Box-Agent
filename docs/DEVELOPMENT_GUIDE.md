@@ -490,6 +490,15 @@ The system prompt (`system_prompt.md`) defines the Agent's behavior, capabilitie
 
 After modifying `system_prompt.md`, be sure to restart the Agent to apply changes
 
+Keep the version-managed placeholders from the bundled templates when customizing
+`system_prompt.md`, `analysis_prompt.md`, or `code_prompt.md`, including renamed or
+absolute paths configured in `agent.*_prompt_path`. Missing or unknown placeholders
+produce a stderr warning; the override is still used. `box-agent doctor` (including
+`--json`) reports these differences and unreadable or non-UTF-8 templates. Compare
+the reported bundled file with your override and preserve your custom instructions
+while updating placeholders. To use the bundled template, remove a default-name
+override; for custom paths, also restore the corresponding default filename in config.
+
 ## 4. Troubleshooting
 
 ### 4.1 Common Issues
@@ -563,3 +572,14 @@ logger.debug(f"Tool call: {tool_call.name}")
 logger.debug(f"Tool arguments: {tool_call.arguments}")
 logger.debug(f"Tool result: {result.content[:200]}")
 ```
+
+Deliverable files follow the current request's language unless the user explicitly
+chooses another language; reference material does not override that choice.
+Conversational replies and progress follow the host UI language (ACP `ui_language`).
+CLI, Python SDK and ACP share the turn-hint generator. Only sufficiently clear
+English requests trigger the extra reminder. Other languages and mixed-language
+requests rely on the system language contract; reference text does not cause a
+Japanese-language override.
+Utility sessions and automatic continuations do not receive these hints.
+Hosts passing a generated continuation as `RunRequest.user_message` must mark it
+with `metadata={"synthetic_continuation": True}`; ordinary SDK requests remain unmarked.

@@ -15,7 +15,7 @@ COPY . /workspace
 RUN --mount=type=cache,target=/root/.cache/pip \
     test -n "${BOX_AGENT_VERSION}" && \
     /usr/bin/python3 -m ensurepip && \
-    /usr/bin/python3 -m pip install --disable-pip-version-check . "pyinstaller>=6.0.0" && \
+    /usr/bin/python3 -m pip install --disable-pip-version-check --timeout 120 --retries 5 . "pyinstaller>=6.0.0" "pydantic==2.12.3" && \
     /usr/bin/python3 -c 'import openai; assert openai.__version__ == "2.8.0", openai.__version__'
 
 RUN --mount=type=cache,target=/root/.cache/pip \

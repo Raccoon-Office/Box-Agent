@@ -138,6 +138,27 @@ def test_review_prep_receipt_resolves_deck_from_another_cwd(isolated_runtime, wo
     assert "ready" not in result and result["qa"] == "not-run"
 
 
+def test_review_prep_syncs_revised_speech_before_render_without_separate_prepare(
+    isolated_runtime, workspace, monkeypatch,
+):
+    deck, events = isolated_runtime
+    plan = workspace / "plan/slide_01.md"
+    plan.write_text(plan.read_text().replace("Talk about page 1.", "Revised explanation."))
+    render = deck["render_all"]
+
+    def render_after_speech(root):
+        assert "Revised explanation." in (root / "speech.md").read_text()
+        return render(root)
+
+    def unexpected_prepare(*args, **kwargs):
+        pytest.fail("review-prep must already prepare its own speech and font inputs")
+
+    monkeypatch.setitem(deck, "render_all", render_after_speech)
+    monkeypatch.setitem(deck, "_prepare_workspace", unexpected_prepare)
+    assert prepare(deck, workspace) == 0
+    assert events == ["fonts", "render", "contact", "audit"]
+
+
 @pytest.mark.parametrize("changed", ["assets/image.png", "assets/runtime.js", "base.css", "slides/slide_01.html"])
 def test_review_prep_always_refreshes_all_pages_without_dependency_cache(isolated_runtime, workspace, capsys, changed):
     deck, events = isolated_runtime

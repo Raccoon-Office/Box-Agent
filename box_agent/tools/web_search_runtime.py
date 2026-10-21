@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -212,7 +213,8 @@ def _normalize_web_search_refs(payload: Any) -> list[dict[str, Any]]:
             source_id = source_id.strip()
             if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", source_id):
                 alias = source_id if source_id.startswith("ref_") else f"ref_{source_id}"
-                ref["reference_aliases"] = [alias]
+                if not ref["reference_tag"].startswith("ref_web_") or not re.fullmatch(r"ref_\d+", alias):
+                    ref["reference_aliases"] = [alias]
         if image_details:
             ref["image_details"] = image_details
         refs.append(ref)
@@ -241,6 +243,56 @@ def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] 
     if not refs:
         return None
     return {"type": "web_search", "refs": refs}
+
+
+def _bind_web_search_citations(visible_content: str, model_content: str) -> tuple[str, str]:
+    """Give the model and client the same URL-stable, cross-search citation keys."""
+    try:
+        payload = json.loads(visible_content)
+    except json.JSONDecodeError:
+        return visible_content, model_content
+    if not isinstance(payload, dict):
+        return visible_content, model_content
+    items = []
+    refs = []
+    for source in _candidate_search_items(payload):
+        normalized = _normalize_web_search_refs([source])
+        if not normalized:
+            items.append(source)
+            continue
+        ref = normalized[0]
+        tag = "ref_web_" + hashlib.sha256(ref["url"].encode("utf-8")).hexdigest()[:24]
+        # Keep full provider fields and passages; only change the citation contract.
+        item = {**source, "reference_tag": tag}
+        aliases = source.get("reference_aliases")
+        if isinstance(aliases, list):
+            item["reference_aliases"] = [
+                alias for alias in aliases
+                if isinstance(alias, str) and not re.fullmatch(r"ref_\d+", alias)
+            ]
+        items.append(item)
+        refs.append({**ref, "reference_tag": tag})
+    if not refs:
+        return visible_content, model_content
+    citation_data = {
+        **_with_filtered_search_items(payload, items),
+        "citation_instructions": (
+            "Cite sources using their exact reference_tag in square brackets, e.g. "
+            f"[{refs[0]['reference_tag']}]. Never invent or renumber reference tags. "
+            "The client assigns display numbers. Use these tags in the answer and source list; "
+            "SortId, rank and list position are not citation identifiers."
+        ),
+    }
+    visible = json.dumps(citation_data, ensure_ascii=False)
+    if model_content == visible_content:
+        return visible, visible
+    # Preserve an existing model-only summary/receipt, but carry the exact link contract.
+    citation_data = {"type": "web_search", "citation_instructions": citation_data["citation_instructions"]}
+    citation_data["refs"] = [
+        {key: ref[key] for key in ("reference_tag", "url", "title") if key in ref}
+        for ref in refs
+    ]
+    return visible, model_content + "\n\n" + json.dumps(citation_data, ensure_ascii=False)
 
 
 def _short_tool_text(value: Any, limit: int = 180) -> str:
@@ -272,6 +324,8 @@ _WEB_SEARCH_RESULT_KEYS: Final[tuple[str, ...]] = (
     "imageResults",
     "ImageResults",
     "image_results",
+    "documents",
+    "Documents",
     "items",
     "value",
     "organic_results",
@@ -417,54 +471,52 @@ def _url_matches_domain(value: Any, domain: str) -> bool:
     return hostname == domain or hostname.endswith(f".{domain}")
 
 
-def _with_filtered_search_items(payload: Any, filtered_items: list[dict[str, Any]]) -> Any:
+def _search_result_path(payload: Any) -> tuple[str, ...] | None:
+    """Locate the same result list for both extraction and replacement."""
     if isinstance(payload, list):
-        return filtered_items
+        return ()
     if not isinstance(payload, dict):
-        return payload
-
+        return None
     for key in _WEB_SEARCH_RESULT_KEYS:
         value = payload.get(key)
         if isinstance(value, list) and any(isinstance(item, dict) for item in value):
-            updated = dict(payload)
-            updated[key] = filtered_items
-            return updated
-
+            return (key,)
     for key, value in payload.items():
-        if isinstance(value, dict) and _candidate_search_items(value):
-            updated = dict(payload)
-            updated[key] = _with_filtered_search_items(value, filtered_items)
-            return updated
+        if isinstance(value, dict):
+            nested = _search_result_path(value)
+            if nested is not None:
+                return (key, *nested)
+        elif isinstance(value, list) and any(
+            _first_present(item, ("title", "Title", "url", "Url", "href", "link"))
+            for item in value if isinstance(item, dict)
+        ):
+            return (key,)
+    return None
 
-    return payload
+
+def _with_filtered_search_items(payload: Any, filtered_items: list[dict[str, Any]]) -> Any:
+    path = _search_result_path(payload)
+    if path is None:
+        return payload
+    if not path:
+        return filtered_items
+    updated = dict(payload)
+    target = updated
+    for key in path[:-1]:
+        target[key] = dict(target[key])
+        target = target[key]
+    target[path[-1]] = filtered_items
+    return updated
 
 
 def _candidate_search_items(payload: Any) -> list[dict[str, Any]]:
     """Extract likely search-result rows from common web_search payload shapes."""
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-
-    if not isinstance(payload, dict):
+    path = _search_result_path(payload)
+    if path is None:
         return []
-
-    for key in _WEB_SEARCH_RESULT_KEYS:
-        value = payload.get(key)
-        if isinstance(value, list):
-            items = [item for item in value if isinstance(item, dict)]
-            if items:
-                return items
-
-    for value in payload.values():
-        if isinstance(value, dict):
-            nested = _candidate_search_items(value)
-            if nested:
-                return nested
-        elif isinstance(value, list):
-            items = [item for item in value if isinstance(item, dict)]
-            if any(_first_present(item, ("title", "Title", "url", "Url", "href", "link")) for item in items):
-                return items
-
-    return []
+    for key in path:
+        payload = payload[key]
+    return [item for item in payload if isinstance(item, dict)]
 
 
 def _search_result_list_found(payload: Any) -> bool:

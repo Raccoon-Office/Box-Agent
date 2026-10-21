@@ -1,20 +1,26 @@
 from pathlib import Path
 
+from box_agent.prompt_capabilities import resolve_capability_placeholders
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.tools.setup import render_system_prompt_template
 
 
-def _prompt() -> str:
+def _raw_prompt() -> str:
     return Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
 
 
+def _prompt() -> str:
+    return resolve_capability_placeholders(_raw_prompt(), None)
+
+
 def test_system_prompt_keeps_the_stable_template_compact():
-    prompt = _prompt()
+    prompt = _raw_prompt()
 
     assert len(prompt) <= 4_300
     assert prompt.count("{SKILLS_METADATA}") == 1
     assert prompt.count("{SANDBOX_INFO}") == 1
     assert prompt.count("{FILE_DELIVERY_INFO}") == 1
+    assert prompt.count("{PLANNING_TOOLS}") == 1
 
 
 def test_system_prompt_renders_current_date_without_leaving_legacy_tokens():
@@ -59,7 +65,7 @@ def test_system_prompt_resolves_paths_without_broad_home_searches():
 
 
 def test_system_prompt_lets_the_model_choose_a_task_directory():
-    prompt = _prompt()
+    prompt = resolve_capability_placeholders(_prompt(), None)
 
     assert "新建交付物前，先用 `search_files` 查看 cwd" in prompt
     assert "默认用 cwd" in prompt
@@ -81,7 +87,8 @@ def test_system_prompt_distinguishes_missing_attachments_from_explicit_paths():
 
 
 def test_system_prompt_keeps_workflow_policy_without_duplicating_tool_schemas():
-    prompt = _prompt()
+    # Planning-tool guidance is capability-rendered; a full session gets all of it.
+    prompt = resolve_capability_placeholders(_prompt(), None)
 
     assert "Plan 表达方法，Todo 只记录进度" in prompt
     assert "不是事实证据或结论来源" in prompt
@@ -139,7 +146,7 @@ def test_system_prompt_forbids_reusing_model_history_placeholders():
 
 
 def test_system_prompt_routes_large_jsonl_to_bounded_query_tool():
-    prompt = _prompt()
+    prompt = resolve_capability_placeholders(_prompt(), None)
 
     assert "JSONL/NDJSON" in prompt
     assert "使用 `query_jsonl` 做字段投影和游标分页" in prompt
@@ -169,7 +176,8 @@ def test_system_prompt_pauses_only_for_blocking_input_or_sensitive_decisions():
     assert decision_schema["requested_auto_submit_seconds"]["default"] == 30
     assert "推荐默认项（`default_option_id`）并请求 30 秒倒计时" in prompt
     assert "若已给出 `default_option_id`，超时或自动提交时必须采用该默认项" in prompt
-    assert "不得改选其他偏好（例如把 design 改成 fast）" in prompt
+    assert "不得改选其他偏好" in prompt
+    assert "design 改成 fast" not in prompt  # PPT-specific; the presentation-mode envelope owns it
     assert "已授权操作直接继续，不重复确认" in prompt
     assert "新增未授权的敏感事项须等待用户选择，不得自动提交" in prompt
 

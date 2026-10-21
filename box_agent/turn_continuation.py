@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from .schema import Message
+from .llm.task_budgets import (
+    CONTINUATION_THINKING_MAX_OUTPUT_TOKENS, SMALL_TASK_MAX_OUTPUT_TOKENS,
+    cap_auxiliary_client,
+)
 
 
 log = logging.getLogger(__name__)
@@ -268,12 +272,17 @@ async def model_says_continue(
 
     judge_task = None
     try:
+        judge_llm = cap_auxiliary_client(
+            llm,
+            CONTINUATION_THINKING_MAX_OUTPUT_TOKENS
+            if thinking_enabled else SMALL_TASK_MAX_OUTPUT_TOKENS,
+        )
         # The provider/client owns the request timeout.  This auxiliary judge
         # must not impose a second, shorter deadline that turns a slow but
         # valid verdict into ``continue=False``.  The polling loop below only
         # checks caller interruption; it is not an overall time limit.
         judge_task = asyncio.create_task(
-            generate(
+            judge_llm.generate(
                 judge_messages,
                 tools=None,
                 thinking_enabled=thinking_enabled,

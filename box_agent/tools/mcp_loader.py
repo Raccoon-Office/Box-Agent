@@ -1,6 +1,7 @@
 """MCP tool loader with real MCP client integration and timeout handling."""
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
@@ -79,6 +80,7 @@ from .mcp_sources import (
 from .model_tool_context import current_model_tool_context
 from .mcp_result_hooks import (
     adapt_mcp_inline_images,
+    adapt_mcp_result_context,
     allowed_mcp_result_adapters,
     persist_mcp_image_references,
 )
@@ -1154,10 +1156,61 @@ class MCPTool(Tool):
                     content_parts.append(str(item))
 
             content_str = "\n".join(content_parts)
-
             is_error = result.isError if hasattr(result, "isError") else False
-
             structured_error = _structured_mcp_error_message(content_str)
+            structured_content = getattr(result, "structuredContent", None)
+            if not isinstance(structured_content, dict):
+                structured_content = None
+            if structured_content is not None:
+                structured_error = structured_error or _structured_mcp_error_message(
+                    json.dumps(structured_content, ensure_ascii=False),
+                )
+            context = adapt_mcp_result_context(
+                server_name=self._server_name, remote_name=self._remote_name,
+                arguments=call_arguments, structured_content=structured_content,
+            )
+            if context:
+                if is_error or structured_error:
+                    context = (
+                        "Failed tool observation: use this state only for diagnosis; "
+                        "refresh the target state before further actions.\n" + context
+                    )
+                content_str = "\n".join([context, content_str]).strip()
+            result_adapters = (
+                allowed_mcp_result_adapters(
+                    server_name=self._server_name, remote_name=self._remote_name,
+                ) if inline_images else ()
+            )
+            image_references = persist_mcp_image_references(
+                server_name=self._server_name, remote_name=self._remote_name,
+                inline_images=inline_images, adapters=result_adapters,
+            )
+            raw_output: dict[str, Any] = {}
+            if structured_content is not None:
+                raw_output["mcp_structured_content"] = structured_content
+            if image_references:
+                raw_output["mcp_image_references"] = image_references
+                paths = [
+                    str(block["contentRef"]) for block in image_references
+                    if isinstance(block, dict) and isinstance(block.get("contentRef"), str)
+                ]
+                content_str = "\n".join([content_str, *paths]).strip()
+            # Persisted references replace only bytes demonstrably covered by
+            # the sidecar. Other images retain the existing raw-output path.
+            persisted_hashes = {
+                block.get("sha256") for block in image_references or []
+                if isinstance(block, dict) and isinstance(block.get("contentRef"), str)
+            }
+            unsaved_images = []
+            for image in inline_images:
+                try:
+                    digest = hashlib.sha256(base64.b64decode(image["data"], validate=True)).hexdigest()
+                except (ValueError, TypeError):
+                    digest = None
+                if digest is None or digest not in persisted_hashes:
+                    unsaved_images.append(image)
+            if unsaved_images:
+                raw_output["mcp_inline_images"] = unsaved_images
             if is_error or structured_error:
                 release_browser_runtime_after_call = self._server_name == "playwright"
                 public_content = public_browser_tool_text(
@@ -1172,51 +1225,25 @@ class MCPTool(Tool):
                     success=False,
                     content=public_content,
                     error=err_msg,
+                    raw_output=raw_output or None,
                 )
             release_browser_runtime_after_call = (
                 self._server_name == "playwright"
                 and self._remote_name == "browser_snapshot"
             )
-            # Optional run-scoped result adapters may expose selected binary
-            # content through the shared ToolResult adaptation channels.
-            # ``raw_output`` remains the original MCP payload.
-            result_adapters = (
-                allowed_mcp_result_adapters(
-                    server_name=self._server_name,
-                    remote_name=self._remote_name,
-                )
-                if inline_images
-                else ()
-            )
-            image_references = persist_mcp_image_references(
-                server_name=self._server_name,
-                remote_name=self._remote_name,
-                inline_images=inline_images,
-                adapters=result_adapters,
-            )
-            if image_references:
-                paths = [
-                    str(block["contentRef"])
-                    for block in image_references
-                    if isinstance(block, dict) and isinstance(block.get("contentRef"), str)
-                ]
-                if paths:
-                    content_str = "\n".join([content_str, *paths]).strip()
             transient_followup_content = adapt_mcp_inline_images(
                 server_name=self._server_name,
                 remote_name=self._remote_name,
                 inline_images=inline_images,
                 adapters=result_adapters,
+                arguments=call_arguments,
+                structured_content=structured_content,
             )
             return ToolResult(
                 success=True,
                 content=content_str,
                 error=None,
-                raw_output=(
-                    {"mcp_inline_images": inline_images}
-                    if inline_images
-                    else None
-                ),
+                raw_output=raw_output or None,
                 transient_followup_content=transient_followup_content or None,
             )
 
@@ -1327,6 +1354,9 @@ async def _open_streamable_http(
     return read_stream, write_stream
 
 
+_MCP_CONNECTION_CLOSE_TIMEOUT = 30.0
+
+
 class MCPServerConnection:
     """Manages connection to a single MCP server (STDIO or URL-based) with timeout handling."""
 
@@ -1374,6 +1404,10 @@ class MCPServerConnection:
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack | None = None
         self.tools: list[MCPTool] = []
+        self._lifecycle_lock = asyncio.Lock()
+        self._connection_task: asyncio.Task[None] | None = None
+        self._close_requested = asyncio.Event()
+        self._close_error: BaseException | None = None
         # ``stdio_http`` only: the server process we own and the per-session
         # client pool that hands every agent session its own BrowserContext.
         self.server_process: ManagedHttpServerProcess | None = None
@@ -1411,6 +1445,103 @@ class MCPServerConnection:
         return self._web_search_concurrency_limiter
 
     async def connect(self) -> bool:
+        """Start a task that owns the SDK contexts until disconnect is requested."""
+        async with self._lifecycle_lock:
+            if self._connection_task is not None:
+                if not self._connection_task.done() and not self._close_requested.is_set():
+                    return True
+                await self._wait_for_connection_close()
+
+            self.tools = []
+            self._close_error = None
+            self._close_requested = asyncio.Event()
+            ready = asyncio.get_running_loop().create_future()
+            self._connection_task = asyncio.create_task(
+                self._run_connection(ready), name=f"mcp-connection:{self.name}",
+            )
+
+            def finished(task: asyncio.Task[None]) -> None:
+                # Also settle startup if shutdown cancels the task before it runs.
+                if not ready.done():
+                    ready.set_result(False)
+
+            self._connection_task.add_done_callback(finished)
+            try:
+                connected = await asyncio.shield(ready)
+                return connected and not self._close_requested.is_set()
+            except asyncio.CancelledError:
+                self._close_requested.set()
+                self._connection_task.cancel()
+                try:
+                    await self._wait_for_connection_close()
+                except Exception as error:
+                    _warn(f"[mcp] cancelled startup cleanup failed server={self.name!r}: {error}")
+                raise
+
+    async def _run_connection(self, ready: asyncio.Future[bool]) -> None:
+        try:
+            if await self._connect_in_owner():
+                ready.set_result(True)
+                # Event.wait suspends; it does not poll or consume idle CPU.
+                await self._close_requested.wait()
+        except asyncio.CancelledError:
+            if not self._close_requested.is_set():
+                self.last_error = "MCP connection task was cancelled"
+        except Exception as error:
+            self.last_error = str(error)
+        finally:
+            unexpected_stop = ready.done() and not self._close_requested.is_set()
+            self._close_requested.set()
+            self.tools = []
+            if self in _mcp_connections:
+                get_mcp_tool_catalog().remove_server(self.name)
+            try:
+                await self._close_owned_connection()
+            except BaseException as error:  # noqa: BLE001
+                self._close_error = error
+                self.last_error = f"Failed to close MCP connection: {error}"
+                _warn(f"[mcp] disconnect:failed server={self.name!r} error={error}")
+            finally:
+                if not ready.done():
+                    ready.set_result(False)
+                elif unexpected_stop:
+                    # An SDK background task may fail after initialization.
+                    self.last_error = self.last_error or "MCP connection task stopped unexpectedly"
+                    _warn(f"[mcp] connection:stopped server={self.name!r} error={self.last_error}")
+                    if self in _mcp_connections:
+                        _record_status(self.name, "failed", error=self.last_error)
+
+    async def _wait_for_connection_close(self) -> None:
+        task = self._connection_task
+        if task is None:
+            return
+        try:
+            # Never move SDK teardown into wait_for's helper task, or cancel it
+            # halfway through unwinding its AnyIO scopes when a caller leaves.
+            await asyncio.wait_for(asyncio.shield(task), _MCP_CONNECTION_CLOSE_TIMEOUT)
+        except asyncio.TimeoutError as error:
+            self.last_error = "Timed out waiting for MCP connection cleanup"
+            _warn(f"[mcp] disconnect:timeout server={self.name!r}")
+            # Retain the owner so a later disconnect can join it. Reconnect must
+            # not replace a connection whose cleanup is still running.
+            raise TimeoutError(self.last_error) from error
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+        if self._close_error is not None:
+            raise RuntimeError(f"Failed to close MCP connection '{self.name}'") from self._close_error
+        self._connection_task = None
+
+    async def _close_owned_connection(self) -> None:
+        try:
+            if self.exit_stack is not None:
+                await self.exit_stack.aclose()
+        finally:
+            self.exit_stack = None
+            self.session = None
+            await self._shutdown_multiplexed_server()
+
+    async def _connect_in_owner(self) -> bool:
         """Connect to the MCP server with timeout protection."""
         self.last_auth_status = None
         connect_timeout = self._get_connect_timeout()
@@ -1431,18 +1562,12 @@ class MCPServerConnection:
         )
 
         async def _close_exit_stack() -> BaseException | None:
-            cleanup_error: BaseException | None = None
-            if self.exit_stack:
-                try:
-                    await self.exit_stack.aclose()
-                except BaseException as error:  # noqa: BLE001
-                    cleanup_error = error
-                finally:
-                    self.exit_stack = None
-                    self.session = None
-            # A failed multiplexed connect must not leave an orphan HTTP server.
-            await self._shutdown_multiplexed_server()
-            return cleanup_error
+            try:
+                await self._close_owned_connection()
+            except BaseException as error:  # noqa: BLE001
+                self._close_error = error
+                return error
+            return None
 
         def _warn_unexpected_cleanup_error(cleanup_error: BaseException | None) -> None:
             if cleanup_error is None or _is_mcp_authentication_error(cleanup_error):
@@ -1739,8 +1864,9 @@ class MCPServerConnection:
             return
         try:
             await self.exit_stack.aclose()
-        except Exception:  # noqa: BLE001
-            pass
+        except BaseException as error:  # noqa: BLE001
+            self._close_error = error
+            raise
         finally:
             self.exit_stack = None
             self.session = None
@@ -1812,19 +1938,10 @@ class MCPServerConnection:
                 await process.stop()
 
     async def disconnect(self):
-        """Properly disconnect from the MCP server."""
-        if self.exit_stack:
-            try:
-                await self.exit_stack.aclose()
-            except Exception:
-                # anyio cancel scope may raise RuntimeError or ExceptionGroup
-                # when stdio_client's task group is closed from a different
-                # task context during shutdown.
-                pass
-            finally:
-                self.exit_stack = None
-                self.session = None
-        await self._shutdown_multiplexed_server()
+        """Ask the task that entered the SDK contexts to close them in place."""
+        async with self._lifecycle_lock:
+            self._close_requested.set()
+            await self._wait_for_connection_close()
 
 
 # Global connections registry
@@ -1905,8 +2022,11 @@ async def disconnect_mcp_server(name: str) -> dict:
         removed_tools = [t.name for t in conn.tools]
         try:
             await conn.disconnect()
-        except Exception:
-            pass
+        except Exception as error:
+            conn.tools = []
+            get_mcp_tool_catalog().remove_server(name)
+            _record_status(name, "failed", error=str(error))
+            return {"success": False, "error": str(error), "removedTools": removed_tools}
         _mcp_connections = [c for c in _mcp_connections if c.name != name]
     get_mcp_tool_catalog().remove_server(name)
     _record_status(name, "disabled")
@@ -2149,6 +2269,20 @@ def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
     )
 
 
+_cua_service = None  # Owned with the existing process-wide MCP registry; closed below.
+
+
+def register_cua_service(service):
+    global _cua_service
+    if _cua_service is not None and _cua_service is not service:
+        if _cua_service.name == service.name and _cua_service.config == service.config:
+            service.adapter.cleanup()
+            return _cua_service
+        raise RuntimeError("CUA runtime is already registered")
+    _cua_service = service
+    return service
+
+
 def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer]:
     global _mcp_sources
     _mcp_sources = configured_mcp_sources(config_path)
@@ -2184,7 +2318,24 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
     )
     for conflict in resolved.conflicts:
         _warn(f"Skipping conflicting MCP server: {conflict}")
-    return resolved.servers
+    servers = dict(resolved.servers)
+    if _cua_service is not None:
+        name = _cua_service.name
+        config = _cua_service.server_config
+        existing = servers.get(name)
+        if existing and existing.config.get("disabled"):
+            return servers  # Explicit disable always wins, including host mode.
+        if existing and existing.config != config:
+            _warn(f"Managed CUA server '{name}' conflicts with existing MCP configuration; remove the old CUA entry before retrying")
+            from dataclasses import replace
+            servers[name] = replace(existing, config={**existing.config, "disabled": True})
+            return servers  # A CUA conflict must not block unrelated MCP servers.
+        servers[name] = ResolvedMcpServer(
+            name=name, config=config, owner="system", config_id=name,
+            connector_id=None, connector_name=None, source_path="<runtime:cua>",
+            fingerprint=json.dumps(config, sort_keys=True),
+        )
+    return servers
 
 
 def _resolve_mcp_config_path(config_path: str) -> Path | None:
@@ -2304,6 +2455,10 @@ async def load_mcp_tools_async(
                 )
                 continue
 
+            if _cua_service is not None and server_name == _cua_service.name:
+                _record_status(server_name, "connecting", error="Call ensure_cua_ready to prepare CUA", definition=definition)
+                continue
+
             conn_type = _effective_connection_type(server_name, server_config)
             url = server_config.get("url")
             command = server_config.get("command")
@@ -2341,7 +2496,7 @@ async def load_mcp_tools_async(
                     auth_status=_mcp_auth_status(success),
                 )
                 continue
-            if success:
+            if success and conn.last_error is None:
                 _mcp_connections.append(conn)
                 _replace_server_catalog(conn)
                 all_tools.extend(conn.tools)
@@ -2377,9 +2532,29 @@ async def load_mcp_tools_async(
 
 async def cleanup_mcp_connections():
     """Clean up all MCP connections."""
-    global _mcp_connections, _mcp_server_definitions, _mcp_sources
-    for connection in _mcp_connections:
-        await connection.disconnect()
+    global _mcp_connections, _mcp_server_definitions, _mcp_sources, _cua_service
+    failed = []
+    closed = []
+    try:
+        for connection in _mcp_connections:
+            try:
+                await connection.disconnect()
+            except Exception as error:
+                failed.append(connection)
+                connection.tools = []
+                _record_status(connection.name, "failed", error=str(error))
+                _warn(f"[mcp] cleanup:failed server={connection.name!r} error={error}")
+            else:
+                closed.append(connection)
+            finally:
+                get_mcp_tool_catalog().remove_server(connection.name)
+    finally:
+        _mcp_connections = [connection for connection in _mcp_connections if connection not in closed]
+        if _cua_service is not None:
+            await _cua_service.close()
+            _cua_service = None
+    if failed:
+        raise RuntimeError(f"Failed to clean up MCP connections: {', '.join(c.name for c in failed)}")
     _mcp_connections.clear()
     _mcp_reconnect_locks.clear()
     _mcp_server_definitions = {}
@@ -2518,6 +2693,8 @@ async def _reconcile_mcp_sources_locked(
         async with lock:
             if after is None:
                 result = await disconnect_mcp_server(name)
+                if not result.get("success"):
+                    return {"name": name, "action": "removed", **result}
                 if before is not None:
                     _record_status(name, "disabled", definition=before)
                 _mcp_server_definitions.pop(name, None)
@@ -2527,7 +2704,8 @@ async def _reconcile_mcp_sources_locked(
                 connection.name == name for connection in _mcp_connections
             ):
                 result = await disconnect_mcp_server(name)
-                _record_status(name, "disabled", definition=after)
+                if result.get("success"):
+                    _record_status(name, "disabled", definition=after)
                 return {"name": name, "action": "disabled", **result}
             _record_status(name, "disabled", definition=after)
             return None
@@ -2622,6 +2800,13 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
         _record_status(name, "disabled", definition=definition)
         return {"success": False, "error": "Server is disabled", "configPath": definition.source_path}
 
+    if _cua_service is not None and name == _cua_service.name:
+        try:
+            await _cua_service.prepare()
+        except (OSError, RuntimeError) as error:
+            _record_status(name, "failed", error=str(error), definition=definition)
+            return {"success": False, "error": str(error)}
+
     catalog = get_mcp_tool_catalog()
     catalog.mark_server_loading(name)
     try:
@@ -2631,8 +2816,11 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
         if old_conn:
             try:
                 await old_conn.disconnect()
-            except Exception:
-                pass
+            except Exception as error:
+                old_conn.tools = []
+                catalog.remove_server(name)
+                _record_status(name, "failed", error=str(error), definition=definition)
+                return {"success": False, "error": str(error), "configPath": definition.source_path}
             _mcp_connections = [c for c in _mcp_connections if c.name != name]
             catalog.remove_server(name)
 
@@ -2663,7 +2851,7 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
             )
             return {"success": False, "error": str(e), "configPath": definition.source_path}
 
-        if success:
+        if success and conn.last_error is None:
             _mcp_connections.append(conn)
             _replace_server_catalog(conn)
             _record_status(

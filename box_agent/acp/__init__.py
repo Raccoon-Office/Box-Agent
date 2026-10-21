@@ -1,5 +1,9 @@
 """ACP (Agent Client Protocol) bridge for Box-Agent.
 
+本模块是执行事件与客户端 ACP 协议之间的适配层。
+工作过程的身份跟踪交给 acp/message_display.py；本层透传元数据，
+并在自动续跑与清理结束后发布最终回执，不在每次模型调用结束时提前判定。
+
 Consumes the shared ``AgentSession.run_events`` facade instead of maintaining its own
 agent loop or importing the core implementation.  This gives ACP access to
 summarization, logging, and safety — features the old ``_run_turn``
@@ -7,10 +11,11 @@ reimplementation was missing.
 
 PoC Behavior Boundaries
 -----------------------
-**Cancellation**: Cooperative — ``cancel()`` sets a flag that the core
-checks at step boundaries (top of step, before tools, after each tool).
-There is no preemptive kill; a long-running LLM call or tool execution
-will finish before cancellation is observed.
+**Cancellation**: ``cancel()`` signals the current run. A pending primary
+model stream read is interrupted without waiting for another HTTP chunk or
+heartbeat; stream cleanup completes before the cancelled turn response.
+Tool execution still uses its existing cooperative cancellation boundaries.
+The shared runtime and unrelated sessions are not killed.
 
 **Safety confirmation**: protocol-aware. Dangerous commands return a
 canonical permission request with ``scope="safety"``. The shared core
@@ -66,6 +71,7 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 from box_agent import __version__
 from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
+from box_agent.acp.message_display import MessageDisplay
 from box_agent.injections import InjectionManager
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
@@ -170,7 +176,11 @@ from box_agent.skill_runtime import SkillRuntime
 from box_agent.turn_runtime import sync_skill_cache_fingerprint_context
 from box_agent.client_info import ClientInfo, scoped_client_info
 from box_agent.llm import LLMClient, SessionBoundLLM
+from box_agent.llm.base import closing_llm_stream
 from box_agent.llm.model_routing import normalize_auto_routing, resolve_model_client
+from box_agent.llm.task_budgets import (
+    SMALL_TASK_MAX_OUTPUT_TOKENS, TITLE_MAX_OUTPUT_TOKENS, lightweight_output_budget,
+)
 from box_agent.llm.model_profiles import client_for_model_profile
 from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
 from box_agent.runtime import invoke_tool_with_permissions
@@ -180,7 +190,7 @@ from box_agent.session_trace import (
 )
 from box_agent.session_log import SessionLog
 from box_agent.task_context import TaskContext, normalize_task_id
-from box_agent.session_continuation import parse_session_continuation
+from box_agent.session_continuation import HISTORY_EDIT_SCHEMA_VERSION, parse_session_continuation
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -205,6 +215,7 @@ from box_agent.acp.follow_up_suggestions import (
     parse_follow_up_suggestions_response,
 )
 from box_agent.llm.lightweight import LightweightPromptError, run_lightweight_prompt
+from box_agent.turn_hints import turn_hints
 from box_agent.project_context import (
     PROJECT_WORKSPACE_MODE_PROMPT,
     append_prompt_segment,
@@ -222,7 +233,7 @@ from box_agent.execution_profile import (
     ExecutionProfile,
     normalize_execution_profile,
 )
-from box_agent.memory import MemoryManager
+from box_agent.memory import MemoryManager, memory_identity, memory_user_turn, uses_local_memory
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.retry import StreamInterrupted
 from box_agent.schema import LLMProvider, Message
@@ -344,22 +355,23 @@ class _ActionHintNormalizingLLM:
     async def generate_stream(self, *args: Any, **kwargs: Any):
         normalizer = ActionHintStreamNormalizer()
         text_template = None
-        async for event in self._wrapped.generate_stream(*args, **kwargs):
-            event_type = getattr(event, "type", None)
-            if event_type == "finish":
-                for text in normalizer.finish():
-                    if text:
-                        yield _text_stream_event_like(event, text)
-                yield event
-                continue
-            if event_type != "text":
-                yield event
-                continue
+        async with closing_llm_stream(self._wrapped.generate_stream(*args, **kwargs)) as stream:
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "finish":
+                    for text in normalizer.finish():
+                        if text:
+                            yield _text_stream_event_like(event, text)
+                    yield event
+                    continue
+                if event_type != "text":
+                    yield event
+                    continue
 
-            text_template = event
-            for text in normalizer.push(event.delta or ""):
-                if text:
-                    yield event.model_copy(update={"delta": text})
+                text_template = event
+                for text in normalizer.push(event.delta or ""):
+                    if text:
+                        yield event.model_copy(update={"delta": text})
 
         if text_template is not None:
             for text in normalizer.finish():
@@ -392,22 +404,23 @@ class _FollowUpSuggestionsExtractingLLM:
         extractor = FollowUpSuggestionsStreamExtractor()
         self._extractor = extractor
         text_template = None
-        async for event in self._wrapped.generate_stream(*args, **kwargs):
-            event_type = getattr(event, "type", None)
-            if event_type == "finish":
-                for text in extractor.finish():
-                    if text:
-                        yield _text_stream_event_like(event, text)
-                yield event
-                continue
-            if event_type != "text":
-                yield event
-                continue
+        async with closing_llm_stream(self._wrapped.generate_stream(*args, **kwargs)) as stream:
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "finish":
+                    for text in extractor.finish():
+                        if text:
+                            yield _text_stream_event_like(event, text)
+                    yield event
+                    continue
+                if event_type != "text":
+                    yield event
+                    continue
 
-            text_template = event
-            for text in extractor.push(event.delta or ""):
-                if text:
-                    yield event.model_copy(update={"delta": text})
+                text_template = event
+                for text in extractor.push(event.delta or ""):
+                    if text:
+                        yield event.model_copy(update={"delta": text})
 
         if text_template is not None:
             for text in extractor.finish():
@@ -939,6 +952,9 @@ def _tool_result_raw_output(
             if session_id:
                 payload.setdefault("session_id", session_id)
                 payload.setdefault("sessionId", session_id)
+        if session_id and payload.get("file_changes_version") in {1, 2}:
+            payload.setdefault("session_id", session_id)
+            payload.setdefault("sessionId", session_id)
         if task_id:
             payload.setdefault("task_id", task_id)
             payload.setdefault("taskId", task_id)
@@ -991,6 +1007,7 @@ class SessionState(AgentSession):
     upstream_title: str = _DEFAULT_AGENT_TITLE
     follow_up_suggestions_enabled: bool = False
     follow_up_suggestions_task: asyncio.Task[None] | None = None
+    mcp_runtime_updates_requested: bool = False
 
     async def aclose(self) -> None:
         task = self.follow_up_suggestions_task
@@ -1002,8 +1019,8 @@ class SessionState(AgentSession):
         await super().aclose()
 
 
-_CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS = 4_096
-_TITLE_MAX_OUTPUT_TOKENS = 8_000
+_CONTEXT_SUMMARY_MAX_OUTPUT_TOKENS = SMALL_TASK_MAX_OUTPUT_TOKENS
+_TITLE_MAX_OUTPUT_TOKENS = TITLE_MAX_OUTPUT_TOKENS
 _CONNECTOR_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _CONNECTOR_STATUS_VALUES = frozenset({"connected", "disconnected"})
 _MAX_CONNECTOR_STATUSES = 256
@@ -1421,7 +1438,7 @@ class BoxACPAgent:
 
     def _set_agent_system_prompt(self, agent: Agent, system_prompt: str) -> None:
         """Update all live holders of the current system prompt."""
-        agent.set_system_prompt(system_prompt)
+        agent.set_system_prompt(system_prompt, preserve_child_prompt=True)
 
     def _strip_auto_loaded_skills(self, system_prompt: str) -> str:
         return strip_auto_loaded_skills(system_prompt)
@@ -1610,7 +1627,7 @@ class BoxACPAgent:
 
     def _start_memory_bootstrap(self) -> None:
         """Wait for the host model binding before any background model calls."""
-        if self._memory is None or self._memory_bootstrap_task is not None:
+        if not uses_local_memory(self._memory) or self._memory_bootstrap_task is not None:
             return
         memory_llm = self._utility_llm_for_meta({})
         bootstrap_id = f"local-agent-memory-{uuid4()}"
@@ -1624,7 +1641,8 @@ class BoxACPAgent:
         async def bootstrap() -> None:
             try:
                 try:
-                    await self._memory.import_openclaw(memory_llm)
+                    if memory_identity(self._config.agent.memory_tenant_id, self._config.agent.memory_user_id) == ("default", "default"):
+                        await self._memory.import_openclaw(memory_llm)
                 except Exception:
                     log.warn("server/start", message="OpenClaw import failed (non-fatal)")
                 if self._config.agent.memory_maintainer_enabled:
@@ -1733,12 +1751,15 @@ class BoxACPAgent:
         follow_up_suggestions_enabled = False
         skillhub_search_enabled = False
         skillhub_install_enabled = False
+        runtime_environment_enabled = False
         # Lightweight one-shot utility session (e.g. host-side title/tag
         # generation). When set, the session carries no tools, skips memory
         # recall injection, and skips auto memory-extraction — it is a pure
         # text transform, not a real user conversation.
         utility = False
         meta = getattr(params, "field_meta", None) or {}
+        memory_meta = meta.get("memory", {}) if isinstance(meta, dict) else {}
+        memory_meta = memory_meta if isinstance(memory_meta, dict) else {}
         client_info = self._client_info
         if isinstance(meta, dict):
             client_info = ClientInfo.from_meta(meta.get("client_info")) or client_info
@@ -1775,6 +1796,7 @@ class BoxACPAgent:
                 "hostCapabilities"
             )
             if isinstance(host_capabilities, dict):
+                runtime_environment_enabled = host_capabilities.get("runtime_environment") == 1
                 raw_skillhub_search = host_capabilities.get(
                     "skillhub_search",
                     host_capabilities.get("skillhubSearch"),
@@ -1992,10 +2014,26 @@ class BoxACPAgent:
 
         # RPC tools are host bindings; session tools and prompt are prepared by plugins.
         tools: list = []
+        runtime_environment_tool = None
+        if runtime_environment_enabled and not utility:
+            from box_agent.tools.runtime_environment_tool import (
+                RuntimeEnvironmentTool, RUNTIME_ENVIRONMENT_METHOD,
+            )
+
+            async def _runtime_request(payload: dict[str, Any]) -> dict[str, Any]:
+                send_ext = getattr(self._conn, "ext_method", None) or getattr(self._conn, "extMethod", None)
+                if send_ext is None:
+                    return {"status": "unavailable"}
+                return await send_ext(RUNTIME_ENVIRONMENT_METHOD, {**payload, "sessionId": session_id})
+
+            runtime_environment_tool = RuntimeEnvironmentTool(_runtime_request)
+            tools.append(runtime_environment_tool)
         session_skill_loader = self._skill_loader
         if expert_context is not None and session_skill_loader is not None:
             session_skill_loader = await session_skill_loader.awith_expert_skill_sources(
-                expert_context.skill_names()
+                expert_context.skill_names(), skill_directories=expert_context.skill_directories,
+                skill_bindings_by_directory=expert_context.skill_bindings_by_directory,
+                skill_bindings_by_path=expert_context.skill_bindings_by_path,
             )
         connector_skill_grants: set[str] = set()
         skillhub_search_tool: SkillHubSearchTool | None = None
@@ -2103,6 +2141,8 @@ class BoxACPAgent:
                 options=SessionOptions(
                     profile="acp", workspace_dir=workspace, token_limit=session_token_limit,
                     utility=utility, sandbox_mode=session_sandbox_mode,
+                    memory_tenant_id=memory_meta.get("tenant_id"),
+                    memory_user_id=memory_meta.get("user_id"),
                     session_mode=session_mode, allow_full_access=session_allow_full_access,
                     permission_mode=permission_mode, effective_policy=effective_policy,
                     process_owner_id=session_id,
@@ -2165,6 +2205,31 @@ class BoxACPAgent:
         agent = state.agent
         session_skill_loader = state.skill_loader
         tools = list(agent.tools.values())
+        if runtime_environment_tool is not None:
+            from box_agent.tools.jupyter_tool import JupyterSandboxTool
+
+            def _apply_runtime_environment(values: dict[str, str]) -> dict[str, str] | None:
+                shell = None
+                for runtime_tool in agent.tools.values():
+                    if isinstance(runtime_tool, (BashTool, JupyterSandboxTool)):
+                        runtime_tool.update_runtime_env(values)
+                    if isinstance(runtime_tool, BashTool):
+                        shell = {
+                            "name": runtime_tool.shell_name,
+                            "instruction": (
+                                f"Subsequent bash tool calls must use {runtime_tool.shell_name} syntax. "
+                                "This is the current shell after environment refresh; "
+                                "do not reuse commands written for a different shell."
+                            ),
+                        }
+                return shell
+
+            runtime_environment_tool.apply_environment = _apply_runtime_environment
+            runtime_environment_tool.workspace_dir = workspace
+            for runtime_tool in tools:
+                if isinstance(runtime_tool, JupyterSandboxTool):
+                    runtime_environment_tool.runtime_env.update(runtime_tool.runtime_env)
+                    runtime_tool.runtime_preparer = runtime_environment_tool.ensure_python
         for tool in tools:
             # Keep Bash ownership across a rebind while other process-backed
             # tools (notably Python kernels) remain handle-scoped.
@@ -2225,7 +2290,7 @@ class BoxACPAgent:
         kwargs: dict[str, Any] = {"sessionId": session_id}
         response_meta: dict[str, Any] = {}
         response_meta["capabilities"] = {
-            "session_continuation_versions": [1],
+            "session_continuation_versions": [1, 2],
             "managed_mcp_config_versions": [1],
         }
         if skillhub_search_enabled:
@@ -2236,6 +2301,8 @@ class BoxACPAgent:
             response_meta["capabilities"]["skillhub_install_versions"] = [
                 SKILLHUB_INSTALL_CAPABILITY_VERSION
             ]
+        if runtime_environment_tool is not None:
+            response_meta["capabilities"]["runtime_environment_versions"] = [1]
         skills = (
             session_skill_loader.list_skills_metadata(include_connector=False)
             if session_skill_loader is not None
@@ -2471,6 +2538,8 @@ class BoxACPAgent:
         if safe_reply is not None:
             await self._send(session_id, update_agent_message(text_block(safe_reply)))
             return PromptResponse(stopReason="end_turn")
+        # Judge the language on the user's own words, before host prefixes are added.
+        hints = turn_hints(user_text)
         plan_detection_text = _latest_user_request_for_plan_detection(user_text)
         source_binding_text = (
             _user_source_text_for_binding(user_text)
@@ -2529,6 +2598,8 @@ class BoxACPAgent:
                 "explicitly requests another language.]\n\n"
                 f"{user_text}"
             )
+        if hints and not state.utility_session:
+            user_text = "\n\n".join([user_text.rstrip(), *hints])
         if not state.utility_session:
             connector_status = _connector_status_context(
                 state.selected_connector_ids,
@@ -2568,10 +2639,17 @@ class BoxACPAgent:
                 context_token_limit=requested_token_limit,
             )
         if state.turn_counter == 0 and not state.continuation_applied:
-            continuation = parse_session_continuation(
-                prompt_meta.get("session_continuation")
-                or prompt_meta.get("sessionContinuation")
+            raw_continuation = prompt_meta.get("session_continuation") or prompt_meta.get(
+                "sessionContinuation"
             )
+            continuation = parse_session_continuation(raw_continuation)
+            if (
+                isinstance(raw_continuation, dict)
+                and raw_continuation.get("schema_version") == HISTORY_EDIT_SCHEMA_VERSION
+                and continuation is not None
+                and continuation.product_session_id != state.upstream_session_id
+            ):
+                raise ValueError("HISTORY_EDIT_SESSION_MISMATCH")
             state.continuation_applied = True
             if (
                 continuation is not None
@@ -2886,6 +2964,7 @@ class BoxACPAgent:
         if isinstance(skillhub_search_tool, SkillHubSearchTool):
             skillhub_search_tool.reset_turn()
 
+        state.mcp_runtime_updates_requested = False
         state.turn_active = True
         meter_token = start_token_meter()
         turn_meter = get_token_meter()
@@ -2901,6 +2980,7 @@ class BoxACPAgent:
             state.config.agent.goal_autopilot_enabled
             and state.config.agent.goal_autopilot_max_turns > 0
         )
+        message_display = MessageDisplay()
         autopilot = GoalAutopilotController(
             started_at=prompt_start,
             max_turns=state.config.agent.goal_autopilot_max_turns,
@@ -2908,58 +2988,64 @@ class BoxACPAgent:
             no_progress_limit=state.config.agent.goal_autopilot_no_progress_turns,
         )
         try:
-            stop_reason = await self._run_turn(
-                state,
-                session_id,
-                task_context=task_context,
-                turn_id=turn_id,
-                billing_session_id=billing_session_id,
-                force_plan_start=force_plan_start,
-                require_plan_approval=require_plan_approval,
-                plan_approval=plan_approval,
-                auto_approve_plan=auto_approve_plan,
-                plan_start_text=plan_detection_text,
-                explicitly_selected_skill_names=explicitly_selected_skill_names,
-                ui_language=ui_language,
-                clear_prompt_grants=False,
-            )
-            while (
-                auto_enabled
-                and state.pending_plan_approval is None
-                and should_continue_goal_autopilot(state.agent, stop_reason)
+            async with memory_user_turn(
+                state, user_text=plan_detection_text,
+                session_id=state.upstream_session_id or session_id, turn_id=turn_id,
             ):
-                if autopilot.budget_exhausted_at(perf_counter()):
-                    break
-                if state.cancelled or state.agent.goal is None:
-                    break
-                autopilot.begin_continuation()
-                continuation = goal_autopilot_prompt(
-                    state.agent.goal,
-                    autopilot.continuations,
-                    state.config.agent.goal_autopilot_max_turns,
-                )
-                log.info(
-                    "goal_autopilot/continue",
-                    session_id=session_id,
-                    continuation=autopilot.continuations,
-                    max_continuations=state.config.agent.goal_autopilot_max_turns,
-                )
-                await state.agent.aadd_user_message(continuation)
-                before_signature = goal_autopilot_progress_signature(state.agent.goal)
                 stop_reason = await self._run_turn(
                     state,
                     session_id,
+                    message_display=message_display,
                     task_context=task_context,
                     turn_id=turn_id,
                     billing_session_id=billing_session_id,
+                    force_plan_start=force_plan_start,
+                    require_plan_approval=require_plan_approval,
+                    plan_approval=plan_approval,
                     auto_approve_plan=auto_approve_plan,
                     plan_start_text=plan_detection_text,
+                    explicitly_selected_skill_names=explicitly_selected_skill_names,
+                    ui_language=ui_language,
                     clear_prompt_grants=False,
                 )
-                after_signature = goal_autopilot_progress_signature(state.agent.goal)
-                if should_continue_goal_autopilot(state.agent, stop_reason):
-                    if autopilot.record_progress(before_signature, after_signature):
+                while (
+                    auto_enabled
+                    and state.pending_plan_approval is None
+                    and should_continue_goal_autopilot(state.agent, stop_reason)
+                ):
+                    if autopilot.budget_exhausted_at(perf_counter()):
                         break
+                    if state.cancelled or state.agent.goal is None:
+                        break
+                    autopilot.begin_continuation()
+                    continuation = goal_autopilot_prompt(
+                        state.agent.goal,
+                        autopilot.continuations,
+                        state.config.agent.goal_autopilot_max_turns,
+                    )
+                    log.info(
+                        "goal_autopilot/continue",
+                        session_id=session_id,
+                        continuation=autopilot.continuations,
+                        max_continuations=state.config.agent.goal_autopilot_max_turns,
+                    )
+                    await state.agent.aadd_user_message(continuation)
+                    before_signature = goal_autopilot_progress_signature(state.agent.goal)
+                    stop_reason = await self._run_turn(
+                        state,
+                        session_id,
+                        message_display=message_display,
+                        task_context=task_context,
+                        turn_id=turn_id,
+                        billing_session_id=billing_session_id,
+                        auto_approve_plan=auto_approve_plan,
+                        plan_start_text=plan_detection_text,
+                        clear_prompt_grants=False,
+                    )
+                    after_signature = goal_autopilot_progress_signature(state.agent.goal)
+                    if should_continue_goal_autopilot(state.agent, stop_reason):
+                        if autopilot.record_progress(before_signature, after_signature):
+                            break
         except asyncio.CancelledError as exc:
             if state.trace_writer is not None:
                 state.trace_writer.write(
@@ -3171,6 +3257,20 @@ class BoxACPAgent:
                 "turn_id": turn_id,
             }
         }
+        # 只在最外层用户请求结束时发布一次最终回答回执，不在每个内部 DoneEvent 时发布。
+        # 自动续跑可能替换阶段性回答，资源清理失败也可能改变最终状态。
+        # 因此必须在这些步骤完成后确认；等待审批、失败或预算耗尽都不触发成功折叠。
+        response_meta["messageDisplay"] = message_display.receipt(
+            completed=(
+                not failed
+                and not waiting_for_user
+                and state.pending_plan_approval is None
+                and stop_reason == StopReason.END_TURN.value
+                and not autopilot.budget_exhausted
+                and not autopilot.no_progress_exhausted
+            ),
+            duration_ms=duration_ms,
+        )
         if state.agent.goal is not None or autopilot.continuations > 0:
             response_meta["goalAutopilot"] = {
                 "enabled": auto_enabled,
@@ -3571,11 +3671,15 @@ class BoxACPAgent:
         tool_count: int = 0,
         always_load_count: int = 0,
     ) -> int:
-        """Inject a hidden, authoritative MCP state change into active turns only."""
+        """Notify active turns that have started MCP discovery, configuration or use."""
         injected = 0
         update_id = uuid4().hex
         for session_id, session in self._sessions.items():
-            if session.utility_session or not session.turn_active:
+            if (
+                session.utility_session
+                or not session.turn_active
+                or not session.mcp_runtime_updates_requested
+            ):
                 continue
             if state == "ready":
                 visibility = (
@@ -3699,7 +3803,7 @@ class BoxACPAgent:
             except (TypeError, ValueError):
                 return {"error": {"code": "invalid_args", "message": "timeoutMs must be a number"}}
 
-        max_output_tokens_cap = None
+        max_output_tokens_cap = lightweight_output_budget(str(purpose), prompt)
         if "title" in normalized_purpose:
             routing_tags = ("summary", "rewrite", "fast")
             routing_ability = 1
@@ -3839,7 +3943,8 @@ class BoxACPAgent:
             self._config_for_session(self._sessions[session_id])
             if session_id else self._config
         )
-        if self._memory is None:
+        memory = (self._sessions[session_id].memory_manager or self._memory) if session_id else self._memory
+        if not uses_local_memory(memory):
             return {"candidates": []}
         cooldown_days = (
             0
@@ -3847,7 +3952,7 @@ class BoxACPAgent:
             else config.agent.memory_promotion_cooldown_days
         )
         entries = await asyncio.to_thread(
-            self._memory.list_promotion_candidates,
+            memory.list_promotion_candidates,
             hit_threshold=config.agent.memory_promotion_hit_threshold,
             cooldown_days=cooldown_days,
         )
@@ -3870,7 +3975,7 @@ class BoxACPAgent:
             wanted = {e.id for e in entries}
             try:
                 context_entries = await asyncio.to_thread(
-                    self._memory.read_all_context_entries,
+                    memory.read_all_context_entries,
                 )
                 full_entries = [
                     e for e in context_entries if e.id in wanted
@@ -3897,7 +4002,7 @@ class BoxACPAgent:
                         title="本地 Agent 记忆整理",
                     )
                 try:
-                    plan = await self._memory.plan_promotion(full_entries, planning_llm)
+                    plan = await memory.plan_promotion(full_entries, planning_llm)
                 except Exception as exc:
                     log.warn(
                         "memory/proposal_list_plan_skipped",
@@ -3952,7 +4057,8 @@ class BoxACPAgent:
         session_id = params.get("sessionId", "")
         if session_id and session_id not in self._sessions:
             return {"error": "session_not_found"}
-        if self._memory is None:
+        memory = (self._sessions[session_id].memory_manager or self._memory) if session_id else self._memory
+        if not uses_local_memory(memory):
             return {"error": "memory_unavailable"}
 
         # ── Plan-mode branch ──────────────────────────────
@@ -3986,9 +4092,9 @@ class BoxACPAgent:
 
             if decision == "apply":
                 def _apply_plan() -> tuple[dict[str, int], str]:
-                    with self._memory.context_transaction():
-                        counts = self._memory.apply_promotion_plan(plan)
-                        return counts, self._memory.read_core()
+                    with memory.context_transaction():
+                        counts = memory.apply_promotion_plan(plan)
+                        return counts, memory.read_core()
 
                 counts, core = await asyncio.to_thread(_apply_plan)
                 log.info(
@@ -4003,9 +4109,9 @@ class BoxACPAgent:
                 }
             if decision == "reject":
                 def _reject_plan() -> tuple[dict[str, int], str]:
-                    with self._memory.context_transaction():
-                        counts = self._memory.reject_promotion_plan(plan)
-                        return counts, self._memory.read_core()
+                    with memory.context_transaction():
+                        counts = memory.reject_promotion_plan(plan)
+                        return counts, memory.read_core()
 
                 counts, core = await asyncio.to_thread(_reject_plan)
                 log.info(
@@ -4019,7 +4125,7 @@ class BoxACPAgent:
                 }
             # skip: host is just dropping its cache; nothing to do here.
             log.info("memory/plan_skip", session_id=session_id)
-            core = await asyncio.to_thread(self._memory.read_core)
+            core = await asyncio.to_thread(memory.read_core)
             return {"skipped": 1, "core": core}
 
         # ── Legacy per-candidate branch ───────────────────
@@ -4032,9 +4138,9 @@ class BoxACPAgent:
             if isinstance(value, str) and value in ("pin", "skip", "reject")
         }
         def _consume_proposal() -> tuple[dict[str, int], str]:
-            with self._memory.context_transaction():
-                counts = self._memory.consume_core_proposal(decisions)
-                return counts, self._memory.read_core()
+            with memory.context_transaction():
+                counts = memory.consume_core_proposal(decisions)
+                return counts, memory.read_core()
 
         counts, core = await asyncio.to_thread(_consume_proposal)
         log.info(
@@ -4065,8 +4171,11 @@ class BoxACPAgent:
         explicitly_selected_skill_names: tuple[str, ...] = (),
         ui_language: str = "zh",
         clear_prompt_grants: bool = True,
+        message_display: MessageDisplay | None = None,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
+        message_display = message_display or MessageDisplay()
+        message_display.begin_run()
         self._config_for_session(state)
         if task_context is None:
             fallback_turn_id = turn_id or state.run_handle.current_turn_id or session_id
@@ -4283,10 +4392,14 @@ class BoxACPAgent:
                 return None
             return server_name, mcp_tool_name
 
-        def _record_tool_usage(tool_name: str, *, user_visible: bool) -> dict[str, Any] | None:
+        def _record_tool_usage(
+            tool_name: str, *, user_visible: bool, server_name: str | None = None,
+        ) -> dict[str, Any] | None:
+            mcp_info = _mcp_tool_info(tool_name)
+            if tool_name in {"tool_search", "mcp_config"} or server_name or mcp_info is not None:
+                state.mcp_runtime_updates_requested = True
             if not user_visible or not tool_name or tool_name == "get_skill":
                 return None
-            mcp_info = _mcp_tool_info(tool_name)
             if mcp_info is not None:
                 used_mcp_tool_counts[mcp_info] = used_mcp_tool_counts.get(mcp_info, 0) + 1
                 server_name, mcp_tool_name = mcp_info
@@ -4417,6 +4530,7 @@ class BoxACPAgent:
                 strategy="utility",
                 task_tags=("general", "chat", "fast"),
                 required_ability_level=1,
+                max_output_tokens_cap=SMALL_TASK_MAX_OUTPUT_TOKENS,
             )
             try:
                 result = await run_lightweight_prompt(
@@ -4524,7 +4638,7 @@ class BoxACPAgent:
             logger=None,  # ACP uses its own logging via the connection
             permission_negotiator=negotiator,
             hooks=self._hooks,
-            memory_manager=self._memory,
+            memory_manager=state.memory_manager or self._memory,
             memory_turn_id=turn_id,
             session_id=state.upstream_session_id,
             turn_id=turn_id,
@@ -4582,6 +4696,8 @@ class BoxACPAgent:
         async with aclosing(events):
             async for envelope in events:
                 event = envelope.payload
+                # 为本次正文事件保留稳定身份，原始正文和发送顺序保持不变。
+                display_meta = message_display.observe(event)
                 try:
                     await _sync_explicit_skill_deliveries()
                     match event:
@@ -4604,12 +4720,16 @@ class BoxACPAgent:
                                     chars=len(event.content),
                                     content=event.content,
                                 )
-                                await self._send(session_id, update_agent_message(text_block(event.content)))
+                                update = update_agent_message(text_block(event.content))
+                                update.field_meta = {"messageDisplay": display_meta}
+                                await self._send(session_id, update)
 
                         case ContentEvent(content=text):
                             log.debug("content/final", session_id=session_id, chars=len(text), content=text)
                             log.debug("content", session_id=session_id, content=text)
-                            await self._send(session_id, update_agent_message(text_block(text)))
+                            update = update_agent_message(text_block(text))
+                            update.field_meta = {"messageDisplay": display_meta}
+                            await self._send(session_id, update)
 
                         case ProgressEvent(step=s, content=text):
                             payload = {
@@ -4663,6 +4783,8 @@ class BoxACPAgent:
                         ):
                             payload = {
                                 "type": "llm_output",
+                                # 完整输出与流式片段共用身份，客户端补回正文时据此去重。
+                                "messageDisplay": display_meta,
                                 "step": s,
                                 "content": content,
                                 "thinking": thinking,
@@ -4721,7 +4843,9 @@ class BoxACPAgent:
                                 skill_name = _get_skill_name_from_args(args)
                                 if skill_name:
                                     skill_name_by_tool_call_id[tid] = skill_name
-                            tool_usage_current = _record_tool_usage(name, user_visible=user_visible)
+                            tool_usage_current = _record_tool_usage(
+                                name, user_visible=user_visible, server_name=server_name,
+                            )
                             if tool_usage_current:
                                 await _send_turn_usage(tool_usage_current)
                             if not user_visible:
@@ -4737,7 +4861,13 @@ class BoxACPAgent:
                                     if isinstance(args, dict) else ""
                                 )
                                 label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
-                            await self._send(session_id, start_tool_call(tid, label, kind="execute", raw_input=args))
+                            start_update = start_tool_call(tid, label, kind="execute", raw_input=args)
+                            start_update.field_meta = {
+                                "tool_name": name,
+                                "task_id": task_context.task_id,
+                                "turn_id": task_context.turn_id,
+                            }
+                            await self._send(session_id, start_update)
 
                         case ToolCallResultEvent(
                             tool_call_id=tid,
@@ -4942,6 +5072,7 @@ class BoxACPAgent:
                                 tool_usage_current = _record_tool_usage(
                                     inner.tool_name,
                                     user_visible=inner.user_visible,
+                                    server_name=inner.server_name,
                                 )
                                 if tool_usage_current:
                                     await _send_turn_usage(tool_usage_current)
@@ -4987,10 +5118,17 @@ class BoxACPAgent:
                                 case ToolCallStartEvent(tool_name=name):
                                     progress["event"] = "tool_start"
                                     progress["tool_name"] = name
-                                case ToolCallResultEvent(tool_name=name, success=ok):
+                                case ToolCallResultEvent(tool_name=name, success=ok, raw_output=child_output):
                                     progress["event"] = "tool_result"
                                     progress["tool_name"] = name
                                     progress["success"] = ok
+                                    if isinstance(child_output, dict) and child_output.get("file_changes_version") in {1, 2}:
+                                        receipt = _tool_result_raw_output(
+                                            {"file_changes_version": child_output["file_changes_version"], "file_changes": child_output.get("file_changes")},
+                                            "", None, session_id=state.upstream_session_id,
+                                            task_id=task_context.task_id, turn_id=task_context.turn_id,
+                                        )
+                                        progress.update(receipt)
                                 case ArtifactEvent() as art:
                                     progress["event"] = "artifact"
                                     artifact_observation = artifact_observer.observe(art)
@@ -5051,11 +5189,11 @@ class BoxACPAgent:
                         # Falls through to case _: pass (no ACP notification sent).
 
                         case MemoryProposalEvent():
-                            if self._memory is not None:
+                            if uses_local_memory(state.memory_manager or self._memory):
                                 negotiator_mem = _MemoryProposalNegotiator(
                                     conn=self._conn,
                                     session_id=session_id,
-                                    memory_manager=self._memory,
+                                    memory_manager=state.memory_manager or self._memory,
                                 )
                                 try:
                                     await negotiator_mem.negotiate(event)
@@ -5657,6 +5795,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 memory_dir=config.agent.memory_dir,
                 dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
                 manager_factory=MemoryManager,
+                settings=config.agent,
             )
 
         # Skills discovery is deferred: a directory full of malformed
@@ -5678,11 +5817,11 @@ async def run_acp_server(config: Config | None = None) -> None:
             defer_skills=True,
             mcp_start_gate=mcp_start_gate,
         )
-        prompt_path = Config.find_config_file(config.agent.system_prompt_path)
+        prompt_path = Config.find_prompt_file(config.agent.system_prompt_path, "system_prompt.md")
         if prompt_path and prompt_path.exists():
-            system_prompt = render_system_prompt_template(
-                prompt_path.read_text(encoding="utf-8")
-            )
+            # Keep {{.CurrentDate}} unrendered: build_acp_session_prompt renders
+            # it per session, so a server that outlives midnight stays correct.
+            system_prompt = prompt_path.read_text(encoding="utf-8")
         else:
             system_prompt = "You are a helpful AI assistant."
 

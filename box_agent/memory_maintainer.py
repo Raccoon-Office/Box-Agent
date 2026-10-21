@@ -41,6 +41,10 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from .llm.model_routing import resolve_model_client
+from .llm.task_budgets import (
+    LONG_TASK_MAX_OUTPUT_TOKENS, SMALL_TASK_MAX_OUTPUT_TOKENS,
+    replacement_output_budget, require_complete_response,
+)
 
 from .memory import (
     ContextEntry,
@@ -418,6 +422,9 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
                 strategy="utility",
                 task_tags=("summary",),
                 required_ability_level=1,
+                max_output_tokens_cap=replacement_output_budget(
+                    user_prompt, default=LONG_TASK_MAX_OUTPUT_TOKENS,
+                ),
             )
             response = await maintenance_llm.generate(
                 messages=[
@@ -426,6 +433,7 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
                 ],
                 call_kind="memory_extract",
             )
+            require_complete_response(response)
         except Exception:
             logger.exception("MemoryMaintainer: compact LLM call failed; keeping original")
             return
@@ -680,6 +688,7 @@ class MemoryMaintainer_Conflict:  # placeholder — bound onto MemoryMaintainer 
                     strategy="utility",
                     task_tags=("analysis", "reasoning"),
                     required_ability_level=3,
+                    max_output_tokens_cap=SMALL_TASK_MAX_OUTPUT_TOKENS,
                 )
                 response = await maintenance_llm.generate(
                     messages=[
@@ -688,6 +697,7 @@ class MemoryMaintainer_Conflict:  # placeholder — bound onto MemoryMaintainer 
                     ],
                     call_kind="memory_extract",
                 )
+                require_complete_response(response)
             except Exception:
                 logger.exception("MemoryMaintainer: conflict LLM call failed; skipping cluster")
                 continue

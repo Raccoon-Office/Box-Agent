@@ -2,7 +2,9 @@ import pytest
 
 from box_agent.core import run_agent_loop
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
-from box_agent.events import ToolCallResult
+from box_agent.events import ArtifactEvent, ToolCallResult
+from box_agent.artifact_publication import metadata_path, retain_chat_file, write_metadata
+from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.bash_tool import BashTool
 from box_agent.tools.file_tools import WriteTool
 
@@ -35,6 +37,102 @@ async def test_declared_new_screenshots_can_be_cleaned_without_approval(tmp_path
     assert result.success, result.error
     assert result.permission_request is None
     assert list(task.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_safe", [False, True])
+@pytest.mark.parametrize("reference", ["brackets", "plain-path"])
+async def test_displayed_qa_image_cannot_be_deleted_by_later_cleanup(
+    tmp_path, parallel_safe, reference,
+):
+    path = tmp_path / "qa-report-full.png"
+
+    class Screenshot(Tool):
+        name = "screenshot"
+        description = "Save a QA screenshot."
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self):
+            path.write_bytes(b"QA screenshot")
+            content = f"[{path}]" if reference == "brackets" else f"Screenshot persisted to {path}"
+            return ToolResult(success=True, content=content)
+
+    producer = Screenshot()
+    producer.parallel_safe = parallel_safe
+    bash = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
+
+    class LLM:
+        step = 0
+
+        async def generate_stream(self, **kwargs):
+            self.step += 1
+            if self.step <= 2:
+                name, args = ("screenshot", {}) if self.step == 1 else (
+                    "bash", {"command": "rm -f qa-report-full.png && echo cleaned"},
+                )
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[
+                    ToolCall(id=str(self.step), type="function", function=FunctionCall(
+                        name=name, arguments=args,
+                    )),
+                ])
+            else:
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    events = [event async for event in run_agent_loop(
+        llm=LLM(), tools={producer.name: producer, "bash": bash},
+        messages=[Message(role="user", content="Produce and check the report")],
+        workspace_dir=str(tmp_path), max_steps=3,
+    )]
+    images = [event for event in events if isinstance(event, ArtifactEvent)]
+    assert len(images) == 1
+    assert images[0].kind == "image"
+    assert images[0].placement == "supporting"
+    result = next(event for event in events if isinstance(event, ToolCallResult) and event.tool_name == "bash")
+    assert not result.success
+    assert "CHAT_REFERENCE_PROTECTED" in result.error
+    assert path.read_bytes() == b"QA screenshot"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", [
+    "rm -f qa/preview.png",
+    "cd ./qa && rm -f preview.png && echo cleaned",
+    "rm -f qa/*.png",
+    "rm -rf qa",
+    "rm -f qa/.preview.png.artifact.json && rm -f qa/preview.png",
+])
+async def test_displayed_image_survives_cleanup_after_runtime_recreation(tmp_path, command):
+    folder = tmp_path / "qa"
+    folder.mkdir()
+    path = folder / "preview.png"
+    path.write_bytes(b"displayed QA")
+    retain_chat_file(path)
+    # A later publication must preserve retention across another tool instance.
+    write_metadata(path, {"type": "artifact"})
+    bash = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
+
+    result = await bash.execute(command=command)
+
+    assert not result.success
+    assert result.permission_request is None
+    assert "CHAT_REFERENCE_PROTECTED" in result.error
+    assert path.read_bytes() == b"displayed QA"
+    assert metadata_path(path).exists()
+
+
+@pytest.mark.asyncio
+async def test_displayed_image_with_quoted_brackets_cannot_be_cleaned(tmp_path):
+    path = tmp_path / "QA 图 [1].png"
+    path.write_bytes(b"displayed QA")
+    retain_chat_file(path)
+    bash = BashTool(workspace_dir=str(tmp_path), bypass_dangerous_command_approval=True)
+
+    result = await bash.execute(command="rm -f 'QA 图 [1].png'")
+
+    assert not result.success
+    assert result.permission_request is None
+    assert "CHAT_REFERENCE_PROTECTED" in result.error
+    assert path.read_bytes() == b"displayed QA"
 
 
 @pytest.mark.asyncio

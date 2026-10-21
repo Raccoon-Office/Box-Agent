@@ -184,12 +184,13 @@ class AgentRunHandle:
             raise RuntimeError("this AgentRunHandle is a legacy session-state view")
 
     def _start(self) -> None:
+        if self._runner_task is not None:
+            return
         self._require_run()
-        if self._runner_task is None:
-            loop = asyncio.get_running_loop()
-            self._collector = RunResultCollector(self.run_id)
-            self._result_future = loop.create_future()
-            self._runner_task = loop.create_task(self._run())
+        loop = asyncio.get_running_loop()
+        self._collector = RunResultCollector(self.run_id)
+        self._result_future = loop.create_future()
+        self._runner_task = loop.create_task(self._run())
 
     async def _run(self) -> None:
         try:
@@ -208,7 +209,10 @@ class AgentRunHandle:
                     await close()
         except BaseException as exc:
             exc = self._delivery_error or exc
-            self._runner_error = exc
+            # Result-only consumers receive the serialized RunResult error.
+            # Keep the original exception only while an event consumer needs it.
+            if not self._result_only:
+                self._runner_error = exc
             # Closing a handle after DoneEvent may cancel pending cleanup.
             if (self._collector.result is None
                     or not isinstance(exc, asyncio.CancelledError)):
@@ -224,9 +228,11 @@ class AgentRunHandle:
                     error={"type": type(exc).__name__, "message": str(exc),
                            **({"code": exc.code} if isinstance(exc, RunDeliveryError) else {})},
                 )
-            if isinstance(exc, asyncio.CancelledError):
-                raise
+            # Cancellation is delivered through events() and RunResult. Let
+            # this private producer finish normally: older asyncio Tasks keep
+            # a re-raised cancellation's traceback even after exception().
         finally:
+            self._events_factory = None
             if self._permission_broker is not None:
                 self._permission_broker.cancel()
             if self._collector.result is None:
@@ -264,8 +270,14 @@ class AgentRunHandle:
                     return
                 yield item
         finally:
-            if self.is_active:
-                await self.aclose()
+            try:
+                if self.is_active:
+                    await self.aclose()
+            finally:
+                # Events have one consumer. Once it finishes (including an
+                # early close), retain the result, not a traceback back to the
+                # entire run. An error already raised to the caller is intact.
+                self._runner_error = None
 
     async def send(self, command: ControlCommand) -> None:
         """Send a host command through the run control boundary."""
@@ -345,16 +357,19 @@ class AgentRunHandle:
 
         await self.send(ControlCommand.cancel())
 
-    async def result(self) -> RunResult:
+    async def result(self, *, consume_events: bool = True) -> RunResult:
         """Wait for the result; without a stream consumer, consume privately.
 
         Start iterating events first when the caller needs the event stream.
         Cancelling this waiter never cancels the run or its private consumer.
+        consume_events=False 仅观察结果，事件仍由原宿主负责消费。
         """
 
         self._start()
-        if not self._events_consumed and not self._result_only:
+        # 后台观察者可等待结算而不抢占宿主尚未开始消费的事件流。
+        if consume_events and not self._events_consumed and not self._result_only:
             self._result_only = True
+            self._runner_error = None
             if self._permission_broker is not None:
                 self._permission_broker.use_result_only()
             self._drain_task = asyncio.create_task(self._drain_events())
@@ -376,6 +391,7 @@ class AgentRunHandle:
         if not self._runner_task.done():
             self._runner_task.cancel()
         await asyncio.gather(self._runner_task, return_exceptions=True)
+        self._events_factory = None
         # A task cancelled before its first step never enters _run's finally.
         if self._result_future is not None and not self._result_future.done():
             self._collector.result = RunResult(

@@ -311,8 +311,9 @@ async def test_cancelled_drain_still_closes_process_transport(manager):
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX subprocess integration")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop_scope", ["kill", "owner", "runtime"])
+@pytest.mark.parametrize("fast_exit", [False, True], ids=["normal-exit", "fast-exit"])
 async def test_stop_after_spool_failure_closes_paused_pipe_without_gc(
-    manager, tmp_path, monkeypatch, stop_scope,
+    manager, tmp_path, monkeypatch, stop_scope, fast_exit,
 ):
     script = tmp_path / "flood.py"
     script.write_text(
@@ -343,6 +344,16 @@ async def test_stop_after_spool_failure_closes_paused_pipe_without_gc(
 
     monkeypatch.setattr(tool, "_create_subprocess", create_process)
     monkeypatch.setattr(bash.tempfile, "SpooledTemporaryFile", FailingSpool)
+    if fast_exit:
+        async def kill_before_exit_callback(process):
+            # Model the group disappearing before the asyncio exit callback.
+            import os
+            import signal
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        monkeypatch.setattr(bash.BashTool, "_kill_process_tree_unix", kill_before_exit_callback)
     started = await tool.execute("synthetic flood", run_in_background=True, lifetime="runtime")
     assert started.success
     shell = manager.get(started.bash_id)
@@ -376,8 +387,8 @@ async def test_stop_after_spool_failure_closes_paused_pipe_without_gc(
         assert not manager._shells
         assert not manager._monitor_tasks
     finally:
-        await tool._kill_process_tree(shell.process)
         transport.close()
+        await tool._kill_process_tree(shell.process)
         await asyncio.sleep(0)
         await tool.cleanup_background_processes()
 

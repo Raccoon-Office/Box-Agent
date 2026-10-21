@@ -33,6 +33,7 @@ class MCPResultAdapter(Protocol):
     ) -> list[dict[str, Any]] | None: ...
 
     # Adapters may optionally expose persist_image_references().
+    # Independent allows_image_persistence() and result_context() are optional.
 
 
 _log = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ def allowed_mcp_result_adapters(
 def adapt_mcp_inline_images(
     *, server_name: str, remote_name: str, inline_images: list[dict[str, str]],
     adapters: tuple[MCPResultAdapter, ...] | None = None,
+    arguments: dict[str, Any] | None = None,
+    structured_content: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Collect authorized follow-ups without changing the original tool result."""
     if not inline_images:
@@ -84,16 +87,45 @@ def adapt_mcp_inline_images(
         server_name=server_name, remote_name=remote_name,
     ):
         try:
-            adapted = adapter.transient_followup_content(
-                server_name=server_name,
-                remote_name=remote_name,
+            method = getattr(adapter, "transient_followup_for_result", None)
+            kwargs = dict(
+                server_name=server_name, remote_name=remote_name,
                 inline_images=[dict(item) for item in inline_images],
             )
+            if callable(method):
+                adapted = method(
+                    **kwargs, arguments=arguments or {},
+                    structured_content=structured_content,
+                )
+            else:
+                adapted = adapter.transient_followup_content(**kwargs)
             if adapted:
                 blocks.extend(adapted)
         except Exception:
             _log.debug("MCP result adapter failed", exc_info=True)
     return blocks or None
+
+
+def adapt_mcp_result_context(
+    *, server_name: str, remote_name: str, arguments: dict[str, Any],
+    structured_content: dict[str, Any] | None,
+) -> str | None:
+    """Let scoped adapters project structured MCP data into model context."""
+    parts = []
+    for adapter in _CURRENT.get():
+        method = getattr(adapter, "result_context", None)
+        if not callable(method):
+            continue
+        try:
+            context = method(
+                server_name=server_name, remote_name=remote_name,
+                arguments=arguments, structured_content=structured_content,
+            )
+            if isinstance(context, str) and context:
+                parts.append(context)
+        except Exception:
+            _log.debug("MCP structured result adapter failed", exc_info=True)
+    return "\n".join(parts) or None
 
 
 def persist_mcp_image_references(
@@ -107,9 +139,31 @@ def persist_mcp_image_references(
     """
     if not inline_images:
         return None
-    eligible = adapters if adapters is not None else allowed_mcp_result_adapters(
-        server_name=server_name, remote_name=remote_name,
-    )
+    # Older adapters retain the transient qualification. New adapters can
+    # persist independently of model image capability and follow-up settings.
+    eligible = []
+    legacy_allowed = adapters
+    sources = list(_CURRENT.get())
+    for adapter in adapters or ():
+        if all(item is not adapter for item in sources):
+            sources.append(adapter)
+    for adapter in sources:
+        if not callable(getattr(adapter, "persist_image_references", None)):
+            continue
+        predicate = getattr(adapter, "allows_image_persistence", None)
+        try:
+            if callable(predicate):
+                allowed = predicate(server_name=server_name, remote_name=remote_name)
+            else:
+                if legacy_allowed is None:
+                    legacy_allowed = allowed_mcp_result_adapters(
+                        server_name=server_name, remote_name=remote_name,
+                    )
+                allowed = any(item is adapter for item in legacy_allowed)
+            if allowed:
+                eligible.append(adapter)
+        except Exception:
+            _log.debug("MCP image persistence eligibility failed", exc_info=True)
     candidates = tuple(
         adapter for adapter in eligible
         if callable(getattr(adapter, "persist_image_references", None))
@@ -141,5 +195,6 @@ __all__ = [
     "bind_mcp_result_adapter",
     "allowed_mcp_result_adapters",
     "adapt_mcp_inline_images",
+    "adapt_mcp_result_context",
     "persist_mcp_image_references",
 ]

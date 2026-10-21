@@ -101,6 +101,36 @@ def _raw_response(stream):
     return raw
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "retry", "error"])
+async def test_response_cleanup_error_does_not_replace_provider_outcome(outcome):
+    error = ValueError("fixture provider failure")
+    items = {
+        "success": [_chunk(content="ok", finish_reason="stop")],
+        "retry": [httpx.RemoteProtocolError("fixture retryable read failure")],
+        "error": [error],
+    }
+    first = _AsyncIter(items[outcome])
+    first.close = AsyncMock(side_effect=OSError("fixture response close failure"))
+    second = _AsyncIter([_chunk(content="ok", finish_reason="stop")])
+    responses = iter([first, second])
+
+    async def factory(**kwargs):
+        return _raw_response(next(responses))
+
+    client, create = _build_client(factory)
+    stream = client.generate_stream([Message(role="user", content="hello")])
+    if outcome == "error":
+        with pytest.raises(ValueError) as raised:
+            _ = [event async for event in stream]
+        assert raised.value is error
+    else:
+        events = [event async for event in stream]
+        assert "".join(event.delta for event in events if event.type == "text") == "ok"
+        assert events[-1].finish_reason == "stop"
+    assert create.await_count == (2 if outcome == "retry" else 1)
+
+
 def _tool_delta(name: str, arguments: str, *, index: int = 0):
     return SimpleNamespace(
         index=index,

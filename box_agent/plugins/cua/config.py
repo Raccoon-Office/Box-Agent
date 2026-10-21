@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class CuaRuntimeConfig(BaseModel):
+    """Trusted host configuration; never supplied as model tool arguments."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = False
+    mode: Literal["standalone", "external"] = "standalone"
+    driver_path: str | None = None
+    endpoint: str | None = None
+
+    @model_validator(mode="after")
+    def require_external_endpoint(self) -> CuaRuntimeConfig:
+        if self.enabled and self.mode == "external" and not self.endpoint:
+            raise ValueError("external CUA runtime requires a host endpoint")
+        return self
 
 
 class CuaConfig(BaseModel):
@@ -12,6 +31,8 @@ class CuaConfig(BaseModel):
 
     server_name: str = Field(default="computer-use", min_length=1)
     feed_screenshots: bool = True
+    persist_images: bool = True
+    runtime: CuaRuntimeConfig | None = None
 
 
-__all__ = ["CuaConfig"]
+__all__ = ["CuaConfig", "CuaRuntimeConfig"]

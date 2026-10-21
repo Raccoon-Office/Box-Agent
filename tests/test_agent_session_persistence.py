@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tracemalloc
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from box_agent.agent import Agent
-from box_agent.events import DoneEvent, SummarizationEvent
+from box_agent.events import DoneEvent, StopReason, SummarizationEvent
 from box_agent.hooks import BaseHook
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.session_log import (
@@ -509,6 +510,224 @@ class _NoReplayStore:
     @property
     def failed(self):
         return self._log.failed
+
+
+@pytest.fixture
+def make_turn_agent(tmp_path):
+    logs = []
+
+    def make(session_id, *, log=None, legacy_store=False):
+        if log is None:
+            log = SessionLog.create(
+                tmp_path / "sessions", session_id=session_id, cwd=tmp_path,
+            )
+        logs.append(log)
+        return Agent(
+            llm_client=_ReferenceCapturingLLM(), system_prompt="system", tools=[],
+            workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False,
+            enable_builtin_tools=False,
+            session_log=_NoReplayStore(log) if legacy_store else log,
+        ), log
+
+    yield make
+    for log in reversed(logs):
+        log.close()
+
+
+async def _complete_numbered_turn(agent, prompt):
+    agent.add_user_message(prompt)
+    events = [event async for event in agent.run_events(
+        options=replace(agent.default_run_options(), logger=None),
+    )]
+    assert [event.stop_reason for event in events if isinstance(event, DoneEvent)] == [
+        StopReason.END_TURN,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["native", "legacy", "legacy-noncallable"])
+async def test_turn_numbers_advance_across_completed_requests(make_turn_agent, store_kind):
+    agent, log = make_turn_agent("continuous-turns", legacy_store=store_kind != "native")
+    if store_kind == "legacy-noncallable":
+        agent.session_log.next_turn_number = None
+    assert agent._next_session_turn() == 1
+
+    for number in range(1, 4):
+        await _complete_numbered_turn(agent, f"request-{number}")
+
+    records = _read_durable_events(log.path)
+    assert [event["data"]["turn"] for event in records if event["type"] == "turn/start"] == [1, 2, 3]
+    assert [event["data"]["turn"] for event in records if event["type"] == "turn/end"] == [1, 2, 3]
+    assert [event["seq"] for event in records] == list(range(len(records)))
+    assert [message.content for message in agent.messages if message.role == "user"] == [
+        "request-1", "request-2", "request-3",
+    ]
+
+
+@pytest.mark.parametrize(
+    "starts, expected",
+    [
+        ([], 1),
+        ([{"turn": 1}, {"turn": 2}], 3),
+        ([{"turn": 8}, {"turn": 2}, {"turn": 5}], 9),
+        ([{}, {"turn": None}, {"turn": "999"}, {"turn": 3.5}, {"turn": 4}], 5),
+        ([{}, {"turn": None}, {"turn": "999"}], 1),
+        ([{"turn": True}, {"turn": False}], 2),
+        ([{"turn": -4}, {"turn": -2}], -1),
+    ],
+    ids=["empty", "consecutive", "largest-not-last", "mixed-types", "no-integers",
+         "legacy-booleans", "legacy-negatives"],
+)
+def test_turn_query_preserves_history_and_uses_only_integer_start_numbers(
+    make_turn_agent, starts, expected,
+):
+    agent, log = make_turn_agent("query-only")
+    for data in starts:
+        log.append("turn/start", data)
+    # A step/request's turn field must not affect the next turn number.
+    log.append("step/start", {"turn": 1000, "step": 1})
+    log.append("request/header", {"turn": 1000, "header": {"tools": []}})
+    log.flush()
+    before_events = log.events
+    before_bytes = log.path.read_bytes()
+
+    assert [agent._next_session_turn() for _ in range(3)] == [expected] * 3
+    assert log.events == before_events
+    assert log.path.read_bytes() == before_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["reopen", "reset", "compaction", "interrupted"])
+async def test_turn_numbers_continue_after_session_restore(
+    tmp_path, make_turn_agent, transition,
+):
+    agent, log = make_turn_agent("restored-turns")
+    await _complete_numbered_turn(agent, "before-1")
+    await _complete_numbered_turn(agent, "before-2")
+    expected_next = 3
+    expected_users = ["before-1", "before-2"]
+    if transition == "reset":
+        agent.clear_history()
+        expected_users = []
+    elif transition == "compaction":
+        log.replace_surface(
+            [Message(role="user", content="saved summary")], turn=2, step=1,
+        )
+        expected_users = ["saved summary"]
+    elif transition == "interrupted":
+        log.append("turn/start", {"turn": 3})
+        log.append("step/start", {"turn": 3, "step": 1})
+        expected_next = 4
+
+    assert agent._next_session_turn() == expected_next
+    log.flush()
+    log.close()
+    opened = SessionLog.open_or_create(
+        tmp_path / "sessions", session_id="restored-turns", cwd=tmp_path,
+    )
+    restored, restored_log = make_turn_agent("restored-turns", log=opened.log)
+    assert opened.resumed
+    assert restored._next_session_turn() == expected_next
+    assert [message.content for message in restored.messages if message.role == "user"] == expected_users
+
+    await _complete_numbered_turn(restored, "after-restore")
+
+    records = _read_durable_events(restored_log.path)
+    assert [event["data"]["turn"] for event in records if event["type"] == "turn/start"] == list(
+        range(1, expected_next + 1)
+    )
+    assert [message.content for message in restored.messages if message.role == "user"] == [
+        *expected_users, "after-restore",
+    ]
+    assert restored._next_session_turn() == expected_next + 1
+
+
+@pytest.mark.asyncio
+async def test_turn_numbers_and_history_stay_isolated_when_sessions_alternate(make_turn_agent):
+    first, first_log = make_turn_agent("first-turns")
+    second, second_log = make_turn_agent("second-turns")
+    for agent, prompt in [
+        (first, "a-1"), (second, "b-1"), (first, "a-2"),
+        (second, "b-2"), (first, "a-3"),
+    ]:
+        await _complete_numbered_turn(agent, prompt)
+
+    for agent, log, turns, prompts in [
+        (first, first_log, [1, 2, 3], ["a-1", "a-2", "a-3"]),
+        (second, second_log, [1, 2], ["b-1", "b-2"]),
+    ]:
+        assert [event["data"]["turn"] for event in _read_durable_events(log.path)
+                if event["type"] == "turn/start"] == turns
+        assert agent._next_session_turn() == turns[-1] + 1
+        assert [message.content for message in agent.messages if message.role == "user"] == prompts
+
+
+@pytest.mark.parametrize("reopen", [False, True], ids=["live", "restored"])
+def test_turn_query_allocation_does_not_scale_with_unrelated_request_payloads(
+    tmp_path, make_turn_agent, reopen,
+):
+    agents = []
+    for label, tool_count in [("small", 0), ("large", 16)]:
+        session_id = f"allocation-{label}"
+        agent, log = make_turn_agent(session_id)
+        log.append("turn/start", {"turn": 7})
+        log.append("turn/end", {"turn": 7})
+        # Same event count, different payload sizes. Only lookup allocations
+        # are measured, excluding fixture construction, parsing, and Agent init.
+        for step in range(16):
+            log.append("request/header", {
+                "turn": 7, "step": step + 1,
+                "header": {
+                    "system": "system",
+                    "config": {"model": "test-model"},
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": f"tool_{index}",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        f"argument_{field}": {"type": "string"}
+                                        for field in range(32)
+                                    },
+                                },
+                            },
+                        }
+                        for index in range(tool_count)
+                    ],
+                },
+            })
+        log.flush()
+        if reopen:
+            log.close()
+            restored_log = SessionLog.open(
+                tmp_path / "sessions", session_id=session_id, cwd=tmp_path,
+            )
+            agent, log = make_turn_agent(session_id, log=restored_log)
+        agents.append(agent)
+
+    peaks = []
+    owned_trace = not tracemalloc.is_tracing()
+    if owned_trace:
+        tracemalloc.start()
+    try:
+        for agent in agents:
+            baseline = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            number = agent._next_session_turn()
+            peak = tracemalloc.get_traced_memory()[1] - baseline
+            assert number == 8
+            peaks.append(peak)
+    finally:
+        if owned_trace:
+            tracemalloc.stop()
+
+    # A generous relative budget avoids RSS/allocator/platform timing noise.
+    assert peaks[1] - peaks[0] <= 256 * 1024, (
+        f"turn lookup copied historical payloads: small={peaks[0]} B, "
+        f"large={peaks[1]} B; allowed extra allocation=262144 B"
+    )
 
 
 @pytest.mark.asyncio

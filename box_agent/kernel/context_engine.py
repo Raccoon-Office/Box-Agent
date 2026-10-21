@@ -9,6 +9,8 @@ import re
 from typing import Any, Callable, Final
 
 from ..llm.capabilities import image_input_support
+from ..llm.base import closing_llm_stream
+from ..llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS, cap_auxiliary_client
 from ..schema import Message
 from ..session_log import SessionLog
 from ..tools.base import Tool, ToolResult
@@ -160,7 +162,8 @@ async def _create_summary(
     # complete text before validating the required summary envelope: a partial
     # summary must never be committed as compacted history.
     summary_parts: list[str] = []
-    async for event in llm.generate_stream(
+    summary_llm = cap_auxiliary_client(llm, SMALL_TASK_MAX_OUTPUT_TOKENS)
+    async with closing_llm_stream(summary_llm.generate_stream(
         messages=[*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)],
         tools=None,
         thinking_enabled=False,
@@ -168,9 +171,12 @@ async def _create_summary(
         turn_id=turn_id,
         title=title,
         call_kind="context_summary",
-    ):
-        if event.type == "text" and event.delta:
-            summary_parts.append(event.delta)
+    )) as stream:
+        async for event in stream:
+            if event.type == "finish" and event.finish_reason in ("length", "max_tokens"):
+                raise RuntimeError("Context summary reached its output token limit")
+            if event.type == "text" and event.delta:
+                summary_parts.append(event.delta)
     response_content = "".join(summary_parts)
     match = re.fullmatch(
         r"\s*<summary>\s*(.*?)\s*</summary>\s*",

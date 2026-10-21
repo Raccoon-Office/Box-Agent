@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from box_agent import skill_dependencies
+from box_agent.config import AgentConfig, ExternalMemoryConfig, MemoryHttpOperation
+from box_agent.memory import MemoryManager, create_memory_backend
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.memory_tool import create_memory_tools
+from box_agent.tools.mcp_loader import MCPTool
+from box_agent.tools.setup import register_mcp_tools
 from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.sub_agent_capabilities import (
     CapabilityFailure,
@@ -46,6 +54,112 @@ def _parse(**overrides) -> DelegationSpec | CapabilityFailure:
     values = {"task": "Inspect the repository"}
     values.update(overrides)
     return parse_delegation_spec(**values)
+
+
+@pytest.mark.parametrize("backend_type,tool_name", [
+    ("memsense", "memory_read"), ("memsense", "memory_search"),
+    ("memsense", "memory_write"), ("memsense", "memory_edit"),
+    ("generic", "memory_read"), ("generic", "memory_search"),
+])
+@pytest.mark.parametrize("network,external_side_effect", [(False, False), (True, False), (True, True)])
+def test_external_memory_delegation_requires_its_actual_permissions(
+    tmp_path, backend_type, tool_name, network, external_side_effect,
+) -> None:
+    backend = create_memory_backend(AgentConfig(
+        memory_backend_type=backend_type, memory_dir=str(tmp_path / "memory"),
+        memory_external=ExternalMemoryConfig(
+            base_url="http://memory.test",
+            read=MemoryHttpOperation(path="/read"),
+            search=MemoryHttpOperation(path="/search"),
+        ),
+    ))
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    spec = _parse(required_tools=[tool_name])
+    assert isinstance(spec, DelegationSpec)
+    spec = replace(spec, constraints=replace(
+        spec.constraints, read_only=False, network=network,
+        external_side_effect=external_side_effect,
+    ))
+
+    result = CapabilityResolver().resolve(spec, parent_tools=tools)
+
+    mutation = tool_name in {"memory_write", "memory_edit"}
+    if not network or (mutation and not external_side_effect):
+        assert isinstance(result, CapabilityFailure)
+        assert result.details["denied_reason"] == (
+            "network_disabled" if not network else "external_side_effect_disabled"
+        )
+    else:
+        assert isinstance(result, ResolvedCapabilityBundle)
+        assert result.tools[tool_name] is tools[tool_name]
+
+
+def test_external_memory_mutations_cannot_borrow_image_tool_permissions(tmp_path) -> None:
+    backend = create_memory_backend(AgentConfig(
+        memory_backend_type="memsense", memory_dir=str(tmp_path / "memory"),
+        memory_external=ExternalMemoryConfig(base_url="http://memory.test"),
+    ))
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    tools["generate_image"] = NamedTool("generate_image")
+    spec = _parse(required_tools=["memory_edit", "generate_image"])
+    assert isinstance(spec, DelegationSpec)
+    assert spec.constraints.network and not spec.constraints.read_only
+    assert not spec.constraints.external_side_effect
+
+    result = CapabilityResolver().resolve(spec, parent_tools=tools)
+
+    assert isinstance(result, CapabilityFailure)
+    assert result.details["denied_reason"] == "external_side_effect_disabled"
+
+
+@pytest.mark.parametrize("tool_name", [
+    "memory_read", "memory_search", "memory_write", "memory_list_corrections",
+])
+def test_local_memory_delegation_needs_no_external_permissions(tmp_path, tool_name) -> None:
+    tools = {tool.name: tool for tool in create_memory_tools(MemoryManager(tmp_path / "memory"))}
+    spec = _parse(required_tools=[tool_name])
+    assert isinstance(spec, DelegationSpec)
+    spec = replace(spec, constraints=replace(spec.constraints, read_only=False))
+
+    result = CapabilityResolver().resolve(spec, parent_tools=tools)
+
+    assert isinstance(result, ResolvedCapabilityBundle)
+    assert result.tools[tool_name] is tools[tool_name]
+
+
+@pytest.mark.parametrize("tool_name", [
+    "memory_read", "memory_search", "memory_write", "memory_edit",
+    "memory_list_corrections", "memory_write_correction",
+    "memory_supersede_correction", "memory_delete_correction",
+])
+@pytest.mark.parametrize("server_name", ["remote-memory", "playwright"])
+def test_eager_mcp_memory_name_collision_cannot_borrow_local_permissions(
+    tmp_path, tool_name, server_name,
+) -> None:
+    backend = create_memory_backend(AgentConfig(
+        memory_backend_type="memsense", memory_dir=str(tmp_path / "memory"),
+        memory_external=ExternalMemoryConfig(base_url="http://memory.test"),
+    ))
+    tools = {tool.name: tool for tool in create_memory_tools(backend)}
+    session = SimpleNamespace(call_tool=AsyncMock())
+    remote = MCPTool(
+        name=tool_name, description="remote memory", parameters={"type": "object"},
+        session=session, server_name=server_name,
+    )
+    register_mcp_tools(tools, [remote])
+    assert tools[tool_name] is remote
+    requested = [tool_name]
+    if tool_name not in {"memory_read", "memory_search", "memory_list_corrections"}:
+        requested.append("generate_image")
+        tools["generate_image"] = NamedTool("generate_image")
+    spec = _parse(required_tools=requested)
+    assert isinstance(spec, DelegationSpec)
+
+    result = CapabilityResolver().resolve(spec, parent_tools=tools)
+
+    assert isinstance(result, CapabilityFailure)
+    assert result.details["denied_reason"] == "unknown_capability_metadata"
+    session.call_tool.assert_not_called()
 
 
 def _write_skill(
@@ -405,35 +519,51 @@ def test_missing_required_tool_distinguishes_loading_from_not_found() -> None:
     assert ready.code == "REQUIRED_TOOL_NOT_FOUND"
 
 
-def test_derived_policy_allows_trusted_network_and_permission_gated_bash() -> None:
-    web_spec = _parse(required_tools=["web_search"])
-    bash_spec = _parse(required_tools=["bash"])
-    assert isinstance(web_spec, DelegationSpec)
-    assert isinstance(bash_spec, DelegationSpec)
-    assert bash_spec.constraints.read_only is False
-    assert bash_spec.constraints.network is True
+@pytest.mark.parametrize("name", ["bash", "execute_code"])
+@pytest.mark.parametrize("broker_available", [False, True])
+def test_execution_tools_inherit_parent_availability_without_extra_approval(
+    name, broker_available,
+) -> None:
+    spec = _parse(required_tools=[name])
+    assert isinstance(spec, DelegationSpec)
+    assert spec.constraints.read_only is False
+    assert spec.constraints.network is True
+    parent_tool = NamedTool(name)
 
-    web_result = CapabilityResolver().resolve(
-        web_spec,
-        parent_tools={"web_search": NamedTool("web_search")},
-    )
-    bash_without_broker = CapabilityResolver().resolve(
-        bash_spec,
-        parent_tools={"bash": NamedTool("bash")},
-    )
-    bash_with_broker = CapabilityResolver().resolve(
-        bash_spec,
-        parent_tools={"bash": NamedTool("bash")},
-        permission_negotiator_available=True,
+    result = CapabilityResolver().resolve(
+        spec, parent_tools={name: parent_tool},
+        permission_negotiator_available=broker_available,
     )
 
-    assert isinstance(web_result, ResolvedCapabilityBundle)
-    assert isinstance(bash_without_broker, CapabilityFailure)
-    assert (
-        bash_without_broker.details["denied_reason"]
-        == "permission_negotiator_unavailable"
+    assert isinstance(result, ResolvedCapabilityBundle)
+    assert result.tools == {name: parent_tool}
+
+
+@pytest.mark.parametrize("name", ["bash", "execute_code"])
+def test_execution_tools_are_unavailable_when_absent_from_parent(name) -> None:
+    spec = _parse(required_tools=[name])
+    result = CapabilityResolver().resolve(spec, parent_tools={})
+
+    assert isinstance(result, CapabilityFailure)
+    assert result.code == "REQUIRED_TOOL_NOT_FOUND"
+
+
+def test_python_status_is_an_explicit_read_only_capability() -> None:
+    spec = _parse(required_tools=["sandbox_status"])
+    assert isinstance(spec, DelegationSpec)
+    assert spec.constraints.read_only is True
+    result = CapabilityResolver().resolve(spec, parent_tools={"sandbox_status": NamedTool("sandbox_status")})
+
+    assert isinstance(result, ResolvedCapabilityBundle)
+
+
+def test_python_execution_keeps_file_tool_write_scope_separate() -> None:
+    spec = _parse(required_tools=["execute_code", "write_file"], write_scope=["result.txt"])
+    result = CapabilityResolver().resolve(
+        spec, parent_tools={name: NamedTool(name) for name in ["execute_code", "write_file"]},
     )
-    assert isinstance(bash_with_broker, ResolvedCapabilityBundle)
+
+    assert isinstance(result, ResolvedCapabilityBundle)
 
 
 def test_explicit_web_extract_derives_network_capability() -> None:

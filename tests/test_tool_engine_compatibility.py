@@ -1,8 +1,8 @@
 """C1 characterization of the pre-Engine setup and Agent tool contract.
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
-descriptions, PPT entry contracts, tool handoffs, background retention and
-connector search apply before exact comparisons.
+descriptions, PPT entry contracts, tool handoffs, child execution, background
+retention, connector search and managed runtimes apply before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -18,7 +18,8 @@ import pytest
 from box_agent.agent import Agent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
 from box_agent.memory import MemoryManager
-from box_agent.tools import bash_tool, image_generation_tool, mcp_tool_catalog
+from box_agent.plugins.cua import driver as cua_driver
+from box_agent.tools import bash_tool, image_generation_tool, mcp_loader, mcp_tool_catalog
 from box_agent.tools import setup as tool_setup
 from box_agent.tools import skill_loader as skill_loader_module
 from box_agent.tools.base import build_tool_name_index
@@ -28,6 +29,14 @@ from box_agent.tools.runtime import SkillRuntimeContext
 
 _ALWAYS_BASE = {"create_scheduled_task", "mcp_config"}
 _SKILLS = {"get_skill", "list_skills"}
+_ENSURE_CUA_READY_SCHEMA = {
+    "aliases": [],
+    "schema": {
+        "name": "ensure_cua_ready",
+        "description": "Prepare desktop computer-use, then connect its MCP tools. Call before desktop actions; use tool_search to discover the returned tools. Never downloads drivers or grants OS permissions.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+}
 _LIST_SKILLS_SCHEMA = {
     "aliases": [],
     "schema": {
@@ -57,6 +66,7 @@ _ALWAYS_WORKSPACE = {
 }
 _FILES = {
     "read_file", "query_jsonl", "search_files", "write_file", "append_file", "edit_file",
+    "read_email", "extract_email_attachment",
 }
 _BASH = {"bash", "bash_output", "bash_kill"}
 _TODO = {"todo_read", "todo_write"}
@@ -82,18 +92,27 @@ _PUBLISH_ARTIFACT_SCHEMA = {
             "After creating and checking a main user-facing file, declare it as "
             "a primary user-facing artifact. Call once for each requested deliverable. "
             "Already published builder outputs and images "
-            "do not need this call. Use it to promote selected intermediate files."
+            "do not need this call. Use it to promote selected intermediate files. "
+            "For a self-contained single-file script deliverable with verifiable ownership, first call "
+            "action=begin with its final path; generate and check the file at the returned "
+            "staging_path, then action=commit with the returned write_id. Only commit "
+            "replaces the final path and records generation. Plain publication never "
+            "proves who generated an existing file. HTML with relative assets and directory "
+            "builders must keep their existing generation/publication flow. Use action=abort to discard staging."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path inside the session workspace."},
+                "path": {"type": "string", "description": "Final file path inside the session workspace."},
+                "action": {"type": "string", "enum": ["publish", "begin", "commit", "abort"],
+                           "default": "publish"},
+                "write_id": {"type": "string", "description": "Exact transaction ID from begin."},
             },
-            "required": ["path"],
             "additionalProperties": False,
         },
     },
 }
+
 _C5_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/c5_schema_changes.json").read_text()
 )
@@ -109,11 +128,65 @@ _TOOL_HANDOFF_SCHEMA_CHANGES = json.loads(
 _BACKGROUND_OUTPUT_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/background_output_schema_changes.json").read_text()
 )
+_JSONL_DESCRIPTION_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/jsonl_description_changes.json").read_text()
+)
 _CONNECTOR_SEARCH_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
         encoding="utf-8"
     )
 )
+_EMAIL_SCHEMAS = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/email_schemas.json").read_text(encoding="utf-8")
+)
+_MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
+    "bash": (
+        (
+            "Execute bash commands in foreground or background.\n\n",
+            "Execute bash commands in foreground or background.\n\n"
+            'Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") '
+            "for that capability when available; join any active installation. Do not use or install alternate "
+            "runtimes or ask the user to switch environments. On failure, report the returned cause or retry "
+            "the managed installer.\n\n",
+        ),
+        (
+            '  - Run the injected Python runtime as "$BOX_AGENT_PYTHON"; do not write "$BOX_AGENT_PYTHON:-python3"\n',
+            '  - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON"; '
+            "otherwise prepare the managed Python through local_environment when available. "
+            'Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).\n',
+        ),
+    ),
+    "execute_code": (
+        (
+            "This tool runs Python code in a **real Jupyter kernel** with its own isolated environment:\n",
+            "This tool runs Python code in a **real Jupyter kernel**:\n"
+            "- Use only application-managed Python, normally the default host-prepared sandbox.\n"
+            '  If it is not ready, use local_environment(action="ensure", capability="python") when available\n'
+            "  to install or wait for the managed environment. Do not duplicate an active installation.\n"
+            "  Do not use or install alternate runtimes or ask the user to switch environments.\n"
+            "- Omit python_path unless specifying a verified application-managed interpreter with working\n"
+            "  ipykernel. Its path is retained for the kernel session. A path change requires a new\n"
+            "  session_id; variables cannot migrate.\n",
+        ),
+        (
+            "- Pre-installed packages:",
+            "- The default managed environment prepares:",
+        ),
+        (
+            "- Do NOT %pip install any pre-installed package — it just wastes time and can hit the timeout\n"
+            "- Only %pip install when you hit an actual ModuleNotFoundError for a non-listed package\n",
+            "- Check actual imports before installing missing packages into the managed interpreter.\n"
+            "  For missing Python/ipykernel, use the managed installer via local_environment when available.\n"
+            "  If preparation fails, use returned diagnostics to retry or report the cause, not switch runtimes.\n",
+        ),
+        (
+            "- Never use the bash tool's `pip install` for sandbox packages — bash runs against the\n"
+            "  host Python and the sandbox kernel will not see those packages\n",
+            "- Install missing task packages only into the managed interpreter that executes the code.\n"
+            "  When using a shell, use that interpreter's `-m pip`; do not modify it while the managed installer is running.\n",
+        ),
+    ),
+}
 _C5_DISCOVERABLE = {
     "append_file", "query_jsonl", "bash_output", "bash_kill", "sandbox_status",
     "mcp_config", "report_execution_result",
@@ -128,11 +201,14 @@ def _c5_names(names):
 
 
 @pytest.fixture
-def isolated_setup(tmp_path, monkeypatch):
+async def isolated_setup(tmp_path, monkeypatch):
     """Keep profile files and host/runtime discovery inside this test boundary."""
     profile = tmp_path / "profile"
     profile.mkdir()
     monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    monkeypatch.delenv("BOX_AGENT_CUA_RUNTIME_CONFIG", raising=False)
+    monkeypatch.setattr(cua_driver, "installed_driver", lambda: None)
+    monkeypatch.setattr(mcp_loader, "_cua_service", None)
     monkeypatch.setenv("BOX_AGENT_OBSIDIAN_CONFIG", str(profile / "obsidian.json"))
     monkeypatch.setattr(
         skill_loader_module, "SKILL_SETTINGS_PATH", profile / "skill-settings.json"
@@ -190,9 +266,11 @@ def isolated_setup(tmp_path, monkeypatch):
         return [remote]
 
     monkeypatch.setattr(tool_setup, "load_mcp_tools_async", load_mcp)
-    return SimpleNamespace(
+    yield SimpleNamespace(
         profile=profile, catalog=catalog, remote=remote, load_calls=load_calls,
     )
+    if mcp_loader._cua_service is not None:
+        await mcp_loader._cua_service.close()
 
 
 def _config(env, flags=None, *, defaults=False):
@@ -270,6 +348,8 @@ def _assert_schema_contract(tools, profile):
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
     expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
     expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
+    expected["ensure_cua_ready"] = deepcopy(_ENSURE_CUA_READY_SCHEMA)
+    expected.update(deepcopy(_EMAIL_SCHEMAS))
     expected["get_skill"]["schema"]["description"] = (
         "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
         "when paged. Read required_skills before their steps; related_skills are optional. "
@@ -302,6 +382,7 @@ def _assert_schema_contract(tools, profile):
             *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
             *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
             *_BACKGROUND_OUTPUT_SCHEMA_CHANGES.get(tool.name, ()),
+            *_JSONL_DESCRIPTION_CHANGES.get(tool.name, ()),
         ):
             target = entry["schema"]
             *parents, field = change["path"]
@@ -314,6 +395,32 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
+        if tool.name == "read_file":
+            anchor = "Binary and structured document files are rejected with an actionable error. "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                "For .eml emails use read_email to decode MIME bodies and attachments. " + anchor,
+            )
+        if tool.name == "sub_agent":
+            read_tools = "read/search tools (`read_file`, `query_jsonl`, "
+            assert entry["schema"]["description"].count(read_tools) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                read_tools, "read/search tools (`read_file`, `read_email`, `query_jsonl`, ",
+            )
+            anchor = (
+                "`bash` is available only when named explicitly and every delegated "
+                "command requires one-shot parent-session approval. "
+            )
+            description = entry["schema"]["description"]
+            assert description.count(anchor) == 1
+            entry["schema"]["description"] = description.replace(
+                anchor,
+                "`bash` and `execute_code` may be named explicitly when the parent has them. "
+                "Bash uses the parent's existing permissions and approval rules; Python "
+                "uses a child-isolated kernel with the parent's runtime and workspace. "
+                "`sandbox_status` reports only this child's kernels. ",
+            )
         if tool.name == "bash":
             anchor = (
                 '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
@@ -323,6 +430,22 @@ def _assert_schema_contract(tools, profile):
                 anchor,
                 anchor + '  - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.\n',
             )
+            # Git safety: no unrequested-commit example, explicit read-only git guidance.
+            git_anchor = "Reserve bash for that directory view, git, builds, tests, package managers, processes, scripts, and system commands.\n"
+            description = entry["schema"]["description"]
+            assert description.count(git_anchor) == 1
+            entry["schema"]["description"] = description.replace(
+                git_anchor,
+                git_anchor + "Git: read-only commands (status, diff, log, show) are fine. Do not commit, push, amend, rebase, stash, reset --hard, clean, checkout/restore over uncommitted changes, use --force/--no-verify, or change git config unless the user explicitly asks; the working tree may contain the user's own uncommitted work.\n",
+            ).replace(
+                '  - Chain dependent commands with &&: git add . && git commit -m "msg"\n',
+                "  - Chain dependent commands with &&: npm install && npm test\n",
+            ).replace(
+                "  - For temporary script outputs elsewhere,",
+                "  - Files referenced by chat and their local dependencies must remain available. "
+                "Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.\n"
+                "  - For temporary script outputs elsewhere,",
+            )
             entry["schema"]["input_schema"]["properties"]["temporary_files"] = {
                 "type": "array", "items": {"type": "string"}, "maxItems": 64,
                 "description": "New disposable output files this foreground command will create, relative to the workspace (not inline cd). Parents must exist. Runtime reserves absent paths; existing files cannot be adopted. Write reserved files in place. Later exact rm is approval-free only while unchanged and unpublished.",
@@ -331,6 +454,22 @@ def _assert_schema_contract(tools, profile):
             entry["schema"]["input_schema"]["properties"]["temporary"] = {
                 "type": "boolean", "default": False,
                 "description": "On the final chunk, explicitly mark a new disposable file for later approval-free exact rm. Does not grant cleanup rights over existing files or published deliverables.",
+            }
+        for before, after in _MANAGED_RUNTIME_DESCRIPTION_CHANGES.get(tool.name, ()):
+            description = entry["schema"]["description"]
+            assert description.count(before) == 1, (tool.name, before)
+            entry["schema"]["description"] = description.replace(before, after)
+        if tool.name == "execute_code":
+            properties = entry["schema"]["input_schema"]["properties"]
+            assert "python_path" not in properties
+            properties["python_path"] = {
+                "type": "string",
+                "description": (
+                    "Optional absolute path to a verified application-managed Python with ipykernel. "
+                    "Prefer omitting this to use the default managed environment. Do not use this "
+                    "parameter to switch to a system, project or third-party runtime. Retained for "
+                    "this kernel session; a path change requires a new session_id."
+                ),
             }
         assert list(tool.aliases) == entry["aliases"], tool.name
         assert _normalized_schema(tool.to_schema(), profile) == entry["schema"], tool.name
@@ -364,7 +503,7 @@ def _assert_schema_contract(tools, profile):
             {"flags": {"enable_skills": True}, "defer_skills": True},
             _SKILLS, id="deferred-empty-skills",
         ),
-        pytest.param({"flags": {"enable_mcp": True}}, {"fixture_lookup"}, id="mcp"),
+        pytest.param({"flags": {"enable_mcp": True}}, {"fixture_lookup", "ensure_cua_ready"}, id="mcp"),
         pytest.param({"flags": {"enable_sub_agent": True}}, set(), id="subagent-no-llm"),
         pytest.param(
             {"flags": {"enable_sub_agent": True}, "llm_mode": "text"},
@@ -377,14 +516,14 @@ def _assert_schema_contract(tools, profile):
         pytest.param({"image_endpoint": True}, {"generate_image"}, id="image-service"),
         pytest.param(
             {"defaults": True, "llm_mode": "text"},
-            _FILES | _BASH | _TODO | _PLAN | _SKILLS | {"sub_agent", "fixture_lookup"},
+            _FILES | _BASH | _TODO | _PLAN | _SKILLS | {"sub_agent", "fixture_lookup", "ensure_cua_ready"},
             id="config-defaults",
         ),
         pytest.param(
             {"defaults": True, "llm_mode": "vision", "memory": True,
              "sandbox": True, "image_endpoint": True, "process_owner_id": "fixture-session"},
             _FILES | _BASH | _TODO | _PLAN | _MEMORY | _SANDBOX | _SKILLS
-            | {"sub_agent", "fixture_lookup", "inspect_images", "generate_image"},
+            | {"sub_agent", "fixture_lookup", "ensure_cua_ready", "inspect_images", "generate_image"},
             id="all-capabilities-session-owned",
         ),
     ],

@@ -104,6 +104,30 @@ def test_optional_contract_and_single_group_are_supported(case):
     assert not (case[0] / "_trace/group-input/bookends").exists()
 
 
+def test_global_design_stays_in_brief_without_duplicating_it_in_deck(case):
+    root, _, _, _ = case
+    brief = root / "plan/design-brief.md"
+    style = ("\nbackground_system: 暖白档案纸\n"
+             "visual_state_range: 证据页克制，首尾聚焦\n"
+             "image_opportunity_map: 01,03 使用真实产品图\n"
+             "special_page_system: 同一字体角色，不复制首尾几何\n")
+    put(brief, brief.read_text().replace("锁定设计。", style))
+    deck = root / "plan/deck.md"
+    put(deck, deck.read_text().replace(
+        "Global context", "Style Lock: plan/design-brief.md#Style Lock"))
+    original = {p: p.read_bytes() for p in (root / "plan").iterdir()}
+    groups = success(run(case))["groups"]
+    for group in groups:
+        text = rendered(group)
+        assert text.count(style) == 1
+        assert brief.read_text() in text
+        assert (root / "base.css").read_text() in text
+        for number in group["pages"]:
+            assert (root / f"plan/slide_{number:02d}.md").read_text() in text
+    assert "background_system" not in deck.read_text()
+    assert {p: p.read_bytes() for p in (root / "plan").iterdir()} == original
+
+
 @pytest.mark.parametrize("old,new,reason", [
     ("- pages: 02", "- pages: 01,02", "more than one"),
     ("- pages: 01,03", "- pages: 01", "missing pages"),

@@ -161,7 +161,9 @@ async def test_eager_mcp_refresh_keeps_utility_registry_and_provider_tools_empty
         state = adapter._sessions[utility.sessionId]
         assert state.agent.tools == {}
         state.turn_active = True
+        state.mcp_runtime_updates_requested = True
         adapter._sessions[normal.sessionId].turn_active = True
+        adapter._sessions[normal.sessionId].mcp_runtime_updates_requested = True
         if refresh == "background":
             adapter._sync_mcp_registries([remote])
             adapter._inject_mcp_runtime_update(name="law", state="connected", tool_count=1)

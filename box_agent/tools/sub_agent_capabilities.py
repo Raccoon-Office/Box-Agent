@@ -12,6 +12,7 @@ checks remain the final resource-level authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .. import skill_dependencies
@@ -28,16 +29,17 @@ BATCH_AGGREGATE_MAX_CHARS = 200_000
 
 _BATCH_FILES_ALLOWED_TOOLS = frozenset({"read_file"})
 DEFAULT_SAFE_TOOL_NAMES = frozenset(
-    {"glob", "grep", "query_jsonl", "read_file", "search_files"}
+    {"glob", "grep", "query_jsonl", "read_email", "read_file", "search_files"}
 )
 DEFAULT_READ_TOOL_NAMES = DEFAULT_SAFE_TOOL_NAMES | frozenset({"web_extract", "web_search"})
 SKILL_READ_TOOL_NAMES = frozenset({"get_skill", "list_skills"})
-PATH_SCOPED_WRITE_TOOLS = frozenset({"append_file", "edit_file", "write_file"})
+PATH_SCOPED_WRITE_TOOLS = frozenset({"append_file", "edit_file", "write_file", "extract_email_attachment"})
 TRUSTED_NETWORK_TOOL_NAMES = frozenset(
     {"generate_image", "inspect_images", "web_extract", "web_search"}
 )
 TRUSTED_UNSCOPED_WRITE_TOOLS = frozenset({"generate_image"})
-PERMISSION_GATED_PROCESS_TOOL_NAMES = frozenset({"bash"})
+EXECUTION_TOOL_NAMES = frozenset({"bash", "execute_code"})
+DELEGABLE_PROCESS_TOOL_NAMES = EXECUTION_TOOL_NAMES | frozenset({"sandbox_status"})
 
 MINIMAL_DELEGATION_EXAMPLE: dict[str, Any] = {
     "task": "Read the provided files and summarize them.",
@@ -60,6 +62,8 @@ class ToolCapabilityMetadata:
 # treated conservatively rather than inferred from their description.
 BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "read_file": ToolCapabilityMetadata(read=True),
+    "read_email": ToolCapabilityMetadata(read=True),
+    "extract_email_attachment": ToolCapabilityMetadata(read=True, write=True),
     "query_jsonl": ToolCapabilityMetadata(read=True),
     "search_files": ToolCapabilityMetadata(read=True),
     "grep": ToolCapabilityMetadata(read=True),
@@ -81,6 +85,7 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "memory_read": ToolCapabilityMetadata(read=True),
     "memory_search": ToolCapabilityMetadata(read=True),
     "memory_write": ToolCapabilityMetadata(write=True),
+    "memory_edit": ToolCapabilityMetadata(write=True),
     "memory_list_corrections": ToolCapabilityMetadata(read=True),
     "memory_write_correction": ToolCapabilityMetadata(write=True),
     "memory_supersede_correction": ToolCapabilityMetadata(write=True),
@@ -110,6 +115,20 @@ def _is_managed_browser_tool(name: str) -> bool:
 
 
 def _tool_capability_metadata(name: str, tool: Tool) -> ToolCapabilityMetadata | None:
+    from .memory_tool import (
+        ExternalMemoryReadTool, ExternalMemorySearchTool,
+        MemsenseMemoryMutationTool, is_memory_tool,
+    )
+
+    # Local and remote memory share names, but have different permission boundaries.
+    if isinstance(tool, (ExternalMemoryReadTool, ExternalMemorySearchTool)):
+        return ToolCapabilityMetadata(read=True, network=True)
+    if isinstance(tool, MemsenseMemoryMutationTool):
+        return ToolCapabilityMetadata(write=True, network=True, external_side_effect=True)
+    if name.startswith("memory_") and not is_memory_tool(tool):
+        # An eager MCP tool can replace a built-in; its name cannot confer local trust.
+        return None
+
     metadata = BUILTIN_TOOL_CAPABILITIES.get(name)
     if metadata is not None:
         return metadata
@@ -213,7 +232,7 @@ class CapabilityFailure:
                         "message": (
                             "write_scope declares outputs, but explicit required_tools "
                             "contains no file-write tool. For a write task, include "
-                            "write_file, edit_file, or append_file in required_tools, "
+                            "write_file, edit_file, append_file, or extract_email_attachment in required_tools, "
                             "or omit required_tools to use scoped file-tool defaults. "
                             "For a read-only task, remove write_scope."
                         ),
@@ -400,7 +419,8 @@ def parse_delegation_spec(
             # Files require an actual reader; the resolver reports a missing
             # parent read_file instead of starting a child unable to read inputs.
             selected_defaults.add("read_file")
-            if not normalized_write_scope and min(raw_steps, general_max_steps) == 1:
+            if (not normalized_write_scope and min(raw_steps, general_max_steps) == 1
+                    and not any(Path(file).suffix.casefold() == ".eml" for file in normalized_files)):
                 # Preserve old one-call file summaries within their stated budget.
                 selected_defaults = {"read_file"}
         normalized_required_tools = tuple(sorted(selected_defaults))
@@ -439,12 +459,12 @@ def parse_delegation_spec(
         read_only=not bool(
             requested_path_writes
             or set(normalized_required_tools) & TRUSTED_UNSCOPED_WRITE_TOOLS
-            or set(normalized_required_tools) & PERMISSION_GATED_PROCESS_TOOL_NAMES
+            or set(normalized_required_tools) & EXECUTION_TOOL_NAMES
         ),
         network=bool(
             (
                 set(normalized_required_tools)
-                & (TRUSTED_NETWORK_TOOL_NAMES | PERMISSION_GATED_PROCESS_TOOL_NAMES)
+                & (TRUSTED_NETWORK_TOOL_NAMES | EXECUTION_TOOL_NAMES)
             )
             or any(_is_managed_browser_tool(name) for name in normalized_required_tools)
         ),
@@ -536,7 +556,6 @@ def _tool_denial_reason(
     *,
     strategy: str,
     constraints: DelegationConstraints,
-    permission_negotiator_available: bool,
 ) -> str | None:
     if strategy == "batch_files" and name not in _BATCH_FILES_ALLOWED_TOOLS:
         return "not_allowed_by_strategy"
@@ -545,14 +564,10 @@ def _tool_denial_reason(
     if metadata is None:
         return "unknown_capability_metadata"
 
-    permission_gated_process = name in PERMISSION_GATED_PROCESS_TOOL_NAMES
-    if metadata.process:
-        if not permission_gated_process:
-            return "process_not_delegable"
-        if not permission_negotiator_available:
-            return "permission_negotiator_unavailable"
+    if metadata.process and name not in DELEGABLE_PROCESS_TOOL_NAMES:
+        return "process_not_delegable"
 
-    if constraints.read_only and (metadata.write or metadata.process):
+    if constraints.read_only and (metadata.write or name in EXECUTION_TOOL_NAMES):
         return "read_only"
     if not constraints.network and metadata.network:
         return "network_disabled"
@@ -561,8 +576,8 @@ def _tool_denial_reason(
     if (
         constraints.write_scope is not None
         and metadata.write
-        and not permission_gated_process
-        and name not in {"write_file", "append_file", "edit_file"}
+        and name not in EXECUTION_TOOL_NAMES
+        and name not in PATH_SCOPED_WRITE_TOOLS
     ):
         return "write_scope_unenforceable"
     return None
@@ -582,6 +597,8 @@ class CapabilityResolver:
         permission_negotiator_available: bool = False,
         refresh_skills: bool = True,
     ) -> ResolvedCapabilityBundle | CapabilityFailure:
+        # Keep permission_negotiator_available for existing callers. Execution
+        # tools request approval through their inherited policy only when needed.
         skills_or_failure = self._resolve_skills(spec, skill_loader, skill_access_filter, refresh=refresh_skills)
         if isinstance(skills_or_failure, CapabilityFailure):
             return skills_or_failure
@@ -635,7 +652,6 @@ class CapabilityResolver:
                 tool,
                 strategy=spec.strategy,
                 constraints=spec.constraints,
-                permission_negotiator_available=permission_negotiator_available,
             )
             if reason:
                 denied.append({"name": name, "origin": origin, "reason": reason})

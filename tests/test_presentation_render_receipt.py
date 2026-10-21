@@ -95,6 +95,7 @@ def test_batch_receipt_lists_only_current_selected_pngs_and_resolved_paths(rende
     captured = capsys.readouterr()
     assert receipts(captured.out) == [{
         "status": "rendered", "qa": "not-run", "rendered_pages": [1, 3],
+        "canvas": {"width": 1600, "height": 900, "device_scale": 2},
         "images": [str(deck / "renders/slide_01.png"), str(deck / "renders/slide_03.png")],
         "deck_dir": str(deck.resolve()), "skill_root": str(skill.resolve()),
         "next_instructions": str(skill / "subagents/slide.md"),

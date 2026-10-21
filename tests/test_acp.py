@@ -57,6 +57,7 @@ from box_agent.session_log import SessionLog, SessionLogWorkspaceMismatch
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.bash_tool import BackgroundShell, BackgroundShellManager
 from box_agent.tools.jupyter_tool import MAX_EXECUTE_CODE_CHARS
+from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.setup import (
@@ -243,7 +244,7 @@ def test_acp_context_summary_routes_auto_by_tags_and_locks_manual_model(tmp_path
 
     assert len(main_llm.clones) == 1
     assert summary_llm.model == "summary-model"
-    assert summary_llm.max_output_tokens == 4_096
+    assert summary_llm.max_output_tokens == 8_192
 
     manual_llm = CloneTrackingLLM()
     locked_summary_llm = agent._summary_llm_for_session(
@@ -617,6 +618,49 @@ async def test_acp_registers_skillhub_search_only_for_capable_host(tmp_path) -> 
     assert "search_skillhub" in install_capable_agent.tools
     assert "install_skillhub_skill" in install_capable_agent.tools
     assert install_capable.field_meta["capabilities"]["skillhub_install_versions"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tmp_path, monkeypatch):
+    import box_agent.tools.bash_tool as bash_module
+    monkeypatch.setattr(bash_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(bash_module, "bundled_win_bash", lambda: None)
+    monkeypatch.delenv("BOX_AGENT_BUNDLED_BASH", raising=False)
+    installed_bash = tmp_path / "PortableGit" / "usr" / "bin" / "bash.exe"
+    class RuntimeConn(DummyConn):
+        async def ext_method(self, method, payload):
+            assert method == "session/runtime_environment"
+            assert payload["sessionId"] == capable.sessionId
+            if payload["capability"] == "git":
+                return {"status": "ready", "env": {"BOX_AGENT_BUNDLED_BASH": str(installed_bash)}}
+            return {"status": "missing", "logTail": "not installed"}
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    host = BoxACPAgent(RuntimeConn(), config, DummyLLM(), [], "system")
+    plain = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    capable = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "host_capabilities": {"runtime_environment": 1},
+    }))
+    assert "local_environment" not in host._sessions[plain.sessionId].agent.tools
+    tools = host._sessions[capable.sessionId].agent.tools
+    assert "local_environment" in tools
+    assert tools["execute_code"].runtime_preparer is not None
+    result = await tools["local_environment"].execute("python")
+    assert result.success
+    assert "not installed" in result.content
+    shell_tool = tools["bash"]
+    assert shell_tool.shell_name == "PowerShell"
+    installed_bash.parent.mkdir(parents=True)
+    installed_bash.write_bytes(b"fixture")
+    installed = await tools["local_environment"].execute("git", "ensure")
+    assert tools["bash"] is shell_tool
+    assert shell_tool.shell_name == "bash"
+    assert json.loads(installed.content)["shell"]["name"] == "bash"
+    assert "syntax" in json.loads(installed.content)["shell"]["instruction"]
 
 
 @pytest.mark.asyncio
@@ -1150,10 +1194,17 @@ async def test_acp_session_creation_and_restore_do_not_scan_skills_on_event_loop
                 state.agent.session_log.close()
 
 
-def test_sandbox_prompt_requires_execute_code_for_explicit_python_results():
+def test_sandbox_prompt_requires_real_python_results_without_forcing_one_tool():
     assert "用户要求“用/使用/运行 Python”得到一个具体结果" in SANDBOX_INFO_PROMPT
-    assert "必须调用 `execute_code` 返回真实执行结果" in SANDBOX_INFO_PROMPT
+    assert "必须实际运行 Python 并返回真实执行结果" in SANDBOX_INFO_PROMPT
+    assert "可使用 `execute_code` 或可用的 shell Python" in SANDBOX_INFO_PROMPT
+    assert "必须调用 `execute_code`" not in SANDBOX_INFO_PROMPT
     assert "不要只给代码示例" in SANDBOX_INFO_PROMPT
+
+
+def test_sandbox_prompt_targets_package_installation_without_banning_shell():
+    assert "通过目标解释器的 `-m pip` 安装" in SANDBOX_INFO_PROMPT
+    assert "**绝对禁止** `bash` 跑 `pip install`" not in SANDBOX_INFO_PROMPT
 
 
 def test_sandbox_prompt_limits_single_execute_code_argument_size():
@@ -3445,6 +3496,7 @@ async def test_mcp_reconnect_injects_hidden_deferred_state_into_active_turns_onl
     active_state = agent._sessions[active_session.sessionId]
     inactive_state = agent._sessions[inactive_session.sessionId]
     active_state.turn_active = True
+    active_state.mcp_runtime_updates_requested = True
     runtime_tool = EchoTool()
     runtime_tool.mcp_always_load = True
 
@@ -3579,6 +3631,7 @@ async def test_acp_auth_refresh_reconnects_and_injects_deferred_catalog_update(
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
+    state.mcp_runtime_updates_requested = True
     runtime_tool = EchoTool()
     runtime_tool.mcp_always_load = False
 
@@ -3639,7 +3692,7 @@ async def test_acp_seeds_negotiated_session_continuation_once(
             field_meta={"session_id": "stable-product-session"},
         )
     )
-    assert session.field_meta["capabilities"]["session_continuation_versions"] == [1]
+    assert session.field_meta["capabilities"]["session_continuation_versions"] == [1, 2]
 
     continuation = {
         "schema_version": "officev3-session-continuation/v1",
@@ -3701,6 +3754,7 @@ async def test_initial_mcp_catalog_ready_is_injected_into_active_turn(tmp_path):
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
+    state.mcp_runtime_updates_requested = True
 
     await agent._finalize_mcp_load()
 
@@ -3709,6 +3763,152 @@ async def test_initial_mcp_catalog_ready_is_injected_into_active_turn(tmp_path):
     assert "catalog discovery is complete" in update["content"]
     assert "Retry tool_search" in update["content"]
     assert "ordinary deferred schemas remain hidden" in update["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["ready", "connected", "failed", "disconnected"])
+async def test_mcp_status_during_greeting_does_not_add_model_request(tmp_path, status):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+
+    class GreetingLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            assert agent._inject_mcp_runtime_update(name="demo", state=status) == 0
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
+    llm = GreetingLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    state = agent._sessions[session.sessionId]
+    # A previous turn's MCP activity must not opt the next greeting into updates.
+    state.mcp_runtime_updates_requested = True
+    for _ in range(2):
+        response = await agent.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "你好"}], field_meta={},
+        ))
+        assert response.stopReason == "end_turn"
+    assert llm.calls == 2
+    assert not any(message.source == "runtime" for message in state.agent.messages)
+
+
+@pytest.mark.asyncio
+async def test_mcp_discovery_can_retry_after_readiness_update_and_call_discovered_tool(
+    tmp_path, monkeypatch,
+):
+    catalog = MCPToolCatalog()
+    catalog.mark_loading()
+    monkeypatch.setattr("box_agent.agent.get_mcp_tool_catalog", lambda: catalog)
+    echo = EchoTool()
+    echo.server_name = "demo"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=8, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_sub_agent=False,
+            mcp=MCPConfig(deferred_loading_enabled=True),
+        ),
+    )
+
+    class DiscoveryLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                assert "MCP catalog is still loading" in messages[-1].content
+                catalog.replace_server("demo", [echo])
+                catalog.mark_ready()
+                assert agent._inject_mcp_runtime_update(
+                    name="catalog", state="ready", tool_count=1,
+                ) == 1
+                yield StreamEvent(type="text", delta="Waiting for discovery")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            if self.calls in {1, 3}:
+                if self.calls == 3:
+                    assert messages[-1].source == "runtime"
+                    assert "catalog discovery is complete" in messages[-1].content
+                name, arguments = "tool_search", {"server_name": "demo"}
+            elif self.calls == 4:
+                assert '"activated_count": 1' in messages[-1].content
+                name, arguments = "echo", {"text": "discovered"}
+            else:
+                assert messages[-1].content == "tool:discovered"
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                ToolCall(id=f"call-{self.calls}", type="function", function=FunctionCall(
+                    name=name, arguments=arguments,
+                )),
+            ])
+
+    llm = DiscoveryLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    state = agent._sessions[session.sessionId]
+    state.agent.tools["tool_search"]._readiness_timeout = 0.001
+    response = await agent.prompt(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Find and use echo"}], field_meta={},
+    ))
+    assert response.stopReason == "end_turn"
+    assert llm.calls == 5
+    assert len(state.agent.activated_mcp_tools) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["mcp_config", "remote_echo"])
+async def test_mcp_configuration_and_eager_tool_use_keep_receiving_status_updates(
+    tmp_path, tool_name,
+):
+    class ActiveMCPTool(EchoTool):
+        @property
+        def name(self):
+            return tool_name
+
+    tool = ActiveMCPTool()
+    if tool_name == "remote_echo":
+        tool.server_name = "demo"
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(
+            enable_sub_agent=False,
+            mcp=MCPConfig(deferred_loading_enabled=False),
+        ),
+    )
+
+    class ActiveMCPLLM(DoneLLM):
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type="finish", finish_reason="tool_calls", tool_calls=[
+                    ToolCall(id="mcp-call", type="function", function=FunctionCall(
+                        name=tool_name, arguments={"text": "test"},
+                    )),
+                ])
+                return
+            if self.calls == 2:
+                assert agent._inject_mcp_runtime_update(name="demo", state="connected") == 1
+            else:
+                assert messages[-1].source == "runtime"
+                assert "Server 'demo' is connected" in messages[-1].content
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = ActiveMCPLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [tool], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    # This test exercises status updates after an available tool is used.
+    # Local mcp_config remains deferred even with eager remote MCP loading.
+    agent._sessions[session.sessionId].agent.local_tool_exposure.require_tools([tool_name])
+    response = await agent.prompt(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Use MCP"}], field_meta={},
+    ))
+    assert response.stopReason == "end_turn"
+    assert llm.calls == 3
 
 
 @pytest.mark.asyncio
@@ -3817,6 +4017,7 @@ async def test_mcp_reconnect_failure_injects_non_availability_state(
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
     state = agent._sessions[session.sessionId]
     state.turn_active = True
+    state.mcp_runtime_updates_requested = True
 
     async def reconnect(_name):
         return {"success": False, "error": "connection failed"}
@@ -4278,6 +4479,24 @@ async def test_acp_turn_executes_tool(acp_agent):
         and update.update.rawOutput.get("type") == "agent_progress"
     ]
     assert progress_outputs == []
+    # Legacy chunks are unchanged; identity metadata distinguishes the tool
+    # preamble from the final answer only after the outer prompt settles.
+    chunks = [u.update for u in conn.updates if u.update.sessionUpdate == "agent_message_chunk"]
+    ids = {u.content.text: u.field_meta["messageDisplay"]["messageId"] for u in chunks}
+    receipt = response.field_meta["messageDisplay"]
+    assert ids["calling tool"] != ids["done"]
+    assert receipt["finalMessageIds"] == [ids["done"]]
+    assert receipt["durationMs"] >= 0
+    assert all("phase" not in u.field_meta["messageDisplay"] for u in chunks)
+    # ACP 标准字段和原有正文保持不变；老客户端忽略 _meta 即可按原流程消费。
+    for chunk in chunks:
+        wire = chunk.model_dump(by_alias=True, exclude_none=True)
+        wire.pop("_meta", None)
+        assert wire == {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk.content.text}}
+    for payload in llm_outputs:
+        source = next(chunk for chunk in chunks if chunk.content.text == payload["content"])
+        assert payload["messageDisplay"] == source.field_meta["messageDisplay"]
+
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
 
@@ -4877,6 +5096,10 @@ async def test_acp_goal_autopilot_continues_active_goal_until_complete(tmp_path)
     assert response.field_meta["goalAutopilot"]["continuations"] == 1
     assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
     assert llm.calls == 3
+    receipt = response.field_meta["messageDisplay"]
+    chunks = [u.update for u in conn.updates if u.update.sessionUpdate == "agent_message_chunk"]
+    assert receipt["finalMessageIds"] == [chunks[-1].field_meta["messageDisplay"]["messageId"]]
+    assert chunks[0].field_meta["messageDisplay"]["messageId"] not in receipt["finalMessageIds"]
     state = agent._sessions[session.sessionId]
     assert state.agent.goal is not None
     assert state.agent.goal.status == "complete"
@@ -4914,6 +5137,7 @@ async def test_acp_goal_autopilot_stops_when_budget_exhausted(tmp_path):
     assert response.stopReason == "max_turn_requests"
     assert response.field_meta["goalAutopilot"]["continuations"] == 1
     assert response.field_meta["goalAutopilot"]["budgetExhausted"] is True
+    assert response.field_meta["messageDisplay"]["finalMessageIds"] == []
     assert response.field_meta["goalAutopilot"]["noProgressExhausted"] is False
     assert llm.calls == 2
     state = agent._sessions[session.sessionId]
@@ -5220,7 +5444,7 @@ async def test_acp_general_mode_keeps_cwd_and_injects_directory_policy(tmp_path)
     assert "会生成多份相关文件" not in state.agent.system_prompt
     assert session.field_meta == {
         "capabilities": {
-            "session_continuation_versions": [1],
+            "session_continuation_versions": [1, 2],
             "managed_mcp_config_versions": [1],
         }
     }
@@ -7008,7 +7232,7 @@ async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path
 
     assert session.field_meta == {
         "capabilities": {
-            "session_continuation_versions": [1],
+            "session_continuation_versions": [1, 2],
             "managed_mcp_config_versions": [1],
         }
     }
@@ -7378,7 +7602,8 @@ async def test_acp_prompt_includes_skill_runtime_context(tmp_path, monkeypatch):
     assert "## Skill Runtime Context" in prompt
     assert "$BOX_AGENT_PYTHON" in prompt
     assert "- Node:" in prompt
-    assert "不可用" in prompt
+    assert "- Node: 初始化时未确认可用的 Node；当前可用性以实际检测和工具执行结果为准" in prompt
+    assert "local_environment" in prompt
     assert "npm install -g" in prompt
     assert "$BOX_AGENT_SKILL_TOOLS_ROOT" in prompt
 
@@ -8451,3 +8676,59 @@ async def test_acp_mcp_status_reports_browser_isolation_mode(tmp_path, monkeypat
     result = await agent.extMethod("mcp/status", {})
 
     assert result["browser"] == snapshot
+
+
+@pytest.mark.parametrize("kind, reuse_id", [("text_continuation", True), ("task_continuation", False), ("stream_recovery", False)])
+def test_display_receipt_preserves_only_explicit_text_continuations(kind, reuse_id):
+    from box_agent.acp.message_display import MessageDisplay
+    from box_agent.events import ContentEvent, LLMOutputEvent, DoneEvent, StopReason
+    from box_agent.injections import InjectionKind, MessageInjection
+
+    display = MessageDisplay()
+    first = display.observe(ContentEvent(content="first", _streaming=True))["messageId"]
+    display.observe(LLMOutputEvent(step=1, content="first"))
+    display.observe(MessageInjection(InjectionKind(kind), "internal").apply([]))
+    last = display.observe(ContentEvent(content="last", _streaming=True))["messageId"]
+    display.observe(LLMOutputEvent(step=2, content="last"))
+    assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == []
+    display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="last"))
+    ids = display.receipt(completed=True, duration_ms=1)["finalMessageIds"]
+    assert ids == [last]
+    assert (first == last) is reuse_id
+    assert display.receipt(completed=False, duration_ms=1)["finalMessageIds"] == []
+    display.begin_run()
+    assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == []
+
+
+def test_display_receipt_does_not_merge_partial_failed_stream_into_retry():
+    from box_agent.acp.message_display import MessageDisplay
+    from box_agent.events import ContentEvent, LLMOutputEvent, DoneEvent, StopReason
+    from box_agent.injections import InjectionKind, MessageInjection
+
+    display = MessageDisplay()
+    partial = display.observe(ContentEvent(content="partial", _streaming=True))["messageId"]
+    display.observe(MessageInjection(InjectionKind.STREAM_RECOVERY, "retry").apply([]))
+    final = display.observe(ContentEvent(content="answer", _streaming=True))["messageId"]
+    assert partial != final
+    display.observe(LLMOutputEvent(step=2, content="answer"))
+    display.observe(DoneEvent(stop_reason=StopReason.END_TURN, final_content="answer"))
+    assert display.receipt(completed=True, duration_ms=1)["finalMessageIds"] == [final]
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_display_output_identity_changes_for_continuation_snapshot(streamed):
+    from box_agent.acp.message_display import MessageDisplay
+    from box_agent.events import ContentEvent, LLMOutputEvent
+    from box_agent.injections import InjectionKind, MessageInjection
+
+    display = MessageDisplay()
+    first = display.observe(ContentEvent(content="Hello wor", _streaming=True))
+    first_snapshot = display.observe(LLMOutputEvent(step=1, content="Hello wor"))
+    assert first == first_snapshot
+    display.observe(MessageInjection(InjectionKind.TEXT_CONTINUATION, "continue").apply([]))
+    second = display.observe(ContentEvent(content="ld.", _streaming=True)) if streamed else None
+    second_snapshot = display.observe(LLMOutputEvent(step=2, content="ld."))
+    assert first["messageId"] == second_snapshot["messageId"]
+    assert first["outputId"] != second_snapshot["outputId"]
+    if streamed:
+        assert second == second_snapshot

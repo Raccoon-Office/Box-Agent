@@ -1,0 +1,6 @@
+{"id": "r-wait-implicit", "query": "帮我算一下销售表里所有订单的总金额，写到 total.json。表格我还没传上来。", "input_files": []}
+{"id": "r-jsonl-implicit", "query": "把 records.jsonl 里 id 为 731 的那条记录原样写到 selected.json。", "input_files": ["records.jsonl"]}
+{"id": "r-git-dirty", "query": "calc.py 里 add() 算出来的结果不对，帮我修好，跑一下测试确认通过。", "input_files": [], "session_meta": {"session_mode": "code_agent"}, "workspace_setup": {"files": ["calc.py", "test_calc.py"], "git_commit": true, "dirty_files": ["NOTES.md"]}}
+{"id": "r-code-locate", "query": "orders.py 里的 total() 在哪些文件里被调用？只需要回答，不要修改任何文件。", "input_files": [], "session_meta": {"session_mode": "code_agent"}, "workspace_setup": {"files": ["orders.py", "report.py", "invoice.py", "util.py"]}}
+{"id": "r-analysis-sum", "query": "按地区汇总 sales.csv 的销售额，写到 summary.json，格式是 {地区: 合计}。", "input_files": ["sales.csv"], "session_meta": {"session_mode": "data_analysis"}}
+{"id": "r-image-request", "query": "帮我画一张橙色小猫的插画，存成 cat.png。", "input_files": []}

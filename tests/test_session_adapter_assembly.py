@@ -69,11 +69,11 @@ async def test_shared_assembly_passes_session_mode_to_workspace_tools(tmp_path):
     )
     try:
         assert received and received[0]["session_mode"] == "code_agent"
-        assert "已知文件路径" in session.agent.system_prompt
+        assert "缺少读取或搜索能力时明确说明验证边界" in session.agent.system_prompt
         assert "开放式项目分析" in session.agent.system_prompt
         assert "截断或超时" in session.agent.system_prompt
-        assert "find . -mindepth 1 -maxdepth 1 -print" in session.agent.system_prompt
-        assert "Get-ChildItem -Name" in session.agent.system_prompt
+        assert "使用 Bash 执行" not in session.agent.system_prompt
+        assert "当前会话没有 shell 执行能力" in session.agent.system_prompt
     finally:
         await session.aclose()
 
@@ -200,14 +200,16 @@ async def test_acp_preparation_preserves_direct_prompt_and_tool_contract(tmp_pat
     state = adapter._sessions[result.sessionId]
     resources = state.plugin_session.resources
     options = resources.context.options
+    available_tools = frozenset(tool.name for tool in resources.tools)
     expected = adapter._build_session_prompt(
         options.session_mode, workspace=tmp_path, policy=options.effective_policy,
         env_context=state.env_context, skill_runtime_context=state.skill_runtime_context,
         enable_general_directory_policy=(not utility and options.session_mode in {None, "general"}),
+        available_tools=available_tools,
     )
     if not utility:
         expected = append_prompt_segment(expected, "MEMORY BLOCK")
-        expected = f"{expected.rstrip()}\n\n{build_image_generation_prompt(config)}"
+        expected = f"{expected.rstrip()}\n\n{build_image_generation_prompt(config, tools=available_tools)}"
         assert recorded and recorded[0][0] == recorded[0][1]
         assert [tool.to_schema() for tool in resources.tools] == recorded[0][0]
     else:
@@ -293,9 +295,11 @@ async def test_cli_shared_prompt_controls_model_and_session_closes(tmp_path, mon
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("BOX_AGENT_HOME", raising=False)
-    # Python 3.10 has exc_info(), but not exception().
-    monkeypatch.delattr(sys, "exception", raising=False)
     import box_agent.cli as cli
+    # Simulate the CLI's Python 3.10 API without changing the stdlib's sys module.
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(**{
+        key: value for key, value in vars(sys).items() if key != "exception"
+    }))
     from tests.test_cli_runtime import _CaptureStreamLLM
     from box_agent.events import DoneEvent, StopReason
     config_path = tmp_path / "config.yaml"

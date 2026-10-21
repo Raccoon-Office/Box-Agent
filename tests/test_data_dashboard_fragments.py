@@ -27,7 +27,13 @@ def test_dashboard_skill_routes_large_html_to_write_file_chunks() -> None:
     assert "禁止用 `bash` heredoc" in instructions
 
 
-def _run_merger(tmp_path: Path, contract: dict, fragments: list[dict]) -> subprocess.CompletedProcess[str]:
+def _run_merger(
+    tmp_path: Path,
+    contract: dict,
+    fragments: list[dict],
+    *,
+    template: Path = TEMPLATE,
+) -> subprocess.CompletedProcess[str]:
     if NODE is None:
         pytest.skip("Node.js is required to test the dashboard fragment merger")
 
@@ -44,7 +50,7 @@ def _run_merger(tmp_path: Path, contract: dict, fragments: list[dict]) -> subpro
             str(NODE),
             str(MERGER),
             "--template",
-            str(TEMPLATE),
+            str(template),
             "--contract",
             str(contract_path),
             "--out",
@@ -80,7 +86,7 @@ def test_dashboard_fragments_merge_in_contract_order(tmp_path: Path) -> None:
             "pageId": "P1",
             "data": {"kpis": [{"label": "GMV", "value": 12}]},
             "html": '<section class="page" id="page-P1"><div id="P1-kpis" class="kpi-grid"></div></section>',
-            "renderer": "() => { ui.kpis('P1-kpis', D.P1.kpis); }",
+            "renderer": "() => { const d = D.P1; ui.kpis('P1-kpis', d.kpis); }",
             "css": "#page-P1 .kpi-grid { margin-top: 8px; }",
         },
     ]
@@ -110,6 +116,59 @@ def test_dashboard_fragments_merge_in_contract_order(tmp_path: Path) -> None:
         check=False,
     )
     assert syntax_check.returncode == 0, syntax_check.stderr
+
+
+@pytest.mark.parametrize("renderer", [
+    "() => { const label = 'a\nb'; }",
+    "() => { chart('P1-chart', { series: [] });",
+])
+def test_dashboard_fragments_reject_invalid_javascript_without_replacing_output(
+    tmp_path: Path, renderer: str,
+) -> None:
+    output_path = tmp_path / "dashboard.html"
+    output_path.write_text("previous valid dashboard", encoding="utf-8")
+    contract = {"title": "Report", "pages": [{"id": "P1", "label": "Overview"}]}
+    fragments = [{
+        "pageId": "P1",
+        "data": {},
+        "html": '<section class="page" id="page-P1"></section>',
+        "renderer": renderer,
+    }]
+
+    result = _run_merger(tmp_path, contract, fragments)
+
+    assert result.returncode == 1
+    assert "fragment-0.json.renderer" in result.stderr
+    assert "invalid JavaScript syntax" in result.stderr
+    assert output_path.read_text(encoding="utf-8") == "previous valid dashboard"
+
+
+def test_dashboard_fragments_validate_merged_scripts_without_running_them(tmp_path: Path) -> None:
+    contract = {"title": "Report", "pages": [{"id": "P1", "label": "Overview"}]}
+    fragments = [{
+        "pageId": "P1",
+        "data": {},
+        "html": '<section class="page" id="page-P1"></section>',
+        "renderer": "() => { throw new Error('renderer must not run during merge'); }",
+    }]
+    template_path = tmp_path / "template.html"
+    template_text = TEMPLATE.read_text(encoding="utf-8")
+    template_path.write_text(template_text, encoding="utf-8")
+
+    valid = _run_merger(tmp_path, contract, fragments, template=template_path)
+
+    assert valid.returncode == 0, valid.stderr
+    previous_output = (tmp_path / "dashboard.html").read_text(encoding="utf-8")
+    template_path.write_text(
+        template_text.replace("<script>", "<script>\nconst broken = ;", 1), encoding="utf-8",
+    )
+
+    invalid = _run_merger(tmp_path, contract, fragments, template=template_path)
+
+    assert invalid.returncode == 1
+    assert "dashboard.html.script-2" in invalid.stderr
+    assert "invalid JavaScript syntax" in invalid.stderr
+    assert (tmp_path / "dashboard.html").read_text(encoding="utf-8") == previous_output
 
 
 def test_dashboard_fragments_reject_shared_css(tmp_path: Path) -> None:
@@ -144,6 +203,21 @@ def test_dashboard_fragments_reject_shared_css(tmp_path: Path) -> None:
         (
             '<section class="page" id="page-P1"></section>',
             "() => { D.P1 = {}; }",
+            "must not declare shared dashboard state",
+        ),
+        (
+            '<section class="page" id="page-P1"></section>',
+            "() => { const D = {}; }",
+            "must not declare shared dashboard state",
+        ),
+        (
+            '<section class="page" id="page-P1"></section>',
+            "() => { renderers.P1 = () => {}; }",
+            "must not declare shared dashboard state",
+        ),
+        (
+            '<section class="page" id="page-P1"></section>',
+            "() => { const label = '</SCRIPT>'; }",
             "must not declare shared dashboard state",
         ),
     ],

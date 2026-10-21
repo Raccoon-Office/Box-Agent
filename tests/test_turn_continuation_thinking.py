@@ -49,6 +49,7 @@ async def test_continuation_judge_matches_current_main_request_thinking_on_wire(
     llm = LLMClient(
         api_key="test", provider=LLMProvider.OPENAI,
         api_base="https://inference.example/v1", model="SenseNova-Continuation-Test",
+        max_output_tokens=100_000,
         reasoning_effort_when_disabled=disabled_effort,
     )
     await llm.aclose()
@@ -84,6 +85,9 @@ async def test_continuation_judge_matches_current_main_request_thinking_on_wire(
         "decision_tool_available": True,
     }
     assert judge["model"] == main["model"]
+    assert main["max_tokens"] == 100_000
+    assert judge["max_tokens"] == (12_288 if thinking_enabled else 8_192)
+    assert llm.max_output_tokens == 100_000
     assert main["reasoning_effort"] == (
         "high" if thinking_enabled else disabled_effort or "none"
     )

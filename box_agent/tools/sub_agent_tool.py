@@ -38,8 +38,9 @@ from ..schema import Message
 from ..skill_dependencies import SkillDependencyError
 from ..session_log import SessionLog, SessionLogDurabilityError
 from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
+from .file_change_receipts import FileWriteInvocationContext
 from .schema_validation import ToolArgumentIssue
-from .safety import detect_dangerous_command
+from .jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from .skill_catalog_tool import ListSkillsTool
 from .skill_tool import GetSkillTool
 from .sub_agent_capabilities import (
@@ -140,16 +141,28 @@ class _WriteScopedTool(Tool):
         return self._tool.parameters
 
     async def execute(self, **kwargs: Any) -> ToolResult:
-        path = kwargs.get("path")
+        if self.name == "publish_artifact":
+            context = (FileWriteInvocationContext(validate_write_target=self._write_scope_error)
+                       if kwargs.get("action") in {"begin", "commit", "abort"} else None)
+            return await self._tool.invoke(kwargs, context=context)
+        path_key = "output_path" if self.name == "extract_email_attachment" else "path"
+        path = kwargs.get(path_key)
         if not isinstance(path, str) or not path.strip():
             return ToolResult(
                 success=False,
-                error="WRITE_SCOPE_VIOLATION: a non-empty path is required.",
+                error=f"WRITE_SCOPE_VIOLATION: a non-empty {path_key} is required.",
             )
         target = Path(path).expanduser()
         if not target.is_absolute():
             target = self._workspace / target
         target = target.resolve()
+        if error := self._write_scope_error(target):
+            return error
+        return await self._tool.invoke(
+            kwargs, context=FileWriteInvocationContext(validate_write_target=self._write_scope_error),
+        )
+
+    def _write_scope_error(self, target: Path) -> ToolResult | None:
         if not any(target == root or root in target.parents for root in self._roots):
             return ToolResult(
                 success=False,
@@ -160,96 +173,15 @@ class _WriteScopedTool(Tool):
                     "allowed_roots": [str(root) for root in self._roots],
                 },
             )
-        return await self._tool.execute(**kwargs)
-
-
-class _PermissionGatedBashTool(Tool):
-    """Require one-shot parent approval for every delegated shell command."""
-
-    _REQUESTED_SCOPE = "delegated_bash_command"
-
-    def __init__(self, tool: Tool, *, title: str | None, scopes: tuple[str, ...] | None):
-        self._tool = tool
-        self._title = title or "sub-agent"
-        self._scopes = scopes or ()
-        self._approved_commands: set[str] = set()
-
-    @property
-    def name(self) -> str:
-        return self._tool.name
-
-    @property
-    def aliases(self) -> tuple[str, ...]:
-        return self._tool.aliases
-
-    @property
-    def description(self) -> str:
-        return self._tool.description
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return self._tool.parameters
-
-    def approve_permission_request(self, permission_request: dict[str, Any]) -> None:
-        if permission_request.get("requested_scope") != self._REQUESTED_SCOPE:
-            approver = getattr(self._tool, "approve_permission_request", None)
-            if callable(approver):
-                approver(permission_request)
-            return
-        command = permission_request.get("command")
-        if isinstance(command, str) and command:
-            self._approved_commands.add(command)
-
-    async def execute(self, **kwargs: Any) -> ToolResult:
-        command = kwargs.get("command")
-        if not isinstance(command, str) or not command.strip():
-            return ToolResult(success=False, error="A non-empty delegated bash command is required.")
-        if command not in self._approved_commands:
-            rendered_scopes = ", ".join(self._scopes) if self._scopes else "none"
-            danger_reason = detect_dangerous_command(command)
-            risk = "Delegated shell commands can read, write, start processes, and use the network."
-            if danger_reason:
-                risk += f" Additional command risk: {danger_reason}."
-            return ToolResult(
-                success=False,
-                error="Parent approval is required for this delegated shell command.",
-                permission_request={
-                    "type": "permission_request",
-                    "scope": "safety",
-                    "requested_scope": self._REQUESTED_SCOPE,
-                    "reason": (
-                        f"Sub-agent '{self._title}' requested an exact shell command. "
-                        f"Declared file-tool write scope: {rendered_scopes}."
-                    ),
-                    "command": command,
-                    "risk": risk,
-                    "temporary_supported": True,
-                    "persistent_supported": False,
-                },
-            )
-
-        self._approved_commands.remove(command)
-        danger_reason = detect_dangerous_command(command)
-        if danger_reason:
-            approver = getattr(self._tool, "approve_permission_request", None)
-            if callable(approver):
-                approver(
-                    {
-                        "scope": "safety",
-                        "requested_scope": "dangerous_command",
-                        "command": command,
-                        "risk": danger_reason,
-                    }
-                )
-        return await self._tool.execute(**kwargs)
+        return None
 
 
 class SubAgentTool(EventEmittingTool):
     """Run a task in an isolated agent context.
 
-    The child agent shares the parent tool instances (so Jupyter kernel
-    sessions, sandbox state, etc. are preserved), but has its own message
-    history. In an automatic hosted-model session it may receive an isolated
+    The child agent shares parent tool permissions, with isolated Python
+    kernel sessions and its own message history. In an automatic hosted-model
+    session it may receive an isolated
     model binding selected from the host allowlist; manual sessions keep the
     parent model. Only the final textual summary is returned to the parent.
     """
@@ -265,6 +197,8 @@ class SubAgentTool(EventEmittingTool):
         budgets = (context.child_budgets if context is not None else ()) or current_budgets()
         with bind_budgets(budgets):
             return await super()._invoke_validated(arguments, context=context)
+
+    accepts_child_prompt_projection = True
 
     def __init__(
         self,
@@ -445,7 +379,7 @@ class SubAgentTool(EventEmittingTool):
             "the startup and merge cost. The parent remains responsible for synthesis, conflicts, "
             "final deliverables, and verification.\n\n"
             "Pass a complete `task` brief. `required_tools` defaults only to available trusted "
-            "read/search tools (`read_file`, `query_jsonl`, `search_files`, `grep`, `glob`, "
+            "read/search tools (`read_file`, `read_email`, `query_jsonl`, `search_files`, `grep`, `glob`, "
             "`web_search`, `web_extract`). Declaring `skills` also includes available "
             "get_skill/list_skills, "
             "restricted to assigned Skills and dependencies. With an exact "
@@ -459,8 +393,10 @@ class SubAgentTool(EventEmittingTool):
             "`managed_browser_handle_dialog`, `managed_browser_take_screenshot`) may be named "
             "explicitly when the parent session already has them. Image tools require explicit "
             "selection. "
-            "`bash` is available only when named explicitly and every delegated "
-            "command requires one-shot parent-session approval. Path-based "
+            "`bash` and `execute_code` may be named explicitly when the parent has them. "
+            "Bash uses the parent's existing permissions and approval rules; Python "
+            "uses a child-isolated kernel with the parent's runtime and workspace. "
+            "`sandbox_status` reports only this child's kernels. Path-based "
             "write tools require an exact `write_scope`, with disjoint scopes for parallel "
             "children.\n\n"
             "For the same read-only operation over known local text files, pass their paths in "
@@ -825,18 +761,12 @@ class SubAgentTool(EventEmittingTool):
         spec: DelegationSpec,
     ) -> dict[str, Tool]:
         scopes = spec.constraints.write_scope
-        if not scopes and "bash" not in tools:
+        if not scopes and "publish_artifact" not in tools:
             return tools
         scoped: dict[str, Tool] = {}
         for name, tool in tools.items():
-            if name in {"write_file", "append_file", "edit_file"}:
+            if name in PATH_SCOPED_WRITE_TOOLS or name == "publish_artifact":
                 scoped[name] = _WriteScopedTool(tool, self._workspace_dir, scopes or ())
-            elif name == "bash":
-                scoped[name] = _PermissionGatedBashTool(
-                    tool,
-                    title=spec.title,
-                    scopes=scopes,
-                )
             else:
                 scoped[name] = tool
         return scoped
@@ -1532,6 +1462,21 @@ class SubAgentTool(EventEmittingTool):
         if scope_failure is not None:
             return self._failure_result(scope_failure, parsed)
         child_tools = self._apply_write_scopes(self._scope_skill_tools(resolved), parsed)
+        child_sandbox = None
+        if {"execute_code", "sandbox_status"} & set(child_tools):
+            parent_sandbox = live_tools.get("execute_code")
+            if not isinstance(parent_sandbox, JupyterSandboxTool):
+                return self._failure_result(CapabilityFailure(
+                    code="CAPABILITY_CONSTRAINT_CONFLICT",
+                    message="The parent Python tool does not support isolated child kernels.",
+                    retryable=False,
+                    details={"tool": "execute_code", "denied_reason": "kernel_isolation_unavailable"},
+                ), parsed)
+            child_sandbox = parent_sandbox.fork_for_child(sub_agent_id)
+            if "execute_code" in child_tools:
+                child_tools["execute_code"] = child_sandbox
+            if "sandbox_status" in child_tools:
+                child_tools["sandbox_status"] = SandboxStatusTool(child_sandbox)
         messages = self._bounded_explicit_messages(parsed, resolved, child_tools)
         if isinstance(messages, CapabilityFailure):
             return self._failure_result(messages, parsed)
@@ -1604,6 +1549,8 @@ class SubAgentTool(EventEmittingTool):
             )
         finally:
             reset_browser_session_key(token)
+            if child_sandbox is not None:
+                await child_sandbox.shutdown_owned_sessions()
             try:
                 await close_browser_session(child_key)
             except Exception as error:

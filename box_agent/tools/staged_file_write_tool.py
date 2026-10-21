@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .argument_limits import MAX_GENERATED_BODY_CHARS, RECOMMENDED_GENERATED_BODY_CHARS
-from .base import Tool, ToolResult
+from .base import Tool, ToolInvocationContext, ToolResult
+from .file_change_receipts import before_write, destination_lock, file_change_result
 from .file_tools import _resolve_from_active_root
 from .safety import backup_file, builtin_skill_write_error, validate_path_in_workspace
 
@@ -113,6 +114,16 @@ class StagedFileWriteTool(Tool):
             "required": ["action"],
             "additionalProperties": False,
         }
+
+    async def _invoke_validated(
+        self, arguments: dict[str, Any], *, context: ToolInvocationContext | None,
+    ) -> ToolResult:
+        if arguments["action"] == "commit":
+            resolved = self._get_write(arguments.get("write_id"))
+            if not isinstance(resolved, ToolResult):
+                async with destination_lock(resolved[1].target):
+                    return await super()._invoke_validated(arguments, context=context)
+        return await super()._invoke_validated(arguments, context=context)
 
     async def execute(
         self,
@@ -376,9 +387,10 @@ class StagedFileWriteTool(Tool):
         state.target.parent.mkdir(parents=True, exist_ok=True)
         if state.target.exists():
             backup_file(state.target)
+        before = before_write(state.target)
         os.replace(state.temporary, state.target)
         self._writes.pop(resolved_write_id, None)
-        return ToolResult(
+        result = ToolResult(
             success=True,
             content=(
                 f"Committed {state.target} ({state.size_bytes} bytes, sha256={digest})."
@@ -390,6 +402,9 @@ class StagedFileWriteTool(Tool):
                 "sha256": digest,
             },
         )
+
+        return file_change_result(result, self.workspace_dir.resolve(),
+                                  state.target.parent.resolve() / state.target.name, before, digest)
 
     def _abort(self, write_id: str | None) -> ToolResult:
         resolved = self._get_write(write_id)

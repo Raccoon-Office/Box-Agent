@@ -8,22 +8,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import ntpath
 import os
 import platform
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, model_validator
 
 from ..config import ToolsConfig
+from .chat_references import bash_chat_mutation_error
 from .base import Tool, ToolResult
 from .argument_limits import MAX_BASH_COMMAND_CHARS
 from .pptx_safety import (
@@ -142,8 +146,7 @@ def _format_bash_result_content(
     return output or "(no output)"
 
 
-# Shells whose syntax is POSIX-compatible (supports &&, ||, for/do/done, etc.)
-_POSIX_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "ash"})
+# Shells supporting the explicit pipeline failure contract.
 _PIPEFAIL_SHELLS = frozenset({"bash", "zsh", "ksh"})
 _LARK_CLI_RE = re.compile(
     r"(?:\blark-cli(?:\.(?:cmd|exe))?\b|\$BOX_AGENT_LARK_CLI\b|\$\{BOX_AGENT_LARK_CLI\}|%BOX_AGENT_LARK_CLI%)",
@@ -235,19 +238,18 @@ def _path_requires_write_permission(command: str, path: str) -> bool:
 
 
 def _resolve_login_shell() -> str:
-    """Return a POSIX-compatible login shell path.
+    """Resolve Bash regardless of the user's interactive shell.
 
-    Uses ``$SHELL`` if it names a known POSIX shell **and** the path exists
-    and is executable; otherwise walks a fallback chain.  This avoids
-    failures from stale paths (Nix store, shell upgrades, devcontainers).
+    The tool and bundled Skills advertise Bash syntax. In particular, zsh's
+    equals expansion and glob rules must not change that execution contract.
+    The inherited environment still supplies the user's prepared PATH.
     """
     shell = os.environ.get("SHELL", "")
-    if shell and os.path.basename(shell) in _POSIX_SHELLS and os.access(shell, os.X_OK):
-        return shell
-    for fallback in ("/bin/bash", "/bin/sh"):
-        if os.access(fallback, os.X_OK):
-            return fallback
-    return "/bin/sh"  # last resort — always present on Unix
+    candidates = (shell, "/bin/bash", "/usr/bin/bash", shutil.which("bash") or "")
+    for candidate in candidates:
+        if candidate and os.path.basename(candidate) == "bash" and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("BASH_NOT_FOUND: the bash tool requires Bash on Unix")
 
 
 def _detect_lark_user_mode_violation(command: str) -> str | None:
@@ -829,6 +831,15 @@ class BackgroundShellManager:
         if not shell:
             raise ValueError(f"Shell not found: {bash_id}")
 
+        # A stopped reader cannot drain a paused pipe. Close that pipe before
+        # process.wait(), which can otherwise wait for pipe EOF after exit.
+        reader = cls._monitor_tasks.get(bash_id)
+        if reader is None or reader.done():
+            transport = getattr(shell.process, "_transport", None)
+            pipe = transport.get_pipe_transport(1) if transport is not None else None
+            if pipe is not None:
+                pipe.close()
+
         # Terminate the process
         await shell.terminate()
 
@@ -932,6 +943,7 @@ class BashTool(Tool):
             _DEFAULT_TOOLS_CONFIG.bash_default_timeout_seconds
         ),
         max_timeout_seconds: int = _DEFAULT_TOOLS_CONFIG.bash_max_timeout_seconds,
+        pptx_sync_script_provider: Callable[[], Path | None] | None = None,
     ):
         """Initialize BashTool with OS-specific shell detection.
 
@@ -959,6 +971,7 @@ class BashTool(Tool):
             raise ValueError(
                 "max_timeout_seconds cannot be lower than default_timeout_seconds"
             )
+        self._pptx_sync_script_provider = pptx_sync_script_provider
         self.default_timeout_seconds = default_timeout_seconds
         self.max_timeout_seconds = max_timeout_seconds
         self.is_windows = platform.system() == "Windows"
@@ -971,43 +984,14 @@ class BashTool(Tool):
         self._bundled_win_bash: str | None = None
         self._bundled_win_path_dirs: list[str] = []
         if self.is_windows:
-            bundled = bundled_win_bash()
-            if bundled is not None:
-                self._bundled_win_bash = str(bundled)
-                self.shell_name = "bash"
-                # bash.exe lives at <PortableGit>/usr/bin/bash.exe. We launch
-                # bash without ``--login`` to avoid MSYS profile slow-start,
-                # which means /etc/profile never runs and coreutils dirs are
-                # absent from PATH. Prepend the three PortableGit search dirs
-                # explicitly so the LLM's `find`/`grep`/`sed`/`git` resolve.
-                portable_git_root = bundled.parent.parent.parent
-                self._bundled_win_path_dirs = [
-                    str(portable_git_root / "usr" / "bin"),
-                    str(portable_git_root / "mingw64" / "bin"),
-                    str(portable_git_root / "cmd"),
-                ]
-                # Some Electron launchers (and the restart-electron-foreground
-                # PowerShell helper) strip the Win system dirs from the env
-                # they hand to box-agent-acp, which leaves `powershell.exe`,
-                # `cmd.exe`, `where`, etc. unreachable from the LLM's bash.
-                # Append them defensively after the PortableGit dirs so the
-                # bundled coreutils still take precedence.
-                sys_root = os.environ.get("SystemRoot") or r"C:\Windows"
-                self._bundled_win_path_dirs.extend([
-                    os.path.join(sys_root, "system32"),
-                    sys_root,
-                    os.path.join(sys_root, "system32", "Wbem"),
-                    os.path.join(sys_root, "system32", "WindowsPowerShell", "v1.0"),
-                ])
+            self._refresh_windows_shell(runtime_env)
             log.info(
                 "bash_tool/init shell=%s bundled_bash=%s frozen=%s path_dirs=%s",
                 self.shell_name, self._bundled_win_bash,
                 getattr(sys, "frozen", False), self._bundled_win_path_dirs,
             )
-        # Unix: resolve login shell so subprocess inherits user's PATH.
-        # Only trust known POSIX-compatible shells; fall back to /bin/bash
-        # for fish, csh, and other non-POSIX shells whose syntax is
-        # incompatible with the commands the LLM generates.
+        # Unix: keep the advertised Bash syntax independent of $SHELL.
+        # PATH and managed runtime environment are inherited as before.
         if not self.is_windows:
             self._login_shell = _resolve_login_shell()
         self.workspace_dir = workspace_dir
@@ -1041,6 +1025,31 @@ class BashTool(Tool):
         if self._subprocess_env is not None:
             self._subprocess_env.pop("BOX_AGENT_OUTPUT_DIR", None)
 
+    def _refresh_windows_shell(self, runtime_env: dict[str, str] | None = None) -> None:
+        """Resolve the shell again after the host finishes preparing a runtime."""
+        env = runtime_env or os.environ
+        if "BOX_AGENT_BUNDLED_BASH" in env:
+            candidate = env.get("BOX_AGENT_BUNDLED_BASH")
+            bundled = Path(candidate) if candidate and Path(candidate).is_file() else None
+        else:
+            bundled = bundled_win_bash()
+        self._bundled_win_bash = str(bundled) if bundled is not None else None
+        self.shell_name = "bash" if bundled is not None else "PowerShell"
+        self._bundled_win_path_dirs = []
+        sys_root = env.get("SystemRoot") or os.environ.get("SystemRoot") or r"C:\Windows"
+        self._powershell_executable = ntpath.join(
+            sys_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+        )
+        if bundled is not None:
+            root = bundled.parent.parent.parent
+            # Non-login Bash needs PortableGit's utilities and Windows system tools.
+            self._bundled_win_path_dirs = [
+                str(root / "usr" / "bin"), str(root / "mingw64" / "bin"),
+                str(root / "cmd"), ntpath.join(sys_root, "system32"), sys_root,
+                ntpath.join(sys_root, "system32", "Wbem"),
+                ntpath.dirname(self._powershell_executable),
+            ]
+
     def update_runtime_env(self, values: dict[str, str | None]) -> None:
         """Update environment values inherited by future subprocesses.
 
@@ -1059,6 +1068,16 @@ class BashTool(Tool):
                 self._subprocess_env.pop(key, None)
             elif isinstance(value, str):
                 self._subprocess_env[key] = value
+        if not self.is_windows and isinstance(values.get("PATH"), str):
+            prefixes = (
+                values["PATH"].split(os.pathsep)
+                + self._subprocess_env.get("BOX_AGENT_SKILL_PATH_PREFIX", "").split(os.pathsep)
+            )
+            self._subprocess_env["BOX_AGENT_SKILL_PATH_PREFIX"] = os.pathsep.join(
+                dict.fromkeys(path for path in prefixes if path)
+            )
+        if self.is_windows and "BOX_AGENT_BUNDLED_BASH" in values:
+            self._refresh_windows_shell(self._subprocess_env)
 
     async def cleanup_background_processes(
         self,
@@ -1097,10 +1116,39 @@ class BashTool(Tool):
     async def _create_subprocess(
         self, command: str, *, merge_stderr: bool = False,
     ) -> asyncio.subprocess.Process:
+        from .python_mutation_guard import PythonMutationGuard, uses_python
+
+        guard = None
+        if uses_python(command):
+            startup = asyncio.create_task(asyncio.to_thread(PythonMutationGuard, self._subprocess_env))
+            try:
+                guard = await asyncio.shield(startup)
+            except asyncio.CancelledError:
+                guard = await asyncio.shield(startup)
+                await asyncio.to_thread(guard.close)
+                raise
+        try:
+            process = await self._spawn_subprocess(
+                command, merge_stderr=merge_stderr,
+                environment=guard.environment if guard else self._subprocess_env,
+            )
+        except BaseException:
+            if guard:
+                await asyncio.to_thread(guard.close)
+            raise
+        if guard:
+            # The lease belongs to the process, including background jobs. It
+            # must outlive execute() and never mutate the tool's cached env.
+            process._box_agent_guard_task = asyncio.create_task(guard.close_on_exit(process))
+        return process
+
+    async def _spawn_subprocess(
+        self, command: str, *, merge_stderr: bool = False, environment: dict | None = None,
+    ) -> asyncio.subprocess.Process:
         """Create subprocess with platform-appropriate shell.
 
-        On Windows uses PowerShell; on Unix uses the user's login shell
-        (``$SHELL -l -c``) so that PATH from profile scripts is inherited.
+        On Windows uses PowerShell; on Unix uses Bash (independent of $SHELL)
+        (``bash -l -c``) so that PATH from Bash profile scripts is inherited.
         When a sandbox venv is active, ``-l`` is omitted to keep the venv
         PATH authoritative.
         """
@@ -1115,8 +1163,8 @@ class BashTool(Tool):
                 # mutating the cached ``_subprocess_env``. Fall back to the
                 # process env when no custom env was prepared.
                 spawn_env = (
-                    dict(self._subprocess_env)
-                    if self._subprocess_env is not None
+                    dict(environment)
+                    if environment is not None
                     else os.environ.copy()
                 )
                 if self._bundled_win_path_dirs:
@@ -1144,12 +1192,12 @@ class BashTool(Tool):
                 command[:500], self.workspace_dir, merge_stderr,
             )
             return await asyncio.create_subprocess_exec(
-                "powershell.exe", "-NoProfile", "-Command", command,
+                self._powershell_executable, "-NoProfile", "-Command", command,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
-                env=self._subprocess_env,
+                env=environment,
             )
         else:
             args = [self._login_shell]
@@ -1168,7 +1216,7 @@ class BashTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
-                env=self._subprocess_env,
+                env=environment,
                 start_new_session=True,
             )
 
@@ -1393,10 +1441,13 @@ class BashTool(Tool):
         shell_examples = {
             "Windows": f"""Execute PowerShell commands in foreground or background.
 
+Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
+
 Do NOT use Get-Content/type to read files; use read_file instead.
 For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
 For a one-level directory view, use a read-only non-recursive command such as Get-ChildItem -Name. Do not use PowerShell for recursive file discovery or content search.
 Reserve bash for that directory view, git, builds, tests, package managers, processes, scripts, and system commands.
+Git: read-only commands (status, diff, log, show) are fine. Do not commit, push, amend, rebase, stash, reset --hard, clean, checkout/restore over uncommitted changes, use --force/--no-verify, or change git config unless the user explicitly asks; the working tree may contain the user's own uncommitted work.
 
 Parameters:
   - command (required): PowerShell command to execute
@@ -1406,7 +1457,7 @@ Parameters:
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
-  - Chain dependent commands with semicolon: git add . ; git commit -m "msg"
+  - Chain dependent commands with semicolon: npm install ; npm test
   - Use absolute paths instead of cd when possible
   - For background commands, monitor with bash_output and terminate with bash_kill
   - Use lifetime=runtime only when the user explicitly needs a service or command to remain available after the final response
@@ -1417,10 +1468,13 @@ Examples:
   - python -u -m http.server 0 --bind 127.0.0.1 (with run_in_background=true; read the dynamic port with bash_output)""",
             "Unix": f"""Execute bash commands in foreground or background.
 
+Use only application-managed Python, Node and Git. If missing, use local_environment(action="ensure") for that capability when available; join any active installation. Do not use or install alternate runtimes or ask the user to switch environments. On failure, report the returned cause or retry the managed installer.
+
 Do NOT use cat/head/tail to read files; use read_file instead.
 For routine file discovery and content search, use glob/grep when available or search_files. Use bash rg only for specialized operations those tools do not express, such as exact match counts.
 For a one-level directory view, use a read-only non-recursive command such as find . -mindepth 1 -maxdepth 1 -print. Do not use Bash for recursive file discovery or content search.
 Reserve bash for that directory view, git, builds, tests, package managers, processes, scripts, and system commands.
+Git: read-only commands (status, diff, log, show) are fine. Do not commit, push, amend, rebase, stash, reset --hard, clean, checkout/restore over uncommitted changes, use --force/--no-verify, or change git config unless the user explicitly asks; the working tree may contain the user's own uncommitted work.
 
 Parameters:
   - command (required): Bash command to execute
@@ -1430,12 +1484,13 @@ Parameters:
 
 Tips:
   - Quote file paths with spaces: cd "My Documents"
-  - Chain dependent commands with &&: git add . && git commit -m "msg"
+  - Chain dependent commands with &&: npm install && npm test
   - Use absolute paths instead of cd when possible
   - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm
   - Keep retained QA reports, requested previews, and delivery dependencies in the task directory. Do not recursively delete QA/task directories as delivery housekeeping; leave undeclared files in place.
+  - Files referenced by chat and their local dependencies must remain available. Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.
   - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.
-  - Run the injected Python runtime as "$BOX_AGENT_PYTHON"; do not write "$BOX_AGENT_PYTHON:-python3"
+  - If BOX_AGENT_PYTHON points to a working managed interpreter, run it as "$BOX_AGENT_PYTHON"; otherwise prepare the managed Python through local_environment when available. Do not write "$BOX_AGENT_PYTHON:-python3" (invalid variable syntax).
   - For one-off data scripts, validate input types and never append to a collection while iterating it; collect additions separately or iterate over a copy
   - A timeout, resource stop, or optional QA failure is advisory for artifact workflows: preserve usable output, record the warning, and continue to delivery when safe
   - For background commands, monitor with bash_output and terminate with bash_kill
@@ -1591,10 +1646,17 @@ Examples:
                     stderr=bypass_error,
                     exit_code=1,
                 )
+            # 仅目标同步命令查询当前会话的技能资源，不缓存可能已失效的路径。
+            expert_sync_script = (
+                self._pptx_sync_script_provider()
+                if self._pptx_sync_script_provider is not None
+                and "sync_image_manifest_status.js" in command else None
+            )
             image_status_error = detect_pptx_image_status_command_bypass(
                 command,
                 workspace_dir=self.workspace_dir,
                 runtime_env=self._subprocess_env,
+                expert_sync_script=expert_sync_script,
                 shell_style=(
                     "powershell"
                     if self.is_windows and self._bundled_win_bash is None
@@ -1638,6 +1700,13 @@ Examples:
                     stdout="",
                     stderr=f"Blocked: {obsidian_cli_error}",
                     exit_code=1,
+                )
+
+            denied = await asyncio.to_thread(bash_chat_mutation_error, command, Path(self.workspace_dir or "."))
+            if denied is not None:
+                error = denied.error
+                return BashOutputResult(
+                    success=False, error=error, stdout="", stderr=error, exit_code=1,
                 )
 
             # 1. Only an explicitly trusted full-access session may bypass the
@@ -1947,6 +2016,8 @@ Examples:
                 finally:
                     if process.returncode is None or not communicate_task.done():
                         await self._cleanup_foreground_process(process, communicate_task)
+                    if guard_task := getattr(process, "_box_agent_guard_task", None):
+                        await asyncio.shield(guard_task)
 
         except Exception as e:
             return BashOutputResult(

@@ -230,17 +230,57 @@ function main() {
       user_constraints: require("./design_contract_core.js").inferDesignContract({ source_text: core.runtimeSourceBinding().source_text }, []) };
     require("./design_recovery.js").fallback(baseline, root, "Outline awaiting validation; content is not verified");
     const report = path.join(root, "qa", "outline_check.json");
-    const checkArgs = [path.join(__dirname, "validate_outline.js"), targetPath, "--report", report];
+    const checkArgs = [path.join(__dirname, "validate_outline.js"), targetPath, "--report", report, "--repair-flow"];
     if (opts["research-handoff"]) checkArgs.push("--research-handoff", core.resolveArtifactPath(opts["research-handoff"]));
     const check = spawnSync(process.execPath, checkArgs, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
     if (check.status !== 0) {
+      let hardReport = {};
+      try { hardReport = JSON.parse(fs.readFileSync(report, "utf8")); } catch (_error) { hardReport = {}; }
+      if (hardReport.repair_required && hardReport.repair_round === "hard_issues") {
+        // Non-terminal: one chance to fix structural issues before the neutral fallback.
+        console.log(JSON.stringify({ ok: false, repair_required: true, status: "outline_needs_fixes",
+          attempt: hardReport.attempt, instructions: hardReport.repair_instructions,
+          issues: hardReport.repair_hard_issues, how_to_fix: hardReport.repair_how_to_fix,
+          checklist: hardReport.repair_checklist, report,
+          next: `Edit ${path.basename(targetPath)} for every listed issue (one write_file), then re-run this same prepare command.` }));
+        return;
+      }
+      // Unsupported public-research numbers are degraded even when other issues block the design.
+      try {
+        if (JSON.parse(fs.readFileSync(report, "utf8")).auto_degraded) {
+          baseline.outline = JSON.parse(fs.readFileSync(targetPath, "utf8"));
+        }
+      } catch (_error) { /* keep the original outline */ }
       const delivery = require("./design_recovery.js").fallback(baseline, root,
         `Outline validation incomplete; inspect ${report}. Content is not verified.`);
       require("./artifact_delivery.js").publishArtifact(delivery.primary_artifact);
+      // Carry the concrete degradation disclosure into the terminal fallback result and report.
+      if (hardReport.auto_degraded) {
+        const disclosure = { auto_degraded: true, degraded: hardReport.degraded,
+          unverified_claims: hardReport.unverified_claims,
+          disclose: "Tell the user which claims were removed or left unverified." };
+        Object.assign(delivery, disclosure);
+        const deliveryReport = path.join(root, "qa", "design_delivery.json");
+        try {
+          write(deliveryReport, { ...JSON.parse(fs.readFileSync(deliveryReport, "utf8")), ...disclosure });
+        } catch (_error) { /* the printed result still carries the disclosure */ }
+      }
       console.log(JSON.stringify(delivery));
       return;
     }
-    const input = plans.makeInput(outline, opts.title || outline.deck_goal, core.runtimeSourceBinding().source_text);
+    let checked = {};
+    try { checked = JSON.parse(fs.readFileSync(report, "utf8")); } catch (_error) { checked = {}; }
+    if (checked.repair_required) {
+      // Non-terminal: no fallback delivery, no design input yet. The model fixes the
+      // checklist once; the follow-up prepare always proceeds (see validate_outline.js).
+      console.log(JSON.stringify({ ok: false, repair_required: true, status: "outline_needs_fixes",
+        attempt: checked.attempt, instructions: checked.repair_instructions,
+        how_to_fix: checked.repair_how_to_fix, checklist: checked.repair_checklist, report,
+        next: `Edit ${path.basename(targetPath)} for every checklist item (one write_file), then re-run this same prepare command.` }));
+      return;
+    }
+    const finalOutline = checked.auto_degraded ? JSON.parse(fs.readFileSync(targetPath, "utf8")) : outline;
+    const input = plans.makeInput(finalOutline, opts.title || finalOutline.deck_goal, core.runtimeSourceBinding().source_text);
     const out = core.resolveArtifactPath(opts.out || path.join(root, "design_input.json"));
     input.outline_file = path.relative(path.dirname(out), targetPath);
     writeInput(out, input, root);
@@ -266,6 +306,8 @@ function main() {
       warnings: researchStatus === "handoff_unverified" ? ["Research handoff was not provided; research verification remains incomplete."] : [] });
     console.log(JSON.stringify({ ok: true, input: out, designer_brief: input.request_file,
       plan: planFile, reusable, research_status: researchStatus,
+      ...(checked.auto_degraded ? { auto_degraded: true, degraded: checked.degraded, unverified_claims: checked.unverified_claims,
+        disclose: "Tell the user which claims were removed or left unverified." } : {}),
       next: reusable ? "reuse the accepted design" : "delegate the role with designer_brief; then run design_plan.js accept design_input.json. Do not write the plan yourself." }));
     return;
   }

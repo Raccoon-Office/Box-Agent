@@ -20,8 +20,9 @@ from box_agent.tools.engine import artifact_results
 
 
 class _OneToolCallLLM:
-    def __init__(self, tool_name: str) -> None:
+    def __init__(self, tool_name: str, arguments: dict | None = None) -> None:
         self._tool_name = tool_name
+        self._arguments = arguments or {}
         self._calls = 0
 
     async def generate(self, **_kwargs):
@@ -37,7 +38,7 @@ class _OneToolCallLLM:
                     ToolCall(
                         id="call-1",
                         type="function",
-                        function=FunctionCall(name=self._tool_name, arguments={}),
+                        function=FunctionCall(name=self._tool_name, arguments=self._arguments),
                     )
                 ],
             )
@@ -64,6 +65,78 @@ class _EchoTool(Tool):
 
     async def execute(self) -> ToolResult:
         return ToolResult(success=True, content="echoed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relative", ["qa/.check.txt.artifact.json", "qa/.artifact-delivery.json"])
+@pytest.mark.parametrize("tool_name", ["write_file", "append_file", "edit_file"])
+async def test_native_protocol_metadata_stays_internal_on_all_artifact_channels(
+    tmp_path, relative, tool_name,
+):
+    from box_agent.acp import _tool_result_raw_output
+    from box_agent.artifact_publication import metadata_path
+    from box_agent.tools.file_tools import AppendTool, EditTool, WriteTool
+
+    target = tmp_path / relative
+    target.parent.mkdir()
+    target.write_text("{}", encoding="utf-8")
+    if tool_name == "edit_file":
+        arguments = {"path": relative, "old_str": "{}", "new_str": '{"type":"artifact"}'}
+    else:
+        arguments = {"path": relative, "content": '\n{"type":"artifact"}'}
+    tool = {"write_file": WriteTool, "append_file": AppendTool, "edit_file": EditTool}[tool_name](str(tmp_path))
+    events = [event async for event in run_agent_loop(
+        llm=_OneToolCallLLM(tool.name, arguments), messages=[Message(role="user", content="Write workflow metadata")],
+        tools={tool.name: tool}, max_steps=2, workspace_dir=str(tmp_path),
+    )]
+    result = next(event for event in events if isinstance(event, ToolCallResult))
+    assert result.success, result.error
+    assert result.raw_output["type"] == "intermediate_asset"
+    assert result.raw_output["file_changes_version"] == 2
+    assert not any(isinstance(event, ArtifactEvent) for event in events)
+    assert not metadata_path(target).exists()
+    assert target not in artifact_results._snapshot_workspace(str(tmp_path))
+    # Neither an explicit text reference nor a raw adapter call bypasses policy.
+    assert artifact_results._detect_tool_artifacts(
+        "script", "bash", f"[{relative}]", None, None, None, str(tmp_path),
+    ) == []
+    raw = _tool_result_raw_output(
+        {"type": "artifact", "path": str(target)}, "done", None,
+        workspace_dir=str(tmp_path), session_id="host", task_id="task", turn_id="turn",
+    )
+    assert raw["type"] == "intermediate_asset"
+    assert raw["session_id"] == "host"
+
+
+@pytest.mark.parametrize("relative", [".foo", ".notes.md", "data.artifact.json"])
+def test_ordinary_hidden_files_and_json_names_remain_structured_artifacts(tmp_path, relative):
+    target = tmp_path / relative
+    target.write_text("user content", encoding="utf-8")
+    events = artifact_results._detect_tool_artifacts(
+        "writer", "write_file", "done", {"type": "artifact", "path": str(target)},
+        None, None, str(tmp_path),
+    )
+    assert [(event.rel_path, event.placement) for event in events] == [(relative, "supporting")]
+
+
+def test_publication_metadata_remains_available_to_private_fingerprint_scans(tmp_path):
+    import hashlib
+    from box_agent.artifact_publication import metadata_path, write_metadata
+
+    target = tmp_path / "working.png"
+    data = b"intermediate image"
+    target.write_bytes(data)
+    marker = metadata_path(target)
+    write_metadata(target, {"type": "intermediate_asset"})
+    scope = tmp_path / ".artifact-delivery.json"
+    scope.write_text('{"schema_version":1,"default":"intermediate"}', encoding="utf-8")
+    assert artifact_results._snapshot_workspace(str(tmp_path)) == {target}
+    assert artifact_results._snapshot_workspace(
+        str(tmp_path), include_publication_metadata=True,
+    ) == {target, marker}
+    assert artifact_results._publication_fingerprints(str(tmp_path)) == {
+        len(data): {hashlib.sha256(data).hexdigest()},
+    }
 
 
 @pytest.mark.asyncio
@@ -518,3 +591,118 @@ async def test_incomplete_post_scan_still_publishes_explicit_tool_files(
         "report.txt",
     ]
     assert any(isinstance(event, DoneEvent) for event in events)
+
+
+@pytest.mark.parametrize("result_key", ["WebResults", "Documents", "ProviderRows"])
+def test_search_citations_match_model_and_events_across_repeated_local_ranks(tmp_path, result_key):
+    from box_agent.events import WebSearchEvent
+
+    messages = []
+    tags = []
+    for index, url in enumerate(["https://example.com/one", "https://example.com/two", "https://example.com/one"]):
+        content = json.dumps({"Result": {result_key: [{
+            "SortId": 1, "Title": "Source", "Url": url,
+        }]}, "SearchStatus": "ok"})
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"search-{index}", tool_name="web_search",
+            arguments={}, result=ToolResult(success=True, content=content),
+            visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+        ))
+        event = next(event for event in outcome.events if isinstance(event, WebSearchEvent))
+        ref = event.payload["refs"][0]
+        tags.append(ref["reference_tag"])
+        assert ref["url"] == url
+        assert ref["reference_tag"] in outcome.tool_message.content
+        assert "Never invent or renumber" in outcome.tool_message.content
+        assert json.loads(outcome.visible_content)["SearchStatus"] == "ok"
+    assert tags[0] != tags[1]
+    assert tags[0] == tags[2]
+    assert all(tag.startswith("ref_web_") for tag in tags)
+
+
+@pytest.mark.parametrize("result_key", ["Documents", "ProviderRows"])
+@pytest.mark.parametrize("model_context", [None, "Independent search summary"])
+def test_global_sources_bind_every_model_reference_to_the_event(tmp_path, result_key, model_context):
+    from box_agent.events import WebSearchEvent
+    from box_agent.tools.web_search_runtime import _dedupe_web_search_content
+
+    sources = [
+        {
+            "Rank": 0, "Title": "First", "Url": "https://example.com/first",
+            "Snippet": [
+                {"Type": "text", "Text": "Original passage"},
+                {"Type": "image", "Image": {
+                    "ImageUrl": "https://cdn.example.com/first.jpg?signature=a%2Bb",
+                    "Width": 1600, "Height": 900, "Alt": "First image",
+                }},
+            ],
+            "DocumentInfo": {"PublishTime": "2026-10-14", "Filetype": "image"},
+        },
+        {"Rank": 1, "Title": "Second", "Url": "https://example.com/second"},
+    ]
+    args = {"query": "first second"}
+    raw = json.dumps({"ResponseMetadata": {"RequestId": "request"}, "Result": {result_key: sources}})
+    content = _dedupe_web_search_content(raw, set(), args)[0]
+    outcome = process_tool_result(ToolResultPipelineInput(
+        messages=[], tool_call_id="global-search", tool_name="web_search", arguments=args,
+        result=ToolResult(success=True, content=content, model_context=model_context),
+        visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+    ))
+    event = next(event for event in outcome.events if isinstance(event, WebSearchEvent))
+    refs = event.payload["refs"]
+    assert len(refs) == 2
+    event_links = {ref["reference_tag"]: ref["url"] for ref in refs}
+    assert len(event_links) == 2
+    assert all(tag.startswith("ref_web_") for tag in event_links)
+    visible = json.loads(outcome.visible_content)
+    rows = visible["Result"][result_key]
+    assert [{key: value for key, value in row.items() if key != "reference_tag"} for row in rows] == sources
+    assert visible["ResponseMetadata"] == {"RequestId": "request"}
+    assert {row["reference_tag"]: row["Url"] for row in rows} == event_links
+    if model_context:
+        assert outcome.model_content.startswith(model_context + "\n\n")
+        model_refs = json.loads(outcome.model_content.split("\n\n", 1)[1])["refs"]
+        assert {ref["reference_tag"]: ref["url"] for ref in model_refs} == event_links
+    else:
+        model_rows = json.loads(outcome.model_content)["Result"][result_key]
+        assert {row["reference_tag"]: row["Url"] for row in model_rows} == event_links
+    first = next(ref for ref in refs if ref["url"] == sources[0]["Url"])
+    assert first["passage"] == "Original passage"
+    assert first["image_details"][0] == {
+        "url": "https://cdn.example.com/first.jpg?signature=a%2Bb",
+        "width": 1600, "height": 900, "alt": "First image",
+    }
+
+
+@pytest.mark.parametrize("result_key", ["Documents", "ProviderRows"])
+def test_global_search_replies_remove_seen_rows_without_reintroducing_numeric_tags(tmp_path, result_key):
+    from box_agent.events import WebSearchEvent
+
+    seen = set()
+    messages = []
+    for index, (names, expected) in enumerate([
+        (["first", "second"], ["first", "second"]),
+        (["second", "third"], ["third"]),
+        (["first", "third"], []),
+    ]):
+        content = json.dumps({"Result": {result_key: [
+            {"Rank": rank, "Title": name, "Url": f"https://example.com/{name}"}
+            for rank, name in enumerate(names)
+        ]}})
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"search-{index}", tool_name="web_search",
+            arguments={"query": "example"}, result=ToolResult(success=True, content=content),
+            visible_content=content, visible_error=None, result_storage=ToolResultStorage(tmp_path),
+            web_search_seen_result_keys=seen,
+        ))
+        rows = json.loads(outcome.visible_content)["Result"][result_key]
+        assert [row["Title"] for row in rows] == expected
+        assert outcome.web_search_new_results == len(expected)
+        events = [event for event in outcome.events if isinstance(event, WebSearchEvent)]
+        if not expected:
+            assert events == []
+            continue
+        assert len(events) == 1
+        links = {ref["reference_tag"]: ref["url"] for ref in events[0].payload["refs"]}
+        assert {row["reference_tag"]: row["Url"] for row in rows} == links
+        assert all(tag.startswith("ref_web_") for tag in links)

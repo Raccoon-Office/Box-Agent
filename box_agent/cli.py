@@ -14,12 +14,17 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import platform
 import shutil
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -31,6 +36,7 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
+from pydantic import ValidationError
 import yaml
 
 from box_agent import LLMClient, __version__
@@ -57,6 +63,7 @@ from box_agent.agent import (
     should_continue_goal_autopilot,
 )
 from box_agent.config import AgentConfig, Config
+from box_agent.memory import memory_user_turn, uses_local_memory
 from box_agent.events import StopReason
 from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.goal_runtime import (
@@ -64,6 +71,7 @@ from box_agent.goal_runtime import (
 )
 from box_agent.turn_runtime import sync_skill_cache_fingerprint_context
 from box_agent.llm.model_routing import resolve_model_client
+from box_agent.llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS
 from box_agent.schema import LLMProvider, Message
 from box_agent.session_trace import SessionTraceWriter, traced_session_turn
 from box_agent.tools.base import Tool
@@ -114,7 +122,7 @@ from box_agent.session_log import SessionLog, default_session_root
 from box_agent.user_paths import state_path
 
 
-_CLI_PROBE_MAX_OUTPUT_TOKENS = 4_096
+_CLI_PROBE_MAX_OUTPUT_TOKENS = SMALL_TASK_MAX_OUTPUT_TOKENS
 
 
 def run_setup_wizard(config_path: Path) -> bool:
@@ -245,6 +253,28 @@ def _mask_secret(value: Any) -> Any:
 
 def _is_secret_path(parts: list[str]) -> bool:
     return bool(parts) and parts[-1] in SECRET_KEY_NAMES
+
+
+def _config_display_value(value: Any, parts: list[str]) -> Any:
+    """Redact secrets even when setting their containing configuration object."""
+    if isinstance(value, dict):
+        return {key: _config_display_value(item, [*parts, key]) for key, item in value.items()}
+    normalized = parts[1:] if parts[:1] == ["agent"] else parts
+    if normalized[:2] == ["memory_external", "headers"]:
+        return "****" if value else value
+    return _mask_secret(value) if _is_secret_path(parts) else value
+
+
+def _config_error_details(error: Exception) -> str:
+    """Keep validation context without echoing secret inputs or YAML excerpts."""
+    if isinstance(error, ValidationError):
+        return "; ".join(
+            f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
+            for item in error.errors(include_input=False, include_context=False, include_url=False)
+        )
+    if isinstance(error, yaml.YAMLError):
+        return f"{type(error).__name__}: invalid configuration YAML"
+    return f"{type(error).__name__}: invalid configuration value"
 
 
 def _normalize_config_path(key: str) -> list[str]:
@@ -493,6 +523,48 @@ def _config_exit_error(message: str, json_output: bool = False) -> int:
 def get_log_directory() -> Path:
     """Get the log directory path."""
     return state_path('log')
+
+
+class _QuietMemoryLogHandler(RotatingFileHandler):
+    """记忆诊断只写文件，磁盘错误也不能打断终端输入或主任务。"""
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        # 标准处理会向 stderr 打印堆栈；日志目录不可写时只能放弃该条记录。
+        pass
+
+
+@contextmanager
+def _memory_file_logging() -> Iterator[None]:
+    """由 CLI 接管记忆日志，直到后台保存清理完成后恢复原有设置。"""
+    memory_logger = logging.getLogger("box_agent.memory")
+    previous = memory_logger.handlers, memory_logger.level, memory_logger.propagate
+    handler: logging.Handler = logging.NullHandler()
+    try:
+        # 按进程分文件，避免多个 CLI 同时轮转同一个文件。
+        log_path = state_path(f"log/memory_{os.getpid()}.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = _QuietMemoryLogHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
+            encoding="utf-8", delay=True,
+        )
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        ))
+    except OSError:
+        # 无法创建日志目录时保持静默，不能因可选记忆能力阻断主任务。
+        pass
+    memory_logger.handlers = [handler]
+    memory_logger.setLevel(logging.INFO)
+    memory_logger.propagate = False
+    try:
+        yield
+    finally:
+        memory_logger.handlers, previous_level, memory_logger.propagate = previous
+        memory_logger.setLevel(previous_level)
+        try:
+            handler.close()
+        except OSError:
+            pass
 
 
 def show_log_directory(open_file_manager: bool = True) -> None:
@@ -1239,6 +1311,8 @@ Examples:
         help="Open the offline developer viewer for session trace JSONL files",
     )
 
+    subparsers.add_parser("install-cua", help="Install the shared CuaDriver runtime for desktop control")
+
     # install-node subcommand
     node_parser = subparsers.add_parser(
         "install-node",
@@ -1304,11 +1378,9 @@ def cmd_config(
         except Exception as e:
             if old_text is not None:
                 config_path.write_text(old_text, encoding="utf-8")
-            return _config_exit_error(f"Failed to update config: {e}", json_output)
+            return _config_exit_error(f"Failed to update config: {_config_error_details(e)}", json_output)
 
-        display_value = value
-        if _is_secret_path(yaml_parts) and not show_secrets:
-            display_value = _mask_secret(value)
+        display_value = value if show_secrets else _config_display_value(value, yaml_parts)
         if json_output:
             _json_print({
                 "ok": True,
@@ -1324,7 +1396,7 @@ def cmd_config(
     try:
         config = Config.from_yaml(config_path)
     except Exception as e:
-        return _config_exit_error(f"Could not parse config: {e}", json_output)
+        return _config_exit_error(f"Could not parse config: {_config_error_details(e)}", json_output)
 
     summary = _config_summary(config, config_path, show_secrets=show_secrets)
     if get_key:
@@ -1457,6 +1529,27 @@ def _doctor_check_obsidian() -> None:
     print(_doctor_obsidian_status_line())
 
 
+def _doctor_prompt_status(config: Config | None = None) -> dict[str, Any]:
+    """Report prompt template overrides that drifted from this version."""
+    from box_agent.config import PROMPT_TEMPLATE_FILES, prompt_override_drift
+
+    drifted = []
+    for filename in PROMPT_TEMPLATE_FILES:
+        attr = {"system_prompt.md": "system_prompt_path", "analysis_prompt.md": "analysis_prompt_path",
+                "code_prompt.md": "code_prompt_path"}[filename]
+        configured = getattr(config.agent, attr) if config is not None else filename
+        path = Config._find_config_file(configured)
+        drift = prompt_override_drift(path, filename) if path is not None else None
+        if drift is not None:
+            drifted.append({"file": filename, **drift})
+    if not drifted:
+        return _doctor_check("ok", "packaged prompt templates in use (or overrides up to date)")
+    names = ", ".join(f"{item['path']} ({item['error']})" if item.get("error") else
+                      f"{item['path']} (missing {len(item['missing'])}, unknown {len(item['unknown'])})"
+                      for item in drifted)
+    return _doctor_check("warning", f"outdated prompt override: {names}", overrides=drifted)
+
+
 def _doctor_config_status() -> tuple[dict[str, Any], Config | None]:
     config_path = Config.find_config_file("config.yaml")
     config = None
@@ -1559,6 +1652,10 @@ async def cmd_doctor(json_output: bool = False) -> int:
     checks["config"], config = _doctor_config_status()
     if not json_output:
         print(_doctor_line("Config", checks["config"]))
+
+    checks["prompts"] = _doctor_prompt_status(config)
+    if not json_output:
+        print(_doctor_line("Prompts", checks["prompts"]))
 
     checks["api"] = await _doctor_api_status(config)
     if not json_output:
@@ -1814,8 +1911,10 @@ async def _run_session_turn(session: AgentSession, **overrides: Any) -> str:
     session_id = overrides.pop("session_id")
     run_id = f"run-{uuid4().hex}"
     turn_id = overrides.pop("turn_id", run_id)
+    synthetic_continuation = overrides.pop("synthetic_continuation", False)
     handle = await AgentService().start(
-        RunRequest(run_id, session_id, user_message),
+        RunRequest(run_id, session_id, user_message,
+                   metadata={"synthetic_continuation": True} if synthetic_continuation else {}),
         session=session,
         options=session.build_run_options(
             session_id=session_id, turn_id=turn_id, **overrides,
@@ -1931,6 +2030,7 @@ async def run_agent(
 
     owned_clients = []
     session_log = None
+    memory_log_scope = ExitStack()
 
     def _new_client(**kwargs):
         client = build_llm_client(**kwargs)
@@ -1938,6 +2038,8 @@ async def run_agent(
         return client
 
     try:
+        if config.agent.enable_memory:
+            memory_log_scope.enter_context(_memory_file_logging())
         llm_client = _new_client(
             client_factory=LLMClient,
             api_key=config.llm.api_key,
@@ -2127,12 +2229,12 @@ async def run_agent(
 
             # Wire memory promotion negotiator (interactive prompts).
             # Non-interactive `--task` mode skips it to avoid blocking on stdin.
-            if memory_mgr and agent_session.config.agent.memory_promotion_proposal_enabled and not task:
+            if uses_local_memory(memory_mgr) and agent_session.config.agent.memory_promotion_proposal_enabled and not task:
                 from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
                 agent.set_memory_proposal_negotiator(CLIMemoryProposalNegotiator(memory_mgr))
 
             def _set_agent_system_prompt(system_prompt: str) -> None:
-                agent.set_system_prompt(system_prompt)
+                agent.set_system_prompt(system_prompt, preserve_child_prompt=True)
 
             def _sync_cli_cache_fingerprint_context() -> None:
                 sync_skill_cache_fingerprint_context(
@@ -2246,39 +2348,44 @@ async def run_agent(
                 )
                 try:
                     with traced_session_turn(trace_writer, content=task) as traced_turn:
-                        final_content = await _run_session_turn(
-                            agent_session,
-                            user_message=task,
-                            session_id=logical_session_id,
+                        async with memory_user_turn(
+                            agent_session, user_text=task, session_id=logical_session_id,
                             turn_id=traced_turn.turn_id,
-                            force_plan_start=agent_session.force_plan_start,
-                            current_turn_text=task,
-                        )
-                        while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
-                            if autopilot.budget_exhausted_at(perf_counter()):
-                                break
-                            if agent.goal is None:
-                                break
-                            autopilot.begin_continuation()
-                            print(
-                                f"\n{Colors.DIM}Goal autopilot continuing "
-                                f"{autopilot.continuations}/{agent_session.config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
-                            )
-                            continuation = goal_autopilot_prompt(
-                                agent.goal,
-                                autopilot.continuations,
-                                agent_session.config.agent.goal_autopilot_max_turns,
-                            )
-                            before_signature = goal_autopilot_progress_signature(agent.goal)
+                        ):
                             final_content = await _run_session_turn(
-                                agent_session, user_message=continuation,
+                                agent_session,
+                                user_message=task,
                                 session_id=logical_session_id,
                                 turn_id=traced_turn.turn_id,
+                                force_plan_start=agent_session.force_plan_start,
+                                current_turn_text=task,
                             )
-                            after_signature = goal_autopilot_progress_signature(agent.goal)
-                            if should_continue_goal_autopilot(agent, agent.last_stop_reason):
-                                if autopilot.record_progress(before_signature, after_signature):
+                            while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                                if autopilot.budget_exhausted_at(perf_counter()):
                                     break
+                                if agent.goal is None:
+                                    break
+                                autopilot.begin_continuation()
+                                print(
+                                    f"\n{Colors.DIM}Goal autopilot continuing "
+                                    f"{autopilot.continuations}/{agent_session.config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
+                                )
+                                continuation = goal_autopilot_prompt(
+                                    agent.goal,
+                                    autopilot.continuations,
+                                    agent_session.config.agent.goal_autopilot_max_turns,
+                                )
+                                before_signature = goal_autopilot_progress_signature(agent.goal)
+                                final_content = await _run_session_turn(
+                                    agent_session, user_message=continuation,
+                                    session_id=logical_session_id,
+                                    turn_id=traced_turn.turn_id,
+                                    synthetic_continuation=True,
+                                )
+                                after_signature = goal_autopilot_progress_signature(agent.goal)
+                                if should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                                    if autopilot.record_progress(before_signature, after_signature):
+                                        break
                         traced_turn.content = final_content
                         traced_turn.stop_reason = agent.last_stop_reason
                     if agent.last_stop_reason == StopReason.ERROR.value:
@@ -2518,8 +2625,8 @@ async def run_agent(
                             parts = user_input.split(maxsplit=1)
                             sub = parts[1].strip().lower() if len(parts) > 1 else ""
                             if sub == "review":
-                                if not memory_mgr:
-                                    print(f"{Colors.YELLOW}⚠️  Memory disabled in config.{Colors.RESET}\n")
+                                if not uses_local_memory(memory_mgr):
+                                    print(f"{Colors.YELLOW}⚠️  当前后端未启用本地记忆晋升。{Colors.RESET}\n")
                                 else:
                                     from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
                                     from box_agent.events import MemoryProposalEvent, MemoryPromotionCandidate
@@ -2715,8 +2822,11 @@ async def run_agent(
         try:
             await close_owned_clients(owned_clients)
         finally:
-            if session_log is not None:
-                session_log.close()
+            try:
+                if session_log is not None:
+                    session_log.close()
+            finally:
+                memory_log_scope.close()
 
 
 def main() -> int:
@@ -2766,6 +2876,20 @@ def main() -> int:
     # Handle install-node subcommand
     if args.command == "install-node":
         cmd_install_node(version=args.version)
+        return 0
+
+    if args.command == "install-cua":
+        from box_agent.tools.cua_install import install_cua
+        try:
+            print("Preparing CuaDriver (reuse verified installation or download)...", flush=True)
+            driver = install_cua()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f"CUA installation failed: {error}")
+            return 1
+        print(f"CuaDriver ready: {driver}")
+        if sys.platform == "darwin":
+            print(f'Grant system permissions before use: "{driver}" permissions grant')
+        print("Restart Box-Agent to discover the installed driver.")
         return 0
 
     workspace_dir = _workspace_from_args(args)
