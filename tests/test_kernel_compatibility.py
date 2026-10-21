@@ -567,6 +567,7 @@ async def test_closing_run_waits_for_tool_cleanup(
     from box_agent.composition import compose_default_kernel_services
     from box_agent.tool_result_storage import ToolResultStorage
 
+    started = asyncio.Event()
     cleaned_up = asyncio.Event()
 
     class BlockingTool(EventEmittingTool if tool_kind == "event" else Tool):
@@ -577,6 +578,7 @@ async def test_closing_run_waits_for_tool_cleanup(
 
         async def execute(self, **_kwargs):
             try:
+                started.set()
                 await asyncio.Event().wait()
             finally:
                 await asyncio.sleep(0)
@@ -638,6 +640,9 @@ async def test_closing_run_waits_for_tool_cleanup(
                 and event.payload.get("phase") == "tool_running"
             ):
                 break
+        # Activity can precede invocation while the scheduler prepares a tool.
+        # Exercise cleanup only after the tool has entered its execution body.
+        await asyncio.wait_for(started.wait(), timeout=5)
         await events.aclose()
         cleanup_finished_before_close_returned = cleaned_up.is_set()
     finally:
