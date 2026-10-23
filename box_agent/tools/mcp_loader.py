@@ -79,6 +79,7 @@ from .mcp_sources import (
 )
 from .model_tool_context import current_model_tool_context
 from .mcp_result_hooks import (
+    adapt_mcp_image_context,
     adapt_mcp_inline_images,
     adapt_mcp_result_context,
     allowed_mcp_result_adapters,
@@ -1185,6 +1186,13 @@ class MCPTool(Tool):
                 server_name=self._server_name, remote_name=self._remote_name,
                 inline_images=inline_images, adapters=result_adapters,
             )
+            image_content, image_source = (
+                adapt_mcp_image_context(
+                    server_name=self._server_name, remote_name=self._remote_name,
+                    inline_images=inline_images, arguments=call_arguments,
+                    structured_content=structured_content,
+                ) if not (is_error or structured_error) else (None, None)
+            )
             raw_output: dict[str, Any] = {}
             if structured_content is not None:
                 raw_output["mcp_structured_content"] = structured_content
@@ -1201,6 +1209,10 @@ class MCPTool(Tool):
                 block.get("sha256") for block in image_references or []
                 if isinstance(block, dict) and isinstance(block.get("contentRef"), str)
             }
+            persisted_hashes.update(
+                block.get("sha256") for block in image_content or []
+                if block.get("type") == "input_image"
+            )
             unsaved_images = []
             for image in inline_images:
                 try:
@@ -1245,6 +1257,8 @@ class MCPTool(Tool):
                 error=None,
                 raw_output=raw_output or None,
                 transient_followup_content=transient_followup_content or None,
+                image_content=image_content,
+                image_source=image_source,
             )
 
         except TimeoutError:

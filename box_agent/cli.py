@@ -283,6 +283,10 @@ def _normalize_config_path(key: str) -> list[str]:
     if not parts:
         raise ValueError("Config key cannot be empty")
 
+    if parts[0] == "image_context":
+        return ["agent", *parts]
+    if parts[:2] == ["agent", "image_context"]:
+        return parts
     if parts[0] == "llm" and len(parts) >= 2:
         if parts[1] == "retry":
             return ["retry", *parts[2:]]
@@ -409,6 +413,7 @@ def _config_summary(config: Config, config_path: Path, show_secrets: bool = Fals
                 config.agent.context_resource_dedup_enabled
             ),
             "enable_memory": config.agent.enable_memory,
+            "image_context": config.agent.image_context.model_dump(),
             "memory_dir": config.agent.memory_dir,
             "enable_memory_extraction": config.agent.enable_memory_extraction,
             "memory_maintainer_enabled": config.agent.memory_maintainer_enabled,

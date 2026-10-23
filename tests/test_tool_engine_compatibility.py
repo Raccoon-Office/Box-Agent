@@ -125,6 +125,24 @@ _PPTX_ENTRY_SCHEMA_CHANGES = json.loads(
 _TOOL_HANDOFF_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/tool_handoff_schema_changes.json").read_text()
 )
+_IMAGE_CONTEXT_SCHEMA_CHANGES = {
+    "inspect_images": (
+        {
+            "path": ["description"],
+            "before": "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's written analysis; native shows image pixels to you in your next request, so you must record your findings before reading another batch. Never modifies files.",
+            "after": "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's written analysis; native shows image pixels to you under the session's image-context retention policy. Omit strategy to use native when the active main model declares image support, otherwise proxy. Never modifies files.",
+        },
+        {
+            "path": ["input_schema", "properties", "strategy", "default"],
+            "before": "proxy", "remove": True,
+        },
+        {
+            "path": ["input_schema", "properties", "strategy", "description"],
+            "before": "proxy asks the configured vision utility model and returns text; native attaches canonical image blocks transiently to the active main model's next request.",
+            "after": "proxy asks the configured vision utility model and returns text; native attaches images to the active main model's context. Omit to choose native for a declared image-capable main model, otherwise proxy.",
+        },
+    ),
+}
 _BACKGROUND_OUTPUT_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/background_output_schema_changes.json").read_text()
 )
@@ -381,6 +399,7 @@ def _assert_schema_contract(tools, profile):
             *_CWD_SCHEMA_CHANGES.get(tool.name, ()),
             *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
             *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
+            *_IMAGE_CONTEXT_SCHEMA_CHANGES.get(tool.name, ()),
             *_BACKGROUND_OUTPUT_SCHEMA_CHANGES.get(tool.name, ()),
             *_JSONL_DESCRIPTION_CHANGES.get(tool.name, ()),
         ):

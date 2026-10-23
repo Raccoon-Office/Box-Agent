@@ -36,6 +36,8 @@ class PreparedContext:
     budget_blocked: bool = False
     on_response: Callable[[], None] | None = None
     reader_required: bool = False
+    image_context: dict[str, Any] | None = None
+    image_notices: tuple[str, ...] = ()
 
 
 class DefaultContextEngine:
@@ -47,8 +49,11 @@ class DefaultContextEngine:
 
     def __init__(self, *, system_prompt_projector: Callable[
         [str, str | tuple[str, ...]], str,
-    ] = effective_system_prompt) -> None:
+    ] = effective_system_prompt, image_context=None, llm=None, thinking_enabled=False) -> None:
         self._system_prompt_projector = system_prompt_projector
+        self.image_context = image_context
+        self.llm = llm
+        self.thinking_enabled = thinking_enabled
         self._memory_lookup = None
         self.references: SkillReferenceContext | None = None
         self.prepared_tools: PreparedTools | None = None
@@ -62,10 +67,36 @@ class DefaultContextEngine:
         self._pending_followup_blocks: list[dict[str, Any]] = []
 
     def configure_run(self, *, skill_engine: Any = None, session_store: Any = None) -> None:
+        if self.image_context is None:
+            from .image_context import ImageContext
+            self.image_context = ImageContext(session_store)
+        elif self.image_context.session_log is not session_store:
+            raise ValueError("Image context and final SessionStore must belong to the same session")
         self.references = (SkillReferenceContext(skill_engine, session_store=session_store)
                            if skill_engine is not None else None)
         self.prepared_tools = None
         self._history = []
+
+    def bind_model(self, llm: Any, *, thinking_enabled: bool = False) -> None:
+        self.llm = llm
+        self.thinking_enabled = thinking_enabled
+
+    def commit_response(self, message: Message) -> None:
+        if self.image_context is not None:
+            self.image_context.mark_response(message)
+
+    def prepare_summary(self, messages: list[Message], llm: Any) -> list[Message]:
+        if self.image_context is None or not self.image_context.images:
+            return messages
+        projection = self.image_context.prepare(messages, llm=llm, purpose="summary")
+        if self.image_context.session_log is not None:
+            self.image_context.session_log.append("request/context", {"imageContext": projection.manifest})
+            self.image_context.session_log.flush()
+        if projection.blocked_reason:
+            raise ValueError(projection.blocked_reason)
+        if projection.input_tokens and _fallback_context_estimate(projection.messages, {}) > self._token_limit:
+            raise ValueError("Summary request exceeds the safe input budget")
+        return projection.messages
 
     def bind_memory(self, memory_lookup: Any) -> None:
         """Bind optional memory after run capabilities have been resolved."""
@@ -263,10 +294,29 @@ class DefaultContextEngine:
             on_response = None
         provider_messages = ([*context_messages, transient_message]
                              if transient_message is not None else context_messages)
+        image_projection = None
+        if self.image_context is not None:
+            image_projection = self.image_context.prepare(
+                provider_messages, llm=self.llm, tools=list(prepared_tools.definitions),
+                thinking_enabled=self.thinking_enabled,
+            )
+            provider_messages = image_projection.messages
+            if image_projection.blocked_reason:
+                blocked_reason = image_projection.blocked_reason
+                budget_blocked = False
+            elif (not blocked_reason and request_input_tokens(provider_messages, prepared_tools.definitions)
+                  + self._transient_reserve_tokens > token_limit):
+                blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
+                budget_blocked = True
+            if blocked_reason:
+                on_committed = on_response = None
         return PreparedContext(
             provider_messages, context_messages, references,
             self._request_reference_tokens,
-            self._request_reference_tokens + self._transient_tokens,
+            self._request_reference_tokens + self._transient_tokens
+            + (image_projection.input_tokens if image_projection else 0),
             blocked_reason, on_committed, budget_blocked, on_response,
             reader_required,
+            image_projection.manifest if image_projection else None,
+            image_projection.notices if image_projection else (),
         )

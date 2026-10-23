@@ -88,7 +88,7 @@ async def test_proxy_inherits_current_parent_thinking_before_loop_and_across_tur
                 thinking_enabled=agent.thinking_enabled,
             )
             # ACP attachment inspection runs before Agent.run_events().
-            result = await image_tool.execute(["slide.png"], "Check readability.")
+            result = await image_tool.execute(["slide.png"], "Check readability.", strategy="proxy")
             assert result.success, result.error
             main_request, image_request = requests[-2:]
             assert main_request["max_tokens"] == 100_000

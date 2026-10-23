@@ -902,6 +902,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                     image_llm is llm and image_input_support(llm) is not False
                 ),
                 native_capability_llm=llm,
+                proxy_llm_resolver=lambda: _image_capable_llm(llm),
             )
         )
         _out(f"{Colors.GREEN}✅ Loaded image inspection tool (inspect_images){Colors.RESET}")

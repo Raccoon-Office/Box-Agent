@@ -26,6 +26,14 @@ provider: "anthropic"
 # then stays text-only unless another adapter declares vision support.
 # image_input: true
 
+# Shared image history for uploads, inspect_images(native), and CUA.
+# Round ages count committed main-model responses; byte budget counts base64.
+# Provider full-request body limits also apply. Files remain in the session.
+agent:
+  image_context:
+    keep_rounds: 3
+    max_encoded_bytes: 10485760
+
 # ===== Computer Use (Optional) =====
 # With tools.enable_mcp enabled, CUA is registered by default. Install the
 # driver with `box-agent install-cua`; `ensure_cua_ready` starts it on demand.

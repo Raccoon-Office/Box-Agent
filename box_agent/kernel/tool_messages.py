@@ -18,11 +18,13 @@ def session_log_messages(messages: list[Message]) -> list[Message]:
 
 
 class ToolMessageCommitter:
-    def __init__(self, messages: list[Message], session_log: SessionStorePort | None, turn: int | None):
+    def __init__(self, messages: list[Message], session_log: SessionStorePort | None, turn: int | None,
+                 image_context=None):
         self.messages = messages
         self.session_log = session_log
         self.turn = turn
         self._parallel_calls_pending = False
+        self.image_context = image_context
 
     def record_call(self, call: ToolCallRecord, step: int) -> None:
         if self.session_log is None or self.turn is None:
@@ -44,6 +46,10 @@ class ToolMessageCommitter:
             self._parallel_calls_pending = False
 
     def commit_result(self, message: Message, event: ToolCallResult, step: int) -> None:
+        if self.image_context is not None and event.image_content:
+            self.image_context.register(message, event.image_content,
+                                        source=event.image_source or "tool",
+                                        eligible=event.image_context_eligible)
         self.messages.append(message)
         if self.session_log is None or self.turn is None:
             return
@@ -55,6 +61,8 @@ class ToolMessageCommitter:
                 "policyDecision": event.policy_decision,
             }},
         )
+        if event.image_content:
+            self.session_log.flush()
 
 
 _INTERRUPTED_TOOL_STUB = (
