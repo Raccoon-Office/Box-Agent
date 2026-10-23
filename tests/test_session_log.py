@@ -720,21 +720,15 @@ def test_unknown_required_event_rejects_restore_but_ignorable_event_is_skipped(
     restored.close()
 
 
-@pytest.mark.parametrize("damage", ["version", "unknown-event", "message", "json"])
+@pytest.mark.parametrize("damage", ["message", "json"])
 def test_recovery_preserves_original_log_before_starting_fresh(tmp_path, damage):
     log = SessionLog.create(tmp_path, session_id="recover", cwd=tmp_path)
-    if damage == "unknown-event":
-        log.append("future/state-change", {})
-    elif damage == "message":
+    if damage == "message":
         log.append("user/message", {"role": "unknown"}, surface_op="append")
     log.flush()
     path = log.path
     log.close()
-    if damage == "version":
-        header = json.loads(path.read_text())
-        header["version"] = 999
-        path.write_text(json.dumps(header) + "\n")
-    elif damage == "json":
+    if damage == "json":
         with path.open("ab") as handle:
             handle.write(b'{broken}\n{"partial":')
     original = path.read_bytes()
@@ -772,7 +766,7 @@ def test_recovery_does_not_replace_a_different_session_or_workspace(tmp_path, mi
 
 def test_failed_recovery_keeps_original_and_releases_writer_lock(tmp_path, monkeypatch):
     log = SessionLog.create(tmp_path, session_id="backup-failure", cwd=tmp_path)
-    log.append("future/state-change", {})
+    log.append("user/message", {"role": "unknown"}, surface_op="append")
     log.flush()
     path = log.path
     log.close()

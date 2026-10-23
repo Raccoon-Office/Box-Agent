@@ -53,7 +53,7 @@ from box_agent.llm import SessionBoundLLM
 from box_agent.kernel.ports import KernelServices
 from box_agent.runtime import invoke_tool_with_permissions
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
-from box_agent.session_log import SessionLog, SessionLogWorkspaceMismatch
+from box_agent.session_log import SessionLog, SessionLogIncompatible, SessionLogWorkspaceMismatch
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.bash_tool import BackgroundShell, BackgroundShellManager
 from box_agent.tools.jupyter_tool import MAX_EXECUTE_CODE_CHARS
@@ -1925,7 +1925,7 @@ async def test_acp_resumes_and_answers_when_previous_skills_are_unavailable(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "damage", ["skill-fields", "skill-list", "todo-fields", "todo-list", "version", "event", "orphan"]
+    "damage", ["skill-fields", "skill-list", "todo-fields", "todo-list", "orphan"]
 )
 async def test_acp_recovers_optional_state_and_accepts_matching_host_history(
     tmp_path, monkeypatch, damage
@@ -1955,18 +1955,11 @@ async def test_acp_recovers_optional_state_and_accepts_matching_host_history(
         log.append("todo/write", {"todos": [{"id": "1", "task": "old", "status": "old-status"}]})
     elif damage == "todo-list":
         log.append("todo/write", {"todos": {}})
-    elif damage == "event":
-        log.append("future/event", {})
     log.flush()
     path = log.path
     log.close()
-    if damage == "version":
-        header = json.loads(path.read_text())
-        header["version"] = 999
-        path.write_text(json.dumps(header) + "\n")
-    elif damage == "orphan":
+    if damage == "orphan":
         path.unlink()
-    original = path.read_bytes() if path.exists() else None
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
@@ -2002,12 +1995,39 @@ async def test_acp_recovers_optional_state_and_accepts_matching_host_history(
                 assert expected_history in [m.content for m in state.agent.messages]
         finally:
             state.agent.session_log.close()
-    archives = list(path.parent.glob("session.recovery-*.jsonl"))
-    if damage in {"version", "event"}:
-        assert len(archives) == 1
-        assert archives[0].read_bytes() == original
-    else:
-        assert not archives
+    assert not list(path.parent.glob("session.recovery-*.jsonl"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", ["version", "event"])
+async def test_acp_preserves_incompatible_session_without_recovery_reset(tmp_path, monkeypatch, unknown):
+    profile = tmp_path / "profile"
+    monkeypatch.setattr(acp_module, "state_path", lambda relative: profile / relative)
+    log = SessionLog.create(profile / "sessions", session_id="future", cwd=tmp_path)
+    log.append("user/message", {"role": "user", "content": "preserve this history"}, surface_op="append")
+    if unknown == "event":
+        log.append("future/event", {})
+    log.flush()
+    path = log.path
+    log.close()
+    if unknown == "version":
+        lines = path.read_text().splitlines()
+        header = json.loads(lines[0])
+        header["version"] = 999
+        lines[0] = json.dumps(header)
+        path.write_text("\n".join(lines) + "\n")
+    original = path.read_bytes()
+    config = Config(llm=LLMConfig(api_key="test-key"), agent=AgentConfig(workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False))
+    adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    try:
+        for _ in range(2):
+            with pytest.raises(SessionLogIncompatible):
+                await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "future"}))
+            assert path.read_bytes() == original
+            assert not list(path.parent.glob("session.recovery-*.jsonl"))
+    finally:
+        await adapter.aclose()
 
 
 @pytest.mark.asyncio

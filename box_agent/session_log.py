@@ -66,6 +66,10 @@ class SessionLogCorrupted(ValueError):
     """The stored JSONL is not a valid committed Session Log prefix."""
 
 
+class SessionLogIncompatible(SessionLogCorrupted):
+    """A valid format requires a different reader; recovery must not reset it."""
+
+
 class SessionLogDurabilityError(OSError):
     """A canonical Session Log write or fsync failed."""
 
@@ -205,6 +209,9 @@ class SessionLog:
         self._lock_handle = lock_handle
         self._closed = False
         self._failed = False
+        # Keep the actual objects alive until commit; an id-only map could
+        # attach an abandoned image to an unrelated Message after id reuse.
+        self._pending_message_metadata: dict[int, tuple[Message, dict[str, Any]]] = {}
         self.recovery_source: Path | None = None
         recovery_name = header.get("recoverySource")
         if isinstance(recovery_name, str) and Path(recovery_name).name == recovery_name:
@@ -368,7 +375,7 @@ class SessionLog:
                     )
                 workspace_verified = True
                 if header.get("version") != SESSION_LOG_VERSION:
-                    raise SessionLogCorrupted("session log version is unsupported")
+                    raise SessionLogIncompatible("session log version is unsupported")
                 committed_end = None
                 if raw and not raw.endswith(b"\n"):
                     committed_end = raw.rfind(b"\n") + 1
@@ -401,7 +408,7 @@ class SessionLog:
                         event_type not in KNOWN_EVENT_TYPES
                         and event.get("ignorable") is not True
                     ):
-                        raise SessionLogCorrupted(
+                        raise SessionLogIncompatible(
                             f"session log contains unknown required event {event_type!r}"
                         )
                     if not isinstance(event.get("data"), dict):
@@ -418,7 +425,8 @@ class SessionLog:
                 handle.seek(0, os.SEEK_END)
             except BaseException as exc:
                 handle.close()
-                if recover and workspace_verified and isinstance(exc, SessionLogCorrupted):
+                if (recover and workspace_verified and isinstance(exc, SessionLogCorrupted)
+                        and not isinstance(exc, SessionLogIncompatible)):
                     return cls._recover_log(
                         path, original_raw, session_id, cwd, lock_handle
                     )
@@ -437,7 +445,7 @@ class SessionLog:
         cwd: str | Path,
         lock_handle: BinaryIO,
     ) -> "SessionLog":
-        """Keep the original bytes before replacing an incompatible runtime log.
+        """Keep the original bytes before replacing a damaged runtime log.
 
         The caller holds the writer lock and has verified the session/workspace.
         No historical tools are replayed; the host may supply semantic history.
@@ -516,6 +524,56 @@ class SessionLog:
         except OSError as exc:
             self._failed = True
             raise SessionLogDurabilityError("session log flush failed") from exc
+
+    def _message_metadata(self, message: Message) -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("session log is closed")
+        if self._failed:
+            raise SessionLogDurabilityError("session log is unusable after an I/O failure")
+        entry = self._pending_message_metadata.get(id(message))
+        if entry is None:
+            entry = (message, {})
+            self._pending_message_metadata[id(message)] = entry
+        return entry[1]
+
+    def queue_message_images(self, message: Message, refs: list[dict[str, Any]]) -> None:
+        """Attach references to this message's next event, outside its content."""
+        if message.role not in {"user", "tool"}:
+            raise ValueError("image references require a user or tool message")
+        copied = deepcopy(refs)
+        for ref in copied:
+            if (not isinstance(ref, dict) or "data" in ref
+                    or not isinstance(ref.get("imageId"), str) or not ref["imageId"]):
+                raise ValueError("image references need an imageId and cannot contain inline data")
+        if copied:
+            metadata = self._message_metadata(message)
+            queued = {ref["imageId"]: ref for ref in metadata.get("images", [])}
+            for ref in copied:
+                if ref["imageId"] in queued and queued[ref["imageId"]] != ref:
+                    raise ValueError("conflicting image occurrence metadata")
+                queued[ref["imageId"]] = ref
+            metadata["images"] = list(queued.values())
+
+    def mark_model_response(self, message: Message, round_number: int) -> None:
+        """Persist the accepted inference round together with its response."""
+        if message.role != "assistant":
+            raise ValueError("model rounds require an assistant message")
+        if isinstance(round_number, bool) or not isinstance(round_number, int) or round_number < 0:
+            raise ValueError("model round must be a nonnegative integer")
+        self._message_metadata(message)["modelRound"] = round_number
+
+    def _append_message_event(
+        self, event_type: str, data: dict[str, Any], *, message: Message,
+        surface_op: str | dict[str, Any], source_event_seqs: list[int] | None = None,
+    ) -> dict[str, Any]:
+        pending = self._pending_message_metadata.get(id(message))
+        if pending is not None:
+            data.update(deepcopy(pending[1]))
+        event = self.append(
+            event_type, data, surface_op=surface_op, source_event_seqs=source_event_seqs,
+        )
+        self._pending_message_metadata.pop(id(message), None)
+        return event
 
     def _skill_reference_path(self, ref: Mapping[str, Any]) -> Path:
         """Accept only a content-addressed file in this session's namespace."""
@@ -677,17 +735,19 @@ class SessionLog:
             if message.role == "user":
                 payload["source"] = message.source
                 appended.append(
-                    self.append(
+                    self._append_message_event(
                         "user/message",
                         payload,
+                        message=message,
                         surface_op="append",
                     )
                 )
             elif message.role == "assistant":
                 appended.append(
-                    self.append(
+                    self._append_message_event(
                         "assistant/message",
                         {"turn": turn, "step": step, "message": payload},
+                        message=message,
                         surface_op="append",
                     )
                 )
@@ -704,9 +764,10 @@ class SessionLog:
                 ):
                     data["result"] = tool_result_metadata[message.tool_call_id]
                 appended.append(
-                    self.append(
+                    self._append_message_event(
                         "tool/result",
                         data,
+                        message=message,
                         surface_op="append",
                     )
                 )
@@ -751,23 +812,26 @@ class SessionLog:
         payload = message.model_dump(mode="json", exclude_none=True)
         if message.role == "user":
             payload["source"] = message.source
-            return self.append(
+            return self._append_message_event(
                 "user/message",
                 payload,
+                message=message,
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
             )
         if message.role == "assistant":
-            return self.append(
+            return self._append_message_event(
                 "assistant/message",
                 {"turn": turn, "step": step, "message": payload},
+                message=message,
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
             )
         if message.role == "tool":
-            return self.append(
+            return self._append_message_event(
                 "tool/result",
                 {"turn": turn, "step": step, "message": payload},
+                message=message,
                 surface_op=surface_op,
                 source_event_seqs=source_event_seqs,
             )
@@ -820,6 +884,7 @@ class SessionLog:
 
         event = self.append("surface/reset", {"reason": reason})
         self.flush()
+        self._pending_message_metadata.clear()
         return event
 
     def replay(self) -> SessionProjection:
@@ -828,11 +893,106 @@ class SessionLog:
         plan: dict[str, Any] | None = None
         todos: list[dict[str, Any]] = []
         skills: list[dict[str, Any]] = []
+        images: dict[str, dict[str, Any]] = {}
+        model_round = 0
+        latest_image_request: tuple[int, list[str], list[str]] | None = None
         for event in self._events:
             event_type = event.get("type")
             data = event["data"]
             if event_type == "surface/reset":
                 surface.clear()
+                images.clear()
+                latest_image_request = None
+                continue
+            if event_type in {"user/message", "tool/result"}:
+                references = data.get("images")
+                if event_type == "tool/result" and "images" not in data:
+                    # Old CUA logs already carry structured, content-addressed
+                    # references. Never infer attachments from message paths.
+                    result = data.get("result")
+                    raw_output = result.get("rawOutput") if isinstance(result, dict) else None
+                    legacy = raw_output.get("mcp_image_references") if isinstance(raw_output, dict) else None
+                    references = []
+                    for index, ref in enumerate(legacy if isinstance(legacy, list) else ()):
+                        if not isinstance(ref, dict) or not isinstance(ref.get("contentRef"), str):
+                            continue
+                        copied = {key: ref[key] for key in (
+                            "contentRef", "sha256", "media_type", "source_bytes", "width", "height",
+                        ) if key in ref}
+                        copied.update(imageId=f"legacy-cua-{event['seq']}-{index}", source="cua",
+                                      createdRound=model_round + 1,
+                                      eligible=ref.get("image_context_eligible", True) is True)
+                        size = copied.get("source_bytes")
+                        if type(size) is int and size >= 0:
+                            copied["base64Bytes"] = 4 * ((size + 2) // 3)
+                        message_data = data.get("message")
+                        if isinstance(message_data, dict):
+                            copied["toolCallId"] = message_data.get("tool_call_id")
+                            copied["toolName"] = message_data.get("name")
+                        references.append(copied)
+                for ref in references if isinstance(references, list) else ():
+                    if not isinstance(ref, dict):
+                        continue
+                    image_id = ref.get("imageId")
+                    if not isinstance(image_id, str) or not image_id or image_id in images:
+                        continue
+                    was_evicted = ref.get("evicted") is True
+                    images[image_id] = {
+                        **deepcopy(ref), "active": (ref.get("eligible", True) is not False
+                                                   and ref.get("active", True) is not False
+                                                   and not was_evicted),
+                        "evicted": was_evicted, "messageSeq": event["seq"],
+                        "delivered": ref.get("delivered") is True,
+                    }
+            if event_type == "assistant/message":
+                recorded_round = data.get("modelRound")
+                if (isinstance(recorded_round, int) and not isinstance(recorded_round, bool)
+                        and recorded_round >= 0):
+                    if (recorded_round > model_round and latest_image_request is not None
+                            and latest_image_request[0] == recorded_round):
+                        for image_id in latest_image_request[1]:
+                            if image_id in images:
+                                images[image_id]["delivered"] = True
+                                images[image_id].setdefault("firstDeliveredRound", recorded_round)
+                                images[image_id]["lastDeliveredRound"] = recorded_round
+                        for image_id in latest_image_request[2]:
+                            if image_id in images:
+                                images[image_id]["noticeDelivered"] = True
+                    model_round = max(model_round, recorded_round)
+                    latest_image_request = None
+            if event_type == "request/context":
+                image_context = data.get("imageContext")
+                is_summary = isinstance(image_context, dict) and image_context.get("purpose") == "summary"
+                if not is_summary:
+                    latest_image_request = None
+                if isinstance(image_context, dict) and not is_summary:
+                    baseline = image_context.get("modelRoundBaseline")
+                    if (image_context.get("phase") == "continuation" and model_round == 0
+                            and type(baseline) is int and baseline > 0):
+                        model_round = baseline
+                    request_round = image_context.get(
+                        "requestRound", image_context.get("round", image_context.get("modelRound")),
+                    )
+                    selected = image_context.get("selected")
+                    notices = image_context.get("noticeImageIds")
+                    if (isinstance(request_round, int) and not isinstance(request_round, bool)
+                            and (isinstance(selected, list) or isinstance(notices, list))):
+                        selected_ids = [
+                            item.get("imageId", item.get("id")) if isinstance(item, dict) else item
+                            for item in (selected if isinstance(selected, list) else ())
+                        ]
+                        latest_image_request = (
+                            request_round, [value for value in selected_ids if isinstance(value, str)],
+                            [value for value in notices if isinstance(value, str)]
+                            if isinstance(notices, list) else [],
+                        )
+                evicted = image_context.get("evicted") if isinstance(image_context, dict) else None
+                for item in evicted if isinstance(evicted, list) else ():
+                    image_id = item.get("imageId", item.get("id")) if isinstance(item, dict) else item
+                    if isinstance(image_id, str) and image_id in images:
+                        images[image_id].update({"active": False, "evicted": True})
+                        if isinstance(item, dict) and isinstance(item.get("reason"), str):
+                            images[image_id]["evictionReason"] = item["reason"]
                 continue
             if event_type == "goal/change":
                 value = data.get("goal")
@@ -900,6 +1060,8 @@ class SessionLog:
             plan=plan,
             todos=todos,
             skills=skills,
+            images=list(images.values()),
+            model_round=model_round,
         )
 
     def repair_interrupted_turn(self) -> list[dict[str, Any]]:
@@ -1006,6 +1168,7 @@ class SessionLog:
     def close(self) -> None:
         if self._closed:
             return
+        self._pending_message_metadata.clear()
         try:
             self._handle.close()
         finally:
