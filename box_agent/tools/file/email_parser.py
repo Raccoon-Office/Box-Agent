@@ -89,6 +89,7 @@ class EmailAttachment:
     content_type: str
     content_id: str
     data: bytes
+    size_bytes: int | None = None
 
 
 @dataclass

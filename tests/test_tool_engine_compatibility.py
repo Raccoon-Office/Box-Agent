@@ -400,7 +400,7 @@ def _assert_schema_contract(tools, profile):
             assert entry["schema"]["description"].count(anchor) == 1
             entry["schema"]["description"] = entry["schema"]["description"].replace(
                 anchor,
-                "For .eml emails use read_email to decode MIME bodies and attachments. " + anchor,
+                "For .eml emails and .pst archives use read_email to decode messages and attachments. " + anchor,
             )
         if tool.name == "sub_agent":
             read_tools = "read/search tools (`read_file`, `query_jsonl`, "

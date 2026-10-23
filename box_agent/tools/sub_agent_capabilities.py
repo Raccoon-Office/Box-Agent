@@ -420,7 +420,7 @@ def parse_delegation_spec(
             # parent read_file instead of starting a child unable to read inputs.
             selected_defaults.add("read_file")
             if (not normalized_write_scope and min(raw_steps, general_max_steps) == 1
-                    and not any(Path(file).suffix.casefold() == ".eml" for file in normalized_files)):
+                    and not any(Path(file).suffix.casefold() in {".eml", ".pst"} for file in normalized_files)):
                 # Preserve old one-call file summaries within their stated budget.
                 selected_defaults = {"read_file"}
         normalized_required_tools = tuple(sorted(selected_defaults))

@@ -44,9 +44,10 @@ def test_extraction_requires_a_declared_write_scope():
     assert 'write_scope' in spec.invalid_fields
 
 
-def test_one_step_email_defaults_keep_decoder_in_general_loop():
+@pytest.mark.parametrize("extension", ["EML", "PST"])
+def test_one_step_email_defaults_keep_decoder_in_general_loop(extension):
     spec = parse_delegation_spec(
-        task='Read email', files=['source.EML'], budget={'max_steps': 1},
+        task='Read email', files=[f'source.{extension}'], budget={'max_steps': 1},
         default_required_tools=('read_file', 'read_email'),
     )
     assert isinstance(spec, DelegationSpec)

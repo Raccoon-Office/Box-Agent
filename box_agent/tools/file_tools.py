@@ -59,6 +59,8 @@ def _normalize_search_pagination(offset: int | None, limit: int | None) -> tuple
 def _binary_file_error(file_path: Path) -> str | None:
     """Return an actionable error for binary files, otherwise None."""
     suffix = file_path.suffix.casefold()
+    if suffix == ".pst":
+        return f"Cannot read PST archive '{file_path.name}' as text. Use read_email to list and read its messages."
     if suffix in _BINARY_EXTENSIONS:
         if suffix in {".docx", ".xlsx", ".pptx", ".pdf"}:
             return (

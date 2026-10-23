@@ -51,17 +51,34 @@ Most agent frameworks are either too simple (no sandbox, no tools) or too comple
 
 ### Local Email Analysis
 
-`read_email` decodes local `.eml` headers, plain/HTML bodies and attachment
-metadata offline, without a Python sandbox or additional packages. Prefer it
-over `read_file` for emails. The body supports character pagination; continue
-with `next_offset` and `expected_sha256=source_sha256` to detect a changed source.
-To inspect an attachment, call the separate `extract_email_attachment` tool
-with its `attachment_index` and a new `output_path` inside the workspace, then
-use the appropriate document or image tool. Reading creates no files;
-extraction checks write permissions and never overwrites a file. Read-only
-sub-agents can read emails; delegated extraction requires an explicit write scope.
-Messages are limited to 50 MiB, 256 MIME parts, 30 nesting levels and 100
-attachments. Encrypted messages are not decrypted.
+`read_email` decodes local `.eml` messages and `.pst` archives offline. Prefer
+it over `read_file` for emails. EML uses the standard-library MIME parser; PST
+uses the pinned `libpff-python` dependency (`pypff`), bundled in the Agent process
+including external-Python-sandbox builds. Run `uv sync` before rebuilding the runtime.
+
+For PST, first omit `message_id` to list messages across folders. Listing uses
+1-based `offset` and `limit` (at most 100 messages per page). Then pass a returned
+`message_id` to read that message's headers, body and attachment metadata.
+Message bodies use character pagination. Continue with `next_offset` and
+`expected_sha256=source_sha256`; the source hash is computed in chunks without
+loading the entire archive into memory. Repeat across selected EML/PST/document
+paths for cross-file analysis, keeping file paths and message IDs as provenance.
+
+To inspect an attachment, use `extract_email_attachment` with its
+`attachment_index`, a new workspace `output_path`, and the same `message_id` for
+PST. Reading creates no files or external requests; extraction checks write
+permissions and never overwrites a file. Read-only sub-agents retain email
+reading; delegated extraction requires an explicit write scope.
+
+EML parsing retains its 50 MiB, 256 MIME parts, 30 nesting levels and 100
+attachments budgets. PST archives have no upload-size budget in this tool;
+folder traversal is bounded to 64 levels and individual extracted attachments
+to 50 MiB. PST attachments are read only when explicitly extracted. Embedded
+Outlook item extraction and RTF-only body conversion are not supported; the
+reader reports these explicitly while preserving readable message data.
+Encrypted message content is not decrypted. Source tests do not establish
+packaged compatibility: rebuild the Agent runtime and host, restart, then verify
+a fresh local task with real EML/PST files and cross-file queries.
 
 ### Sub-Agent Parallelism
 

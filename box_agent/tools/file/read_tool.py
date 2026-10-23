@@ -183,7 +183,7 @@ class ReadTool(Tool):
             "maximum is 2000; use offset and limit to continue through large files. "
             "For JSONL logs, especially those with large records, use query_jsonl to filter "
             "and project fields instead of returning raw records. "
-            "For .eml emails use read_email to decode MIME bodies and attachments. "
+            "For .eml emails and .pst archives use read_email to decode messages and attachments. "
             "Binary and structured document files are rejected with an actionable error. "
             "Call it repeatedly to read different files or page through one file."
         )

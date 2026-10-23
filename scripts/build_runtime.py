@@ -231,6 +231,7 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
         # Document processing (runtime extras)
         "docx",  # python-docx imports as 'docx'
         "pypdf",
+        "pypff",  # PST reader runs in the Agent process, including external-sandbox builds.
         "pdfplumber",
         "reportlab",
         "reportlab.pdfgen",
