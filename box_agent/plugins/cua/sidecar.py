@@ -69,6 +69,7 @@ class CuaImageSidecar:
             "type": "input_image",
             "media_type": media_type,
             "contentRef": relative,
+            "path": str(target.resolve()),
             "sha256": digest,
             "source_bytes": len(raw),
         })

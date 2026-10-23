@@ -365,7 +365,10 @@ async def test_execute_code_runs_with_runtime_env_python(
     )
 
     try:
-        result = await tool.execute("print('external-python-ok')", session_id="runtime-env")
+        # Verify interpreter execution, not shared-runner startup latency.
+        result = await tool.execute(
+            "print('external-python-ok')", session_id="runtime-env", timeout=120,
+        )
     finally:
         await JupyterSandboxTool.shutdown_all()
         JupyterSandboxTool._sandbox_env = None
