@@ -101,6 +101,20 @@ def _validate_cron(expr: str) -> tuple[bool, str]:
     for value, (low, high) in zip(parts, _CRON_FIELD_RANGES):
         if not _validate_cron_field(value, low, high):
             return False, f"cron_expr 字段非法：{value!r}（合法范围 {low}-{high}）于 {expr!r}"
+    minutes: set[int] = set()
+    for part in parts[0].split(","):
+        base, separator, step_text = part.partition("/")
+        step = int(step_text) if separator else 1
+        if base == "*":
+            start, end = 0, 59
+        elif "-" in base:
+            start, end = map(int, base.split("-"))
+        else:
+            start = end = int(base)
+        minutes.update(range(start, end + 1, step))
+    # Multiple minutes repeat within every matching hour, less than 60 minutes apart.
+    if len(minutes) != 1:
+        return False, "周期任务的触发间隔至少为 60 分钟，分钟字段只能匹配一个固定分钟；例如 0 * * * *（每小时）。"
     return True, ""
 
 
@@ -143,7 +157,8 @@ class CreateScheduledTaskTool(Tool):
             "- name：简短的任务名（展示用）。\n"
             "- prompt：每次定时触发时下发给 agent 的【完整可独立执行指令】，要把内容、产出格式、"
             "数据来源都写清楚，使其脱离当前对话也能照做。\n"
-            "- cron_expr：标准 5 段 cron（分 时 日 月 周）。例：每天 9 点=`0 9 * * *`；"
+            "- cron_expr：标准 5 段 cron（分 时 日 月 周）。周期任务的触发间隔至少为 60 分钟，"
+            "分钟字段只能匹配一个固定分钟。例：每小时=`0 * * * *`；每天 9 点=`0 9 * * *`；"
             "每周一 10 点=`0 10 * * 1`；每个工作日 16 点=`0 16 * * 1-5`。\n"
             "- trigger_type：'cron'（周期，默认）或 'once'（一次性）。\n"
             "- fire_at：trigger_type 为 'once' 时必填，ISO 8601 时间（如 `2026-06-20T09:00:00`）。"
@@ -166,6 +181,7 @@ class CreateScheduledTaskTool(Tool):
                     "type": "string",
                     "description": (
                         "标准 5 段 cron（分 时 日 月 周）。trigger_type 为 'cron' 时使用；"
+                        "触发间隔至少为 60 分钟，分钟字段只能匹配一个固定分钟（如 0 * * * *）；"
                         f"留空则默认 {DEFAULT_CRON_EXPR}（每天 9 点）。"
                     ),
                 },
