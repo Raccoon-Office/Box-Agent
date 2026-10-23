@@ -27,7 +27,7 @@ def test_host_environment_selects_external_and_enables_plugin(monkeypatch):
     config = SimpleNamespace(plugins={})
     service = create_cua_service(config)
     assert service.config.mode == "external"
-    assert service.server_config["args"] == ["mcp", "--socket", "/host/socket", "--embedded"]
+    assert service.driver_server_config["args"] == ["mcp", "--socket", "/host/socket", "--embedded"]
     assert config.plugins["cua"]["runtime"]["enabled"]
 
 
@@ -123,7 +123,7 @@ def test_sessions_reject_conflicting_cua_runtime_ownership(monkeypatch, server_n
 
 
 @pytest.mark.asyncio
-async def test_cua_conflict_does_not_remove_other_server_definitions(tmp_path, monkeypatch):
+async def test_managed_cua_replaces_legacy_registration_and_preserves_other_servers(tmp_path, monkeypatch):
     file = tmp_path / "mcp.json"
     file.write_text(json.dumps({"mcpServers": {
         "computer-use": {"command": "legacy-cua"}, "other": {"command": "other-mcp"}}}))
@@ -131,7 +131,7 @@ async def test_cua_conflict_does_not_remove_other_server_definitions(tmp_path, m
     monkeypatch.setattr(loader, "_cua_service", service)
     try:
         definitions = loader._resolve_registered_sources(str(file))
-        assert definitions["computer-use"].config["disabled"]
+        assert definitions["computer-use"].config == service.server_config
         assert definitions["other"].config["command"] == "other-mcp"
     finally:
         await loader.cleanup_mcp_connections()
@@ -167,3 +167,43 @@ async def test_cold_load_publishes_cua_without_starting_daemon(tmp_path, monkeyp
         service.prepare.assert_not_awaited()
     finally:
         await loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+async def test_app_interface_replaces_legacy_driver_registration_with_host_endpoint(tmp_path, monkeypatch):
+    from box_agent.plugins.cua import config as cua_config
+    monkeypatch.setattr(cua_config.sys, 'platform', 'darwin')
+    monkeypatch.setenv('BOX_AGENT_CUA_RUNTIME_CONFIG', json.dumps({
+        'enabled': True, 'mode': 'external',
+        'driver_path': '/host/driver', 'endpoint': '/host/socket',
+    }))
+    service = create_cua_service(SimpleNamespace(plugins={}))
+    assert service.settings.tool_interface == 'app'
+    file = tmp_path / 'mcp.json'
+    file.write_text(json.dumps({'mcpServers': {'computer-use': service.driver_server_config}}))
+    monkeypatch.setattr(loader, '_cua_service', service)
+    try:
+        definitions = loader._resolve_registered_sources(str(file))
+        config = definitions['computer-use'].config
+        assert config == service.server_config
+        assert not config['disabled']
+        file.write_text(json.dumps({'mcpServers': {
+            'computer-use': {**service.driver_server_config, 'args': ['mcp', '--socket', '/other/socket']}}}))
+        definitions = loader._resolve_registered_sources(str(file))
+        assert definitions['computer-use'].config == service.server_config
+    finally:
+        await loader.cleanup_mcp_connections()
+
+
+def test_live_cua_interface_cannot_be_silently_reused_after_switch(monkeypatch):
+    runtime = CuaRuntimeConfig(enabled=True, mode='external',
+                               driver_path='/host/driver', endpoint='/host/socket')
+    first = CuaService(CuaConfig(tool_interface="driver", runtime=runtime))
+    second = CuaService(CuaConfig(tool_interface='app', runtime=runtime))
+    monkeypatch.setattr(loader, '_cua_service', first)
+    try:
+        with pytest.raises(RuntimeError, match='already registered'):
+            loader.register_cua_service(second)
+    finally:
+        first.adapter.cleanup()
+        second.adapter.cleanup()

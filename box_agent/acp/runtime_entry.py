@@ -11,6 +11,7 @@ import sys
 
 
 WEB_EXTRACT_MCP_ARG = "--web-extract-mcp"
+CUA_MCP_ARG = "--cua-mcp"
 BOOTSTRAP_MCP_CONFIG_ARG = "--bootstrap-mcp-config"
 
 
@@ -62,6 +63,18 @@ def main() -> None:
         finally:
             # MCP owns and may close the duplicate buffer. Restore the original
             # stream before PyInstaller performs its final stdout flush.
+            sys.stdout = protocol_stdout
+        return
+
+    if sys.argv[1:] == [CUA_MCP_ARG]:
+        # Native App adapter over the official cua-driver (macOS only).
+        from box_agent.mcp_servers.cua_server import main as run_cua_mcp
+
+        protocol_stdout = sys.stdout
+        sys.stdout = _McpStdoutProxy(protocol_stdout)
+        try:
+            run_cua_mcp()
+        finally:
             sys.stdout = protocol_stdout
         return
 
