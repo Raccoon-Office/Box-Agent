@@ -433,3 +433,19 @@ def test_rereading_identical_bytes_creates_a_new_age_without_reviving_old_occurr
     assert [ref["imageId"] for ref in request.manifest["selected"]] == [second["imageId"]]
     assert request.manifest["evicted"][0]["imageId"] == original["imageId"]
     assert len(list(context.store.directory.glob("*.png"))) == 1
+
+
+def test_seeded_excluded_image_keeps_its_pending_not_delivered_notice(tmp_path):
+    from box_agent.session_continuation import ContinuationMessage
+
+    log = SessionLog.create(tmp_path, session_id="seed-notice", cwd=tmp_path)
+    agent = make_agent(tmp_path, RecordingLLM(), log)
+    ref = {"imageId": "excluded", "source": "user_upload", "active": False,
+           "evicted": True, "delivered": False, "createdRound": 1,
+           "evictionReason": "encoded_byte_budget"}
+    agent.seed_continuation_messages((ContinuationMessage("user", "look", (ref,)),), model_round=2)
+    prepared = agent.image_context.prepare(agent.messages, llm=agent.llm)
+    assert prepared.notices
+    assert prepared.manifest["noticeImageIds"] == ["excluded"]
+    assert not image_blocks(prepared.messages)
+    log.close()

@@ -903,14 +903,40 @@ class Agent:
                 defer_ack(skill_messages)
 
     def seed_continuation_messages(
-        self, messages: tuple[ContinuationMessage, ...]
+        self, messages: tuple[ContinuationMessage, ...], *, model_round: int = 0,
     ) -> int:
         """Seed semantic history into a fresh Agent without tool protocol state."""
 
         if len(self.messages) != 1 or self.messages[0].role != "system":
             return 0
+        if type(model_round) is not int or model_round < 0:
+            raise ValueError("invalid continuation model round")
         for message in messages:
-            self.messages.append(Message(role=message.role, content=message.content))
+            seeded = Message(role=message.role, content=message.content)
+            refs = deepcopy(list(message.image_refs))
+            if refs:
+                if self.session_log is None:
+                    raise ValueError("Image continuation requires a session-owned image store")
+                for ref in refs:
+                    if ref.get("active", True) and not ref.get("evicted"):
+                        try:
+                            self.image_context.store.load_block(ref)
+                        except (OSError, ValueError):
+                            ref.update(active=False, evicted=True, evictionReason="missing_or_corrupt_file")
+                    if ref.get("evictionReason") in {"missing_or_corrupt_file", "persistence_failed"}:
+                        seeded.content += "\n" + self.image_context._notice(ref, ref["evictionReason"])
+                self.session_log.queue_message_images(seeded, refs)
+                self.image_context.add_references(refs)
+            self.messages.append(seeded)
+        if model_round:
+            self.image_context.model_round = model_round
+            if self.session_log is not None:
+                self.session_log.append("request/context", {"imageContext": {
+                    "phase": "continuation", "modelRoundBaseline": model_round,
+                }})
+        if any(message.image_refs for message in messages) and self.session_log is not None:
+            self._persist_unlogged_messages(turn=self._next_session_turn(), step=None)
+            self.session_log.flush()
         return len(messages)
 
     def set_goal(

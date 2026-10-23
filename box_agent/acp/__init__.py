@@ -189,7 +189,9 @@ from box_agent.session_trace import (
 )
 from box_agent.session_log import SessionLog
 from box_agent.task_context import TaskContext, normalize_task_id
-from box_agent.session_continuation import HISTORY_EDIT_SCHEMA_VERSION, parse_session_continuation
+from box_agent.session_continuation import (
+    HISTORY_EDIT_SCHEMA_VERSION, import_continuation_images, parse_session_continuation,
+)
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -2724,14 +2726,37 @@ class BoxACPAgent:
                 and continuation.product_session_id != state.upstream_session_id
             ):
                 raise ValueError("HISTORY_EDIT_SESSION_MISMATCH")
-            state.continuation_applied = True
             if (
                 continuation is not None
                 and continuation.product_session_id == state.upstream_session_id
             ):
-                seeded_count = state.agent.seed_continuation_messages(
-                    continuation.messages
-                )
+                if any(message.image_refs for message in continuation.messages):
+                    destination_log = state.agent.session_log
+                    if destination_log is None:
+                        raise ValueError("CONTINUATION_IMAGE_DESTINATION_REQUIRED")
+                    source_log = next((
+                        existing.agent.session_log for existing in self._sessions.values()
+                        if existing.upstream_session_id == continuation.source_session_id
+                        and existing.agent.session_log is not None
+                    ), None)
+                    opened_source = source_log is None
+                    if source_log is None:
+                        source_log = SessionLog.open(
+                            state_path("sessions"), session_id=continuation.source_session_id,
+                            cwd=destination_log.header["cwd"], recover=False,
+                        )
+                    try:
+                        imported = import_continuation_images(
+                            continuation, source_log=source_log, destination_log=destination_log,
+                        )
+                        seeded_count = state.agent.seed_continuation_messages(
+                            imported.messages, model_round=imported.model_round,
+                        )
+                    finally:
+                        if opened_source:
+                            source_log.close()
+                else:
+                    seeded_count = state.agent.seed_continuation_messages(continuation.messages)
                 seeded_chars = sum(
                     len(message.content) for message in continuation.messages
                 )
@@ -2757,6 +2782,7 @@ class BoxACPAgent:
                             "target_task_id": continuation.target_task_id,
                         },
                     )
+            state.continuation_applied = True
         state.turn_counter += 1
         provided_turn_id = _meta_string(prompt_meta, "turn_id", "turnId")
         turn_id = provided_turn_id or f"{session_id}-turn-{state.turn_counter}"
