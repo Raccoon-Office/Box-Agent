@@ -2275,7 +2275,8 @@ _cua_service = None  # Owned with the existing process-wide MCP registry; closed
 def register_cua_service(service):
     global _cua_service
     if _cua_service is not None and _cua_service is not service:
-        if _cua_service.name == service.name and _cua_service.config == service.config:
+        if (_cua_service.name == service.name and _cua_service.config == service.config
+                and _cua_service.settings.tool_interface == service.settings.tool_interface):
             service.adapter.cleanup()
             return _cua_service
         raise RuntimeError("CUA runtime is already registered")
@@ -2325,11 +2326,9 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
         existing = servers.get(name)
         if existing and existing.config.get("disabled"):
             return servers  # Explicit disable always wins, including host mode.
-        if existing and existing.config != config:
-            _warn(f"Managed CUA server '{name}' conflicts with existing MCP configuration; remove the old CUA entry before retrying")
-            from dataclasses import replace
-            servers[name] = replace(existing, config={**existing.config, "disabled": True})
-            return servers  # A CUA conflict must not block unrelated MCP servers.
+        # The managed runtime owns this server name. Replace legacy direct-Driver
+        # registrations with the selected interface, using the host's resolved
+        # endpoint. Publishing a second server would expose two tool contracts.
         servers[name] = ResolvedMcpServer(
             name=name, config=config, owner="system", config_id=name,
             connector_id=None, connector_name=None, source_path="<runtime:cua>",

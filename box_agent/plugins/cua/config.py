@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -30,6 +31,9 @@ class CuaConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     server_name: str = Field(default="computer-use", min_length=1)
+    tool_interface: Literal["driver", "app"] = Field(
+        default_factory=lambda: "app" if sys.platform == "darwin" else "driver"
+    )
     feed_screenshots: bool = True
     persist_images: bool = True
     runtime: CuaRuntimeConfig | None = None

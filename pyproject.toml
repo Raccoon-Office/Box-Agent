@@ -41,6 +41,7 @@ box-agent = "box_agent.cli:main"
 box-agent-acp = "box_agent.acp.server:main"
 box-agent-build-runtime = "box_agent.build_runtime_cli:main"
 box-agent-web-extract-mcp = "box_agent.mcp_servers.web_extract_server:main"
+box-agent-cua-mcp = "box_agent.mcp_servers.cua_server:main"
 
 [project.urls]
 Homepage = "https://github.com/Raccoon-Office/Box-Agent"
@@ -89,7 +90,7 @@ exclude = ["tests*"]
 # Include skills directory (git submodule) as package data
 # After moving submodule to box_agent/skills
 [tool.setuptools.package-data]
-box_agent = ["skills/**/*", "config/*", "trace_viewer/*"]
+box_agent = ["skills/**/*", "config/*", "trace_viewer/*", "mcp_servers/native/*.swift"]
 
 [tool.setuptools.exclude-package-data]
 box_agent = [
