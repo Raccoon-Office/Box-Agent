@@ -22,7 +22,13 @@ from ..tools.argument_limits import (
 )
 from ..tools.base import tool_call_name_variants
 from .base import LLMClientBase
-from .image_payload import HOSTED_MAX_REQUEST_BODY_BYTES, RequestBodyTooLargeError, prepare_image_request
+from .image_payload import (
+    HOSTED_MAX_REQUEST_BODY_BYTES,
+    RequestBodyTooLargeError,
+    inspect_image_request,
+    prepare_image_request,
+    validate_image_request,
+)
 from ..client_info import should_attach_client_headers
 from ..session_trace import emit_session_trace
 from .error_messages import is_retryable_llm_error
@@ -577,12 +583,18 @@ class OpenAIClient(LLMClientBase):
             timeout=timeout,
         )
 
-    async def _bound_request_body(self, params: dict[str, Any], *, turn_id: str) -> dict[str, Any]:
+    async def _bound_request_body(
+        self, params: dict[str, Any], *, turn_id: str, preserve_image_bytes: bool = False,
+    ) -> dict[str, Any]:
         limit = getattr(self, "max_request_body_bytes", None)
         if limit is None:
             return params
         try:
-            prepared, metrics = await asyncio.to_thread(prepare_image_request, params, limit)
+            if preserve_image_bytes:
+                metrics = await asyncio.to_thread(validate_image_request, params, limit)
+                prepared = params
+            else:
+                prepared, metrics = await asyncio.to_thread(prepare_image_request, params, limit)
         except RequestBodyTooLargeError as exc:
             emit_session_trace("llm.request_payload", turn_id=turn_id,
                                data={"provider": "openai", "model": self.model,
@@ -591,6 +603,49 @@ class OpenAIClient(LLMClientBase):
         emit_session_trace("llm.request_payload", turn_id=turn_id,
                            data={"provider": "openai", "model": self.model, **metrics})
         return prepared
+
+    def _request_body_params(
+        self, api_messages: list[dict[str, Any]], tools: list[Any] | None, *,
+        max_tokens: int, thinking_enabled: bool, stream: bool,
+    ) -> dict[str, Any]:
+        """Build the same body for read-only preflight and actual transport."""
+        params: dict[str, Any] = {"messages": api_messages, "max_tokens": max_tokens}
+        if self.model:
+            params["model"] = self.model
+        if stream:
+            params.update(stream=True, stream_options={"include_usage": True})
+        if tools:
+            params["tools"] = self._convert_tools(tools)
+        _apply_thinking_params(
+            params, model=self.model, thinking_enabled=thinking_enabled,
+            reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
+        )
+        if (self.api_base, params.get("model", "")) in getattr(self, "_max_completion_token_bindings", set()):
+            params["max_completion_tokens"] = params.pop("max_tokens")
+        return params
+
+    def preflight_image_request(
+        self, messages: list[Message], tools: list[Any] | None = None, *,
+        thinking_enabled: bool = False, stream: bool = True,
+    ) -> dict[str, Any]:
+        """Measure a request without I/O, image conversion, or consuming overrides.
+
+        Selection belongs to the caller. Reserve the extra bytes of the supported
+        token-parameter fallback so a subsequent retry cannot cross the budget.
+        """
+        _, api_messages = self._convert_messages(messages)
+        cap = getattr(self, "_ephemeral_max_output_tokens", None)
+        params = self._request_body_params(
+            api_messages, tools, max_tokens=max(cap or 0, self.max_output_tokens),
+            thinking_enabled=thinking_enabled, stream=stream,
+        )
+        metrics = inspect_image_request(params, getattr(self, "max_request_body_bytes", None))
+        reserve = len("max_completion_tokens") - len("max_tokens") if "max_tokens" in params else 0
+        metrics["token_parameter_reserve_bytes"] = reserve
+        metrics["required_body_bytes"] = metrics["body_bytes"] + reserve
+        metrics["fits"] = (metrics["budget_bytes"] is None
+                           or metrics["required_body_bytes"] <= metrics["budget_bytes"])
+        return metrics
 
     def set_ephemeral_max_output_tokens(self, value: int | None) -> None:
         """Override the output-token limit for the very next request.
@@ -648,6 +703,7 @@ class OpenAIClient(LLMClientBase):
         turn_id: str = "",
         title: str = "",
         call_kind: str = "",
+        preserve_image_bytes: bool = False,
     ) -> Any:
         """Execute API request (core method that can be retried).
 
@@ -664,21 +720,9 @@ class OpenAIClient(LLMClientBase):
             Exception: API call failed
         """
 
-        params: dict[str, Any] = {
-            "messages": api_messages,
-            "max_tokens": self._consume_effective_max_tokens(),
-        }
-        if self.model:
-            params["model"] = self.model
-
-        if tools:
-            params["tools"] = self._convert_tools(tools)
-
-        _apply_thinking_params(
-            params,
-            model=self.model,
-            thinking_enabled=thinking_enabled,
-            reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
+        params = self._request_body_params(
+            api_messages, tools, max_tokens=self._consume_effective_max_tokens(),
+            thinking_enabled=thinking_enabled, stream=False,
         )
 
         async def _once():
@@ -688,7 +732,9 @@ class OpenAIClient(LLMClientBase):
             if auth_headers:
                 params["extra_headers"] = auth_headers
 
-            request_params = await self._bound_request_body(dict(params), turn_id=turn_id)
+            request_params = await self._bound_request_body(
+                dict(params), turn_id=turn_id, preserve_image_bytes=preserve_image_bytes,
+            )
             log_llm_request(provider="openai", mode="completion", api_base=self.api_base, params=request_params)
 
             try:
@@ -887,6 +933,11 @@ class OpenAIClient(LLMClientBase):
         return {
             "api_messages": api_messages,
             "tools": tools,
+            "preserve_image_bytes": any(
+                block.get("type") == "input_image" and block.get("preserve_image_bytes") is True
+                for message in messages if isinstance(message.content, list)
+                for block in message.content if isinstance(block, dict)
+            ),
         }
 
     def _parse_response(
@@ -1022,6 +1073,7 @@ class OpenAIClient(LLMClientBase):
                 turn_id=turn_id,
                 title=title,
                 call_kind=call_kind,
+                **({"preserve_image_bytes": True} if request_params["preserve_image_bytes"] else {}),
             )
         else:
             # Don't use retry
@@ -1033,6 +1085,7 @@ class OpenAIClient(LLMClientBase):
                 turn_id=turn_id,
                 title=title,
                 call_kind=call_kind,
+                **({"preserve_image_bytes": True} if request_params["preserve_image_bytes"] else {}),
             )
 
         # Parse and return response
@@ -1056,21 +1109,10 @@ class OpenAIClient(LLMClientBase):
         """
         request_params = self._prepare_request(messages, tools)
 
-        params: dict[str, Any] = {
-            "messages": request_params["api_messages"],
-            "max_tokens": self._consume_effective_max_tokens(),
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if self.model:
-            params["model"] = self.model
-        if request_params["tools"]:
-            params["tools"] = self._convert_tools(request_params["tools"])
-        _apply_thinking_params(
-            params,
-            model=self.model,
-            thinking_enabled=thinking_enabled,
-            reasoning_effort_when_disabled=getattr(self, "reasoning_effort_when_disabled", None),
+        params = self._request_body_params(
+            request_params["api_messages"], request_params["tools"],
+            max_tokens=self._consume_effective_max_tokens(),
+            thinking_enabled=thinking_enabled, stream=True,
         )
 
         should_buffer_sensenova_tool_markup = bool(
@@ -1083,7 +1125,9 @@ class OpenAIClient(LLMClientBase):
         if auth_headers:
             params["extra_headers"] = auth_headers
 
-        params = await self._bound_request_body(params, turn_id=turn_id)
+        params = await self._bound_request_body(
+            params, turn_id=turn_id, preserve_image_bytes=request_params["preserve_image_bytes"],
+        )
 
         # Accumulators
         text_content = ""

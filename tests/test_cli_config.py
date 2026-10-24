@@ -88,6 +88,27 @@ def test_cmd_config_set_updates_nested_tool_limit(tmp_path: Path, monkeypatch) -
     assert cli.Config.from_yaml(config_path).tool_limits.general.max_tool_calls == 96
 
 
+@pytest.mark.parametrize("prefix", ["agent.image_context", "image_context"])
+def test_image_context_config_set_updates_nested_yaml_and_get_round_trips(tmp_path, monkeypatch, capsys, prefix):
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    with config_path.open("a") as handle:
+        handle.write("agent:\n  image_context:\n    keep_rounds: 3\n    max_encoded_bytes: 10485760\n")
+    monkeypatch.setattr(cli.Config, "find_config_file", lambda _name: config_path)
+    for name, value in (("keep_rounds", 5), ("max_encoded_bytes", 12345)):
+        assert cli.cmd_config(set_pair=(f"{prefix}.{name}", str(value))) == 0
+        capsys.readouterr()
+        assert cli.cmd_config(get_key=f"agent.image_context.{name}") == 0
+        assert capsys.readouterr().out.strip() == str(value)
+    data = yaml.safe_load(config_path.read_text())
+    assert data["agent"]["image_context"] == {"keep_rounds": 5, "max_encoded_bytes": 12345}
+    assert "image_context" not in data
+    before_invalid = config_path.read_text()
+    for invalid in ("0", "-1", "true", "3.5"):
+        assert cli.cmd_config(set_pair=(f"{prefix}.keep_rounds", invalid)) == 1
+        assert config_path.read_text() == before_invalid
+
+
 def test_cmd_config_set_updates_relaxed_timeout_controls(
     tmp_path: Path,
     monkeypatch,

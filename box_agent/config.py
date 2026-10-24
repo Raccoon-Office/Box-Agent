@@ -248,6 +248,13 @@ class ExternalMemoryConfig(BaseModel):
     save: MemoryHttpOperation | None = None
 
 
+class ImageContextConfig(BaseModel):
+    """Shared retention policy for durable image occurrences."""
+
+    keep_rounds: int = Field(default=3, gt=0, strict=True)
+    max_encoded_bytes: int = Field(default=10 * 1024 * 1024, gt=0, strict=True)
+
+
 class AgentConfig(BaseModel):
     """Agent configuration"""
 
@@ -303,6 +310,7 @@ class AgentConfig(BaseModel):
     # Keep repeated read_file output compact only while an exact source remains
     # in the live model context. Disable for immediate rollback.
     context_resource_dedup_enabled: bool = True
+    image_context: ImageContextConfig = Field(default_factory=ImageContextConfig)
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
     code_prompt_path: str = "code_prompt.md"
@@ -648,6 +656,11 @@ class Config(BaseModel):
             for field_name in AgentConfig.model_fields
             if field_name in data
         }
+        nested_agent = data.get("agent", {})
+        if not isinstance(nested_agent, dict):
+            raise ValueError("agent must be a mapping")
+        agent_data.update({key: value for key, value in nested_agent.items()
+                           if key in AgentConfig.model_fields})
         # Preserve the historical behavior where an explicit YAML null for the
         # parallel timeout means "use the runtime default".
         if agent_data.get("parallel_tool_timeout_seconds") is None:

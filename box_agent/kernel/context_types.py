@@ -33,6 +33,7 @@ class CompactionInput:
     force: bool = False
     estimate_tools: dict[str, Any] | None = None
     summary_input_token_limit: int | None = None
+    summary_projector: Callable[[list[Message], Any], list[Message]] | None = None
 
 
 @dataclass(frozen=True)

@@ -185,6 +185,9 @@ def process_tool_result(
         policy_decision=pipeline_input.policy_decision,
         tool_id=pipeline_input.tool_id,
         server_name=pipeline_input.server_name,
+        image_content=result.image_content if result.success else None,
+        image_source=result.image_source,
+        image_context_eligible=result.image_context_eligible,
     )
     if pipeline_input.commit_result is None:
         pipeline_input.messages.append(tool_message)

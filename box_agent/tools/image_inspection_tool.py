@@ -6,6 +6,7 @@ import asyncio
 import base64
 import io
 import json
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -53,8 +54,6 @@ class _PermissionRequired(ValueError):
 class ImageInspectionTool(Tool):
     """Inspect local PNG/JPEG images with an injected multimodal LLM."""
 
-    transient_followup_allowed = True
-
     def __init__(
         self,
         llm: Any,
@@ -64,6 +63,7 @@ class ImageInspectionTool(Tool):
         relative_root_dir: str | None = None,
         native_supported: bool = False,
         native_capability_llm: Any | None = None,
+        proxy_llm_resolver: Callable[[], Any | None] | None = None,
     ) -> None:
         self.llm = llm
         self.workspace_dir = Path(workspace_dir).absolute()
@@ -74,6 +74,8 @@ class ImageInspectionTool(Tool):
         self._perm = permission_engine
         self.native_supported = native_supported
         self._native_capability_llm = native_capability_llm
+        self._proxy_llm_resolver = proxy_llm_resolver
+        self._proxy_binding: tuple[Any, ...] | None = None
         self._thinking_enabled = False
         self._unsupported_error: str | None = None
 
@@ -89,8 +91,9 @@ class ImageInspectionTool(Tool):
     def description(self) -> str:
         return (
             "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's "
-            "written analysis; native shows image pixels to you in your next request, "
-            "so you must record your findings before reading another batch. "
+            "written analysis; native shows image pixels to you under the session's "
+            "image-context retention policy. Omit strategy to use native when the "
+            "active main model declares image support, otherwise proxy. "
             "Never modifies files."
         )
 
@@ -124,11 +127,11 @@ class ImageInspectionTool(Tool):
                 "strategy": {
                     "type": "string",
                     "enum": ["proxy", "native"],
-                    "default": "proxy",
                     "description": (
                         "proxy asks the configured vision utility model and returns text; "
-                        "native attaches canonical image blocks transiently to the active "
-                        "main model's next request."
+                        "native attaches images to the active main model's context. "
+                        "Omit to choose native for a declared image-capable main model, "
+                        "otherwise proxy."
                     ),
                 },
             },
@@ -139,7 +142,7 @@ class ImageInspectionTool(Tool):
         self,
         image_paths: list[str],
         instruction: str,
-        strategy: str = "proxy",
+        strategy: str | None = None,
     ) -> ToolResult:
         """Inspect images without modifying the filesystem."""
         if not image_paths or len(image_paths) > _MAX_IMAGES:
@@ -153,7 +156,9 @@ class ImageInspectionTool(Tool):
                 "IMAGE_INPUT_INVALID",
                 "instruction must not be empty",
             )
-        normalized_strategy = strategy.strip().lower()
+        normalized_strategy = (
+            "native" if self._default_native_input_supported() else "proxy"
+        ) if strategy is None else strategy.strip().lower()
         if normalized_strategy not in {"proxy", "native"}:
             return self._error(
                 "IMAGE_INPUT_INVALID",
@@ -165,6 +170,26 @@ class ImageInspectionTool(Tool):
                 "the active main model is not known to accept image input; "
                 "use strategy='proxy'",
             )
+
+        proxy_llm = self.llm
+        if normalized_strategy == "proxy":
+            if self._proxy_llm_resolver is not None:
+                proxy_llm = self._proxy_llm_resolver()
+            if proxy_llm is None:
+                return self._error(
+                    "IMAGE_INPUT_UNSUPPORTED",
+                    "no image-capable proxy model is available in the active model configuration",
+                )
+            binding = (
+                str(getattr(proxy_llm, "model", "") or ""),
+                str(getattr(proxy_llm, "api_base", "") or ""),
+                image_input_support(proxy_llm),
+            )
+            if binding != self._proxy_binding:
+                self._unsupported_error = None
+                self._proxy_binding = binding
+            if self._unsupported_error is not None:
+                return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
 
         try:
             images = self._load_images(image_paths)
@@ -185,11 +210,10 @@ class ImageInspectionTool(Tool):
             )
             blocks[0]["text"] = (
                 "Native image inspection: the labeled images below are visible to "
-                "you in this request only. Inspect their pixels yourself; no separate "
+                "you while retained in the session image context. Inspect their pixels yourself; no separate "
                 "vision-model answer will follow. In your next assistant response, "
                 "record concise findings for each filename in ordinary assistant text, "
-                "including anything unreadable or uncertain, before requesting another "
-                "image batch. These written findings remain after the image pixels "
+                "including anything unreadable or uncertain. These written findings remain after the image pixels "
                 "leave the context. You may record findings and call inspect_images "
                 "for the next requested batch in the same response; another user turn "
                 "is not required. Match each finding to the label immediately before "
@@ -197,9 +221,11 @@ class ImageInspectionTool(Tool):
             )
             image_metadata = self._image_metadata(images, detailed=True)
             receipt = (
-                f"Loaded {len(images)} image(s) for native inspection. Their pixels "
-                "and filename labels accompany your next request. This receipt is "
-                "not a visual assessment; inspect the attached images yourself."
+                f"Loaded {len(images)} image(s) for native inspection, subject to the "
+                "session image-context limits. Only images included in the request's "
+                "image context are available for inspection. This receipt is not a "
+                "visual assessment; report any unavailable image without claiming to see it. "
+                f"Inspection instruction: {json.dumps(normalized_instruction, ensure_ascii=False)}"
             )
             return ToolResult(
                 success=True,
@@ -211,11 +237,9 @@ class ImageInspectionTool(Tool):
                     "images": image_metadata,
                     "instruction": normalized_instruction,
                 },
-                transient_followup_content=blocks,
+                image_content=blocks,
+                image_source="image_inspect",
             )
-
-        if self._unsupported_error is not None:
-            return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
 
         response = None
         last_timeout: asyncio.TimeoutError | None = None
@@ -234,7 +258,7 @@ class ImageInspectionTool(Tool):
             ]
             try:
                 inspection_llm = cap_auxiliary_client(
-                    self.llm,
+                    proxy_llm,
                     LONG_TASK_MAX_OUTPUT_TOKENS
                     if self._thinking_enabled else SMALL_TASK_MAX_OUTPUT_TOKENS,
                 )
@@ -304,7 +328,15 @@ class ImageInspectionTool(Tool):
             content=content,
             raw_output=raw_output,
             model_context=self._model_context(content),
+            image_content=self._content_blocks(candidate_images, instruction=normalized_instruction),
+            image_source="image_inspect",
+            image_context_eligible=False,
         )
+
+    def _default_native_input_supported(self) -> bool:
+        if self._native_capability_llm is not None:
+            return image_input_support(self._native_capability_llm) is True
+        return self.native_supported
 
     def _native_input_supported(self) -> bool:
         if self._native_capability_llm is not None:
@@ -564,6 +596,7 @@ class ImageInspectionTool(Tool):
                     },
                     {
                         "type": "input_image",
+                        "source_label": f"Image {image['index']}: {image['path']}",
                         "media_type": image["mime_type"],
                         "data": image["data"],
                         "width": image["width"],
@@ -616,3 +649,41 @@ class ImageInspectionTool(Tool):
                 return str(path.relative_to(self.workspace_dir))
             except ValueError:
                 return str(path)
+
+
+class ImageAttachmentSnapshotTool(ImageInspectionTool):
+    """Host-only reader when the ordinary inspection tool is unavailable."""
+
+    @property
+    def name(self) -> str:
+        return "read_image_attachment"
+
+    async def execute(self, image_paths: list[str], instruction: str,
+                      strategy: str | None = None) -> ToolResult:
+        if not image_paths or len(image_paths) > _MAX_IMAGES or not instruction.strip():
+            return self._error("IMAGE_INPUT_INVALID", "invalid image attachment request")
+        try:
+            images = self._load_images(image_paths)
+        except _PermissionRequired as exc:
+            return ToolResult(success=False, error=f"IMAGE_PERMISSION_REQUIRED: {exc}",
+                              permission_request=exc.permission_request,
+                              raw_output={"code": "IMAGE_PERMISSION_REQUIRED", "tool": self.name})
+        except ValueError as exc:
+            return self._error("IMAGE_INPUT_INVALID", str(exc))
+        eligible = self._default_native_input_supported()
+        notice = (
+            f"Loaded {len(images)} image attachment(s) for native inspection, subject to "
+            "session image-context limits. Only images included in the request are visible."
+        ) if eligible else (
+            f"Loaded {len(images)} image attachment(s) for session storage. "
+            "The image pixels were not delivered to the model: no image-capable model "
+            "is configured. No visual analysis was performed; do not claim the images were seen."
+        )
+        return ToolResult(
+            success=True, content=notice, model_context=notice,
+            raw_output={"type": "image_attachment_snapshot", "schema_version": 1,
+                        "images": self._image_metadata(images, detailed=True),
+                        **({} if eligible else {"not_delivered_reason": "image_model_unavailable"})},
+            image_content=self._content_blocks(images, instruction=instruction),
+            image_source="user_upload", image_context_eligible=eligible,
+        )

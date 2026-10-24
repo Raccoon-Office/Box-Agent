@@ -63,6 +63,10 @@ def allowed_mcp_result_adapters(
 ) -> tuple[MCPResultAdapter, ...]:
     allowed = []
     for adapter in _CURRENT.get():
+        # Image-context adapters use the durable attachment seam, not the
+        # legacy one-shot overlay. Keep ordinary transient adapters unchanged.
+        if callable(getattr(adapter, "image_context_for_result", None)):
+            continue
         try:
             if adapter.allows_transient_followup(
                 server_name=server_name, remote_name=remote_name,
@@ -104,6 +108,39 @@ def adapt_mcp_inline_images(
         except Exception:
             _log.debug("MCP result adapter failed", exc_info=True)
     return blocks or None
+
+
+def adapt_mcp_image_context(
+    *, server_name: str, remote_name: str, inline_images: list[dict[str, str]],
+    arguments: dict[str, Any], structured_content: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Collect trusted images without exposing their bytes in public results."""
+    if not inline_images:
+        return None, None
+    blocks: list[dict[str, Any]] = []
+    source = None
+    for adapter in _CURRENT.get():
+        method = getattr(adapter, "image_context_for_result", None)
+        predicate = getattr(adapter, "allows_image_context", None)
+        if not callable(method) or not callable(predicate):
+            continue
+        try:
+            if not predicate(server_name=server_name, remote_name=remote_name):
+                continue
+            adapter_source = getattr(adapter, "image_source", None)
+            if not isinstance(adapter_source, str) or (source is not None and source != adapter_source):
+                continue
+            adapted = method(
+                server_name=server_name, remote_name=remote_name,
+                inline_images=[dict(item) for item in inline_images],
+                arguments=arguments, structured_content=structured_content,
+            )
+            if adapted:
+                blocks.extend(adapted)
+                source = adapter_source
+        except Exception:
+            _log.debug("MCP image context adapter failed", exc_info=True)
+    return blocks or None, source
 
 
 def adapt_mcp_result_context(

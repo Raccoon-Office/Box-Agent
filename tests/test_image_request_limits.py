@@ -1,6 +1,7 @@
 """Verify byte limits at the actual SDK boundary, including native tool recovery."""
 
 import base64
+import hashlib
 import io
 import json
 import random
@@ -173,29 +174,32 @@ def test_main_lite_config_limits_remain_separate(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("repeat_bad_call", [False, True])
-async def test_native_4_plus_4_rejects_combined_body_and_preserves_unseen_pages(tmp_path, repeat_bad_call):
+@pytest.mark.parametrize("additional_batch", [False, True])
+async def test_native_batches_drop_oldest_images_and_never_replay_executed_tools(tmp_path, additional_batch):
     from box_agent.agent import Agent
     from box_agent.events import ErrorEvent
     from box_agent.llm.llm_wrapper import LLMClient
     from box_agent.schema import LLMProvider
+    from box_agent.session_log import SessionLog
     from box_agent.tools.image_inspection_tool import ImageInspectionTool
 
     raw = base64.b64decode(image_message(size=(100, 100), alpha=True).content[1]["data"])
     paths = [f"page_{i}.png" for i in range(1, 9)]
     for path in paths:
         (tmp_path / path).write_bytes(raw)
-    requests, verified = [], []
+    requests, executed = [], []
+
+    class RecordingInspectionTool(ImageInspectionTool):
+        async def execute(self, image_paths, instruction, strategy=None):
+            executed.append(list(image_paths))
+            return await super().execute(image_paths, instruction, strategy)
 
     async def handle(request):
         body = json.loads(request.content)
         if not body.get("stream"):
             return reply('{"continue": false}')
         requests.append((len(request.content), body))
-        if image_blocks(body):
-            labels = str(body["messages"][-1]["content"])
-            verified.extend(path for path in paths if path in labels)
-        next_paths = paths if repeat_bad_call or len(requests) == 1 else [p for p in paths if p not in verified][:2]
+        next_paths = paths if len(requests) == 1 else paths[:2] if additional_batch and len(requests) == 2 else []
         calls = [{"index": i, "id": f"inspect-{len(requests)}-{i}", "type": "function",
                   "function": {"name": "inspect_images", "arguments": json.dumps({
                       "image_paths": next_paths[start:start + 4], "instruction": "Inspect all pages.",
@@ -208,27 +212,41 @@ async def test_native_4_plus_4_rejects_combined_body_and_preserves_unseen_pages(
     await llm.aclose()
     llm._client.client = AsyncOpenAI(api_key="test", base_url=llm.api_base, max_retries=0,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+    log = SessionLog.create(tmp_path / "sessions", session_id="batch-test", cwd=tmp_path)
     agent = Agent(llm_client=llm, system_prompt="Inspect all supplied pages.",
-                  tools=[ImageInspectionTool(llm, workspace_dir=str(tmp_path), native_supported=True)],
-                  workspace_dir=str(tmp_path), max_steps=20, deferred_mcp_loading_enabled=False)
+                  tools=[RecordingInspectionTool(llm, workspace_dir=str(tmp_path), native_supported=True)],
+                  workspace_dir=str(tmp_path), max_steps=5, deferred_mcp_loading_enabled=False,
+                  session_log=log)
     agent.add_user_message("Inspect all eight pages.")
     try:
         events = [event async for event in agent.run_events()]
     finally:
         await llm.aclose()
-    assert len(requests) > 1
-    assert "REQUEST_BODY_TOO_LARGE" in str(requests[1][1]["messages"])
-    assert "not been inspected" in str(requests[1][1]["messages"])
-    assert image_blocks(requests[1][1]) == []
+        log.close()
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+    assert errors and all(event.error_code == "IMAGE_NOT_DELIVERED" and not event.is_fatal for event in errors)
+    assert [len(image_blocks(body)) for _, body in requests] == ([0, 2, 2] if additional_batch else [0, 2])
+    assert "was not delivered" in str(requests[1][1]["messages"])
+    assert "provider_body_limit" in str(requests[1][1]["messages"])
+    assert "Do not assume its contents were seen" in str(requests[1][1]["messages"])
     assert all(size <= 152_000 for size, _ in requests)
-    if repeat_bad_call:
-        assert any(isinstance(event, ErrorEvent) for event in events)
-        assert len(requests) <= 4
-        assert verified == []
-    else:
-        assert not any(isinstance(event, ErrorEvent) for event in events)
-        assert sorted(verified) == paths
-        assert [len(image_blocks(body)) for _, body in requests] == [0, 0, 2, 2, 2, 2]
+    assert executed == ([paths[:4], paths[4:], paths[:2]] if additional_batch else [paths[:4], paths[4:]])
+    refs = [ref for event in log.events for ref in event["data"].get("images", [])]
+    manifests = [event["data"]["imageContext"] for event in log.events
+                 if event["type"] == "request/context" and "imageContext" in event["data"]]
+    first_selection = next(item for item in manifests if item.get("evicted"))
+    assert [item["imageId"] for item in first_selection["evicted"]] == [ref["imageId"] for ref in refs[:6]]
+    assert [item["imageId"] for item in first_selection["selected"]] == [ref["imageId"] for ref in refs[6:8]]
+    for _, body in requests:
+        for block in image_blocks(body):
+            encoded = block["image_url"]["url"].split(",", 1)[1]
+            sent = base64.b64decode(encoded)
+            digest = hashlib.sha256(sent).hexdigest()
+            matching = [ref for ref in refs if ref["sha256"] == digest]
+            assert matching
+            assert (log.path.parent / matching[0]["contentRef"]).read_bytes() == sent
+            with Image.open(io.BytesIO(sent)) as decoded:
+                assert decoded.size == (matching[0]["width"], matching[0]["height"]) == (100, 100)
     assert all((tmp_path / path).read_bytes() == raw for path in paths)
 
 

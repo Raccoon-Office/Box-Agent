@@ -567,7 +567,9 @@ async def test_closing_run_waits_for_tool_cleanup(
     from box_agent.composition import compose_default_kernel_services
     from box_agent.tool_result_storage import ToolResultStorage
 
+    tool_started = asyncio.Event()
     cleaned_up = asyncio.Event()
+    allow_guard_check = asyncio.Event()
 
     class BlockingTool(EventEmittingTool if tool_kind == "event" else Tool):
         name = "blocking"
@@ -577,6 +579,7 @@ async def test_closing_run_waits_for_tool_cleanup(
 
         async def execute(self, **_kwargs):
             try:
+                tool_started.set()
                 await asyncio.Event().wait()
             finally:
                 await asyncio.sleep(0)
@@ -620,6 +623,17 @@ async def test_closing_run_waits_for_tool_cleanup(
             },
         ).run()
     elif entrypoint_name == "agent":
+        from box_agent.tools.chat_references import ChatReferences
+
+        original_check = ChatReferences.acheck
+
+        async def check_after_heartbeat(self, *args, **kwargs):
+            await allow_guard_check.wait()
+            return await original_check(self, *args, **kwargs)
+
+        # A heartbeat can precede execution while the filesystem guard is
+        # pending. Exercise that ordering without depending on worker timing.
+        monkeypatch.setattr(ChatReferences, "acheck", check_after_heartbeat)
         agent = Agent(
             run_arguments["llm"], "Run the tool.", list(run_arguments["tools"].values()),
             max_steps=1, workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False,
@@ -638,6 +652,10 @@ async def test_closing_run_waits_for_tool_cleanup(
                 and event.payload.get("phase") == "tool_running"
             ):
                 break
+        if entrypoint_name == "agent":
+            assert not tool_started.is_set()
+        allow_guard_check.set()
+        await asyncio.wait_for(tool_started.wait(), timeout=1)
         await events.aclose()
         cleanup_finished_before_close_returned = cleaned_up.is_set()
     finally:

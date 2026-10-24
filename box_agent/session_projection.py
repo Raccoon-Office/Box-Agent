@@ -28,6 +28,8 @@ class SessionProjection:
     _plan: dict[str, Any] | None
     _todos: tuple[dict[str, Any], ...]
     _skills: tuple[dict[str, Any], ...]
+    _images: tuple[dict[str, Any], ...]
+    _model_round: int
 
     def __init__(
         self,
@@ -36,12 +38,16 @@ class SessionProjection:
         plan: dict[str, Any] | None,
         todos: Sequence[dict[str, Any]],
         skills: Sequence[dict[str, Any]],
+        images: Sequence[dict[str, Any]] = (),
+        model_round: int = 0,
     ) -> None:
         object.__setattr__(self, "_messages", deepcopy(tuple(messages)))
         object.__setattr__(self, "_goal", deepcopy(goal))
         object.__setattr__(self, "_plan", deepcopy(plan))
         object.__setattr__(self, "_todos", deepcopy(tuple(todos)))
         object.__setattr__(self, "_skills", deepcopy(tuple(skills)))
+        object.__setattr__(self, "_images", deepcopy(tuple(images)))
+        object.__setattr__(self, "_model_round", model_round)
 
     @property
     def messages(self) -> list[Message]:
@@ -62,6 +68,15 @@ class SessionProjection:
     @property
     def skills(self) -> list[dict[str, Any]]:
         return deepcopy(list(self._skills))
+
+    @property
+    def images(self) -> list[dict[str, Any]]:
+        """Return image occurrences, including recorded context evictions."""
+        return deepcopy(list(self._images))
+
+    @property
+    def model_round(self) -> int:
+        return self._model_round
 
 
 __all__ = ["SessionProjection"]

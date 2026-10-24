@@ -40,7 +40,8 @@ from .events import (
     ToolCallStart,
 )
 from .context_resources import ContextResourceLedger
-from .config import AgentConfig, ToolLimitsConfig
+from .config import AgentConfig, ImageContextConfig, ToolLimitsConfig
+from .image_context import ImageContext
 from .llm import LLMClient
 from .logger import AgentLogger
 from .project_context import WORKSPACE_STATEMENT_PREFIX
@@ -472,6 +473,7 @@ class Agent:
         plugins: tuple[Any, ...] = (),
         skill_runtime: SkillRuntime | None = None,
         session_id: str = "",
+        image_context: ImageContextConfig | None = None,
     ):
         self.llm = llm_client
         self.tools = {
@@ -618,6 +620,7 @@ class Agent:
             self.tools["goal_read"] = _GoalReadTool(self)
             self.tools["goal_write"] = _GoalWriteTool(self)
         self.session_log = session_log
+        self.image_context = ImageContext(session_log, image_context)
         self._pending_skill_restore: list[dict[str, Any]] = []
         self._skill_persistence_pending = False
         self._persisted_active_skill_records: list[dict[str, Any]] = []
@@ -859,12 +862,15 @@ class Agent:
                     "the previous compact commit could not be replayed; refusing to continue"
                 ) from exc
 
-    async def aadd_user_message(self, content: str) -> None:
+    async def aadd_user_message(self, content: str, *, image_content: list[dict[str, Any]] | None = None,
+                                image_source: str = "user_upload", image_context_eligible: bool = True) -> None:
         validation = await self.skill_runtime.avalidate_references(self.skill_runtime.selected_names)
         with self.skill_runtime.reference_scope(validation):
-            self.add_user_message(content)
+            self.add_user_message(content, image_content=image_content, image_source=image_source,
+                                  image_context_eligible=image_context_eligible)
 
-    def add_user_message(self, content: str) -> None:
+    def add_user_message(self, content: str, *, image_content: list[dict[str, Any]] | None = None,
+                         image_source: str = "user_upload", image_context_eligible: bool = True) -> None:
         """Add a user message and materialize selected Skills beside it."""
         self._restore_session_surface_after_replay_failure()
         if self.goal is not None and self.goal.status == "active":
@@ -874,7 +880,14 @@ class Agent:
         # ContextEngine does not need to rediscover Skill bodies per request.
         materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
         materialized = materialize(self.messages) if callable(materialize) else ()
-        self.messages.append(Message(role="user", content=content))
+        user_message = Message(role="user", content=content)
+        if image_content:
+            self.image_context.register(user_message, image_content, source=image_source,
+                                        eligible=image_context_eligible)
+        self.messages.append(user_message)
+        if image_content and self.session_log is not None:
+            self._persist_unlogged_messages(turn=self._next_session_turn(), step=None)
+            self.session_log.flush()
         if materialized:
             skill_messages = []
             for _name, skill_content in materialized:
@@ -890,14 +903,40 @@ class Agent:
                 defer_ack(skill_messages)
 
     def seed_continuation_messages(
-        self, messages: tuple[ContinuationMessage, ...]
+        self, messages: tuple[ContinuationMessage, ...], *, model_round: int = 0,
     ) -> int:
         """Seed semantic history into a fresh Agent without tool protocol state."""
 
         if len(self.messages) != 1 or self.messages[0].role != "system":
             return 0
+        if type(model_round) is not int or model_round < 0:
+            raise ValueError("invalid continuation model round")
         for message in messages:
-            self.messages.append(Message(role=message.role, content=message.content))
+            seeded = Message(role=message.role, content=message.content)
+            refs = deepcopy(list(message.image_refs))
+            if refs:
+                if self.session_log is None:
+                    raise ValueError("Image continuation requires a session-owned image store")
+                for ref in refs:
+                    if ref.get("active", True) and not ref.get("evicted"):
+                        try:
+                            self.image_context.store.load_block(ref)
+                        except (OSError, ValueError):
+                            ref.update(active=False, evicted=True, evictionReason="missing_or_corrupt_file")
+                    if ref.get("evictionReason") in {"missing_or_corrupt_file", "persistence_failed"}:
+                        seeded.content += "\n" + self.image_context._notice(ref, ref["evictionReason"])
+                self.session_log.queue_message_images(seeded, refs)
+                self.image_context.add_references(refs)
+            self.messages.append(seeded)
+        if model_round:
+            self.image_context.model_round = model_round
+            if self.session_log is not None:
+                self.session_log.append("request/context", {"imageContext": {
+                    "phase": "continuation", "modelRoundBaseline": model_round,
+                }})
+        if any(message.image_refs for message in messages) and self.session_log is not None:
+            self._persist_unlogged_messages(turn=self._next_session_turn(), step=None)
+            self.session_log.flush()
         return len(messages)
 
     def set_goal(
@@ -1067,6 +1106,7 @@ class Agent:
             self.session_log.append("surface/reset", {"reason": "agent.clear_history"})
             self.session_log.flush()
         del self.messages[1:]
+        self.image_context.reset()
         self.context_resource_ledger.rotate_epoch()
         return removed
 
@@ -1245,7 +1285,10 @@ class Agent:
             cache_fingerprint_context=effective_options.cache_fingerprint_context,
             cache_fingerprint_sink=effective_options.cache_fingerprint_sink,
             skill_engine=self.skill_runtime,
-            context_engine=DefaultContextEngine(system_prompt_projector=self._project_system_prompt),
+            context_engine=DefaultContextEngine(system_prompt_projector=self._project_system_prompt,
+                                                image_context=self.image_context,
+                                                llm=effective_options.llm,
+                                                thinking_enabled=self.thinking_enabled),
             current_turn_text=effective_options.current_turn_text,
             context_resource_ledger=self.context_resource_ledger,
             context_resource_dedup_enabled=self.context_resource_dedup_enabled,

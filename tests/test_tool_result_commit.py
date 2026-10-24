@@ -9,6 +9,28 @@ from box_agent.tool_result_storage import ToolResultStorage
 from box_agent.tools.base import ToolResult
 
 
+def test_private_image_payload_reaches_committer_without_public_serialization(tmp_path):
+    from box_agent.api.run import _json_value
+
+    blocks = [{"type": "input_image", "media_type": "image/png", "data": "cGl4ZWxz"}]
+    result = ToolResult(success=True, content="Image loaded.", image_content=blocks,
+                        image_source="image_inspect", image_context_eligible=False)
+    committed = []
+    outcome = process_tool_result(ToolResultPipelineInput(
+        messages=[], tool_call_id="image-1", tool_name="inspect_images", arguments={},
+        result=result, visible_content=result.content, visible_error=None,
+        result_storage=ToolResultStorage(tmp_path),
+        commit_result=lambda message, event, step: committed.append(event),
+    ))
+    assert committed[0] is outcome.events[0]
+    assert committed[0].image_content == blocks
+    assert committed[0].image_source == "image_inspect"
+    assert not committed[0].image_context_eligible
+    assert "image_content" not in result.model_dump()
+    assert "image_content" not in _json_value(committed[0])
+    assert "cGl4ZWxz" not in repr(committed[0])
+
+
 @pytest.mark.parametrize("commit_fails", [False, True], ids=["committed", "commit-failed"])
 def test_pipeline_commits_once_before_registering_resource_history(tmp_path, commit_fails):
     messages = [Message(role="user", content="Read the fixture.")]
