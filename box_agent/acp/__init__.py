@@ -534,12 +534,12 @@ def _normalize_llm_binding(meta: Any) -> dict[str, Any] | None:
     ):
         raise ValueError("llm_binding.maxTokens must be smaller than contextWindow")
     binding: dict[str, Any] = {"source": source, "model": model}
+    routing_mode = str(raw.get("routingMode", raw.get("routing_mode")) or "").strip()
     if source == "profile":
         profile_id = str(raw.get("profileId", raw.get("profile_id")) or "").strip()
         profile_revision = str(
             raw.get("profileRevision", raw.get("profile_revision")) or ""
         ).strip()
-        routing_mode = str(raw.get("routingMode", raw.get("routing_mode")) or "").strip()
         if (
             not profile_id
             or not profile_revision
@@ -558,11 +558,14 @@ def _normalize_llm_binding(meta: Any) -> dict[str, Any] | None:
         binding["contextWindow"] = raw_context_window
     if raw_max_tokens is not None:
         binding["maxTokens"] = raw_max_tokens
-    auto_routing = normalize_auto_routing(
-        raw.get("autoRouting", raw.get("auto_routing"))
-    )
-    if auto_routing is not None:
-        binding["autoRouting"] = auto_routing
+    # An explicit manual choice overrides even a stale or malformed automatic pool.
+    # Legacy builtin bindings without a routing mode retain pool-based routing.
+    if routing_mode != "manual":
+        auto_routing = normalize_auto_routing(
+            raw.get("autoRouting", raw.get("auto_routing"))
+        )
+        if auto_routing is not None:
+            binding["autoRouting"] = auto_routing
     return binding
 
 
