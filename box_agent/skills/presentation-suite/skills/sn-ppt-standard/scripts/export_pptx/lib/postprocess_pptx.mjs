@@ -12,7 +12,8 @@
 //   await buildPptx(...);
 //   await postprocessPptx(pptxPath, [handler]);
 
-import JSZip from 'jszip';
+import { createRequire } from 'node:module';
+const JSZip = createRequire(import.meta.url)('jszip');
 import { readFile, writeFile } from 'node:fs/promises';
 
 /**

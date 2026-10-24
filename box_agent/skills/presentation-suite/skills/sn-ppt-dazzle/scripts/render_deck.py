@@ -291,6 +291,7 @@ class DeckRenderer:
             device_scale_factor=DEVICE_SCALE,
             ignore_https_errors=True,
             bypass_csp=True,
+            offline=True,
         )
         self._page = ctx.new_page()
         self._page.set_default_timeout(GOTO_TIMEOUT_MS)

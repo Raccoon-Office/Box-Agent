@@ -110,18 +110,8 @@ def _fetch(url: str, root: Path) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-    search = commands.add_parser("search")
-    search.add_argument("--query", required=True)
-    search.add_argument("--limit", type=int, default=6, choices=range(1, 11), metavar="1..10")
-    fetch = commands.add_parser("fetch")
-    fetch.add_argument("--url", required=True)
-    fetch.add_argument("--root", type=Path, default=Path("."))
-    args = parser.parse_args()
-    if args.command == "search":
-        return _search(args.query, args.limit)
-    return _fetch(args.url, args.root.resolve())
+    print(json.dumps({"status": "unavailable", "reason": "offline_package"}))
+    return 2
 
 
 if __name__ == "__main__":

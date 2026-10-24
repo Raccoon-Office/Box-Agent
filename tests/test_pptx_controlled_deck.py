@@ -613,13 +613,13 @@ def test_scaffold_normalizes_business_semantics_to_dedicated_layouts(
     assert contract["layout_normalizations"][0]["to"] == expected_layout
 
 
-def test_skill_avoids_public_research_permission_and_micro_todo_loops() -> None:
+def test_offline_skill_uses_local_sources_without_research_or_micro_todo_loops() -> None:
     skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     outline = (SKILL_DIR / "references/outline.md").read_text(encoding="utf-8")
     assert "do not call\n`plan_write` or `todo_write`" in skill
-    assert "Do not\n  ask again for permission to use public sources" in skill
-    assert "Do not replace that workflow with" in outline
-    assert "a PPT-specific four-query scan" in outline
+    assert "Do not load `research-synthesis`, search, fetch pages, or invent citations." in skill
+    assert "Do not perform external research" in outline
+    assert "Do not load research skills, call search/fetch tools, download images" in outline
 
 
 def test_every_visual_dna_theme_has_complete_contrast_safe_runtime_tokens() -> None:

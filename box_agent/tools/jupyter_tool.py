@@ -1324,16 +1324,15 @@ except ImportError:
                     # (a busy kernel reused next call corrupts output).
                     break
 
-            if not idle_received:
-                return "", [], KERNEL_EXEC_TIMEOUT
-
             # Only report errors from explicit error messages (not stderr)
             # stderr often contains warnings, pip notices, etc.
-            if error_parts:
-                return "", [], "\n".join(error_parts)
+            error = (
+                KERNEL_EXEC_TIMEOUT if not idle_received
+                else "\n".join(error_parts) or None
+            )
 
         except Exception as e:
-            return "", [], f"Execution failed: {str(e)}"
+            error = f"Execution failed: {str(e)}"
 
         # Include stderr as part of stdout (warnings, pip output, etc.)
         all_output = "".join(stdout_parts)
@@ -1345,7 +1344,7 @@ except ImportError:
                 else:
                     all_output = stderr_text
 
-        return all_output, images, None
+        return all_output, images, error
 
     async def stop(self):
         """Stop the kernel."""
@@ -1536,14 +1535,13 @@ except ImportError:
                     # timeout so the caller discards this session.
                     break
 
-            if not idle_received:
-                return "", [], KERNEL_EXEC_TIMEOUT
-
-            if error_parts:
-                return "", [], "\n".join(error_parts)
+            error = (
+                KERNEL_EXEC_TIMEOUT if not idle_received
+                else "\n".join(error_parts) or None
+            )
 
         except Exception as e:
-            return "", [], f"Execution failed: {str(e)}"
+            error = f"Execution failed: {str(e)}"
 
         all_output = "".join(stdout_parts)
         if stderr_parts:
@@ -1554,7 +1552,7 @@ except ImportError:
                 else:
                     all_output = stderr_text
 
-        return all_output, images, None
+        return all_output, images, error
 
     async def stop(self):
         """Stop the in-process kernel."""
@@ -2081,19 +2079,23 @@ Output formats:
             # surface a timeout, mirroring the outer wait_for timeout branch.
             if error == KERNEL_EXEC_TIMEOUT:
                 await self._discard_session(session_id)
-                return ToolResult(
-                    success=False,
-                    content="",
-                    error=f"Code execution timed out ({timeout}s). The kernel was "
-                          "reset. If installing packages, run %pip install "
-                          "separately first, or raise the timeout.",
+                error = (
+                    f"Code execution timed out ({timeout}s). The kernel was "
+                    "reset. If installing packages, run %pip install "
+                    "separately first, or raise the timeout."
                 )
 
             if error:
+                error = self._simplify_error(error)
+                output = stdout.strip()
+                # Failed tool history uses error, not content. Keep diagnostics
+                # in both the visible output and the model's error message.
+                if output:
+                    error += f"\n\nOutput before error:\n{output}"
                 return ToolResult(
                     success=False,
-                    content="",
-                    error=self._simplify_error(error),
+                    content=output,
+                    error=error,
                 )
 
             # Detect NEW files created during execution

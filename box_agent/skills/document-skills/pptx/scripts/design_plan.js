@@ -69,6 +69,8 @@ function writeInput(file, input, root) {
   const layoutFiles = packets("layouts", directory.layouts.map(layout => ({
     id: layout.id, label: layout.label, roles: layout.roles,
     visual_options: layout.visual_options,
+    media_required: Boolean(layout.media_slots.background?.required
+      || layout.media_slots.slots.some(slot => slot.required)),
   })));
   const paletteFiles = packets("palettes", directory.palettes || []);
   const harmonyFiles = packets("harmony", [directory.harmony_rules]);
@@ -76,6 +78,8 @@ function writeInput(file, input, root) {
   const recommendation = require("./theme_selection_core.js").inferTheme(directory.themes,
     { title: input.title, outline: input.outline, source_text: input.source_text });
   const brief = {
+    media_policy: "local_only",
+    offline_constraints: "Local files and model inference only. No search, generation, downloads or installs. Avoid required media without supplied local assets; disclose unmet requirements. See design-role.md.",
     title: input.title, goal: input.outline.deck_goal, audience: input.outline.audience,
     tone: input.outline.tone, source_text: input.source_text, user_constraints: input.user_constraints,
     theme_recommendation: { theme_id: recommendation.theme_id, confidence: recommendation.confidence,

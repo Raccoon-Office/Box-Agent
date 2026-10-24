@@ -371,7 +371,8 @@ def test_image_candidates_have_parent_handoff_without_claiming_asset_readiness()
     returned = image.split("## 6. 返回合同", 1)[1]
     status = re.search(r"(?m)^status: (.+)$", returned).group(1).split(" | ")
     assert status == ["ready", "blocked", "pending_parent_verification"]
-    assert "prompt:" in returned and "pending_parent_operations:" in returned
+    assert "source:" in returned and "pending_parent_operations:" in returned
+    assert "origin: attachment | derived" in returned
     assert "否则返回 `blocked`" not in returned
     tools = (STANDARD / "references/box-agent-tool-contract.md").read_text()
     handoff = tools.split("### 子任务输入与返回", 1)[1].split("## 4.", 1)[0]
@@ -401,26 +402,24 @@ def test_visual_service_failure_preserves_existing_artifacts_without_starting_ex
 
 
 @pytest.mark.parametrize("missing", [False, True])
-@pytest.mark.parametrize("model", ["actual-model-from-tool", None])
-def test_documented_asset_batch_preserves_source_and_stops_on_failure(tmp_path, missing, model):
+def test_documented_offline_asset_batch_preserves_source_and_stops_on_failure(tmp_path, missing):
     from PIL import Image
 
     contract = (STANDARD / "references/box-agent-tool-contract.md").read_text()
-    assert "unknown (Box-Agent generate_image)" in contract
-    assert "不为此搜索配置" in contract
+    assert "只复用 Entry 交接的本地附件" in contract
+    assert "不把附件标为 downloaded/generated" in contract
     command = next(block for block in re.findall(r"```bash\n(.*?)\n```", contract, re.S)
                    if "asset-register" in block)
     assert "asset-assign" in command and "asset-contact" in command
     deck = tmp_path / "deck with spaces"
     (deck / "assets").mkdir(parents=True)
+    source = tmp_path / "source with 'quote' and $(not-a-command).png"
+    Image.new("RGB", (160, 90), "white").save(source)
     if not missing:
-        Image.new("RGB", (160, 90), "white").save(deck / "assets/final hero.png")
+        shutil.copyfile(source, deck / "assets/final hero.png")
     env = dict(os.environ, DECK_DIR=deck.as_posix(), ASSET_PATH="assets/final hero.png",
                ASSET_ID="launch-hero", GROUP_ID="campaign-art",
-               ORIGINAL_PROMPT="Product hero; original 'quote' and $(not-a-command)")
-    env.pop("GENERATOR_MODEL", None)
-    if model is not None:
-        env["GENERATOR_MODEL"] = model
+               SOURCE_PATH=source.as_posix())
     command = command.replace("<SKILL_ROOT>", STANDARD.as_posix())
     command = re.sub(r"(?m)^python ", shlex.quote(Path(sys.executable).as_posix()) + " ", command)
     result = subprocess.run([str(Path(shutil.which("git")).parent.parent / "usr/bin/bash.exe") if os.name == "nt" else "bash", "-c", command], cwd=tmp_path, env=env,
@@ -438,6 +437,8 @@ def test_documented_asset_batch_preserves_source_and_stops_on_failure(tmp_path, 
         assert asset["path"] == env["ASSET_PATH"]
         assert asset["group_id"] == env["GROUP_ID"]
         assert asset["asset_id"] == env["ASSET_ID"]
-        assert asset["generator_model"] == (model or "unknown (Box-Agent generate_image)")
-        assert asset["prompt"] == env["ORIGINAL_PROMPT"]
+        assert asset["origin"] == "attachment"
+        assert asset["source_path"] == env["SOURCE_PATH"]
+        assert asset["generator_model"] is None
+        assert asset["prompt"] is None
         assert asset["status"] == "candidate", "Registration cannot grant visual approval"

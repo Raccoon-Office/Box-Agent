@@ -16,7 +16,7 @@ try {
   const bundledEchartsPath = require.resolve('echarts/dist/echarts.min.js');
   bundledEchartsSource = readFileSync(bundledEchartsPath, 'utf8');
 } catch {
-  // Page-local ECharts remains usable when the bundled dependency is absent.
+  bundledEchartsSource = readFileSync(new URL('../../../assets/vendor/echarts.min.js', import.meta.url), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -895,7 +895,7 @@ export async function extractPages(htmlPaths) {
   const results = [];
 
   try {
-    const page = await browser.newPage();
+    const page = await browser.newPage({ offline: true });
 
     if (bundledEchartsSource) {
       try {

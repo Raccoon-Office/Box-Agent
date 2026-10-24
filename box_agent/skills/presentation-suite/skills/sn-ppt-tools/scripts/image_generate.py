@@ -209,48 +209,8 @@ def _atomic_write(destination: Path, data: bytes) -> None:
 
 
 def main() -> int:
-    args = _parser().parse_args()
-    try:
-        destination = _destination(args.deck_dir, args.output)
-        prompt = _read_prompt(args)
-        url, key, model = _configuration(args.model)
-        missing = []
-        if not _valid_url(url):
-            missing.append("url")
-        if not key:
-            missing.append("api_key")
-        if not model:
-            missing.append("model")
-        if missing:
-            _emit("unavailable", reason="missing or invalid configuration", missing=missing)
-            return 2
-
-        payload: dict[str, Any] = {
-            "model": model,
-            "prompt": prompt,
-            "size": args.size,
-            # "response_format": "url",
-            "output_format": "png",
-        }
-        if args.negative_prompt:
-            payload["negative_prompt"] = args.negative_prompt
-        data = _post(url, key, payload)
-        image = _image_bytes(data)
-        _atomic_write(destination, image)
-        _emit("ok", output=str(destination), bytes=len(image), model=model)
-        return 0
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        _emit("failed", reason=f"HTTP {exc.code}", detail=detail)
-    except (
-        error.URLError,
-        TimeoutError,
-        json.JSONDecodeError,
-        ValueError,
-        OSError,
-    ) as exc:
-        _emit("failed", reason=type(exc).__name__, detail=str(exc)[:500])
-    return 1
+    _emit("unavailable", reason="offline_package")
+    return 2
 
 
 if __name__ == "__main__":

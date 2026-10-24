@@ -223,7 +223,7 @@ function requireModule(name, installHint) {
 function printBrowserInstallHint() {
   const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH || officeRaccoonBrowserHostPath();
   console.error("Playwright Chromium is not available.");
-  console.error("Install it in Office Raccoon: Settings -> Plugins -> Web automation (Playwright) -> Download Chromium and enable.");
+  console.error("Offline package is incomplete: ship Playwright and Chromium with the installer; do not download dependencies during a presentation task.");
   console.error(`Expected browser host under: ${browsersPath}`);
   console.error("If Playwright itself is missing, reinstall or repair Office Raccoon's managed runtime.");
   console.error("Without a browser host, ask the user to choose HTML delivery or native PptxGenJS PPTX.");
@@ -264,7 +264,7 @@ async function main() {
 
   const { chromium } = requireModule(
     "playwright",
-    "Repair Office Raccoon's managed runtime, then install Chromium in Settings -> Plugins -> Web automation (Playwright)."
+    "Repair the offline package with bundled Playwright and Chromium; do not download dependencies during a presentation task."
   );
   const bundlePath = resolveBrowserBundle();
 
@@ -289,6 +289,7 @@ async function main() {
   let page = await browser.newPage({
     viewport: probeViewport,
     deviceScaleFactor: 1,
+    offline: true,
   });
 
   await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
@@ -321,6 +322,7 @@ async function main() {
     page = await browser.newPage({
       viewport: { width: detectedWidth, height: detectedHeight },
       deviceScaleFactor: 2,
+      offline: true,
     });
     await page.exposeFunction("__writePptxBase64", base64 => {
       fs.writeFileSync(pptxPath, Buffer.from(base64, "base64"));

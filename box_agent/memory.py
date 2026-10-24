@@ -2722,6 +2722,7 @@ class MemoryExtractor:
         self._step_interval = step_interval
         self._last_time: float = 0.0
         self._steps_since: int = 0
+        self._extraction_lock = asyncio.Lock()
 
     def set_turn_id(self, turn_id: str) -> None:
         """Update the current host-owned turn id for subsequent extractions."""
@@ -2746,29 +2747,35 @@ class MemoryExtractor:
             True if extraction was actually performed.
         """
         extraction_turn_id = _header_value(self._turn_id if turn_id is None else turn_id)
-        now = monotonic()
-
-        if trigger == "step_interval":
-            self._steps_since += 1
-            if self._steps_since < self._step_interval:
-                return False
-            if now - self._last_time < self._cooldown:
-                return False
-        elif trigger == "pre_summarize":
-            if now - self._last_time < self._cooldown:
-                return False
-        elif trigger == "loop_end":
-            if not _has_high_signal_for_loop_end(messages):
-                return False
-
-        try:
-            await self._extract(messages, trigger, turn_id=extraction_turn_id)
-            self._last_time = monotonic()
-            self._steps_since = 0
-            return True
-        except Exception:
-            logger.exception("Memory extraction failed (trigger=%s)", trigger)
+        # Periodic background calls must not pile up while extraction is in
+        # flight. Lifecycle triggers wait so final feedback is still captured.
+        if trigger == "step_interval" and self._extraction_lock.locked():
             return False
+
+        messages = list(messages)
+        async with self._extraction_lock:
+            now = monotonic()
+            if trigger == "step_interval":
+                self._steps_since += 1
+                if self._steps_since < self._step_interval:
+                    return False
+                if now - self._last_time < self._cooldown:
+                    return False
+            elif trigger == "pre_summarize":
+                if now - self._last_time < self._cooldown:
+                    return False
+            elif trigger == "loop_end":
+                if not _has_high_signal_for_loop_end(messages):
+                    return False
+
+            try:
+                await self._extract(messages, trigger, turn_id=extraction_turn_id)
+                self._last_time = monotonic()
+                self._steps_since = 0
+                return True
+            except Exception:
+                logger.exception("Memory extraction failed (trigger=%s)", trigger)
+                return False
 
     async def _extract(self, messages: list[Message], trigger: str, *, turn_id: str) -> None:
         """Use LLM to analyze messages and update CONTEXT.md."""

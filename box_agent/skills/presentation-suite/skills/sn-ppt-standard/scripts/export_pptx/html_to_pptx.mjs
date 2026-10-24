@@ -6,42 +6,25 @@ import artifactDelivery from '../artifact_delivery.js';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-/**
- * 首次运行时自动安装依赖（npm install + playwright chromium）。
- * 后续运行检测到 node_modules 和 chromium 已存在则跳过。
- */
+// Offline package: validate provisioned dependencies; never run installers.
 async function ensureDependencies() {
-  const nodeModules = resolve(__dirname, 'node_modules');
-  const pptxgenMarker = resolve(nodeModules, 'pptxgenjs');
-  const playwrightMarker = resolve(nodeModules, 'playwright');
-  const echartsMarker = resolve(nodeModules, 'echarts');
-
-  if (!existsSync(pptxgenMarker) || !existsSync(playwrightMarker) || !existsSync(echartsMarker)) {
-    console.error('[setup] 首次运行，正在安装 npm 依赖...');
-    try {
-      execSync('npm install --omit=dev', { cwd: __dirname, stdio: ['ignore', 2, 2] });
-    } catch (e) {
-      throw new Error(`npm install failed: ${e.message}. Headless browser environment unavailable.`);
-    }
+  const require = createRequire(import.meta.url);
+  for (const name of ['pptxgenjs', 'jszip', process.env.BOX_AGENT_PLAYWRIGHT_MODULE_PATH || 'playwright']) {
+    try { require.resolve(name); }
+    catch { throw new Error(`Offline package incomplete: missing ${name}; provision dependencies before shipping`); }
   }
-
-  // 浏览器检查改为 pickBrowserExe()：本地已有任何可用浏览器（期望版本或
-  // 本地扫描回退）就直接使用，不触发下载；只有完全没有任何可用路径时才安装。
+  if (!existsSync(resolve(__dirname, '../../assets/vendor/echarts.min.js'))) {
+    throw new Error('Offline package incomplete: missing bundled ECharts');
+  }
   const { pickBrowserExe } = await import('./lib/browser_picker.mjs');
   const exe = pickBrowserExe();
-  if (exe && existsSync(exe)) {
-    return;
-  }
-  console.error('[setup] 本地无可用 Chromium，正在安装 Playwright Chromium...');
-  try {
-    execSync('npx playwright install chromium', { cwd: __dirname, stdio: ['ignore', 2, 2] });
-  } catch (e) {
-    throw new Error(`Chromium installation failed: ${e.message}. Cannot install headless browser in this environment.`);
+  if (!exe || !existsSync(exe)) {
+    throw new Error('Offline package incomplete: missing Chromium; bundle the browser before shipping');
   }
 }
 
@@ -87,7 +70,7 @@ async function main() {
     throw new Error('必须指定存在的 --deck-dir 目录');
   }
 
-  // 确保依赖安装（npm + playwright chromium）。
+  // 检查随包依赖；不执行安装或下载。
   try {
     await ensureDependencies();
   } catch (e) {
@@ -110,10 +93,8 @@ async function main() {
     pagesDir: args.pagesDir,
   });
 
-  // 下载与导出使用同一组页面，资源路径相对于各自 HTML 所在目录。
-  if (!args.batch) {
-    await downloadRemoteImages(args.deckDir, htmlFiles);
-  }
+  // 检查待导出页面的资源均来自本地，不抓取远程素材。
+  await downloadRemoteImages(args.deckDir, htmlFiles);
 
   const { extractPages } = await import('./lib/dom_extractor.mjs');
   const { buildPptx } = await import('./lib/pptx_builder.mjs');

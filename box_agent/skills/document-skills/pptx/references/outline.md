@@ -21,8 +21,8 @@ original request or an actively changed card choice is a hard constraint;
 `recommended` and `default` values are soft framing and do not override the
 source material or original prompt. `confirmed_by=user` alone does not upgrade
 unchanged soft defaults. Use its audience to shape the outline, adapt
-tone/storyline to its role and scene, and activate `creative_image_mode` only
-when its mode is `creative`. Do not ask for a choice already present in that
+tone/storyline to its role and scene. This offline package always uses
+`local_only` media, including when its mode is `creative`. Do not ask for a choice already present in that
 block.
 
 For page count, first identify the independent narrative beats and the amount
@@ -49,99 +49,23 @@ this artifact.
 
 ## When the request is under-specified or under-sourced
 
-A new deck must not start from too little. But "too little" is never answered
-with a cold refusal — it is answered by **asking back** or **routing to
-research**. Pick the branch that fits:
+Use supplied local files and the user's actual brief. Use `source_mode=user_provided`
+for factual materials and proposed solutions, or `creative_brief` for explicitly
+creative content. Do not perform external research or treat model memory as
+verified current facts. A local report may be summarized with its actual file and
+page references; preserve its dates and uncertainty without claiming a fresh check.
 
-1. **Content is sufficient.** The user or an upstream expert/research step
-   already gave usable page-level material (titles, order, key points, data).
-   Treat it as the source of truth and build the outline. Do not invent a
-   competing storyline over usable input.
+A sufficient solution/architecture brief can proceed as a proposal. Clearly label
+recommendations; do not invent product capabilities, customer names or metrics.
+For optional unsupported facts, omit the claim. Required factual gaps use
+`待补充（离线未核验）`; private gaps use `待补充` or `待客户确认`. Preserve explicit
+requirements and report the gap. Ask one focused structural question only when
+scope/audience ambiguity materially changes the result, never for each missing fact.
 
-2. **The request is a solution/design brief.** A prompt that names the goal,
-   requested system or product components, integrations/processes to cover, and
-   approximate page count is sufficient for a proposed architecture or
-   implementation plan. Use `source_mode=user_provided`, frame unsupplied
-   details as recommendations, and do not load `research-synthesis` or browse by
-   default. If a named external product/API claim genuinely needs confirmation,
-   use at most two targeted official-source lookups; switch to the research
-   branch only if the requested deck becomes evidence-driven.
-
-3. **Only the structure/framing is unclear** (facts are available, but audience,
-   page count, ordering, emphasis, or plan-vs-build is ambiguous). These are
-   finite preferences, not missing facts: never use `request_user_input` for
-   them. Call `request_user_decision` with one focused question and 2-6 options,
-   put the recommended option first, and—when it is low-risk, reversible, and
-   preserves the request—set it as the default with a 30-second timeout. Examples:
-   - "这套面向投资人还是内部评审?大概几页?" (then propose a default count)
-   - "你已有这些要点,我按 问题→方案→市场→进展 的顺序排,可以吗?"
-   Do not stall with an open-ended "tell me more", and do not silently guess an
-   entire narrative the user never asked for.
-
-4. **The topic needs facts you don't have** (claims, market/industry/company/
-   policy data, anything that must be sourced) and the material is thin or
-   absent. **Do not fabricate, and do not write a flat rejection.** Load the
-   research workflow first, then build the outline from the sourced findings:
-
-   ```
-   get_skill(skill_name="research-synthesis")
-   ```
-
-   Follow the selected `research-synthesis` route's coarse-to-fine evidence
-   budget and persist its research artifacts. Do not replace that workflow with
-   a PPT-specific four-query scan: a one-line request for a sourced factual
-   report still needs enough landscape, authority, and conflict coverage to
-   support the slide plan, while a concise proposal brief stays in branch 2. After
-   the route is complete, run its bundled artifact validator with
-   `--report research/qa/{topic}_research_check.json`; even a reduced sequential
-   run should preserve distinct dimensions, but the dimension target is a
-   quality goal rather than a delivery gate. The workflow converts a fresh
-   report into the generic `presentation_handoff` contract: `full` uses the
-   complete verified facts, `partial` uses only its verified subset, and `framework` creates
-   explicit unavailable-data placeholders. Cover, agenda, and section-divider
-   pages are structural and may keep `evidence: []`; framework data pages still
-   need an explicit unavailable-data placeholder. Then omit or mark nonessential gaps instead of repeating the same
-   queries. If bounded research or its validator is unavailable or incomplete,
-   continue with supported findings, omit optional claims, and use explicit
-   placeholders for required facts; never delay `index.html`. Pass resulting
-   factual statements to the scaffold with repeated `--research-fact`; reserve
-   `--fact` for verbatim user/source text. Treat `AuthLevel` as a ranking hint,
-   not proof that a result is authoritative. When a first-party domain is known,
-   prefer a `site:`-constrained query; discard SEO-looking, mirror, or unrelated
-   results. Prefer at least one `claim | source | URL` evidence item on a
-   public-research page when a verified source is available. Missing evidence,
-   URL, or numeric traceability excludes that claim from the factual handoff,
-   but never blocks outline or HTML delivery. Never label a source FIFA/IOC/official unless that returned
-   URL belongs to the named institution, and never treat an unverified URL as
-   verified evidence. If a `site:` query returns no matching host, never invent
-   the expected URL; successfully read a known exact first-party URL, omit the
-   optional claim, or use `暂无可验证公开数据` when the field itself is required.
-   A normal factual-deck request already permits research
-   from public authoritative sources; do not pause later to ask for permission
-   to use those sources. Respect a strict/private source boundary, use an
-   explicit placeholder when the allowed sources do not contain a required
-   fact, and disclose material source conflicts with neutral wording.
-   If `research-synthesis` is unavailable in this session, use available
-   search/browser tools for at most two targeted official-source attempts per
-   unresolved slide-relevant claim and never repeat an equivalent failed
-   search. This search is mandatory for a public-fact topic: do not write
-   `outline.json` from memory. Start with plain queries (no `site:` operator —
-   club/federation domains often return zero results), then `web_extract` the
-   pages you will cite, and record each fact with its exact page URL and the
-   exact figure/date it supports; every number in the slide's title, message or
-   bullets must appear literally in that slide's evidence text. When `prepare`
-   returns a `checklist`, fix each listed line before re-running it (cite the
-   exact figure from a page already read, search for it, or reword the line
-   without the number); unfixed lines are cut from the slides. If those tools are unavailable or insufficient, omit optional claims
-   and use explicit placeholders for required facts — never pause the deck or
-   present unsourced content as fact. Keep the boundary clear: this skill turns
-   researched/supplied content into a slide plan; it does not itself perform
-   deep research, fact-checking, or source-credibility judgement.
-
-Reserve `BLOCKED` for the `creative_image_mode` image-complete requirement only;
-still deliver structurally valid degraded HTML. A normal deck that is merely under-specified is handled by a structural-choice
-question, bounded research, omission, or an explicit placeholder — never by a
-cold "I can't do this".
+Do not load research skills, call search/fetch tools, download images, or activate
+`creative_image_mode`. Use local media or editable charts/diagrams/typography.
+Image-rich requirements without supplied media remain a disclosed limitation;
+continue to a usable local draft instead of waiting for unavailable services.
 
 ## Required Output
 
@@ -301,7 +225,7 @@ preserve any explicit user order or page count. The registry lives in
   slides; do not trim or merge items to fit a template. Avoid restating the title.
 - Avoid repetitive slides with the same title, message, layout, or visual.
 - Do not reuse the same evidence as the main support for more than two pages;
-  combine repetitive pages or research another distinct fact.
+  combine repetitive pages or use another supported fact from the local materials.
 - For public-research decks, omit nonessential gaps instead of planning visible
   placeholders. Use `暂无可验证公开数据` only for a required unavailable public
   fact; use `待补充` or `待客户确认` for required user/private inputs.

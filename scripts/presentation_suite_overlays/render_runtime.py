@@ -369,7 +369,7 @@ class RenderSession:
     def page(self, width, height, scale=2):
         self.renew_page_deadline()
         context = self.browser.new_context(
-            viewport={"width": width, "height": height}, device_scale_factor=scale)
+            viewport={"width": width, "height": height}, device_scale_factor=scale, offline=True)
         try:
             context.set_default_timeout(15000)
             context.set_default_navigation_timeout(30000)

@@ -16,22 +16,13 @@
    HTML deliverable and ask whether to defer export or switch to native PPTX.
 5. When browser export is blocked and user chooses `PPTX`, switch to `PptxGenJS`.
 
-## 3. Dependency install path
+## 3. Offline dependencies
 
-1. Install Node dependencies only into managed Office Raccoon prefixes.
-2. Use the managed Office Raccoon prefix variable, never a platform-specific hardcoded path:
-   `OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}"`
-   Then:
-   `${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" pptxgenjs`
-3. For Playwright setup:
-
-```bash
-OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}"
-${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" playwright
-"$OFFICE_RACCOON_NODE_PREFIX/node_modules/.bin/playwright" install chromium
-```
-
-4. For OpenAI runtime install in this skill path, use managed install path and `--prefix`.
+Dependencies are supplied by the installer, never installed during a task.
+Use managed runtime paths and the exact host Playwright/Chromium contract.
+If they are absent, keep the HTML and report an incomplete offline package.
+Do not invoke npm/pip, browser downloads, CDN fallbacks or system installers.
+See `dependency-policy.md` for the package acceptance boundary.
 
 ## 4. Render path
 

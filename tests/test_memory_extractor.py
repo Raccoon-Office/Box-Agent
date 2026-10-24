@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -298,6 +299,120 @@ async def test_step_interval_counting(mgr: MemoryManager):
 
     assert await extractor.maybe_extract(messages, "step_interval") is False
     assert await extractor.maybe_extract(messages, "step_interval") is False
+    assert await extractor.maybe_extract(messages, "step_interval") is True
+
+
+async def test_periodic_extraction_does_not_overlap_or_queue_duplicates(mgr: MemoryManager):
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(
+        mgr, '{"additions": [], "merges": []}', cooldown=0, step_interval=1,
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    generate = extractor._llm.generate
+
+    async def slow_generate(**kwargs):
+        started.set()
+        await release.wait()
+        return generate.return_value
+
+    generate.side_effect = slow_generate
+    messages = [Message(role="user", content="Remember that I prefer Python")]
+    first = asyncio.create_task(extractor.maybe_extract(messages, "step_interval"))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        repeated = await asyncio.wait_for(asyncio.gather(
+            extractor.maybe_extract(messages, "step_interval"),
+            extractor.maybe_extract(messages, "step_interval"),
+        ), 1)
+        assert repeated == [False, False]
+        assert generate.await_count == 1
+    finally:
+        release.set()
+        await first
+
+    assert await extractor.maybe_extract(messages, "step_interval") is True
+    assert generate.await_count == 2
+
+
+async def test_loop_end_waits_for_periodic_extraction_and_keeps_final_feedback(
+    mgr: MemoryManager, monkeypatch,
+):
+    from box_agent.schema import Message
+
+    monkeypatch.setattr("box_agent.memory.monotonic", lambda: 10_000.0)
+    extractor = _make_extractor(
+        mgr, '{"additions": [], "merges": []}', cooldown=9999, step_interval=1,
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    generate = extractor._llm.generate
+    triggers = []
+    extract = extractor._extract
+
+    async def observed_extract(messages, trigger, *, turn_id):
+        triggers.append(trigger)
+        await extract(messages, trigger, turn_id=turn_id)
+
+    monkeypatch.setattr(extractor, "_extract", observed_extract)
+
+    async def slow_generate(**kwargs):
+        started.set()
+        await release.wait()
+        return generate.return_value
+
+    generate.side_effect = slow_generate
+    first = asyncio.create_task(extractor.maybe_extract(
+        [Message(role="user", content="Remember that I prefer Python")], "step_interval",
+    ))
+    final_messages = [Message(role="user", content="Remember to keep the final report concise")]
+    final = None
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        final = asyncio.create_task(extractor.maybe_extract(
+            final_messages, "loop_end", turn_id="final-turn",
+        ))
+        await asyncio.sleep(0)
+        assert triggers == ["step_interval"]
+        assert generate.await_count == 1
+        final_messages.append(Message(role="user", content="Unrelated later turn"))
+    finally:
+        release.set()
+        await first
+        if final is not None:
+            await final
+
+    assert final.result() is True
+    assert triggers == ["step_interval", "loop_end"]
+    assert generate.await_count == 2
+    final_call = generate.await_args.kwargs
+    assert final_call["turn_id"] == "final-turn"
+    assert "final report concise" in final_call["messages"][1].content
+    assert "Unrelated later turn" not in final_call["messages"][1].content
+
+
+@pytest.mark.parametrize("outcome", ["failure", "cancelled"])
+async def test_extraction_can_retry_after_failure_or_cancellation(
+    mgr: MemoryManager, outcome,
+):
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(
+        mgr, '{"additions": [], "merges": []}', cooldown=0, step_interval=1,
+    )
+    generate = extractor._llm.generate
+    generate.side_effect = (
+        RuntimeError("unavailable") if outcome == "failure" else asyncio.CancelledError()
+    )
+    messages = [Message(role="user", content="Remember that I prefer Python")]
+    if outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await extractor.maybe_extract(messages, "step_interval")
+    else:
+        assert await extractor.maybe_extract(messages, "step_interval") is False
+
+    generate.side_effect = None
     assert await extractor.maybe_extract(messages, "step_interval") is True
 
 

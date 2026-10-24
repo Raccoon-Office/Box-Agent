@@ -155,6 +155,14 @@ function main() {
   }
 
   imagePlan.forEach(item => {
+    if (manifest.mode === "local_only" && item && (
+      !["skip", "use_existing"].includes(item.decision)
+      || !["none", "user"].includes(item.acquire_via)
+      || (item.output_path && /^(?:[a-z]+:|\/\/)/i.test(item.output_path))
+      || item.search
+    )) {
+      issues.push(`slide ${item.slide || "?"}: local_only requires skipped media or a supplied local asset; online acquisition is unavailable.`);
+    }
     if (!item || item.acquire_via === undefined) return;
     const acquireVia = item.acquire_via;
     if (!["ai", "web", "user", "none"].includes(acquireVia)) {
@@ -228,8 +236,8 @@ function main() {
   if (opts.mode && manifest.mode !== opts.mode) {
     issues.push(`manifest.mode must be "${opts.mode}", got ${JSON.stringify(manifest.mode)}.`);
   }
-  if (!["auto", "creative_image_mode"].includes(manifest.mode)) {
-    issues.push(`manifest.mode must be "auto" or "creative_image_mode", got ${JSON.stringify(manifest.mode)}.`);
+  if (!["local_only", "auto", "creative_image_mode"].includes(manifest.mode)) {
+    issues.push(`manifest.mode must be "local_only", "auto" or "creative_image_mode", got ${JSON.stringify(manifest.mode)}.`);
   }
 
   if (imageService !== undefined) {
@@ -272,7 +280,9 @@ function main() {
   unresolvedRequired.forEach(item => {
     issues.push(
       `required image entry is unresolved for slide ${item.slide || "?"}: ` +
-      `${item.decision || "missing decision"}; generate it or bind an existing asset`
+      `${item.decision || "missing decision"}; ` + (manifest.mode === "local_only"
+        ? "bind a supplied local asset or revise the design; offline image acquisition is unavailable"
+        : "generate it or bind an existing asset")
     );
   });
 

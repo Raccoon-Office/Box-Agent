@@ -74,6 +74,14 @@ function ensureReviewArtifact(deckDir, opts = {}) {
     if (headings.length !== 1) fail('expected one unique Final review contract section');
     const start = headings[0].index + headings[0][0].length;
     const section = text.slice(start).split(/^#{1,2}\s+/m)[0];
+    const offlinePartial = { status: 'partial', final_pixels_inspected: 'no', remaining: 'visual_unverified' };
+    if (Object.entries(offlinePartial).every(([key, expected]) => {
+      const values = [...section.matchAll(new RegExp(`^[ \t]*(?:-[ \t]+)?${key}:[ \t]*([^\r\n]*)\r?$`, 'gm'))];
+      return values.length === 1 && values[0][1].trim() === expected;
+    })) {
+      process.stderr.write('[WARN] offline visual_unverified: exporting a partial draft without claiming pixel review\n');
+      return;
+    }
     for (const [key, required] of Object.entries({
       status: 'ready', final_pixels_inspected: 'yes', remaining: 'none',
     })) {

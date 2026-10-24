@@ -243,6 +243,8 @@ def import_candidate(
 ) -> dict[str, object]:
     manifest_path = manifest_path.resolve()
     manifest, image_plan, presentation_dir = _read_manifest(manifest_path)
+    if manifest.get("mode") == "local_only":
+        raise ValueError("Offline package: image downloads are unavailable; bind a supplied local asset")
     candidate_resolved = candidate_path.resolve()
     if presentation_dir not in candidate_resolved.parents:
         raise ValueError("candidate file must be inside the presentation directory")

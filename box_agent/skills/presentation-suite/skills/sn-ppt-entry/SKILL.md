@@ -17,14 +17,27 @@ triggers:
 
 # sn-ppt-entry
 
+## 离线包执行边界
+
+本分支专供离线包，保留快速、设计静态和设计动态模式。只有模型推理和本地文件/工具
+可用；不调用网页搜索、图片搜索、生图、远程下载或依赖安装，不做连通性探测或重试。
+恢复任务也直接将联网能力记为 unavailable，不继续历史待执行的联网步骤。
+只用用户提供的本地材料、图片与随包字体/库。外部事实缺口标为“待补充（离线未核验）”，
+不伪造引用、数据或真实对象图片。没有图片时重排为文字、图表、SVG/Canvas 与本地形状，
+保留并披露明确未满足的图片需求，不留下破图或虚假完成状态。不得引入 CDN、远程字体、
+脚本、样式或图片；引用链接只是文字证据，不抓取。此边界优先于下文历史联网操作说明，
+并须原样交接给每个子任务；独立推理角色仍可使用同一宿主模型和本地工具。
+视觉检查只能使用现有模型的图像输入能力；不可用时记录 visual_unverified，不调用代理
+视觉服务、不配置其他模型、不重试。实际文件、页数、内容、渲染与资源检查照常执行。
+
+
 执行前，必须已有用户明确要求设计模式或无冲突的动态演示，或公共 `pptx` 入口已收到
 `presentation_mode` 选择卡的 `design` 回复（用户点击或宿主超时均可）。
 若只是模型推荐了设计模式，先返回 `get_skill(skill_name="pptx")` 完成模式选择，
 不要建立任务目录、写任务包或开始研究。加载本 Skill 本身不表示模式已经确认。
 已确认模式的同一任务续作不重复选择。
 
-统一接收 PPT 生成请求，建立唯一任务目录，准备材料。Standard 先完成定向外部证据补充，
-Deep 先完成完整 Research，**下一步必须调用 `sn-ppt-story` 生成公共 `outline.md`**，再按 `choices.output` 分发到 `sn-ppt-standard` 或 `sn-ppt-dazzle`。
+统一接收 PPT 生成请求，建立唯一任务目录，准备本地材料。Standard 和 Deep 做材料内证据整理，**下一步必须调用 `sn-ppt-story` 生成公共 `outline.md`**，再按 `choices.output` 分发到 `sn-ppt-standard` 或 `sn-ppt-dazzle`。
 
 这是一套 Skill 的入口，不是独立运行时。文本理解、视觉理解和推理使用宿主 Agent
 已有能力。普通搜索、图片搜索和图片生成优先使用宿主原生工具；原生能力不存在或实际
@@ -49,14 +62,10 @@ Node 脚本必须加载该绝对模块路径，并把 `BOX_AGENT_PLAYWRIGHT_CHRO
 
 ### 执行深度
 
-- `draft`：尽快形成可看的方向稿。默认不做外部事实搜索，大纲完成后直接生产。
-- `standard`：质量和等待时间平衡。Story 前由 Entry 做定向外部搜索和证据补充，不运行
-  完整 `sn-deep-research`；生成前让用户看 `outline.md`。
-- `deep`：先确认外部 `sn-deep-research` 可用，再完成研究和正式 `outline.md`；生成前让用户确认。该外部 Skill 未随本套件提供，不可用时说明并让用户选择 Draft 或 Standard，保留已有产物。
-
-Entry 根据任务复杂度、事实时效性、材料完整度和用户措辞推荐一档，同时展示
-Draft / Standard / Deep。用户可以覆盖；用户未覆盖时采用推荐，不为这个选择增加一轮
-阻塞问答。
+保留 Draft / Standard / Deep 选择。离线时三者都只使用本地材料：Draft 快速成稿，
+Standard 做材料内证据整理，Deep 深入交叉分析已提供的本地文件。Deep 不代表联网研究。
+说明事实覆盖边界；不加载外部 Research Skill，不为缺少联网能力要求重选模式。
+Standard / Deep 仍保持原有大纲确认，其他用户选择和输出格式不变。
 
 ### 输出格式
 
@@ -128,7 +137,7 @@ QA 报告、正式预览和交付依赖仍放 `deck_dir`；未登记的已有 QA
     "scene": "...",
     "page_count": 8,
     "language": "zh-Hans",
-    "image_source": "auto",
+    "image_source": "local_only",
     "infographic_source": "echarts"
   },
   "request": {
@@ -209,23 +218,12 @@ QA 报告、正式预览和交付依赖仍放 `deck_dir`；未登记的已有 QA
 `raw_documents.documents[].inherited_images[].visual_summary`。已有缓存且图片未变时跳过，
 下游统一读取缓存；不创建独立 caption 服务。
 
-## 可选搜索与图像能力
+## 离线能力记录
 
-把当前 Skill 的同级目录解析为 skills 根，并固定：
-
-```text
-PPT_TOOLS_DIR = <skills root>/sn-ppt-tools
-```
-
-开始需要某项能力时读取
-`<PPT_TOOLS_DIR>/references/capability-policy.md`，按
-`native -> bundled -> none` 选择。`sn-ppt-tools` 是 PPT 整包的一部分，不做“是否安装”
-判断，也不扫描其他仓库。只把每类能力的来源、状态、非敏感错误摘要和更新时间写入
-`task_pack.state.capabilities`；不得记录 key 或 Authorization header。
-
-媒体能力都不是 Entry 的强制前置。缺失时按 policy 继续，用可交付的无图版式表达内容。
-需要用户处理配置时只提示运行 `sn-ppt-doctor`；不要在 Entry 重复变量清单。Doctor 会显示
-Hermes/OpenClaw 实际读取的用户级 `.env`、缺失项和配置模板。
+读取同级 `sn-ppt-tools/references/capability-policy.md`，直接使用无联网能力路径。
+在 `task_pack.state.capabilities` 中将 web_search/image_search/image_generate 记为
+`source=none`、`status=unavailable`、`last_error=offline_package`，不发起测试请求。
+不得要求配置搜索或生图密钥；缺少本地渲染依赖时报告离线安装包不完整。
 
 ## 大纲确认（Box-Agent）
 
@@ -285,35 +283,10 @@ Standard / Deep 的 Story 完成后，先展示一行叙事概括和同一 `deck
    按上述兼容字段缓存，失败项记录后继续。再生成 `document_digest`，写
    `info_pack.json`。Story 和出口不得重复理解已有缓存的图片，除非文件变化或当前任务确实
    需要重新核对视觉细节。
-7. **决定外部证据路径**：
-   - Draft：默认跳过，写 `required=false`、`executor=null`、`mode=null`。用户明确要求核查
-     某个事实时，可直接用普通搜索完成该核查，但不为 Draft 启动完整 Deep Research。
-   - Standard：默认写 `required=true`、`executor=entry`、`mode=null`。不得因为“用户材料
-     看起来足够”而跳过；只要用户未禁止联网且普通搜索可用，就必须在 Story 前执行至少一次
-     真实普通搜索。
-   - Deep：写 `required=true`、`executor=sn-deep-research`；默认 `mode=normal`，复杂、
-     多维、争议、高时效或高风险任务使用 `heavy`。`quick / normal / heavy` 只属于
-     `sn-deep-research`，不用于描述 Standard。
-   - 用户明确禁止外部搜索或要求只使用给定材料时，不联网，写 `required=false`、
-     `executor=null`、`mode=null` 和 `skipped_reason=user_forbidden`，只做材料内证据审计。
-8. **完成外部证据补充**：先按可选能力规则确定普通搜索来源：宿主原生网页搜索可用时
-   直接使用；否则调用 `<PPT_TOOLS_DIR>/scripts/web_search.py`。
-   - Standard 由 Entry 当前 Agent 做定向搜索，不调用 `sn-deep-research`，不做 scout、
-     多维拆解、补研循环或完整研究报告编排。搜索目标只来自用户 query、材料中的时效性风险、
-     关键事实和会影响叙事的明显缺口；优先官方和一手来源，记录标题、URL、日期、支持的结论
-     及未解决限制。停止条件是 Story 所需关键证据已经覆盖或缺口已经明确，不为扩写而漫游。
-     把简洁结果写到 `<deck_dir>/research/report.md`。
-   - Deep 把普通搜索来源、绝对 `report_dir=<deck_dir>/research` 和当前任务材料交给
-     `sn-deep-research`，按 `mode=normal|heavy` 完整运行。`sn-ppt-tools` 只作为搜索能力
-     fallback，不是另一套 Research 流程。
-   - 两条路径完成后都把同一个 `<deck_dir>/research/report.md` 写入
-     `info_pack.research_report` 和 `task_pack.state.artifacts.research_report`，再进入 Story。
-   - 原生与内置搜索都不可用时，不伪造 Research，也不阻塞 PPT：把
-     `state.research.required=false`、`state.research.executor=null`、
-     `state.research.skipped_reason=search_unavailable` 和
-     `info_pack.document_digest.open_questions` 中的事实覆盖限制写清楚，然后直接进入
-     Story。
-   - 搜索能力存在但 Research 本身尚未完成时，仍不得先写正式大纲。
+7. **固定离线证据路径**：所有执行深度均写 `required=false`、`executor=null`、
+   `mode=null`、`skipped_reason=offline_package`，不使用联网 Research。
+8. **完成材料内证据整理**：保留本地文件来源、页码、日期与冲突。缺少外部/时效事实时
+   省略可选断言，必需内容标为“待补充（离线未核验）”，记录到 open_questions 后继续。
 9. **调用 Story**：把同一 `deck_dir` 交给 `sn-ppt-story`。Story 读取 query、
    `info_pack.json`、`raw_documents.json` 和已有 Research，生成唯一
    `<deck_dir>/outline.md`。

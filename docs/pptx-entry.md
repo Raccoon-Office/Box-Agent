@@ -21,6 +21,49 @@ Tools 和 Doctor 为设计模式提供共用工具和检查。Standard 自带静
 成功不足以宣告完成；播放器缺失时复用已有页面补齐，失败保留产物并记录 `partial`。
 动态出口继续使用 `deck.html`。这是 Skill 收尾要求，未增加内核强制门或另一套汇总脚本。
 
+## 当前分支：离线桌面包
+
+本分支的三个出口全部保留，只使用当前模型推理、本地文件和随包工具。不做网页研究、
+搜图、生图、远程下载、CDN 加载、联网探测或任务中安装依赖。Draft / Standard / Deep
+分别控制材料整理深度，都不再触发外部研究。引用链接可以保留为文字，不抓取其内容。
+素材优先复用用户附件；缺图时改用排印、图表或本地矢量表达。必需事实缺口标为
+“待补充（离线未核验）”，明确的图片要求未满足时也须披露。
+
+快速模式的独立设计输入声明 `local_only`，脚手架不生成图片获取任务，manifest 校验会
+拒绝联网获取；必需素材缺失仍报错，需修正设计而非伪造成功。设计模式的联网脚本入口
+直接返回 `unavailable / offline_package`，静态 exporter 只检查已预置依赖，不执行安装。
+快速 PPTX 导出、设计静态渲染/导出、动态渲染都使用离线浏览器 context。
+
+图像输入能力存在时照常执行模型看图；没有时保持结构、内容、渲染及资源检查，并披露
+`visual_unverified`。Standard 仅允许唯一未完成项为看图的合同导出草稿：
+`status: partial`、`final_pixels_inspected: no`、`remaining: visual_unverified`。
+导出发出警告，最终交付保持 partial；真实内容或渲染问题不因此通过质量门。
+
+打包方需在构建阶段预置并验证以下资源，离线用户不承担下载步骤：
+
+| 资源 | 要求 |
+|---|---|
+| Node / Python | 宿主受管运行时及全部解析/渲染依赖；Python 至少包含所选本地材料解析库、Playwright、psutil、Pillow、FontTools/Brotli |
+| 浏览器 | 对应目标平台的 Chromium、Playwright SDK 与必要系统库；沿用宿主显式 executable/module path |
+| 静态 PPTX | Node 可解析 `pptxgenjs`、`jszip`、Playwright；允许宿主 `NODE_PATH`，不要求任务目录安装 |
+| Skill 资源 | 完整主题/版式、`dom-to-pptx.bundle.js`、套件字体、ECharts、许可证及匹配的 `source.json` / `_manifest.json` |
+| 可选预览 | 使用 LibreOffice/pdftoppm 路线时需预置；缺失不触发安装，也不阻塞已可用 HTML 的交付 |
+
+专属适配源在 `scripts/presentation_suite_overlays/offline_package.py`；使用下文同步器
+生成套件及来源哈希，不手改 vendored 文件。离线适配由本分支固定启用，无线上/离线开关。
+
+在宿主已提供运行时路径的环境运行：
+
+```bash
+uv run --no-sync python scripts/generate_skills_manifest.py
+PPT_RENDER_BROWSER_TESTS=1 uv run --no-sync pytest -q tests/test_pptx_offline.py tests/test_presentation_offline.py tests/test_pptx_entry.py tests/test_presentation_suite_bundle.py
+```
+
+源码回归和本机离线浏览器探针不证明安装包完整。发布前仍需在目标系统的全新用户配置下，
+禁止非模型外网，验证三个模式的实际模型任务、本地附件、中文字体、HTML 重开和 PPTX
+打开。确认无缓存依赖、无安装/下载尝试，核对任务回执与降级说明。此修改范围仅为 PPT
+Skill 及其脚本，不建立 Agent 全局网络隔离策略。
+
 ## 选择与续跑
 
 OfficeV3 直接发送用户需求，不做 PPT 正则分类或发送前的模式拦截。Box-Agent 原有通用

@@ -1,32 +1,23 @@
-# Dependency Policy
+# Offline dependency policy
 
-## 1. Scope
+All runtime dependencies must be provisioned before the offline package is shipped.
+During a presentation task, never run npm/pip/uvx/npx installs, download a browser,
+fetch a font, or install system packages. Missing files are package defects, not
+requests to try an online installer. `scripts/setup_check.py` is diagnostic only.
 
-1. This document is for runtime setup and dependency installation decisions in this skill.
-2. `scripts/setup_check.py` is diagnostic only and never a gate to install globally.
+Use managed `BOX_AGENT_NODE` and `BOX_AGENT_PYTHON`. Load the exact host Playwright
+module and Chromium executable when supplied. The normal editable export uses
+bundled `scripts/dom-to-pptx.bundle.js`; do not install npm `dom-to-pptx`.
+The package needs Node, Python and required Python libraries, Playwright/Chromium,
+the complete skill resources (themes/layouts/vendor libraries), and suitable local
+fonts for each target platform. Native PptxGenJS is an optional route only if
+already bundled. LibreOffice and pdftoppm are only needed for their optional preview path.
 
-## 2. Hard constraints
+Run `scripts/check_html_export_env.js` before required PPTX export. If a dependency
+is missing, report its exact path and preserve the existing HTML. Do not claim PPTX
+completion or switch generators silently. Missing optional preview tools do not
+block package/text validation or HTML delivery. Never install solely for a preview.
 
-1. No Homebrew/system package installation unless explicitly requested.
-2. No global npm/pip/package-manager install for this workflow by default.
-3. No per-session `mnt/<session-id>` dependency installs unless temporary execution explicitly requires it.
-4. Keep all installs inside Office Raccoon managed prefixes.
-
-## 3. NPM / Python policy
-
-1. Install `pptxgenjs` only in managed Office Raccoon prefix when native path is required.
-2. For HTML export, do not install `dom-to-pptx`; use bundled `scripts/dom-to-pptx.bundle.js`.
-3. Preferred install targets are managed Office Raccoon prefixes in `${BOX_AGENT_NODE_PREFIX}` or `${BOX_AGENT_RUNTIME_PREFIX}` (platform default is supplied by environment/runtime; do not hardcode one OS).
-4. Use `pip`/Python packages only through managed environment path when missing helpers are required.
-
-## 4. Fallback behavior
-
-1. If `soffice` is missing, still run package and text checks.
-2. Report Quick Look limitations explicitly when rendering is partial.
-3. For HTML export blockers, do not fallback to weaker generators; use route confirmation.
-
-## 5. QA implications
-
-1. Installing dependencies does not replace package validation.
-2. Installing render libraries does not replace `scripts/render_pptx.py`.
-3. Dependency missing state must be reported with command examples and exact blocker.
+The source checks do not establish installer completeness. Package validation must
+use a fresh target-machine profile with external networking disabled, then verify
+local authoring, HTML reopening, PPTX export, text/page checks and local media.

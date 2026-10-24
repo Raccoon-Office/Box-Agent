@@ -1,3 +1,28 @@
+
+## 离线包执行边界
+
+本分支专供离线包，保留快速、设计静态和设计动态模式。只有模型推理和本地文件/工具
+可用；不调用网页搜索、图片搜索、生图、远程下载或依赖安装，不做连通性探测或重试。
+恢复任务也直接将联网能力记为 unavailable，不继续历史待执行的联网步骤。
+只用用户提供的本地材料、图片与随包字体/库。外部事实缺口标为“待补充（离线未核验）”，
+不伪造引用、数据或真实对象图片。没有图片时重排为文字、图表、SVG/Canvas 与本地形状，
+保留并披露明确未满足的图片需求，不留下破图或虚假完成状态。不得引入 CDN、远程字体、
+脚本、样式或图片；引用链接只是文字证据，不抓取。此边界优先于下文历史联网操作说明，
+并须原样交接给每个子任务；独立推理角色仍可使用同一宿主模型和本地工具。
+视觉检查只能使用现有模型的图像输入能力；不可用时记录 visual_unverified，不调用代理
+视觉服务、不配置其他模型、不重试。实际文件、页数、内容、渲染与资源检查照常执行。
+
+
+### 离线包缺少图像理解时的交付
+
+仍运行本地 render、review-prep、内容/页数/资源/占位符检查。存在已知渲染或内容硬伤时
+继续修复或交付 partial，不得利用视觉不可用掩盖错误。如果唯一未完成项是模型看图，
+在原 `_trace/review-issues.md` 的唯一 Final review contract 中准确记录：
+`status: partial`、`final_pixels_inspected: no`、`remaining: visual_unverified`。
+该离线合同允许 Standard exporter 导出当前页面的 PPTX，并输出未完成视觉检查的警告。
+不使用 --force、不伪写 ready/PASS；task_pack 和最终交付仍为 partial，列出未验页面。
+已有真实看图能力时保持正常 ready/yes/none 合同及原质量门。
+
 # Box-Agent 工具契约
 
 本文件是 `sn-ppt-standard` 在 Box-Agent 上的薄适配层。只翻译 harness 接口，不降低根 `SKILL.md`、reference 或角色卡中的事实、设计、视觉验收与交付要求。
@@ -75,37 +100,23 @@ Box-Agent 的 `sub_agent` 没有父子交错的暂停/续跑协议。实际委�
 
 已有且仍与当前来源一致的完整原文分片可按顺序复用；与 task 中的完整原文一样，已含角色说明、契约或参考原文的不重复读取来源。它们只是输入视图，原计划、CSS 与素材账本仍是真相源。来源变化或原文缺失时读取当前源文件，不要求重新包装或迁移计划。新委派必须获得完整角色说明与本文件阅读路由指定的工具契约章节，但不限定为额外一次读取；同一主 Agent 切换职责也不必重读仍完整有效的说明。修复前读取受影响页的当前 HTML、逐页计划，以及本次问题必要的当前 Style Lock、CSS、组合同和参考，不重新准备无关页面的输入或重做规划。路径与 task pack 不一致是错误，不搜索其他 workspace，也不做任务迁移。
 
-## 4. 生图、搜图与来源账本
+## 4. 本地素材与来源账本
 
-### 生图
+离线包跳过生图、Serper 搜图和 fetch。只复用 Entry 交接的本地附件或从本地文档提取的图。
+父级复制素材到 `DECK_DIR/assets/` 后，用原有 `deck.py asset-register` 登记
+`--origin attachment --source-path '<实际附件路径>'`，随后按原计划 asset-assign。
+派生素材保留真实 parent asset；不把附件标为 downloaded/generated。无素材时在制作前
+调整相应版式，不要求 Image 子任务获取不存在的图片，也不伪造 ready。
+图像理解不可用则如实记录未核验，保留身份/裁切不确定性，不能写已经看图。
 
-调用 Box-Agent 原生 `generate_image`，必须给出位于 `assets/` 下的稳定 `output_path`。OpenAI 兼容服务使用 `1536x1024`、`1024x1536` 或 `1024x1024`；16:9 页面素材先选 `1536x1024`，再按计划的 crop contract 处理。PPT 素材调用显式传 `watermark=false`。
-
-生成成功后，父级在素材阶段完成来源登记与分组，不等 `review-prep` 报缺项再补。保留工具实际返回的文件与原始 prompt；将文件落实到 `DECK_DIR/assets/` 下的正式路径，`ASSET_PATH` 使用 `assets/<真实文件名>`，不是绝对路径，也不是 `assets/generated/<file>`。`ASSET_ID` 与 `GROUP_ID` 使用素材计划中已经确定的真实 ID，不拿页码或临时编造的组名代替。原始 prompt 原样作为参数传入，不在收尾猜写。`GENERATOR_MODEL` 只使用本次执行明确暴露的实际模型名，不能由用户指定值、默认示例或自填 metadata 推断；服务未暴露时留空，命令将记录 `unknown (Box-Agent generate_image)`，诚实标记未知，不为此搜索配置或猜写模型名。
-
-同一批现有命令可在一次 bash 中串行执行，保留失败退出码；每组所有图片登记/分配完成后，只生成一次素材联系表。例如已取到一张素材时：
+复制完成后，设置实际的 DECK_DIR、ASSET_PATH（assets/ 下相对路径）、SOURCE_PATH（原始附件
+路径）、ASSET_ID 和 GROUP_ID，再按下面的失败即停顺序执行，不给来源字段填虚构 URL/模型：
 
 ```bash
-python "<SKILL_ROOT>/scripts/deck.py" asset-register "$DECK_DIR" \
-  --path "$ASSET_PATH" --origin generated \
-  --generator-model "${GENERATOR_MODEL:-unknown (Box-Agent generate_image)}" --prompt "$ORIGINAL_PROMPT" &&
-python "<SKILL_ROOT>/scripts/deck.py" asset-assign "$DECK_DIR" \
-  --path "$ASSET_PATH" --asset-id "$ASSET_ID" --group-id "$GROUP_ID" &&
+python "<SKILL_ROOT>/scripts/deck.py" asset-register "$DECK_DIR" --path "$ASSET_PATH" --origin attachment --source-path "$SOURCE_PATH" &&
+python "<SKILL_ROOT>/scripts/deck.py" asset-assign "$DECK_DIR" --path "$ASSET_PATH" --asset-id "$ASSET_ID" --group-id "$GROUP_ID" &&
 python "<SKILL_ROOT>/scripts/deck.py" asset-contact "$DECK_DIR" --group-id "$GROUP_ID"
 ```
-
-看图通过后才用既有 `asset-review --group-id ... --ready ...` 写 ready，再回填计划的实际路径与 crop contract；登记/分配成功不是素材验收。下载素材沿用 fetch 返回的已登记路径，不重复登记；附件使用原路径的 `--source-path`，派生图保留 `--parent-asset`，不伪填 generated 来源。
-
-### Serper 搜图和真实图落地
-
-若会话已有 schema 明确支持 `search_type="images"` 的 `web_search`，可先用它检索；否则父级使用 skill 自带的确定性入口，密钥只从 `SERPER_API_KEY` 环境变量读取：
-
-```bash
-python "<SKILL_ROOT>/scripts/serper_images.py" search --query '<查询>' --limit 6
-python "<SKILL_ROOT>/scripts/serper_images.py" fetch --url '<图片直链>' --root "$DECK_DIR"
-```
-
-`fetch` 校验响应确为可解析位图，写入 `assets/`，并通过现有 `deck.py asset-register` 自动记录 `origin=downloaded` 与原始 URL。不得把密钥写进计划、日志、HTML、讲稿或 `assets/catalog.json`。
 
 ## 5. 父级渲染闭环
 

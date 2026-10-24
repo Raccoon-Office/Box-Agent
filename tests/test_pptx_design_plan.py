@@ -133,6 +133,9 @@ def test_validated_design_scaffolds_exact_choices_without_parent_catalog(design_
     assert "available_theme_ids" not in result
     assert "composition" not in result["slides"][0]["content_fields"]
     assert result["slides"][0]["content_bindings"]["items"] == ["bullets"]
+    manifest = json.loads((root / "assets/generated/manifest.json").read_text())
+    assert manifest["mode"] == "local_only"
+    assert all(item["decision"] != "generate" for item in manifest["image_plan"])
 
 
 def test_nested_workspace_relation_is_accepted():

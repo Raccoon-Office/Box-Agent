@@ -105,57 +105,8 @@ def _post(url: str, key: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _parser()
-    args = parser.parse_args(argv)
-    query, result_count = _resolved_query_and_num(parser, args)
-    url, key = _configuration()
-    missing = []
-    if not key:
-        missing.append("api_key")
-    if not _valid_url(url):
-        missing.append("url")
-    if missing:
-        _emit("unavailable", reason="missing or invalid configuration", missing=missing)
-        return 2
-
-    payload: dict[str, Any] = {
-        "q": query,
-        "num": max(1, result_count),
-        "page": max(1, args.page),
-    }
-    if args.gl:
-        payload["gl"] = args.gl
-    if args.hl:
-        payload["hl"] = args.hl
-
-    try:
-        data = _post(url, key, payload)
-        raw_items = data.get("organic")
-        if not isinstance(raw_items, list):
-            raw_items = []
-        results = []
-        for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-            result_url = str(item.get("link") or "").strip()
-            results.append(
-                {
-                    "title": str(item.get("title") or "").strip(),
-                    "url": result_url,
-                    "source": str(item.get("source") or "").strip()
-                    or (parse.urlparse(result_url).hostname or ""),
-                    "snippet": str(item.get("snippet") or "").strip(),
-                    "date": str(item.get("date") or "").strip(),
-                }
-            )
-        _emit("ok", results=results, count=len(results))
-        return 0
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        _emit("failed", reason=f"HTTP {exc.code}", detail=detail)
-    except (error.URLError, TimeoutError, json.JSONDecodeError, ValueError, OSError) as exc:
-        _emit("failed", reason=type(exc).__name__, detail=str(exc)[:500])
-    return 1
+    _emit("unavailable", reason="offline_package")
+    return 2
 
 
 if __name__ == "__main__":

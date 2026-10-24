@@ -11,81 +11,20 @@ metadata:
 
 # sn-ppt-tools
 
-这是 PPT Skill 整包自带的备用工具，不是独立内容生产流程。调用前先读
-`references/capability-policy.md`。宿主 Agent 的等价原生工具始终优先；只有原生能力
-不存在或一次实际调用确认不可用时，才调用这里的脚本。
+## 离线包执行边界
 
-## 持久配置
+本分支专供离线包，保留快速、设计静态和设计动态模式。只有模型推理和本地文件/工具
+可用；不调用网页搜索、图片搜索、生图、远程下载或依赖安装，不做连通性探测或重试。
+恢复任务也直接将联网能力记为 unavailable，不继续历史待执行的联网步骤。
+只用用户提供的本地材料、图片与随包字体/库。外部事实缺口标为“待补充（离线未核验）”，
+不伪造引用、数据或真实对象图片。没有图片时重排为文字、图表、SVG/Canvas 与本地形状，
+保留并披露明确未满足的图片需求，不留下破图或虚假完成状态。不得引入 CDN、远程字体、
+脚本、样式或图片；引用链接只是文字证据，不抓取。此边界优先于下文历史联网操作说明，
+并须原样交接给每个子任务；独立推理角色仍可使用同一宿主模型和本地工具。
+视觉检查只能使用现有模型的图像输入能力；不可用时记录 visual_unverified，不调用代理
+视觉服务、不配置其他模型、不重试。实际文件、页数、内容、渲染与资源检查照常执行。
 
-四个脚本每次启动都会自动加载一个用户级 `.env`：
 
-1. 设置了 `SN_PPT_ENV_FILE` 时读取该文件；
-2. OpenClaw 读取 `~/.openclaw/.env`；
-3. 其他环境默认读取 `~/.hermes/.env`。
-
-已有进程环境变量优先，`.env` 只补充缺失项。不要把 secret 写进 Skill 目录、workspace、
-命令行、prompt 或 task pack。完整模板和缺失项检查通过 `sn-ppt-doctor` 查看。
-
-## 普通搜索
-
-```bash
-python3 "$PPT_TOOLS_DIR/scripts/web_search.py" "QUERY" --num 10
-```
-
-配置：
-
-- URL：`SN_PPT_WEB_SEARCH_URL`；否则
-  `SN_PPT_SEARCH_BASE_URL` / `SERPER_BASE_URL` 加 `/search`。
-- Key：`SN_PPT_WEB_SEARCH_API_KEY` -> `SN_PPT_SEARCH_API_KEY` ->
-  `SERPER_API_KEY`。
-
-## 图片搜索与下载
-
-```bash
-python3 "$PPT_TOOLS_DIR/scripts/image_search.py" "QUERY" --num 10
-
-python3 "$PPT_TOOLS_DIR/scripts/fetch_image.py" \
-  "https://example.com/image.png" \
-  --deck-dir "$DECK_DIR" \
-  --output "assets/image.png" \
-  --referer "https://example.com/source-page"
-```
-
-图片搜索配置：
-
-- URL：`SN_PPT_IMAGE_SEARCH_URL`；否则
-  `SN_PPT_SEARCH_BASE_URL` / `SERPER_BASE_URL` 加 `/images`。
-- Key：`SN_PPT_IMAGE_SEARCH_API_KEY` -> `SN_PPT_SEARCH_API_KEY` ->
-  `SERPER_API_KEY`。
-
-先根据搜索元数据选择候选，再下载选中的图片。不得把远程 URL 直接留在最终 deck。
-
-## 图片生成
-
-```bash
-python3 "$PPT_TOOLS_DIR/scripts/image_generate.py" \
-  --prompt-file "$DECK_DIR/pages/page_001.prompt.txt" \
-  --deck-dir "$DECK_DIR" \
-  --output "pages/page_001.png" \
-  --size "2752x1536"
-```
-
-配置：
-
-- URL：`SN_PPT_IMAGE_GEN_URL`；否则
-  `SN_IMAGE_GEN_BASE_URL` / `SN_BASE_URL` 加 `/images/generations`。
-- Key：`SN_PPT_IMAGE_GEN_API_KEY` -> `SN_IMAGE_GEN_API_KEY` ->
-  `SN_API_KEY`。
-- Model：`SN_PPT_IMAGE_GEN_MODEL` -> `SN_IMAGE_GEN_MODEL`。
-
-只支持 OpenAI/SenseNova 兼容的同步 `POST /images/generations` 协议，响应可以是
-`data[].url` 或 `data[].b64_json`。不在这里扩展其他 provider。
-
-## 输出与失败
-
-- 成功输出单行 JSON，`status` 为 `ok`。
-- 缺少配置输出 `status=unavailable`，退出码为 2。
-- 请求或落盘失败输出 `status=failed`，退出码为 1。
-- 所有图片只能写入调用方给定的绝对 `DECK_DIR` 内。
-- Key 不通过命令行传递，不写入输出、日志、task pack 或 deck 文件。
-- 同一能力调用失败后不循环重试；由调用 Skill 按 policy 继续无工具路径。
+本离线包禁用这套联网备用工具。不要调用 web_search.py、image_search.py、fetch_image.py、
+image_generate.py，不读取或配置 API key。直接读取 `references/capability-policy.md`
+并继续本地材料流程；不把能力缺失误认为需要重试的服务故障。

@@ -146,11 +146,13 @@ def test_git_source_packaging_includes_all_vendored_resources():
     assert not checked.stdout.strip(), checked.stdout
 
 
-def test_dynamic_method_uses_box_native_tools_and_common_media_fallback():
+def test_dynamic_method_uses_local_media_and_animation_offline():
     dynamic = (SUITE / "skills/sn-ppt-dazzle/SKILL.md").read_text()
-    assert "inspect_images" in dynamic and "generate_image" in dynamic
+    assert "离线包执行边界" in dynamic
+    assert "禁止 CDN" in dynamic
+    assert "原生 CSS/SVG/Canvas" in dynamic
+    assert "准备本地素材" in dynamic
     assert "vision_analyze" not in dynamic
-    assert "capability-policy.md" in dynamic
 
 
 def _sync_function():
@@ -167,6 +169,7 @@ def source_repo(tmp_path, monkeypatch):
     monkeypatch.setitem(sync.__globals__, "_image_inspection_recovery_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_windows_compat_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_canvas_dimensions_overlay", lambda _, data: data)
+    monkeypatch.setitem(sync.__globals__, "_offline_package_overlay", lambda _, data: data)
     repo = tmp_path / "upstream"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)

@@ -90,7 +90,7 @@ function main() {
     console.log("Missing browser export environment. Ask the user to choose:");
     console.log("  HTML: deliver deck.html now; editable PPTX export can run after Playwright/Chromium or a host renderer is available.");
     console.log("  PPTX: switch to native PptxGenJS and create a directly editable PPTX with different HTML/CSS fidelity tradeoffs.");
-    console.log("Install in Office Raccoon: Settings -> Plugins -> Web automation (Playwright) -> Download Chromium and enable.");
+    console.log("Offline package is incomplete: ship Playwright and Chromium with the installer; do not download or install dependencies during a presentation task.");
     console.log(`Expected browser host under: ${browsersPath}`);
     console.log("If Playwright itself is missing, reinstall or repair Office Raccoon's managed runtime.");
   }

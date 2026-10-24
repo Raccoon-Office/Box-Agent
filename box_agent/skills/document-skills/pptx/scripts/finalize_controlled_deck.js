@@ -463,8 +463,8 @@ function main() {
   let manifestMode = "auto";
   try {
     const manifest = readJson(manifestPath);
-    if (manifest && manifest.mode === "creative_image_mode") {
-      manifestMode = "creative_image_mode";
+    if (manifest && ["local_only", "creative_image_mode"].includes(manifest.mode)) {
+      manifestMode = manifest.mode;
     }
   } catch (_error) {
     // The manifest validator below writes the actionable missing/invalid report.

@@ -613,7 +613,7 @@ function parseArgs(argv) {
         "[--style-override KEY=VALUE ...] " +
         "[--design-review-verdict accepted|revised|unavailable --design-review-reason REASON] " +
         "[--family FAMILY_ID] [--composition-variant VARIANT] [--title TITLE] [--truth-mode MODE] " +
-        "[--image-mode auto|creative_image_mode] [--no-images] " +
+        "[--image-mode local_only|auto|creative_image_mode] [--no-images] " +
         "[--image-asset SLIDE:SLOT=PATH ...] " +
         "[--fact TEXT ...] [--research-fact TEXT ...] [--assumption TEXT ...] " +
         "[--require-field SLIDE:FIELD ...] [--outline outline.json] [--out deck.json] " +
@@ -1354,6 +1354,7 @@ function buildImagePlanEntry(
   );
   const generationForbidden = context.generationForbidden === true
     || AUTO_COVER_IMAGE_OPTOUT_RE.test(slideText);
+  const localOnly = imageMode === "local_only";
   const supportsPlannedBackground = Boolean(slot || backgroundLayoutContract);
   const creativeCover = !generationForbidden
     && imageMode === "creative_image_mode"
@@ -1408,7 +1409,7 @@ function buildImagePlanEntry(
     || creativeOptional
     || autoCover
     || autoOptional;
-  const generate = !generationForbidden && !useExisting && Boolean(
+  const generate = !localOnly && !generationForbidden && !useExisting && Boolean(
     plannedGeneration
   );
   const explicitAiSource = AUTO_AI_IMAGE_SOURCE_RE.test(slideVisualText);
@@ -1436,6 +1437,10 @@ function buildImagePlanEntry(
     decisionReason = "a user-provided source asset is available for this declared media slot";
   } else if (generationForbidden) {
     decisionReason = "the user explicitly forbids generated images for this presentation";
+  } else if (localOnly) {
+    decisionReason = required
+      ? "offline package: bind a supplied local asset or revise the design to a layout without required media"
+      : "offline package: use editable text, charts and diagrams; no image search or generation";
   } else if (creativeCover) {
     decisionReason = "creative_image_mode requires a generated cover visual";
   } else if (slot && slot.required) {
@@ -1522,7 +1527,8 @@ function buildImagePlanEntry(
         },
       }
       : {}),
-    allowed_strategies: generationForbidden ? ["skip"] : strategies,
+    allowed_strategies: generationForbidden ? ["skip"]
+      : localOnly ? strategies.filter(strategy => strategy !== "generate") : strategies,
     ...(targetId === "background"
       ? {
         kind: "background",
@@ -1690,6 +1696,8 @@ function main() {
       throw new Error("--outline must match the validated design input");
     }
     opts.outline = independentDesign.outline_file;
+    // This branch's independent authoring workflow targets the offline package.
+    opts.imageMode = "local_only";
     opts.title = independentDesign.input.title;
     opts.layoutIds = independentDesign.plan.slides.map(slide => slide.layout_id);
     opts.themeId = independentDesign.preset.theme.id;
@@ -1807,8 +1815,8 @@ function main() {
   if (!["source_bound", "illustrative"].includes(opts.truthMode)) {
     throw new Error("--truth-mode must be source_bound or illustrative");
   }
-  if (!["auto", "creative_image_mode"].includes(opts.imageMode)) {
-    throw new Error("--image-mode must be auto or creative_image_mode");
+  if (!["local_only", "auto", "creative_image_mode"].includes(opts.imageMode)) {
+    throw new Error("--image-mode must be local_only, auto or creative_image_mode");
   }
   if (opts.imageAssets.length && !opts.out) {
     throw new Error("--image-asset requires --out deck.json so the asset can be copied portably");
@@ -2374,7 +2382,9 @@ function main() {
         : {}),
       image_policy: {
         mode: opts.imageMode,
-        rule: opts.imageMode === "creative_image_mode"
+        rule: opts.imageMode === "local_only"
+          ? "Offline package: use only supplied local --image-asset files. Never search, download or generate images. Required media without a local file remains incomplete; revise the design instead of fabricating an asset."
+          : opts.imageMode === "creative_image_mode"
           ? "At least the cover is scaffolded as generate and one real generated asset is mandatory. Batch independent generate_image calls in one model turn."
           : "Resolve required media entries. The scaffold reads outline visual intent: product/interface, code/system, investor/launch, and visual-story covers promote a concrete image job; user-provided --image-asset bindings win through use_existing, while text/data pages stay image-free when bitmap media adds no narrative value.",
         validation_command: opts.imageMode === "creative_image_mode"

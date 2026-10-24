@@ -23,12 +23,9 @@ Before writing a deck generation script, verify that PptxGenJS is already availa
 ${BOX_AGENT_NODE:-node} -e "require.resolve('pptxgenjs')"
 ```
 
-If this command fails in Office Raccoon, install PptxGenJS into the managed app
-support prefix when possible, for example
-`${BOX_AGENT_NPM:-npm} install --prefix "${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}" pptxgenjs`.
-Do not install globally, do not install inside the deliverable folder, and do
-not switch to another generator unless the user explicitly approves that
-fallback.
+If the managed package is missing, report an incomplete offline package and
+preserve the HTML. Do not install dependencies, download replacements or switch
+generators silently. This route is available only when provisioned before delivery.
 
 ## Baseline Script
 

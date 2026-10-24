@@ -1,5 +1,6 @@
 // PPTX 构建器：将 IR 映射为 pptxgenjs slide 对象
-import PptxGenJS from 'pptxgenjs';
+import { createRequire } from 'node:module';
+const PptxGenJS = createRequire(import.meta.url)('pptxgenjs');
 import {
   cssColorToHex, isTransparent, parseLinearGradient, parseRadialGradient,
   parseBoxShadow, parseFontFamily, parseBorder, pxToInch, setCanvasWidth,

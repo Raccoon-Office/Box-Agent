@@ -1,5 +1,19 @@
 # Review subagent · 职责卡
 
+## 离线包执行边界
+
+本分支专供离线包，保留快速、设计静态和设计动态模式。只有模型推理和本地文件/工具
+可用；不调用网页搜索、图片搜索、生图、远程下载或依赖安装，不做连通性探测或重试。
+恢复任务也直接将联网能力记为 unavailable，不继续历史待执行的联网步骤。
+只用用户提供的本地材料、图片与随包字体/库。外部事实缺口标为“待补充（离线未核验）”，
+不伪造引用、数据或真实对象图片。没有图片时重排为文字、图表、SVG/Canvas 与本地形状，
+保留并披露明确未满足的图片需求，不留下破图或虚假完成状态。不得引入 CDN、远程字体、
+脚本、样式或图片；引用链接只是文字证据，不抓取。此边界优先于下文历史联网操作说明，
+并须原样交接给每个子任务；独立推理角色仍可使用同一宿主模型和本地工具。
+视觉检查只能使用现有模型的图像输入能力；不可用时记录 visual_unverified，不调用代理
+视觉服务、不配置其他模型、不重试。实际文件、页数、内容、渲染与资源检查照常执行。
+
+
 若任务运行于 Box-Agent，先完整读取 `references/box-agent-tool-contract.md`；其中的工具调用、渲染分工和委派规则覆盖本职责卡中的旧 harness 工具写法，但不改变本角色的问题账本、修复预算、像素新鲜度和返回合同。
 
 Box-Agent 静态新建按根 `SKILL.md` 的“Box-Agent 静态新建的执行方式”，由主 Agent 执行本说明全部验收工作，不因切换到 Review 再建子任务。下文父子交接仅适用于实际委派；已有编辑与其他环境保持原分工。
@@ -144,3 +158,13 @@ summary: <一两句>
 `simple_edit` 的目标修改本身也计一轮，不只计 Vision 之后的返修。
 
 `simple_edit` 只有目标修改完成、overview/focus 已看、变化页已批量重渲且构建通过时才能 `ready`；`final_review` 还要求全册诊断完成。存在附件或 Research 时必须 `content_fidelity: pass`；只有无需事实核验的任务才可 `not-applicable`。当前 Review 返回 `blocked` 时必须给出可定位到页面和证据的 `remaining`；Box-Agent 静态新建由主 Agent 按根 Skill 的页组返修上限处理，其他环境与已有编辑由 Orchestrator 交回原页组。实际修复并生成新像素后才允许下一次 Review。不得要求无限重审，也不得把 advisory 包装成硬伤。
+
+### 离线包缺少图像理解时的交付
+
+仍运行本地 render、review-prep、内容/页数/资源/占位符检查。存在已知渲染或内容硬伤时
+继续修复或交付 partial，不得利用视觉不可用掩盖错误。如果唯一未完成项是模型看图，
+在原 `_trace/review-issues.md` 的唯一 Final review contract 中准确记录：
+`status: partial`、`final_pixels_inspected: no`、`remaining: visual_unverified`。
+该离线合同允许 Standard exporter 导出当前页面的 PPTX，并输出未完成视觉检查的警告。
+不使用 --force、不伪写 ready/PASS；task_pack 和最终交付仍为 partial，列出未验页面。
+已有真实看图能力时保持正常 ready/yes/none 合同及原质量门。

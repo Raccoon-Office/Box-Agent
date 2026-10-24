@@ -12,6 +12,22 @@ metadata:
 
 # PPT Fast Skill
 
+## Offline package contract
+
+This branch is for the offline desktop package. Only model inference and local
+file/tool execution are available. Do not call research/search/browser-fetch,
+image search, image generation, remote asset downloads, or package installers,
+even if those tools appear in the session. Do not probe or retry those services.
+Use supplied local materials and assets, bundled themes/layouts/charts/diagrams,
+and local fonts. Never reference CDN scripts, remote CSS/fonts or remote images.
+URLs in supplied citations are references, not permission to fetch them.
+Pass this boundary to every delegated role. The main and isolated design model
+may still reason over local files; a separate online service is not required.
+Use `local_only` media policy. A creative brief may change composition and color,
+but cannot activate `creative_image_mode` or require generated assets.
+Visual inspection may use the current model's image input only. If unavailable,
+record it as unverified; never use a separate vision service or configure another model.
+
 Create controlled, editable HTML presentations. A request to make a PPT/PowerPoint
 requires a `.pptx` file alongside the HTML; the user need not separately ask to
 “export”. Carry that format request through mode selection and task continuation.
@@ -80,10 +96,9 @@ or clearly labeled growth rates derived from the supplied values.
 - Supplied page content is the source of truth; preserve its intended ordering.
 - Proposed architectures/solutions with sufficient goals and components use
   `source_mode=user_provided`; they do not require research by default.
-- Missing external/current/company/market facts use `research-synthesis` when
-  available. Follow its selected research budget and use only the validated
-  `presentation_handoff.verified_facts[].canonical` as researched facts. Do not
-  ask again for permission to use public sources already authorized by the task.
+- External/current/company/market facts must come from supplied local sources.
+  Do not load `research-synthesis`, search, fetch pages, or invent citations.
+  Omit optional unsupported claims; mark required gaps `待补充（离线未核验）`.
 - Preserve strict/private source boundaries. Omit optional unsupported claims;
   disclose required public gaps as `暂无可验证公开数据`, and private gaps as
   `待补充` or `待客户确认`. Assumptions require explicit user authorization.
@@ -241,8 +256,8 @@ Claim independently replaceable images only for actual picture objects, not
 shapes or artwork baked into a page background. Package validity alone does not
 prove those content/editability requirements.
 
-An actual export error should be repaired within the existing dependency/export
-rules and retried. If it remains blocked, deliver the existing HTML and report
+An actual export error may be repaired with already bundled dependencies and
+retried once; never install or download dependencies during the task. If it remains blocked, deliver the existing HTML and report
 the missing PPTX as incomplete. Failed design validation does not authorize a
 fresh HTML implementation, a new python-pptx deck or a switch to the escape route.
 
@@ -254,7 +269,7 @@ explain the limitations from `qa/design_delivery.json`.
 ### 4. Scaffold the validated plan once
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js --design-plan design_plan.json --design-input design_input.json --outline outline.json --out deck.json
+${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js --design-plan design_plan.json --design-input design_input.json --outline outline.json --image-mode local_only --out deck.json
 ```
 
 Use `cd '<PRESENTATION_DIR>' && ${BOX_AGENT_NODE:-node}` on that same line;
@@ -272,22 +287,15 @@ only for user-required semantic data fields, never decoration.
 
 ### 5. Acquire media and fill content
 
-Before issuing any image-generation batch, read `assets/generated/manifest.json`
-and collect each selected row's exact `output_path`. Generate directly to those
-paths; do not generate descriptive aliases first and rename them afterwards.
-
-Read `references/image-assets.md` for image acquisition. Follow the scaffolded
-`acquire_via`: `user` keeps localized supplied assets; `web` uses image search;
-`ai` uses generation; `none` stays image-free. Web rows use the exact search query
-with `search_type: "image"` and `count: 5`, once per unique query. Localize selected
-receipts with `scripts/localize_web_image.py`. Only after `exhausted` or
-`unavailable` may a web job use its labelled AI-concept fallback. Never fabricate
-a documentary image of a real subject. Call `generate_image` with
-`watermark: false` and `publish_artifact: false`; use the manifest entry's
-`output_path` verbatim as the tool's `output_path` (never invent a short alias such
-as `cover-hero.png`). Independent jobs may share a tool batch. Generation success
-is not insertion proof: the final manifest must bind the asset to the actual page
-and field.
+Read `references/image-assets.md`. Use only supplied local assets. Bind them
+at scaffold time with repeated `--image-asset SLIDE:SLOT=PATH` arguments; the
+helper copies them to portable `assets/source/` paths. The manifest records
+`use_existing` / `acquire_via: user`, or `skip` / `acquire_via: none`. Without a
+local asset, prefer editable text, charts, tables and diagrams. Never call image
+search, generation or `scripts/localize_web_image.py` in this offline workflow.
+If a chosen layout requires unavailable media, request a bounded design
+correction to a suitable layout. Preserve and disclose explicit unmet user
+image requirements; do not mark them complete or fabricate documentary images.
 
 Then synchronize once with one tightly scoped Bash-tool command. A missing optional
 generated asset is recorded as deferred and does not stop HTML delivery; an
@@ -363,10 +371,9 @@ compare each key page with its expression: naming an axis is not a route diagram
 and naming materials is not a material-detail visual. Report any expression that
 could not be implemented; a profile in JSON is not proof of visible subject fit.
 
-Explicit image-rich briefs may activate `creative_image_mode`; at least one real
-generated asset must be referenced for an image-complete result. If all required
-generation fails, deliver structurally usable degraded HTML and accurately report
-the unmet image requirement. Ordinary factual topics do not imply creative mode.
+Image-rich briefs use supplied local images. If they are unavailable, deliver
+the usable editable draft and disclose which requested visuals remain unmet.
+Offline availability does not authorize inventing facts or claiming generated art.
 
 ### 6. Finalize and deliver
 
@@ -452,39 +459,23 @@ uses `scripts/render_composition_gallery.js --out composition-previews/index.htm
 it displays existing internal presets without requiring main-agent family choices.
 `html-templates` is optional richer design reference, not a hard dependency.
 
-## Research and image evidence boundaries
+## Local evidence boundaries
 
-For a factual public deck without supplied evidence (people, organizations,
-events, products, data), research happens **before** `outline.json`, never after:
-load `research-synthesis` when available; when it is unavailable or hidden in
-this session (fast mode), call the search tools yourself — open with general
-queries without `site:`, then `web_extract` the specific pages you will cite.
-Writing `outline.json` for such a deck before any search or page read is a
-process error. Only write `source_mode=public_authoritative_research` when the
-outline's facts come from sources you actually opened in this task, and put the
-exact page URL (not a homepage or a bare site name) plus the exact figure or
-date into that slide's `evidence`: every number or date in a slide's title,
-message or bullets must appear literally in that same slide's evidence text
-(e.g. `2013年加盟巴塞罗那 | FC Barcelona | https://…`), one fact per item. If nothing was searched, do not claim that
-mode: use only supplied facts, omit optional claims and disclose required gaps.
-If `prepare` answers `repair_required: true`, design has not started and the
-outline must be fixed now: work through every `checklist` item in one rewrite of
-`outline.json` — copy the exact figure/date from a page you already opened into
-that slide's evidence next to its URL; otherwise run at most two targeted
-searches for it; otherwise reword the line without the number (or use
-`暂无可验证公开数据`). Then re-run the same `prepare` command. Anything left
-unfixed is cut from the slides before design, leaving them short or empty, so do
-not re-run `prepare` without editing. If a later `prepare` reports
-`auto_degraded` or `unverified_claims`, name those items in the final reply. `prepare` records `research_status`; if it is
-`handoff_unverified`, do not claim verified research or hide this limitation.
-Use only supported facts, omit optional claims or disclose required gaps, and
-continue production without treating research gaps as a rendering failure.
+Read supplied files before writing `outline.json`. Use `source_mode=user_provided`
+for those materials or proposed solutions; `creative_brief` is only for explicitly
+creative content. Do not label a new offline deck `public_authoritative_research`.
+Keep actual source filenames/page references in evidence. A URL in a document is
+not a source opened or verified during this task. Model memory is not verified
+current data. Omit unsupported optional facts, and disclose required gaps as
+`待补充（离线未核验）`; private facts remain `待补充` or `待客户确认`.
+When preparing an older research-backed outline reports a checklist, correct it
+from available local evidence or use the validator's unavailable-data placeholder
+`暂无可验证公开数据`. Do not search, repeatedly retry preparation, or silently remove
+an explicit user requirement. Disclose auto-degraded/unverified content.
 
-Image understanding is optional. If `inspect_images` cannot view the image or
-reports no multimodal capability, record visual identity/quality as unverified
-and continue immediately. Do not retry it, switch models, change user settings,
-or block design, media binding, rendering or export. Actual file existence,
-decode and geometry checks remain program checks, independent of model vision.
+Image understanding remains optional and may only use model capability already
+available for local inputs. Missing vision never triggers service configuration,
+model switching, or a retry. Actual file, decode and geometry checks stay local.
 
 ## Export and runtime
 
@@ -588,15 +579,14 @@ host `ui_language` instruction when present, then the language of the user's
 task. Never override that contract with a locale-specific default, and do not
 mix headings from one language with body text from another.
 
-Treat generated or acquired slide illustrations, diagrams, backgrounds, and
+Treat local slide illustrations, diagrams, backgrounds, and
 individual screenshots as intermediate assets. Do not embed them in progress
 messages or the final reply, or list them as standalone deliverables, unless
 the user explicitly requests the individual images. Keep their local files and
-manifest references for deck rendering and editing. For PPT assets call
-`generate_image` with `publish_artifact: false`; this suppresses artifact
-publication without suppressing generation or insertion. For a requested
+manifest references for deck rendering and editing. When a local asset tool
+supports it, set `publish_artifact: false` for intermediate files. For a requested
 individual-image deliverable, call `publish_artifact(path)` on the validated
-image after generation.
+local image.
 
 The preparation script declares the presentation directory as an intermediate
 workspace. Only explicitly registered deliveries appear in chat. Finalization
