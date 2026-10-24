@@ -49,6 +49,7 @@ from .injections import InjectionManager
 from .runtime import run_agent_loop
 from .schema import Message
 from .session_log import SessionLog, SessionLogReplayError
+from .session_projection import SessionProjection
 from .tools.base import Tool, ToolResult, build_tool_name_index
 from .tools.local_tool_exposure import LocalToolExposurePolicy
 from .tools.mcp_tool_catalog import MCPToolCatalog, get_mcp_tool_catalog
@@ -630,51 +631,55 @@ class Agent:
         # directly. Feature-detect so such a Store does not crash construction.
         _replay = getattr(self.session_log, "replay", None)
         if self.session_log is not None and callable(_replay):
-            projection = _replay()
-            self.messages.extend(projection.messages)
-            self.restore_goal(projection.goal)
-            plan_tool = self.tools.get("plan_write")
-            configure_plan = getattr(plan_tool, "configure_session_persistence", None)
-            if callable(configure_plan):
-                configure_plan(self.session_log, projection.plan)
-            todo_tool = self.tools.get("todo_write")
-            configure_todos = getattr(todo_tool, "configure_session_persistence", None)
-            if callable(configure_todos):
-                configure_todos(self.session_log, projection.todos)
-            # Skill state is optional session data. A damaged or older log may
-            # contain null/non-object entries; ignore those entries instead of
-            # letting session construction crash before the conversation can
-            # continue. Object records that look like Skill facts still go
-            # through restore validation so invalid field types fail closed.
-            self.restored_skills = select_restore_records(projection.skills)
-            self._persisted_active_skill_records = deepcopy(self.restored_skills)
-            if self.restored_skills:
-                try:
-                    self.skill_runtime.restore_records(self.restored_skills)
-                    restored_names = {
-                        row["name"] for row in self.skill_runtime.log_records()
-                    }
-                    expected_names = {
-                        row["name"] for row in self.restored_skills
-                        if isinstance(row.get("name"), str)
-                    }
-                    if restored_names != expected_names:
-                        # Partial ACP restoration intentionally drops records
-                        # whose source is unavailable. Preserve the historical
-                        # snapshot as the durable state; an empty runtime is
-                        # not an explicit clear operation.
-                        self._persisted_active_skill_records = deepcopy(
-                            self.skill_runtime.log_records()
-                        )
-                except SkillDependencyError as exc:
-                    if exc.code != "SKILL_PROVIDER_UNAVAILABLE":
-                        raise
-                    # Legacy callers may supply current text through the
-                    # tuple restore API after construction, before execution.
-                    self._pending_skill_restore = self.restored_skills
+            self.restore_session_projection(_replay())
         else:
             self.restored_skills = []
         self._sync_child_system_prompt()
+
+    def restore_session_projection(self, projection: SessionProjection) -> None:
+        """Restore durable session facts without writing new history."""
+        self._pending_skill_restore = []
+        self.messages[:] = [self.messages[0], *projection.messages]
+        self.restore_goal(projection.goal)
+        plan_tool = self.tools.get("plan_write")
+        configure_plan = getattr(plan_tool, "configure_session_persistence", None)
+        if callable(configure_plan):
+            configure_plan(self.session_log, projection.plan)
+        todo_tool = self.tools.get("todo_write")
+        configure_todos = getattr(todo_tool, "configure_session_persistence", None)
+        if callable(configure_todos):
+            configure_todos(self.session_log, projection.todos)
+        # Skill state is optional session data. A damaged or older log may
+        # contain null/non-object entries; ignore those entries instead of
+        # letting session construction crash before the conversation can
+        # continue. Object records that look like Skill facts still go
+        # through restore validation so invalid field types fail closed.
+        self.restored_skills = select_restore_records(projection.skills)
+        self._persisted_active_skill_records = deepcopy(self.restored_skills)
+        if self.restored_skills:
+            try:
+                self.skill_runtime.restore_records(self.restored_skills)
+                restored_names = {
+                    row["name"] for row in self.skill_runtime.log_records()
+                }
+                expected_names = {
+                    row["name"] for row in self.restored_skills
+                    if isinstance(row.get("name"), str)
+                }
+                if restored_names != expected_names:
+                    # Partial ACP restoration intentionally drops records
+                    # whose source is unavailable. Preserve the historical
+                    # snapshot as the durable state; an empty runtime is
+                    # not an explicit clear operation.
+                    self._persisted_active_skill_records = deepcopy(
+                        self.skill_runtime.log_records()
+                    )
+            except SkillDependencyError as exc:
+                if exc.code != "SKILL_PROVIDER_UNAVAILABLE":
+                    raise
+                # Legacy callers may supply current text through the
+                # tuple restore API after construction, before execution.
+                self._pending_skill_restore = self.restored_skills
 
     @property
     def thinking_enabled(self) -> bool:

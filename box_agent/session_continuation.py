@@ -7,7 +7,6 @@ from typing import Any
 
 
 SCHEMA_VERSION = "officev3-session-continuation/v1"
-HISTORY_EDIT_SCHEMA_VERSION = "officev3-session-continuation/v2"
 MAX_MESSAGES = 12
 MAX_MESSAGE_CHARS = 12_000
 MAX_TOTAL_CHARS = 48_000
@@ -30,10 +29,8 @@ class SessionContinuation:
 
 
 def parse_session_continuation(value: Any) -> SessionContinuation | None:
-    """Parse bounded v1 recovery or validate a complete v2 edited branch."""
+    """Return one bounded v1 continuation snapshot or ``None``."""
 
-    if isinstance(value, dict) and value.get("schema_version") == HISTORY_EDIT_SCHEMA_VERSION:
-        return _parse_history_edit(value)
     if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
         return None
     product_session_id = value.get("product_session_id")
@@ -96,44 +93,8 @@ def parse_session_continuation(value: Any) -> SessionContinuation | None:
     )
 
 
-def _parse_history_edit(value: dict[str, Any]) -> SessionContinuation:
-    """Accept an entire semantic branch or fail before appending the new prompt."""
-    session_id = value.get("product_session_id")
-    raw = value.get("messages")
-    if (
-        not isinstance(session_id, str)
-        or not session_id.strip()
-        or value.get("reason") != "history_edit"
-        or value.get("truncated") is not False
-        or not isinstance(raw, list)
-        or len(raw) > 4096
-    ):
-        raise ValueError("INVALID_HISTORY_EDIT_CONTINUATION")
-    messages: list[ContinuationMessage] = []
-    chars = 0
-    for item in raw:
-        if (
-            not isinstance(item, dict)
-            or item.get("role") not in {"user", "assistant"}
-            or not isinstance(item.get("content"), str)
-            or not item["content"].strip()
-        ):
-            raise ValueError("INVALID_HISTORY_EDIT_CONTINUATION")
-        chars += len(item["content"])
-        if chars > 4_000_000:
-            raise ValueError("HISTORY_EDIT_TOO_LARGE")
-        messages.append(ContinuationMessage(role=item["role"], content=item["content"]))
-    return SessionContinuation(
-        product_session_id=session_id,
-        reason="history_edit",
-        messages=tuple(messages),
-        truncated=False,
-    )
-
-
 __all__ = [
     "ContinuationMessage",
-    "HISTORY_EDIT_SCHEMA_VERSION",
     "MAX_MESSAGE_CHARS",
     "MAX_MESSAGES",
     "MAX_TOTAL_CHARS",
