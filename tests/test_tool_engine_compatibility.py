@@ -2,7 +2,8 @@
 
 The fixed C1/C5 fixtures remain intact. Enumerated C5 changes, session-cwd
 descriptions, PPT entry contracts, tool handoffs, child execution, background
-retention, connector search and managed runtimes apply before exact comparisons.
+retention, connector search, managed runtimes and schedule frequency descriptions
+apply before exact comparisons.
 Network/runtime discovery is isolated; setup, tools, stores and Agent are real.
 """
 
@@ -125,11 +126,32 @@ _PPTX_ENTRY_SCHEMA_CHANGES = json.loads(
 _TOOL_HANDOFF_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/tool_handoff_schema_changes.json").read_text()
 )
+_IMAGE_CONTEXT_SCHEMA_CHANGES = {
+    "inspect_images": (
+        {
+            "path": ["description"],
+            "before": "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's written analysis; native shows image pixels to you in your next request, so you must record your findings before reading another batch. Never modifies files.",
+            "after": "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's written analysis; native shows image pixels to you under the session's image-context retention policy. Omit strategy to use native when the active main model declares image support, otherwise proxy. Never modifies files.",
+        },
+        {
+            "path": ["input_schema", "properties", "strategy", "default"],
+            "before": "proxy", "remove": True,
+        },
+        {
+            "path": ["input_schema", "properties", "strategy", "description"],
+            "before": "proxy asks the configured vision utility model and returns text; native attaches canonical image blocks transiently to the active main model's next request.",
+            "after": "proxy asks the configured vision utility model and returns text; native attaches images to the active main model's context. Omit to choose native for a declared image-capable main model, otherwise proxy.",
+        },
+    ),
+}
 _BACKGROUND_OUTPUT_SCHEMA_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/background_output_schema_changes.json").read_text()
 )
 _JSONL_DESCRIPTION_CHANGES = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/jsonl_description_changes.json").read_text()
+)
+_SCHEDULE_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/schedule_schema_changes.json").read_text(encoding="utf-8")
 )
 _CONNECTOR_SEARCH_SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/connector_search_schema.json").read_text(
@@ -343,8 +365,23 @@ def _normalized_schema(schema, profile):
     return json.loads(serialized.replace(json.dumps(str(profile), ensure_ascii=False)[1:-1], "<PROFILE>"))
 
 
+def _apply_schedule_schema_changes(schema):
+    expected = deepcopy(schema)
+    for change in _SCHEDULE_SCHEMA_CHANGES["create_scheduled_task"]:
+        target = expected
+        *parents, field = change["path"]
+        for key in parents:
+            target = target[key]
+        assert target[field] == change["before"], change["path"]
+        target[field] = change["after"]
+    return expected
+
+
 def _assert_schema_contract(tools, profile):
     expected = json.loads(_SCHEMA_FIXTURE.read_text(encoding="utf-8"))["tools"]
+    expected["create_scheduled_task"]["schema"] = _apply_schedule_schema_changes(
+        expected["create_scheduled_task"]["schema"],
+    )
     # Preserve the old fixture and enumerate the Skill Engine's public additions.
     expected["list_skills"] = deepcopy(_LIST_SKILLS_SCHEMA)
     expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
@@ -381,6 +418,7 @@ def _assert_schema_contract(tools, profile):
             *_CWD_SCHEMA_CHANGES.get(tool.name, ()),
             *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
             *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
+            *_IMAGE_CONTEXT_SCHEMA_CHANGES.get(tool.name, ()),
             *_BACKGROUND_OUTPUT_SCHEMA_CHANGES.get(tool.name, ()),
             *_JSONL_DESCRIPTION_CHANGES.get(tool.name, ()),
         ):

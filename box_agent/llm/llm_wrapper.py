@@ -219,6 +219,7 @@ class LLMClient:
                 auth_token=auth_token,
                 auth_file=auth_file,
                 timeout=timeout,
+                max_request_body_bytes=max_request_body_bytes,
             )
         elif provider == LLMProvider.OPENAI:
             self._client = OpenAIClient(
@@ -286,6 +287,16 @@ class LLMClient:
     def retry_callback(self, value):
         """Set retry callback."""
         self._client.retry_callback = value
+
+    def preflight_image_request(
+        self, messages: list[Message], tools: list | None = None, *,
+        thinking_enabled: bool = False, stream: bool = True,
+    ) -> dict[str, Any] | None:
+        """Return provider wire-budget metrics when the provider supports them."""
+        preflight = getattr(self._client, "preflight_image_request", None)
+        if not callable(preflight):
+            return None
+        return preflight(messages, tools, thinking_enabled=thinking_enabled, stream=stream)
 
     async def generate(
         self,

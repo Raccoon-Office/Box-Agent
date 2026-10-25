@@ -12,7 +12,9 @@ from box_agent.plugins.cua.wiring import build_cua_bindings
 
 
 def test_sidecar_reference_has_no_inline_data(tmp_path):
-    raw = b"small-png-payload"
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
     sidecar = CuaImageSidecar(tmp_path / "images")
     reference = sidecar.persist_block({
         "type": "input_image", "media_type": "image/png",
@@ -21,6 +23,7 @@ def test_sidecar_reference_has_no_inline_data(tmp_path):
     assert reference is not None
     digest = hashlib.sha256(raw).hexdigest()
     assert reference["contentRef"] == f"images/{digest}.png"
+    assert reference["path"] == str((tmp_path / "images" / f"{digest}.png").resolve())
     assert "data" not in reference
     assert (tmp_path / "images" / f"{digest}.png").read_bytes() == raw
 

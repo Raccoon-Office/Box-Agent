@@ -49,6 +49,19 @@ def test_capability_change_is_checked_before_each_tool_result():
     assert not binding.allows_transient_followup(**args)
 
 
+def test_catalog_can_disable_allowlisted_model_screenshot_injection():
+    llm = SimpleNamespace(model="gpt-5.5")
+    binding = build_cua_bindings(llm=llm, config=CuaConfig())
+    args = dict(server_name="computer-use", remote_name="screenshot")
+    assert binding.allows_transient_followup(**args)
+
+    llm.auto_model_candidates = ({"model": "gpt-5.5", "tags": ["code"]},)
+    assert not binding.allows_transient_followup(**args)
+
+    llm.auto_model_candidates = ({"model": "gpt-5.5", "tags": ["vision"]},)
+    assert binding.allows_transient_followup(**args)
+
+
 async def test_stream_binds_adapter_per_pull_and_close_across_tasks():
     binding = build_cua_bindings(llm=object(), config=CuaConfig())
     closed = []

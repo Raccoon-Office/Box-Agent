@@ -15,6 +15,7 @@ from box_agent.tools.image_inspection_tool import (
     _MAX_LONG_EDGE_PX,
     _MAX_MODEL_CONTEXT_CHARS,
     ImageInspectionTool,
+    ImageAttachmentSnapshotTool,
 )
 from box_agent.tools.setup import add_workspace_tools
 
@@ -47,6 +48,19 @@ def _tool(tmp_path: Path, llm=None, **kwargs) -> ImageInspectionTool:
         allow_full_access=False,
         **kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_attachment_snapshot_respects_read_permissions_without_a_vision_client(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_ONE_PIXEL_PNG)
+    loader = ImageAttachmentSnapshotTool(llm=None, workspace_dir=str(workspace), allow_full_access=False)
+    result = await loader.invoke({"image_paths": [str(outside)], "instruction": "Store attachment."})
+    assert not result.success
+    assert result.image_content is None
+    assert "workspace" in result.error.lower()
 
 
 @pytest.mark.asyncio
@@ -125,7 +139,7 @@ async def test_inspect_images_bounds_model_context_without_truncating_result(
 
 
 @pytest.mark.asyncio
-async def test_inspect_images_native_returns_request_only_canonical_blocks(
+async def test_inspect_images_native_returns_private_persistable_canonical_blocks(
     tmp_path: Path,
 ):
     image = tmp_path / "slide.png"
@@ -146,20 +160,23 @@ async def test_inspect_images_native_returns_request_only_canonical_blocks(
     assert result.raw_output["type"] == "image_inspection_native"
     assert "data" not in result.raw_output["images"][0]
     assert result.raw_output["images"][0]["sha256"]
-    assert result.transient_followup_content is not None
+    assert result.image_content is not None
     image_block = next(
         block
-        for block in result.transient_followup_content
+        for block in result.image_content
         if block["type"] == "input_image"
     )
     assert image_block["media_type"] == "image/png"
     assert base64.b64decode(image_block["data"]) == _ONE_PIXEL_PNG
-    assert "untrusted visual evidence" in result.transient_followup_content[0]["text"]
-    native_instruction = result.transient_followup_content[0]["text"]
+    assert "untrusted visual evidence" in result.image_content[0]["text"]
+    native_instruction = result.image_content[0]["text"]
     assert "Check readability." in native_instruction
     assert result.content == result.model_context
     assert result.model_context != native_instruction
-    assert "transient_followup_content" not in result.model_dump()
+    assert "image_content" not in result.model_dump()
+    assert result.transient_followup_content is None
+    assert result.image_source == "image_inspect"
+    assert result.image_context_eligible
     assert set(tmp_path.iterdir()) == {image}
 
 
@@ -217,7 +234,109 @@ async def test_inspect_images_native_capability_tracks_rebound_main_model(tmp_pa
     )
 
     assert supported.success, supported.error
-    assert supported.transient_followup_content is not None
+    assert supported.image_content is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", [True, False, None])
+async def test_omitted_image_strategy_follows_declared_main_model_capability(tmp_path, capability):
+    (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
+    proxy = FakeVisionLLM()
+    main = SimpleNamespace(capabilities={"image_input": capability})
+    tool = _tool(tmp_path, proxy, native_capability_llm=main)
+    result = await tool.invoke({"image_paths": ["slide.png"], "instruction": "Describe it."})
+    assert result.success
+    assert result.image_content
+    assert result.image_context_eligible is (capability is True)
+    assert proxy.calls == (0 if capability is True else 1)
+    assert result.transient_followup_content is None
+    assert "image_content" not in result.model_dump()
+    assert "image_source" not in result.model_dump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tags, native", [(None, True), (["vision"], True), ([], False)])
+async def test_omitted_image_strategy_uses_tags_before_model_allowlist(
+    tmp_path, tags, native,
+):
+    (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
+    proxy = FakeVisionLLM()
+    main = SimpleNamespace(model="gpt-5.5")
+    if tags is not None:
+        main.auto_model_candidates = ({"model": "gpt-5.5", "tags": tags},)
+    tool = _tool(tmp_path, proxy, native_capability_llm=main)
+
+    result = await tool.invoke(
+        {"image_paths": ["slide.png"], "instruction": "Describe it."}
+    )
+
+    assert result.success
+    assert result.image_context_eligible is native
+    assert proxy.calls == (0 if native else 1)
+
+
+@pytest.mark.asyncio
+async def test_omitted_image_strategy_tracks_main_model_rebinding_and_explicit_proxy(tmp_path):
+    (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
+    proxy = FakeVisionLLM()
+    main = SimpleNamespace(capabilities={"image_input": False})
+    tool = _tool(tmp_path, proxy, native_capability_llm=main)
+    arguments = {"image_paths": ["slide.png"], "instruction": "Describe it."}
+    assert not (await tool.invoke(arguments)).image_context_eligible
+    main.capabilities = {"image_input": True}
+    assert (await tool.invoke(arguments)).image_context_eligible
+    assert not (await tool.invoke({**arguments, "strategy": "proxy"})).image_context_eligible
+    assert proxy.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_registered_inspector_reselects_proxy_after_main_becomes_text_only(tmp_path):
+    (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
+
+    class MutableMain(FakeVisionLLM):
+        model = "vision-main"
+        capabilities = {"image_input": True}
+        auto_model_candidates = (
+            {"model": "text-main", "tags": ["code"], "abilityLevel": 4},
+            {"model": "vision-proxy", "tags": ["vision"], "abilityLevel": 5},
+        )
+
+        def for_model(self, model, *, max_output_tokens=None):
+            selected = FakeVisionLLM()
+            selected.model = model
+            self.proxy = selected
+            return selected
+
+    main = MutableMain()
+    tools = []
+    add_workspace_tools(tools, ToolConfig(), tmp_path, llm=main, output=lambda *_: None)
+    inspector = next(tool for tool in tools if tool.name == "inspect_images")
+    arguments = {"image_paths": ["slide.png"], "instruction": "Describe."}
+    native = await inspector.invoke(arguments)
+    assert native.success and native.image_context_eligible
+    main.capabilities = {"image_input": False}
+    main.model = "text-main"
+    proxied = await inspector.invoke(arguments)
+    assert proxied.success and not proxied.image_context_eligible
+    assert main.proxy.model == "vision-proxy" and main.proxy.calls == 1
+    assert main.calls == 0
+    assert native.image_content[-1]["source_label"] == "Image 1: slide.png"
+
+
+@pytest.mark.asyncio
+async def test_registered_inspector_reports_missing_proxy_after_main_rebind(tmp_path):
+    class MutableMain(FakeVisionLLM):
+        capabilities = {"image_input": True}
+
+    main = MutableMain()
+    tools = []
+    add_workspace_tools(tools, ToolConfig(), tmp_path, llm=main, output=lambda *_: None)
+    inspector = next(tool for tool in tools if tool.name == "inspect_images")
+    main.capabilities = {"image_input": False}
+    result = await inspector.invoke({"image_paths": ["missing.png"], "instruction": "Describe."})
+    assert not result.success
+    assert result.raw_output["code"] == "IMAGE_INPUT_UNSUPPORTED"
+    assert main.calls == 0
 
 
 @pytest.mark.asyncio
@@ -560,6 +679,7 @@ def test_add_workspace_tools_omits_inspect_images_for_known_text_only_model(
     class TextOnlyLLM:
         model = "deepseek-v4-pro"
         api_base = "https://api.deepseek.com"
+        capabilities = {"image_input": False}
 
     tools = []
 

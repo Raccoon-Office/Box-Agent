@@ -90,6 +90,43 @@ def _images(params: dict[str, Any]) -> list[dict[str, Any]]:
             and isinstance(block.get("image_url"), dict)]
 
 
+def inspect_image_request(params: dict[str, Any], max_body_bytes: int | None) -> dict[str, Any]:
+    """Measure the exact wire body without transforming any image or input."""
+    size = request_body_bytes(params)
+    without_images = deepcopy(params)
+    images = _images(without_images)
+    image_count = len(images)
+    for image in images:
+        image["url"] = ""
+    messages = (without_images.get("extra_body") or {}).get("messages", without_images.get("messages", []))
+    for message in messages:
+        for block in message.get("content", []) if isinstance(message.get("content"), list) else ():
+            if (isinstance(block, dict) and block.get("type") == "image"
+                    and isinstance(block.get("source"), dict) and block["source"].get("type") == "base64"):
+                image_count += 1
+                block["source"]["data"] = ""
+    budget = max_body_bytes * 95 // 100 if max_body_bytes is not None else None
+    return {
+        "original_body_bytes": size, "body_bytes": size,
+        "max_body_bytes": max_body_bytes, "budget_bytes": budget,
+        "image_count": image_count, "non_image_bytes": request_body_bytes(without_images),
+        "fits": budget is None or size <= budget, "transforms": [],
+    }
+
+
+def validate_image_request(params: dict[str, Any], max_body_bytes: int) -> dict[str, Any]:
+    """Check a context-selected request, preserving its exact image bytes."""
+    metrics = inspect_image_request(params, max_body_bytes)
+    if not metrics["fits"]:
+        error = RequestBodyTooLargeError(
+            body_bytes=metrics["body_bytes"], budget_bytes=metrics["budget_bytes"],
+            image_count=metrics["image_count"], non_image_bytes=metrics["non_image_bytes"],
+        )
+        error.metrics = metrics
+        raise error
+    return metrics
+
+
 def _decode(url: str) -> Any | None:
     from PIL import Image, ImageOps
 

@@ -93,7 +93,7 @@ def write_metadata(path: Path, value: dict, workspace: str | Path | None = None)
 
 def retain_chat_file(path: Path, workspace: str | Path | None = None) -> None:
     """Cache retention without promoting a file's delivery placement."""
-    if is_publication_metadata(path, workspace):
+    if is_publication_metadata(path, workspace) or not path.resolve().name:
         return
     value = storage.read_metadata(path, workspace)
     if (value.get("retain_for_chat") is not True

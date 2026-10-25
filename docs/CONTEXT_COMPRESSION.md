@@ -7,59 +7,60 @@ Box-Agent controls durable context growth at two boundaries:
 
 The two mechanisms are deliberately separate. Tool-result storage is lossless at the storage layer: the complete result remains on disk while the model keeps a bounded head-and-tail working preview plus the recovery path. Context summarization is lossy, so it runs later and preserves a bounded working set.
 
-Native image inspection uses a third, request-only path. Canonical image blocks
-are attached to exactly one main-model request without entering durable message
-history. Their budget is estimated from decoded image dimensions rather than
-Base64 character length, and the raw payload is redacted from session traces and
-provider debug logs.
+Images use a session-owned attachment store and request-only projections.
+Uploads, native image inspection and persisted CUA screenshots share a retention
+policy: by default an occurrence remains available for three committed main-model
+inferences, subject to encoded-byte and provider request-body limits. Pixels stay
+outside durable message content; SessionLog records references and lifecycle
+metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
 ## Request lifecycle
 
 ```text
 tool finishes
-  -> immediate per-result check
-  -> tool messages are appended
+  -> persist its result and any session-owned image attachments
+  -> append tool messages and attachment references
   -> before the next LLM request, enforce the fresh-result aggregate budget
-  -> reserve any request-only image budget from the text-history limit
-  -> estimate the next request size
-  -> compact conversation history only when the threshold is reached
-  -> attach the transient image overlay
-  -> call the LLM
-  -> release the overlay after a successful provider response
+  -> select retained images and enforce image/request-body budgets
+  -> reserve the request-only image cost from the text-history limit
+  -> compact conversation history when necessary
+  -> attach the selected image overlay and call the LLM
+  -> commit the accepted response and advance the image inference counter
 ```
 
 ## Request-only native image input
 
-`inspect_images(..., strategy="native")` is available only when the active main
-model is known or expected to accept image input. The default `proxy` strategy
-keeps the existing utility-model behavior and returns text.
+Omitting `inspect_images` strategy selects native when the current model declares
+image support; otherwise it uses the configured proxy and returns text. Explicit
+native requests retain their capability checks. Capability resolution uses an
+explicit declaration first, then current-model catalog tags, then the maintained
+model-name allowlist.
 
-The native strategy validates, orientation-normalizes, and downsamples the same
-bounded PNG/JPEG inputs as the proxy path. It then returns provider-neutral
-`input_image` blocks through an internal ToolResult field. Core accepts that
-field only from an explicitly opted-in Tool, validates the active model
-capability, and applies one aggregate request-only budget capped at 30% of the
-safe input limit. Image cost is estimated conservatively from width and height,
-with a 512-token floor and 4,096-token ceiling per image; Base64 transport size
-is never treated as conversational text.
+The inspection tool validates, orientation-normalizes and downsamples its bounded
+PNG/JPEG inputs before archival. The shared image context persists those exact
+bytes, then hydrates selected occurrences into provider-neutral `input_image`
+blocks. It does not resize archived images during request preparation. Selection
+first enforces the retention window and encoded-byte budget, then checks the
+complete provider body. Excluded new images produce an explicit not-delivered
+notice; a completed tool operation is not automatically repeated.
 
-The overlay is appended only to the in-memory list passed to the next provider
-call. It is excluded from ToolResult serialization, session persistence,
-ordinary AgentLogger history, cache fingerprints, and summarization input.
-Session traces retain only text plus image media type, dimensions, source byte
-count, and digest. Provider debug logging redacts both Anthropic Base64 sources
-and OpenAI-compatible data URLs even when full-payload logging is enabled. An
-empty provider-stale retry retains the overlay; any response content or normal
-finish releases it. If capability or budget validation fails, the Tool result
-becomes a bounded error directing the model to use `strategy="proxy"` or fewer
-images.
+The overlay is added only to the in-memory provider request. Pixels are excluded
+from public ToolResult serialization, durable message content and ordinary
+AgentLogger history. Session traces and provider debug logs redact raw image
+payloads. A summary may receive still-active images when its model and budgets
+permit; summary calls do not advance the main-model inference counter or retire
+images merely because the summary provider has a smaller body limit.
 
-Provider usage for the response still includes the image input. The resulting
-assistant message therefore persists only the numeric request-only estimate;
-the next context calculation subtracts it before adding later durable messages.
-This prevents an already released image from causing premature compaction and
-keeps the correction available after session resume without retaining image
-bytes.
+An empty or discarded retry retains the same image age. An accepted, committed
+main-model response advances the counter, including tool-call responses within
+a user turn. Other tools' transient overlays, and CUA with `persist_images: false`,
+retain their one-request behavior. Session restore and history edits restore
+image occurrences together with their committed inference counter.
+
+Provider usage includes image input. The assistant message retains the numeric
+request-only token estimate, which is subtracted from the text-history estimate
+before adding the current request's overlay. Image cost is estimated from pixel
+dimensions; base64 length is used for transport budgets, not conversational text.
 
 ## Oversized tool-result storage
 
@@ -177,7 +178,7 @@ It then estimates messages appended after that response conservatively. If no me
 
 ### Compacted message layout
 
-Compaction makes one summary request by appending a temporary `user` instruction to the exact existing message list. It does not serialize messages into a new prompt and does not split or roll the source. This preserves the complete provider message prefix so the summary request can reuse its KV cache. ACP resolves this call through the session model router and caps it at 4,096 output tokens. Automatic sessions may select only from the host-provided `autoRouting.models` pool, ranked by the summary task tags, ability, and context fit. Context fit uses the active Agent's safe input limit so a small-window utility model is not selected for a larger history. Explicitly selected sessions stay on that exact model; there is no independent lite-model switch. Other hosts may supply a dedicated summary client or fall back to the main client. Tools and thinking are disabled. The instruction requires a chronological list of every user message and places all structured analysis inside one `<summary>...</summary>` block, with an embedded nine-section output example. The response must consist of exactly one non-empty summary block; only its inner text is written after `Summary:` and the tags are discarded. The requested and locally enforced summary limit is 8,000 characters; if the rebuilt request still exceeds the safe input limit, the same summary is deterministically tightened to 4,000 and finally 2,000 characters without another provider call. If the call fails, is malformed, or returns empty output, an explicitly lossy deterministic bounded fallback is used. If the rebuilt request still exceeds the limit, the turn ends with a normal context-limit error; compaction does not invoke a domain recovery state machine.
+Compaction makes one summary request by appending a temporary `user` instruction to the exact existing message list. It does not serialize messages into a new prompt and does not split or roll the source. This preserves the complete provider message prefix so the summary request can reuse its KV cache. ACP resolves this call through the session model router and caps it at 4,096 output tokens. Automatic sessions may select only from the host-provided `autoRouting.models` pool, ranked by the summary task tags, ability, and context fit. Context fit uses the active Agent's safe input limit so a small-window utility model is not selected for a larger history. Explicitly selected sessions stay on that exact model; there is no independent lite-model switch. ACP ignores `autoRouting` when `routingMode=manual`, even if the host sends a stale or malformed pool. This applies to session, child-agent, and utility bindings; legacy builtin bindings without a routing mode retain pool-based routing. Other hosts may supply a dedicated summary client or fall back to the main client. Tools and thinking are disabled. The instruction requires a chronological list of every user message and places all structured analysis inside one `<summary>...</summary>` block, with an embedded nine-section output example. The response must consist of exactly one non-empty summary block; only its inner text is written after `Summary:` and the tags are discarded. The requested and locally enforced summary limit is 8,000 characters; if the rebuilt request still exceeds the safe input limit, the same summary is deterministically tightened to 4,000 and finally 2,000 characters without another provider call. If the call fails, is malformed, or returns empty output, an explicitly lossy deterministic bounded fallback is used. If the rebuilt request still exceeds the limit, the turn ends with a normal context-limit error; compaction does not invoke a domain recovery state machine.
 
 The model output is wrapped in this synthetic `user` message:
 

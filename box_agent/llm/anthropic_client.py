@@ -17,6 +17,8 @@ from ..tools.argument_limits import (
     streamed_argument_limit,
 )
 from .base import LLMClientBase
+from ..client_info import should_attach_client_headers
+from .image_payload import HOSTED_MAX_REQUEST_BODY_BYTES, inspect_image_request, validate_image_request
 from .error_messages import is_retryable_llm_error
 from .debug_logging import (
     log_llm_error_meta,
@@ -59,6 +61,7 @@ class AnthropicClient(LLMClientBase):
         auth_token: str = "",
         auth_file: str = "",
         timeout: float = 600.0,
+        max_request_body_bytes: int | None = None,
     ):
         """Initialize Anthropic client.
 
@@ -71,12 +74,19 @@ class AnthropicClient(LLMClientBase):
             auth_token: Optional in-memory product login token.
             auth_file: Optional auth.json path read before every request.
             timeout: Wall-clock cap (seconds) for each request to the API.
+            max_request_body_bytes: Optional complete JSON body limit with 5%
+                headroom; defaults to the hosted gateway limit when applicable.
         """
         super().__init__(
             api_key, api_base, model, retry_config,
             auth_token=auth_token, auth_file=auth_file, timeout=timeout,
         )
         self.max_output_tokens = max_output_tokens
+        if max_request_body_bytes is not None and (type(max_request_body_bytes) is not int or max_request_body_bytes <= 0):
+            raise ValueError("max_request_body_bytes must be a positive integer or null")
+        self.max_request_body_bytes = (max_request_body_bytes if max_request_body_bytes is not None
+                                       else HOSTED_MAX_REQUEST_BODY_BYTES if should_attach_client_headers(api_base)
+                                       else None)
 
         # Initialize Anthropic async client
         self.client = anthropic.AsyncAnthropic(
@@ -84,6 +94,40 @@ class AnthropicClient(LLMClientBase):
             api_key=api_key,
             timeout=timeout,
         )
+
+    def _request_body_params(
+        self, system_message: str | None, api_messages: list[dict[str, Any]],
+        tools: list[Any] | None, *, thinking_enabled: bool,
+    ) -> dict[str, Any]:
+        """Share exact request parameters between preflight and both transports."""
+        params: dict[str, Any] = {"max_tokens": self.max_output_tokens, "messages": api_messages}
+        if self.model:
+            params["model"] = self.model
+        if system_message:
+            params["system"] = system_message
+        if tools:
+            params["tools"] = self._convert_tools(tools)
+        if thinking_enabled:
+            params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
+        return params
+
+    def preflight_image_request(
+        self, messages: list[Message], tools: list[Any] | None = None, *,
+        thinking_enabled: bool = False, stream: bool = True,
+    ) -> dict[str, Any]:
+        """Measure exact Anthropic JSON without changing image bytes or state."""
+        system, api_messages = self._convert_messages(messages)
+        params = self._request_body_params(system, api_messages, tools, thinking_enabled=thinking_enabled)
+        if stream:
+            # messages.stream adds this internally; it is not an accepted
+            # keyword of that SDK helper itself.
+            params["stream"] = True
+        return inspect_image_request(params, getattr(self, "max_request_body_bytes", None))
+
+    def _validate_request_body(self, params: dict[str, Any], *, stream: bool = False) -> None:
+        limit = getattr(self, "max_request_body_bytes", None)
+        if limit is not None:
+            validate_image_request({**params, "stream": True} if stream else params, limit)
 
     async def _make_api_request(
         self,
@@ -114,21 +158,9 @@ class AnthropicClient(LLMClientBase):
         """
 
         async def _once():
-            params: dict[str, Any] = {
-                "max_tokens": self.max_output_tokens,
-                "messages": api_messages,
-            }
-            if self.model:
-                params["model"] = self.model
-
-            if system_message:
-                params["system"] = system_message
-
-            if tools:
-                params["tools"] = self._convert_tools(tools)
-
-            if thinking_enabled:
-                params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
+            params = self._request_body_params(
+                system_message, api_messages, tools, thinking_enabled=thinking_enabled,
+            )
 
             auth_headers = await self._auth_headers(
                 self._request_headers(session_id, turn_id, title, call_kind)
@@ -136,6 +168,7 @@ class AnthropicClient(LLMClientBase):
             if auth_headers:
                 params["extra_headers"] = auth_headers
 
+            self._validate_request_body(params)
             log_llm_request(provider="anthropic", mode="completion", api_base=self.api_base, params=params)
 
             try:
@@ -477,18 +510,10 @@ class AnthropicClient(LLMClientBase):
         """
         request_params = self._prepare_request(messages, tools)
 
-        params: dict[str, Any] = {
-            "max_tokens": self.max_output_tokens,
-            "messages": request_params["api_messages"],
-        }
-        if self.model:
-            params["model"] = self.model
-        if request_params["system_message"]:
-            params["system"] = request_params["system_message"]
-        if request_params["tools"]:
-            params["tools"] = self._convert_tools(request_params["tools"])
-        if thinking_enabled:
-            params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
+        params = self._request_body_params(
+            request_params["system_message"], request_params["api_messages"], request_params["tools"],
+            thinking_enabled=thinking_enabled,
+        )
 
         auth_headers = await self._auth_headers(
             self._request_headers(session_id, turn_id, title, call_kind)
@@ -496,6 +521,7 @@ class AnthropicClient(LLMClientBase):
         if auth_headers:
             params["extra_headers"] = auth_headers
 
+        self._validate_request_body(params, stream=True)
         log_llm_request(provider="anthropic", mode="stream", api_base=self.api_base, params=params)
 
         # Accumulators for the finish event (reset per retry attempt below)

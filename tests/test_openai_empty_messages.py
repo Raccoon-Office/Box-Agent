@@ -192,7 +192,7 @@ async def test_judge_fills_assistant_made_empty_by_reasoning_redaction(wire_clie
 
 
 @pytest.mark.asyncio
-async def test_tool_empty_final_retry_fills_wire_without_changing_history(wire_client, tmp_path):
+async def test_tool_empty_final_retry_excludes_the_discarded_empty_response(wire_client, tmp_path):
     client, requests, stream_replies = wire_client
     path = tmp_path / "answer.txt"
     path.write_text("42", encoding="utf-8")
@@ -214,14 +214,18 @@ async def test_tool_empty_final_retry_fills_wire_without_changing_history(wire_c
     )]
 
     assert len(requests) == 4  # Tool call, empty final, retry, continuation judge.
-    assert requests[2]["messages"][3] == {"role": "assistant", "content": PLACEHOLDER}
-    assert requests[3]["messages"][3] == {"role": "assistant", "content": PLACEHOLDER}
+    # An empty attempt is not an accepted inference round. Keep the tool
+    # protocol group, but do not commit a synthetic empty assistant reply.
+    assert requests[2]["messages"][3]["role"] == "user"
+    assert all(message.get("content") != PLACEHOLDER for request in requests[2:]
+               for message in request["messages"])
     for request in requests[1:]:
         assert request["messages"][1]["content"] == ""
         assert request["messages"][1]["tool_calls"][0]["id"] == "read-1"
         assert request["messages"][2]["tool_call_id"] == "read-1"
     assert len([event for event in events if isinstance(event, ToolCallResult)]) == 1
-    assert messages[3].role == "assistant" and messages[3].content == ""
+    assert not any(message.role == "assistant" and not message.content and not message.tool_calls
+                   for message in messages)
     assert all(message.content != PLACEHOLDER for message in messages)
     done = [event for event in events if isinstance(event, DoneEvent)]
     assert done[-1].stop_reason == StopReason.END_TURN

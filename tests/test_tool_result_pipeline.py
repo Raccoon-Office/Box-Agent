@@ -68,6 +68,27 @@ class _EchoTool(Tool):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("link", ['<a href="/">Home</a>', '<base href="/">'])
+async def test_html_write_with_root_link_returns_success_and_artifact(tmp_path, link):
+    from box_agent.tools.file_tools import WriteTool
+
+    relative = "anime-news/templates/base.html"
+    content = f"<!DOCTYPE html><html><body>{link}</body></html>"
+    tool = WriteTool(str(tmp_path))
+    events = [event async for event in run_agent_loop(
+        llm=_OneToolCallLLM(tool.name, {"path": relative, "content": content}),
+        messages=[Message(role="user", content="Write the website template")],
+        tools={tool.name: tool}, max_steps=2, workspace_dir=str(tmp_path),
+    )]
+
+    result = next(event for event in events if isinstance(event, ToolCallResult))
+    assert result.success, result.error
+    assert (tmp_path / relative).read_text() == content
+    assert any(isinstance(event, ArtifactEvent) and event.rel_path == relative for event in events)
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("relative", ["qa/.check.txt.artifact.json", "qa/.artifact-delivery.json"])
 @pytest.mark.parametrize("tool_name", ["write_file", "append_file", "edit_file"])
 async def test_native_protocol_metadata_stays_internal_on_all_artifact_channels(

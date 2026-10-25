@@ -17,6 +17,7 @@ from box_agent.tools.skill_loader import SkillLoader
 from box_agent.tools.sub_agent_capabilities import (
     CapabilityFailure, CapabilityResolver, DelegationSpec, parse_delegation_spec,
 )
+from tests.test_tool_engine_compatibility import _apply_schedule_schema_changes
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,7 +51,7 @@ def test_schedule_keeps_original_python_class_name_and_complete_schema():
     baseline = json.loads((ROOT / "tests/fixtures/tool_engine/c1_schemas.json").read_text())["tools"][SCHEDULE_NAME]
     assert type(tool).__name__ == "CreateScheduledTaskTool"
     assert tool.name == SCHEDULE_NAME
-    assert tool.to_schema() == baseline["schema"]
+    assert tool.to_schema() == _apply_schedule_schema_changes(baseline["schema"])
     assert tool.to_openai_schema()["function"]["name"] == SCHEDULE_NAME
     assert tool.aliases == ()
     index = build_tool_name_index([tool])

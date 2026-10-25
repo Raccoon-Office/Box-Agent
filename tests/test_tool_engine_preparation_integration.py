@@ -28,6 +28,7 @@ from tests.test_tool_engine_compatibility import (
     _C5_DISCOVERABLE, _c5_names, _EMAIL_SCHEMAS,
     _agent,
     _assemble,
+    _apply_schedule_schema_changes,
     _assert_schema_contract,
     _normalized_schema,
     _SCHEMA_FIXTURE,
@@ -77,11 +78,11 @@ async def test_preparation_preserves_legacy_order_schemas_and_aliases(
         }
     assert {tool.name for tool in legacy_tools} == expected_names
 
-    # Schedule naming, aliases and every schema field retain the C1 contract.
+    # Only the enumerated frequency descriptions change the schedule C1 contract.
     schedule = agent.tools["create_scheduled_task"]
     assert "create_scheduled_task" in expected_names
     assert schedule.aliases == ()
-    expected_schedule = baseline["create_scheduled_task"]["schema"]
+    expected_schedule = _apply_schedule_schema_changes(baseline["create_scheduled_task"]["schema"])
     schedule_schema = _normalized_schema(schedule.to_schema(), isolated_setup.profile)
     assert schedule_schema == expected_schedule
     schedule_openai = _normalized_schema(schedule.to_openai_schema(), isolated_setup.profile)

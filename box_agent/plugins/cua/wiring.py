@@ -54,6 +54,16 @@ class CuaBindings:
     _agent: Any = field(default=None, init=False, repr=False)
     _original_instance_method: Any = field(default=_MISSING, init=False, repr=False)
     sidecar: CuaImageSidecar | None = field(default=None, repr=False)
+    image_source = "cua"
+
+    def allows_image_context(self, *, server_name: str, remote_name: str) -> bool:
+        return self.config.persist_images and self.allows_transient_followup(
+            server_name=server_name, remote_name=remote_name,
+        )
+
+    def image_context_for_result(self, **kwargs: Any) -> list[dict[str, Any]] | None:
+        """Return private images for shared session retention and persistence."""
+        return self.transient_followup_for_result(**kwargs)
 
     def allows_transient_followup(self, *, server_name: str, remote_name: str) -> bool:
         return (
@@ -163,6 +173,10 @@ class CuaBindings:
                 continue
             reference = self.sidecar.persist_block(block)
             if reference is not None:
+                # New native occurrences are committed through data.images.
+                # These compatibility references are archive-only, including
+                # failed captures and sessions with screenshot feeding disabled.
+                reference["image_context_eligible"] = False
                 references.append(reference)
         return references or None
 

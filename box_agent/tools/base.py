@@ -46,6 +46,11 @@ class ToolResult(BaseModel):
         default=None,
         exclude=True,
     )
+    # Private image payload consumed by the shared session attachment commit.
+    # Durable messages and public events carry references, never these bytes.
+    image_content: list[dict[str, Any]] | None = Field(default=None, exclude=True, repr=False)
+    image_source: str | None = Field(default=None, exclude=True)
+    image_context_eligible: bool = Field(default=True, exclude=True)
 
 
 class ToolInvocationRejected(RuntimeError):

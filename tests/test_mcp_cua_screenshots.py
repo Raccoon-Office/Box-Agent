@@ -76,18 +76,21 @@ async def test_matching_server_normalizes_only_supported_images():
     tool = _make_tool(result)
     with bind_mcp_result_adapter(_binding()):
         out = await tool.execute()
-        assert tool.transient_followup_allowed
+        assert not tool.transient_followup_allowed
 
     assert out.success
     assert out.content == "captured desktop"
-    assert len([b for b in out.transient_followup_content if b["type"] == "input_image"]) == 1
+    assert len([b for b in out.image_content if b["type"] == "input_image"]) == 1
     assert any(b["type"] == "text" and "tool invocation" in b["text"]
-               for b in out.transient_followup_content)
-    assert out.transient_followup_content[0]["type"] == "input_image"
-    assert out.transient_followup_content[0]["media_type"] == "image/png"
+               for b in out.image_content)
+    assert out.image_content[0]["type"] == "input_image"
+    assert out.image_content[0]["media_type"] == "image/png"
+    assert out.transient_followup_content is None
+    assert out.image_source == "cua"
+    assert "image_content" not in out.model_dump()
+    # The supported PNG travels only through the private attachment channel.
     assert out.raw_output["mcp_inline_images"] == [
-        {"data": item.data, "mime_type": item.mimeType}
-        for item in result.content if hasattr(item, "data")
+        {"data": result.content[-1].data, "mime_type": "image/gif"}
     ]
 
 
@@ -97,7 +100,7 @@ async def test_no_plugin_preserves_the_original_mcp_result():
     assert out.success
     assert out.content == "captured desktop"
     assert len(out.raw_output["mcp_inline_images"]) == 1
-    assert out.transient_followup_content is None
+    assert out.image_content is None
     assert not tool.transient_followup_allowed
 
 
@@ -107,7 +110,7 @@ async def test_other_servers_do_not_enter_the_cua_adapter():
         out = await tool.execute()
         assert not tool.transient_followup_allowed
     assert out.success
-    assert out.transient_followup_content is None
+    assert out.image_content is None
     assert len(out.raw_output["mcp_inline_images"]) == 1
 
 
@@ -125,7 +128,7 @@ async def test_text_and_unknown_models_skip_image_encoding(capability, monkeypat
         assert not tool.transient_followup_allowed
     assert out.success
     assert out.content == "captured desktop"
-    assert out.transient_followup_content is None
+    assert out.image_content is None
     assert len(out.raw_output["mcp_inline_images"]) == 1
 
 
@@ -133,7 +136,7 @@ async def test_failed_mcp_call_does_not_inject_images():
     with bind_mcp_result_adapter(_binding()):
         out = await _make_tool(_result(is_error=True)).execute()
     assert not out.success
-    assert out.transient_followup_content is None
+    assert out.image_content is None
 
 
 async def test_invalid_image_does_not_fail_the_desktop_action():
@@ -143,8 +146,59 @@ async def test_invalid_image_does_not_fail_the_desktop_action():
         out = await _make_tool(result).execute()
     assert out.success
     assert out.content == "captured desktop"
-    assert out.transient_followup_content is None
+    assert out.image_content is None
     assert out.raw_output["mcp_inline_images"][0]["data"] == "not base64"
+
+
+@pytest.mark.parametrize("capability", [True, False, None])
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_audit_images_survive_disabled_feeding_and_tool_errors(
+    tmp_path, capability, is_error,
+):
+    import hashlib
+
+    result = _result(is_error=is_error)
+    binding = build_cua_bindings(
+        llm=SimpleNamespace(capabilities={"image_input": capability}),
+        config=CuaConfig(server_name="desktop", feed_screenshots=False),
+        sidecar_dir=tmp_path / "images",
+    )
+    with bind_mcp_result_adapter(binding):
+        out = await _make_tool(result).execute()
+
+    assert out.success is (not is_error)
+    assert out.transient_followup_content is None
+    reference = out.raw_output["mcp_image_references"][0]
+    saved = (tmp_path / reference["contentRef"]).read_bytes()
+    assert saved == base64.b64decode(result.content[1].data)
+    assert reference["sha256"] == hashlib.sha256(saved).hexdigest()
+    assert Path(reference["path"]).is_absolute()
+    assert reference["path"] in out.content
+    assert "mcp_inline_images" not in out.raw_output
+
+
+async def test_screenshot_return_path_can_be_reloaded_from_another_workspace(tmp_path):
+    from box_agent.tools.image_inspection_tool import ImageInspectionTool
+
+    binding = build_cua_bindings(
+        llm=SimpleNamespace(capabilities={"image_input": True}),
+        config=CuaConfig(server_name="desktop"),
+        sidecar_dir=tmp_path / "session" / "images",
+    )
+    with bind_mcp_result_adapter(binding):
+        out = await _make_tool(_result()).execute()
+    path = out.content.splitlines()[-1]
+    assert Path(path).is_absolute()
+    assert path == out.raw_output["mcp_image_references"][0]["path"]
+    inspector = ImageInspectionTool(
+        llm=None, workspace_dir=str(tmp_path / "different-workspace"),
+        native_supported=True,
+    )
+    loaded = await inspector.execute(
+        image_paths=[path], instruction="Inspect this screenshot", strategy="native",
+    )
+    assert loaded.success, loaded.error
+    assert any(b["type"] == "input_image" for b in loaded.image_content)
 
 
 def _image_messages(messages):
@@ -156,8 +210,10 @@ def _image_messages(messages):
 
 
 @pytest.mark.parametrize("capability", [True, False, None])
-async def test_managed_mcp_loop_persists_sidecar_and_sends_latest_image(
-    tmp_path, capability,
+@pytest.mark.parametrize("feed_screenshots", [True, False])
+@pytest.mark.parametrize("persist_images", [True, False])
+async def test_managed_mcp_loop_respects_image_persistence_and_feed_settings(
+    tmp_path, capability, feed_screenshots, persist_images,
 ):
     from box_agent.agent_session import AgentSession
     from box_agent.events import DoneEvent, StopReason
@@ -187,7 +243,10 @@ async def test_managed_mcp_loop_persists_sidecar_and_sends_latest_image(
                 yield StreamEvent(type="finish", finish_reason="stop")
 
     config = session_config(tmp_path, max_steps=5)
-    config.plugins["cua"] = {"server_name": "desktop"}
+    config.plugins["cua"] = {
+        "server_name": "desktop", "feed_screenshots": feed_screenshots,
+        "persist_images": persist_images,
+    }
     llm = ScreenshotThenGoalLLM()
     session_log = SessionLog.create(tmp_path / "logs", session_id="vision", cwd=tmp_path)
     session = await AgentSession.open(
@@ -206,26 +265,65 @@ async def test_managed_mcp_loop_persists_sidecar_and_sends_latest_image(
         assert [e.stop_reason for e in events if isinstance(e, DoneEvent)] == [StopReason.END_TURN]
         assert len(llm.requests) == 3
         assert [len(_image_messages(request)) for request in llm.requests] == (
-            [0, 1, 0] if capability is True else [0, 0, 0]
+            [0, 1, int(persist_images)] if capability is True and feed_screenshots else [0, 0, 0]
         )
-        if capability is True:
+        if capability is True and feed_screenshots:
             overlay = _image_messages(llm.requests[1])[0]
             assert overlay.role == "user"
             assert overlay.trace_redact_content
-            assert overlay.content[0].get("data")
-            assert not _image_messages(llm.requests[2])
+            assert any(block.get("data") for block in overlay.content if block.get("type") == "input_image")
+            assert bool(_image_messages(llm.requests[2])) is persist_images
             assert not _image_messages(session.agent.messages)
         else:
             assert not _image_messages(session.agent.messages)
         session_log.flush()
+        images = session_log.replay().images
+        assert len(images) == int(persist_images)
+        if images:
+            assert images[0]["active"] is (capability is True and feed_screenshots)
         replay_text = [str(message.content) for message in session_log.replay().messages]
-        assert any("images/" in content for content in replay_text)
-        assert list((session_log.path.parent / "images").glob("*.png"))
+        assert any("images/" in content for content in replay_text) is persist_images
+        assert bool(list((session_log.path.parent / "images").glob("*.png"))) is persist_images
+        assert _image_b64() not in session_log.path.read_text()
         assert current_mcp_result_adapters() == ()
         assert "run_events" not in vars(session.agent)
     finally:
         await session.aclose()
         session_log.close()
+
+
+@pytest.mark.parametrize("failure", ["mcp_error", "invalid_frame", "capture_error"])
+async def test_failed_cua_capture_archive_cannot_reappear_as_model_image_after_restore(tmp_path, failure):
+    from box_agent.schema import Message
+    from box_agent.session_log import SessionLog
+
+    result = _result(is_error=failure == "mcp_error")
+    if failure == "invalid_frame":
+        result.structuredContent = {"screenshot_frame_valid": False}
+    elif failure == "capture_error":
+        result.structuredContent = {"screenshot_error": "failed"}
+    log = SessionLog.create(tmp_path / "logs", session_id="failed-cua", cwd=tmp_path)
+    binding = build_cua_bindings(
+        llm=SimpleNamespace(capabilities={"image_input": True}),
+        config=CuaConfig(server_name="desktop"), sidecar_dir=log.path.parent / "images",
+    )
+    with bind_mcp_result_adapter(binding):
+        output = await _make_tool(result).execute()
+    assert output.image_content is None
+    references = output.raw_output["mcp_image_references"]
+    assert references and all(ref["image_context_eligible"] is False for ref in references)
+    message = Message(role="tool", name="screenshot", tool_call_id="capture", content=output.content)
+    log.append_unlogged_messages([message], turn=1, step=1,
+                                 tool_result_metadata={"capture": {"rawOutput": output.raw_output}})
+    log.flush()
+    log.close()
+    restored = SessionLog.open(tmp_path / "logs", session_id="failed-cua", cwd=tmp_path)
+    try:
+        assert len(restored.replay().images) == 1
+        assert restored.replay().images[0]["eligible"] is False
+        assert restored.replay().images[0]["active"] is False
+    finally:
+        restored.close()
 
 
 @pytest.mark.parametrize("is_error", [False, True])
@@ -238,7 +336,7 @@ async def test_structured_driver_state_reaches_context_and_persistence(is_error)
     assert out.raw_output["mcp_structured_content"] == result.structuredContent
     assert '"snapshot_id":"s12345678"' in out.content
     if is_error:
-        assert out.transient_followup_content is None
+        assert out.image_content is None
 
 
 @pytest.mark.parametrize("state", [{"screenshot_frame_valid": False}, {"screenshot_error": "capture_failed"}])
@@ -248,7 +346,7 @@ async def test_invalid_driver_screenshot_is_not_injected(state):
     with bind_mcp_result_adapter(_binding()):
         out = await _make_tool(result).execute()
     assert out.success
-    assert out.transient_followup_content is None
+    assert out.image_content is None
     assert out.raw_output["mcp_structured_content"] == state
 
 

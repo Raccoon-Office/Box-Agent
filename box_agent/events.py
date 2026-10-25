@@ -142,6 +142,11 @@ class ToolCallResult:
     policy_decision: dict[str, Any] | None = None
     tool_id: str | None = None
     server_name: str | None = None
+    # Internal handoff to the session committer. The public event serializer
+    # excludes repr=False fields, as it does runtime callbacks.
+    image_content: list[dict[str, Any]] | None = field(default=None, repr=False, compare=False)
+    image_source: str | None = field(default=None, repr=False, compare=False)
+    image_context_eligible: bool = field(default=True, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

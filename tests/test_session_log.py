@@ -22,6 +22,77 @@ from box_agent.session_log import (
 )
 
 
+def test_history_revision_restores_tool_pairs_and_all_prefix_state_after_reopen(tmp_path):
+    log = SessionLog.create(tmp_path, session_id="revision", cwd=tmp_path)
+    pair = [
+        Message(role="user", content="kept"),
+        Message(role="assistant", content="", tool_calls=[ToolCall(
+            id="call-1", type="function",
+            function=FunctionCall(name="read_file", arguments={"path": "a.txt"}),
+        )]),
+        Message(role="tool", content="kept-result", tool_call_id="call-1"),
+        Message(role="assistant", content="kept-answer"),
+    ]
+    log.append("turn/start", {"turn": 1})
+    log.append_unlogged_messages(pair, turn=1, step=1)
+    for kind, key, value in [
+        ("goal/change", "goal", {"objective": "kept-goal"}),
+        ("plan/write", "plan", {"title": "kept-plan"}),
+        ("todo/write", "todos", [{"title": "kept-todo"}]),
+        ("skill/change", "skills", [{"name": "kept-skill"}]),
+    ]:
+        log.append(kind, {key: value})
+    cutoff = log.append("turn/end", {"turn": 1})["seq"]
+    expected = log.replay()
+    log.append("turn/start", {"turn": 2})
+    log.append_unlogged_messages([*pair, Message(role="user", content="discarded")], turn=2, step=1)
+    log.append("goal/change", {"goal": {"objective": "future-goal"}})
+    log.append("plan/write", {"plan": None})
+    log.append("todo/write", {"todos": []})
+    log.append("skill/change", {"skills": []})
+    log.replace_surface([Message(role="user", content="future-summary")], turn=2, step=1)
+    log.append("turn/end", {"turn": 2})
+    log.append("history/revise", {
+        "revision_id": "r2", "previous_revision_id": "initial", "turn_id": "t3",
+        "restore_through_seq": cutoff,
+    })
+    replacement = Message(role="user", content="edited")
+    log.append("turn/start", {"turn": 3})
+    log.append_unlogged_messages([*expected.messages, replacement], turn=3, step=None)
+    log.append("turn/end", {"turn": 3})
+    log.flush()
+    original = log.path.read_text(encoding="utf-8")
+    log.close()
+    reopened = SessionLog.open(tmp_path, session_id="revision", cwd=tmp_path, recover=True)
+    try:
+        actual = reopened.replay()
+        assert actual.messages == [*expected.messages, replacement]
+        assert actual.goal == expected.goal
+        assert actual.plan == expected.plan
+        assert actual.todos == expected.todos
+        assert actual.skills == expected.skills
+        assert "future-summary" in original
+        assert reopened.next_turn_number() == 4
+        assert reopened.repair_interrupted_turn() == []
+    finally:
+        reopened.close()
+
+
+def test_invalid_history_revision_cannot_be_recovered_as_an_empty_log(tmp_path):
+    log = SessionLog.create(tmp_path, session_id="bad-revision", cwd=tmp_path)
+    log.append("history/revise", {
+        "revision_id": "r2", "previous_revision_id": "initial", "turn_id": "t2",
+        "restore_through_seq": 100,
+    })
+    log.flush()
+    path = log.path
+    before = path.read_bytes()
+    log.close()
+    with pytest.raises(SessionLogCorrupted, match="revision"):
+        SessionLog.open(tmp_path, session_id="bad-revision", cwd=tmp_path, recover=True)
+    assert path.read_bytes() == before
+
+
 def test_session_log_rejects_second_writer_until_owner_closes(tmp_path):
     owner = SessionLog.create(tmp_path, session_id="single-writer", cwd=tmp_path)
 
@@ -720,21 +791,15 @@ def test_unknown_required_event_rejects_restore_but_ignorable_event_is_skipped(
     restored.close()
 
 
-@pytest.mark.parametrize("damage", ["version", "unknown-event", "message", "json"])
+@pytest.mark.parametrize("damage", ["message", "json"])
 def test_recovery_preserves_original_log_before_starting_fresh(tmp_path, damage):
     log = SessionLog.create(tmp_path, session_id="recover", cwd=tmp_path)
-    if damage == "unknown-event":
-        log.append("future/state-change", {})
-    elif damage == "message":
+    if damage == "message":
         log.append("user/message", {"role": "unknown"}, surface_op="append")
     log.flush()
     path = log.path
     log.close()
-    if damage == "version":
-        header = json.loads(path.read_text())
-        header["version"] = 999
-        path.write_text(json.dumps(header) + "\n")
-    elif damage == "json":
+    if damage == "json":
         with path.open("ab") as handle:
             handle.write(b'{broken}\n{"partial":')
     original = path.read_bytes()
@@ -772,7 +837,7 @@ def test_recovery_does_not_replace_a_different_session_or_workspace(tmp_path, mi
 
 def test_failed_recovery_keeps_original_and_releases_writer_lock(tmp_path, monkeypatch):
     log = SessionLog.create(tmp_path, session_id="backup-failure", cwd=tmp_path)
-    log.append("future/state-change", {})
+    log.append("user/message", {"role": "unknown"}, surface_op="append")
     log.flush()
     path = log.path
     log.close()

@@ -69,7 +69,8 @@ def _local_path(value: str, base: Path, root: Path) -> Path | None:
     if value.startswith("local-file://"):
         value = value[len("local-file://"):]
     if os.name == "nt" and re.match(r"^[A-Za-z]:[/\\]", value):
-        return Path(os.path.abspath(value))
+        path = Path(os.path.abspath(value))
+        return path if path.name else None
     try:
         parsed = urlsplit(value)
     except ValueError:
@@ -85,7 +86,7 @@ def _local_path(value: str, base: Path, root: Path) -> Path | None:
     if "\x00" in decoded or any(len(os.fsencode(part)) > 255 for part in path.parts):
         return None
     path = Path(os.path.abspath(path if path.is_absolute() else base / path))
-    return path if path != root else None
+    return path if path.name and path != root else None
 
 
 def local_dependencies(path: Path, root: Path) -> set[Path]:
@@ -329,7 +330,11 @@ class ChatReferences:
         for event in events if isinstance(events, (list, tuple)) else ():
             data = event.get("data", {})
             if event.get("type") == "chat/reference":
-                self.paths.update(Path(os.path.abspath(path)) for path in data.get("paths", []) if isinstance(path, str))
+                for value in data.get("paths", []):
+                    if isinstance(value, str):
+                        path = Path(os.path.abspath(value))
+                        if path.name and (not path.exists() or path.resolve().name):
+                            self.paths.add(path)
             elif event.get("type") == "chat/reference_deleted":
                 released = {Path(path).resolve() for path in data.get("paths", [])}
                 self.paths.difference_update(released)
@@ -395,6 +400,9 @@ class ChatReferences:
                     # closed. Retain its bundle directory rather than guessing
                     # that the unresolved neighboring files are disposable.
                     closure.add(candidate.parent)
+        # Root links (including symlinks and fallback parents) must not protect
+        # the entire filesystem or reach the per-file metadata writer.
+        closure = {candidate for candidate in closure if candidate.resolve().name}
         new = closure - self.paths
         if new:
             self._append("chat/reference", {"root": str(path), "paths": sorted(map(str, closure))})

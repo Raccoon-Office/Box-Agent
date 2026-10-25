@@ -68,6 +68,12 @@ facts and is rebuilt from Session Log on restoration. Confirmed deletion release
 the target's registered workspace caches and shared owner records after the
 durable release event, leaving unrelated targets intact.
 
+Filesystem roots and aliases resolving to them are not retained dependencies.
+HTML links such as `href="/"` and `<base href="/">` must not create root metadata
+or interrupt a successful file write. Session restoration ignores legacy root
+references without rewriting the log; ordinary file and bundle-directory
+references keep their cleanup protection.
+
 Single-file mutation checks use exact path and ancestor lookups. Directory checks
 scan only retained references and the affected subtree, with the existing limits;
 they do not enumerate unrelated publication/intermediate history. Internal-path

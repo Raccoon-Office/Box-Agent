@@ -293,6 +293,112 @@ def test_html_dependency_closure_includes_nested_css_js_markdown_and_explicit_fi
     assert guard.check("write_file", {"path": "assets/site.css"})[0] is None
 
 
+@pytest.mark.parametrize("html", [
+    '<a href="/">Home</a>',
+    '<base href="/">',
+    '<a href="/%2e?home=1#top">Home</a>',
+    '<a href="{root_uri}">Home</a>',
+    '<a href="local-file://{fs_root}">Home</a>',
+    '<a href="{fs_root}">Home</a>',
+])
+def test_html_root_links_preserve_file_dependencies_without_retaining_filesystem_root(tmp_path, html):
+    fs_root = Path(tmp_path.anchor)
+    report = tmp_path / "base.html"
+    image = tmp_path / "asset.png"
+    image.write_bytes(b"image")
+    report.write_text(html.format(root_uri=fs_root.as_uri(), fs_root=fs_root.as_posix())
+                      + '<img src="asset.png">')
+    guard = ChatReferences(tmp_path)
+
+    guard.retain(report)
+
+    assert guard.paths == {report, image}
+    assert not guard.affected(tmp_path / "unrelated.txt")
+    assert read_metadata(metadata_path(image))["retain_for_chat"] is True
+    assert not metadata_path(fs_root, tmp_path).exists()
+
+
+def test_html_root_alias_does_not_protect_unrelated_files(tmp_path):
+    fs_root = Path(tmp_path.anchor)
+    alias = tmp_path / "root-link"
+    try:
+        alias.symlink_to(fs_root, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    report = tmp_path / "base.html"
+    report.write_text('<a href="root-link">Home</a>')
+    guard = ChatReferences(tmp_path)
+
+    guard.retain(report)
+
+    assert guard.paths == {report}
+    assert not guard.affected(tmp_path / "unrelated.txt")
+    assert not metadata_path(fs_root, tmp_path).exists()
+
+
+@pytest.mark.parametrize("use_alias", [False, True])
+def test_retention_cache_ignores_filesystem_roots(tmp_path, use_alias):
+    fs_root = Path(tmp_path.anchor)
+    target = fs_root
+    if use_alias:
+        target = tmp_path / "root-link"
+        try:
+            target.symlink_to(fs_root, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlinks are unavailable")
+
+    retain_chat_file(target, tmp_path)
+
+    assert not metadata_path(fs_root, tmp_path).exists()
+    assert not (Path.home() / ".box-agent/artifact-metadata/retained").exists()
+
+
+@pytest.mark.parametrize("use_alias", [False, True])
+def test_restore_ignores_legacy_root_references_and_keeps_file_protection(tmp_path, use_alias):
+    fs_root = Path(tmp_path.anchor)
+    invalid = fs_root
+    if use_alias:
+        invalid = tmp_path / "root-link"
+        try:
+            invalid.symlink_to(fs_root, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlinks are unavailable")
+    report = tmp_path / "report.html"
+    report.write_text("report")
+    sessions = tmp_path / "sessions"
+    log = SessionLog.create(sessions, session_id="legacy-root", cwd=tmp_path)
+    log.append("chat/reference", {"root": str(report), "paths": [str(report), str(invalid), str(fs_root)]},
+               ignorable=True)
+    log.close()
+    reopened = SessionLog.open(sessions, session_id="legacy-root", cwd=tmp_path)
+    try:
+        events = reopened.events
+        guard = ChatReferences(tmp_path, session_log=reopened)
+
+        assert guard.paths == {report}
+        assert guard.affected(report) == {report}
+        assert not guard.affected(tmp_path / "unrelated.txt")
+        assert not metadata_path(fs_root, tmp_path).exists()
+        assert reopened.events == events
+    finally:
+        reopened.close()
+
+
+def test_restore_preserves_unresolvable_reference_without_failing(tmp_path):
+    from types import SimpleNamespace
+
+    alias = tmp_path / "cyclic-link"
+    try:
+        alias.symlink_to(alias)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    log = SimpleNamespace(events=[{"type": "chat/reference", "data": {"paths": [str(alias)]}}])
+
+    guard = ChatReferences(tmp_path, session_log=log)
+
+    assert guard.paths == {alias}
+
+
 def test_edited_reference_retains_new_dependencies_when_displayed_again(tmp_path):
     path, guard = referenced(tmp_path, "report.html")
     image = tmp_path / "new.png"

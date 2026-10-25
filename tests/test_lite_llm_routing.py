@@ -884,3 +884,77 @@ async def test_memory_bootstrap_releases_its_profile_client_on_completion_or_shu
     await agent.aclose()
     client.aclose.assert_awaited_once()
     main.aclose.assert_not_awaited()
+
+
+@pytest.mark.parametrize("source", ["builtin", "profile"])
+@pytest.mark.parametrize("snake_case", [False, True])
+@pytest.mark.parametrize("pool", [
+    {"models": [{"model": "other-model", "tags": ["summary"], "abilityLevel": 1}]},
+    {"models": []},
+    "invalid-pool",
+])
+def test_manual_binding_ignores_even_malformed_auto_pool(source, snake_case, pool):
+    from box_agent.acp import _normalize_llm_binding
+
+    binding = {
+        "source": source, "model": "chosen-model", "version": 2,
+        "profileId": "hosted", "profileRevision": "revision",
+        "routing_mode" if snake_case else "routingMode": "manual",
+        "auto_routing" if snake_case else "autoRouting": pool,
+    }
+    normalized = _normalize_llm_binding({"llm_binding": binding})
+    assert normalized["model"] == "chosen-model"
+    assert "autoRouting" not in normalized
+    if source == "profile":
+        assert normalized["routingMode"] == "manual"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["builtin", "profile"])
+async def test_manual_pool_cannot_switch_sessions_children_or_utilities(tmp_path, monkeypatch, source):
+    agent, main, _ = _make_agent(tmp_path, lite=True)
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    monkeypatch.setattr(
+        "box_agent.acp.client_for_model_profile",
+        lambda binding, **kwargs: main.for_model(binding["model"]),
+    )
+    binding = {
+        "source": source, "version": 2, "profileId": "hosted",
+        "profileRevision": "revision", "routingMode": "manual", "model": "chosen-model",
+        "autoRouting": {"models": [
+            {"model": "other-model", "tags": ["summary", "code"], "abilityLevel": 3},
+        ]},
+    }
+    try:
+        await agent.initialize(SimpleNamespace(field_meta={"llm_binding": binding}))
+        result = await agent._llm_prompt({"prompt": "summarize", "_meta": {"purpose": "title"}})
+        assert result["text"] == "reply-from-bound-chosen-model"
+        session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        state = agent._sessions[session.sessionId]
+        assert state.session_llm.model == "chosen-model"
+        assert state.session_llm.auto_model_candidates == ()
+        assert state.agent.tools["sub_agent"]._llm is state.session_llm
+        assert agent._summary_llm_for_session(
+            session_llm=state.session_llm, session_id="test", title="test", client_info=None,
+        ).model == "chosen-model"
+
+        # First enable automatic routing, then reuse its pool with an explicit manual choice.
+        auto = {**binding, "routingMode": "auto"}
+        await agent.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "hello"}],
+            field_meta={"llm_binding": auto},
+        ))
+        assert len(state.session_llm.auto_model_candidates) == 1
+        await agent.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "debug this complex code"}],
+            field_meta={"llm_binding": binding},
+        ))
+        assert state.session_llm.model == "chosen-model"
+        assert state.session_llm.auto_model_candidates == ()
+        result = await agent._llm_prompt({
+            "prompt": "summarize", "_meta": {"purpose": "summary", "llm_binding": binding},
+        })
+        assert result["text"] == "reply-from-bound-chosen-model"
+    finally:
+        await agent.aclose()

@@ -740,6 +740,9 @@ async def _run_agent_loop_impl(
         compact_engine = DefaultCompactEngine()
     context_engine = _services.context_engine
     if context_engine is not None:
+        bind_model = getattr(context_engine, "bind_model", None)
+        if callable(bind_model):
+            bind_model(llm, thinking_enabled=thinking_enabled)
         binding = getattr(context_engine, "abind_history", context_engine.bind_history)(messages)
         if inspect.isawaitable(binding):
             await binding
@@ -977,7 +980,20 @@ async def _run_agent_loop_impl(
     # valid while nudging the model to synthesize.
     tool_engine = _services.tool_engine
     assert tool_engine is not None
-    tool_messages = ToolMessageCommitter(messages, session_log, session_turn)
+    tool_messages = ToolMessageCommitter(messages, session_log, session_turn,
+                                        image_context=getattr(context_engine, "image_context", None))
+
+    def commit_model_response(message: Message) -> None:
+        if not (message.content or message.thinking or message.tool_calls):
+            return
+        commit_response = getattr(context_engine, "commit_response", None)
+        if callable(commit_response):
+            commit_response(message)
+        messages.append(message)
+        if session_log is not None and session_turn is not None:
+            session_log.append_unlogged_messages(session_log_messages(messages),
+                                                 turn=session_turn, step=step + 1)
+            session_log.flush()
 
     def validate_followup(result, tool, pending):
         accepted, blocks, tokens = _validate_transient_followup_result(
@@ -1098,6 +1114,7 @@ async def _run_agent_loop_impl(
             before_summary=before_summary,
             force=force, estimate_tools=estimate_tools,
             summary_input_token_limit=token_limit if force else None,
+            summary_projector=getattr(context_engine, "prepare_summary", None),
         ))
         if result.mode == "fallback" and result.summary_calls > 0 and result.error:
             summary_failure_cooldown_steps = (
@@ -1393,6 +1410,7 @@ async def _run_agent_loop_impl(
         # ── LLM call (streaming) ──────────────────────────────
         request_overlay_tokens = pending_transient_followup_tokens if transient_message is not None else 0
         skill_references = ()
+        image_manifest = None
         on_request_committed = None
         on_response_received = None
         if context_engine is not None:
@@ -1489,6 +1507,9 @@ async def _run_agent_loop_impl(
             request_overlay_tokens = projection.request_only_input_tokens
             on_request_committed = getattr(projection, "on_committed", None)
             on_response_received = getattr(projection, "on_response", None)
+            image_manifest = getattr(projection, "image_context", None)
+            for notice in getattr(projection, "image_notices", ()):
+                yield ErrorEvent(message=notice, is_fatal=False, error_code="IMAGE_NOT_DELIVERED")
         else:
             # Legacy manually constructed service bundles may omit Context.
             # Keep the historical estimate-driven compaction path for those
@@ -1565,6 +1586,8 @@ async def _run_agent_loop_impl(
             # emitting an empty field would falsely suggest dual persistence.
             if skill_references:
                 request_context["skillReferences"] = list(skill_references)
+            if image_manifest is not None:
+                request_context["imageContext"] = image_manifest
             session_log.append("request/context", request_context)
             session_log.flush()
 
@@ -1809,7 +1832,7 @@ async def _run_agent_loop_impl(
                 partial_text = exc.partial_text or ""
                 partial_thinking = exc.partial_thinking or ""
                 if partial_text or partial_thinking:
-                    messages.append(
+                    commit_model_response(
                         Message(
                             role="assistant",
                             content=partial_text,
@@ -2003,7 +2026,7 @@ async def _run_agent_loop_impl(
                 if not has_partial_content:
                     provider_stale_retries += 1
                 if has_partial_content:
-                    messages.append(assistant_msg)
+                    commit_model_response(assistant_msg)
                     recovery_text = (
                         "模型服务在上一轮已经输出部分内容、但尚未完成动作时长时间没有返回"
                         "新数据。请从未完成的动作继续，不要重复已经输出的说明，也不要把"
@@ -2058,7 +2081,7 @@ async def _run_agent_loop_impl(
                 for item in details
             ) or "unknown tool"
             if response.content.strip():
-                messages.append(assistant_msg)
+                commit_model_response(assistant_msg)
             if oversized_tool_argument_retries < 1:
                 oversized_tool_argument_retries += 1
                 repair_text = (
@@ -2195,7 +2218,7 @@ async def _run_agent_loop_impl(
             # No tool attempt: preserve the existing text continuation and
             # empty-response retry behavior.
             if visible_text and truncation_continuations < max_truncation_continuations:
-                messages.append(assistant_msg)
+                commit_model_response(assistant_msg)
                 truncation_continuations += 1
                 tail = response.content.rstrip()[-40:]
                 cont_text = truncation_continuation_text(tail)
@@ -2267,7 +2290,7 @@ async def _run_agent_loop_impl(
 
             # Retries / continuations exhausted — persist plain text and
             # surface the error.
-            messages.append(assistant_msg)
+            commit_model_response(assistant_msg)
             usage = response.usage
             diag_parts: list[str] = []
             if usage is not None:
@@ -2307,13 +2330,7 @@ async def _run_agent_loop_impl(
             return
 
         # ── Append assistant message (non-truncated path) ───
-        messages.append(assistant_msg)
-        if session_log is not None and session_turn is not None:
-            session_log.append_unlogged_messages(
-                session_log_messages(messages),
-                turn=session_turn,
-                step=step + 1,
-            )
+        commit_model_response(assistant_msg)
 
         # Reset the retry counter now that a clean turn landed — a future
         # truncation on a later step should get its own fresh budget.

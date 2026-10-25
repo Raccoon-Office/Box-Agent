@@ -159,6 +159,7 @@ class AgentSession:
             max_truncated_tool_call_retries=settings.max_truncated_tool_call_retries,
             truncated_tool_call_boost_cap=settings.truncated_tool_call_boost_cap,
             context_resource_dedup_enabled=settings.context_resource_dedup_enabled,
+            image_context=settings.image_context,
             allowed_connector_ids_provider=allowed_connector_ids_provider,
             deferred_mcp_loading_enabled=(
                 not utility
