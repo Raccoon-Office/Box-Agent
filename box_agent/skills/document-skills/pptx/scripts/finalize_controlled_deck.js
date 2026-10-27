@@ -8,6 +8,9 @@ const { createHash } = require("crypto");
 
 const { resolveArtifactPath } = require("./deck_spec_core.js");
 const { reconcileReadyManifestMedia } = require("./apply_deck_patch.js");
+const { renderQuality, correctionNext } = require("./render_quality.js");
+
+let failureContext = null;
 
 function usage() {
   console.error(
@@ -158,6 +161,29 @@ function fail(stage, result, reportPath = null) {
   } else {
     const diagnostic = tail(`${result.stdout || ""}\n${result.stderr || ""}`);
     if (diagnostic) console.error(diagnostic);
+  }
+  if (failureContext) {
+    const { deckPath, outputPath, reportDir, requirePptx } = failureContext;
+    const quality = stage === "html_self_check" && summary
+      ? renderQuality(readJson(reportPath), null) : null;
+    const next = quality && !quality.ok ? correctionNext(quality)
+      : `Repair the reported ${stage} failure before retrying. Preserve existing artifacts; do not reset the deck.`;
+    const qualityPath = path.join(reportDir, "render_quality.json");
+    if (quality) writeJson(qualityPath, { ...quality, advisory: false,
+      correction_required: !quality.ok, next });
+    const payload = {
+      ok: false, stage, blocking: true, delivery_status: "partial",
+      deck: deckPath, html: fs.existsSync(outputPath) ? outputPath : null, pptx: null,
+      requested_format: requirePptx ? "pptx" : "html",
+      blocking_issues: summary?.issues.length ? summary.issues
+        : [tail(result.error?.message || `${result.stdout || ""}\n${result.stderr || ""}`) || `${stage} failed`],
+      warnings: summary?.warnings || [],
+      correction_required: Boolean(quality && !quality.ok),
+      render_quality: quality, next,
+      qa_reports: [reportPath, quality ? qualityPath : null].filter(Boolean),
+    };
+    writeJson(path.join(reportDir, "finalization.json"), payload);
+    console.log(JSON.stringify(payload));
   }
   process.exit(Number.isInteger(result.status) && result.status !== 0 ? result.status : 1);
 }
@@ -336,7 +362,7 @@ function runPostRenderStage(stage, scriptName, args, reportPath, strict = false)
     console.log(`FINALIZE_PASS stage=${stage} warnings=${summary.warnings.length}`);
     return report;
   }
-  if (strict) fail(stage, result, reportPath);
+  if (strict) fail(stage, result, reportIsFresh ? reportPath : null);
   if (reportIsFresh && report?.editor?.paletteCompliance?.enforced
     && report.editor.paletteCompliance.failures.length) {
     fail("palette_contract", { status: 1, stdout: "", stderr: JSON.stringify(report.editor.paletteCompliance.failures.slice(0, 12)) });
@@ -422,6 +448,7 @@ function main() {
     ? resolveArtifactPath(opts.manifest)
     : path.join(artifactRoot, "assets", "generated", "manifest.json");
   const reportDir = path.join(artifactRoot, "qa");
+  failureContext = { deckPath, outputPath, reportDir, requirePptx: opts.requirePptx };
   const reports = {
     contract: path.join(reportDir, "deck_contract.json"),
     review: path.join(reportDir, "design_review_check.json"),
@@ -514,10 +541,9 @@ function main() {
   const exportError = pptxPath
     ? exportRequiredPptx(outputPath, pptxPath, deck.slides.length, reportDir)
     : null;
-  const quality = require("./render_quality.js").renderQuality(htmlReport, runtimeReport);
+  const quality = renderQuality(htmlReport, runtimeReport);
   reports.quality = path.join(reportDir, "render_quality.json");
-  const qualityNext = quality.ok ? null
-    : `Run design_plan.js correct design_input.json --pages ${quality.affected_pages.join(",")} with these visual defects, then accept, apply and finalize once. If correction is unavailable or still fails, report partial and deliver an explicitly degraded draft. Do not report completed or visual checks passed.`;
+  const qualityNext = correctionNext(quality);
   writeJson(reports.quality, { ...quality, advisory: false,
     correction_required: !quality.ok, next: qualityNext });
   if (!quality.ok) {
@@ -548,26 +574,28 @@ function main() {
   const { publishArtifact } = require("./artifact_delivery.js");
   publishArtifact(outputPath);
   if (pptxPath && !exportError) publishArtifact(pptxPath);
-  console.log(
-    JSON.stringify({
-      ok: !exportError && quality.ok,
-      deck: deckPath,
-      html: outputPath,
-      pptx: exportError ? null : pptxPath,
-      requested_format: opts.requirePptx ? "pptx" : "html",
-      media_bindings: mediaBindings,
-      qa_reports: Object.values(reports),
-      warnings: warningCount,
-      degraded,
-      degraded_stages: degradedStages,
-      render_quality: quality,
-      correction_required: !quality.ok,
-      next: qualityNext,
-      blocking_issues: [...quality.issues.map(issue => `Page ${issue.page}: ${issue.detail}`),
-        ...blockingImageIssues, ...(exportError ? [`PPTX export failed: ${exportError}`] : [])],
-      delivery_status: deliveryStatus,
-    })
-  );
+  const payload = {
+    ok: !exportError && quality.ok,
+    stage: exportError ? "pptx" : !quality.ok ? "render_quality" : "complete",
+    blocking: Boolean(exportError || !quality.ok),
+    deck: deckPath,
+    html: outputPath,
+    pptx: exportError ? null : pptxPath,
+    requested_format: opts.requirePptx ? "pptx" : "html",
+    media_bindings: mediaBindings,
+    qa_reports: Object.values(reports),
+    warnings: warningCount,
+    degraded,
+    degraded_stages: degradedStages,
+    render_quality: quality,
+    correction_required: !quality.ok,
+    next: qualityNext,
+    blocking_issues: [...quality.issues.map(issue => `Page ${issue.page}: ${issue.detail}`),
+      ...blockingImageIssues, ...(exportError ? [`PPTX export failed: ${exportError}`] : [])],
+    delivery_status: deliveryStatus,
+  };
+  writeJson(path.join(reportDir, "finalization.json"), payload);
+  console.log(JSON.stringify(payload));
   if (exportError || !quality.ok) process.exitCode = 1;
 }
 

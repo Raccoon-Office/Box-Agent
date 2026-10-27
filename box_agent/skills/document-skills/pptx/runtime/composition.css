@@ -4401,6 +4401,48 @@ body[data-deck-composition] .kpis-hero.kpis-count-6 .kpi-card:nth-child(n + 5) {
   grid-column: span 3;
 }
 
+/* Five/six cards need two rows at presentation size. Keep the featured card
+   wider without forcing a full-width hero plus two more rows of body text.
+   Explicit user column constraints continue to own their geometry. */
+body[data-deck-composition]:not([data-deck-style-card-columns])
+  .cards-numbered:is(.cards-count-5, .cards-count-6) .cards-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+body[data-deck-composition]:not([data-deck-style-card-columns])
+  .cards-featured:is(.cards-count-5, .cards-count-6) .cards-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-auto-rows: auto;
+}
+
+body[data-deck-composition]:not([data-deck-style-card-columns])
+  .cards-featured:is(.cards-count-5, .cards-count-6) .content-card {
+  grid-column: span 4;
+  grid-row: auto;
+}
+
+body[data-deck-composition]:not([data-deck-style-card-columns])
+  .cards-featured:is(.cards-count-5, .cards-count-6) .content-card:first-child {
+  grid-column: span 6;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: 24px;
+}
+
+body[data-deck-composition]:not([data-deck-style-card-columns])
+  .cards-featured.cards-count-5 .content-card:nth-child(2) {
+  grid-column: span 6;
+}
+
+body[data-deck-composition]:not([data-deck-style-card-columns])
+  .cards-featured.cards-count-6 .content-card:nth-child(n + 2):nth-child(-n + 3) {
+  grid-column: span 3;
+}
+
+body[data-deck-composition]:not([data-deck-style-card-columns])
+  .cards-featured.cards-count-6 .content-card:nth-child(n + 4) {
+  grid-column: span 4;
+}
+
 body[data-deck-composition] .kpis-hero .kpi-card:not(:first-child) {
   display: block;
 }

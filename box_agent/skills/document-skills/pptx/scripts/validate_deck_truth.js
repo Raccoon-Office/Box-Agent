@@ -131,17 +131,29 @@ function numberTokens(value) {
 }
 
 function isNumberBackedForSlide(token, statements, slide, fieldPath = "") {
-  const candidates = [token];
   const props = slide && slide.props ? slide.props : {};
   const suffix = String(props.value_suffix || "").trim();
   const categories = Array.isArray(props.categories) ? props.categories : [];
   const valueIndexMatch = String(fieldPath).match(/\.series\.\d+\.values\.(\d+)$/);
   const valueIndex = valueIndexMatch ? Number(valueIndexMatch[1]) : -1;
   const localCategory = valueIndex >= 0 ? String(categories[valueIndex] || "") : "";
-  const percentContext = suffix === "%"
-    || /%|％|百分|(?:比率|率|占比|份额|percentage|percent|rate|ratio|share)/i.test(localCategory);
-  if (percentContext && !token.endsWith("%")) candidates.push(`${token}%`);
-  return candidates.some(candidate => isNumberSourceBacked(candidate, statements));
+  const chartValue = slide?.layout_id === "chart-data-v1" && valueIndex >= 0;
+  const barValue = slide?.layout_id === "chart-bar-v1"
+    && /\.props\.items\.\d+\.value$/.test(fieldPath);
+  const percentContext = chartValue && (suffix === "%" || suffix === "％"
+    || /%|％|百分|(?:比率|率|占比|份额|percentage|percent|rate|ratio|share)/i.test(localCategory))
+    || barValue && /[%％]/.test(String(props.series_label || ""));
+  // A chart value inherits its displayed unit; prose and unrelated numbers do not.
+  const claim = percentContext && !token.endsWith("%") ? `${token}%` : token;
+  return isNumberSourceBacked(claim, statements);
+}
+
+function isVisualEnumEntry(entry, slide) {
+  const parts = String(entry.path).split(".props.")[1]?.split(".") || [];
+  let field = { shape: getLayout(slide?.layout_id)?.fields || {} };
+  for (const part of parts) field = /^\d+$/.test(part)
+    ? { shape: field?.itemShape } : field?.shape?.[part];
+  return field?.type === "enum";
 }
 
 function slideDisclosesAssumptions(slide) {
@@ -796,6 +808,7 @@ function sanitizeUnsupportedClaims(
   if (typeof value === "string") {
     if (isHonestPlaceholder(value)) return value;
     const entry = { path: fieldPath, text: value };
+    if (isVisualEnumEntry(entry, slide)) return value;
     const hasUnsupportedNumber = !isRuntimeSourceCopy(value, structuralContext.runtimeSource)
       && numberTokens(value).some(token =>
       !isNumberBackedForSlide(token, sourceFacts, slide, fieldPath)
@@ -1340,6 +1353,7 @@ function validateSourceBoundDeck(deck) {
         || entry.placeholderContext
         || PLACEHOLDER_RE.test(entry.text)
         || isDiagramStructuralEntry(entry, slide)
+        || isVisualEnumEntry(entry, slide)
       ) return;
       numberTokens(entry.text).forEach(token => {
         const sourceBackedNumber = isRuntimeSourceCopy(entry.text, sourceBinding.source_text) || isNumberBackedForSlide(

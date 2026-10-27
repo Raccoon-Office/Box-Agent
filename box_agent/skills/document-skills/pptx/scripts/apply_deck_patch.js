@@ -11,6 +11,8 @@ const {
   resolveArtifactPath,
   runtimeSourceBinding,
   validateAssumptionsAgainstRuntime,
+  validateSourceFactsAgainstRuntime,
+  validateResearchFactsAgainstRuntime,
   validateAndNormalizeDeck,
 } = require("./deck_spec_core.js");
 const {
@@ -654,8 +656,8 @@ function main() {
   }
   if (unknownTopLevel.length) {
     const sourceFactHint = unknownTopLevel.includes("source_facts")
-      ? "; source facts are scaffold-only under truth_contract.source_facts. " +
-        "For user-authorized illustrative data, patch truth_contract.assumptions instead"
+      ? "; append verified facts under truth_contract.add_source_facts or " +
+        "truth_contract.add_research_facts; do not replace scaffold facts"
       : "";
     const slideEnvelopeHint = unknownTopLevel.every(key => /^slide-\d+$/i.test(key))
       ? '; slide ids must be nested under the top-level "slides" object, for example ' +
@@ -668,13 +670,16 @@ function main() {
   }
   const sourceBinding = runtimeSourceBinding();
   const truthWarnings = [];
+  const evidenceOnly = patch.title === undefined && patch.slides === undefined
+    && isPlainObject(patch.truth_contract)
+    && Object.keys(patch.truth_contract).every(key => ["add_source_facts", "add_research_facts"].includes(key));
   if (patch.title !== undefined) deck.title = patch.title;
   if (patch.truth_contract !== undefined) {
     if (!isPlainObject(patch.truth_contract)) {
       throw new Error("truth_contract patch must be an object");
     }
     const unknownTruthFields = Object.keys(patch.truth_contract)
-      .filter(key => !["mode", "source_facts", "research_facts", "assumptions"].includes(key));
+      .filter(key => !["mode", "source_facts", "research_facts", "assumptions", "add_source_facts", "add_research_facts"].includes(key));
     if (unknownTruthFields.length) {
       throw new Error(
         `Unknown truth_contract patch field(s): ${unknownTruthFields.join(", ")}`
@@ -702,6 +707,25 @@ function main() {
         normalizationChanges,
         "truth_contract.research_facts: ignored patch mutation and preserved scaffold research facts"
       );
+    }
+    for (const [field, validate] of [
+      ["source_facts", validateSourceFactsAgainstRuntime],
+      ["research_facts", validateResearchFactsAgainstRuntime],
+    ]) {
+      const additions = patch.truth_contract[`add_${field}`];
+      if (additions === undefined) continue;
+      if (!Array.isArray(additions) || additions.some(fact => typeof fact !== "string" || !fact.trim())) {
+        throw new Error(`truth_contract.add_${field}: expected an array of non-empty facts`);
+      }
+      if (field === "source_facts" && additions.length && !sourceBinding.available) {
+        throw new Error("truth_contract.add_source_facts: runtime source is required to verify verbatim additions");
+      }
+      const binding = validate(additions);
+      if (binding.issues.length) throw new Error(binding.issues.join("\n"));
+      deck.truth_contract[field] = [...new Set([
+        ...(deck.truth_contract[field] || []), ...additions.map(fact => fact.trim()),
+      ])];
+      recordChange(normalizationChanges, `truth_contract.${field}: appended validated additions without resetting the deck`);
     }
     if (patch.truth_contract.assumptions !== undefined) {
       const assumptionBinding = validateAssumptionsAgainstRuntime(
@@ -759,9 +783,10 @@ function main() {
     patchedSlides.push(slideId);
   }
 
-  reconcileReadyManifestMedia(deck, deckPath, normalizationChanges);
-
-  restoreBoundOutlineTitles(deck, deckPath, normalizationChanges);
+  if (!evidenceOnly) {
+    reconcileReadyManifestMedia(deck, deckPath, normalizationChanges);
+    restoreBoundOutlineTitles(deck, deckPath, normalizationChanges);
+  }
 
   let validation = validateAndNormalizeDeck(deck);
   if (!validation.ok) {
@@ -776,7 +801,9 @@ function main() {
     && !sourceBinding.allows_assumptions
   );
   if (shouldGuardSourceTruth) {
-    const sanitized = sanitizeStrictSourceDeck(validation.normalized);
+    const sanitized = evidenceOnly
+      ? { deck: validation.normalized, changes: [] }
+      : sanitizeStrictSourceDeck(validation.normalized);
     validation = validateAndNormalizeDeck(sanitized.deck);
     if (!validation.ok) {
       throw new Error(`Truth-normalized deck is invalid:\n${validation.issues.join("\n")}`);
@@ -791,7 +818,7 @@ function main() {
       ],
     };
     if (
-      [...truthResult.issues, ...truthResult.warnings].length
+      !evidenceOnly && [...truthResult.issues, ...truthResult.warnings].length
       && omitUnsupportedOptionalResearchProofs(
         validation.normalized,
         [...truthResult.issues, ...truthResult.warnings],
@@ -811,7 +838,8 @@ function main() {
     }
   }
   fs.mkdirSync(path.dirname(deckPath), { recursive: true });
-  fs.writeFileSync(deckPath, `${JSON.stringify(validation.normalized, null, 2)}\n`, "utf8");
+  if (evidenceOnly) deck.truth_contract = validation.normalized.truth_contract;
+  fs.writeFileSync(deckPath, `${JSON.stringify(evidenceOnly ? deck : validation.normalized, null, 2)}\n`, "utf8");
   console.log(JSON.stringify({
     ok: true,
     deck: deckPath,
@@ -821,6 +849,8 @@ function main() {
     truth_guard_changes: truthGuard.changes,
     truth_guard_warnings: truthGuard.warnings,
     truth_warning_count: truthGuard.warnings.length,
+    blocking: false,
+    next: "Continue rendering/finalization. Review source advisories once; do not reset the deck or retry only to clear warnings.",
     truth_mode: validation.normalized.truth_contract
       ? validation.normalized.truth_contract.mode
       : null,

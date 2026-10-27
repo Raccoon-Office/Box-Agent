@@ -281,9 +281,21 @@ errors rather than silently replacing a layout or splitting pages. It writes
 `deck.json`, `assets/generated/manifest.json`, and `qa/deck_contract.json`.
 The stdout is the selected **content** contract: fields, defaults, source pages,
 content bindings and media slots. Reuse it; do not inspect every layout again.
-Use `--fact` for verbatim user facts, `--research-fact` only after research, and
+Use `--fact` for verbatim user facts, `--research-fact` only after reading supplied local documents, and
 `--assumption` only for explicitly authorized assumptions. Use `--require-field`
 only for user-required semantic data fields, never decoration.
+
+After scaffolding, append missing evidence with `apply_deck_patch.js`, for example
+`{"truth_contract":{"add_source_facts":["verbatim supplied text"],"add_research_facts":["verified document fact with its table/page reference"]}}`.
+Source additions must match the runtime user source; document/research additions
+retain the existing strict-source restrictions. This validates provenance rules,
+not the truth of a statement: read the source before registering it. Additions are
+deduplicated and preserve existing evidence, content and design. Never move patches
+aside or run scaffold `--force` just to add facts or clear advisories.
+In this offline package, `add_research_facts` records evidence read from supplied
+local documents only; it does not authorize web research or network requests.
+Review fact advisories once, correct unsupported content or append verified evidence
+in one batch, then continue to rendering. Do not retry solely to reach zero warnings.
 
 ### 5. Acquire media and fill content
 
@@ -385,7 +397,12 @@ This is the single normal finalization command. Core schema/design-contract and
 render failures block. Outline binding drift blocks by default. Only an explicit
 `BOX_AGENT_ALLOW_DEGRADED_OUTLINE_BINDING=1` permits that semantic-only draft.
 Image, optional inspection and source findings are recorded as advisories.
-On any nonzero finalization result, read `qa/render_quality.json` before
+Run the finalizer directly, without a pipeline, `tail`, or a trailing diagnostic
+command that masks its exit status. Hard stage failures also write a machine-readable
+`qa/finalization.json` with `stage`, `blocking_issues`, and `next`; stdout progress
+lines are not a JSON document. Use the final JSON result, not shell success alone.
+On any nonzero finalization result, use its named reports. If it names
+`qa/render_quality.json`, read that report before
 classifying other advisories. Its `ok: false`, non-advisory issues and the
 finalizer's `blocking_issues` are confirmed visual failures. A local
 `text.status: fit` only describes text sizing and does not clear container
