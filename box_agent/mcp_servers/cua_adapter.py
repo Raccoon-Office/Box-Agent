@@ -1,15 +1,8 @@
-"""Native macOS App adapter over the official cua-driver MCP.
+"""Native macOS App adapter for CuaDriver 0.38.
 
-Ported from mac-cua ``data/guest/cua_adapter.py`` (dev/codex_v1.0@fe6f3af),
-aligned with dev/codex_v1.0@a62bc9f (2026-10-21) for native attachment
-relationships and focus checks. Box-Agent retains screenshot-pixel coordinates,
-background-first delivery and its native helpers. Window and sheet identity
-checks are retained. Input is background-first using the 0.34 delivery contract;
-file-panel shortcuts use an optional native helper for remote-process routing.
-explicit background refusals retry once through the original explicit-focus
-foreground path. Untargeted keyboard fallback retains desktop delivery. Desktop-coordinate
-fallback and drag retain foreground delivery. Older geometry adaptations
-are marked ``0.32:``.
+Driver owns window enumeration, semantic actions, input focus and foreground
+activation. The adapter owns app handles, snapshot IDs and attachment checks.
+All input is delivered by Driver; unknown or partial outcomes are never replayed.
 """
 from __future__ import annotations
 
@@ -25,16 +18,6 @@ import threading
 import time
 import uuid
 
-from box_agent.mcp_servers.cua_panel_keyboard import (
-    PanelFocusSession,
-    activate_application,
-    deliver_focused_editor,
-    deliver_panel_key,
-    deliver_search_escape,
-    focus_panel_field,
-    perform_sheet_action,
-    supports_focused_editor_key,
-)
 
 PROTOCOL = '2024-11-05'
 DRIVER_TIMEOUT_SECONDS = 60
@@ -42,10 +25,6 @@ APP_LAUNCH_TIMEOUT_SECONDS = 60
 APP_LAUNCH_WINDOW_TIMEOUT_SECONDS = 30
 APP_LAUNCH_POLL_SECONDS = 0.25
 APP_LAUNCH_STABLE_SAMPLES = 2
-CF_NUMBER_SINT64_TYPE = 4
-CG_WINDOW_LIST_ON_SCREEN_ONLY = 1 << 0
-CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS = 1 << 4
-CG_NULL_WINDOW_ID = 0
 # 0.32: Box-Agent re-encodes images above this long edge before the model sees
 # them. Ask the driver for at most this size so model pixels == driver pixels.
 MAX_IMAGE_DIMENSION = 1568
@@ -211,14 +190,7 @@ def failed(result: dict) -> bool:
 
 def ended_session(name: str, text: str) -> dict | None:
     """Return start_session args when text proves the call was rejected unrun."""
-    # 0.25 daemon wording.
-    match = re.fullmatch(
-        r"session '([^'\n]+)' has ended; tool call '" + re.escape(name)
-        + r"' was rejected\. Call start_session with this id to revive it before "
-          r"issuing further actions, or use a new session id\.", text)
-    if match:
-        return {'session': match[1]}
-    # 0.32 daemon wording (cua-driver/src/serve.rs).
+    # Named-session refusal in CuaDriver 0.38 (cua-driver/src/serve.rs).
     match = re.fullmatch(
         r"session has ended; tool call '" + re.escape(name)
         + r"' was rejected\. Call start_session with session '([^'\n]+)' to start it again, "
@@ -244,18 +216,6 @@ def rectangle(value):
 def clear_image(state):
     for name in ('image_frame', 'image_size', 'image_bounds', 'image_background_input'):
         state.pop(name, None)
-
-
-class _CGPoint(ctypes.Structure):
-    _fields_ = [('x', ctypes.c_double), ('y', ctypes.c_double)]
-
-
-class _CGSize(ctypes.Structure):
-    _fields_ = [('width', ctypes.c_double), ('height', ctypes.c_double)]
-
-
-class _CGRect(ctypes.Structure):
-    _fields_ = [('origin', _CGPoint), ('size', _CGSize)]
 
 
 def native_focused_window_id(pid: int, *, require_nonminimized=False) -> int | None:
@@ -308,83 +268,6 @@ def native_focused_window_id(pid: int, *, require_nonminimized=False) -> int | N
         for value in (focused.value, key, app):
             if value:
                 cf.CFRelease(value)
-
-
-def native_window_inventory(pid: int) -> list[dict]:
-    """Return same-process WindowServer records, including nonzero layers."""
-    if sys.platform != 'darwin':
-        return []
-    core_foundation = ctypes.CDLL(
-        '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
-    core_graphics = ctypes.CDLL(
-        '/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-    core_graphics.CGWindowListCopyWindowInfo.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
-    core_graphics.CGWindowListCopyWindowInfo.restype = ctypes.c_void_p
-    core_graphics.CGRectMakeWithDictionaryRepresentation.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(_CGRect)]
-    core_graphics.CGRectMakeWithDictionaryRepresentation.restype = ctypes.c_bool
-    core_foundation.CFArrayGetCount.argtypes = [ctypes.c_void_p]
-    core_foundation.CFArrayGetCount.restype = ctypes.c_long
-    core_foundation.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
-    core_foundation.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
-    core_foundation.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    core_foundation.CFDictionaryGetValue.restype = ctypes.c_void_p
-    core_foundation.CFNumberGetValue.argtypes = [
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
-    core_foundation.CFNumberGetValue.restype = ctypes.c_bool
-    core_foundation.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
-    core_foundation.CFBooleanGetValue.restype = ctypes.c_bool
-    core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
-
-    keys = {name: ctypes.c_void_p.in_dll(core_graphics, name).value for name in (
-        'kCGWindowNumber', 'kCGWindowOwnerPID', 'kCGWindowLayer',
-        'kCGWindowBounds', 'kCGWindowIsOnscreen')}
-    array = core_graphics.CGWindowListCopyWindowInfo(
-        CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS | CG_WINDOW_LIST_ON_SCREEN_ONLY,
-        CG_NULL_WINDOW_ID)
-    if not array:
-        raise OSError('CGWindowListCopyWindowInfo returned no inventory')
-
-    def value(record, name):
-        return core_foundation.CFDictionaryGetValue(record, keys[name])
-
-    def number(record, name):
-        output = ctypes.c_longlong()
-        raw = value(record, name)
-        return (output.value if raw and core_foundation.CFNumberGetValue(
-            raw, CF_NUMBER_SINT64_TYPE, ctypes.byref(output)) else None)
-
-    try:
-        total = core_foundation.CFArrayGetCount(array)
-        rows = []
-        for index in range(total):
-            record = core_foundation.CFArrayGetValueAtIndex(array, index)
-            owner = number(record, 'kCGWindowOwnerPID')
-            window_id = number(record, 'kCGWindowNumber')
-            layer = number(record, 'kCGWindowLayer')
-            bounds = _CGRect()
-            raw_bounds = value(record, 'kCGWindowBounds')
-            if (owner != pid or window_id is None or layer is None or not raw_bounds
-                    or not core_graphics.CGRectMakeWithDictionaryRepresentation(
-                        raw_bounds, ctypes.byref(bounds))):
-                continue
-            raw_on_screen = value(record, 'kCGWindowIsOnscreen')
-            rows.append({
-                'pid': owner,
-                'window_id': window_id,
-                'title': '',
-                'bounds': {'x': bounds.origin.x, 'y': bounds.origin.y,
-                           'width': bounds.size.width, 'height': bounds.size.height},
-                'layer': layer,
-                # Live on-screen order, with larger values meaning frontmost.
-                'z_index': total - index,
-                'is_on_screen': bool(raw_on_screen and
-                                     core_foundation.CFBooleanGetValue(raw_on_screen)),
-                'native_inventory': True,
-            })
-        return rows
-    finally:
-        core_foundation.CFRelease(array)
 
 
 def app_elements(elements: list[dict]) -> list[dict]:
@@ -440,8 +323,7 @@ def attached_sheet_elements(elements: list[dict], bounds: dict | None = None,
         if actual_role != role and not floating:
             continue
         frame = rectangle(element.get('frame'))
-        # ponytail: frame equality is the only parent signal in cua-driver 0.25.0;
-        # replace it when the driver exposes an attached-sheet parent window ID.
+        # Match the attached surface to its subtree in the parent AX snapshot.
         if target is not None and frame != target:
             continue
         depth = element.get('depth', 0)
@@ -481,7 +363,6 @@ class Adapter:
 
     def __init__(self, driver, evidence=None):
         self.driver = driver
-        self.panel_focus = PanelFocusSession()
         # A cua-driver session belongs to this transport, not the REPL service.
         self.session = 'repl-' + uuid.uuid4().hex
         self.handles = {}
@@ -491,7 +372,6 @@ class Adapter:
         self.evidence = evidence
         self.deadline = None
         self.record_counts = {}
-        self.screen_ratio = None
         self.event_sink = None
         self.action_app_inventory = None
 
@@ -516,6 +396,9 @@ class Adapter:
         return args
 
     def call(self, name, args, *, recover_session=True):
+        if name == 'get_window_state':
+            # Internal consumers need elements, metadata and the full menu tree.
+            args = {**args, 'full_output': True}
         args = self.validate(name, args)
         # Re-read app identity/activity after any attempted UI mutation, even
         # when the Driver refuses it and the existing foreground fallback runs.
@@ -656,139 +539,26 @@ class Adapter:
         return [w for w in candidates if w.get('is_on_screen') is True
                 or (w in offscreen and w['window_id'] == focused)]
 
-    @staticmethod
-    def native_window_key(window):
-        bounds = window.get('bounds') or {}
-        return (window['window_id'], tuple(bounds.get(name) for name in
-                                           ('x', 'y', 'width', 'height')))
 
-    def verify_native_window(self, state, window, parents=()):
-        """Resolve a native window directly or as one parent's exact AXSheet."""
-        try:
-            result = self.call('get_window_state', {
-                'pid': state['pid'], 'window_id': window['window_id'],
-                'include_screenshot': False, 'include_accessibility_tree': True})
-        except ActionError:
-            return False
-        raw = data(result)
-        roots = [element for element in raw.get('elements', [])
-                 if element.get('depth', 0) == 0 and element.get('role') == 'AXWindow']
-        if (raw.get('pid') != state['pid']
-                or raw.get('window_id') != window['window_id']):
-            return False
-        if len(roots) == 1:
-            return True
-        if rectangle(window.get('bounds')) is None:
-            return False
-        sources = set()
-        for parent in parents:
-            if (parent['window_id'] == window['window_id']
-                    or parent.get('pid', state['pid']) != state['pid']):
-                continue
-            try:
-                parent_raw = data(self.call('get_window_state', {
-                    'pid': state['pid'], 'window_id': parent['window_id'],
-                    'include_screenshot': False, 'include_accessibility_tree': True}))
-            except ActionError:
-                continue
-            if (parent_raw.get('pid') != state['pid']
-                    or parent_raw.get('window_id') != parent['window_id']):
-                continue
-            sheet = attached_sheet_elements(parent_raw.get('elements', []), window['bounds'])
-            if sheet and sheet[0].get('role') == 'AXSheet':
-                sources.add(parent['window_id'])
-        return len(sources) == 1
-
-    def interaction_windows(self, state, verify_native=False):
-        """Add same-process top-level windows omitted by driver list_windows."""
+    def interaction_windows(self, state):
+        """Use Driver's all-layer, filtered inventory and read app-local focus."""
         rows = self.visible_windows(state)
-        try:
-            native = native_window_inventory(state['pid'])
-        except OSError as error:
-            state['native_inventory_error'] = str(error)
-            return rows
-        state.pop('native_inventory_error', None)
-        # Use one live on-screen ordering for both Driver and supplemental rows.
-        # The all-windows inventory can rank a stale document above its open panel.
-        live_order = {window['window_id']: window['z_index'] for window in native
-                      if window.get('pid') == state['pid'] and window.get('is_on_screen') is True
-                      and type(window.get('z_index')) is int}
-        rows = [{**window, 'z_index': live_order[window['window_id']]}
-                if window['window_id'] in live_order else window for window in rows]
-        known = {window['window_id'] for window in rows}
-        extra = [window for window in native
-                 if window.get('pid') == state['pid']
-                 and window['window_id'] not in known
-                 and window.get('is_on_screen') is True
-                 and window.get('bounds', {}).get('width', 0) > 0
-                 and window.get('bounds', {}).get('height', 0) > 0]
-        cache = state.setdefault('native_window_validation', {})
-        # A sheet can move between Driver and supplemental inventories when
-        # its app becomes active. Keep validation for the same live ID/frame.
-        live = {self.native_window_key(window) for window in rows + extra}
-        for key in cache.keys() - live:
-            del cache[key]
-        if verify_native:
-            for window in sorted(extra, key=lambda item: item.get('z_index', -1), reverse=True):
-                key = self.native_window_key(window)
-                if cache.get(key) is not True:
-                    self.invalidate()
-                    state['fresh'] = False
-                    cache[key] = self.verify_native_window(state, window, rows + extra)
-        supplemental = []
-        for window in extra:
-            verified = cache.get(self.native_window_key(window))
-            if verified is not False:
-                supplemental.append({**window, 'native_verified': verified})
-        combined = rows + supplemental
         try:
             focused_id = native_focused_window_id(state['pid'])
         except (OSError, AttributeError):
             focused_id = None
-        if focused_id is not None and any(w['window_id'] == focused_id for w in combined):
-            # Background input can focus an already-open document without
-            # changing WindowServer order. Stack order is only a fallback.
-            combined = [{**w, 'is_focused': w['window_id'] == focused_id} for w in combined]
-        return combined
+        if focused_id is not None and any(w['window_id'] == focused_id for w in rows):
+            rows = [{**w, 'is_focused': w['window_id'] == focused_id} for w in rows]
+        return rows
 
     def windows(self, state):
-        return self.selected_window(state, self.interaction_windows(state, verify_native=True))
+        return self.selected_window(state, self.interaction_windows(state))
 
     def selected_window(self, state, rows):
-        if any(w.get('is_focused') is True for w in rows):
-            state.pop('focus_hint', None)
-            return self.current_window(rows)
-        hint = state.get('focus_hint')
-        frames = [self.frame(w) for w in sorted(rows, key=lambda w: w['window_id'])]
-        if hint and hint['frames'] == frames:
-            matches = [w for w in rows if w['window_id'] == hint['window_id']]
-            if len(matches) == 1:
-                return matches[0]
-        state.pop('focus_hint', None)
         return self.current_window(rows)
 
     @staticmethod
     def current_window(rows):
-        ranked_verified = [w for w in rows
-                           if not (w.get('native_inventory') is True
-                                   and w.get('native_verified') is None)
-                           and type(w.get('z_index')) is int]
-        verified_top = max((w['z_index'] for w in ranked_verified), default=None)
-        unknown = [w for w in rows if w.get('native_inventory') is True
-                   and w.get('native_verified') is None
-                   and type(w.get('z_index')) is int
-                   and (verified_top is None or w['z_index'] >= verified_top)]
-        if unknown:
-            raise ValueError('WindowUnverified: a new native surface must be observed before input')
-        native = [w for w in rows if w.get('native_inventory') is True]
-        if native:
-            ranked = [w for w in rows if type(w.get('z_index')) is int]
-            top = max((w['z_index'] for w in ranked), default=None)
-            winners = [w for w in native if w.get('z_index') == top]
-            if len(winners) == 1:
-                return winners[0]
-            if winners:
-                raise ValueError('WindowAmbiguous: multiple native windows are frontmost')
         focused = [w for w in rows if w.get('is_focused') is True]
         if len(focused) == 1:
             return focused[0]
@@ -807,16 +577,6 @@ class Adapter:
     @staticmethod
     def frame(window):
         return (window['window_id'], window.get('bounds'))
-
-    def focus_window(self, state, active_window, allow_correction=False,
-                     keyboard=False, observation_fresh=False, activate=False):
-        try:
-            return self._focus_window(state, active_window, allow_correction,
-                                      keyboard, observation_fresh, activate)
-        except (ValueError, ActionError) as error:
-            self.record({'phase': 'attachment_rejected', 'window_id': active_window['window_id'],
-                         'reason': str(error)})
-            raise
 
 
     def verify_frame(self, state, window):
@@ -987,10 +747,6 @@ class Adapter:
                 raise ValueError('AttachmentUnverified: keyboard AX refresh failed; input not sent')
             if len(chain) == 1 and not state['attachment_ax'][window['window_id']]:
                 raise ValueError('AttachmentUnverified: no proven AX parent or accessible target; input not sent')
-            if (state.get('attachment_focus_reported')
-                    and (state.get('attachment_focus_count') != 1
-                         or state.get('attachment_focused') != {window['window_id']})):
-                raise ValueError('AttachmentUnverified: focused-control evidence conflicts with target; input not sent')
             self.record({'phase': 'keyboard_focus_refreshed', 'window_id': window['window_id'],
                          'chain': chain, 'focus_reported': state.get('attachment_focus_reported'),
                          'focus_count': state.get('attachment_focus_count')})
@@ -1000,111 +756,13 @@ class Adapter:
             raise
 
 
-    def _focus_window(self, state, active_window, allow_correction=False,
-                      keyboard=False, observation_fresh=False, activate=False):
-        wid = active_window['window_id']
-        if (wid in state.get('attachments', {}) or wid in state.get('unresolved_windows', set())
-                or wid in state.get('attachment_conflicts', set())):
-            rows = self.interaction_windows(state)
-            chain = self.attachment_chain(state, wid, rows)
-            if len(chain) < 2:
-                raise ValueError('AttachmentUnverified: no proven AX parent; input not sent')
-            if activate and state.get('app_active') is not True:
-                # Attached sheets are not necessarily ordinary layer-0 windows.
-                # Activate the owning app, then prove the exact surface below.
-                try:
-                    self.call('bring_to_front', {'pid': state['pid']})
-                except ActionError as error:
-                    if data(error.result).get('code') != 'ambiguous_window_target':
-                        raise
-                    activation = activate_application(state['pid'], state['bundle_id'],
-                                                      timeout=self.driver.timeout)
-                    self.record({'phase': 'application_activation', 'result': activation})
-                rows = self.interaction_windows(state, verify_native=True)
-                self.inspect_window_relationships(state, active_window, rows)
-                if self.attachment_chain(state, wid, rows) != chain:
-                    raise ValueError('WindowChanged: attachment changed during activation; input not sent')
-                observation_fresh = True
-            if state.get('app_active') is not True:
-                raise ValueError('AttachmentUnverified: owning app is not confirmed foreground')
-            ranked = [row for row in rows if type(row.get('z_index')) is int]
-            if len(ranked) != len(rows):
-                raise ValueError('AttachmentUnverified: frontmost surface is unknown')
-            top = max(row['z_index'] for row in ranked)
-            front = [row['window_id'] for row in ranked if row['z_index'] == top]
-            if len(front) != 1:
-                raise ValueError('AttachmentUnverified: ambiguous frontmost surface')
-            front_chain = self.attachment_chain(state, front[0], rows)
-            if wid not in front_chain:
-                raise ValueError('AttachmentUnverified: another surface blocks the target')
-            focus_evidence = 'not_required'
-            if keyboard:
-                if not observation_fresh:
-                    raise ValueError('AttachmentUnverified: fresh focused-control observation is missing; observe again')
-                if state.get('attachment_focus_reported'):
-                    if (state.get('attachment_focus_count') != 1
-                            or state.get('attachment_focused') != {wid}):
-                        raise ValueError('AttachmentUnverified: focused-control evidence conflicts with target; input not sent')
-                    focus_evidence = 'explicit'
-                else:
-                    # Missing AX focus is unknown, not a negative report. Let macOS
-                    # deliver keys only when this verified surface is itself frontmost.
-                    if front[0] != wid:
-                        raise ValueError('AttachmentUnverified: keyboard target is not the frontmost surface')
-                    focus_evidence = 'unreported_frontmost_surface'
-            self.record({'phase': 'attachment_verified', 'window_id': wid, 'chain': chain,
-                         'front_chain': front_chain, 'keyboard': keyboard, 'focus_evidence': focus_evidence,
-                         'edges': [state['attachments'][child] for child in chain[:-1]]})
-            return active_window
-        if (active_window.get('native_inventory') is True
-                and active_window.get('native_verified') is True):
-            if state.get('app_active') is not True:
-                raise ValueError('Window focus was not verified; input not sent. Observe again.')
-            return active_window
-        try:
-            focus = self.call('bring_to_front', {'pid': state['pid'], 'window_id': active_window['window_id']})
-        except ActionError as error:
-            focus = error.result
-        if data(focus).get('exact_window_effect', {}).get('verified') is not True:
-            report = data(focus)
-            observed = report.get('observed', {})
-            wid = observed.get('focused_window_id')
-            # One bounded correction before input; never reinterpret screenshot coordinates.
-            if (not allow_correction
-                    or report.get('code') != 'bring_to_front_exact_window_unverified'
-                    or report.get('pid') != state['pid']
-                    or report.get('window_id') != active_window['window_id']
-                    or type(wid) is not int or wid == active_window['window_id']
-                    or observed.get('front_process_matches_target') is not True
-                    or observed.get('frontmost_pid') != state['pid']
-                    or observed.get('workspace_frontmost_pid') != state['pid']
-                    or observed.get('frontmost_ordinary_window_id') != wid):
-                if failed(focus):
-                    raise ActionError(focus)
-                raise ValueError('Window focus was not verified; input not sent. Observe again.')
-            rows = self.interaction_windows(state)
-            matches = [w for w in rows if w['window_id'] == wid]
-            if len(matches) != 1:
-                raise ValueError('WindowChanged: reported focus is not a visible app window; input not sent')
-            corrected = matches[0]
-            focus = self.call('bring_to_front', {'pid': state['pid'], 'window_id': wid})
-            if data(focus).get('exact_window_effect', {}).get('verified') is not True:
-                raise ValueError('Window focus correction was not verified; input not sent')
-            active_window = corrected
-            state.update(window=corrected, focus_hint={
-                'window_id': wid,
-                'frames': [self.frame(w) for w in sorted(rows, key=lambda w: w['window_id'])]})
-            clear_image(state)
-        return active_window
-
-
     def observe(self, state, method, disable_diff=False):
         if method != 'getScreenshot':
             state.update(attachments={}, attachment_ax={}, attachment_focused=set(), unresolved_windows=set())
             self.invalidate()
             state['fresh'] = False
             clear_image(state)
-        rows = sorted(self.interaction_windows(state, verify_native=True), key=lambda w: w['window_id'])
+        rows = sorted(self.interaction_windows(state), key=lambda w: w['window_id'])
         try:
             current = self.selected_window(state, rows)
         except ValueError:
@@ -1128,8 +786,7 @@ class Adapter:
         if current is not None:
             wid = current['window_id']
             child = dict(snapshots.get(wid, {}))
-            child.update(pid=state['pid'], bundle_id=state.get('bundle_id'),
-                         native_inventory_error=state.get('native_inventory_error'))
+            child.update(pid=state['pid'], bundle_id=state.get('bundle_id'))
             observation = self.observe_window(
                 child, 'getAXStateAndScreenshot' if method == 'getAXStateAndScreenshot' else 'getAXState',
                 current, disable_diff, scope=('window', wid))
@@ -1265,8 +922,6 @@ class Adapter:
                 notices.append('AX tree incomplete: ' + str(raw.get('truncation_reason', 'truncated')))
             if raw.get('degraded_reason') and sheet_bounds is None:
                 notices.append('AX unavailable: ' + str(raw['degraded_reason']))
-            if state.get('native_inventory_error'):
-                notices.append('Native window inventory unavailable: ' + state['native_inventory_error'])
             title += ', Window ID: ' + str(shown['window_id'])
             if display_window and popover:
                 title += ', Popover window ID: ' + str(display_window['window_id'])
@@ -1319,57 +974,13 @@ class Adapter:
             raise ValueError('Coordinates fall outside the observed screenshot')
         return {'x': x, 'y': y}
 
-    def element_point(self, state, element):
-        if state.get('image_frame') != self.frame(state['window']):
-            raise ValueError('UnsupportedCapability: indexed pixel fallback requires a current screenshot')
-        bounds = state.get('image_bounds')
-        frame = rectangle(element.get('frame'))
-        size = state.get('image_size')
-        if (not bounds or not frame or not isinstance(size, tuple) or len(size) != 2
-                or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
-                       for value in (*size, bounds[2], bounds[3], frame[2], frame[3]))):
-            raise ValueError('UnsupportedCapability: element lacks verified screenshot geometry')
-        left, top = max(frame[0], bounds[0]), max(frame[1], bounds[1])
-        right = min(frame[0] + frame[2], bounds[0] + bounds[2])
-        bottom = min(frame[1] + frame[3], bounds[1] + bounds[3])
-        if right <= left or bottom <= top:
-            raise ValueError('UnsupportedCapability: element is outside the current screenshot')
-        x = ((left + right) / 2 - bounds[0]) * size[0] / bounds[2]
-        y = ((top + bottom) / 2 - bounds[1]) * size[1] / bounds[3]
-        return {'x': round(x, 2), 'y': round(y, 2)}
 
     def pixel_click_route(self, state, window, params, *, foreground=False):
-        attached = window['window_id'] in state.get('attachments', {})
-        if not attached and not (window.get('native_inventory') is True
-                and window.get('native_verified') is True):
-            return ({'pid': state['pid'], 'window_id': window['window_id']},
-                    {**params, 'delivery_mode': 'foreground' if foreground else 'background'})
-        report = state.get('image_background_input') or {}
-        exact = report.get('exact_window') or {}
-        bounds = state.get('image_bounds')
-        size = state.get('image_size')
-        if (exact.get('pid') != state['pid'] or exact.get('window_id') != window['window_id']
-                or exact.get('status') not in ({'matched', 'ax_unresolved'} if attached else {'matched'})
-                or not bounds or not isinstance(size, tuple) or len(size) != 2
-                or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
-                       for value in (*size, bounds[2], bounds[3]))):
-            raise ValueError('UnsupportedCapability: supplemental window lacks exact screenshot geometry')
-        if not foreground:
-            # A supplemental window is still an exact window target. Only the
-            # foreground fallback needs the legacy desktop-coordinate mapping.
-            return ({'pid': state['pid'], 'window_id': window['window_id']},
-                    {**params, 'delivery_mode': 'background'})
-        screen_x = bounds[0] + params['x'] * bounds[2] / size[0]
-        screen_y = bounds[1] + params['y'] * bounds[3] / size[1]
-        # 0.32: desktop-scope x/y are native desktop-screenshot pixels, which
-        # the driver divides by the display backing scale. Pre-multiply so the
-        # logical screen point computed above is the point actually clicked.
-        ratio = self.desktop_ratio()
-        return ({'scope': 'desktop'},
-                {**params, 'x': round(screen_x * ratio, 2), 'y': round(screen_y * ratio, 2),
-                 'delivery_mode': 'foreground'})
+        # Keep the exact window and its screenshot coordinate space on both paths.
+        return ({'pid': state['pid'], 'window_id': window['window_id']},
+                {**params, 'delivery_mode': 'foreground' if foreground else 'background'})
 
-    def verify_attached_point(self, state, window, params, rows, *, desktop=False):
+    def verify_attached_point(self, state, window, params, rows):
         """Upstream chain/occlusion checks using Box-Agent screenshot pixels."""
         chain = self.attachment_chain(state, window['window_id'], rows)
         bounds, size = state.get('image_bounds'), state.get('image_size')
@@ -1377,12 +988,8 @@ class Adapter:
                 or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
                        for v in (*size, bounds[2], bounds[3]))):
             raise ValueError('AttachmentUnverified: pixel input requires verified screenshot geometry')
-        if desktop:
-            ratio = self.desktop_ratio()
-            x, y = params['x'] / ratio, params['y'] / ratio
-        else:
-            x = bounds[0] + params['x'] * bounds[2] / size[0]
-            y = bounds[1] + params['y'] * bounds[3] / size[1]
+        x = bounds[0] + params['x'] * bounds[2] / size[0]
+        y = bounds[1] + params['y'] * bounds[3] / size[1]
         containing = [row for row in rows if row['window_id'] in chain
                       and (b := rectangle(row.get('bounds')))
                       and b[0] <= x < b[0] + b[2] and b[1] <= y < b[1] + b[3]]
@@ -1450,7 +1057,9 @@ class Adapter:
             raise ValueError('Invalid app reference; acquire it again with cua.getApp')
         state = self.handles[handle]
         if method == 'listWindows':
-            rows = self.interaction_windows(state, verify_native=True)
+            rows = self.interaction_windows(state)
+            if not rows:
+                return []
             active = self.selected_window(state, rows)
             return [{'id': w['window_id'], 'title': w.get('title', ''), 'bounds': w.get('bounds'),
                      'layer': w.get('layer', 0), 'isActive': self.frame(w) == self.frame(active),
@@ -1475,9 +1084,6 @@ class Adapter:
             raise ValueError('WindowUnavailable: no current window for keyboard or coordinate input; observe again')
         identity = {'pid': state['pid'], 'window_id': target_window['window_id']}
         name, params = '', {}
-        pixel_fallback = False
-        field_focus_frame = None
-        panel_confirm_frame = None
         if method == 'click':
             opts = args.get('options', {})
             if not isinstance(opts, dict) or opts.keys() - {'mouseButton', 'clickCount', 'action'}:
@@ -1499,21 +1105,6 @@ class Adapter:
                 if ax_actions[action] not in state['elements'][args['target']].get('actions', []):
                     raise ValueError('AX action not advertised by this element; observe again')
                 params['action'] = action
-                if action == 'confirm':
-                    element = state['elements'][args['target']]
-                    if element.get('role') == 'AXTextField':
-                        panel_confirm_frame = rectangle(element.get('frame'))
-            if (action == 'press' and 'element_token' in params and count == 1 and button == 'left'
-                    and 'AXPress' not in state['elements'][args['target']].get('actions', [])):
-                element = state['elements'][args['target']]
-                if element.get('role') == 'AXTextField':
-                    field_focus_frame = rectangle(element.get('frame'))
-                self.observe(state, 'getScreenshot')
-                active_window = state['window']
-                target_window = active_window
-                identity['window_id'] = active_window['window_id']
-                params = self.element_point(state, element)
-                pixel_fallback = True
             if 'element_token' in params and count != 1:
                 if count != 2 or button != 'left':
                     raise ValueError('UnsupportedCapability: indexed clicks support one click or left double click')
@@ -1535,7 +1126,7 @@ class Adapter:
             if 'x' not in start:
                 raise ValueError('drag requires two coordinate pairs')
             name = 'drag'
-            params = dict(from_x=start['x'], from_y=start['y'], to_x=end['x'], to_y=end['y'], delivery_mode='foreground')
+            params = dict(from_x=start['x'], from_y=start['y'], to_x=end['x'], to_y=end['y'], delivery_mode='background')
         elif method == 'scroll':
             direction = args.get('direction')
             direction = {'u': 'up', 'd': 'down', 'l': 'left', 'r': 'right'}.get(direction, direction)
@@ -1560,7 +1151,7 @@ class Adapter:
                     or opts.keys() - {'format'} or opts.get('format', 'text') != 'text'):
                 raise ValueError('paste requires a string and optional {format: "text"}; rich text is unsupported')
             self.validate('clipboard_write', {'text': args['text']})
-            name, params = 'press_key', {'key': 'v', 'modifiers': ['cmd'], 'delivery_mode': 'background'}
+            name, params = 'hotkey', {'keys': ['cmd', 'v'], 'delivery_mode': 'background'}
         elif method == 'pressKey':
             key = args.get('key')
             if not isinstance(key, str) or not key or any(not k for k in key.split('+')):
@@ -1570,22 +1161,42 @@ class Adapter:
             keys = [aliases.get(k.lower(), k.lower()) for k in key.split('+')]
             if any(k not in {'cmd', 'ctrl', 'shift', 'option', 'fn'} for k in keys[:-1]):
                 raise ValueError('pressKey requires modifiers followed by one key')
-            name = 'press_key'
-            params = {'key': keys[-1], 'modifiers': keys[:-1], 'delivery_mode': 'background'}
-            if indexed and keys == ['return']:
-                element = state['elements'][args['target']]
-                if element.get('role') == 'AXTextField':
-                    panel_confirm_frame = rectangle(element.get('frame'))
+            name = 'hotkey' if len(keys) > 1 else 'press_key'
+            params = {**({'keys': keys} if len(keys) > 1 else {'key': keys[0]}),
+                      'delivery_mode': 'background'}
         else:
             raise ValueError('Unknown native App method: ' + method)
         if targeted_input:
             params.update(self.target(state, args['target']))
         if 'deliveryMode' in args:
             mode = args['deliveryMode']
-            if mode not in {'background', 'foreground'} or method not in {'click', 'typeText', 'pressKey', 'paste'}:
+            if mode not in {'background', 'foreground'} or method not in {'click', 'drag', 'scroll', 'typeText', 'pressKey', 'paste'}:
                 raise ValueError('Invalid delivery mode for this action')
             params['delivery_mode'] = mode
-        # All argument failures precede input delivery; indexed pixel fallback may take a screenshot.
+        # A token belongs to the AX snapshot's source window. Driver 0.38
+        # derives keyboard delivery's window from that token, even if another
+        # window_id is supplied. Never send parent-scoped keys to an attachment.
+        if targeted_input:
+            surface = state.get('element_surfaces', {}).get(args['target'])
+            if (target_window['window_id'] != active_window['window_id']
+                    or (surface is not None and surface['window_id'] != target_window['window_id'])):
+                element = state['elements'][args['target']]
+                if (method == 'pressKey' and keys == ['return']
+                        and params['delivery_mode'] == 'background'
+                        and surface is not None
+                        and surface['window_id'] == active_window['window_id']
+                        and element.get('role') == 'AXTextField'
+                        and 'AXConfirm' in element.get('actions', [])):
+                    # Confirm the specific field through its retained AX element;
+                    # no keyboard focus preparation, activation or token rewriting.
+                    name, params = 'click', {
+                        **self.target(state, args['target']), 'action': 'confirm',
+                        'button': 'left', 'delivery_mode': 'background'}
+                else:
+                    raise ValueError('AttachmentKeyboardUnsupported: element token belongs to the '
+                                     'AX source window, not the active input surface. Observe again '
+                                     'and use an advertised semantic action; no input sent.')
+        # Validate all arguments before input delivery.
         self.validate(name, {**identity, **params})
         if method in {'pressKey', 'typeText', 'paste'} and not indexed:
             self.refresh_keyboard_focus(state, active_window)
@@ -1605,8 +1216,7 @@ class Adapter:
                 if method == 'drag' or (method == 'scroll' and 'x' in params):
                     raise ValueError('UnsupportedCapability: attached-surface drag/coordinate scroll needs occlusion proof')
                 if 'x' in params:
-                    self.verify_attached_point(state, active_window, params, rows,
-                                               desktop=identity.get('scope') == 'desktop')
+                    self.verify_attached_point(state, active_window, params, rows)
             if (active_window['window_id'] in state.get('unresolved_windows', set())
                     and active_window['window_id'] not in state.get('attachments', {})
                     and not any(e.get('role') == 'AXToolbar' for e in state.get('elements', {}).values())):
@@ -1621,126 +1231,16 @@ class Adapter:
         check_windows()
         self.invalidate()
         def foreground_delivery(reason):
-            nonlocal active_window, target_window, identity, params
-            if (reason not in {'explicit_request', 'driver_foreground_only'}
-                    or self.panel_focus.identity is not None):
-                self.clear_action_app_inventory()
-            self.panel_focus.close()
-            self.record({'phase': 'foreground_delivery', 'tool': name, 'reason': reason,
-                         'pid': state['pid'], 'window_id': target_window['window_id']})
-            # Retain the original adapter's verified focus and desktop-key route.
-            focus_target = (state.get('element_surfaces', {}).get(args.get('target'), active_window)
-                            if indexed and not pixel_fallback else active_window)
-            corrected = self.focus_window(
-                state, focus_target,
-                not targeted_input and ((indexed and not pixel_fallback)
-                                        or method in {'pressKey', 'typeText', 'paste'}),
-                keyboard=method in {'pressKey', 'typeText', 'paste'}, observation_fresh=True, activate=True)
-            if corrected['window_id'] != focus_target['window_id']:
-                active_window = corrected
-                if not indexed:
-                    target_window = corrected
-                    if 'window_id' in identity:
-                        identity['window_id'] = corrected['window_id']
-            if method == 'click' and 'x' in params and state.get('image_frame') != self.frame(active_window):
-                # Activation may invalidate the earlier capture. Obtain geometry
-                # after activation instead of dispatching with a cleared image.
-                self.observe(state, 'getScreenshot')
-                if self.frame(state['window']) != self.frame(active_window):
-                    raise ValueError('WindowChanged: click target changed during activation; observe again')
-                if pixel_fallback:
-                    params = {**self.element_point(state, element), 'button': button, 'count': count,
-                              'delivery_mode': 'background'}
-                    identity = {'pid': state['pid'], 'window_id': active_window['window_id']}
+            self.clear_action_app_inventory()
             check_windows()
-            # Explicit fields keep their snapshot token, PID and source window;
-            # Driver resolves/focuses that field and rejects stale identities.
-            # Desktop keys are reserved for unaddressed keyboard input.
-            if method in {'pressKey', 'paste'} and not targeted_input:
-                chord = ['cmd', 'v'] if method == 'paste' else keys
-                return self.call('hotkey' if len(chord) > 1 else 'press_key', {
-                    'scope': 'desktop', **({'keys': chord} if len(chord) > 1 else {'key': chord[0]})})
-            if method == 'click' and 'x' in params:
-                click_identity, click_params = self.pixel_click_route(
-                    state, target_window, params, foreground=True)
-                return self.call(name, {**click_identity, **click_params})
+            self.record({'phase': 'foreground_delivery', 'tool': name, 'reason': reason,
+                         **identity})
             return self.call(name, {**identity, **params, 'delivery_mode': 'foreground'})
 
         def deliver():
-            # Parent tokens remain scoped to the parent snapshot. Resolve only
-            # extracted sheet semantic actions through the verified native path.
-            sheet_root = next(iter(state.get('elements', {}).values()), {})
-            if (indexed and not pixel_fallback and target_window != active_window
-                    and sheet_root.get('role') == 'AXSheet'
-                    and rectangle(state['elements'][args['target']].get('frame')) is not None
-                    and (method == 'setValue' or (method == 'click' and name == 'click'))
-                    and params.get('delivery_mode') != 'foreground'):
-                report = perform_sheet_action(
-                    state['pid'], active_window['window_id'], rectangle(active_window.get('bounds')),
-                    state['elements'][args['target']],
-                    'set_value' if method == 'setValue' else ax_actions[action],
-                    value=args.get('value') if method == 'setValue' else None,
-                    timeout=self.driver.timeout)
-                self.record({'phase': 'sheet_semantic_action', 'tool': name, **report})
-                if report['effect'] == 'not_sent':
-                    raise ActionError({'isError': True, 'structuredContent': report,
-                                       'content': [{'type': 'text', 'text': report['code']}]})
-                return {'structuredContent': report}
-            if identity.get('scope') == 'desktop' or params.get('delivery_mode') == 'foreground':
-                return foreground_delivery('explicit_request' if args.get('deliveryMode') == 'foreground'
-                                           else 'driver_foreground_only')
-            if (not indexed
-                    and method == 'pressKey' and params['key'] == 'escape' and not params['modifiers']):
-                report = deliver_search_escape(
-                    state['pid'], active_window['window_id'],
-                    frame=rectangle(active_window.get('bounds')), timeout=self.driver.timeout)
-                if report is not None:
-                    self.record({'phase': 'search_escape', 'tool': name, **report})
-                    if report['effect'] != 'not_sent':
-                        return {'structuredContent': report}
-            if (not indexed and (method == 'typeText' or
-                    (method == 'pressKey' and supports_focused_editor_key(params['key'], params['modifiers'])))):
-                # The helper never prepares focus or activates the application.
-                report = deliver_focused_editor(
-                    state['pid'], active_window['window_id'],
-                    frame=rectangle(active_window.get("bounds")), timeout=self.driver.timeout,
-                    **({'text': args['text']} if method == 'typeText'
-                       else {'key': params['key'], 'modifiers': params['modifiers']}))
-                if report is not None:
-                    self.record({'phase': 'focused_editor', 'tool': name, **report})
-                    if report['effect'] != 'not_sent':
-                        return {'structuredContent': report}
-            if field_focus_frame is not None:
-                report = focus_panel_field(state['pid'], active_window['window_id'],
-                                           field_focus_frame, timeout=self.driver.timeout)
-                if report is not None:
-                    self.record({'phase': 'panel_field_focus', 'tool': name, **report})
-                    if report['effect'] != 'not_sent':
-                        return {'structuredContent': report}
-            if panel_confirm_frame is not None:
-                report = deliver_panel_key(
-                    state['pid'], active_window['window_id'], 'return', [],
-                    timeout=self.driver.timeout, session=self.panel_focus,
-                    field_frame=panel_confirm_frame)
-                if report is not None:
-                    self.record({'phase': 'panel_confirm', 'tool': name, **report})
-                    if report['effect'] != 'not_sent':
-                        return {'structuredContent': report}
-            if method == 'pressKey' and not indexed:
-                report = deliver_panel_key(
-                    state['pid'], active_window['window_id'], params['key'],
-                    params['modifiers'], timeout=self.driver.timeout, session=self.panel_focus)
-                if report is not None:
-                    self.record({'phase': 'panel_keyboard', 'tool': name,
-                                 'key': params['key'], 'modifiers': params['modifiers'],
-                                 'timestamp': time.time(), **report})
-                    if report['effect'] != 'not_sent':
-                        return {'structuredContent': report}
-                    if report.get('code') == 'panel_focus_unavailable':
-                        check_windows()
-                        return foreground_delivery(report['code'])
-            if method in {'pressKey', 'paste', 'typeText'}:
-                self.panel_focus.close()
+            if params.get('delivery_mode') == 'foreground':
+                return foreground_delivery('explicit_request')
+            # Driver establishes and verifies focus.
             try:
                 return self.call(name, {**identity, **params})
             except ActionError as error:
@@ -1756,13 +1256,14 @@ class Adapter:
                     self.record({'phase': 'ax_action_uncertain', 'tool': name,
                                  'pid': state['pid'], 'error': error.result})
                     return {'structuredContent': {'effect': 'unverifiable'}}
-                # Never replay unknown/partial effects, stale targets, or transport errors.
+                # Only a definite pre-delivery refusal can enter another route.
+                # Stale targets, transport failures and partial/unknown effects stop.
                 if (params.get('delivery_mode') != 'background'
-                        or not (report.get('code') == 'background_unavailable'
-                                or (report.get('code') in {'same_pid_keyboard_ambiguity',
-                                                            'off_space_or_ax_unresolved'}
-                                    and report.get('effect') == 'refused'))
-                        or report.get('effect') not in (None, 'not_sent', 'refused')):
+                        or args.get('deliveryMode') == 'background'
+                        or report.get('code') != 'background_unavailable'
+                        or report.get('escalation', {}).get('recommended') not in {None, 'foreground'}
+                        or target_window['window_id'] != active_window['window_id']
+                        or report.get('effect') not in {'not_sent', 'refused'}):
                     raise
                 check_windows()
                 self.record({'phase': 'foreground_fallback', 'tool': name,
@@ -1794,25 +1295,22 @@ class Adapter:
                 raise ValueError(message) from error
         else:
             result = deliver()
-        effect = data(result).get('effect')
-        if effect and effect != 'confirmed':
-            return {'effect': effect}
-        return {}
+        report = data(result)
+        output = {key: report[key] for key in (
+            'effect', 'code', 'path', 'delivery_mode', 'delivered_chars', 'hint', 'reason', 'escalation')
+            if key in report}
+        messages = [item['text'] for item in result.get('content', [])
+                    if item.get('type') == 'text' and item.get('text')]
+        if messages:
+            output['messages'] = messages
+        return output
 
     def image_limit(self):
         props = self.driver.tools.get('get_window_state', {}).get('inputSchema', {}).get('properties', {})
         return {'max_image_dimension': MAX_IMAGE_DIMENSION} if 'max_image_dimension' in props else {}
 
-    def desktop_ratio(self):
-        if self.screen_ratio is None:
-            screen = data(self.call('get_screen_size', {})) if 'get_screen_size' in self.driver.tools else {}
-            scale = screen.get('scale_factor')
-            self.screen_ratio = (float(scale) if type(scale) in (int, float)
-                                 and math.isfinite(scale) and scale >= 1 else 1.0)
-        return self.screen_ratio
 
     def close(self):
-        self.panel_focus.close()
         self.deadline = None
         self.driver.deadline = None
         if self.started and 'end_session' in self.driver.tools:

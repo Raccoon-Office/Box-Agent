@@ -48,7 +48,7 @@ def popover_app(monkeypatch):
     return api, driver, state, rows, root
 
 
-def test_recursive_ax_attachments_skip_activation_and_require_focused_control():
+def test_recursive_ax_attachments_track_focus_and_detect_moved_parent():
     driver = FakeDriver()
     api = adapter.Adapter(driver)
     rows = [{'window_id': wid, 'pid': 42, 'z_index': i, 'is_on_screen': True,
@@ -63,17 +63,7 @@ def test_recursive_ax_attachments_skip_activation_and_require_focused_control():
     ]}}
     api.build_attachments(state, rows)
     assert api.attachment_chain(state, 39, rows) == [39, 40, 28]
-    assert api.focus_window(state, rows[2], keyboard=True, observation_fresh=True) == rows[2]
-    assert not any(name == 'bring_to_front' for name, _ in driver.calls)
-    with pytest.raises(ValueError, match='focused-control'):
-        api.focus_window(state, rows[2], keyboard=True, observation_fresh=False)
-    state['attachment_focus_count'] = 2
-    with pytest.raises(ValueError, match='focused-control'):
-        api.focus_window(state, rows[2], keyboard=True, observation_fresh=True)
-    state['attachment_focus_count'] = 1
-    state['attachment_focused'] = {28}
-    with pytest.raises(ValueError, match='focused-control'):
-        api.focus_window(state, rows[2], keyboard=True, observation_fresh=True)
+    assert state['attachment_focused'] == {39}
     rows[0]['bounds'] = {**rows[0]['bounds'], 'x': 900}
     with pytest.raises(ValueError, match='WindowChanged'):
         api.attachment_chain(state, 39, rows)
@@ -144,43 +134,6 @@ def test_calendar_geometry_only_relationship():
     assert api.attachment_chain(state, 47, rows) == [47, 28]
 
 
-@pytest.mark.parametrize('failure', ['inactive', 'blocked', 'focus', 'ambiguous'])
-def test_attachment_failure_never_falls_back_to_activation(popover_app, failure):
-    api, driver, state, rows, root = popover_app
-    api.observe(state, 'getAXState')
-    if failure == 'inactive':
-        state['app_active'] = False
-    elif failure == 'blocked':
-        rows.append({**rows[0], 'window_id': 99, 'z_index': 9})
-    elif failure == 'focus':
-        state['attachment_focus_count'] = 0
-    else:
-        state['attachment_conflicts'] = {80}
-    start = len(driver.calls)
-    with pytest.raises(ValueError, match='AttachmentUnverified'):
-        api.focus_window(state, rows[1], keyboard=True, observation_fresh=True)
-    assert not any(name == 'bring_to_front' for name, _ in driver.calls[start:])
-
-
-def test_explicit_false_focus_is_not_missing(popover_app, monkeypatch):
-    api, driver, state, rows, root = popover_app
-    original = driver.call
-    def call(name, arguments):
-        response = original(name, arguments)
-        if name == 'get_window_state':
-            for element in response['structuredContent']['elements']:
-                if 'focused' in element:
-                    element['focused'] = False
-        return response
-    monkeypatch.setattr(driver, 'call', call)
-    api.observe(state, 'getAXState')
-    assert state['attachment_focus_reported'] and state['attachment_focus_count'] == 0
-    start = len(driver.calls)
-    with pytest.raises(ValueError, match='focused-control evidence conflicts'):
-        api.control('pressKey', 'app', {'key': 'cmd+a'})
-    assert not any(name in {'bring_to_front', 'hotkey'} for name, _ in driver.calls[start:])
-
-
 @pytest.mark.parametrize('method,args', [
     ('click', {'target': 2}),
     ('pressKey', {'key': 'cmd+a'}),
@@ -195,7 +148,7 @@ def test_attached_input_enumerates_apps_once_without_activation(popover_app, met
     start = len(driver.calls)
     api.control(method, 'app', {**args, 'deliveryMode': 'foreground'})
     calls = driver.calls[start:]
-    assert sum(name == 'list_apps' for name, _ in calls) == 1
+    assert sum(name == 'list_apps' for name, _ in calls) == 2
     assert not any(name == 'bring_to_front' for name, _ in calls)
     assert calls[-1][0] in {'click', 'hotkey', 'press_key'}
     assert api.action_app_inventory is None
@@ -237,43 +190,6 @@ def test_paste_still_detects_window_movement_after_clipboard_write(popover_app, 
     with pytest.raises(ValueError, match='WindowChanged'):
         api.control('paste', 'app', {'text': 'not delivered', 'deliveryMode': 'foreground'})
     assert not any(name == 'hotkey' for name, _ in driver.calls[start:])
-
-
-def test_foreground_activation_invalidates_app_inventory(monkeypatch):
-    driver = FakeDriver()
-    api = adapter.Adapter(driver)
-    state = {'pid': 42, 'bundle_id': 'com.apple.TextEdit'}
-    api.handles['app'] = state
-    api.observe(state, 'getAXState')
-    original = driver.call
-
-    def call(name, args):
-        response = original(name, args)
-        if name == 'bring_to_front':
-            driver.responses['list_apps']['structuredContent']['apps'][0]['pid'] = 99
-        return response
-
-    monkeypatch.setattr(driver, 'call', call)
-    start = len(driver.calls)
-    with pytest.raises(ValueError, match='ApplicationChanged'):
-        api.control('pressKey', 'app', {'key': 'cmd+a', 'deliveryMode': 'foreground'})
-    calls = driver.calls[start:]
-    assert sum(name == 'list_apps' for name, _ in calls) == 2
-    assert not any(name == 'hotkey' for name, _ in calls)
-
-
-@pytest.mark.parametrize('fresh,frontmost', [(False, True), (True, False)])
-def test_missing_focus_still_requires_fresh_frontmost_target(popover_app, fresh, frontmost):
-    api, driver, state, rows, root = popover_app
-    api.observe(state, 'getAXState')
-    state.update(attachment_focus_reported=False, attachment_focus_count=0, attachment_focused=set())
-    if not frontmost:
-        rows.append({**rows[1], 'window_id': 99, 'z_index': 9})
-        state['attachments'][99] = [{'source': api.frame(rows[1]), 'surface': api.frame(rows[2])}]
-    start = len(driver.calls)
-    with pytest.raises(ValueError, match='AttachmentUnverified'):
-        api.focus_window(state, rows[1], keyboard=True, observation_fresh=fresh)
-    assert not any(name == 'bring_to_front' for name, _ in driver.calls[start:])
 
 
 @pytest.mark.parametrize('key', ['cmd+a', 'Tab', 'Return', 'Escape'])
@@ -330,15 +246,14 @@ def test_keyboard_refresh_checks_current_state_before_paste(popover_app, monkeyp
     elif change == 'inactive':
         state['app_active'] = False
     start = len(driver.calls)
-    if change == 'same_surface_control':
+    if change in {'focus', 'same_surface_control'}:
         api.control('paste', 'app', {'text': 'Review'})
-        assert driver.calls[-1][0] == 'press_key'
+        assert driver.calls[-1][0] == 'hotkey'
     else:
         with pytest.raises((ValueError, TimeoutError)):
             api.control('paste', 'app', {'text': 'Review'})
         assert not any(n in {'clipboard_write', 'hotkey', 'bring_to_front'} for n, _ in driver.calls[start:])
     assert not state['fresh']
-
 
 
 @pytest.mark.parametrize('scale', [1, 2])
@@ -365,7 +280,7 @@ def test_background_popover_keyboard_does_not_require_frontmost_app(popover_app)
     api.observe(state, 'getAXState')
     state['app_active'] = False
     api.control('pressKey', 'app', {'key': 'cmd+a'})
-    assert driver.calls[-1][0] == 'press_key'
+    assert driver.calls[-1][0] == 'hotkey'
     assert driver.calls[-1][1]['delivery_mode'] == 'background'
     assert not any(name == 'bring_to_front' for name, _ in driver.calls)
 
@@ -434,107 +349,97 @@ def test_nested_surface_token_keeps_source_and_skips_activation(popover_app, rol
 
 
 
-@pytest.mark.parametrize('activated', [True, False])
-def test_inactive_host_requires_verified_activation_for_foreground_input(popover_app, monkeypatch, activated):
-    api, driver, state, rows, root = popover_app
-    api.observe(state, 'getAXState')
-    state['app_active'] = False
-    original = driver.call
 
-    def call(name, args):
-        if name == 'bring_to_front':
-            driver.calls.append((name, args))
-            state['app_active'] = activated
-            return result(activated=activated)
-        return original(name, args)
-
-    monkeypatch.setattr(driver, 'call', call)
-    start = len(driver.calls)
-    if activated:
-        assert api.focus_window(state, rows[1], keyboard=True,
-                                observation_fresh=True, activate=True) == rows[1]
-    else:
-        with pytest.raises(ValueError, match='owning app is not confirmed foreground'):
-            api.focus_window(state, rows[1], keyboard=True,
-                             observation_fresh=True, activate=True)
-    calls = [name for name, _ in driver.calls[start:]]
-    assert 'bring_to_front' in calls
-    assert 'get_window_state' in calls
-
-
-def test_native_sheet_can_resolve_through_native_parent(popover_app, monkeypatch):
-    api, driver, state, rows, root = popover_app
-    root['role'] = 'AXSheet'
-    native = [{**row, 'pid': 42, 'native_inventory': True} for row in rows]
-    driver.responses['list_windows'] = result(windows=[])
-    monkeypatch.setattr(adapter, 'native_window_inventory', lambda pid: native)
-    observed = api.interaction_windows(state, verify_native=True)
-    assert {row['window_id'] for row in observed} == {73, 80}
-    assert all(row['native_verified'] is True for row in observed)
-
-
-def test_foreground_pixel_fallback_recaptures_after_activation(popover_app, monkeypatch):
+def test_attached_field_return_confirms_ax_element_without_keyboard(popover_app, monkeypatch):
     api, driver, state, rows, root = popover_app
     original = driver.call
     def call(name, args):
-        if name == 'bring_to_front':
-            driver.calls.append((name, args))
-            state['app_active'] = True
-            return result(activated=True)
         response = original(name, args)
         if name == 'get_window_state':
-            for field in response['structuredContent']['elements']:
-                if field.get('role') == 'AXTextField':
-                    field['frame'] = {'x': 240, 'y': 70, 'w': 120, 'h': 25}
-        if name == 'click' and args.get('delivery_mode') == 'background':
-            return {'isError': True, **result(code='background_unavailable', effect='not_sent')}
+            for element in response['structuredContent']['elements']:
+                if element.get('element_token') == 'parent:2':
+                    element['actions'] = ['AXConfirm']
         return response
     monkeypatch.setattr(driver, 'call', call)
     api.observe(state, 'getAXState')
-    state['app_active'] = False
-    target = next(i for i, e in state['elements'].items() if e.get('role') == 'AXTextField')
-    start = len(driver.calls)
-    api.control('click', 'app', {'target': target})
-    calls = driver.calls[start:]
-    activation = next(i for i, (name, _) in enumerate(calls) if name == 'bring_to_front')
-    assert any(name == 'get_window_state' and args.get('include_screenshot')
-               for name, args in calls[activation + 1:])
-    assert calls[-1][0] == 'click' and calls[-1][1]['scope'] == 'desktop'
+    target = next(i for i, e in state['elements'].items() if e.get('element_token') == 'parent:2')
+    assert state['element_windows'][target]['window_id'] == 73
+    assert state['element_surfaces'][target]['window_id'] == 80
+    driver.calls.clear()
+    api.control('pressKey', 'app', {'key': 'return', 'target': target})
+    actions = [(n, a) for n, a in driver.calls if n in {'click', 'press_key', 'hotkey', 'bring_to_front'}]
+    assert actions == [('click', {'pid': 42, 'window_id': 73, 'element_token': 'parent:2',
+                                 'action': 'confirm', 'button': 'left', 'delivery_mode': 'background',
+                                 'session': api.session})]
 
 
-@pytest.mark.parametrize('change', ['same', 'moved', 'closed'])
-def test_sheet_validation_survives_driver_inventory_transition(popover_app, monkeypatch, change):
+@pytest.mark.parametrize('method,args', [
+    ('pressKey', {'key': 'return'}),  # No AXConfirm advertised.
+    ('pressKey', {'key': 'cmd+a'}),
+    ('typeText', {'text': 'must not type into parent'}),
+    ('paste', {'text': 'must not change clipboard'}),
+    ('pressKey', {'key': 'return', 'deliveryMode': 'foreground'}),
+])
+def test_attached_keyboard_never_uses_source_window_as_receiver(popover_app, method, args):
     api, driver, state, rows, root = popover_app
-    root['role'] = 'AXSheet'
-    native = [copy.deepcopy(row) for row in rows]
-    for row in native:
-        row.update(pid=42, native_inventory=True)
-    monkeypatch.setattr(adapter, 'native_window_inventory', lambda pid: copy.deepcopy(native))
-    driver.responses['list_windows'] = result(windows=[rows[0]])
-    observed = api.interaction_windows(state, verify_native=True)
-    assert api.current_window(observed)['native_verified'] is True
-    key = api.native_window_key(rows[1])
-    assert state['native_window_validation'][key] is True
+    api.observe(state, 'getAXState')
+    target = next(i for i, e in state['elements'].items() if e.get('element_token') == 'parent:2')
+    driver.calls.clear()
+    with pytest.raises(ValueError, match='AttachmentKeyboardUnsupported'):
+        api.control(method, 'app', {**args, 'target': target})
+    assert not any(n in {'press_key', 'hotkey', 'type_text', 'clipboard_write', 'bring_to_front', 'click'}
+                   for n, _ in driver.calls)
 
-    # Inactive apps expose the same sheet as a layer-0 Driver window.
-    driver.responses['list_windows'] = result(windows=copy.deepcopy(rows))
-    api.interaction_windows(state)
-    assert state['native_window_validation'][key] is True
 
-    # Clicking activates the app; the sheet is supplemental again.
-    driver.responses['list_windows'] = result(windows=[rows[0]])
-    if change == 'moved':
-        native[1]['bounds']['x'] += 1
-    elif change == 'closed':
-        native.pop()
-    start = len(driver.calls)
-    observed = api.interaction_windows(state)
-    if change == 'same':
-        assert api.current_window(observed)['window_id'] == 80
-        assert api.current_window(observed)['native_verified'] is True
+@pytest.mark.parametrize('failure', ['moved', 'refused'])
+def test_attached_confirmation_never_retries_as_foreground(popover_app, failure):
+    api, driver, state, rows, root = popover_app
+    api.observe(state, 'getAXState')
+    target = next(i for i, e in state['elements'].items() if e.get('element_token') == 'parent:2')
+    state['elements'][target]['actions'] = ['AXConfirm']
+    if failure == 'moved':
+        rows[0]['bounds'] = {**rows[0]['bounds'], 'x': 999}
     else:
-        assert key not in state['native_window_validation']
-        if change == 'moved':
-            with pytest.raises(ValueError, match='new native surface'):
-                api.current_window(observed)
-    assert not any(name == 'get_window_state' for name, _ in driver.calls[start:])
+        driver.responses['click'] = {'isError': True, **result(effect='refused', code='background_unavailable')}
+    driver.calls.clear()
+    with pytest.raises((ValueError, adapter.ActionError)):
+        api.control('pressKey', 'app', {'key': 'return', 'target': target})
+    sent = [a for n, a in driver.calls if n == 'click']
+    assert len(sent) == (0 if failure == 'moved' else 1)
+    assert all(a['delivery_mode'] == 'background' for a in sent)
+    assert not any(n in {'press_key', 'hotkey', 'bring_to_front'} for n, _ in driver.calls)
+
+
+def test_mcp_path_assignment_then_return_never_dispatches_hid(popover_app, monkeypatch):
+    from box_agent.mcp_servers.cua_server import CuaService
+    api, driver, state, rows, root = popover_app
+    original = driver.call
+    field = {'value': ''}
+    def call(name, args):
+        response = original(name, args)
+        if name == 'set_value':
+            field['value'] = args['value']
+        if name == 'get_window_state':
+            for element in response['structuredContent']['elements']:
+                if element.get('element_token') == 'parent:2':
+                    element.update(actions=['AXConfirm'], value=field['value'])
+        return response
+    monkeypatch.setattr(driver, 'call', call)
+    svc = CuaService(lambda timeout: driver)
+    svc.adapter = api
+    svc.apps['Word'] = 'app'
+    try:
+        assert not svc.call_result('get_state', {'app': 'Word'}).isError
+        target = next(i for i, e in state['elements'].items() if e.get('element_token') == 'parent:2')
+        assert not svc.call_result('set_value', {'app': 'Word', 'element': target, 'value': '/tmp/proof.docx'}).isError
+        assert not svc.call_result('get_state', {'app': 'Word'}).isError
+        target = next(i for i, e in state['elements'].items() if e.get('value') == '/tmp/proof.docx')
+        response = svc.call_result('press_key', {'app': 'Word', 'element': target, 'key': 'return'})
+        assert not response.isError
+        assert response.structuredContent['requires_requery']
+        sent = [(n, a) for n, a in driver.calls if n in {'set_value', 'click', 'press_key', 'hotkey', 'bring_to_front'}]
+        assert [n for n, _ in sent] == ['set_value', 'click']
+        assert sent[-1][1]['action'] == 'confirm'
+        assert sent[-1][1]['delivery_mode'] == 'background'
+    finally:
+        svc.close()

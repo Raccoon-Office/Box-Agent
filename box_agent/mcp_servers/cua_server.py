@@ -87,7 +87,7 @@ TOOLS = [
     _tool(
         "list_windows",
         "List the app's visible windows (id, title, bounds, layer, isActive). Read-only; "
-        "a new supplemental window is verified once, which invalidates earlier element IDs.",
+        "uses the Driver window inventory.",
         {"app": _APP},
         ["app"],
     ),
@@ -107,8 +107,8 @@ TOOLS = [
     ),
     _tool(
         "click",
-        "Click an element ID or screenshot point. Elements without AXPress are clicked at the "
-        "center of their visible frame when screenshot geometry is verified.",
+        "Click an element ID or screenshot point. Driver resolves semantic element actions; "
+        "coordinate clicks require verified screenshot geometry.",
         {
             "app": _APP,
             "target": _TARGET,
@@ -167,7 +167,7 @@ TOOLS = [
 # Explicit foreground is available after observation proves a background action
 # did not land. It is never inferred from an unverifiable result alone.
 for _definition in TOOLS:
-    if _definition.name in {"click", "type_text", "press_key", "paste"}:
+    if _definition.name in {"click", "drag", "scroll", "type_text", "press_key", "paste"}:
         _definition.inputSchema["properties"]["delivery_mode"] = {
             "type": "string", "enum": ["background", "foreground"], "default": "background",
             "description": "Prefer background. Use foreground only when observation confirms the background action was ineffective or unavailable; may interrupt user input.",
@@ -219,7 +219,6 @@ class CuaService:
             self.adapter.invalidate()
             for state in self.adapter.handles.values():
                 clear_image(state)
-            self.adapter.panel_focus.close()
 
     def call_result(self, name: str, args: dict[str, Any]) -> CallToolResult:
         items, is_error = self.call(name, args)
@@ -264,7 +263,7 @@ class CuaService:
             self._error_category = "backend_error"
             detail = json.dumps(
                 {k: v for k, v in data(failure.result).items()
-                 if k in {"effect", "status", "error", "reason", "refusal", "message", "code", "foreground_attempted", "clipboard_may_have_changed"}},
+                 if k in {"effect", "status", "error", "reason", "refusal", "message", "code", "foreground_attempted", "clipboard_may_have_changed", "hint", "path", "delivered_chars", "escalation"}},
                 ensure_ascii=False,
             )
             texts = [c.get("text", "") for c in failure.result.get("content", []) if c.get("type") == "text"]
@@ -324,11 +323,13 @@ class CuaService:
             value = control("click", handle, {"target": args.get("target"), "options": options,
                 **({"deliveryMode": args["delivery_mode"]} if "delivery_mode" in args else {})})
         elif name == "drag":
-            value = control("drag", handle, {"from": args.get("from"), "to": args.get("to")})
+            value = control("drag", handle, {"from": args.get("from"), "to": args.get("to"),
+                **({"deliveryMode": args["delivery_mode"]} if "delivery_mode" in args else {})})
         elif name == "scroll":
             value = control("scroll", handle, {
                 "target": args.get("target"), "direction": args.get("direction"),
-                "pages": args.get("pages", 1)})
+                "pages": args.get("pages", 1),
+                **({"deliveryMode": args["delivery_mode"]} if "delivery_mode" in args else {})})
         elif name == "set_value":
             value = control("setValue", handle, {"target": args.get("element"), "value": args.get("value")})
         elif name == "type_text":
@@ -347,7 +348,7 @@ class CuaService:
             raise ValueError(f"Unknown tool: {name}")
         effect = value.get("effect")
         return [_text(f"Done (driver effect: {effect}). Observe to verify." if effect
-                      else "Done. Observe to verify.")]
+                      else "Done. Observe to verify."), *([_text(json.dumps(value, ensure_ascii=False))] if value.keys() - {"effect"} else [])]
 
     def close(self) -> None:
         adapter, self.adapter = self.adapter, None
