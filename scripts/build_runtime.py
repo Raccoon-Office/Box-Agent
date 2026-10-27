@@ -185,7 +185,6 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
         "box_agent.mcp_servers.web_extract",
         "box_agent.mcp_servers.web_extract_server",
         "box_agent.mcp_servers.cua_adapter",
-        "box_agent.mcp_servers.cua_panel_keyboard",
         "box_agent.mcp_servers.cua_server",
         "box_agent.retry",
         "box_agent.schema",
@@ -700,7 +699,6 @@ def build_runtime(
     datas = [
         (str(project_root / "box_agent" / "config"), "box_agent/config"),
         (str(project_root / "box_agent" / "skills"), "box_agent/skills"),
-        (str(project_root / "box_agent" / "mcp_servers" / "native"), "box_agent/mcp_servers/native"),
     ]
     datas_args = []
     for src, dst in datas:

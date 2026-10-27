@@ -12,9 +12,7 @@ import pytest
 from box_agent.mcp_servers import cua_adapter as adapter
 from box_agent.mcp_servers import cua_server
 
-from tests.test_cua_adapter_port import (
-    FakeDriver, PNG, result, no_native_input_in_fake_driver_tests,
-)
+from tests.test_cua_adapter_port import FakeDriver, PNG, result, no_native_input_in_fake_driver_tests
 
 
 @pytest.fixture
@@ -64,9 +62,8 @@ def test_get_app_observation_diff_and_silent_actions(service):
     ok(service, 'type_text', app='TextEdit', text='hello')
     ok(service, 'press_key', app='TextEdit', key='cmd+s')
     sent = [n for n, _ in driver.calls[before:]]
-    assert sent.count('get_window_state') == 2 and sent[-1] == 'press_key'
-    assert driver.calls[-1][1]['key'] == 's'
-    assert driver.calls[-1][1]['modifiers'] == ['cmd']
+    assert sent.count('get_window_state') == 2 and sent[-1] == 'hotkey'
+    assert driver.calls[-1][1]['keys'] == ['cmd', 's']
 
 
 def test_unknown_app_reference_and_stale_ids_send_no_input(service):
@@ -133,9 +130,9 @@ def test_paste_writes_clipboard_once_then_cmd_v(service):
     driver.calls.clear()
     ok(service, 'paste', app='TextEdit', text='/Users/me/报告.docx')
     actions = [(n, a) for n, a in driver.calls if n in {'bring_to_front', 'clipboard_write', 'hotkey', 'press_key'}]
-    assert [n for n, _ in actions] == ['clipboard_write', 'press_key']
+    assert [n for n, _ in actions] == ['clipboard_write', 'hotkey']
     assert actions[0][1]['text'] == '/Users/me/报告.docx'
-    assert actions[-1][1] == {'pid': 42, 'window_id': 7, 'key': 'v', 'modifiers': ['cmd'],
+    assert actions[-1][1] == {'pid': 42, 'window_id': 7, 'keys': ['cmd', 'v'],
                              'delivery_mode': 'background', 'session': service.adapter.session}
 
 
@@ -146,17 +143,6 @@ def test_032_screenshot_size_is_capped_to_model_image_limit(service):
     assert observed and all(a['max_image_dimension'] == adapter.MAX_IMAGE_DIMENSION for a in observed)
 
 
-def test_032_supplemental_desktop_click_uses_native_desktop_pixels(service):
-    ok(service, 'get_app', app='TextEdit')
-    api = service.adapter
-    state = {'pid': 42, 'image_background_input': {'exact_window': {
-        'pid': 42, 'window_id': 55, 'status': 'matched'}},
-        'image_bounds': (100.0, 200.0, 400.0, 300.0), 'image_size': (800, 600)}
-    window = {'window_id': 55, 'native_inventory': True, 'native_verified': True}
-    identity, params = api.pixel_click_route(state, window, {'x': 400, 'y': 300}, foreground=True)
-    # Window pixel (400,300) is screen point (300,350); 0.32 wants 2x desktop pixels.
-    assert identity == {'scope': 'desktop'}
-    assert (params['x'], params['y']) == (600.0, 700.0)
 
 
 @pytest.mark.parametrize('label', ['raccoon-docx', 'repl-0123'])
@@ -331,8 +317,8 @@ def _desktop_driver(service, width=1568, height=1018, original=(3024, 1964)):
 
 @pytest.mark.parametrize('tool,payload,driver_tool', [
     ('type_text', {'text': '/tmp/'}, 'type_text'),
-    ('press_key', {'key': 'cmd+a'}, 'press_key'),
-    ('paste', {'text': '/tmp/'}, 'press_key'),
+    ('press_key', {'key': 'cmd+a'}, 'hotkey'),
+    ('paste', {'text': '/tmp/'}, 'hotkey'),
 ])
 def test_explicit_input_element_reaches_driver_without_click(service, tool, payload, driver_tool):
     ok(service, 'get_app', app='TextEdit')
@@ -344,7 +330,7 @@ def test_explicit_input_element_reaches_driver_without_click(service, tool, payl
     assert args['element_token'] == 's1:1'
     assert args['pid'] == 42 and args['window_id'] == 7
     assert args['delivery_mode'] == 'background'
-    assert not any(n in {'click', 'bring_to_front', 'hotkey', 'set_value'} for n, _ in driver.calls)
+    assert not any(n in {'click', 'bring_to_front', 'set_value'} for n, _ in driver.calls)
     before = len(driver.calls)
     content, error = service.call(tool, {'app': 'TextEdit', 'element': 0, **payload})
     assert error and 'StaleElement' in texts(content)
@@ -375,13 +361,14 @@ def test_confirm_action_is_ax_and_never_pixel_fallback(service):
     assert not any(n in {'get_window_state', 'bring_to_front'} for n, _ in driver.calls)
 
 
-def test_explicit_foreground_key_restores_original_focus_then_desktop_hotkey(service):
+def test_explicit_foreground_key_keeps_exact_target_for_driver_activation(service):
     ok(service, 'get_app', app='TextEdit')
     driver = service.drivers[0]
     driver.calls.clear()
     ok(service, 'press_key', app='TextEdit', key='cmd+o', delivery_mode='foreground')
     names = [n for n, _ in driver.calls]
-    assert names.index('bring_to_front') < names.index('hotkey')
+    assert 'bring_to_front' not in names
     calls = [a for n, a in driver.calls if n == 'hotkey']
-    assert len(calls) == 1 and calls[0]['scope'] == 'desktop'
+    assert len(calls) == 1 and calls[0]['pid'] == 42 and calls[0]['window_id'] == 7
+    assert calls[0]['delivery_mode'] == 'foreground' and 'scope' not in calls[0]
     assert calls[0]['keys'] == ['cmd', 'o']
