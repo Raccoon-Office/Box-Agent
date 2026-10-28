@@ -98,6 +98,13 @@ limits, compatibility behavior, and host diagnostics.
 
 Python runs in an isolated Jupyter kernel with pre-installed data science packages (`pandas`, `numpy`, `matplotlib`, `scikit-learn`, `openpyxl`, `xlrd`). Generated files (charts, CSVs, PDFs) are automatically detected and surfaced as structured artifacts.
 
+`execute_code` keeps a bounded 32 KiB head/tail preview of stdout/stderr.
+Larger output is streamed in full to an internal file; model replies, UI events,
+and traces carry the preview and file reference instead of the full text.
+Read that file in bounded pages to recover omitted content. If output persistence
+fails, the reply explicitly reports that the full output is unavailable and keeps
+the preview, without interrupting the Agent loop or rerunning the code.
+
 ### Multi-Provider LLM
 
 One config, any provider:

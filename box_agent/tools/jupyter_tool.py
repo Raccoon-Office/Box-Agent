@@ -23,6 +23,7 @@ from typing import Any, Mapping, Optional
 
 from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
+from .jupyter_output import OutputCapture, bound_output_text
 from .python_environment import probe_python
 
 from box_agent.user_paths import state_path
@@ -1276,9 +1277,9 @@ except ImportError:
             except Exception:
                 break
 
-        stdout_parts = []
-        stderr_parts = []
-        error_parts = []
+        output_dir = self.workspace / ".box-agent" / "tool-results"
+        output = OutputCapture(output_dir)
+        errors = OutputCapture(output_dir, "error")
         images = []
 
         try:
@@ -1302,15 +1303,16 @@ except ImportError:
                         text = content.get("text", "")
                         # Strip ANSI escape codes
                         text = re.sub(r"\x1b\[[0-9;]*m", "", text)
-                        if name == "stdout":
-                            stdout_parts.append(text)
-                        elif name == "stderr":
-                            # Collect stderr separately — only treat as error
-                            # if there's also an explicit error message
-                            stderr_parts.append(text)
+                        if name in ("stdout", "stderr"):
+                            # Warnings remain ordinary output, not execution
+                            # errors. Both streams share one bounded preview.
+                            output.append(text)
 
                     elif msg_type == "error":
-                        error_parts.append(f"{content.get('ename')}: {content.get('evalue')}")
+                        errors.append(str(content.get("ename")))
+                        errors.append(": ")
+                        errors.append(str(content.get("evalue")))
+                        errors.append("\n")
 
                     elif msg_type in ("display_data", "execute_result"):
                         data = content.get("data", {})
@@ -1328,23 +1330,15 @@ except ImportError:
             # stderr often contains warnings, pip notices, etc.
             error = (
                 KERNEL_EXEC_TIMEOUT if not idle_received
-                else "\n".join(error_parts) or None
+                else errors.finish().strip() or None
             )
 
         except Exception as e:
-            error = f"Execution failed: {str(e)}"
+            errors.append(f"Execution failed: {str(e)}")
+            error = errors.finish()
 
-        # Include stderr as part of stdout (warnings, pip output, etc.)
-        all_output = "".join(stdout_parts)
-        if stderr_parts:
-            stderr_text = "".join(stderr_parts).strip()
-            if stderr_text:
-                if all_output:
-                    all_output += "\n" + stderr_text
-                else:
-                    all_output = stderr_text
-
-        return all_output, images, error
+        errors.finish()  # Also close partial error output on a kernel timeout.
+        return output.finish(), images, error
 
     async def stop(self):
         """Stop the kernel."""
@@ -1491,9 +1485,9 @@ except ImportError:
             except Exception:
                 break
 
-        stdout_parts = []
-        stderr_parts = []
-        error_parts = []
+        output_dir = self.workspace / ".box-agent" / "tool-results"
+        output = OutputCapture(output_dir)
+        errors = OutputCapture(output_dir, "error")
         images = []
 
         try:
@@ -1514,15 +1508,14 @@ except ImportError:
                         name = content.get("name", "")
                         text = content.get("text", "")
                         text = re.sub(r"\x1b\[[0-9;]*m", "", text)
-                        if name == "stdout":
-                            stdout_parts.append(text)
-                        elif name == "stderr":
-                            stderr_parts.append(text)
+                        if name in ("stdout", "stderr"):
+                            output.append(text)
 
                     elif msg_type == "error":
-                        error_parts.append(
-                            f"{content.get('ename')}: {content.get('evalue')}"
-                        )
+                        errors.append(str(content.get("ename")))
+                        errors.append(": ")
+                        errors.append(str(content.get("evalue")))
+                        errors.append("\n")
 
                     elif msg_type in ("display_data", "execute_result"):
                         data = content.get("data", {})
@@ -1537,22 +1530,15 @@ except ImportError:
 
             error = (
                 KERNEL_EXEC_TIMEOUT if not idle_received
-                else "\n".join(error_parts) or None
+                else errors.finish().strip() or None
             )
 
         except Exception as e:
-            error = f"Execution failed: {str(e)}"
+            errors.append(f"Execution failed: {str(e)}")
+            error = errors.finish()
 
-        all_output = "".join(stdout_parts)
-        if stderr_parts:
-            stderr_text = "".join(stderr_parts).strip()
-            if stderr_text:
-                if all_output:
-                    all_output += "\n" + stderr_text
-                else:
-                    all_output = stderr_text
-
-        return all_output, images, error
+        errors.finish()
+        return output.finish(), images, error
 
     async def stop(self):
         """Stop the in-process kernel."""
@@ -2086,7 +2072,12 @@ Output formats:
                 )
 
             if error:
-                error = self._simplify_error(error)
+                # Keep an already-bounded file receipt intact, including the
+                # distinction between complete output and persistence failure.
+                error = bound_output_text(error, workspace / ".box-agent" / "tool-results", "error")
+                if not error.startswith("<persisted-output>"):
+                    error = self._simplify_error(error)
+                stdout = bound_output_text(stdout, workspace / ".box-agent" / "tool-results")
                 output = stdout.strip()
                 # Failed tool history uses error, not content. Keep diagnostics
                 # in both the visible output and the model's error message.
@@ -2120,7 +2111,9 @@ Output formats:
                 content_parts.append("\n".join(images))
 
             content = "\n".join(content_parts) if content_parts else "(No output)"
-            return ToolResult(success=True, content=content)
+            # Also covers custom kernels and many generated file references.
+            content = bound_output_text(content, workspace / ".box-agent" / "tool-results")
+            return ToolResult(success=True, content=content, model_context=content)
 
         except (asyncio.TimeoutError, TimeoutError):
             # The kernel is still blocked executing this code in a thread-pool
