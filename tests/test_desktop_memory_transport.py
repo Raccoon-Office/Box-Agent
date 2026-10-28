@@ -263,6 +263,18 @@ async def test_oversized_or_invalid_requests_are_not_sent(bootstrap, monkeypatch
     assert calls == []
 
 
+async def test_core_json_escaping_does_not_reduce_the_raw_content_limit(bootstrap, monkeypatch):
+    path, data, _ = bootstrap
+    calls = []
+    install_http(monkeypatch, lambda request: calls.append(request) or httpx.Response(200, json=envelope(data)))
+    # Raw text remains below 32 MiB, while quoting doubles the JSON wire size.
+    content = '"' * (17 * 1024 * 1024)
+    result = await MemoryHostTransport(path, data["identity_epoch"]).request("core/mutate", {"content": content})
+    assert result == {"items": []}
+    assert len(calls) == 1 and len(calls[0].content) > 32 * 1024 * 1024
+    assert json.loads(calls[0].content)["content"] == content
+
+
 async def test_request_headers_bodies_and_private_errors_do_not_reach_http_logs(bootstrap, monkeypatch, caplog):
     path, data, _ = bootstrap
 

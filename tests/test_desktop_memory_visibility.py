@@ -102,6 +102,12 @@ async def test_later_context_projection_revokes_previous_qualification(bound):
     next_request.on_committed()
     next_request.on_response()
     assert events[-1][0] is record and events[-1][1] is False
+    assert events[-1][2] == ""
+    restored = project(engine, messages, record)
+    restored.on_committed()
+    restored.on_response()
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
 
 
 async def test_old_success_callback_cannot_qualify_new_request_or_new_read(bound):

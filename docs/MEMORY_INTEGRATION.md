@@ -19,6 +19,9 @@
 最终 QA 捕获原轮次来源与事件键，只交接合格在线云端轮次；HTTP 超时不自动重发，
 durable_unknown 不计为云端已保存。新经验生成链路尚未完成。
 桌面轮次的诊断正文被省略，包含 full-payload 调试开关；真实模型输入和正式 SessionLog 保留原语义。
+私有 core/mutate 只返回 revision/正文摘要等元数据，由工具核对原候选，不回传另一份全文；
+原始 core/read 及 mutate 请求允许解码后 32 MiB，JSON 线上预算容纳最坏六倍转义。
+全文从最终投影移除后必须重新读取，恢复旧工具消息不能重新激活；认证/身份/关闭记忆信号清除预载和资格。
 测试入口为 `tests/test_desktop_memory_transport.py`、`tests/test_desktop_memory_visibility.py`，
 后者覆盖真实执行循环中成功、模型失败与截断响应。
 

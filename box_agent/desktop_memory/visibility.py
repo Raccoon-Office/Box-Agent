@@ -48,7 +48,7 @@ class CoreVisibilityGuard(ModelInputGuard):
         self._active.pop(path, None)
         read = self._reads.pop(path, None)
         if read is not None:
-            self._notify(read, False, self._request)
+            self._notify(read, False, "")
 
     def consume(self, path: str) -> CoreRead:
         """Consume locally before mutation; Host consumes its grant atomically."""
@@ -113,6 +113,9 @@ class CoreVisibilityGuard(ModelInputGuard):
                 self._notify(read, False, request_id)
         exact = {message.content for message in projection.messages
                  if message.role == "tool" and message.name == "memory_read" and isinstance(message.content, str)}
+        for path, read in tuple(self._reads.items()):
+            if read.model_content not in exact:
+                self.forget(path)
         visible = tuple(read for read in self._reads.values() if read.model_content in exact)
         if projection.blocked_reason:
             return projection

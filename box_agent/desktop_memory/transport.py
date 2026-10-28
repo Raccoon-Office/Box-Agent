@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -19,7 +19,7 @@ import httpx
 
 _KIB = 1024
 _BODY_LIMIT = 512 * _KIB
-_CORE_LIMIT = 32 * 1024 * _KIB + 64 * _KIB
+_CORE_LIMIT = 32 * 1024 * _KIB * 6 + 64 * _KIB
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43,256}\Z")
 _ERROR_CODES = frozenset({
     "AUTH_REQUIRED", "IDENTITY_CHANGED", "SESSION_REVOKED", "TURN_REVOKED",
@@ -165,6 +165,7 @@ class MemoryHostTransport:
 
     bootstrap_file: Path = field(repr=False)
     identity_epoch: str
+    on_revoked: Callable[[], None] | None = field(default=None, repr=False)
     _bootstrap: _Bootstrap | None = field(default=None, init=False, repr=False)
     _bootstrap_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -239,7 +240,9 @@ class MemoryHostTransport:
         try:
             # wait_for also supports the repository's Python 3.10 floor.
             return await asyncio.wait_for(send(), timeout=spec.timeout if timeout is None else timeout)
-        except MemoryProxyError:
+        except MemoryProxyError as error:
+            if self.on_revoked is not None and error.code in {"AUTH_REQUIRED", "IDENTITY_CHANGED", "SESSION_REVOKED", "TURN_REVOKED", "MEMORY_DISABLED"}:
+                self.on_revoked()
             raise
         except asyncio.CancelledError:
             # Caller cancellation stays cancellation. No automatic replay is
