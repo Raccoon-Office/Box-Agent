@@ -433,6 +433,18 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
+        if tool.name == "query_jsonl":
+            before = (
+                "If a one-line read exceeds that limit, use another permitted file-copy "
+                "method without printing the record, or report the limit; do not reserialize query "
+                "data as the original text. "
+            )
+            assert entry["schema"]["description"].count(before) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(before, (
+                "Larger source lines return bounded fragments: follow read_file's "
+                "next_byte_offset as byte_offset with the same path to read toward EOF. "
+                "Do not reserialize query data as the original text. "
+            ))
         if tool.name == "read_file":
             anchor = "Binary and structured document files are rejected with an actionable error. "
             assert entry["schema"]["description"].count(anchor) == 1
@@ -440,6 +452,20 @@ def _assert_schema_contract(tools, profile):
                 anchor,
                 "For .eml emails use read_email to decode MIME bodies and attachments. " + anchor,
             )
+            entry["schema"]["description"] += (
+                " For large text or long lines, set byte_offset (zero-based) to read up to 16 KiB "
+                "without line numbering. Continue with next_byte_offset until it is null. "
+                "Byte mode overrides offset/limit and reads toward EOF. Oversized line pages "
+                "automatically return the first byte chunk from their starting line."
+            )
+            entry["schema"]["input_schema"]["properties"]["byte_offset"] = {
+                "type": "integer", "minimum": 0,
+                "description": (
+                    "Starting byte (zero-based) for a text chunk of up to 16 KiB. "
+                    "Use the returned next_byte_offset to continue, including mid-line. "
+                    "Overrides offset/limit."
+                ),
+            }
         if tool.name == "sub_agent":
             read_tools = "read/search tools (`read_file`, `query_jsonl`, "
             assert entry["schema"]["description"].count(read_tools) == 1

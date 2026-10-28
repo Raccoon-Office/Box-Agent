@@ -155,20 +155,20 @@ async def test_read_tool_defaults_to_bounded_page_with_continuation_hint(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_read_tool_rejects_oversized_page_instead_of_truncating_middle(tmp_path):
+async def test_read_tool_returns_a_continuation_for_an_oversized_page(tmp_path):
     path = tmp_path / "long-line.txt"
     path.write_text("x" * 100_001, encoding="utf-8")
 
     result = await ReadTool(workspace_dir=str(tmp_path)).execute(path="long-line.txt")
 
-    assert result.success is False
-    assert "100,000-character safety limit" in result.error
-    assert "smaller limit" in result.error
-    assert "Content truncated" not in result.error
+    assert result.success is True
+    assert result.error is None
+    assert result.raw_output["partial"] is True
+    assert f'byte_offset={result.raw_output["next_byte_offset"]}' in result.content
 
 
 @pytest.mark.asyncio
-async def test_read_tool_routes_oversized_jsonl_record_to_query_tool(tmp_path):
+async def test_read_tool_offers_raw_continuation_and_jsonl_query_guidance(tmp_path):
     path = tmp_path / "trace.jsonl"
     path.write_text(
         json.dumps({"event": "llm.request", "data": "x" * 100_001}) + "\n",
@@ -177,10 +177,9 @@ async def test_read_tool_routes_oversized_jsonl_record_to_query_tool(tmp_path):
 
     result = await ReadTool(workspace_dir=str(tmp_path)).execute(path="trace.jsonl", limit=1)
 
-    assert result.success is False
-    assert "JSONL record at line 1" in result.error
-    assert "Use query_jsonl with fields/where" in result.error
-    assert "Retry with a smaller limit" not in result.error
+    assert result.success is True
+    assert result.raw_output["next_byte_offset"]
+    assert "use query_jsonl with fields/where" in result.content
 
 
 @pytest.mark.asyncio

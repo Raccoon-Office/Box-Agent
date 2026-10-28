@@ -128,6 +128,16 @@ model: "your-model"
 
 ### Staged Context Compression
 
+`read_file` preserves its existing line pagination (`offset`, `limit`, default
+500 lines, maximum 2000). Set `byte_offset=0` to read at most 16 KiB of text,
+then pass the returned `next_byte_offset` until it is null. Byte mode seeks
+directly, preserves UTF-8 characters and original newlines, and overrides
+`offset`/`limit`. A line page above 100,000 characters automatically returns
+the first byte chunk starting at that page's first line; byte continuation
+reads toward EOF. Line scanning uses bounded 64 KiB reads. Fragments report
+their byte range without claiming complete-line context coverage. Reads use
+the current file, not a snapshot; existing model-context budgets still apply.
+
 - **Oversized tool results**: Individual results are persisted immediately when needed; fresh parallel results also share a 50k-character pre-request budget. The model receives a stable preview while full text remains on disk. Read results are exempt and stay bounded by Read's own line/character controls.
 - **Tool output delivery**: All tools share a final guard before model history, host events and diagnostic traces. Text above 512 KiB and structured metadata above 64 KiB are externalized; a 1 MiB serialized result budget additionally accounts for combined fields and JSON escaping, leaving room below the 4 MiB event limit. Valid Read pages and small semantic model projections remain intact. Large structured results are saved as complete JSON; inline metadata retains small fields plus `_persisted_output` with `path`, `output_truncated` and `file_complete`. Large fields are omitted from that inline projection, not replaced with incompatible field types. Output-storage/serialization failures produce an explicit partial/unavailable notice and do not repeat the tool or stop the Agent Loop; cancellation and durable session-commit failures retain their existing behavior. This guard cannot prevent memory used to construct the original output inside a tool.
 - **Usage-aware auto-summary**: The next request is estimated from the latest real API usage plus subsequent messages. When it reaches the model-derived safety threshold, older history is summarized into a `user` message while bounded recent messages and todo, plan, and skill state are restored.

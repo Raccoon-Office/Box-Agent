@@ -353,6 +353,10 @@ class ToolResultStorage:
             self._replacements[tool_call_id] = model_content
         return ToolResultDelivery(content, error, raw_output, model_content)
 
+    def record_delivery(self, tool_call_id: str, model_content: str) -> None:
+        """Keep the aggregate budget from restoring a stale pre-fallback reply."""
+        self._replacements[tool_call_id] = model_content
+
     def _externalize_raw_output(
         self, raw_output: dict[str, Any], directory: Path, label: str,
     ) -> tuple[dict[str, Any], str]:

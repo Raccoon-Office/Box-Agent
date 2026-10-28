@@ -2165,6 +2165,18 @@ async def test_batch_files_uses_configurable_synthesis_timeout():
             },
             "FILE_CONTENT_TRUNCATED",
         ),
+        (
+            "first fragment of a long line",
+            {
+                "source_char_count": 120_000,
+                "selected_char_count": 16_384,
+                "selected_line_count": 1,
+                "truncated": False,
+                "partial": True,
+                "next_byte_offset": 16_384,
+            },
+            "FILE_CONTENT_TRUNCATED",
+        ),
     ],
 )
 async def test_batch_files_rejects_unproven_or_incomplete_reads_before_model(

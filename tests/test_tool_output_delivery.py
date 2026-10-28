@@ -297,6 +297,7 @@ class _LargeOutputTool(Tool):
     def __init__(self, tool_name, result_kind):
         self._name = tool_name
         self.result_kind = result_kind
+        self.calls = 0
 
     @property
     def name(self):
@@ -311,6 +312,7 @@ class _LargeOutputTool(Tool):
         return {"type": "object", "properties": {}}
 
     async def execute(self):
+        self.calls += 1
         text = "HEAD\n" + "\\x00" * 1_200_000 + "\nTAIL"
         if self.result_kind == "raw":
             return ToolResult(success=True, content="HEAD\nSee structured output.\nTAIL", raw_output={"status": "done", "data": text})
@@ -341,7 +343,7 @@ class _InspectingLLM:
         yield StreamEvent(type="finish", finish_reason="stop")
 
 
-@pytest.mark.parametrize("failure", [None, "file", "history", "trace"])
+@pytest.mark.parametrize("failure", [None, "file", "history", "trace", "delivery", "metadata"])
 @pytest.mark.parametrize("tool_name", ["execute_code", "bash", "mcp_query", "task"])
 @pytest.mark.parametrize("result_kind", ["content", "error", "raw"])
 async def test_agent_loop_and_event_delivery_continue_after_output_handling_failures(
@@ -361,6 +363,18 @@ async def test_agent_loop_and_event_delivery_continue_after_output_handling_fail
             raise OSError("output history unavailable")
 
         monkeypatch.setattr(ToolResultStorage, "process_message", fail_history)
+    if failure == "delivery":
+        def fail_delivery(*args, **kwargs):
+            raise RuntimeError("output formatter unavailable")
+
+        monkeypatch.setattr(ToolResultStorage, "prepare_delivery", fail_delivery)
+    if failure == "metadata":
+        from box_agent.tools.engine import engine
+
+        def with_large_metadata(request):
+            return process_tool_result(replace(request, policy_decision={"detail": "x" * (5 * 1024 * 1024)}))
+
+        monkeypatch.setattr(engine, "process_tool_result", with_large_metadata)
     llm = _InspectingLLM(tool_name)
     tool = _LargeOutputTool(tool_name, result_kind)
     writer = SessionTraceWriter(session_id="s", acp_session_id="a", trace_dir=tmp_path / "traces", enabled=True)
@@ -385,6 +399,7 @@ async def test_agent_loop_and_event_delivery_continue_after_output_handling_fail
     assert any(isinstance(event, DoneEvent) for event in events)
     assert next(event for event in events if isinstance(event, ToolCallResult)).success is (result_kind != "error")
     assert llm.calls == 2
+    assert tool.calls == 1
     assert "HEAD" in llm.tool_reply and "TAIL" in llm.tool_reply
     if failure == "file":
         assert ("Full structured output unavailable" if result_kind == "raw" else "Full output unavailable") in llm.tool_reply
@@ -392,5 +407,75 @@ async def test_agent_loop_and_event_delivery_continue_after_output_handling_fail
         assert "Full JSON saved to:" not in llm.tool_reply
     elif failure == "history":
         assert "bounded output retained" in llm.tool_reply
+    elif failure in ("delivery", "metadata"):
+        assert "Output delivery failed" in llm.tool_reply
+        assert ("output formatter unavailable" if failure == "delivery" else "oversized or cannot be serialized") in llm.tool_reply
+        event = next(event for event in events if isinstance(event, ToolCallResult))
+        assert event.policy_decision is None
+        assert event.raw_output is None
+        assert writer.file_path.stat().st_size < MAX_TOOL_RESULT_BYTES
     else:
         assert ("Full JSON saved to:" if result_kind == "raw" else "Full output saved to:") in llm.tool_reply
+
+
+@pytest.mark.parametrize("metadata", [
+    {"policy_decision": {"reason": float("nan")}},
+    {"policy_decision": {"reason": object()}},
+    {"policy_decision": {"reason": "\ud800"}},
+    {"server_name": "x" * (5 * 1024 * 1024)},
+], ids=["nan", "unsupported-object", "invalid-unicode", "oversized-server-name"])
+def test_invalid_event_metadata_becomes_a_small_serializable_tool_reply(tmp_path, metadata):
+    request = replace(_pipeline(tmp_path, ToolResult(success=False, error="original tool failure")), **metadata)
+    outcome = process_tool_result(request)
+    event = outcome.events[0]
+    assert not event.success
+    assert "original tool failure" in outcome.model_content
+    assert "Output delivery failed" in outcome.model_content
+    assert event.policy_decision is None
+    assert len(json.dumps(EventEnvelope("r", "r:1", 1, event).to_dict(), ensure_ascii=False, allow_nan=False).encode()) < MAX_TOOL_RESULT_BYTES
+    assert outcome.tool_message.tool_call_id == request.tool_call_id
+
+
+def test_failure_reply_survives_cached_history_and_does_not_retry_storage(tmp_path, monkeypatch):
+    storage = ToolResultStorage(tmp_path)
+    request = replace(_pipeline(tmp_path, ToolResult(success=True, content="HEAD" + "x" * 100_000 + "TAIL")), result_storage=storage)
+    # Model-side persistence succeeds first, then all final formatting/storage
+    # fails. The failure reply must replace the cached success receipt.
+    def fail_delivery(*args, **kwargs):
+        monkeypatch.setattr(Path, "open", lambda *args, **kwargs: pytest.fail("fallback must not write files"))
+        raise OSError("formatter storage failed")
+
+    monkeypatch.setattr(storage, "prepare_delivery", fail_delivery)
+    outcome = process_tool_result(request)
+    assert "formatter storage failed" in outcome.model_content
+    assert outcome.events[0].success is True
+    storage.enforce_fresh_budget(request.messages, tools={})
+    assert request.messages[-1].content == outcome.model_content
+
+
+def test_delivery_cancellation_is_not_converted_into_an_output_failure(tmp_path, monkeypatch):
+    def cancel(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(ToolResultStorage, "prepare_delivery", cancel)
+    request = _pipeline(tmp_path, ToolResult(success=True, content="done"))
+    with pytest.raises(asyncio.CancelledError):
+        process_tool_result(request)
+    assert request.messages == []
+
+
+def test_final_size_checker_failure_uses_a_bounded_reply_without_calling_it_again(tmp_path, monkeypatch):
+    from box_agent.tools.engine import results
+
+    calls = []
+
+    def fail_check(*args):
+        calls.append(1)
+        raise RuntimeError("event size checker unavailable")
+
+    monkeypatch.setattr(results, "_json_fits", fail_check)
+    outcome = process_tool_result(_pipeline(tmp_path, ToolResult(success=True, content="done")))
+    assert len(calls) == 1
+    assert "event size checker unavailable" in outcome.model_content
+    encoded = json.dumps(EventEnvelope("r", "r:1", 1, outcome.events[0]).to_dict(), allow_nan=False).encode()
+    assert len(encoded) < MAX_TOOL_RESULT_BYTES

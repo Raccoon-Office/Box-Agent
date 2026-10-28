@@ -17,7 +17,13 @@ from ...events import (
 )
 from ...schema import Message
 from ...session_trace import emit_session_trace
-from ...tool_result_storage import PERSISTED_OUTPUT_TAG, ToolResultStorage
+from ...tool_result_storage import (
+    MAX_TOOL_RESULT_BYTES,
+    PERSISTED_OUTPUT_TAG,
+    ToolResultDelivery,
+    ToolResultStorage,
+    _json_fits,
+)
 from ..base import Tool, ToolResult
 from ..browser_result_adapter import _trace_safe_tool_raw_output
 from ..file_result_adapter import (
@@ -80,6 +86,15 @@ class ToolResultPipelineOutcome:
     web_search_duplicate_results: int = 0
     web_search_labels: tuple[str, ...] = ()
     web_search_inspected: bool = False
+
+
+def _failure_preview(value: str | None) -> str:
+    """Emergency output must not depend on persistence or the failed formatter."""
+    if not isinstance(value, str):
+        return ""
+    if len(value) > 4096:
+        value = value[:2048] + "\n...[preview omitted]...\n" + value[-2048:]
+    return value.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def process_tool_result(
@@ -190,16 +205,51 @@ def process_tool_result(
         tool_id=pipeline_input.tool_id,
         server_name=pipeline_input.server_name,
     )
-    delivery = pipeline_input.result_storage.prepare_delivery(
-        tool_call_id=pipeline_input.tool_call_id,
-        session_id=pipeline_input.session_id,
-        content=visible_content,
-        error=visible_error,
-        raw_output=_trace_safe_tool_raw_output(result.raw_output),
-        model_content=tool_message.content,
-        original_model_content=original_model_content,
-        event_metadata=event_metadata,
-    )
+    try:
+        delivery = pipeline_input.result_storage.prepare_delivery(
+            tool_call_id=pipeline_input.tool_call_id,
+            session_id=pipeline_input.session_id,
+            content=visible_content,
+            error=visible_error,
+            raw_output=_trace_safe_tool_raw_output(result.raw_output),
+            model_content=tool_message.content,
+            original_model_content=original_model_content,
+            event_metadata=event_metadata,
+        )
+        # Check every public result field after preparation, including metadata.
+        # The 1 MiB budget leaves room for the envelope below the 4 MiB limit.
+        if not _json_fits({
+            **event_metadata, "content": delivery.content,
+            "error": delivery.error, "raw_output": delivery.raw_output,
+        }, MAX_TOOL_RESULT_BYTES):
+            raise ValueError("result event is oversized or cannot be serialized")
+    except Exception as exc:
+        detail = next((arg[:512] for arg in exc.args if isinstance(arg, str)), "")
+        reason = _failure_preview(type(exc).__name__[:128] + (": " + detail if detail else ""))
+        notice = (
+            f"Output delivery failed ({reason}). "
+            f"The tool reported {'success' if result.success else 'failure'}; "
+            "only a bounded preview is available and full output availability is unverified. "
+            "Continue using this diagnostic or another method; do not blindly repeat side effects."
+        )
+        delivery = ToolResultDelivery(
+            content=notice + "\n\n" + _failure_preview(visible_content),
+            error=(notice + "\n\n" + _failure_preview(visible_error))
+            if visible_error is not None or not result.success else None,
+            raw_output=None,
+            model_content=notice + "\n\n" + _failure_preview(tool_message.content),
+        )
+        # Fixed-size primitives also cover malformed/oversized metadata. Do not
+        # call the failed formatter or attempt another disk write in this path.
+        event_metadata = dict(
+            tool_call_id=_failure_preview(pipeline_input.tool_call_id[:256]),
+            tool_name=_failure_preview(pipeline_input.tool_name[:256]),
+            success=result.success, user_visible=pipeline_input.user_visible,
+            policy_decision=None, tool_id=None, server_name=None,
+        )
+        pipeline_input.result_storage.record_delivery(
+            pipeline_input.tool_call_id, delivery.model_content,
+        )
     visible_content, visible_error, model_content = delivery.content, delivery.error, delivery.model_content
     tool_message = tool_message.model_copy(update={"content": model_content})
     result_event = ToolCallResult(
@@ -233,15 +283,15 @@ def process_tool_result(
     )
 
     trace_data: dict[str, Any] = {
-        "tool_name": pipeline_input.tool_name,
-        "tool_id": pipeline_input.tool_id,
-        "server_name": pipeline_input.server_name,
+        "tool_name": event_metadata["tool_name"],
+        "tool_id": event_metadata["tool_id"],
+        "server_name": event_metadata["server_name"],
         "success": result.success,
         "content": visible_content,
         "error": visible_error,
         "raw_output": delivery.raw_output,
         "model_content": model_content,
-        "policy_decision": pipeline_input.policy_decision,
+        "policy_decision": event_metadata["policy_decision"],
         "user_visible": pipeline_input.user_visible,
     }
     if pipeline_input.parallel:
