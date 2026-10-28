@@ -17,7 +17,7 @@ from ...events import (
 )
 from ...schema import Message
 from ...session_trace import emit_session_trace
-from ...tool_result_storage import ToolResultStorage, _safe_path_segment
+from ...tool_result_storage import PERSISTED_OUTPUT_TAG, ToolResultStorage
 from ..base import Tool, ToolResult
 from ..browser_result_adapter import _trace_safe_tool_raw_output
 from ..file_result_adapter import (
@@ -26,7 +26,6 @@ from ..file_result_adapter import (
     _repeatable_framework_error,
     _tool_message_content_for_model,
 )
-from ..jupyter_output import bound_output_text, output_metadata_fits
 from ..web_search_runtime import (
     _bind_web_search_citations,
     _dedupe_web_search_content,
@@ -91,40 +90,6 @@ def process_tool_result(
     result = pipeline_input.result
     visible_content = pipeline_input.visible_content
     visible_error = pipeline_input.visible_error
-    is_execute_code = pipeline_input.tool_name == "execute_code"
-    if is_execute_code:
-        # A final, capability-local guard also covers custom kernels/hooks that
-        # bypass the streaming collector. All consumers below see the same
-        # bounded text, never the original stdout again.
-        output_dir = (
-            pipeline_input.result_storage.root_dir
-            / _safe_path_segment(pipeline_input.session_id, "local")
-            / "tool-results"
-        )
-        visible_content = bound_output_text(visible_content, output_dir)
-        if visible_error == pipeline_input.visible_content:
-            visible_error = visible_content
-        elif visible_error is not None:
-            visible_error = bound_output_text(visible_error, output_dir, "error")
-        model_context = result.model_context
-        if result.persistence_content is not None:
-            model_context = result.persistence_content
-        if model_context == pipeline_input.visible_content:
-            model_context = visible_content
-        elif model_context is not None:
-            model_context = bound_output_text(model_context, output_dir)
-        raw_output = result.raw_output
-        if not output_metadata_fits(raw_output):
-            raw_output = None
-            note = "\nAdditional execute_code metadata omitted: oversized or invalid."
-            visible_content += note
-            if model_context is not None:
-                model_context += note
-        result = result.model_copy(update={
-            "content": visible_content, "error": visible_error,
-            "model_context": model_context, "raw_output": raw_output,
-            "persistence_content": None,
-        })
     correction_notice: CorrectionNotice | None = None
     new_count = 0
     duplicate_count = 0
@@ -197,6 +162,7 @@ def process_tool_result(
         tool_call_id=pipeline_input.tool_call_id,
         name=pipeline_input.tool_name,
     )
+    original_model_content = model_content
     try:
         tool_message = pipeline_input.result_storage.process_message(
             tool_message,
@@ -204,31 +170,43 @@ def process_tool_result(
             session_id=pipeline_input.session_id,
             persistence_content=result.persistence_content,
             content_already_processed=(
-                is_execute_code
+                model_content.startswith((PERSISTED_OUTPUT_TAG, "Error: " + PERSISTED_OUTPUT_TAG))
                 or (result.success and result.model_context is not None
                     and model_content == result.model_context)
             ),
         )
     except Exception as exc:
-        if not is_execute_code:
-            raise
         # Only output presentation/storage is best-effort. The durable result
         # commit below still retains its normal error semantics.
         note = f"\nOutput history preparation failed ({type(exc).__name__}); bounded output retained."
         tool_message = tool_message.model_copy(update={"content": model_content + note})
         visible_content += note
-    model_content = tool_message.content
-    result_event = ToolCallResult(
+    event_metadata = dict(
         tool_call_id=pipeline_input.tool_call_id,
         tool_name=pipeline_input.tool_name,
         success=result.success,
-        content=visible_content,
-        error=visible_error,
-        raw_output=_trace_safe_tool_raw_output(result.raw_output),
         user_visible=pipeline_input.user_visible,
         policy_decision=pipeline_input.policy_decision,
         tool_id=pipeline_input.tool_id,
         server_name=pipeline_input.server_name,
+    )
+    delivery = pipeline_input.result_storage.prepare_delivery(
+        tool_call_id=pipeline_input.tool_call_id,
+        session_id=pipeline_input.session_id,
+        content=visible_content,
+        error=visible_error,
+        raw_output=_trace_safe_tool_raw_output(result.raw_output),
+        model_content=tool_message.content,
+        original_model_content=original_model_content,
+        event_metadata=event_metadata,
+    )
+    visible_content, visible_error, model_content = delivery.content, delivery.error, delivery.model_content
+    tool_message = tool_message.model_copy(update={"content": model_content})
+    result_event = ToolCallResult(
+        **event_metadata,
+        content=visible_content,
+        error=visible_error,
+        raw_output=delivery.raw_output,
         image_content=result.image_content if result.success else None,
         image_source=result.image_source,
         image_context_eligible=result.image_context_eligible,
@@ -261,7 +239,7 @@ def process_tool_result(
         "success": result.success,
         "content": visible_content,
         "error": visible_error,
-        "raw_output": _trace_safe_tool_raw_output(result.raw_output),
+        "raw_output": delivery.raw_output,
         "model_content": model_content,
         "policy_decision": pipeline_input.policy_decision,
         "user_visible": pipeline_input.user_visible,

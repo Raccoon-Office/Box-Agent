@@ -1,8 +1,7 @@
-"""Bounded previews and best-effort streaming persistence for execute_code."""
+"""Bounded text previews and best-effort streaming output persistence."""
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import BinaryIO
 from uuid import uuid4
@@ -102,53 +101,19 @@ class OutputCapture:
         )
 
 
-def bound_output_text(text: str, directory: Path, label: str = "result") -> str:
+def bound_output_text(
+    text: str, directory: Path, label: str = "result", *, inline_limit: int = OUTPUT_REPLY_BYTES,
+) -> str:
     """Last defense for final text, including custom kernels and result hooks."""
-    if len(text) <= OUTPUT_REPLY_BYTES // 4:
+    if len(text) <= inline_limit // 4:
         return text.encode("utf-8", errors="replace").decode("utf-8")
-    if len(text) <= OUTPUT_REPLY_BYTES:
+    if len(text) <= inline_limit:
         size = sum(
             len(text[offset:offset + _CHUNK_CHARS].encode("utf-8", errors="replace"))
             for offset in range(0, len(text), _CHUNK_CHARS)
         )
-        if size <= OUTPUT_REPLY_BYTES:
+        if size <= inline_limit:
             return text.encode("utf-8", errors="replace").decode("utf-8")
     capture = OutputCapture(directory, label)
     capture.append(text)
     return capture.finish()
-
-
-def output_metadata_fits(value: object) -> bool:
-    """Conservatively preflight optional metadata without serializing big text."""
-    remaining = OUTPUT_REPLY_BYTES
-
-    def fits(item: object, depth: int) -> bool:
-        nonlocal remaining
-        remaining -= 32  # Containers, separators, quotes and primitive values.
-        if remaining < 0 or depth > 12:
-            return False
-        if isinstance(item, str):
-            remaining -= len(item) * 6  # Upper bound including JSON escaping.
-            if remaining < 0:
-                return False
-            item.encode("utf-8")  # Reject malformed Unicode before event delivery.
-            return True
-        if item is None or isinstance(item, bool):
-            return True
-        if isinstance(item, int):
-            return item.bit_length() <= 64
-        if isinstance(item, float):
-            return math.isfinite(item)
-        if isinstance(item, dict):
-            return all(
-                isinstance(key, str) and fits(key, depth + 1) and fits(child, depth + 1)
-                for key, child in item.items()
-            )
-        if isinstance(item, (list, tuple)):
-            return all(fits(child, depth + 1) for child in item)
-        return False
-
-    try:
-        return fits(value, 0)
-    except Exception:
-        return False

@@ -23,7 +23,7 @@ from typing import Any, Mapping, Optional
 
 from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
-from .jupyter_output import OutputCapture, bound_output_text
+from .output_capture import OutputCapture, bound_output_text
 from .python_environment import probe_python
 
 from box_agent.user_paths import state_path

@@ -1,4 +1,4 @@
-"""Persist oversized model-facing tool results without losing recoverability."""
+"""Persist oversized tool results and bound their model/host representations."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
 
 from .schema import Message
 from .tools.base import Tool
+from .tools.output_capture import OUTPUT_REPLY_BYTES, bound_output_text
 
 
 DEFAULT_MAX_RESULT_SIZE_CHARS = 20_000
@@ -22,6 +23,79 @@ CONTEXT_RESULT_LIMIT_RATIO = 0.25
 CONTEXT_AGGREGATE_BUDGET_RATIO = 0.50
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
+# Preserve valid read_file pages (up to 100k Unicode characters) and existing
+# semantic model projections. The final budget also accounts for JSON escaping.
+MAX_INLINE_OUTPUT_BYTES = 512 * 1024
+MAX_RAW_OUTPUT_BYTES = 64 * 1024
+MAX_TOOL_RESULT_BYTES = 1024 * 1024
+
+
+def _json_chunks(value: Any, *, ascii_only: bool = False) -> Iterator[str]:
+    """Encode JSON in bounded string chunks, rejecting cycles/invalid values.
+
+    JSONEncoder.iterencode still constructs one huge string for a huge leaf.
+    Escape string leaves in pieces instead, so persistence and size checks do
+    not allocate another copy of an unbounded tool payload.
+    """
+    parents: set[int] = set()
+
+    def encode(item: Any, depth: int) -> Iterator[str]:
+        if depth > 100:
+            raise ValueError("tool output nesting exceeds serialization limit")
+        if isinstance(item, str):
+            yield '"'
+            for offset in range(0, len(item), 8192):
+                yield json.dumps(item[offset:offset + 8192], ensure_ascii=ascii_only)[1:-1]
+            yield '"'
+        elif item is None or isinstance(item, (bool, int, float)):
+            yield json.dumps(item, allow_nan=False)
+        elif isinstance(item, (dict, list, tuple)):
+            identity = id(item)
+            if identity in parents:
+                raise ValueError("circular tool output")
+            parents.add(identity)
+            try:
+                mapping = isinstance(item, dict)
+                yield "{" if mapping else "["
+                for index, entry in enumerate(item.items() if mapping else item):
+                    if index:
+                        yield ","
+                    if mapping:
+                        key, child = entry
+                        if not isinstance(key, str):
+                            raise TypeError("tool output JSON keys must be strings")
+                        yield from encode(key, depth + 1)
+                        yield ":"
+                    else:
+                        child = entry
+                    yield from encode(child, depth + 1)
+                yield "}" if mapping else "]"
+            finally:
+                parents.remove(identity)
+        else:
+            raise TypeError("tool output is not JSON serializable")
+
+    yield from encode(value, 0)
+
+
+def _json_fits(value: Any, limit: int) -> bool:
+    try:
+        size = 0
+        for chunk in _json_chunks(value):
+            size += len(chunk.encode("utf-8"))
+            if size > limit:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResultDelivery:
+    content: str
+    error: str | None
+    raw_output: dict[str, Any] | None
+    model_content: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,8 +225,8 @@ def _safe_path_segment(value: str, fallback: str) -> str:
 class ToolResultStorage:
     """Own oversized-result persistence and stable per-conversation decisions.
 
-    The interface intentionally accepts model-facing ``Message`` objects. Full
-    visible tool events and logs stay outside this module and remain unchanged.
+    Model budgets keep their existing policy. prepare_delivery applies a final
+    shared output budget before model history, public events and trace commit.
     """
 
     def __init__(
@@ -211,6 +285,119 @@ class ToolResultStorage:
             ):
                 self._replacements[message.tool_call_id] = message.content
         self._initialized = True
+
+    def prepare_delivery(
+        self,
+        *,
+        tool_call_id: str,
+        session_id: str,
+        content: str,
+        error: str | None,
+        raw_output: dict[str, Any] | None,
+        model_content: str,
+        original_model_content: str,
+        event_metadata: dict[str, Any],
+    ) -> ToolResultDelivery:
+        """Bound all tool results without changing execution/commit semantics."""
+        directory = (
+            self.root_dir / _safe_path_segment(session_id or self._default_session_id, "local")
+            / "tool-results"
+        )
+        label = _safe_path_segment(tool_call_id, "result")
+        stored_model_content = model_content
+        # Reuse an existing model-side file instead of persisting stdout twice.
+        if (
+            content == original_model_content
+            and model_content.startswith(PERSISTED_OUTPUT_TAG)
+            and not _json_fits(content, MAX_INLINE_OUTPUT_BYTES)
+        ):
+            content = model_content
+        elif (
+            error and original_model_content == f"Error: {error}"
+            and model_content.startswith(PERSISTED_OUTPUT_TAG)
+            and not _json_fits(error, MAX_INLINE_OUTPUT_BYTES)
+        ):
+            if content == error:
+                content = model_content
+            error = model_content
+        original_content = content
+        content = bound_output_text(content, directory, label, inline_limit=MAX_INLINE_OUTPUT_BYTES)
+        if error == original_content:
+            error = content
+        elif error is not None:
+            error = bound_output_text(error, directory, label + "-error", inline_limit=MAX_INLINE_OUTPUT_BYTES)
+        model_content = (
+            content if model_content == original_content else
+            bound_output_text(model_content, directory, label + "-model", inline_limit=MAX_INLINE_OUTPUT_BYTES)
+        )
+        if raw_output is not None and not _json_fits(raw_output, MAX_RAW_OUTPUT_BYTES):
+            raw_output, notice = self._externalize_raw_output(raw_output, directory, label)
+            content += "\n\n" + notice
+            model_content += "\n\n" + notice
+            if error is not None:
+                error += "\n\n" + notice
+
+        fields = {**event_metadata, "content": content, "error": error, "raw_output": raw_output}
+        if not _json_fits(fields, MAX_TOOL_RESULT_BYTES):
+            # Aggregate/escaping fallback. It uses the same full-file + preview
+            # representation, rather than rejecting the completed invocation.
+            previous_content = content
+            content = bound_output_text(content, directory, label + "-event", inline_limit=OUTPUT_REPLY_BYTES)
+            if error == previous_content:
+                error = content
+            elif error is not None:
+                error = bound_output_text(error, directory, label + "-event-error", inline_limit=OUTPUT_REPLY_BYTES)
+        if model_content != stored_model_content:
+            # The later aggregate model budget must not restore the old receipt
+            # and discard the structured-output reference or failure notice.
+            self._replacements[tool_call_id] = model_content
+        return ToolResultDelivery(content, error, raw_output, model_content)
+
+    def _externalize_raw_output(
+        self, raw_output: dict[str, Any], directory: Path, label: str,
+    ) -> tuple[dict[str, Any], str]:
+        path: Path | None = None
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            candidate = directory / f"{label}-raw-{uuid4().hex[:12]}.json"
+            with candidate.open("x", encoding="utf-8", newline="\n") as stream:
+                path = candidate
+                # ASCII escapes preserve even malformed Unicode in a valid JSON
+                # file, without permitting it in the UTF-8 public event itself.
+                for chunk in _json_chunks(raw_output, ascii_only=True):
+                    stream.write(chunk)
+            reference = {"path": str(path), "format": "json", "file_complete": True, "output_truncated": True}
+            notice = (
+                f"Structured output externalized. Full JSON saved to: {path}\n"
+                "Inline metadata is incomplete. Inspect selected fields or bounded ranges; do not print the whole file."
+            )
+        except Exception as exc:
+            reference = {"format": "json", "file_complete": False, "output_truncated": True, "error": type(exc).__name__}
+            if path is not None:
+                reference["partial_path"] = str(path)
+            notice = (
+                f"Full structured output unavailable ({type(exc).__name__}); "
+                "only bounded metadata is retained. Omitted fields cannot be recovered."
+            )
+        projected: dict[str, Any] = {"_persisted_output": reference}
+        # Preserve small routing/status fields first, then small containers.
+        # Omit large fields instead of changing a list/string into a reference
+        # dict that existing host consumers would misinterpret. The root receipt
+        # explicitly marks this as a partial projection of the complete JSON.
+        for containers in (False, True):
+            for key, value in raw_output.items():
+                if isinstance(value, (dict, list, tuple)) != containers:
+                    continue
+                if not isinstance(key, str) or key == "_persisted_output" or len(key) > 256 or not _json_fits(key, 2048):
+                    continue
+                if len(projected) >= 65:
+                    break
+                if _json_fits(value, 4096):
+                    projected[key] = value
+                if not _json_fits(projected, MAX_RAW_OUTPUT_BYTES):
+                    del projected[key]
+                    break
+        return projected, notice
 
     def process_message(
         self,
@@ -394,11 +581,18 @@ class ToolResultStorage:
         path = self.root_dir / session / "tool-results" / (
             f"{identifier}.json" if is_json else f"{identifier}.txt"
         )
+
+        def write_content(target: Path) -> None:
+            with target.open("x", encoding="utf-8", newline="") as stream:
+                # TextIOWrapper.write otherwise encodes one unbounded UTF-8
+                # copy before the shared delivery guard can reduce the reply.
+                for offset in range(0, len(content_text), 8192):
+                    stream.write(content_text[offset:offset + 8192])
+
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                with path.open("x", encoding="utf-8") as stream:
-                    stream.write(content_text)
+                write_content(path)
             except FileExistsError:
                 try:
                     existing = path.read_text(encoding="utf-8")
@@ -408,8 +602,7 @@ class ToolResultStorage:
                     digest = hashlib.sha256(content_text.encode("utf-8")).hexdigest()[:12]
                     path = path.with_name(f"{path.stem}-{digest}{path.suffix}")
                     try:
-                        with path.open("x", encoding="utf-8") as stream:
-                            stream.write(content_text)
+                        write_content(path)
                     except FileExistsError:
                         try:
                             if path.read_text(encoding="utf-8") != content_text:

@@ -7,12 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from box_agent.tools.jupyter_output import (
+from box_agent.tools.output_capture import (
     OUTPUT_PREVIEW_BYTES,
     OUTPUT_REPLY_BYTES,
     OutputCapture,
     bound_output_text,
-    output_metadata_fits,
 )
 from box_agent.tools.jupyter_tool import InProcessKernelSession, JupyterKernelSession
 
@@ -101,14 +100,6 @@ def test_output_persistence_failures_keep_draining_and_report_data_loss(
     assert "HEAD" in reply and "TAIL" in reply
     assert len(reply.encode("utf-8")) < OUTPUT_REPLY_BYTES
     assert capture._stream is None
-
-
-def test_optional_metadata_rejects_huge_text_cycles_and_non_json_values():
-    cycle = {}
-    cycle["self"] = cycle
-    assert output_metadata_fits({"path": "output.txt", "complete": True, "size": 100})
-    for raw in ({"stdout": "x" * OUTPUT_REPLY_BYTES}, cycle, {"x": object()}, {"x": float("nan")}):
-        assert not output_metadata_fits(raw)
 
 
 class _OutputKernelClient:
