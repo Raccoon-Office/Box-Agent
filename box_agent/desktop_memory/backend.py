@@ -137,7 +137,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self.corrections = None
         self.log_context: dict[str, str] = {}
         self.capabilities = frozenset({"recall", "read", "search", "save", "write", "edit"})
-        self.transport = MemoryHostTransport(Path(config.bootstrap_file), config.identity_epoch)
+        self.transport = MemoryHostTransport(Path(config.bootstrap_file), config.identity_epoch, on_revoked=self.end_turn)
         self.model_input_guard = DesktopInputGuard(self._visibility, self._preload)
         self.current_scope: TurnScope | None = None
         self._sections: dict[str, Any] = {}
@@ -243,7 +243,8 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
     def _record(data: dict[str, Any], path: str) -> dict[str, Any]:
         content = data.get("content")
         exists = data.get("exists")
-        if not isinstance(content, str) or type(exists) is not bool or data.get("path") != "memory://" + path:
+        if (not isinstance(content, str) or len(content.encode("utf-8")) > 32 * 1024 * 1024
+                or type(exists) is not bool or data.get("path") != "memory://" + path):
             raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE")
         revision = "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest() if exists else "absent"
         if data.get("revision") != revision or not exists and content:
@@ -288,6 +289,8 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
                 raise MemoryEditError("文件不存在，请用 memory_write 创建。")
             updated = (self._rewrite_core_content(record["content"], content) if operation == "write" else
                        self._edit_core_content(record["content"], self._ENTRY_OPEN_RE.sub("<mem>", old_text), new_text))
+            if len(updated.encode("utf-8")) > 32 * 1024 * 1024:
+                raise MemoryProxyError("BUDGET_EXCEEDED")
             check_tool_cancellation()
             self.model_input_guard.consume(path)
             try:
@@ -295,15 +298,13 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
                     "binding": dict(scope.binding), "path": path, "read_id": read.read_id,
                     "base_revision": record["revision"], "content": updated,
                 })
-                try:
-                    written = self._record(data, path)
-                except MemoryProxyError:
-                    raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE", outcome="unknown") from None
-                if not written["exists"] or written["content"] != updated:
+                expected_hash = hashlib.sha256(updated.encode("utf-8")).hexdigest()
+                if (data.get("path") != "memory://" + path or data.get("exists") is not True
+                        or data.get("content_sha256") != expected_hash or data.get("revision") != "sha256:" + expected_hash):
                     raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE", outcome="unknown")
                 if self.current_scope is not scope:
                     raise MemoryProxyError("TURN_REVOKED", outcome="unknown")
-                return {"path": path, "operation": operation, "exists": True, "revision": written["revision"]}
+                return {"path": path, "operation": operation, "exists": True, "revision": data["revision"]}
             finally:
                 self._visibility(read, False, "")
                 self._records.pop(read.read_id, None)

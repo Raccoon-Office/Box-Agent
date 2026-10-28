@@ -79,6 +79,7 @@ def host(tmp_path, monkeypatch):
             assert core_record(payload["path"], state.files.get(payload["path"]))["revision"] == payload["base_revision"]
             state.files[payload["path"]] = payload["content"]
             data = core_record(payload["path"], payload["content"])
+            data["content_sha256"] = hashlib.sha256(data.pop("content").encode()).hexdigest()
         elif operation == "qa":
             if state.qa_release is not None:
                 await state.qa_release.wait()
@@ -564,5 +565,26 @@ async def test_durable_unknown_qa_receipt_is_preserved_without_agent_retry(host)
         receipt = await manager.handoff(scope, "question", "answer", 123)
         assert receipt["state"] == "durable_unknown"
         assert len([1 for operation, _ in host.calls if operation == "qa"]) == 1
+    finally:
+        await manager.aclose()
+
+
+async def test_authentication_revocation_clears_preload_and_core_qualification(host):
+    manager = backend(host)
+
+    async def denied(operation, payload):
+        if operation == "search":
+            return httpx.Response(403, json={"protocol": 2, "identity_epoch": host.bootstrap["identity_epoch"], "ok": False,
+                                            "error": {"code": "AUTH_REQUIRED"}})
+
+    try:
+        engine, history = await start_turn(manager)
+        await qualify(manager, engine, history)
+        host.before = denied
+        with pytest.raises(MemoryProxyError, match="AUTH_REQUIRED"):
+            await manager.search_memory("query")
+        assert manager.current_scope is None and manager._preload(16000) == ""
+        with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+            await manager.model_input_guard.require("memory.md")
     finally:
         await manager.aclose()
