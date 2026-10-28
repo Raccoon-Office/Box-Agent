@@ -1,5 +1,21 @@
 # Memory System Integration Guide
 
+## 桌面 MemoryV2 接入进度
+
+`box_agent.desktop_memory` 已提供专用本机代理传输和全文模型可见性门禁的基础能力，
+目前尚未注册为可选后端，也未接入桌面启动。不要将通用 memsense 配置指向桌面代理：
+通用后端仍会构造本地纠错存储，不能满足迁移期间本地只读的要求。
+
+传输仅支持固定的 loopback 协议 V2，首次请求才读取私有 bootstrap，并固定 identity_epoch；
+无环境代理、重定向或 HTTP 重试。超时覆盖文件读取至响应体，已派发变更的失败保留 unknown。
+当前文件权限实现及实测针对 POSIX；Windows 私有文件权限适配尚未验证。
+
+`CoreVisibilityGuard` 通过 `ModelInputGuard` 接入最终模型输入投影。完整读取仅形成 pending；
+实际请求提交且模型成功响应后才激活资格，后续投影移除正文或消费写入会撤销。
+宿主须实现 commit/revoke 回调及最终写入门禁；基础模块测试不能代替真实宿主验收。
+测试入口为 `tests/test_desktop_memory_transport.py`、`tests/test_desktop_memory_visibility.py`，
+后者覆盖真实执行循环中成功、模型失败与截断响应。
+
 ## 后端选择与外部接入
 
 默认 `memory_backend_type: local` 使用原有本地记忆。`memsense` 提供原生接入；

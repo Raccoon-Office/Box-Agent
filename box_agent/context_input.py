@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from contextlib import nullcontext
 import logging
@@ -40,6 +41,18 @@ class PreparedContext:
     image_notices: tuple[str, ...] = ()
 
 
+class ModelInputGuard(ABC):
+    """Optional capability checks on final input, without editing durable history."""
+
+    @abstractmethod
+    def bind_context(self, context: DefaultContextEngine) -> None:
+        """Borrow the exact run's schemas, history and input budget."""
+
+    @abstractmethod
+    def prepare_context(self, projection: PreparedContext) -> PreparedContext:
+        """Compose delivery callbacks or reject a projection before dispatch."""
+
+
 class DefaultContextEngine:
     """Own request coverage and budgets, borrowing the final resolved services.
 
@@ -55,6 +68,7 @@ class DefaultContextEngine:
         self.llm = llm
         self.thinking_enabled = thinking_enabled
         self._memory_lookup = None
+        self._input_guard: ModelInputGuard | None = None
         self.references: SkillReferenceContext | None = None
         self.prepared_tools: PreparedTools | None = None
         self._history: list[Message] = []
@@ -101,6 +115,10 @@ class DefaultContextEngine:
     def bind_memory(self, memory_lookup: Any) -> None:
         """Bind optional memory after run capabilities have been resolved."""
         self._memory_lookup = memory_lookup
+        guard = getattr(memory_lookup, "model_input_guard", None)
+        self._input_guard = guard if isinstance(guard, ModelInputGuard) else None
+        if self._input_guard is not None:
+            self._input_guard.bind_context(self)
 
     def bind_history(self, messages: list[Message]) -> None:
         """Observe exact tool history before Kernel may compact it; never edit it."""
@@ -310,7 +328,7 @@ class DefaultContextEngine:
                 budget_blocked = True
             if blocked_reason:
                 on_committed = on_response = None
-        return PreparedContext(
+        projection = PreparedContext(
             provider_messages, context_messages, references,
             self._request_reference_tokens,
             self._request_reference_tokens + self._transient_tokens
@@ -320,3 +338,4 @@ class DefaultContextEngine:
             image_projection.manifest if image_projection else None,
             image_projection.notices if image_projection else (),
         )
+        return self._input_guard.prepare_context(projection) if self._input_guard is not None else projection
