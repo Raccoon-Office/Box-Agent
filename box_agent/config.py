@@ -674,6 +674,9 @@ class Config(BaseModel):
         if agent_data.get("parallel_tool_timeout_seconds") is None:
             agent_data.pop("parallel_tool_timeout_seconds", None)
         agent_config = AgentConfig(**agent_data)
+        from .desktop_memory.launch import desktop_launch_agent
+
+        agent_config = desktop_launch_agent(agent_config)
 
         # Parse tools configuration
         tools_data = data.get("tools", {})

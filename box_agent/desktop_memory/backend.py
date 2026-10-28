@@ -185,12 +185,15 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self._records.clear()
         self.current_scope = None
         self._sections = {}
+        if not getattr(self, "context_attempt_durable", True):
+            raise MemoryProxyError("MEMORY_ATTEMPT_NOT_DURABLE")
         self._serial += 1
         serial = self._serial
         session, turn = context.get("session_id"), context.get("turn_id")
         if not _identifier(session) or not _identifier(turn) or not isinstance(query, str):
             raise MemoryProxyError("INVALID_ARGUMENT")
-        data = await self.transport.request("context", {"session_id": session, "turn_id": turn, "query": query})
+        data = await self.transport.request("context", {"session_id": session, "turn_id": turn, "query": query,
+                                                        "require_existing": getattr(self, "context_requires_existing", False)})
         if serial != self._serial or self._closed:
             raise MemoryProxyError("TURN_REVOKED")
         scope = _scope(data, self.desktop_config.identity_epoch, session, turn)

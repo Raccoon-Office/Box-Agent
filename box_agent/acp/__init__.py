@@ -1720,9 +1720,19 @@ class BoxACPAgent:
             agentInfo=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
         skills = self._skills_meta()
+        response_meta: dict[str, Any] = {}
         if skills is not None:
             # Pydantic alias: _meta ↔ field_meta
-            kwargs["field_meta"] = {"skills": skills}
+            response_meta["skills"] = skills
+        if self._config.agent.memory_backend_type == "desktop":
+            response_meta["desktop_memory"] = {
+                "protocol_version": 2,
+                "backend": "desktop",
+                "enabled": self._config.agent.enable_memory,
+                "attempt_log_v1": True,
+            }
+        if response_meta:
+            kwargs["field_meta"] = response_meta
         resp = InitializeResponse(**kwargs)
         log.info("initialize", message=f"Initialized box-agent v{__version__}, skills={len(skills) if skills else 0}")
         return resp
@@ -6009,6 +6019,9 @@ async def _close_acp_connection(
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
     config = config or Config.load()
+    from ..desktop_memory.launch import desktop_launch_agent
+
+    config = config.model_copy(update={"agent": desktop_launch_agent(config.agent)})
 
     # ── Playwright default cache path ──────────────────────
     # Host (e.g. officev3) can override by exporting PLAYWRIGHT_BROWSERS_PATH

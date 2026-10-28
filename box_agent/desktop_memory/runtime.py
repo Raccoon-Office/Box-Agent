@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from typing import Any
 
@@ -18,6 +20,8 @@ class DesktopMemoryRuntime(MemoryRuntime):
         super().__init__(backend)
         self._turn_scope: TurnScope | None = None
         self._scheduled: TurnScope | None = None
+        self._attempts: dict[str, int] = {}
+        self._attempt_log = None
 
     def user_turn_scope(self, turn: _MemoryTurn):
         from ..payload_privacy import private_payload_scope
@@ -27,6 +31,36 @@ class DesktopMemoryRuntime(MemoryRuntime):
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
         self._turn_scope = None
         self._scheduled = None
+        key = hashlib.sha256(json.dumps([turn.session_id, turn.turn_id], ensure_ascii=False,
+                                       separators=(",", ":")).encode()).hexdigest()
+        log = getattr(session.agent, "session_log", None)
+        self.backend.context_attempt_durable = True
+        try:
+            if log is not None and log is not self._attempt_log:
+                self._attempts = {}
+                for event in log.events:
+                    if event.get("type") != "memory/desktop-attempt":
+                        continue
+                    data = event.get("data", {})
+                    timestamp = data.get("timestamp")
+                    if (not isinstance(data.get("turn_key"), str) or len(data["turn_key"]) != 64
+                            or type(timestamp) is not int or timestamp < 0):
+                        raise ValueError("invalid_memory_attempt")
+                    self._attempts.setdefault(data["turn_key"], timestamp)
+                self._attempt_log = log
+            self.backend.context_requires_existing = key in self._attempts
+            if key in self._attempts:
+                turn.timestamp = self._attempts[key]
+            else:
+                if len(self._attempts) >= 5000:
+                    raise ValueError("memory_attempt_budget")
+                if log is not None:
+                    log.append("memory/desktop-attempt", {"turn_key": key, "timestamp": turn.timestamp}, ignorable=True)
+                    log.flush()
+                self._attempts[key] = turn.timestamp
+        except Exception as exc:
+            self.backend.context_attempt_durable = False
+            self.backend.log_failure("attempt", type(exc).__name__)
         await super().refresh(session, turn)
         self._turn_scope = self.backend.current_scope
 
