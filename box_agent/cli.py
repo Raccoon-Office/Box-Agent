@@ -262,6 +262,8 @@ def _config_display_value(value: Any, parts: list[str]) -> Any:
     normalized = parts[1:] if parts[:1] == ["agent"] else parts
     if normalized[:2] == ["memory_external", "headers"]:
         return "****" if value else value
+    if normalized[:1] == ["memory_desktop"]:
+        return "****" if value else value
     return _mask_secret(value) if _is_secret_path(parts) else value
 
 

@@ -154,6 +154,10 @@ def create_memory_tools(manager: Any, llm: Any = None) -> list[Tool]:
 
     if manager is None:
         return []
+    if isinstance(manager, ExternalMemoryBackend) and manager.backend_type == "desktop":
+        from ..desktop_memory.tools import create_desktop_memory_tools
+
+        return create_desktop_memory_tools(manager)
     if isinstance(manager, ExternalMemoryBackend):
         tools = []
         if "read" in manager.capabilities:
@@ -174,7 +178,9 @@ def create_memory_tools(manager: Any, llm: Any = None) -> list[Tool]:
 
 def is_memory_tool(tool: Any) -> bool:
     """识别本能力拥有的工具，方便为会话身份重新绑定。"""
-    return isinstance(tool, (ExternalMemoryReadTool, ExternalMemorySearchTool, MemsenseMemoryMutationTool, MemoryReadTool,
+    from ..desktop_memory.tools import DesktopMemoryTool
+
+    return isinstance(tool, (DesktopMemoryTool, ExternalMemoryReadTool, ExternalMemorySearchTool, MemsenseMemoryMutationTool, MemoryReadTool,
                              MemoryWriteTool, MemorySearchTool, MemoryListCorrectionsTool,
                              MemoryWriteCorrectionTool, MemorySupersedeCorrectionTool, MemoryDeleteCorrectionTool))
 

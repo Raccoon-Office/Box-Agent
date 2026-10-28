@@ -2,9 +2,10 @@
 
 ## 桌面 MemoryV2 接入进度
 
-`box_agent.desktop_memory` 已提供专用本机代理传输和全文模型可见性门禁的基础能力，
-目前尚未注册为可选后端，也未接入桌面启动。不要将通用 memsense 配置指向桌面代理：
-通用后端仍会构造本地纠错存储，不能满足迁移期间本地只读的要求。
+`memory_backend_type: desktop` 已注册到共同的 CLI/ACP 装配；私有配置为
+`memory_desktop.bootstrap_file` 和 `memory_desktop.identity_epoch`。构造及会话打开不访问代理，
+每真实轮次按 Host 返回的固定来源读取；不构造本地 MemoryManager、不加载纠错、不启动本地提取维护。
+桌面启动端尚未接线，默认 local 配置保持原行为。不要将通用 memsense 配置指向桌面代理。
 
 传输仅支持固定的 loopback 协议 V2，首次请求才读取私有 bootstrap，并固定 identity_epoch；
 无环境代理、重定向或 HTTP 重试。超时覆盖文件读取至响应体，已派发变更的失败保留 unknown。
@@ -12,7 +13,12 @@
 
 `CoreVisibilityGuard` 通过 `ModelInputGuard` 接入最终模型输入投影。完整读取仅形成 pending；
 实际请求提交且模型成功响应后才激活资格，后续投影移除正文或消费写入会撤销。
-宿主须实现 commit/revoke 回调及最终写入门禁；基础模块测试不能代替真实宿主验收。
+`DesktopInputGuard` 先缩减可选预载，再检查完整读；模型 tokenizer 未精确适配时采用
+已有 usage 估算与完整 UTF-8 JSON 字节上界的较大值，并保留 1,024 token 余量，可能保守拒绝大全文。
+宿主仍须实现代理和 commit/revoke 回调及最终写入门禁；合成 Host 测试不能代替真实宿主验收。
+最终 QA 捕获原轮次来源与事件键，只交接合格在线云端轮次；HTTP 超时不自动重发，
+durable_unknown 不计为云端已保存。新经验生成链路尚未完成。
+桌面轮次的诊断正文被省略，包含 full-payload 调试开关；真实模型输入和正式 SessionLog 保留原语义。
 测试入口为 `tests/test_desktop_memory_transport.py`、`tests/test_desktop_memory_visibility.py`，
 后者覆盖真实执行循环中成功、模型失败与截断响应。
 

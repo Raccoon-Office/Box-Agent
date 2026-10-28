@@ -436,6 +436,10 @@ def emit_session_trace(
     if context is None:
         return
     writer, context_turn_id = context
+    from .payload_privacy import private_payloads
+
+    if private_payloads():
+        data = {"payload_redacted": True}
     writer.write(
         event,
         turn_id=turn_id.strip() or context_turn_id,
