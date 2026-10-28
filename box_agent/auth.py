@@ -86,6 +86,27 @@ def _jwt_expiry(token: str) -> int | None:
     return int(expiry) if isinstance(expiry, (int, float)) else None
 
 
+def _is_local_development_gateway(url: str) -> bool:
+    """Only an explicitly configured loopback origin may receive local fixture auth."""
+    configured = os.environ.get("BOX_AGENT_LOCAL_GATEWAY_ORIGIN", "")
+    if not configured:
+        return False
+    try:
+        expected, actual = urlparse(configured), urlparse(url)
+        return (
+            expected.scheme == actual.scheme == "http"
+            and expected.hostname in {"localhost", "127.0.0.1", "::1"}
+            and actual.hostname == expected.hostname
+            and actual.port == expected.port
+            and not actual.username
+            and not actual.password
+            and not expected.username
+            and not expected.password
+        )
+    except ValueError:
+        return False
+
+
 def _xiaohuanxiong_refresh_url(api_base: str) -> str:
     try:
         parsed = urlparse(api_base)
@@ -95,6 +116,7 @@ def _xiaohuanxiong_refresh_url(api_base: str) -> str:
     if not (
         hostname == "xiaohuanxiong.com"
         or hostname.endswith(".xiaohuanxiong.com")
+        or _is_local_development_gateway(api_base)
     ):
         return ""
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -355,7 +377,7 @@ def should_attach_auth_header(url: str) -> bool:
         return False
 
     hostname = hostname.lower().rstrip(".")
-    return any(
+    return _is_local_development_gateway(url) or any(
         hostname == suffix or hostname.endswith(f".{suffix}")
         for suffix in AUTH_HEADER_HOST_SUFFIXES
     )

@@ -966,3 +966,19 @@ async def test_generate_real_api_key_skips_force_refresh_on_401(
         assert refresh_calls == []
     finally:
         await client.client.close()
+
+
+def test_local_gateway_auth_requires_exact_explicit_loopback_origin(monkeypatch):
+    monkeypatch.delenv("BOX_AGENT_LOCAL_GATEWAY_ORIGIN", raising=False)
+    assert not should_attach_auth_header("http://localhost:18082/api/web/llm/v2")
+    monkeypatch.setenv("BOX_AGENT_LOCAL_GATEWAY_ORIGIN", "http://localhost:18082")
+    assert should_attach_auth_header("http://localhost:18082/api/web/llm/v2")
+    for url in [
+        "http://localhost:18083/v1",
+        "http://localhost.evil:18082/v1",
+        "http://user:pw@localhost:18082/v1",
+        "https://localhost:18082/v1",
+    ]:
+        assert not should_attach_auth_header(url)
+    monkeypatch.setenv("BOX_AGENT_LOCAL_GATEWAY_ORIGIN", "http://192.168.1.1:18082")
+    assert not should_attach_auth_header("http://192.168.1.1:18082/v1")
