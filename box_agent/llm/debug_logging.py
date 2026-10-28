@@ -452,6 +452,10 @@ def _summarize_request_value(value: Any, *, preview_chars: int = _REQUEST_TEXT_P
 
 
 def _emit(record: dict[str, Any]) -> None:
+    from ..payload_privacy import private_payloads
+
+    if private_payloads():
+        record = {"event": record.get("event"), "payload_redacted": True}
     full_record = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "level": "DEBUG",

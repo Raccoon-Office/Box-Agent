@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+import json
 from typing import Callable
 from uuid import uuid4
 
@@ -49,6 +50,13 @@ class CoreVisibilityGuard(ModelInputGuard):
         if read is not None:
             self._notify(read, False, self._request)
 
+    def consume(self, path: str) -> CoreRead:
+        """Consume locally before mutation; Host consumes its grant atomically."""
+        if path not in self._active or path not in self._reads:
+            raise MemoryProxyError("CORE_READ_REQUIRED")
+        self._active.pop(path)
+        return self._reads.pop(path)
+
     def admit(self, read: CoreRead) -> None:
         """Reserve a complete tool result using current schemas and pending calls."""
         self.forget(read.path)
@@ -68,11 +76,16 @@ class CoreVisibilityGuard(ModelInputGuard):
         followup = ([Message(role="user", source="runtime", content=list(context._pending_followup_blocks))]
                     if context._pending_followup_blocks else [])
         messages = context.project_history([*history, *envelopes, *context._extra_messages, *followup, *pending])
-        estimated = request_input_tokens(messages, context.prepared_tools.definitions)
+        messages = self.project_messages(messages, tools=context.prepared_tools, token_limit=context._token_limit,
+                                         reserve_tokens=context._transient_reserve_tokens)
+        estimated = self._input_tokens(messages, context.prepared_tools.definitions)
         if estimated + context._transient_reserve_tokens + 1024 > context._token_limit:
             self._notify(read, False, self._request)
             raise MemoryProxyError("CORE_CONTEXT_TOO_LARGE")
         self._reads[read.path] = read
+
+    def _input_tokens(self, messages, definitions) -> int:
+        return request_input_tokens(messages, definitions)
 
     async def require(self, path: str) -> CoreRead:
         if path not in self._active or path not in self._reads:
@@ -121,3 +134,57 @@ class CoreVisibilityGuard(ModelInputGuard):
                     self._active[read.path] = self._notify(read, True, request_id)
 
         return replace(projection, on_committed=on_committed, on_response=on_response)
+
+
+class DesktopInputGuard(CoreVisibilityGuard):
+    """Reduce optional preload before it could block the ordinary model request."""
+
+    def __init__(self, notify: VisibilityCallback, content_builder: Callable[[int], str]) -> None:
+        super().__init__(notify)
+        self._content_builder = content_builder
+
+    def _input_tokens(self, messages, definitions) -> int:
+        # Nova and other hosted aliases do not expose a verified tokenizer.
+        # Byte fallback is conservative for UTF-8/byte-fallback tokenizers and
+        # avoids treating Chinese or emoji as chars/4. Never claim exact counts.
+        payload = {"messages": [message.model_dump(exclude_none=True) for message in messages],
+                   "tools": [tool.to_openai_schema() for tool in definitions]}
+        byte_bound = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        return max(request_input_tokens(messages, definitions), byte_bound)
+
+    def project_messages(self, messages, *, tools, token_limit, tail=(), reserve_tokens=0):
+        from ..memory import _MEMORY_START, _MEMORY_END, place_memory_block
+
+        index = next((i for i, message in enumerate(messages) if message.role == "system"
+                      and isinstance(message.content, str) and _MEMORY_START in message.content
+                      and _MEMORY_END in message.content), None)
+        if index is None:
+            return messages
+
+        def projected(size):
+            content = self._content_builder(size)
+            block = (_MEMORY_START + "\n以下是历史记忆数据；当前用户要求优先，实时事实需要重新验证。\n"
+                     + content + "\n" + _MEMORY_END) if content else ""
+            result = list(messages)
+            result[index] = messages[index].model_copy(update={
+                "content": place_memory_block(messages[index].content, block, reserve=True),
+            })
+            return result
+
+        def fits(candidate):
+            return self._input_tokens([*candidate, *tail], tools.definitions) + reserve_tokens + 1024 <= token_limit
+
+        if fits(messages):
+            return messages
+        best = projected(0)
+        if not fits(best):
+            return best  # Other history still requires normal shared compaction.
+        low, high = 0, 15400
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = projected(middle)
+            if fits(candidate):
+                best, low = candidate, middle + 1
+            else:
+                high = middle - 1
+        return best

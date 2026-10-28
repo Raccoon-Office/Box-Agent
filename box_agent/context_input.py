@@ -52,6 +52,11 @@ class ModelInputGuard(ABC):
     def prepare_context(self, projection: PreparedContext) -> PreparedContext:
         """Compose delivery callbacks or reject a projection before dispatch."""
 
+    def project_messages(self, messages: list[Message], *, tools: PreparedTools, token_limit: int,
+                         tail: tuple[Message, ...] = (), reserve_tokens: int = 0) -> list[Message]:
+        """Bound owned optional input before references and shared budget checks."""
+        return messages
+
 
 class DefaultContextEngine:
     """Own request coverage and budgets, borrowing the final resolved services.
@@ -258,6 +263,12 @@ class DefaultContextEngine:
             0, self._transient_tokens - _fallback_context_estimate([transient_message], {}),
         ) if transient_message is not None else 0)
         context_messages = self.project_history([*messages, *extra_messages])
+        if self._input_guard is not None:
+            context_messages = self._input_guard.project_messages(
+                context_messages, tools=prepared_tools, token_limit=token_limit,
+                tail=(transient_message,) if transient_message is not None else (),
+                reserve_tokens=self._transient_reserve_tokens,
+            )
         references: tuple[dict[str, Any], ...] = ()
         self._request_reference_tokens = 0
         blocked_reason = None

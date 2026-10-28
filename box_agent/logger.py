@@ -242,6 +242,11 @@ class AgentLogger:
         if self.log_file is None:
             return
 
+        from .payload_privacy import private_payloads
+
+        if private_payloads():
+            content = "<private diagnostic payload omitted>"
+
         with open(self.log_file, "a", encoding="utf-8") as f:
             f.write("\n" + "-" * 80 + "\n")
             f.write(f"[{self.log_index}] {log_type}\n")

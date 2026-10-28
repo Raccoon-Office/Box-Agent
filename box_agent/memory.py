@@ -17,7 +17,7 @@ import logging
 import re
 import threading
 import uuid
-from contextlib import aclosing, asynccontextmanager, contextmanager
+from contextlib import aclosing, asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -3014,6 +3014,10 @@ def uses_local_memory(manager: Any) -> bool:
 
 def create_memory_backend(settings: AgentConfig, *, manager_factory: Any = MemoryManager) -> Any:
     """统一构造后端，本地存储同时承载独立的纠错记忆能力。"""
+    if settings.memory_backend_type == "desktop":
+        from .desktop_memory.backend import DesktopMemoryBackend
+
+        return DesktopMemoryBackend(settings.memory_desktop)
     tenant_id, user_id = memory_identity(settings.memory_tenant_id, settings.memory_user_id)
     local = manager_factory(
         memory_dir=scoped_memory_dir(settings.memory_dir, tenant_id, user_id),
@@ -3062,6 +3066,13 @@ class ExternalMemoryBackend:
                                       if getattr(config, name, None) is not None)
         if backend_type in {"mem0", "memu"}:
             logger.warning("memory backend=%s 使用 generic 映射，尚未提供原生协议适配", backend_type)
+
+    def clone_for_session(self) -> ExternalMemoryBackend:
+        """Borrow configuration, keeping per-session remote state independent."""
+        return type(self)(self.backend_type, self.config, self.tenant_id, self.user_id, self.corrections)
+
+    def create_runtime(self) -> MemoryRuntime:
+        return MemoryRuntime(self)
 
     @property
     def correction_curator(self) -> Any:
@@ -3573,6 +3584,10 @@ class MemoryRuntime:
         if self._refresh_cancel is not None:
             self._refresh_cancel.set()
 
+    def user_turn_scope(self, turn: _MemoryTurn):
+        """Optional non-persistent capability scope around the user execution."""
+        return nullcontext()
+
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
         if getattr(session, "cancelled", False):
             return
@@ -3621,6 +3636,9 @@ class MemoryRuntime:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
+    def end_turn(self, turn: _MemoryTurn) -> None:
+        """Optional capability cleanup, including exceptional user-turn exits."""
+
     async def _save(self, turn: _MemoryTurn) -> None:
         context = {"session_id": turn.session_id, "turn_id": turn.turn_id, "timestamp": turn.timestamp}
         try:
@@ -3667,15 +3685,17 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
         return
     turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000))
     runtime.active = turn
-    try:
-        await runtime.refresh(session, turn)
-        yield turn
-    except BaseException:
-        raise
-    else:
-        runtime.schedule(turn)
-    finally:
-        runtime.active = None
+    with runtime.user_turn_scope(turn):
+        try:
+            await runtime.refresh(session, turn)
+            yield turn
+        except BaseException:
+            raise
+        else:
+            runtime.schedule(turn)
+        finally:
+            runtime.end_turn(turn)
+            runtime.active = None
 
 
 async def memory_run_events(session: Any, request: Any, options: Any) -> AsyncIterator[AgentEvent]:

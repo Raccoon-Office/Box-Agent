@@ -42,6 +42,7 @@ class _Operation:
 # The caller chooses a capability, never an arbitrary URL or timeout increase.
 _OPERATIONS = {
     "context": _Operation(timeout=0.8, response_limit=256 * _KIB),
+    "turn/close": _Operation(mutation=True),
     "search": _Operation(),
     "managed/read": _Operation(),
     "core/read": _Operation(response_limit=_CORE_LIMIT),

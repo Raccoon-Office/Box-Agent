@@ -92,13 +92,14 @@ async def prepare_model(resources: SessionResources) -> None:
 
 
 async def prepare_memory(resources: SessionResources) -> None:
-    from .memory import ExternalMemoryBackend, MemoryRuntime, memory_identity, uses_local_memory
+    from .memory import ExternalMemoryBackend, memory_identity, uses_local_memory
 
     context = resources.context
     config = context.config
     resources.memory_manager = context.host.memory_manager
     if context.options.utility:
         # 工具型会话保留宿主提供的引导信息，仍不创建提取或外部保存资源。
+        resources.memory_manager = None
         resources.state.update(memory_manager=None, memory_runtime=None, memory_extractor=None)
         return
     if not config.agent.enable_memory and not uses_local_memory(resources.memory_manager):
@@ -120,6 +121,8 @@ async def prepare_memory(resources: SessionResources) -> None:
         if isinstance(resources.memory_manager, ExternalMemoryBackend):
             settings.memory_backend_type = resources.memory_manager.backend_type
             settings.memory_external = resources.memory_manager.config
+            if settings.memory_backend_type == "desktop":
+                settings.memory_desktop = resources.memory_manager.desktop_config
         elif uses_local_memory(resources.memory_manager):
             settings.memory_backend_type = "local"
         settings.memory_tenant_id, settings.memory_user_id = memory_identity(
@@ -133,12 +136,10 @@ async def prepare_memory(resources: SessionResources) -> None:
     elif isinstance(resources.memory_manager, ExternalMemoryBackend):
         # ACP 可借用进程后端配置，但每个会话的请求上下文必须独立。
         manager = resources.memory_manager
-        resources.memory_manager = type(manager)(
-            manager.backend_type, manager.config, manager.tenant_id, manager.user_id, manager.corrections,
-        )
+        resources.memory_manager = manager.clone_for_session()
     resources.state["memory_manager"] = resources.memory_manager
     if isinstance(resources.memory_manager, ExternalMemoryBackend):
-        runtime = MemoryRuntime(resources.memory_manager)
+        runtime = resources.memory_manager.create_runtime()
         resources.state["memory_runtime"] = runtime
         resources.state["memory_extractor"] = None
         resources.cleanup.push_async_callback(runtime.aclose)

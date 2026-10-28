@@ -255,6 +255,13 @@ class ImageContextConfig(BaseModel):
     max_encoded_bytes: int = Field(default=10 * 1024 * 1024, gt=0, strict=True)
 
 
+class DesktopMemoryConfig(BaseModel):
+    """Private host bootstrap location; credentials never enter public metadata."""
+
+    bootstrap_file: str = Field(default="", repr=False, max_length=4096)
+    identity_epoch: str = Field(default="", repr=False, max_length=64)
+
+
 class AgentConfig(BaseModel):
     """Agent configuration"""
 
@@ -318,10 +325,11 @@ class AgentConfig(BaseModel):
     enable_memory: bool = True
     memory_dir: str = Field(default_factory=default_memory_dir)
     # 后端选择和内部身份；是否向远端发送身份由具体协议决定。
-    memory_backend_type: Literal["local", "memsense", "generic", "mem0", "memu"] = "local"
+    memory_backend_type: Literal["local", "memsense", "generic", "mem0", "memu", "desktop"] = "local"
     memory_tenant_id: str = "default"
     memory_user_id: str = "default"
     memory_external: ExternalMemoryConfig = Field(default_factory=ExternalMemoryConfig)
+    memory_desktop: DesktopMemoryConfig = Field(default_factory=DesktopMemoryConfig, repr=False)
 
     # Memory auto-extraction
     enable_memory_extraction: bool = True
