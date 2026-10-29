@@ -11,8 +11,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from time import monotonic
 from typing import Any
 
-from openai import AsyncOpenAI, BadRequestError
+from openai import AsyncOpenAI, BadRequestError, DefaultAsyncHttpxClient
 
+from ..auth import is_private_service_url
 from ..retry import RetryConfig, StreamInterrupted, async_retry, is_retryable_stream_error
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from ..tools.argument_limits import (
@@ -606,6 +607,12 @@ class OpenAIClient(LLMClientBase):
             api_key=api_key,
             base_url=api_base,
             timeout=timeout,
+            # Redirects may forward login metadata and the request body outside
+            # the private service boundary, even when Authorization is stripped.
+            http_client=(
+                DefaultAsyncHttpxClient(follow_redirects=False)
+                if is_private_service_url(api_base) else None
+            ),
         )
 
     async def _bound_request_body(

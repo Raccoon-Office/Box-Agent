@@ -55,7 +55,12 @@ except ImportError:
 
     create_mcp_http_client = None
 
-from box_agent.auth import request_auth_headers, resolve_auth_token, should_attach_auth_header
+from box_agent.auth import (
+    is_private_service_url,
+    request_auth_headers,
+    resolve_auth_token,
+    should_attach_auth_header,
+)
 from box_agent.config import MCPConfig
 
 from .base import Tool, ToolInvocationContext, ToolResult
@@ -1313,6 +1318,27 @@ class MCPTool(Tool):
                 await release_browser_runtime_for_current_turn()
 
 
+def _private_mcp_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Keep every private MCP request within the configured service boundary."""
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    async def check_url(request: httpx.Request) -> None:
+        # SSE endpoint events can change the POST URL without an HTTP redirect.
+        if not is_private_service_url(str(request.url)):
+            raise httpx.RequestError(
+                "MCP request is outside the private service boundary", request=request
+            )
+
+    client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    client.follow_redirects = False
+    client.event_hooks["request"].append(check_url)
+    return client
+
+
 async def _open_streamable_http(
     exit_stack: AsyncExitStack,
     *,
@@ -1367,6 +1393,8 @@ async def _open_streamable_http(
             auth=transport_auth,
         )
         http_client = await exit_stack.enter_async_context(http_client_context)
+        if is_private_service_url(url or ""):
+            http_client.follow_redirects = False
         streams = await exit_stack.enter_async_context(
             streamable_http_client(url=url, http_client=http_client)
         )
@@ -1380,6 +1408,8 @@ async def _open_streamable_http(
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=auth,
+                **({"httpx_client_factory": _private_mcp_http_client}
+                   if is_private_service_url(url or "") else {}),
             )
         )
     read_stream, write_stream = streams[:2]
@@ -1855,6 +1885,8 @@ class MCPServerConnection:
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=self.auth,
+                **({"httpx_client_factory": _private_mcp_http_client}
+                   if is_private_service_url(self.url or "") else {}),
             )
         )
 

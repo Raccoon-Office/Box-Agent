@@ -19,6 +19,7 @@ from box_agent.auth import (
     HostedAuthRequiredError,
     _xiaohuanxiong_refresh_url,
     ensure_hosted_auth_ready,
+    is_private_service_url,
     read_auth_token_file,
     refresh_hosted_auth_token_if_needed,
     request_auth_headers,
@@ -152,6 +153,12 @@ def resolve_image_generation_endpoint(
 
 def align_hosted_image_endpoint(endpoint: str, llm_api_base: str) -> str:
     """Use the session's hosted origin for the built-in image service."""
+    if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+        # The host owns the private preset; do not infer an endpoint from the LLM URL.
+        if is_private_service_url(endpoint) and is_private_service_url(_derive_edit_endpoint(endpoint)):
+            return endpoint
+        return ""
+
     if not (should_attach_auth_header(endpoint) and should_attach_auth_header(llm_api_base)):
         return endpoint
     image_url = urlsplit(endpoint)
@@ -797,13 +804,14 @@ class GenerateImageTool(Tool):
             raise ValueError(f"Reference image is not a file: {self._display_path(path)}")
         return path
 
-    async def _request_headers(self) -> dict[str, str]:
+    async def _request_headers(self, endpoint: str | None = None) -> dict[str, str]:
+        endpoint = endpoint or self.endpoint
         headers = {"Accept": "application/json, image/*"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             return headers
-        await ensure_hosted_auth_ready(self.endpoint, self.auth_file)
-        return request_auth_headers(auth_file=self.auth_file, existing=headers, url=self.endpoint)
+        await ensure_hosted_auth_ready(endpoint, self.auth_file)
+        return request_auth_headers(auth_file=self.auth_file, existing=headers, url=endpoint)
 
     async def _send_with_hosted_auth_retry(
         self, client: httpx.AsyncClient, request: httpx.Request,
@@ -818,7 +826,10 @@ class GenerateImageTool(Tool):
             # Buffer multipart bodies so an edit can be replayed exactly once.
             await request.aread()
         for attempt in range(2):
-            response = await client.send(request)
+            # 私有请求不能通过重定向把令牌或图片内容发送到信任范围之外。
+            response = await client.send(
+                request, follow_redirects=not is_private_service_url(str(request.url)),
+            )
             if not uses_file:
                 return response
             rejected = response.status_code == 401
@@ -997,7 +1008,7 @@ class GenerateImageTool(Tool):
                 endpoint,
                 data=data,
                 files=files,
-                headers=await self._request_headers(),
+                headers=await self._request_headers(endpoint),
             )
             log_image_generation_request(
                 mode="image_to_image",

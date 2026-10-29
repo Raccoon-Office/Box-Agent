@@ -9,8 +9,11 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import httpx
 import pytest
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage, JSONRPCRequest
 
 from box_agent.tools import mcp_loader
 from box_agent.tools.browser_runtime_scope import (
@@ -290,9 +293,12 @@ async def test_streamable_http_mcp1_passes_transport_configuration(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch):
+@pytest.mark.parametrize("private", [False, True])
+async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch, private):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://example.com")
     captured = {}
-    fake_http_client = object()
+    fake_http_client = SimpleNamespace(follow_redirects=True)
 
     @asynccontextmanager
     async def managed_http_client():
@@ -344,6 +350,114 @@ async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch):
     assert captured["url"] == "https://example.com/mcp"
     assert captured["http_client"] is fake_http_client
     assert captured["auth"] is not conn.auth
+    assert fake_http_client.follow_redirects is not private
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connection_type", ["sse", "streamable_http"])
+@pytest.mark.parametrize("status,location", [
+    (302, "/untrusted"),
+    (307, "/untrusted"),
+    (302, "https://outside.example/untrusted"),
+    (307, "https://outside.example/untrusted"),
+])
+async def test_private_mcp_transport_does_not_forward_redirected_requests(
+    monkeypatch, connection_type, status, location,
+):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(status, headers={"location": location})
+        return httpx.Response(400)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    conn = MCPServerConnection(
+        name="private-redirect", connection_type=connection_type,
+        url="https://tenant.example/office/mcp",
+        auth=DynamicBearerAuth(explicit_token="private-token"), connect_timeout=1,
+    )
+    try:
+        assert await conn.connect() is False
+    finally:
+        try:
+            await conn.disconnect()
+        except RuntimeError as error:
+            # MCP 1.x can surface its background HTTP error again on close.
+            assert mcp_loader._http_statuses_from_exception(error) == {status}
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://tenant.example/office/mcp"
+    assert requests[0].headers["Authorization"] == "Bearer private-token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private,endpoint,allowed", [
+    (True, "/office/messages", True),
+    (True, "/other/messages", False),
+    (True, "/office;untrusted", False),
+    (False, "/office;untrusted", True),
+])
+async def test_sse_endpoint_respects_private_service_boundary(
+    monkeypatch, private, endpoint, allowed,
+):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    requests = []
+    post_received = asyncio.Event()
+
+    class Events(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield f"event: endpoint\ndata: {endpoint}\n\n".encode()
+            await anyio.sleep_forever()
+
+    def handler(request):
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=Events(),
+            )
+        post_received.set()
+        return httpx.Response(202)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    conn = MCPServerConnection(
+        name="private-sse-boundary", connection_type="sse",
+        url="https://tenant.example/office/mcp", headers={"X-Api-Key": "static-key"},
+        auth=DynamicBearerAuth(explicit_token="dynamic-token"), connect_timeout=1,
+    )
+    conn.exit_stack = AsyncExitStack()
+    message = SessionMessage(JSONRPCMessage(JSONRPCRequest(
+        jsonrpc="2.0", id=1, method="tools/call",
+        params={"name": "example", "arguments": {"value": "example-content"}},
+    )))
+    with anyio.fail_after(5):
+        try:
+            _, write = await conn._connect_sse()
+            await write.send(message)
+            if allowed:
+                await post_received.wait()
+            else:
+                # The SDK closes its writer after the rejected first POST.
+                with pytest.raises((anyio.BrokenResourceError, anyio.ClosedResourceError)):
+                    await write.send(message)
+        finally:
+            await conn.exit_stack.aclose()
+
+    assert len(requests) == (2 if allowed else 1)
+    assert requests[0].headers["X-Api-Key"] == "static-key"
+    if private:
+        assert requests[0].headers["Authorization"] == "Bearer dynamic-token"
+    if allowed:
+        assert str(requests[1].url) == f"https://tenant.example{endpoint}"
+        assert requests[1].headers["X-Api-Key"] == "static-key"
+        if private:
+            assert requests[1].headers["Authorization"] == "Bearer dynamic-token"
+        assert b"example-content" in requests[1].content
 
 
 class NamedDummyTool(Tool):

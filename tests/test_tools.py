@@ -1101,13 +1101,18 @@ async def test_initialize_base_tools_can_gate_mcp_until_protocol_ready(
     monkeypatch,
 ):
     from box_agent.tools import setup as setup_module
+    from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
 
     started = asyncio.Event()
     loaded_paths: list[str] = []
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(setup_module, "get_mcp_tool_catalog", lambda: catalog)
+    monkeypatch.setattr("box_agent.plugins.cua.ready_tool.create_cua_service", lambda _: None)
 
     async def fake_load_mcp_tools_async(config_path, **kwargs):
         loaded_paths.append(config_path)
         started.set()
+        catalog.mark_ready()
         return []
 
     monkeypatch.setattr(
@@ -1138,10 +1143,12 @@ async def test_initialize_base_tools_can_gate_mcp_until_protocol_ready(
     assert mcp_task is not None
     await asyncio.sleep(0)
     assert started.is_set() is False
+    assert catalog.initial_loading
 
     gate.set()
     await mcp_task
     assert started.is_set() is True
+    assert not catalog.initial_loading
     assert loaded_paths == [str(mcp_config)]
     bootstrapped = json.loads(mcp_config.read_text(encoding="utf-8"))
     assert (
