@@ -10,6 +10,7 @@ from typing import Any
 
 from ..memory import MemoryRuntime, _MemoryTurn
 from .backend import TurnScope
+from .evidence import EvidenceCursor, no_evidence
 
 
 _log = logging.getLogger(__name__)
@@ -22,6 +23,8 @@ class DesktopMemoryRuntime(MemoryRuntime):
         self._scheduled: TurnScope | None = None
         self._attempts: dict[str, int] = {}
         self._attempt_log = None
+        self._evidence_cursor: EvidenceCursor | None = None
+        self._evidence_session = None
 
     def user_turn_scope(self, turn: _MemoryTurn):
         from ..payload_privacy import private_payload_scope
@@ -34,6 +37,16 @@ class DesktopMemoryRuntime(MemoryRuntime):
         key = hashlib.sha256(json.dumps([turn.session_id, turn.turn_id], ensure_ascii=False,
                                        separators=(",", ":")).encode()).hexdigest()
         log = getattr(session.agent, "session_log", None)
+        self._evidence_session = session
+        try:
+            from ..turn_hints import with_turn_hints
+            goal = getattr(session.agent, "goal", None)
+            wrapper = getattr(session.agent, "_apply_goal_context", None)
+            wrapped = wrapper(with_turn_hints(turn.user)) if getattr(goal, "status", None) == "active" and callable(wrapper) else None
+            self._evidence_cursor = EvidenceCursor.begin(log, turn.user, wrapped_user=wrapped)
+        except Exception:
+            self._evidence_cursor = None
+            self.backend.log_failure("evidence", "log_unavailable")
         self.backend.context_attempt_durable = True
         try:
             if log is not None and log is not self._attempt_log:
@@ -72,7 +85,11 @@ class DesktopMemoryRuntime(MemoryRuntime):
             self.backend.log_failure("handoff", "queue_full")
             return
         self._scheduled = scope
-        task = asyncio.create_task(self._finish(turn, scope), name="desktop-memory-handoff")
+        cursor = self._evidence_cursor
+        if cursor is not None and getattr(self._evidence_session.agent, "session_log", None) is not cursor.log:
+            cursor = None
+        end = cursor.log.event_count if cursor else 0
+        task = asyncio.create_task(self._finish(turn, scope, cursor, end), name="desktop-memory-handoff")
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
@@ -80,21 +97,33 @@ class DesktopMemoryRuntime(MemoryRuntime):
         scope = self._turn_scope
         self.backend.end_turn()
         self._turn_scope = None
+        self._evidence_cursor = None
+        self._evidence_session = None
         if scope is not None and self._scheduled is not scope and not self._closed:
             if len(self.tasks) < self.backend.config.save_queue_limit:
                 task = asyncio.create_task(self.backend.close_turn(scope), name="desktop-memory-close")
                 self.tasks.add(task)
                 task.add_done_callback(self.tasks.discard)
 
-    async def _finish(self, turn: _MemoryTurn, scope: TurnScope) -> None:
+    async def _finish(self, turn: _MemoryTurn, scope: TurnScope,
+                      cursor: EvidenceCursor | None = None, end: int = 0) -> None:
         try:
             if not scope.learnable or not turn.user.strip() or turn.handle is None:
                 return
             result = await turn.handle.result(consume_events=False)
             if result.status.value != "completed" or not result.final_content.strip():
                 return
+            evidence = no_evidence(turn.session_id, turn.turn_id, scope.qa_event_id, "log_unavailable")
+            if cursor is not None:
+                try:
+                    evidence = cursor.capture(session_id=turn.session_id, turn_id=turn.turn_id,
+                                              event_id=scope.qa_event_id, user=turn.user,
+                                              assistant=result.final_content, end=end)
+                except Exception:
+                    self.backend.log_failure("evidence", "log_unavailable")
             async with self._save_slots:
-                receipt = await self.backend.handoff(scope, turn.user, result.final_content, turn.timestamp)
+                receipt = await self.backend.handoff(scope, turn.user, result.final_content, turn.timestamp,
+                                                     evidence=evidence)
             _log.info("memory backend=desktop operation=handoff state=%s", receipt["state"])
         except asyncio.CancelledError:
             raise

@@ -48,6 +48,7 @@ _OPERATIONS = {
     "core/read": _Operation(response_limit=_CORE_LIMIT),
     "core/mutate": _Operation(timeout=15, mutation=True, request_limit=_CORE_LIMIT),
     "qa": _Operation(timeout=15, mutation=True),
+    "qa/evidence": _Operation(timeout=15, mutation=True, control=True),
     "experience/search": _Operation(),
     "experience/entities/get": _Operation(),
     "experience/entities/save": _Operation(timeout=15, mutation=True),

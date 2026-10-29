@@ -269,6 +269,8 @@ box-agent doctor                    # 检查环境与 API 连通性
 box-agent doctor --json             # 机器可读健康检查
 ```
 
+桌面记忆运行时可从当前轮次的真实 Session Log 固定有界、脱敏的证据，通过原生控制凭据交接；普通工具不能上传证据。QA 意图与证据一起持久化，证据缺失不阻止普通 QA，结果未知保留原输入恢复。确认 QA 接收后证据进入 `READY`，仅表示可以开始提取；后台生成、Fact/Observation 保存及后续使用仍须另行完成和验收。参见 [证据采集](box_agent/desktop_memory/evidence.py) 与 [回归测试](tests/test_desktop_memory_evidence.py)。源码变更须重新构建、安装运行时才能供打包宿主使用。
+
 ## CLI 用法
 
 ```bash

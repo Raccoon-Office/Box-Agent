@@ -46,7 +46,7 @@ def host(tmp_path, monkeypatch):
         operation = request.url.path.removeprefix("/memory/v2/")
         payload = json.loads(request.content)
         state.calls.append((operation, payload))
-        expected_token = bootstrap["control_token"] if operation.startswith("visibility/") else bootstrap["token"]
+        expected_token = bootstrap["control_token"] if operation.startswith("visibility/") or operation == "qa/evidence" else bootstrap["token"]
         assert request.headers["authorization"] == "Bearer " + expected_token
         if state.before is not None:
             override = await state.before(operation, payload)
@@ -80,7 +80,7 @@ def host(tmp_path, monkeypatch):
             state.files[payload["path"]] = payload["content"]
             data = core_record(payload["path"], payload["content"])
             data["content_sha256"] = hashlib.sha256(data.pop("content").encode()).hexdigest()
-        elif operation == "qa":
+        elif operation in {"qa", "qa/evidence"}:
             if state.qa_release is not None:
                 await state.qa_release.wait()
             data = {"event_id": payload["event_id"], "state": "accepted", "source_id": "source-1"}
@@ -362,7 +362,7 @@ async def test_background_qa_uses_original_turn_scope_after_next_turn_started(ho
         await runtime.refresh(session, _MemoryTurn("next question", "session-1", "turn-2", 124))
         host.qa_release.set()
         await asyncio.gather(*tuple(runtime.tasks))
-        qas = [payload for operation, payload in host.calls if operation == "qa"]
+        qas = [payload for operation, payload in host.calls if operation in {"qa", "qa/evidence"}]
         if first_source == "legacy_read_only":
             assert qas == []
         else:
@@ -490,7 +490,7 @@ async def test_hung_preload_is_bounded_and_cancellation_does_not_cancel_main_tas
         assert elapsed < (0.2 if cancel else 1.05)
         assert runtime._turn_scope is None
         assert not session.cancelled
-        assert not any(operation == "qa" for operation, _ in host.calls)
+        assert not any(operation in {"qa", "qa/evidence"} for operation, _ in host.calls)
     finally:
         await runtime.aclose()
 
@@ -588,3 +588,49 @@ async def test_authentication_revocation_clears_preload_and_core_qualification(h
             await manager.model_input_guard.require("memory.md")
     finally:
         await manager.aclose()
+
+
+@pytest.mark.parametrize("evidence_read_fails", [False, True])
+@pytest.mark.parametrize("active_goal", [False, True])
+async def test_real_managed_agent_run_hands_off_actual_session_log_with_control_capability(tmp_path, host, monkeypatch, evidence_read_fails, active_goal):
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+    from box_agent.session_log import SessionLog
+
+    log = SessionLog.create(tmp_path / "canonical", session_id="actual-log", cwd=tmp_path)
+    if evidence_read_fails:
+        def unavailable(*args, **kwargs):
+            raise OSError("synthetic evidence read failure")
+        monkeypatch.setattr(log, "event_page", unavailable)
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    config.agent.memory_desktop = DesktopMemoryConfig(bootstrap_file=str(host.path), identity_epoch=host.bootstrap["identity_epoch"])
+    process = backend(host)
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=RecordingLLM("actual final answer"), memory_manager=process, tools=[],
+        system_prompt="BASE", session_log=log), options=SessionOptions(profile="acp", workspace_dir=tmp_path))
+    try:
+        if active_goal:
+            session.agent.set_goal("Synthetic goal")
+        handle = await AgentService().start(RunRequest(run_id="actual-turn", session_id="session-1", user_message="question"), session=session)
+        result = await handle.result()
+        assert result.status.value == "completed"
+        await asyncio.gather(*tuple(session.memory_runtime.tasks))
+        operations = [(operation, payload) for operation, payload in host.calls if operation == "qa/evidence"]
+        assert len(operations) == 1
+        evidence = operations[0][1]["evidence"]
+        if evidence_read_fails:
+            assert evidence["status"] == "no_evidence" and evidence["reason"] == "log_unavailable"
+            return
+        assert evidence["status"] == "captured"
+        assert evidence["session_id"] == "session-1" and evidence["turn_id"] == "actual-turn"
+        actual = {event["seq"]: event for event in log.events}
+        for view in evidence["views"]:
+            ref = view["source_ref"]
+            assert ref["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
+            assert all(actual[seq]["type"] == ref["event_type"] for seq in ref["event_seqs"])
+        assert {view["source_ref"]["event_type"] for view in evidence["views"]} == {"user/message", "assistant/message", "turn/end"}
+    finally:
+        await session.aclose()
+        await process.aclose()
+        log.close()

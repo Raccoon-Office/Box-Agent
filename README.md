@@ -319,6 +319,8 @@ For endpoints that reject `reasoning_effort: "none"`, see
 
 See [isolated runtime profiles](docs/isolated-runtime-profile.md) and the no-background-startup [example configuration](box_agent/config/isolated-profile-example.yaml). This is path/configuration isolation, not an OS sandbox or permission to call a model.
 
+The desktop memory runtime can hand off bounded, redacted evidence from the current canonical Session Log through the native control capability. QA and evidence are durably recorded together; missing evidence does not prevent ordinary QA, and unknown results retain the original input for recovery. A confirmed QA receipt makes the evidence `READY` for extraction. This handoff does not itself generate or save Experience Facts/Observations; the background producer and later-use acceptance remain separate work. See [evidence collection](box_agent/desktop_memory/evidence.py) and its [regression tests](tests/test_desktop_memory_evidence.py). Packaged hosts require a runtime rebuild/install before using these source changes.
+
 ## CLI Usage
 
 ```bash
