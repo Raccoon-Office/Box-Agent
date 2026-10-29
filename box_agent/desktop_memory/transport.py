@@ -26,7 +26,9 @@ _ERROR_CODES = frozenset({
     "MEMORY_DISABLED", "MEMORY_OFFLINE", "MEMORY_NOT_READY", "MEMORY_READ_ONLY",
     "CORE_READ_REQUIRED", "CORE_CONTEXT_TOO_LARGE", "MEMORY_REVISION_CONFLICT",
     "INVALID_ARGUMENT", "NOT_FOUND", "BUDGET_EXCEEDED", "RATE_LIMITED",
-    "RECONCILIATION_REQUIRED", "RESULT_UNKNOWN",
+    "RECONCILIATION_REQUIRED", "RESULT_UNKNOWN", "INVALID_EXPERIENCE_PLAN", "INVALID_OPERATION",
+    "MEMORY_EXPERIENCE_BUSY", "MEMORY_EXPERIENCE_LEASE_EXPIRED", "MEMORY_EXPERIENCE_FROZEN",
+    "MEMORY_EXPERIENCE_CONFLICT", "MEMORY_EXPERIENCE_NOT_FOUND", "MEMORY_SESSION_RETIRED", "MODEL_CONTEXT_TOO_LARGE",
 })
 
 
@@ -49,6 +51,7 @@ _OPERATIONS = {
     "core/mutate": _Operation(timeout=15, mutation=True, request_limit=_CORE_LIMIT),
     "qa": _Operation(timeout=15, mutation=True),
     "qa/evidence": _Operation(timeout=15, mutation=True, control=True),
+    "experience/job": _Operation(timeout=15, mutation=True, control=True),
     "experience/search": _Operation(),
     "experience/entities/get": _Operation(),
     "experience/entities/save": _Operation(timeout=15, mutation=True),
@@ -101,32 +104,45 @@ def _decode(body: bytes) -> Any:
                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid_json_constant")))
 
 
+def _read_private_posix_file(path: Path) -> bytes:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    directory = os.open(path.parent, flags | os.O_DIRECTORY)
+    try:
+        owner = os.getuid()
+        parent = os.fstat(directory)
+        if parent.st_uid != owner or stat.S_IMODE(parent.st_mode) != 0o700:
+            raise ValueError("invalid_bootstrap_directory")
+        descriptor = os.open(path.name, flags | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != owner
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 64 * _KIB):
+                raise ValueError("invalid_bootstrap_file")
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                body = stream.read(64 * _KIB + 1)
+            if len(body) > 64 * _KIB:
+                raise ValueError("invalid_bootstrap_size")
+            return body
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory)
+
+
+def _read_private_file(path: Path) -> bytes:
+    if os.name == "nt":
+        from .windows_files import read_private_bootstrap
+
+        return read_private_bootstrap(path, 64 * _KIB)
+    return _read_private_posix_file(path)
+
+
 def _read_bootstrap(path: Path, expected_epoch: str) -> _Bootstrap:
-    """Open relative to a verified private directory, without following final links."""
+    """Platform-private bytes, followed by the same protocol and identity checks."""
     try:
         if not path.is_absolute() or not _uuid(expected_epoch):
             raise ValueError("invalid_bootstrap")
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-        directory = os.open(path.parent, flags | os.O_DIRECTORY)
-        try:
-            owner = os.getuid()
-            parent = os.fstat(directory)
-            if parent.st_uid != owner or stat.S_IMODE(parent.st_mode) != 0o700:
-                raise ValueError("invalid_bootstrap_directory")
-            descriptor = os.open(path.name, flags | os.O_NONBLOCK, dir_fd=directory)
-            try:
-                info = os.fstat(descriptor)
-                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != owner
-                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 64 * _KIB):
-                    raise ValueError("invalid_bootstrap_file")
-                with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                    body = stream.read(64 * _KIB + 1)
-                if len(body) > 64 * _KIB:
-                    raise ValueError("invalid_bootstrap_size")
-            finally:
-                os.close(descriptor)
-        finally:
-            os.close(directory)
+        body = _read_private_file(path)
         data = _decode(body)
         fields = {"protocol", "base_url", "token", "control_token", "identity_epoch", "profile_id"}
         if not isinstance(data, dict) or set(data) != fields or type(data["protocol"]) is not int or data["protocol"] != 2:
