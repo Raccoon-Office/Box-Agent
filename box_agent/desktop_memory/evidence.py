@@ -139,12 +139,12 @@ class EvidenceCursor:
             truncated = len(encoded) > EXCERPT_BYTES
             if truncated:
                 text = encoded[:EXCERPT_BYTES].decode("utf-8", errors="ignore")
+            coverage = "excerpt" if truncated or event["type"] == "user/message" and event["data"].get("content") != user else "full"
             ref = {"evidence_id": "ev:" + _hash(_json([event_id, event["seq"], _hash(text)])),
                    "source_id": self.source_id, "session_id": session_id,
                    "event_seqs": [event["seq"]], "event_type": event["type"], "call_id": call_id,
-                   "coverage": "excerpt" if truncated or event["type"] == "user/message" and
-                   event["data"].get("content") != user else "full",
-                   "view_spec": {"format_version": VERSION, "excerpt_limit": EXCERPT_BYTES},
+                   "coverage": coverage,
+                   "view_spec": {"format_version": VERSION, "excerpt_limit": EXCERPT_BYTES if coverage == "excerpt" else None},
                    "visible_sha256": _hash(text)}
             views.append({"text": text, "source_ref": ref})
         bundle = {"schema": VERSION, "session_id": session_id, "turn_id": turn_id,

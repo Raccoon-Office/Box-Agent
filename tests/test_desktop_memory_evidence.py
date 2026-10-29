@@ -56,6 +56,7 @@ def test_canonical_suffix_excludes_history_and_hashes_exact_redacted_tool_views(
         assert ref["event_seqs"][0] >= cursor.start
         assert ref["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
         assert ref["source_id"].startswith("session-log:")
+        assert ref["view_spec"]["excerpt_limit"] == (None if ref["coverage"] == "full" else EXCERPT_BYTES)
     assert "[REDACTED]" in encoded
     assert not any(view["source_ref"]["event_type"] == "tool/result" and '"success":false' in view["text"]
                    for view in bundle["views"])
@@ -93,6 +94,7 @@ def test_unicode_excerpts_remain_valid_and_do_not_claim_full_coverage(log):
     first = bundle["views"][0]
     assert len(first["text"].encode()) <= EXCERPT_BYTES
     assert first["source_ref"]["coverage"] == "excerpt"
+    assert first["source_ref"]["view_spec"]["excerpt_limit"] == EXCERPT_BYTES
     assert len(json.dumps(bundle, ensure_ascii=False).encode()) <= MAX_BYTES
 
 
