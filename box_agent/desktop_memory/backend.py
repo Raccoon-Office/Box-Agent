@@ -341,13 +341,17 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
             raise MemoryProxyError("TURN_REVOKED")
         return data
 
-    async def handoff(self, scope: TurnScope, user: str, assistant: str, timestamp: int) -> dict[str, Any]:
+    async def handoff(self, scope: TurnScope, user: str, assistant: str, timestamp: int,
+                      *, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
         if not scope.learnable:
             raise MemoryProxyError("MEMORY_READ_ONLY")
         if not user.strip() or not assistant.strip() or len((user + assistant).encode()) > 256 * 1024:
             raise MemoryProxyError("BUDGET_EXCEEDED")
-        data = await self.transport.request("qa", {"binding": dict(scope.binding), "event_id": scope.qa_event_id,
-                                                   "user": user, "assistant": assistant, "timestamp": timestamp})
+        payload = {"binding": dict(scope.binding), "event_id": scope.qa_event_id,
+                   "user": user, "assistant": assistant, "timestamp": timestamp}
+        if evidence is not None:
+            payload["evidence"] = evidence
+        data = await self.transport.request("qa/evidence" if evidence is not None else "qa", payload)
         if (data.get("event_id") != scope.qa_event_id or data.get("state") not in {"accepted", "durable_unknown"}
                 or data.get("state") == "accepted" and not _identifier(data.get("source_id"))):
             raise MemoryProxyError("MEMORY_PROXY_INVALID_RESPONSE", outcome="unknown")
