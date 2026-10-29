@@ -12,7 +12,8 @@ import pytest
 
 from box_agent.context_input import DefaultContextEngine, PreparedContext
 from box_agent.desktop_memory.transport import MemoryProxyError
-from box_agent.desktop_memory.visibility import CoreRead, CoreVisibilityGuard
+from box_agent.desktop_memory.visibility import CoreRead, CoreVisibilityGuard, DesktopInputGuard
+from box_agent.kernel.context_engine import REQUEST_INPUT_HEADROOM_TOKENS
 from box_agent.schema import Message
 from box_agent.tools.engine.preparation import prepare_tools
 
@@ -39,6 +40,53 @@ def project(engine, messages, record, **updates):
     reply = Message(role="tool", name="memory_read", tool_call_id="read-call", content=record.model_content)
     return engine.prepare_request([*messages, reply.model_copy(update=updates)],
                                   prepared_tools=prepare_tools([]), token_limit=10000)
+
+
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+async def test_utf8_full_read_at_the_real_conservative_budget_boundary(monkeypatch, delta):
+    events, measured = [], []
+    guard = DesktopInputGuard(lambda *args: events.append(args), lambda _: "")
+    original = guard._input_tokens
+
+    def measure(messages, definitions):
+        cost = original(messages, definitions)
+        measured.append(cost)
+        return cost
+
+    monkeypatch.setattr(guard, "_input_tokens", measure)
+    engine = DefaultContextEngine()
+    engine.configure_run()
+    engine.bind_memory(SimpleNamespace(model_input_guard=guard))
+    messages = [Message(role="system", content="BASE"), Message(role="user", content="remember")]
+    tools = prepare_tools([])
+    record = read_record(text=('中文😀 "quoted" \\ escaped\n' * 128))
+    engine.prepare_request(messages, prepared_tools=tools, token_limit=100000)
+    guard.admit(record)
+    cost = measured[-1]
+    assert cost >= len(record.model_content.encode("utf-8"))
+    guard.forget(record.path)
+    limit = cost + REQUEST_INPUT_HEADROOM_TOKENS + delta
+    engine.prepare_request(messages, prepared_tools=tools, token_limit=limit)
+    if delta < 0:
+        with pytest.raises(MemoryProxyError, match="CORE_CONTEXT_TOO_LARGE"):
+            guard.admit(record)
+        with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+            await guard.require(record.path)
+        assert not any(event[1] for event in events)
+        return
+    guard.admit(record)
+    assert measured[-1] == cost
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+    reply = Message(role="tool", name="memory_read", tool_call_id=record.read_id,
+                    content=record.model_content)
+    request = engine.prepare_request([*messages, reply], prepared_tools=tools, token_limit=limit)
+    assert request.messages[-1].content == record.model_content
+    request.on_committed()
+    with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+        await guard.require(record.path)
+    request.on_response()
+    assert await guard.require(record.path) is record
 
 
 async def test_successful_http_read_alone_never_qualifies_mutation(bound):

@@ -3246,6 +3246,7 @@ class BoxACPAgent:
         try:
             async with memory_user_turn(
                 state, user_text=plan_detection_text,
+                logged_user_text=user_text,
                 session_id=state.upstream_session_id or session_id, turn_id=turn_id,
             ):
                 stop_reason = await self._run_turn(

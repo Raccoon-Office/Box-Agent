@@ -11,6 +11,7 @@ from typing import Any
 from ..memory import MemoryRuntime, _MemoryTurn
 from .backend import TurnScope
 from .evidence import EvidenceCursor, no_evidence
+from .experience import ExperienceRuntime
 
 
 _log = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class DesktopMemoryRuntime(MemoryRuntime):
         self._attempt_log = None
         self._evidence_cursor: EvidenceCursor | None = None
         self._evidence_session = None
+        self._experience = ExperienceRuntime(backend.transport)
 
     def user_turn_scope(self, turn: _MemoryTurn):
         from ..payload_privacy import private_payload_scope
@@ -42,7 +44,10 @@ class DesktopMemoryRuntime(MemoryRuntime):
             from ..turn_hints import with_turn_hints
             goal = getattr(session.agent, "goal", None)
             wrapper = getattr(session.agent, "_apply_goal_context", None)
-            wrapped = wrapper(with_turn_hints(turn.user)) if getattr(goal, "status", None) == "active" and callable(wrapper) else None
+            logged = turn.logged_user_text
+            wrapped = logged if logged is not None else with_turn_hints(turn.user)
+            if getattr(goal, "status", None) == "active" and callable(wrapper):
+                wrapped = wrapper(wrapped)
             self._evidence_cursor = EvidenceCursor.begin(log, turn.user, wrapped_user=wrapped)
         except Exception:
             self._evidence_cursor = None
@@ -76,6 +81,13 @@ class DesktopMemoryRuntime(MemoryRuntime):
             self.backend.log_failure("attempt", type(exc).__name__)
         await super().refresh(session, turn)
         self._turn_scope = self.backend.current_scope
+        # An online cloud session can reconcile a prior unknown request even
+        # while automatic learning is off. The native Host selects pending-only
+        # work in that case; this does not qualify the current turn for learning.
+        if (self._turn_scope and self._turn_scope.binding["source"] == "cloud"
+                and self._turn_scope.binding["onlineAtStart"]
+                and not self._turn_scope.binding.get("parentTurnId")):
+            self._experience.schedule(turn.session_id, getattr(session.agent, "llm", None), getattr(session.agent, "token_limit", 0), self.tasks)
 
     def schedule(self, turn: _MemoryTurn) -> None:
         scope = self._turn_scope
@@ -89,7 +101,7 @@ class DesktopMemoryRuntime(MemoryRuntime):
         if cursor is not None and getattr(self._evidence_session.agent, "session_log", None) is not cursor.log:
             cursor = None
         end = cursor.log.event_count if cursor else 0
-        task = asyncio.create_task(self._finish(turn, scope, cursor, end), name="desktop-memory-handoff")
+        task = asyncio.create_task(self._finish(turn, scope, cursor, end, getattr(self._evidence_session.agent, "llm", None), getattr(self._evidence_session.agent, "token_limit", 0)), name="desktop-memory-handoff")
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
@@ -106,7 +118,7 @@ class DesktopMemoryRuntime(MemoryRuntime):
                 task.add_done_callback(self.tasks.discard)
 
     async def _finish(self, turn: _MemoryTurn, scope: TurnScope,
-                      cursor: EvidenceCursor | None = None, end: int = 0) -> None:
+                      cursor: EvidenceCursor | None = None, end: int = 0, llm: Any = None, token_limit: int = 0) -> None:
         try:
             if not scope.learnable or not turn.user.strip() or turn.handle is None:
                 return
@@ -125,6 +137,7 @@ class DesktopMemoryRuntime(MemoryRuntime):
                 receipt = await self.backend.handoff(scope, turn.user, result.final_content, turn.timestamp,
                                                      evidence=evidence)
             _log.info("memory backend=desktop operation=handoff state=%s", receipt["state"])
+            self._experience.schedule(turn.session_id, llm, token_limit, self.tasks)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -133,6 +146,7 @@ class DesktopMemoryRuntime(MemoryRuntime):
             await self.backend.close_turn(scope)
 
     async def aclose(self) -> None:
+        self._experience.close()
         try:
             await super().aclose()
         finally:

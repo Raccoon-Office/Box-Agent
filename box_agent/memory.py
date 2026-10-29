@@ -3565,6 +3565,7 @@ class _MemoryTurn:
     turn_id: str
     timestamp: int
     handle: Any = None
+    logged_user_text: str | None = None
 
 
 class MemoryRuntime:
@@ -3674,7 +3675,7 @@ class MemoryRuntime:
 
 @asynccontextmanager
 async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
-                           turn_id: str) -> AsyncIterator[_MemoryTurn | None]:
+                           turn_id: str, logged_user_text: str | None = None) -> AsyncIterator[_MemoryTurn | None]:
     """宿主声明真实用户轮次，内部续跑复用同一边界。"""
     runtime = getattr(session, "memory_runtime", None)
     if runtime is None:
@@ -3683,7 +3684,8 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
     if runtime.active is not None:
         yield runtime.active
         return
-    turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000))
+    turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000),
+                       logged_user_text=logged_user_text)
     runtime.active = turn
     with runtime.user_turn_scope(turn):
         try:

@@ -46,7 +46,7 @@ def host(tmp_path, monkeypatch):
         operation = request.url.path.removeprefix("/memory/v2/")
         payload = json.loads(request.content)
         state.calls.append((operation, payload))
-        expected_token = bootstrap["control_token"] if operation.startswith("visibility/") or operation == "qa/evidence" else bootstrap["token"]
+        expected_token = bootstrap["control_token"] if operation.startswith("visibility/") or operation in {"qa/evidence", "experience/job"} else bootstrap["token"]
         assert request.headers["authorization"] == "Bearer " + expected_token
         if state.before is not None:
             override = await state.before(operation, payload)
@@ -87,6 +87,8 @@ def host(tmp_path, monkeypatch):
         elif operation == "turn/close":
             state.active.difference_update(key for key, (binding, _) in state.reads.items() if binding == payload["binding"])
             data = {"closed": True}
+        elif operation == "experience/job":
+            data = {"job": None}
         elif operation == "search":
             data = {"results": [{"excerpt": "hit", "entry_ref": "ref-1", "version": "file-v1"}]}
         elif operation == "managed/read":
@@ -413,6 +415,28 @@ async def test_real_session_keeps_single_frozen_block_and_same_batch_mutation_is
         await manager.aclose()
 
 
+@pytest.mark.parametrize("source,online,expected", [("cloud", True, True), ("cloud", False, False), ("legacy_read_only", True, False)])
+async def test_automatic_off_online_cloud_session_can_wake_pending_reconciliation_without_qualifying_new_learning(host, source, online, expected):
+    host.automatic, host.source, host.online = False, source, online
+    manager = backend(host)
+    runtime = manager.create_runtime()
+    async def unexpected_model(**kwargs):
+        pytest.fail("pending-only wakeup must not generate a new model response")
+    agent = SimpleNamespace(system_prompt="BASE", llm=SimpleNamespace(generate=unexpected_model), token_limit=100000)
+    agent.set_system_prompt = lambda value, **kwargs: setattr(agent, "system_prompt", value)
+    session = SimpleNamespace(agent=agent, cancelled=False)
+    try:
+        await runtime.refresh(session, _MemoryTurn("question", "session-1", "turn-1", 123))
+        await asyncio.gather(*tuple(runtime.tasks))
+        assert not runtime._turn_scope.learnable
+        actions = [payload["action"] for operation, payload in host.calls if operation == "experience/job"]
+        assert actions == (["claim"] if expected else [])
+        assert not any(operation in {"qa", "qa/evidence"} for operation, _ in host.calls)
+    finally:
+        await runtime.aclose()
+        await manager.aclose()
+
+
 async def test_small_model_budget_reduces_preload_without_changing_user_rules_or_full_core(host):
     from box_agent.kernel.context_engine import request_input_tokens
     from box_agent.memory import place_memory_block
@@ -630,6 +654,55 @@ async def test_real_managed_agent_run_hands_off_actual_session_log_with_control_
             assert ref["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
             assert all(actual[seq]["type"] == ref["event_type"] for seq in ref["event_seqs"])
         assert {view["source_ref"]["event_type"] for view in evidence["views"]} == {"user/message", "assistant/message", "turn/end"}
+    finally:
+        await session.aclose()
+        await process.aclose()
+        log.close()
+
+
+@pytest.mark.parametrize("active_goal", [False, True])
+@pytest.mark.parametrize("prelogged", [False, True])
+@pytest.mark.parametrize("wrong_host_text", [False, True])
+async def test_acp_wrapped_user_event_is_exactly_verified_but_only_original_words_are_handed_off(
+        tmp_path, host, active_goal, prelogged, wrong_host_text):
+    from box_agent.acp import _connector_status_context
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+    from box_agent.session_log import SessionLog
+    from box_agent.turn_hints import with_turn_hints
+
+    log = SessionLog.create(tmp_path / "canonical-acp", session_id="actual-acp-log", cwd=tmp_path)
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    process = backend(host)
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=RecordingLLM("actual final answer"), memory_manager=process, tools=[],
+        system_prompt="BASE", session_log=log), options=SessionOptions(profile="acp", workspace_dir=tmp_path))
+    user = "For every workflow report, state the verified outcome before remaining risks."
+    logged = with_turn_hints(user).rstrip() + "\n\n" + _connector_status_context(set())
+    try:
+        if active_goal:
+            session.agent.set_goal("Synthetic goal")
+        await session.agent.aadd_user_message(logged)
+        if prelogged:
+            session.agent._persist_unlogged_messages(turn=1, step=None)
+            log.flush()
+        async with memory_user_turn(session, user_text=user, session_id="session-1", turn_id="acp-turn",
+                                    logged_user_text="wrong host wrapper" if wrong_host_text else logged):
+            handle = await AgentService().start(RunRequest(run_id="acp-turn", session_id="session-1"), session=session)
+            assert (await handle.result()).status.value == "completed"
+        await asyncio.gather(*tuple(session.memory_runtime.tasks))
+        sent = next(payload for operation, payload in host.calls if operation == "qa/evidence")
+        evidence = sent["evidence"]
+        if wrong_host_text:
+            assert evidence["status"] == "no_evidence"
+            return
+        assert evidence["status"] == "captured"
+        view = next(v for v in evidence["views"] if v["source_ref"]["event_type"] == "user/message")
+        assert json.loads(view["text"]) == {"content": user}
+        assert view["source_ref"]["coverage"] == "excerpt"
+        assert "connector-status" not in view["text"] and "Active Goal" not in view["text"]
+        assert sent["user"] == user
     finally:
         await session.aclose()
         await process.aclose()
