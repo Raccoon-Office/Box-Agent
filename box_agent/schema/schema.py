@@ -122,6 +122,9 @@ class Message(BaseModel):
     # but intentionally absent from the next durable request. Persist the
     # numeric adjustment so context estimation remains correct after resume.
     request_only_input_tokens: int = Field(default=0, ge=0)
+    # Exact host-appended fragment, including its separator. Persist provenance
+    # so request projection can remove stale snapshots without parsing user text.
+    host_connector_status: str | None = None
     # Request-only multimodal overlays may carry raw image bytes to a provider
     # without persisting them in durable traces. Excluded from serialization so
     # this remains an internal observability directive.

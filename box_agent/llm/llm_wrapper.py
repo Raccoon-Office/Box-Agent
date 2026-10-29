@@ -32,7 +32,7 @@ def _trace_int(value: Any) -> int:
 
 
 def _trace_request_message(message: Message) -> dict[str, Any]:
-    payload = message.model_dump(exclude_none=True)
+    payload = message.model_dump(exclude_none=True, exclude={"host_connector_status"})
     if not message.trace_redact_content or not isinstance(message.content, list):
         return payload
 

@@ -2811,13 +2811,15 @@ class BoxACPAgent:
             )
         if hints and not state.utility_session:
             user_text = "\n\n".join([user_text.rstrip(), *hints])
+        host_connector_status = None
         if not state.utility_session:
             connector_status = _connector_status_context(
                 state.selected_connector_ids,
                 state.connector_statuses,
                 state.connector_status_unavailable,
             )
-            user_text = f"{user_text.rstrip()}\n\n{connector_status}"
+            host_connector_status = f"\n\n{connector_status}"
+            user_text = f"{user_text.rstrip()}{host_connector_status}"
         requested_llm_binding = _normalize_llm_binding(prompt_meta)
         if requested_llm_binding is not None and requested_llm_binding != state.llm_binding:
             if state.turn_active:
@@ -3198,7 +3200,9 @@ class BoxACPAgent:
             }
             if image_content else {}
         )
-        await state.agent.aadd_user_message(user_text, **image_kwargs)
+        await state.agent.aadd_user_message(
+            user_text, host_connector_status=host_connector_status, **image_kwargs,
+        )
 
         # Drain any stale injections from a previous turn
         for stale in state.inject_queue.begin_run(discard_pending=True):

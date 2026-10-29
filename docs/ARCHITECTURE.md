@@ -137,6 +137,28 @@ as follows:
 | Tool-result preparation and capability adaptations | `tools/engine/results.py` and tools adapters; final history commit in `kernel/tool_messages.py` |
 | Legacy helper imports and timing-default monkeypatch behavior | `core.py` re-exports/wrappers |
 
+## Host connector snapshots in model context
+
+The system prompt treats connector status as background host metadata. It is
+discussed only when the task needs a connector or the user asks about connectivity.
+ACP still appends the current connector snapshot to every ordinary user turn.
+`Message.host_connector_status` records the exact host-owned fragment in Session
+Log, so `connector_context.project_connector_status` can retain only the latest
+marked snapshot in each request without parsing or deleting user-authored XML.
+`DefaultContextEngine.project_history` applies the same projection to request
+budgeting, compaction, and provider input; summary preparation also uses it.
+Projection copies changed messages and content blocks, never the durable history
+in place, and keeps no cross-session state. Provider request traces omit this
+provenance field because it is not model input.
+If connector projection raises an ordinary exception, it logs only the exception
+type and returns the entire original history, preserving the previous behavior
+rather than blocking the request or exposing a partially projected history.
+
+Legacy messages without this provenance remain unchanged: their XML cannot be
+reliably distinguished from literal user text. The single-snapshot guarantee
+applies to marked host injections; start a new conversation to exclude snapshots
+from an older runtime. Custom replacement Context Engines own their projection.
+
 ## Static plugins, registries, and replacement
 
 Plugin catalogs are static and follow the existing lifecycle:

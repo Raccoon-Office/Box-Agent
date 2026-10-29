@@ -1479,7 +1479,8 @@ async def test_uploaded_image_payload_reaches_user_message_boundary(tmp_path, mo
             field_meta={"image_attachment_paths": [str(tmp_path / "reference.png")]},
         ))
         assert received == [{"image_content": blocks, "image_source": "user_upload",
-                             "image_context_eligible": eligible}]
+                             "image_context_eligible": eligible,
+                             "host_connector_status": _EMPTY_CONNECTOR_CONTEXT}]
         if eligible:
             assert "prepared for native inspection" in received_text[0]
             assert "may explicitly call inspect_images again" in received_text[0]
@@ -1791,6 +1792,16 @@ class DoneLLM:
 
 @pytest.mark.asyncio
 async def test_acp_appends_connector_status_to_every_user_turn(tmp_path, monkeypatch):
+    class SnapshotLLM(DoneLLM):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.requests.append([message.model_copy(deep=True) for message in messages])
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
     monkeypatch.setattr(
         "box_agent.acp.get_mcp_connector_server_names",
         lambda: {"pkulaw": frozenset({"pkulaw-law-search-semantic"})},
@@ -1812,7 +1823,8 @@ async def test_acp_appends_connector_status_to_every_user_turn(tmp_path, monkeyp
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    llm = SnapshotLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
     session = await agent.newSession(
         SimpleNamespace(
             cwd=str(tmp_path),
@@ -1856,6 +1868,14 @@ async def test_acp_appends_connector_status_to_every_user_turn(tmp_path, monkeyp
         "pkulaw 北大法宝: disconnected\n"
         "</connector-status>"
     )
+    assert messages[-4].host_connector_status == messages[-4].content[len("first"):]
+    assert messages[-2].host_connector_status == messages[-2].content[len("second"):]
+    assert len(llm.requests) == 2
+    for request in llm.requests:
+        contents = "\n".join(str(message.content) for message in request)
+        assert contents.count("<connector-status>\n") == 1
+    assert "pkulaw 北大法宝: connected" not in str(llm.requests[-1])
+    assert "pkulaw 北大法宝: disconnected" in str(llm.requests[-1])
     session_log = agent._sessions[session.sessionId].agent.session_log
     if session_log is not None:
         session_log.close()
