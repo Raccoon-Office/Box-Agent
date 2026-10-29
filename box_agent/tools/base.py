@@ -33,6 +33,9 @@ class ToolResult(BaseModel):
     error: str | None = None
     permission_request: dict | None = None  # capability request payload
     raw_output: dict | None = None  # optional structured payload for host UIs
+    # Tool-owned host projection, used only when the full raw output is saved.
+    # Never serialize this private handoff or treat it as the complete result.
+    raw_output_preview: dict | None = Field(default=None, exclude=True, repr=False)
     model_context: str | None = None  # optional compact content for future LLM turns
     # Complete persistable text when ``content`` is intentionally bounded by
     # the tool. The shared result-storage seam consumes it before the

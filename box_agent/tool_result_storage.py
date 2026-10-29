@@ -297,6 +297,7 @@ class ToolResultStorage:
         model_content: str,
         original_model_content: str,
         event_metadata: dict[str, Any],
+        raw_output_preview: dict[str, Any] | None = None,
     ) -> ToolResultDelivery:
         """Bound all tool results without changing execution/commit semantics."""
         directory = (
@@ -331,7 +332,7 @@ class ToolResultStorage:
             bound_output_text(model_content, directory, label + "-model", inline_limit=MAX_INLINE_OUTPUT_BYTES)
         )
         if raw_output is not None and not _json_fits(raw_output, MAX_RAW_OUTPUT_BYTES):
-            raw_output, notice = self._externalize_raw_output(raw_output, directory, label)
+            raw_output, notice = self._externalize_raw_output(raw_output, directory, label, raw_output_preview)
             content += "\n\n" + notice
             model_content += "\n\n" + notice
             if error is not None:
@@ -359,6 +360,7 @@ class ToolResultStorage:
 
     def _externalize_raw_output(
         self, raw_output: dict[str, Any], directory: Path, label: str,
+        tool_preview: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str]:
         path: Path | None = None
         try:
@@ -384,10 +386,15 @@ class ToolResultStorage:
                 "only bounded metadata is retained. Omitted fields cannot be recovered."
             )
         projected: dict[str, Any] = {"_persisted_output": reference}
-        # Preserve small routing/status fields first, then small containers.
-        # Omit large fields instead of changing a list/string into a reference
-        # dict that existing host consumers would misinterpret. The root receipt
-        # explicitly marks this as a partial projection of the complete JSON.
+        # The capability owns business-field semantics. The common boundary only
+        # validates its preview; it never recursively rewrites arbitrary data.
+        if tool_preview is not None:
+            projected.update({key: value for key, value in tool_preview.items() if key != "_persisted_output"})
+            if _json_fits(projected, MAX_RAW_OUTPUT_BYTES):
+                return projected, notice
+            projected = {"_persisted_output": reference}
+        # Unknown result shapes get a file receipt and only verbatim small
+        # fields. No inferred schema or string/list-to-object substitutions.
         for containers in (False, True):
             for key, value in raw_output.items():
                 if isinstance(value, (dict, list, tuple)) != containers:

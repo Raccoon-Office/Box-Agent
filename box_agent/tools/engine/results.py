@@ -212,6 +212,7 @@ def process_tool_result(
             content=visible_content,
             error=visible_error,
             raw_output=_trace_safe_tool_raw_output(result.raw_output),
+            raw_output_preview=result.raw_output_preview,
             model_content=tool_message.content,
             original_model_content=original_model_content,
             event_metadata=event_metadata,

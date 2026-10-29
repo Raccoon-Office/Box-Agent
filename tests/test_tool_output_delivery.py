@@ -23,6 +23,8 @@ from box_agent.tool_result_storage import (
 )
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.file.read_tool import ReadTool
+from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
+from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
 from box_agent.tools.output_capture import OUTPUT_REPLY_BYTES, OutputCapture
 
 
@@ -158,11 +160,113 @@ def test_raw_json_is_complete_and_small_status_fields_keep_their_types(tmp_path)
     assert event.raw_output["exit_code"] == 0
     assert event.raw_output["path"] == "report.json"
     assert event.raw_output["nested"] == raw["nested"]
-    assert "rows" not in event.raw_output  # Do not replace an array with a dict.
+    assert "rows" not in event.raw_output  # Unknown arrays are not recursively rewritten.
     assert reference["path"] in outcome.model_content
     request.result_storage.enforce_fresh_budget(request.messages, tools={})
     assert reference["path"] in request.messages[-1].content
     assert result.raw_output == raw  # Internal tool data is never mutated.
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+@pytest.mark.parametrize("read_back", [False, True])
+async def test_large_plan_keeps_host_fields_and_steps_after_shared_delivery(tmp_path, monkeypatch, save_fails, read_back):
+    store = PlanStore()
+    tool = PlanWriteTool(store)
+    result = await tool.execute(
+        action="set", title="Migration plan", objective="Preserve existing behavior",
+        steps=[{"title": f"Step {index}", "details": "HEAD" + "x" * 3000 + "TAIL"} for index in range(24)],
+        verification=["Verify the migration"],
+    )
+    if read_back:
+        tool = PlanReadTool(store)
+        result = await tool.execute()
+    original = result.raw_output
+    assert len(json.dumps(original).encode()) > MAX_RAW_OUTPUT_BYTES
+    if save_fails:
+        original_open = Path.open
+
+        def fail_json(path, *args, **kwargs):
+            if path.suffix == ".json":
+                raise OSError("disk full")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_json)
+    request = replace(_pipeline(tmp_path, result), tool_name=tool.name, tool=tool)
+    outcome = process_tool_result(request)
+    event = outcome.events[0]
+    raw = event.raw_output
+    assert event.success
+    assert raw["type"] == "plan_snapshot" and raw.get("action") == original.get("action")
+    assert raw["summary"] == original["summary"]
+    plan = raw["plan"]
+    assert plan["id"] == original["plan"]["id"]
+    assert plan["title"] == "Migration plan"
+    assert plan["objective"] == "Preserve existing behavior"
+    assert plan["verification"] == ["Verify the migration"]
+    assert len(plan["steps"]) == 24
+    for actual, expected in zip(plan["steps"], original["plan"]["steps"]):
+        assert actual["id"] == expected["id"]
+        assert actual["title"] == expected["title"]
+        assert actual["details"].startswith("HEAD") and actual["details"].endswith("TAIL")
+        if actual["details"] != expected["details"]:
+            assert "omitted" in actual["details"]
+    assert any("omitted" in step["details"] for step in plan["steps"])
+    reference = raw["_persisted_output"]
+    assert reference["file_complete"] is not save_fails
+    if save_fails:
+        assert "cannot be recovered" in outcome.model_content
+        assert "Full JSON saved" not in outcome.model_content
+    else:
+        assert json.loads(Path(reference["path"]).read_text(encoding="utf-8")) == original
+    assert len(json.dumps(raw).encode()) <= MAX_RAW_OUTPUT_BYTES
+    assert len(json.dumps(EventEnvelope("r", "r:1", 1, event).to_dict()).encode()) < MAX_TOOL_RESULT_BYTES
+    assert result.raw_output is original and len(original["plan"]["steps"][0]["details"]) > 3000
+
+
+async def test_plan_preview_accepts_restored_plan_without_optional_fields(tmp_path):
+    store = PlanStore()
+    store.restore({"id": "42", "title": "Restored plan", "status": "active"})
+    result = await PlanReadTool(store).execute()
+    assert result.success
+    assert result.raw_output_preview["plan"]["id"] == "42"
+    assert result.raw_output_preview["plan"]["steps"] == []
+
+
+@pytest.mark.parametrize("read_back", [False, True])
+async def test_todo_owns_its_large_snapshot_preview_and_keeps_active_work(tmp_path, read_back):
+    store = TodoStore()
+    tool = TodoWriteTool(store)
+    result = await tool.execute(action="set", todos=[
+        {"task": "中文" * 2000, "status": "in_progress" if index == 49 else "pending"}
+        for index in range(50)
+    ])
+    if read_back:
+        tool = TodoReadTool(store)
+        result = await tool.execute()
+    raw = result.raw_output
+    request = replace(_pipeline(tmp_path, result), tool_name=tool.name, tool=tool)
+    outcome = process_tool_result(request)
+    projected = outcome.events[0].raw_output
+    assert projected["summary"] == raw["summary"]
+    assert isinstance(projected["items"], list) and 0 < len(projected["items"]) <= 64
+    assert projected["items"][0]["id"] == raw["items"][49]["id"]
+    assert projected["items"][0]["status"] == "in_progress"
+    assert len(projected["items"][0]["task"]) <= 500
+    assert projected["omitted_items"] == 50 - len(projected["items"])
+    assert len(json.dumps(projected, ensure_ascii=False).encode()) <= MAX_RAW_OUTPUT_BYTES
+    assert json.loads(Path(projected["_persisted_output"]["path"]).read_text(encoding="utf-8")) == raw
+    assert "raw_output_preview" not in result.model_dump()
+
+
+def test_invalid_tool_preview_falls_back_without_mutating_unknown_fields(tmp_path):
+    raw = {"status": "done", "rows": ["x" * 100_000]}
+    result = ToolResult(success=True, content="done", raw_output=raw,
+                        raw_output_preview={"rows": {"changed_type": "x" * 100_000}})
+    outcome = process_tool_result(_pipeline(tmp_path, result))
+    projected = outcome.events[0].raw_output
+    assert projected["status"] == "done"
+    assert "rows" not in projected
+    assert json.loads(Path(projected["_persisted_output"]["path"]).read_text(encoding="utf-8")) == raw
 
 
 def test_many_small_structured_fields_obey_an_aggregate_budget(tmp_path):
@@ -172,6 +276,17 @@ def test_many_small_structured_fields_obey_an_aggregate_budget(tmp_path):
     assert len(json.dumps(projected, ensure_ascii=False).encode("utf-8")) < MAX_RAW_OUTPUT_BYTES
     path = projected["_persisted_output"]["path"]
     assert json.loads(Path(path).read_text(encoding="utf-8")) == raw
+
+
+def test_small_status_fields_after_large_containers_are_preserved(tmp_path):
+    raw = {f"rows_{index}": ["x" * 2000] for index in range(100)}
+    raw["status"] = "ready"
+    raw["path"] = "report.json"
+    outcome = process_tool_result(_pipeline(tmp_path, ToolResult(success=True, content="done", raw_output=raw)))
+    projected = outcome.events[0].raw_output
+    assert projected["status"] == "ready"
+    assert projected["path"] == "report.json"
+    assert len(json.dumps(projected).encode()) <= MAX_RAW_OUTPUT_BYTES
 
 
 @pytest.mark.parametrize("failure", ["open", "write", "close", "cycle"])
