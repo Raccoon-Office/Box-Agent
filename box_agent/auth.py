@@ -11,7 +11,7 @@ import weakref
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import httpx
@@ -29,6 +29,33 @@ AUTH_TOKEN_FILE_KEYS = ("token", "access_token", "auth_token")
 AUTH_HEADER_HOST_SUFFIXES = ("xiaohuanxiong.com", "10.158.136.99")
 AUTH_REFRESH_WINDOW_SECONDS = 300
 AUTH_REFRESH_TIMEOUT_SECONDS = 15.0
+
+
+def is_private_service_url(url: str) -> bool:
+    """Match only the private Office service explicitly supplied by the host."""
+    if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") != "true":
+        return False
+    try:
+        base = urlparse(os.environ.get("RACCOON_PRIVATE_OFFICE_URL", "").strip())
+        target = urlparse(url)
+        origins = []
+        for parsed in (base, target):
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.fragment):
+                return False
+            port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+            origins.append((parsed.scheme, parsed.hostname, port))
+        if base.query or origins[0] != origins[1]:
+            return False
+        base_path = unquote(base.path).rstrip("/")
+        target_path = unquote(target.path)
+        for value in (base_path, target_path):
+            if "\\" in value or any(part in {".", ".."} for part in value.split("/")):
+                return False
+        return target_path == base_path or target_path.startswith(f"{base_path}/")
+    except ValueError:
+        return False
 
 
 class HostedAuthRefreshError(RuntimeError):
@@ -87,6 +114,9 @@ def _jwt_expiry(token: str) -> int | None:
 
 
 def _xiaohuanxiong_refresh_url(api_base: str) -> str:
+    # Private login/refresh belongs to the host; its auth service may use another port.
+    if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+        return ""
     try:
         parsed = urlparse(api_base)
     except ValueError:
@@ -170,6 +200,12 @@ async def ensure_hosted_auth_ready(
     """
     token = _coerce_token(explicit_token)
     if token:
+        return token
+
+    if is_private_service_url(api_base):
+        token = resolve_auth_token(auth_file=auth_file)
+        if not token:
+            raise HostedAuthRequiredError("未登录，请通过客户端登录后再试")
         return token
 
     if not _xiaohuanxiong_refresh_url(api_base):
@@ -349,6 +385,8 @@ def bearer_auth_headers(
 
 def should_attach_auth_header(url: str) -> bool:
     """True for hosted officev3 gateway URLs that expect the login token."""
+    if os.environ.get("RACCOON_PRIVATE_DEPLOYMENT") == "true":
+        return is_private_service_url(url)
     try:
         hostname = urlparse(url).hostname or ""
     except ValueError:

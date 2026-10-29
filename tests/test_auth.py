@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from anthropic import APIStatusError as AnthropicStatusError
+from openai import APIStatusError as OpenAIStatusError
 
 from box_agent.auth import (
     AUTH_TOKEN_ENV_VARS,
@@ -966,3 +968,161 @@ async def test_generate_real_api_key_skips_force_refresh_on_401(
         assert refresh_calls == []
     finally:
         await client.client.close()
+
+
+@pytest.mark.parametrize("target,allowed", [
+    ("http://tenant.internal:5591/office/api/web/llm/v2", True),
+    ("http://tenant.internal:5591/office/mcp?session=fixture", True),
+    ("http://tenant.internal:5592/office/api/web/llm/v2", False),
+    ("https://tenant.internal:5591/office/api/web/llm/v2", False),
+    ("http://other.internal:5591/office/api/web/llm/v2", False),
+    ("https://xiaohuanxiong.com/api/web/llm/v2", False),
+    ("http://tenant.internal:5591/office-other/v1", False),
+    ("http://tenant.internal:5591/office/../other/v1", False),
+    ("http://tenant.internal:5591/office/%2e%2e/other/v1", False),
+    ("http://user:password@tenant.internal:5591/office/v1", False),
+    ("http://tenant.internal:bad/office/v1", False),
+])
+def test_private_login_token_is_limited_to_the_host_supplied_service(monkeypatch, target, allowed):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "http://tenant.internal:5591/office/")
+    assert should_attach_auth_header(target) is allowed
+    assert bearer_auth_headers("private-token", url=target) == (
+        {"Authorization": "Bearer private-token"} if allowed else {}
+    )
+
+
+@pytest.mark.parametrize("base", ["", "https://[invalid", "https://user:pass@tenant.internal", "https://tenant.internal?token=x", "file:///tmp/service"])
+def test_private_mode_rejects_missing_or_invalid_host_configuration(monkeypatch, base):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", base)
+    assert not should_attach_auth_header("https://tenant.internal/v1")
+    assert not should_attach_auth_header("https://xiaohuanxiong.com/v1")
+
+
+def test_private_auth_requires_explicit_opt_in_and_follows_deployment_changes(monkeypatch):
+    monkeypatch.delenv("RACCOON_PRIVATE_DEPLOYMENT", raising=False)
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.internal")
+    assert not should_attach_auth_header("https://tenant.internal/v1")
+    assert should_attach_auth_header("https://xiaohuanxiong.com/v1")
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    assert should_attach_auth_header("https://tenant.internal:443/v1")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://next.internal")
+    assert not should_attach_auth_header("https://tenant.internal/v1")
+    assert should_attach_auth_header("https://next.internal/v1")
+    assert bearer_auth_headers("private-token", {"Authorization": "Bearer custom"}, "https://next.internal/v1") == {"Authorization": "Bearer custom"}
+
+
+@pytest.mark.asyncio
+async def test_private_token_refresh_remains_host_owned(tmp_path, monkeypatch):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "http://tenant.internal:5591")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "host-token", "refresh_token": "host-refresh"}))
+    requests = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(500))) as client:
+        for url in ["http://tenant.internal:5591/v1", "https://xiaohuanxiong.com/v1"]:
+            assert await refresh_hosted_auth_token_if_needed(url, auth_file, force=True, http_client=client) == "host-token"
+        assert await ensure_hosted_auth_ready("http://tenant.internal:5591/v1", auth_file, http_client=client) == "host-token"
+    assert requests == []
+    auth_file.write_text(json.dumps({"access_token": "rotated-token"}))
+    assert await ensure_hosted_auth_ready("http://tenant.internal:5591/v1", auth_file) == "rotated-token"
+    auth_file.unlink()
+    for key in AUTH_TOKEN_ENV_VARS:
+        monkeypatch.delenv(key, raising=False)
+    with pytest.raises(HostedAuthRequiredError):
+        await ensure_hosted_auth_ready("http://tenant.internal:5591/v1", auth_file)
+
+
+@pytest.mark.asyncio
+async def test_private_mcp_reads_rotated_auth_without_sending_it_to_public_services(tmp_path, monkeypatch):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "http://tenant.internal:5591")
+    auth_file = tmp_path / "auth.json"
+    auth = mcp_loader.DynamicBearerAuth(auth_file=str(auth_file))
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), auth=auth) as client:
+        for token in ["first-token", "rotated-token"]:
+            auth_file.write_text(json.dumps({"access_token": token}))
+            await client.get("http://tenant.internal:5591/api/web/mcp/web_search/v1/mcp")
+            assert seen[-1].headers["Authorization"] == f"Bearer {token}"
+        await client.get("https://xiaohuanxiong.com/api/web/mcp/web_search/v1/mcp")
+        assert "Authorization" not in seen[-1].headers
+        await client.get("http://tenant.internal:5592/mcp")
+        assert "Authorization" not in seen[-1].headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_type", [OpenAIClient, AnthropicClient])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("status,location", [
+    (302, "/untrusted"),
+    (307, "/untrusted"),
+    (302, "https://outside.example/untrusted"),
+    (307, "https://outside.example/untrusted"),
+])
+async def test_private_llm_does_not_forward_redirected_headers_or_body(
+    tmp_path, monkeypatch, client_type, stream, status, location,
+):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"access_token": "private-token", "office_identity": "team-one"}))
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(status, headers={"location": location})
+        return httpx.Response(400, json={"error": {"message": "unexpected redirected request"}})
+
+    transport = httpx.MockTransport(handler)
+    # Replace only network I/O; retain the SDK's actual redirect configuration.
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    client = client_type(
+        api_key="box-agent-auth-json", api_base="https://tenant.example/office/v1",
+        model="test", auth_file=str(auth_file), retry_config=RetryConfig(enabled=False),
+    )
+    try:
+        with pytest.raises((OpenAIStatusError, AnthropicStatusError)) as caught:
+            if stream:
+                _ = [event async for event in client.generate_stream([Message(role="user", content="PRIVATE_PROMPT")])]
+            else:
+                await client.generate([Message(role="user", content="PRIVATE_PROMPT")])
+        assert caught.value.status_code == status
+    finally:
+        await client.client.close()
+    assert len(requests) == 1
+    assert requests[0].headers["Authorization"] == "Bearer private-token"
+    assert requests[0].headers["X-Org-Code"] == "team-one"
+    assert b"PRIVATE_PROMPT" in requests[0].content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_type", [OpenAIClient, AnthropicClient])
+@pytest.mark.parametrize("private", [False, True])
+async def test_default_and_custom_provider_redirect_behavior_is_preserved(monkeypatch, client_type, private):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.example/office")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(307, headers={"location": "/forwarded"})
+        return httpx.Response(200)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx.AsyncClient, "_transport_for_url", lambda self, url: transport)
+    base = "https://provider.example/v1" if private else "https://xiaohuanxiong.com/v1"
+    client = client_type(api_key="custom-key", api_base=base, model="test")
+    try:
+        response = await client.client._client.post(base, json={"fixture": True})
+        assert response.status_code == 200
+    finally:
+        await client.client.close()
+    assert len(requests) == 2
+    assert requests[-1].url.path == "/forwarded"

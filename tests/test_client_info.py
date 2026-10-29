@@ -179,3 +179,12 @@ async def test_acp_session_inherits_client_info_from_initialize(tmp_path) -> Non
         "x-client-platform": "desktop-linux-arm64",
         "x-client-version": "v0.21.1",
     }
+
+
+def test_private_client_metadata_follows_the_deployment_origin(monkeypatch):
+    monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", "true")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://tenant.internal/office")
+    client = ClientInfo(device_id="device-1")
+    assert client.headers_for_url("https://tenant.internal/office/v1")["x-client-device-id"] == "device-1"
+    for url in ["https://xiaohuanxiong.com/v1", "https://tenant.internal:444/office/v1", "https://tenant.internal/other/v1"]:
+        assert client.headers_for_url(url) == {}

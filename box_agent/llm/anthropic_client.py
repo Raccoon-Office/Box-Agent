@@ -9,6 +9,7 @@ from typing import Any
 
 import anthropic
 
+from ..auth import is_private_service_url
 from ..retry import RetryConfig, StreamInterrupted, async_retry, is_retryable_stream_error
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from ..tools.argument_limits import (
@@ -93,6 +94,10 @@ class AnthropicClient(LLMClientBase):
             base_url=api_base,
             api_key=api_key,
             timeout=timeout,
+            http_client=(
+                anthropic.DefaultAsyncHttpxClient(follow_redirects=False)
+                if is_private_service_url(api_base) else None
+            ),
         )
 
     def _request_body_params(
