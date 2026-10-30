@@ -2,6 +2,8 @@
 
 import base64
 import hashlib
+import os
+from pathlib import Path
 import shutil
 
 import pytest
@@ -34,6 +36,39 @@ def test_image_store_round_trip_has_exact_bytes_without_inline_reference_data(tm
     assert (loaded["width"], loaded["height"]) == (1, 1)
     assert store.persist_block(block) == reference
     assert len(list((tmp_path / "images").iterdir())) == 1
+
+
+def test_images_are_persisted_and_reused_when_windows_requires_writable_sync(tmp_path, monkeypatch):
+    store = SessionImageStore(tmp_path / "images")
+    original_open = Path.open
+    real_os = os
+    opened_targets = []
+
+    def track_open(path, mode="r", *args, **kwargs):
+        handle = original_open(path, mode, *args, **kwargs)
+        if path.parent == store.directory:
+            opened_targets.append((handle, mode))
+        return handle
+
+    class WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def fsync(self, fd):
+            for handle, mode in opened_targets:
+                if not handle.closed and handle.fileno() == fd and "+" not in mode:
+                    raise OSError("Windows cannot sync a read-only file")
+            return real_os.fsync(fd)
+
+    monkeypatch.setattr(Path, "open", track_open)
+    monkeypatch.setattr(image_store_module, "os", WindowsOS())
+    block = image_block()
+    reference = store.persist_block(block)
+    assert reference is not None
+    assert store.persist_block(block) == reference
+    assert store.load_block(reference)["data"] == block["data"]
 
 
 def test_session_image_references_survive_moving_the_session_directory(tmp_path):
