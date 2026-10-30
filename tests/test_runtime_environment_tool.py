@@ -70,7 +70,7 @@ async def test_ready_status_omits_logs_without_installing_or_exposing_environmen
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capability", ["python", "node", "git", "browser"])
+@pytest.mark.parametrize("capability", ["python", "node", "git", "browser", "chromium"])
 @pytest.mark.parametrize("action", ["status", "load", "ensure"])
 async def test_ready_results_keep_paths_and_shell_without_installer_details(monkeypatch, capability, action):
     import box_agent.tools.runtime_environment_tool as environment_module
@@ -85,6 +85,8 @@ async def test_ready_results_keep_paths_and_shell_without_installer_details(monk
     }
     if capability == "browser":
         response.update(mcp={"state": "connected"}, environments=[{"path": "browser.exe"}])
+    if capability == "chromium":
+        response["environments"] = [{"path": "chromium.exe", "source": "host"}]
     requester = AsyncMock(return_value=response)
     tool = RuntimeEnvironmentTool(requester)
     shell = {"name": "bash", "instruction": "Use bash syntax."}
@@ -291,3 +293,196 @@ async def test_python_preparation_success_continues_same_call(monkeypatch, tmp_p
     assert order == ['prepared', 'kernel-init']
     assert result.success
     assert result.content == '1'
+
+
+@pytest.mark.asyncio
+async def test_chromium_waits_for_install_then_refreshes_paths_for_next_shell(tmp_path):
+    from box_agent.tools.bash_tool import BashTool
+    import shlex
+    import sys
+
+    started = asyncio.Event()
+    installed = asyncio.Event()
+    executable = str(tmp_path / "chromium")
+    calls = []
+
+    async def request(payload):
+        calls.append(payload)
+        assert payload["capability"] == "chromium"
+        if payload["action"] == "status":
+            return {"status": "missing"}
+        started.set()
+        await installed.wait()
+        return {"status": "ready", "environments": [{"path": executable, "source": "host"}],
+                "env": {"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": executable,
+                        "BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": executable}}
+
+    shell = BashTool(workspace_dir=str(tmp_path), runtime_env={
+        "BOX_AGENT_PLAYWRIGHT_MODULE_PATH": "electron-adapter",
+        "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": "",
+    })
+    environment = RuntimeEnvironmentTool(request)
+    environment.apply_environment = shell.update_runtime_env
+    pending = asyncio.create_task(environment.execute("chromium", "ensure"))
+    await asyncio.wait_for(started.wait(), 2)
+    assert not pending.done()
+    installed.set()
+    result = await pending
+    assert result.success
+    assert json.loads(result.content)["environments"] == [{"path": executable, "source": "host"}]
+    script = "import os; print(os.environ['PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH']); print(os.environ['BOX_AGENT_PLAYWRIGHT_MODULE_PATH'])"
+    if shell.shell_name == "PowerShell":
+        quote = lambda value: "'" + value.replace("'", "''") + "'"
+        command = f"& {quote(sys.executable)} -c {quote(script)}"
+    else:
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+    executed = await shell.execute(command)
+    assert executed.success, executed.error
+    assert executable in executed.content
+    assert "electron-adapter" in executed.content
+    assert [c["action"] for c in calls] == ["status", "ensure"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "timeout", "unavailable"])
+async def test_chromium_failure_does_not_apply_environment_or_retry_in_a_loop(status):
+    requester = AsyncMock(side_effect=[{"status": "missing"}, {"status": status}])
+    tool = RuntimeEnvironmentTool(requester)
+    applied = []
+    tool.apply_environment = applied.append
+    result = await tool.execute("chromium", "ensure")
+    assert not result.success
+    assert not applied
+    assert requester.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_chromium_cancellation_propagates_without_continuing():
+    requester = AsyncMock(side_effect=[{"status": "installing"}, asyncio.CancelledError()])
+    tool = RuntimeEnvironmentTool(requester)
+    applied = []
+    tool.apply_environment = applied.append
+    with pytest.raises(asyncio.CancelledError):
+        await tool.execute("chromium", "ensure")
+    assert not applied
+
+
+def test_chromium_guidance_preserves_original_workflow_on_preparation_failure():
+    description = RuntimeEnvironmentTool(AsyncMock()).description
+    for rule in ("when supported", "retain the original rendering workflow", "use your judgment",
+                 "Check installer status", "avoid competing", "respect user cancellation",
+                 "actual rendering results", "existing acceptance gates"):
+        assert rule in description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unsupported", "failed", "timeout"])
+async def test_chromium_preparation_failure_preserves_existing_shell_environment(tmp_path, failure):
+    from box_agent.tools.bash_tool import BashTool
+
+    if failure == "unsupported":
+        requester = AsyncMock(side_effect=RuntimeError("Invalid runtime request"))
+    else:
+        terminal = asyncio.TimeoutError() if failure == "timeout" else {"status": "failed"}
+        requester = AsyncMock(side_effect=[{"status": "missing"}, terminal])
+    existing = {"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": "/managed/existing-chromium",
+                "BOX_AGENT_PLAYWRIGHT_MODULE_PATH": "/managed/electron-adapter"}
+    shell = BashTool(workspace_dir=str(tmp_path), runtime_env=existing)
+    tool = RuntimeEnvironmentTool(requester)
+    tool.apply_environment = shell.update_runtime_env
+    result = await tool.execute("chromium", "ensure")
+    assert not result.success
+    expected = "unavailable" if failure == "unsupported" else failure
+    assert json.loads(result.content)["status"] == expected
+    assert requester.await_count == (1 if failure == "unsupported" else 2)
+    for key, value in existing.items():
+        assert shell._subprocess_env[key] == value
+
+
+def _model_history(result, capability="chromium"):
+    from box_agent.tools.file_result_adapter import _tool_message_content_for_model
+    return _tool_message_content_for_model(
+        tool_name="local_environment", arguments={"capability": capability, "action": "ensure"},
+        result=result, visible_content=result.content, visible_error=result.error,
+    )
+
+
+@pytest.mark.asyncio
+async def test_chromium_failure_diagnostics_survive_model_history_with_bounded_redaction():
+    response = {"status": "failed", "error": "Install failed", "installerRunning": False, "errorKind": [],
+                "progress": [{"phase": "checking"}, {"phase": "downloading"}],
+                "logTail": "x" * 20000 + "\ndownload verification failed\nAuthorization: Bearer fixture-secret\n"
+                           "https://user:fixture-secret@example.invalid/file?signature=fixture-secret\n",
+                "logPath": "/tmp/chromium-install.log",
+                "env": {"PRIVATE_VALUE": "fixture-env-secret"},
+                "unrelated": "fixture-unknown-secret"}
+    requester = AsyncMock(side_effect=[{"status": "missing"}, response])
+    result = await RuntimeEnvironmentTool(requester).execute("chromium", "ensure")
+    history = _model_history(result)
+    assert not result.success
+    assert history.startswith("Error: Chromium runtime diagnostics: ")
+    diagnostic = json.loads(history.split("diagnostics: ", 1)[1])
+    assert diagnostic["category"] == "installation_failed"
+    assert diagnostic["status"] == "failed"
+    assert diagnostic["phases"] == ["checking", "downloading"]
+    assert diagnostic["installerRunning"] is False
+    assert diagnostic["logPath"] == "/tmp/chromium-install.log"
+    assert "download verification failed" in diagnostic["logTail"]
+    assert "[truncated]" in diagnostic["logTail"]
+    assert "fixture-secret" not in history
+    assert "fixture-env-secret" not in history
+    assert "fixture-unknown-secret" not in history
+    assert len(history) < 3000
+    assert requester.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_chromium_rejection_and_connection_failure_are_distinct_in_model_history():
+    from acp import RequestError
+    histories = []
+    for error in (RequestError(-32602, "fixture-secret", {"private": "fixture-secret"}),
+                  ConnectionError("fixture-secret")):
+        requester = AsyncMock(side_effect=error)
+        result = await RuntimeEnvironmentTool(requester).execute("chromium", "ensure")
+        history = _model_history(result)
+        assert "fixture-secret" not in history
+        histories.append(history)
+        assert requester.await_count == 1
+    assert histories[0] != histories[1]
+    assert '"category": "request_rejected"' in histories[0]
+    assert '"rpcCode": -32602' in histories[0]
+    assert "unsupported" not in histories[0]  # Invalid params is not proof of an unsupported capability.
+    assert '"category": "transport_error"' in histories[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,category", [
+    (asyncio.TimeoutError(), "timeout"),
+    ({"status": "failed", "error": "CHROMIUM_CANCELLED", "progress": [{"phase": "cancelled"}]}, "cancelled"),
+    ([], "invalid_response"),
+])
+async def test_chromium_timeout_cancellation_and_invalid_reply_reach_model_history(failure, category):
+    requester = AsyncMock(side_effect=[{"status": "missing"}, failure])
+    tool = RuntimeEnvironmentTool(requester)
+    applied = []
+    tool.apply_environment = applied.append
+    result = await tool.execute("chromium", "ensure")
+    assert not result.success
+    assert f'"category": "{category}"' in _model_history(result)
+    if category == "timeout":
+        assert "background installation may still be running" in _model_history(result)
+    assert not applied
+    assert requester.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", ["python", "node", "git", "browser"])
+async def test_non_chromium_failure_history_keeps_existing_contract(capability):
+    requester = AsyncMock(side_effect=[{"status": "missing"}, {
+        "status": "failed", "error": "Install failed", "logTail": "details",
+    }])
+    result = await RuntimeEnvironmentTool(requester).execute(capability, "ensure")
+    assert result.error == "Install failed"
+    assert _model_history(result, capability) == "Error: Install failed"
+    unavailable = await RuntimeEnvironmentTool(AsyncMock(side_effect=ConnectionError("private"))).execute(capability, "ensure")
+    assert unavailable.error == "Host runtime service is unavailable."

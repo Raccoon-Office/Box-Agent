@@ -35,7 +35,7 @@ OVERLAYS = ["metadata.user_visible=false", "metadata.allow_override=false",
             "source-relative-pptx-page-directories", "explicit-delivery-scopes",
             "presentation-progress-without-reconfirmation", "host-playwright-runtime",
             "bounded-image-inspection-recovery", "native-windows-rendering", "workspace-canvas-dimensions",
-            "centralized-artifact-metadata"]
+            "centralized-artifact-metadata", "host-chromium-preparation"]
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite"
 LICENSE_INPUT_PATH = "scripts/presentation_suite_licenses/echarts-5.5.0"
 LICENSE_INPUT_DIR = Path(__file__).resolve().parents[1] / LICENSE_INPUT_PATH
@@ -57,6 +57,7 @@ _host_playwright_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "host_playwrig
 _windows_compat_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "windows_compat.py"))["apply"]
 _canvas_dimensions_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "canvas_dimensions.py"))["apply"]
 _centralized_metadata_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "centralized_artifact_metadata.py"))["apply"]
+_host_chromium_preparation_overlay = runpy.run_path(str(RUNTIME_INPUT_DIR / "host_chromium_preparation.py"))["apply"]
 
 _image_inspection_recovery_overlay = runpy.run_path(
     str(RUNTIME_INPUT_DIR / "image_inspection_recovery.py")
@@ -376,6 +377,7 @@ def sync_suite(source_checkout: Path, revision: str, output_dir: Path = OUTPUT_D
             data = _windows_compat_overlay(str(relative), data)
             data = _canvas_dimensions_overlay(str(relative), data)
             data = _centralized_metadata_overlay(str(relative), data)
+            data = _host_chromium_preparation_overlay(str(relative), data)
             if relative.name == "SKILL.md":
                 data = _apply_host_metadata(data)
             target = staged / relative
@@ -540,7 +542,8 @@ def refresh_host_overlays(output_dir: Path) -> dict:
                    "host-playwright-runtime": _host_playwright_overlay,
                    "bounded-image-inspection-recovery": _image_inspection_recovery_overlay,
                    "workspace-canvas-dimensions": _canvas_dimensions_overlay,
-                   "centralized-artifact-metadata": _centralized_metadata_overlay}
+                   "centralized-artifact-metadata": _centralized_metadata_overlay,
+                   "host-chromium-preparation": _host_chromium_preparation_overlay}
     pending = OVERLAYS[len(applied):]
     if (provenance.get("name") != BUNDLE_NAME
             or provenance.get("revision") != PINNED_REVISION

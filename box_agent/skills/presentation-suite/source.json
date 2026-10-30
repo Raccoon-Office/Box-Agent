@@ -236,7 +236,7 @@
       "source_sha256": "644e0cae9b40f0b10ab729a01bd32032e3973bac22be3dccae01bf6ae7fde969"
     },
     "skills/sn-ppt-dazzle/SKILL.md": {
-      "sha256": "66662d3e05f1685b77b4b51b15a5ccde30634a48fc1ab92a63889883e028fb81",
+      "sha256": "8fdfdc01d0996b8d1924935a25fb23a6ebbc2aec69e26a0b3f868100e4105fd8",
       "source_path": "skills/sn-ppt-dazzle/SKILL.md",
       "source_sha256": "680f8c4eb578190e2ed4beffe415d7d94ce7d3bd50f160904b214c90de3fe147"
     },
@@ -267,7 +267,7 @@
       "source_sha256": "fa1306bcf83baf9f6f8c06e20c8019896c60925b44e7f4e12ec8fb4b2df3165b"
     },
     "skills/sn-ppt-doctor/SKILL.md": {
-      "sha256": "1c57dd75f37317a4f8e4909a702d7bc8817ddcb6885360171df34fd21f9219a7",
+      "sha256": "06a06108193e2575915f659b8092e76488999f8b506f890b5e8e0533bbe9f04d",
       "source_path": "skills/sn-ppt-doctor/SKILL.md",
       "source_sha256": "bc2ba1b05b87aa0064e82a70359568368f5a00376c27759554e355039bb39caf"
     },
@@ -308,7 +308,7 @@
       "source_sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3"
     },
     "skills/sn-ppt-standard/SKILL.md": {
-      "sha256": "0e6db3b78c9b80931a2045fca4fc1993fbe347167e5fda5c2b9ee6d4f66456d3",
+      "sha256": "6705d9faefac1f39ed9255e2b683b592cc93cabf22c902a88aae14833f000d3f",
       "source_path": "skills/sn-ppt-standard/SKILL.md",
       "source_sha256": "6e32143cd1fcf07bca4fdb4414cff586fc2bfbe68e6684c213347782795fae5a"
     },
@@ -671,7 +671,8 @@
     "bounded-image-inspection-recovery",
     "native-windows-rendering",
     "workspace-canvas-dimensions",
-    "centralized-artifact-metadata"
+    "centralized-artifact-metadata",
+    "host-chromium-preparation"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",
   "revision": "e82cdb296b880a79a50711bc2937bf70b2222dc3",

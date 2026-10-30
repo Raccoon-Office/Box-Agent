@@ -164,6 +164,7 @@ def source_repo(tmp_path, monkeypatch):
     sync = _sync_function()
     monkeypatch.setitem(sync.__globals__, "_apply_integration_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_host_playwright_overlay", lambda _, data: data)
+    monkeypatch.setitem(sync.__globals__, "_host_chromium_preparation_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_image_inspection_recovery_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_windows_compat_overlay", lambda _, data: data)
     monkeypatch.setitem(sync.__globals__, "_canvas_dimensions_overlay", lambda _, data: data)
@@ -417,3 +418,65 @@ def test_full_sync_also_applies_image_recovery_policy(source_repo, tmp_path, mon
 def test_image_recovery_overlay_rejects_unreviewed_source(relative):
     with pytest.raises(ValueError, match="needs review"):
         _image_recovery_overlay()["apply"](relative, b"changed upstream policy\n")
+
+
+def _chromium_preparation_sources():
+    overlay = runpy.run_path(str(REPO / "scripts/presentation_suite_overlays/host_chromium_preparation.py"))
+    sources = {}
+    for relative, replacements in overlay["REPLACEMENTS"].items():
+        text = (SUITE / relative).read_text()
+        for old, new in reversed(replacements):
+            assert text.count(new) == 1, relative
+            text = text.replace(new, old, 1)
+        sources[relative] = text.encode()
+    return overlay, sources
+
+
+def test_chromium_preparation_refresh_is_reproducible_and_rejects_drift(tmp_path):
+    sync = runpy.run_path(str(REPO / "scripts/sync_presentation_suite.py"))
+    overlay, sources = _chromium_preparation_sources()
+    files = {}
+    for relative, data in sources.items():
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        files[relative] = {"source_sha256": digest, "sha256": digest}
+    marker = tmp_path / "source.json"
+    marker.write_text(json.dumps({"name": sync["BUNDLE_NAME"], "revision": sync["PINNED_REVISION"],
+        "overlays": sync["OVERLAYS"][:sync["OVERLAYS"].index("host-chromium-preparation")],
+        "files": files}))
+    first = sync["refresh_host_overlays"](tmp_path)
+    for relative, data in sources.items():
+        expected = (SUITE / relative).read_bytes()
+        assert (tmp_path / relative).read_bytes() == expected
+        assert first["files"][relative]["sha256"] == hashlib.sha256(expected).hexdigest()
+        assert first["files"][relative]["source_sha256"] == hashlib.sha256(data).hexdigest()
+    assert sync["refresh_host_overlays"](tmp_path) == first
+    target.write_bytes(target.read_bytes() + b"unrecorded drift\n")
+    with pytest.raises(ValueError, match="differs from its provenance"):
+        sync["refresh_host_overlays"](tmp_path)
+    for relative in sources:
+        with pytest.raises(ValueError, match="needs review"):
+            overlay["apply"](relative, b"unreviewed upstream source")
+
+
+def test_full_sync_applies_chromium_preparation(source_repo, tmp_path, monkeypatch):
+    sync, repo, _ = source_repo
+    overlay, sources = _chromium_preparation_sources()
+    monkeypatch.setitem(sync.__globals__, "_host_chromium_preparation_overlay", overlay["apply"])
+    for relative, data in sources.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-qm", "Chromium fixture"], check=True)
+    revision = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    destination = tmp_path / "regenerated"
+    result = sync(repo, revision, destination)
+    assert "host-chromium-preparation" in result["overlays"]
+    for relative in sources:
+        expected = (SUITE / relative).read_bytes()
+        assert (destination / relative).read_bytes() == expected
+        assert result["files"][relative]["sha256"] == hashlib.sha256(expected).hexdigest()

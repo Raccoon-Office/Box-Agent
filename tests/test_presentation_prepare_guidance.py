@@ -201,3 +201,16 @@ def test_prepare_font_failure_is_not_reclassified_as_missing_planning(
     assert "prepare:PASS" not in output.out
     assert "speech:PASS" in output.out  # The existing stage ordering is retained.
     assert json.loads(output.err.splitlines()[-1])["deck_dir"] == str(root)
+
+
+
+def test_python_skills_prepare_chromium_without_replacing_original_workflow():
+    root = Path(__file__).resolve().parents[1] / "box_agent/skills/presentation-suite/skills"
+    for name in ("sn-ppt-standard", "sn-ppt-dazzle", "sn-ppt-doctor"):
+        text = (root / name / "SKILL.md").read_text()
+        for rule in ('local_environment(capability="chromium", action="ensure")',
+                     "新的子进程", "沿用原渲染流程", "Agent 根据错误和任务需要自主判断",
+                     "避免并发安装", "尊重用户取消", "原有验收要求"):
+            assert rule in text, (name, rule)
+        assert "--host-runtime" not in text
+        assert 'capability="python"' not in text

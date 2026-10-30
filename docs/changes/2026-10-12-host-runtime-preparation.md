@@ -91,3 +91,18 @@ absolute executable path, so a stripped PATH does not prevent starting it.
 - `installationReady` does not prove a connected MCP. `mcp.state`, `toolCount` and `error`
   report the Agent's actual Playwright connection separately. Failed connection is not a
   reason to download browser files again. Runtime environment keys remain internal.
+
+
+## Standalone Python Chromium
+
+`local_environment(capability="chromium", action="ensure")` reuses the host's standalone
+Chromium installer. Ready results refresh browser paths for future subprocesses; this
+capability does not change Electron/MCP preparation or existing Python kernels.
+Standard, Dazzle and Doctor prefer this preparation before Chromium-dependent work.
+Unsupported hosts retain the original rendering workflow. On preparation failure, the
+Agent decides the next step using the error and existing environment, while respecting
+installer concurrency, user cancellation and existing acceptance gates.
+Chromium failures preserve bounded diagnostics in model-visible error summaries.
+Python/Node/Git behavior and Doctor's Python checks remain unchanged. Skills are generated
+through the host-chromium-preparation overlay with provenance validation. Client and
+Agent are packaged together; no per-capability negotiation or automatic retry is added.
