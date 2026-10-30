@@ -11597,7 +11597,26 @@ def test_finalizer_includes_failed_image_layout_contract_in_delivery_status(tmp_
         "layout_contract": {"slide_size": {"width": 1920, "height": 1080},
                             "text_regions": [{"name": "missing", "x": 0, "y": 0, "width": 100, "height": 100}]}
     }]}), encoding="utf-8")
-    result = _run("finalize_controlled_deck.js", str(deck_path), "--out", str(tmp_path / "index.html"))
+    preload = tmp_path / "mock-image-layout.cjs"
+    preload.write_text(
+        """
+const fs = require('fs');
+const path = require('path');
+const child = require('child_process');
+const original = child.spawnSync;
+child.spawnSync = function(command, args, options) {
+  if (path.basename(args[0]) === 'validate_image_layout_contract.js') {
+    const report = args[args.indexOf('--report') + 1];
+    fs.writeFileSync(report, JSON.stringify({ok: false, issues: ['missing layout region'], warnings: []}));
+    return {status: 1, stdout: '', stderr: ''};
+  }
+  return original.apply(this, arguments);
+};
+""",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "NODE_OPTIONS": f"--require={preload}"}
+    result = _run("finalize_controlled_deck.js", str(deck_path), "--out", str(tmp_path / "index.html"), env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     report = json.loads((tmp_path / "qa/image_layout_contract.json").read_text())
