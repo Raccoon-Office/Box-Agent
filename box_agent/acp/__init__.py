@@ -2676,6 +2676,14 @@ class BoxACPAgent:
                     log_store.flush()
             if log_store is not None and context:
                 log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
+            config = state.config or self._config
+            if config.agent.memory_backend_type == "desktop":
+                from ..payload_privacy import private_payload_scope
+
+                # Include prompt preparation/finalization and their failures,
+                # not only the inner model iterator's private scope.
+                with private_payload_scope():
+                    return await self._prompt_for_session(params, session_id, state, context, prepared_input)
             return await self._prompt_for_session(params, session_id, state, context, prepared_input)
         except Exception as exc:
             if edit is not None:
@@ -4149,6 +4157,16 @@ class BoxACPAgent:
         return injected
 
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._config.agent.memory_backend_type == "desktop":
+            from ..payload_privacy import private_payload_scope
+
+            # Titles/summaries can contain the same private QA as the main
+            # conversation, even though this endpoint creates no memory turn.
+            with private_payload_scope():
+                return await self._run_llm_prompt(params)
+        return await self._run_llm_prompt(params)
+
+    async def _run_llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/rewrites).
 
         Bypasses ``newSession``: no MCP wait, no skills metadata, no tools, no
