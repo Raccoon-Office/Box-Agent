@@ -18,6 +18,7 @@ pattern-match on the lowercased string form.
 from __future__ import annotations
 
 import json
+import re
 from typing import NamedTuple
 
 from ..auth import HostedAuthRefreshError, HostedAuthRequiredError
@@ -210,7 +211,7 @@ def classify_llm_error(exc: BaseException) -> FriendlyError:
                 category="model_configuration",
             )
         for category, tokens, message in _RULES:
-            if any(tok in haystack for tok in tokens):
+            if any(_matches_error_token(haystack, tok) for tok in tokens):
                 return FriendlyError(
                     message=message,
                     category=category,
@@ -564,6 +565,12 @@ def _looks_like_unsupported_model(haystack: str) -> bool:
         and "but you passed" in normalized
     )
     return explicit_unsupported or supported_names_mismatch
+
+
+def _matches_error_token(haystack: str, token: str) -> bool:
+    if token.isdecimal():
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", haystack))
+    return token in haystack
 
 
 def _unwrap(exc: BaseException) -> BaseException:
