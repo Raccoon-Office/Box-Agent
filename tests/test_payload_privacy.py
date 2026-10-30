@@ -74,3 +74,19 @@ def test_bootstrap_path_and_epoch_are_redacted_from_parent_config_display():
     value = {"memory_desktop": {"bootstrap_file": "/private/fixture/bootstrap.json", "identity_epoch": "private-epoch"}}
     displayed = _config_display_value(value, ["agent"])
     assert displayed == {"memory_desktop": {"bootstrap_file": "****", "identity_epoch": "****"}}
+
+
+def test_direct_trace_write_omits_private_data_and_preserves_event_ids(tmp_path):
+    writer = SessionTraceWriter(session_id="private", acp_session_id="acp",
+                                trace_dir=tmp_path, enabled=True)
+    payload = {"content": "PRIVATE-TRACE-CANARY"}
+    with private_payload_scope():
+        writer.write("turn.error", turn_id="turn", step=2, llm_call_id="llm",
+                     tool_call_id="tool", data=payload)
+    writer.write("ordinary", data=payload)
+    private, ordinary = [json.loads(line) for line in writer.file_path.read_text().splitlines()]
+    assert private["data"] == {"payload_redacted": True}
+    assert private["event"] == "turn.error" and private["turn_id"] == "turn"
+    assert private["step"] == 2 and private["llm_call_id"] == "llm" and private["tool_call_id"] == "tool"
+    assert ordinary["data"] == payload
+    assert payload == {"content": "PRIVATE-TRACE-CANARY"}

@@ -16,6 +16,10 @@ For eligible online cloud sessions, `ExperienceRuntime` uses the control-only `e
 
 Hosts must implement the named proxy operations and enforce identity, session, read-visibility and write-protection boundaries. Backend deployment, authorization policy and product rollout remain the host's responsibility. The default local backend does not require this service.
 
+## Diagnostic privacy and revocation
+
+Private desktop payloads are omitted at the shared trace writer, including ACP input and error events that write directly. Model input and the canonical Session Log retain their normal semantics. After authentication, identity or memory-disable rejection, final input projection removes the owned preload block before checking whether the request fits its budget. It does not rewrite durable history. Utility sessions keep memory tools, extraction and persistence disabled; existing local host metadata used for UI guidance remains compatible, while desktop utility sessions retain no usable backend.
+
 ## Verification boundary
 
 Focused checks: `uv run pytest tests/test_desktop_memory_launch.py tests/test_desktop_memory_attempts.py tests/test_desktop_memory_backend.py tests/test_desktop_memory_transport.py tests/test_desktop_memory_visibility.py tests/test_desktop_memory_evidence.py tests/test_desktop_memory_experience.py tests/test_desktop_memory_windows_files.py tests/test_cli_config.py -q`.
