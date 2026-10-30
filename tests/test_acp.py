@@ -336,8 +336,8 @@ def test_acp_normalizes_connector_selection_and_renders_session_scoped_status(mo
     )
     assert _connector_status_context({"pkulaw"}, connector_statuses) == (
         "<connector-status>\n"
-        "qixin 启信慧眼: disconnected\n"
         "pkulaw 北大法宝: connected\n"
+        "qixin 启信慧眼: disconnected\n"
         "</connector-status>"
     )
     assert _connector_status_unavailable_from_meta(
@@ -1480,7 +1480,7 @@ async def test_uploaded_image_payload_reaches_user_message_boundary(tmp_path, mo
         ))
         assert received == [{"image_content": blocks, "image_source": "user_upload",
                              "image_context_eligible": eligible,
-                             "host_connector_status": _EMPTY_CONNECTOR_CONTEXT}]
+                             "host_connector_status": _EMPTY_CONNECTOR_CONTEXT.strip()}]
         if eligible:
             assert "prepared for native inspection" in received_text[0]
             assert "may explicitly call inspect_images again" in received_text[0]
@@ -1791,7 +1791,7 @@ class DoneLLM:
 
 
 @pytest.mark.asyncio
-async def test_acp_appends_connector_status_to_every_user_turn(tmp_path, monkeypatch):
+async def test_acp_appends_only_changed_snapshots_and_preserves_sent_prefixes(tmp_path):
     class SnapshotLLM(DoneLLM):
         def __init__(self):
             super().__init__()
@@ -1802,83 +1802,88 @@ async def test_acp_appends_connector_status_to_every_user_turn(tmp_path, monkeyp
             async for event in super().generate_stream(messages, tools, **kwargs):
                 yield event
 
-    monkeypatch.setattr(
-        "box_agent.acp.get_mcp_connector_server_names",
-        lambda: {"pkulaw": frozenset({"pkulaw-law-search-semantic"})},
-    )
-    monkeypatch.setattr(
-        "box_agent.acp.get_mcp_status",
-        lambda: [
-            {
-                "owner": "connector",
-                "connectorId": "pkulaw",
-                "connectorName": "北大法宝",
-                "name": "pkulaw-law-search-semantic",
-                "state": "connected",
-            }
-        ],
-    )
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     llm = SnapshotLLM()
-    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(
-            cwd=str(tmp_path),
-            field_meta={
-                "selected_connector_ids": ["pkulaw"],
-                "connector_statuses": [
-                    {"id": "qixin", "name": "启信慧眼", "status": "disconnected"},
-                    {"id": "pkulaw", "name": "北大法宝", "status": "connected"},
-                ],
-            },
-        )
-    )
+    host = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    connected = [
+        {"id": "qixin", "name": "启信慧眼", "status": "disconnected"},
+        {"id": "pkulaw", "name": "北大法宝", "status": "connected"},
+    ]
+    disconnected = [{**row, "status": "disconnected"} for row in connected]
+    session = await host.newSession(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"connector_statuses": connected}))
+    turns = [
+        ({}, True),
+        ({"connector_statuses": list(reversed(connected))}, False),
+        ({"connector_statuses": disconnected}, True),
+        ({}, False),
+        ({"connector_status_unavailable": True}, True),
+        ({"connector_status_unavailable": True}, False),
+        ({"connector_statuses": connected}, True),
+        ({"connector_statuses": []}, True),
+    ]
+    previous = []
+    try:
+        for index, (meta, emits) in enumerate(turns):
+            before = len(llm.requests)
+            await host.prompt(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta=meta))
+            assert len(llm.requests) == before + 1
+            current = llm.requests[-1]
+            assert current[:len(previous)] == previous
+            latest = host._sessions[session.sessionId].agent.messages[-2]
+            assert ("<connector-status>" in latest.content) is emits
+            if not emits:
+                assert latest.content == f"hello {index}"
+            if emits and index:
+                assert "supersedes all earlier" in latest.content
+            if index == 4:
+                assert "status: unavailable" in latest.content
+            if index == 7:
+                assert latest.content.endswith("<connector-status>\n</connector-status>")
+            previous = current
+    finally:
+        log = host._sessions[session.sessionId].agent.session_log
+        if log is not None:
+            log.close()
 
-    await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "first"}], field_meta={})
-    )
-    await agent.prompt(
-        SimpleNamespace(
-            sessionId=session.sessionId,
-            prompt=[{"text": "second"}],
-            field_meta={
-                "selected_connector_ids": [],
-                "connector_statuses": [
-                    {"id": "qixin", "name": "启信慧眼", "status": "disconnected"},
-                    {"id": "pkulaw", "name": "北大法宝", "status": "disconnected"},
-                ],
-            },
-        )
-    )
 
-    messages = agent._sessions[session.sessionId].agent.messages
-    assert messages[-4].content == (
-        "first\n\n<connector-status>\n"
-        "qixin 启信慧眼: disconnected\n"
-        "pkulaw 北大法宝: connected\n"
-        "</connector-status>"
-    )
-    assert messages[-2].content == (
-        "second\n\n<connector-status>\n"
-        "qixin 启信慧眼: disconnected\n"
-        "pkulaw 北大法宝: disconnected\n"
-        "</connector-status>"
-    )
-    assert messages[-4].host_connector_status == messages[-4].content[len("first"):]
-    assert messages[-2].host_connector_status == messages[-2].content[len("second"):]
-    assert len(llm.requests) == 2
-    for request in llm.requests:
-        contents = "\n".join(str(message.content) for message in request)
-        assert contents.count("<connector-status>\n") == 1
-    assert "pkulaw 北大法宝: connected" not in str(llm.requests[-1])
-    assert "pkulaw 北大法宝: disconnected" in str(llm.requests[-1])
-    session_log = agent._sessions[session.sessionId].agent.session_log
-    if session_log is not None:
-        session_log.close()
+@pytest.mark.asyncio
+async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(tmp_path, monkeypatch):
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_sub_agent=False))
+    host = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    render = acp_module._connector_status_context
+
+    def fail(*args):
+        raise OSError("state read failed")
+
+    monkeypatch.setattr(acp_module, "_connector_status_context", fail)
+    try:
+        for index in range(2):
+            await host.prompt(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta={}))
+            message = host._sessions[session.sessionId].agent.messages[-2]
+            if index == 0:
+                assert "status: unavailable" in message.content
+            else:
+                assert message.content == "hello 1"
+        monkeypatch.setattr(acp_module, "_connector_status_context", render)
+        await host.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "recovered"}],
+            field_meta={"connector_statuses": [
+                {"id": "pkulaw", "name": "北大法宝", "status": "connected"}]}))
+        assert "pkulaw 北大法宝: connected" in host._sessions[session.sessionId].agent.messages[-2].content
+    finally:
+        log = host._sessions[session.sessionId].agent.session_log
+        if log is not None:
+            log.close()
 
 
 @pytest.mark.asyncio
@@ -1940,8 +1945,8 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
 
     assert state.connector_statuses == (("pkulaw", "北大法宝", "disconnected"),)
     assert state.connector_status_unavailable is False
-    assert state.agent.messages[-2].content == (
-        "现在呢\n\n"
+    assert state.agent.messages[-2].content.startswith("现在呢\n\n[Host connector status update:")
+    assert state.agent.messages[-2].content.endswith(
         "<connector-status>\n"
         "pkulaw 北大法宝: disconnected\n"
         "</connector-status>"
@@ -2011,7 +2016,7 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
         "stale migration seed"
     ) == 0
     assert [(message.role, message.content) for message in state.agent.messages[-2:]] == [
-        ("user", "continue after restart" + _EMPTY_CONNECTOR_CONTEXT),
+        ("user", "continue after restart"),
         ("assistant", "done"),
     ]
     state.agent.session_log.close()

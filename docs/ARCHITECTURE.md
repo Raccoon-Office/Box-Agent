@@ -141,23 +141,28 @@ as follows:
 
 The system prompt treats connector status as background host metadata. It is
 discussed only when the task needs a connector or the user asks about connectivity.
-ACP still appends the current connector snapshot to every ordinary user turn.
-`Message.host_connector_status` records the exact host-owned fragment in Session
-Log, so `connector_context.project_connector_status` can retain only the latest
-marked snapshot in each request without parsing or deleting user-authored XML.
-`DefaultContextEngine.project_history` applies the same projection to request
-budgeting, compaction, and provider input; summary preparation also uses it.
-Projection copies changed messages and content blocks, never the durable history
-in place, and keeps no cross-session state. Provider request traces omit this
-provenance field because it is not model input.
-If connector projection raises an ordinary exception, it logs only the exception
-type and returns the entire original history, preserving the previous behavior
-rather than blocking the request or exposing a partially projected history.
+ACP supplies trusted connector state separately from user text. Rows are sorted
+by ID/name/status; comparison ignores row ordering. Agent appends a full snapshot
+only on the first supplied state or a change. Updates explicitly supersede earlier
+snapshots; unavailable state invalidates earlier state, and recovery emits a fresh
+snapshot. A missing update is not an empty catalog or an unavailable snapshot.
 
-Legacy messages without this provenance remain unchanged: their XML cannot be
-reliably distinguished from literal user text. The single-snapshot guarantee
-applies to marked host injections; start a new conversation to exclude snapshots
-from an older runtime. Custom replacement Context Engines own their projection.
+Already sent messages, including legacy snapshots, are never deleted or rewritten
+for deduplication. This preserves their prefix across user turns, but does not
+guarantee cache hits when tools, routing, compaction, or provider cache policy
+change. The last host snapshot is authoritative; runtime permissions are unchanged.
+
+`Message.host_connector_status` persists current trusted state even on unchanged
+turns without adding it to model text or request trace metadata. Replay restores
+this state for comparison. If normal compaction drops the visible snapshot,
+`restore_connector_status` restores it from retained metadata at stable positions
+in the compacted state runs, without relying on the generated summary. Previously
+recovered runs remain stable even when later turns change state. It never
+deletes old snapshots or parses user-authored XML. There is no cross-session cache.
+
+Comparison failures append the current snapshot to the new message; recovery
+failures return the original history. Logs contain only the exception type.
+Custom replacement Context Engines own their recovery policy.
 
 ## Static plugins, registries, and replacement
 

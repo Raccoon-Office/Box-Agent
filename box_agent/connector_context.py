@@ -1,68 +1,90 @@
-"""Session-local projection of host connector snapshots; never parse user XML."""
+"""Append-only trusted connector updates and post-compaction state recovery."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from .schema import Message
 
 _log = logging.getLogger(__name__)
+_UPDATE_NOTICE = (
+    "[Host connector status update: this complete snapshot supersedes all earlier "
+    "host connector snapshots. If unavailable, do not reuse earlier connection states.]"
+)
 
 
-def _remove_fragment(
-    content: str | list[dict[str, Any]], fragment: str,
-) -> tuple[str | list[dict[str, Any]], bool]:
-    if isinstance(content, str):
-        index = content.rfind(fragment)
-        if index >= 0:
-            return content[:index] + content[index + len(fragment):], True
-        return content, False
-    for index in range(len(content) - 1, -1, -1):
-        block = content[index]
-        if block.get("type") != "text" or not isinstance(block.get("text"), str):
-            continue
-        text, removed = _remove_fragment(block["text"], fragment)
-        if removed:
-            projected = list(content)
-            projected[index] = {**block, "text": text}
-            return projected, True
-    return content, False
+def _snapshot_key(snapshot: str) -> tuple[str, ...]:
+    # Only inspect the separately marked host fragment, never user-authored XML.
+    return tuple(sorted(line.strip() for line in snapshot.splitlines()
+                        if line.strip() and line.strip() not in {
+                            "<connector-status>", "</connector-status>",
+                        }))
 
 
-def project_connector_status(messages: list[Message]) -> list[Message]:
-    """Keep the latest marked snapshot, copying only changed messages/blocks.
+def _append_snapshot(content: str, snapshot: str, *, update: bool = True) -> str:
+    notice = _UPDATE_NOTICE + "\n" if update else ""
+    return f"{content.rstrip()}\n\n{notice}{snapshot.strip()}"
 
-    Unmarked legacy text and user-authored examples are deliberately untouched.
-    No latest-state cache is shared across runs, sessions, or child agents.
+
+def append_connector_status(messages: list[Message], content: str, snapshot: str | None) -> str:
+    """Append the first/changed snapshot to a NEW message; leave history untouched."""
+    if not snapshot:
+        return content
+    try:
+        previous = next((message.host_connector_status for message in reversed(messages)
+                         if message.role == "user" and message.host_connector_status), None)
+        if previous is not None and _snapshot_key(previous) == _snapshot_key(snapshot):
+            return content
+    except Exception as exc:
+        _log.warning("Connector status comparison failed (%s); appending current snapshot",
+                     type(exc).__name__)
+        return _append_snapshot(content, snapshot)
+    return _append_snapshot(content, snapshot, update=previous is not None)
+
+
+def _contains_snapshot(message: Message) -> bool:
+    fragment = message.host_connector_status.strip()
+    if isinstance(message.content, str):
+        return fragment in message.content
+    return any(block.get("type") == "text" and isinstance(block.get("text"), str)
+               and fragment in block["text"] for block in message.content)
+
+
+def restore_connector_status(messages: list[Message]) -> list[Message]:
+    """Restore state dropped by compaction, never delete historical updates.
+
+    Unchanged host turns retain internal state metadata. Restore missing snapshots
+    at each retained state run's first message. Earlier recovered runs must remain
+    stable even when a later turn changes state; no cross-request cache is needed.
     """
     try:
-        return _project_connector_status(messages)
+        marked = [(index, message) for index, message in enumerate(messages)
+                  if message.role == "user" and message.host_connector_status]
+        if not marked:
+            return messages
+        runs: list[list[tuple[int, Message]]] = []
+        previous_key = None
+        for index, message in marked:
+            key = _snapshot_key(message.host_connector_status)
+            if not runs or key != previous_key:
+                runs.append([])
+            runs[-1].append((index, message))
+            previous_key = key
+        projected = messages
+        for run in runs:
+            if any(_contains_snapshot(message) for _, message in run):
+                continue
+            anchor, message = run[0]
+            content = (_append_snapshot(message.content, message.host_connector_status)
+                       if isinstance(message.content, str) else [
+                           *message.content,
+                           {"type": "text", "text": _append_snapshot("", message.host_connector_status)},
+                       ])
+            if projected is messages:
+                projected = list(messages)
+            projected[anchor] = message.model_copy(update={"content": content})
+        return projected
     except Exception as exc:
-        _log.warning("Connector status projection failed (%s); keeping original history",
+        _log.warning("Connector status recovery failed (%s); keeping original history",
                      type(exc).__name__)
         return messages
-
-
-def _project_connector_status(messages: list[Message]) -> list[Message]:
-    latest = next((index for index in range(len(messages) - 1, -1, -1)
-                   if messages[index].role == "user" and messages[index].host_connector_status), None)
-    projected = list(messages)
-    for index, message in enumerate(messages):
-        fragment = message.host_connector_status
-        if message.role != "user" or not fragment:
-            continue
-        content, found = _remove_fragment(message.content, fragment)
-        if index == latest:
-            # Compaction may have bounded the original text. The persisted host
-            # snapshot still owns current state and must not silently disappear.
-            if found:
-                continue
-            content = (message.content + fragment if isinstance(message.content, str)
-                       else [*message.content, {"type": "text", "text": fragment}])
-            projected[index] = message.model_copy(update={"content": content})
-        else:
-            projected[index] = message.model_copy(update={
-                "content": content, "host_connector_status": None,
-            })
-    return projected

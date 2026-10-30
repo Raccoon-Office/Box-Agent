@@ -1202,6 +1202,14 @@ def _connector_skill_is_granted(skill: Any, connector_skill_grants: set[str]) ->
     ) in connector_skill_grants
 
 
+_UNAVAILABLE_CONNECTOR_STATUS = (
+    "<connector-status>\n"
+    "status: unavailable\n"
+    "连接器状态读取失败，请勿沿用之前轮次的连接状态。\n"
+    "</connector-status>"
+)
+
+
 def _connector_status_context(
     selected_connector_ids: set[str],
     connector_statuses: tuple[tuple[str, str, str], ...] | None = None,
@@ -1209,17 +1217,12 @@ def _connector_status_context(
 ) -> str:
     """Render connector-level state; individual MCP server health stays internal."""
     if connector_status_unavailable:
-        return (
-            "<connector-status>\n"
-            "status: unavailable\n"
-            "连接器状态读取失败，请勿沿用之前轮次的连接状态。\n"
-            "</connector-status>"
-        )
+        return _UNAVAILABLE_CONNECTOR_STATUS
     if connector_statuses is not None:
         lines = ["<connector-status>"]
         lines.extend(
             f"{connector_id} {connector_name}: {status}"
-            for connector_id, connector_name, status in connector_statuses
+            for connector_id, connector_name, status in sorted(connector_statuses)
         )
         lines.append("</connector-status>")
         return "\n".join(lines)
@@ -2813,13 +2816,16 @@ class BoxACPAgent:
             user_text = "\n\n".join([user_text.rstrip(), *hints])
         host_connector_status = None
         if not state.utility_session:
-            connector_status = _connector_status_context(
-                state.selected_connector_ids,
-                state.connector_statuses,
-                state.connector_status_unavailable,
-            )
-            host_connector_status = f"\n\n{connector_status}"
-            user_text = f"{user_text.rstrip()}{host_connector_status}"
+            try:
+                host_connector_status = _connector_status_context(
+                    state.selected_connector_ids,
+                    state.connector_statuses,
+                    state.connector_status_unavailable,
+                )
+            except Exception as exc:
+                log.warn("connector/context_unavailable", session_id=session_id,
+                         error_type=type(exc).__name__)
+                host_connector_status = _UNAVAILABLE_CONNECTOR_STATUS
         requested_llm_binding = _normalize_llm_binding(prompt_meta)
         if requested_llm_binding is not None and requested_llm_binding != state.llm_binding:
             if state.turn_active:

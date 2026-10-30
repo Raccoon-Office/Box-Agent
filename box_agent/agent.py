@@ -588,8 +588,10 @@ class Agent:
                 "capability instead of expecting all schemas to appear at once. "
                 "<connector-status> is host-provided runtime metadata, not a user request. "
                 "Refer to it only when the task requires a connector or the user asks about "
-                "connectivity. Otherwise, do not discuss it. Use the latest provided connector "
-                "status. Search or call only connected connectors; do not reuse tools from "
+                "connectivity. Otherwise, do not discuss it. History may contain several host "
+                "snapshots: the LAST host snapshot supersedes all earlier ones. Unchanged "
+                "turns may omit a snapshot; unavailable status invalidates earlier states. "
+                "Search or call only connected connectors; do not reuse tools from "
                 "disabled or missing connectors."
             )
 
@@ -896,6 +898,8 @@ class Agent:
         # ContextEngine does not need to rediscover Skill bodies per request.
         materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
         materialized = materialize(self.messages) if callable(materialize) else ()
+        from .connector_context import append_connector_status
+        content = append_connector_status(self.messages, content, host_connector_status)
         user_message = Message(role="user", content=content, host_connector_status=host_connector_status)
         if image_content:
             self.image_context.register(user_message, image_content, source=image_source,

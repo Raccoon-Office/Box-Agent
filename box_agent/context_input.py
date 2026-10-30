@@ -13,7 +13,7 @@ from .kernel.context_engine import (
     request_input_tokens, skill_reference_budget_chars,
 )
 from .schema import Message
-from .connector_context import project_connector_status
+from .connector_context import restore_connector_status
 from .skill_context import (
     SkillReferenceContext, effective_system_prompt, project_legacy_system, verified_system_suffixes,
 )
@@ -87,7 +87,7 @@ class DefaultContextEngine:
             self.image_context.mark_response(message)
 
     def prepare_summary(self, messages: list[Message], llm: Any) -> list[Message]:
-        messages = project_connector_status(messages)
+        messages = restore_connector_status(messages)
         if self.image_context is None or not self.image_context.images:
             return messages
         projection = self.image_context.prepare(messages, llm=llm, purpose="summary")
@@ -126,7 +126,7 @@ class DefaultContextEngine:
     def project_history(self, messages: list[Message]) -> list[Message]:
         """Effective rules for budgeting/compaction, without reference delivery."""
         suffix = verified_system_suffixes(self.references.runtime) if self.references is not None else ()
-        return project_connector_status(
+        return restore_connector_status(
             project_legacy_system(messages, suffix, self._system_prompt_projector),
         )
 
