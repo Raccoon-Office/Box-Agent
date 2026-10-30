@@ -707,3 +707,84 @@ async def test_acp_wrapped_user_event_is_exactly_verified_but_only_original_word
         await session.aclose()
         await process.aclose()
         log.close()
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_desktop_acp_trace_does_not_persist_private_qa(tmp_path, monkeypatch, host, failed):
+    from box_agent.acp import BoxACPAgent
+    from tests.test_acp import DummyConn, DoneLLM
+
+    monkeypatch.setenv('BOX_AGENT_LOG_FULL_PAYLOAD', '1')
+    monkeypatch.setenv('BOX_AGENT_SESSION_TRACE_ENABLED', '1')
+    monkeypatch.setenv('BOX_AGENT_SESSION_TRACE_DIR', str(tmp_path / 'diagnostics'))
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = 'desktop'
+    config.agent.memory_desktop = DesktopMemoryConfig(
+        bootstrap_file=str(host.path), identity_epoch=host.bootstrap['identity_epoch'])
+    process = backend(host)
+    adapter = BoxACPAgent(DummyConn(), config, DoneLLM(), [], 'system', memory_manager=process)
+    canary = 'REVIEW-PRIVATE-QA-CANARY-20261030'
+    try:
+        opened = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={'session_id': 'review-trace'}))
+        state = adapter._sessions[opened.sessionId]
+        request = SimpleNamespace(sessionId=opened.sessionId,
+            prompt=[{'type': 'text', 'text': canary}], field_meta={'turn_id': 'trace-turn'})
+        if failed:
+            async def fail_turn(*args, **kwargs):
+                raise RuntimeError(canary)
+            monkeypatch.setattr(adapter, '_run_turn', fail_turn)
+            with pytest.raises(RuntimeError, match=canary):
+                await adapter.prompt(request)
+        else:
+            await adapter.prompt(request)
+            assert canary in state.agent.session_log.path.read_text()
+        records = [json.loads(line) for line in state.trace_writer.file_path.read_text().splitlines()]
+        assert any(row['event'] == 'turn.input' for row in records)
+        assert canary not in state.trace_writer.file_path.read_text()
+        if failed:
+            assert any(row['event'] == 'turn.error' for row in records)
+    finally:
+        await adapter.aclose()
+        await process.aclose()
+
+
+@pytest.mark.parametrize("code", ["AUTH_REQUIRED", "IDENTITY_CHANGED", "MEMORY_DISABLED"])
+async def test_revocation_removes_preload_from_next_model_request(tmp_path, host, code):
+    from copy import deepcopy
+
+    class SearchThenAnswer(RecordingLLM):
+        async def generate_stream(self, **kwargs):
+            self.requests.append({'messages': deepcopy(kwargs['messages'])})
+            if len(self.requests) == 1:
+                yield StreamEvent(type='finish', finish_reason='tool_use', tool_calls=[
+                    ToolCall(id='search', type='function', function=FunctionCall(name='memory_search', arguments={'query': 'query'}))])
+            else:
+                yield StreamEvent(type='text', delta='done')
+                yield StreamEvent(type='finish', finish_reason='stop')
+
+    async def denied(operation, payload):
+        if operation == 'search':
+            return httpx.Response(403, json={'protocol': 2, 'identity_epoch': host.bootstrap['identity_epoch'],
+                                            'ok': False, 'error': {'code': code}})
+    host.before = denied
+    process = backend(host)
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = 'desktop'
+    model = SearchThenAnswer()
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=model, memory_manager=process, tools=create_memory_tools(process), system_prompt='BASE'),
+        options=SessionOptions(profile='acp', workspace_dir=tmp_path))
+    try:
+        assert (await session.agent.tools['tool_search'].execute(tool_names=['memory_search'])).success
+        async with memory_user_turn(session, user_text='question', session_id='session-1', turn_id='turn-1'):
+            session.agent.add_user_message('question')
+            _ = [event async for event in session.run_events(options=session.build_run_options(logger=None))]
+            assert session.memory_manager.current_scope is None
+        assert len(model.requests) == 2
+        assert 'user_items-unique-data' in str(model.requests[0]['messages'])
+        failure = next(m for m in model.requests[1]['messages'] if m.role == 'tool' and m.name == 'memory_search')
+        assert code in str(failure.content)
+        assert 'user_items-unique-data' not in str(model.requests[1]['messages'])
+    finally:
+        await session.aclose()
+        await process.aclose()

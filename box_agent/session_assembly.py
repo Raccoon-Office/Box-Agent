@@ -98,8 +98,9 @@ async def prepare_memory(resources: SessionResources) -> None:
     config = context.config
     resources.memory_manager = context.host.memory_manager
     if context.options.utility:
-        # 工具型会话保留宿主提供的引导信息，仍不创建提取或外部保存资源。
-        resources.memory_manager = None
+        # 保留 local 宿主的引导信息；远端后端不进入 utility 会话。
+        if isinstance(resources.memory_manager, ExternalMemoryBackend):
+            resources.memory_manager = None
         resources.state.update(memory_manager=None, memory_runtime=None, memory_extractor=None)
         return
     if not config.agent.enable_memory and not uses_local_memory(resources.memory_manager):

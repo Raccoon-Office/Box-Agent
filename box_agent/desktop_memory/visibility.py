@@ -177,6 +177,9 @@ class DesktopInputGuard(CoreVisibilityGuard):
         def fits(candidate):
             return self._input_tokens([*candidate, *tail], tools.definitions) + reserve_tokens + 1024 <= token_limit
 
+        # A revoked scope must clear its old preload even when the request fits.
+        if not self._content_builder(15400):
+            return projected(0)
         if fits(messages):
             return messages
         best = projected(0)
