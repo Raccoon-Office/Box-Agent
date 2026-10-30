@@ -5,12 +5,12 @@ const path = require("path");
 const clone = value => JSON.parse(JSON.stringify(value));
 
 function correction(base, update, error, scope = null) {
-  const fields = [...new Set([...String(error).matchAll(/design_plan\.([a-z_]+)/g)].map(m => m[1]))]
+  const fields = [...new Set([...String(error).matchAll(/(?:design_plan|designer)\.([a-z_]+)/g)].map(m => m[1]))]
     .filter(key => ["theme_id", "profile_id", "visual_profile", "palette", "visual_requirements", "slides", "reason"].includes(key));
   const merged = clone(base);
   for (const field of fields) if (update && Object.hasOwn(update, field)) {
     if (field === "slides") {
-      const pages = scope?.pages || [...String(error).matchAll(/design_plan\.slides\.(\d+)/g)].map(m => Number(m[1]) + 1);
+      const pages = scope?.pages || [...String(error).matchAll(/(?:design_plan|designer)\.slides\.(\d+)/g)].map(m => Number(m[1]) + 1);
       if (pages.length && Array.isArray(update.slides)) {
         if (update.slides.length !== base.slides.length || pages.some(page => !update.slides[page - 1])) {
           throw new Error("designer correction: slides must contain the complete original page list; only scoped pages may change");
@@ -52,6 +52,9 @@ function normalizeCorrectionUpdate(update, base) {
   }
   return result;
 }
+function needsFullReplacement(error) {
+  return /designer\.[a-z_]+: unknown field/.test(String(error)) || !correction({}, {}, error).fields.length;
+}
 function decisionFromResponses(responses, input, plans) {
   const parse = require("./design_response_source.js").parseDecision;
   const first = responses[0];
@@ -81,6 +84,9 @@ function decisionFromResponses(responses, input, plans) {
   if (second.error) throw new Error(second.error);
   const update = normalizeCorrectionUpdate(parse(second.text), base);
   if (second.correction_base) {
+    if (needsFullReplacement((second.correction_issues || []).join("\n"))) {
+      return { decision: update, correction_fields: [] };
+    }
     const merged = correction(base,update,(second.correction_issues || []).join("\n"), second.correction_scope);
     return { decision:merged.decision, correction_fields:merged.fields };
   }
@@ -88,6 +94,9 @@ function decisionFromResponses(responses, input, plans) {
   // has no authority to replace it without a program-bound correction scope.
   if (!error) return { decision: base, correction_fields: [],
     warnings: ["Ignored an unbound replacement of an accepted design; use a scoped correction packet."] };
+  if (needsFullReplacement(error)) {
+    return { decision: update, correction_fields: [] };
+  }
   const merged = correction(base, update, error);
   return { decision: merged.decision, correction_fields: merged.fields };
 }
@@ -126,10 +135,6 @@ function recoveryDeck(input, proposedCount = 0) {
   const add = (layout_id, props, source) => pages.push({ id: `slide-${String(pages.length + 1).padStart(2,"0")}`,
     layout_id, props, source_outline_page: source });
   const outline = input.outline.slides;
-  const first = outline[0] || {};
-  add("cover-editorial-v1", { eyebrow: "产品与主题介绍", title: chunks(input.title || first.title || "演示",84)[0],
-    subtitle: chunks(first.message || first.title,160)[0] || "", marker: "", meta: "基础主题 · 内容待核验", tags: [],
-    composition: "poster", alignment: "left" }, 1);
   const groups = outline.flatMap((slide, index) => {
     const title = chunks(slide.title || "内容",64)[0];
     // Keep the full title/message as content if they exceed their header capacity.
@@ -143,17 +148,6 @@ function recoveryDeck(input, proposedCount = 0) {
       content: content.slice(i,i+capacity), source: index+1 });
     return result;
   });
-  const desired = Math.min(39, Math.max(groups.length, Number.isInteger(proposedCount) ? proposedCount-1 : 0));
-  while (groups.length < desired) {
-    const candidates = groups.map((group,index)=>({index,size:group.content.length})).filter(item=>item.size>1)
-      .sort((a,b)=>b.size-a.size);
-    if (!candidates.length) break;
-    const index = candidates[0].index, group = groups[index];
-    const rest = group.content.splice(Math.ceil(group.content.length/2));
-    groups.splice(index+1,0,{...group,content:rest});
-  }
-  // A full 40-page outline must not exceed the normal schema just for a cover.
-  if (groups.length >= 40) pages.pop();
   for (const group of groups) {
     const items = group.content.map((body,index)=>({title:body.match(/^([^：:]{1,24})[：:]/)?.[1] || `要点 ${index+1}`,body}));
     if (items.length >= 3) add("cards-grid-v1", { eyebrow: "内容要点", title: group.title, subtitle: group.subtitle,
@@ -203,4 +197,4 @@ function fallback(input, root, reason, proposedCount = 0, publish = true) {
   fs.writeFileSync(reportFile,JSON.stringify(report,null,2)+"\n");
   return report;
 }
-module.exports = { correction, decisionFromResponses, normalizeCorrectionUpdate, recoveryDeck, fallback };
+module.exports = { correction, decisionFromResponses, normalizeCorrectionUpdate, needsFullReplacement, recoveryDeck, fallback };

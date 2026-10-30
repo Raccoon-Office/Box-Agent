@@ -9,6 +9,17 @@ import pytest
 
 from tests.test_pptx_controlled_deck import _run
 from tests.test_pptx_design_regressions import js, render_case, render
+from tests.test_pptx_design_plan import design_case, scaffold
+
+
+def test_managed_pptx_commands_use_literal_runtime_references():
+    from pathlib import Path
+    skill = Path(__file__).resolve().parents[1] / "box_agent/skills/document-skills/pptx"
+    for path in (skill / "SKILL.md", skill / "references/qa.md"):
+        text = path.read_text(encoding="utf-8")
+        assert '${BOX_AGENT_PYTHON:-' not in text
+        assert '${BOX_AGENT_NODE:-' not in text
+    assert '"$BOX_AGENT_PYTHON" scripts/validate_pptx_package.py' in (skill / "SKILL.md").read_text()
 
 
 def source_env(text):
@@ -136,6 +147,47 @@ cp.spawnSync=function(command,args,options){
     assert json.loads((tmp_path / 'qa/finalization.json').read_text()) == report
     quality = json.loads((tmp_path / 'qa/render_quality.json').read_text())
     assert quality['ok'] is False and quality['advisory'] is False
+
+
+@pytest.mark.parametrize('same_plan', [True, False])
+def test_overflow_does_not_request_a_second_correction_for_the_same_plan(tmp_path, same_plan, design_case):
+    root, _, _, _ = design_case
+    result = scaffold(root)
+    assert result.returncode == 0, result.stderr
+    deck_path = root / 'deck.json'
+    plan_hash = json.loads(deck_path.read_text())['design_plan']['plan_hash']
+    (tmp_path / 'qa' / 'design_delivery.json').write_text(json.dumps({
+        'status': 'correction_failed', 'terminal': True,
+        'plan_hash': plan_hash if same_plan else 'different-plan',
+    }))
+    preload = tmp_path / 'overflow-terminal.cjs'
+    preload.write_text(r'''
+const cp=require('child_process'),fs=require('fs'),path=require('path'),original=cp.spawnSync;
+cp.spawnSync=function(command,args,options){
+ if(args[0].endsWith('validate_deck_spec.js')){
+  const report=args[args.indexOf('--report')+1];fs.mkdirSync(path.dirname(report),{recursive:true});
+  fs.writeFileSync(report,JSON.stringify({ok:true,issues:[],warnings:[]}));
+  return {status:0,stdout:'',stderr:''};
+ }
+ if(args[0].endsWith('render_deck_html.js')){
+  fs.writeFileSync(args[args.indexOf('--out')+1],'<html>draft</html>');
+  return {status:0,stdout:'',stderr:''};
+ }
+ if(args[0].endsWith('html_self_check.js')){
+  const report=args[args.indexOf('--report')+1];fs.mkdirSync(path.dirname(report),{recursive:true});
+  fs.writeFileSync(report,JSON.stringify({ok:false,issues:['slide-01 div.cards-grid: visible content extends outside the slide bounds.'],warnings:[]}));
+  return {status:1,stdout:'',stderr:'overflow'};
+ }
+ return original.call(this,command,args,options);
+};
+''')
+    result = _run('finalize_controlled_deck.js', str(deck_path), '--out',
+                  str(tmp_path / 'index.html'), '--require-pptx',
+                  env={**os.environ, 'NODE_OPTIONS': f'--require={preload}'})
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert result.returncode == 1 and report['delivery_status'] == 'partial'
+    assert report['correction_required'] is not same_plan
+    assert ('already used' in report['next']) if same_plan else ('--pages 1' in report['next'])
 
 
 def test_dense_featured_cards_export_all_text_to_pptx(tmp_path):

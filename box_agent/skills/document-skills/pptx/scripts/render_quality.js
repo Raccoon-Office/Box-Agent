@@ -17,8 +17,9 @@ function renderQuality(html, runtime) {
     affected_pages: [...new Set(issues.map(issue => issue.page))].sort((a, b) => a - b) };
 }
 
-function correctionNext(quality) {
+function correctionNext(quality, correctionUsed = false) {
   return quality.ok ? null
+    : correctionUsed ? "The design correction was already used or failed for this plan. Do not retry or manually debug the layout; retain the existing draft and report the affected pages as partial."
     : `Run design_plan.js correct design_input.json --pages ${quality.affected_pages.join(",")} with these visual defects, then accept, apply and finalize once. If correction is unavailable, already used, or still fails, report partial and retain an explicitly degraded draft. Do not report completed or visual checks passed.`;
 }
 

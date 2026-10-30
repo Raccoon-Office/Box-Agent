@@ -54,7 +54,7 @@ def test_pptx_skill_makes_scaffold_and_framework_fallback_executable() -> None:
     skill = skill_path.read_text(encoding="utf-8")
 
     assert (
-        "Use `cd '<PRESENTATION_DIR>' && ${BOX_AGENT_NODE:-node}` on that same line"
+        'Use `cd \'<PRESENTATION_DIR>\' && "$BOX_AGENT_NODE"` on that same line'
         in skill
     )
     assert "do not split `cd` and the inspector across lines" in skill

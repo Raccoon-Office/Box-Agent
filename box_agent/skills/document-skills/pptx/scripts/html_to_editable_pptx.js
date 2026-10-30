@@ -335,6 +335,9 @@ async function main() {
     });
   }
 
+  // Element screenshots can include the page's overlay scrollbar when a slide
+  // reaches the viewport edge. Keep scrolling and overflow detection intact.
+  await page.addStyleTag({ content: "* { scrollbar-width: none !important; } *::-webkit-scrollbar { display: none !important; }" });
   await waitForDiagramLayout(page);
 
   const fontResolution = await resolveExpressiveExportFonts(page);
@@ -417,7 +420,74 @@ async function main() {
     console.log(`Captured ${bgCaptures.length} background image(s) in-memory.`);
   }
 
-  await page.addScriptTag({ path: bundlePath });
+  // Controlled titles and short labels reserve right padding in HTML. Keep
+  // their measured outer width while giving editable PPTX text that space:
+  // different font metrics can otherwise wrap a final CJK character.
+  await page.evaluate(() => {
+    const selector = ':is(.cover-copy, .editorial-cover-copy) h1[data-prop-kind="text"], .slide :is(.eyebrow, .card-kicker, .meta)[data-prop-kind="text"]';
+    for (const text of document.querySelectorAll(selector)) {
+      const width = text.getBoundingClientRect().width;
+      const padding = parseFloat(getComputedStyle(text).paddingRight);
+      if (!width || ![14, 18, 20, 24].includes(padding)) continue;
+      text.style.setProperty("box-sizing", "border-box", "important");
+      const isShortLabel = text.matches(".eyebrow, .card-kicker, .meta");
+      const available = text.parentElement?.getBoundingClientRect().width || width;
+      text.style.setProperty("width", `${isShortLabel ? Math.min(width + 32, available) : width}px`, "important");
+      text.style.setProperty("padding-right", "0", "important");
+    }
+    // Right-anchored card numbers have content-sized boxes in HTML. Provide
+    // a little room for PPTX font metrics while keeping the right edge fixed.
+    for (const index of document.querySelectorAll(".slide .card-index")) {
+      const style = getComputedStyle(index);
+      if (style.position !== "absolute" || style.right === "auto") continue;
+      const width = index.getBoundingClientRect().width;
+      if (!width) continue;
+      index.style.setProperty("width", `${width + 16}px`, "important");
+      index.style.setProperty("text-align", "right", "important");
+    }
+    // Preserve browser line breaks in simple table cells. Some PPTX viewers
+    // do not wrap CJK table text at the same boundaries as Chromium.
+    for (const cell of document.querySelectorAll(".slide td, .slide th")) {
+      let leaf = cell;
+      while (leaf.childNodes.length === 1 && leaf.firstChild.nodeType === Node.ELEMENT_NODE) leaf = leaf.firstChild;
+      if (leaf.childNodes.length !== 1 || leaf.firstChild.nodeType !== Node.TEXT_NODE) continue;
+      const node = leaf.firstChild;
+      const offsets = [];
+      let offset = 0, previousTop = null;
+      for (const character of node.data) {
+        const next = offset + character.length;
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.setEnd(node, next);
+        const rect = range.getBoundingClientRect();
+        if (rect.width && rect.height) {
+          if (previousTop !== null && rect.top > previousTop + 2) offsets.push(offset);
+          previousTop = rect.top;
+        }
+        offset = next;
+      }
+      for (const split of offsets.reverse()) {
+        const tail = node.splitText(split);
+        tail.before(document.createElement("br"));
+      }
+    }
+  });
+
+  // The bundled exporter otherwise emits zero-height table rows. Preserve the
+  // browser-measured row heights in the native editable PowerPoint table.
+  // Check the exact integration points so a future bundle update fails closed.
+  let bundle = fs.readFileSync(bundlePath, "utf8");
+  const tablePatches = [
+    ["    const colWidths = [];\n\n    // 1. Calculate Column Widths", "    const colWidths = [];\n    const rowHeights = [];\n\n    // 1. Calculate Column Widths"],
+    ["        rows.push(rowData);\n      }\n    });\n\n    return { rows, colWidths };", "        rows.push(rowData);\n        rowHeights.push(tr.getBoundingClientRect().height * (1 / 96) * scale);\n      }\n    });\n\n    return { rows, colWidths, rowHeights };"],
+    ["            margin: margin,\n\n            rowspan:", "            margin: margin.map(value => value / 72),\n\n            rowspan:"],
+    ["          colW: item.tableData.colWidths, // Essential for correct layout", "          rowH: item.tableData.rowHeights,\n          colW: item.tableData.colWidths, // Essential for correct layout"],
+  ];
+  for (const [before, after] of tablePatches) {
+    if (bundle.split(before).length !== 2) throw new Error("Unsupported dom-to-pptx table exporter; cannot preserve row heights.");
+    bundle = bundle.replace(before, after);
+  }
+  await page.addScriptTag({ content: bundle });
 
   const exportResult = await page.evaluate(
     async ({

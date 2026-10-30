@@ -2349,7 +2349,7 @@ function main() {
         initial_full_deck_writes: 0,
         initial_scaffold_writes: 1,
         next_step: "The selected layout fields/defaults below are complete. Patch deck.json and assets/generated/manifest.json in place; do not call inspect_layout again for these layout ids.",
-        batch_patch_command: "Write deck.patch.json once, then run ${BOX_AGENT_NODE:-node} scripts/apply_deck_patch.js deck.json deck.patch.json to update all slide props in one validated mutation.",
+        batch_patch_command: "Write deck.patch.json once, then run \"$BOX_AGENT_NODE\" scripts/apply_deck_patch.js deck.json deck.patch.json to update all slide props in one validated mutation.",
         after_validation_failure: "Patch only the paths named in the validation report; do not rewrite the whole deck.",
         repeated_issue: "If the same issue class appears twice, re-read this contract and stop full-file rewrites.",
       },

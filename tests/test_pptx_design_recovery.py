@@ -190,7 +190,7 @@ def test_profile_correction_preserves_other_choices_and_revalidates(
     assert scaffold(root).returncode == 0
 
 
-def test_failed_correction_delivers_extra_pages_without_inventing_facts(design_case):
+def test_failed_correction_preserves_outline_page_count_without_inventing_facts(design_case):
     root, outline, _, _ = design_case
     fresh(root,outline)
     record_response(root,decision(4))
@@ -199,7 +199,7 @@ def test_failed_correction_delivers_extra_pages_without_inventing_facts(design_c
     result=run('design_plan.js','accept','design_input.json',cwd=root)
     assert result.returncode==0,result.stderr
     report=json.loads(result.stdout)
-    assert report['status']=='degraded' and report['actual_pages']>=4
+    assert report['status']=='degraded' and report['actual_pages']==len(outline['slides'])
     html=Path(report['artifact']).read_text()
     deck=json.loads(Path(report['deck']).read_text())
     assert len(deck['slides'])==report['actual_pages']
@@ -207,6 +207,45 @@ def test_failed_correction_delivers_extra_pages_without_inventing_facts(design_c
     for page in outline['slides']:
         for bullet in page['bullets']:
             assert content.count(bullet)==1
+
+
+def test_unknown_designer_fields_request_and_accept_full_replacement(design_case):
+    root, outline, _, plan = design_case
+    fresh(root, outline)
+    valid = {key: plan[key] for key in ('theme_id', 'palette', 'reason') if key in plan}
+    valid['slides'] = [{'layout_id': slide['layout_id'], 'visual_options': slide['visual_options']}
+                       for slide in plan['slides']]
+    invalid = {**valid, 'subject_expression': 'unrecognized top-level field'}
+    invalid['slides'] = [{**slide, 'layout': slide['layout_id']} for slide in valid['slides']]
+    record_response(root, invalid)
+    first = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert first.returncode != 0
+    packet = Path(json.loads(first.stderr)['correction_file'])
+    assert json.loads(packet.read_text())['requires_full_read'] is True
+    # A complete, independently read replacement can remove unknown fields.
+    record_response(root, valid, correction_file=packet)
+    result = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert result.returncode == 0, result.stderr
+    assert 'plan' in json.loads(result.stdout)
+
+
+def test_unknown_slide_field_is_corrected_on_the_affected_page(design_case):
+    root, outline, _, plan = design_case
+    fresh(root, outline)
+    valid = {key: plan[key] for key in ('theme_id', 'palette', 'reason') if key in plan}
+    valid['slides'] = [{'layout_id': slide['layout_id'], 'visual_options': slide['visual_options']}
+                       for slide in plan['slides']]
+    invalid = {**valid, 'slides': [dict(slide) for slide in valid['slides']]}
+    invalid['slides'][1]['layout'] = 'cards-grid-v1'
+    record_response(root, invalid)
+    first = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert first.returncode != 0
+    packet = Path(json.loads(first.stderr)['correction_file'])
+    assert json.loads(packet.read_text())['editable_fields'] == ['slides']
+    record_correction(root, packet, {'slides': valid['slides']})
+    result = run('design_plan.js', 'accept', 'design_input.json', cwd=root)
+    assert result.returncode == 0, result.stderr
+    assert 'plan' in json.loads(result.stdout)
 
 
 def test_missing_response_delivers_fallback_and_preserves_existing_html(design_case):

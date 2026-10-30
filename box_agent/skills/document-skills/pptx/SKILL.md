@@ -114,10 +114,14 @@ them. Do not add unrelated history or synthetic continuation text as user facts.
 ### 2. Prepare the isolated design input
 
 All shell examples below run in the presentation directory using the directory
-prefix above and the loader-expanded script paths.
+prefix above and the loader-expanded script paths. In the managed desktop host,
+use the quoted `"$BOX_AGENT_NODE"` and `"$BOX_AGENT_PYTHON"` executables exactly;
+do not use shell default-value expressions as executable names. If a variable
+is absent in an unmanaged environment, use the known executable `node` or
+`python3` directly instead.
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/design_plan.js prepare outline.json --out design_input.json
+"$BOX_AGENT_NODE" scripts/design_plan.js prepare outline.json --out design_input.json
 ```
 
 For a research-backed outline, add `--research-handoff research/qa/<topic>_research_check.json`.
@@ -160,7 +164,7 @@ The role returns a response, not a complete deck plan. Never write or repair
 `design_plan.json` yourself. Import the completed child's actual Session Log:
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/design_plan.js accept design_input.json
+"$BOX_AGENT_NODE" scripts/design_plan.js accept design_input.json
 ```
 
 The importer finds only completed child sessions that read this exact brief in
@@ -173,7 +177,7 @@ If a valid accepted design later fails page-level render QA, do not start a fres
 designer with only the old brief. Bind the original decision and failed pages:
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/design_plan.js correct design_input.json --pages 4 --issue "Page 4 overflows"
+"$BOX_AGENT_NODE" scripts/design_plan.js correct design_input.json --pages 4 --issue "Page 4 overflows"
 ```
 
 Send the returned correction_file to the design role, then run accept and apply.
@@ -205,10 +209,11 @@ call `inspect_deck_contract`, `apply_deck_patch`, `finalize_controlled_deck`, ed
 `deck.json`, delete slides, or start another design call. Continue the requested
 format delivery from `primary_artifact` as described below. Missing,
 malformed or still-invalid designer output must not leave the user without a deck.
-Recovery uses plain-neutral with registered cover/cards/closing layouts and the
+Recovery uses plain-neutral with registered cards/closing layouts and the
 normal deck schema, renderer, playback, layout editor, save and export controls.
 Never substitute a separate text-only HTML implementation.
-Extra pages are tolerated in the fallback by splitting existing outline content;
+Preserve one recovery page per outline page when its content fits. Extra pages
+are tolerated only when needed to retain content that exceeds a page's capacity;
 never invent content or facts to fill them. Do not start a third design call or
 alter input just to reset the attempt count. If later compilation fails, use the
 existing fallback HTML with its report. Images or unavailable vision must never
@@ -221,6 +226,8 @@ failed but the original accepted plan remains valid. Keep its palette, subject
 identity and page count; apply that retained plan if needed and finalize the
 existing deck. Do not switch to neutral recovery HTML or restart design. Report
 any remaining confirmed visual defects as a degraded draft with partial outcome.
+Do not enter a manual CSS debugging loop after this terminal result. Export the
+retained artifact and report the affected pages and failed checks.
 
 `degraded` / `terminal` ends design retries, not outstanding format delivery.
 Read `qa/design_delivery.json`; keep its actual `primary_artifact` HTML unchanged.
@@ -229,9 +236,9 @@ run the existing exporter on that same file, using its absolute path in place of
 `<PRIMARY_ARTIFACT>`:
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/check_html_export_env.js
-${BOX_AGENT_NODE:-node} scripts/html_to_editable_pptx.js '<PRIMARY_ARTIFACT>' output.pptx
-${BOX_AGENT_PYTHON:-python} scripts/validate_pptx_package.py output.pptx
+"$BOX_AGENT_NODE" scripts/check_html_export_env.js
+"$BOX_AGENT_NODE" scripts/html_to_editable_pptx.js '<PRIMARY_ARTIFACT>' output.pptx
+"$BOX_AGENT_PYTHON" scripts/validate_pptx_package.py output.pptx
 ```
 
 Then extract text and check actual page count/order, required content and picture
@@ -254,10 +261,10 @@ explain the limitations from `qa/design_delivery.json`.
 ### 4. Scaffold the validated plan once
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/inspect_deck_contract.js --design-plan design_plan.json --design-input design_input.json --outline outline.json --out deck.json
+"$BOX_AGENT_NODE" scripts/inspect_deck_contract.js --design-plan design_plan.json --design-input design_input.json --outline outline.json --out deck.json
 ```
 
-Use `cd '<PRESENTATION_DIR>' && ${BOX_AGENT_NODE:-node}` on that same line;
+Use `cd '<PRESENTATION_DIR>' && "$BOX_AGENT_NODE"` on that same line;
 do not split `cd` and the inspector across lines.
 The inspector must be the only command after the literal directory prefix: no
 pipe, redirection, `tail`, or additional diagnostic command. It rejects attempts
@@ -272,6 +279,10 @@ only for user-required semantic data fields, never decoration.
 
 After scaffolding, append missing evidence with `apply_deck_patch.js`, for example
 `{"truth_contract":{"add_source_facts":["verbatim supplied text"],"add_research_facts":["verified document fact with its table/page reference"]}}`.
+Write that JSON to a patch file and pass its path as the second argument, as in
+`apply_deck_patch.js deck.json deck.patch.json`; do not pass inline JSON as a path.
+Fictional examples authored for the presentation are not user source facts or
+research facts. Label them as examples and do not register them as evidence.
 Source additions must match the runtime user source; document/research additions
 retain the existing strict-source restrictions. This validates provenance rules,
 not the truth of a statement: read the source before registering it. Additions are
@@ -292,14 +303,23 @@ Read `references/image-assets.md` for image acquisition. Follow the scaffolded
 with `search_type: "image"` and `count: 5`, once per unique query. Localize selected
 receipts with `scripts/localize_web_image.py`. Only after `exhausted` or
 `unavailable` may a web job use its labelled AI-concept fallback. Never fabricate
-a documentary image of a real subject. Call `generate_image` with
+a documentary image of a real subject. Before generating that fallback, use the
+`localize_web_image.py ... mark` command in the image-assets reference to record
+the actual terminal search status and reason in the manifest; describing the
+search result in conversation does not update the manifest. Call `generate_image` with
 `watermark: false` and `publish_artifact: false`; use the manifest entry's
 `output_path` verbatim as the tool's `output_path` (never invent a short alias such
 as `cover-hero.png`). Independent jobs may share a tool batch. Generation success
 is not insertion proof: the final manifest must bind the asset to the actual page
 and field.
 
-Then synchronize once with one tightly scoped Bash-tool command. A missing optional
+Before finalization, inspect every required image row. A pending web search or
+pending generation is not an unavailable service: actually attempt the planned
+search and, when eligible, its fallback. If acquisition fails, record the real
+failure and deliver the resulting degraded draft; do not silently skip the job
+or repeat the same failed acquisition indefinitely.
+
+After required generation jobs finish, synchronize once with one tightly scoped Bash-tool command. A missing optional
 generated asset is recorded as deferred and does not stop HTML delivery; an
 explicitly required asset remains an incomplete-delivery finding. Use the exact
 platform-specific directory prefix below; do not pass `workspaceDir` to the
@@ -381,7 +401,7 @@ the unmet image requirement. Ordinary factual topics do not imply creative mode.
 ### 6. Finalize and deliver
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/finalize_controlled_deck.js deck.json --out index.html
+"$BOX_AGENT_NODE" scripts/finalize_controlled_deck.js deck.json --out index.html
 ```
 
 This is the single normal finalization command. Core schema/design-contract and
@@ -418,6 +438,10 @@ visual review: report the concrete component/property from QA without replacing
 the accepted colors or patching the compiler. Missing image understanding alone
 does not block this deterministic color check or ordinary delivery.
 `ok: true` does not imply warning-free. Never describe degraded output as clean.
+When `delivery_status` is `degraded`, report the execution outcome as `partial`,
+identify the named degraded stages, and keep the artifact as a draft. Do not mark
+failed checks advisory merely to submit `completed`, or repeat finalization just
+to make the status pass. Report the remaining issue and finish.
 A design-plan deck does not require a second semantic reviewer; the report records
 that post-content model review was not performed. Program QA still runs normally.
 For a requested PPT/PPTX, add `--require-pptx --pptx output.pptx` to this command.
@@ -426,9 +450,9 @@ these flags it delivers HTML only. An export failure keeps the HTML, returns a
 nonzero exit status and reports `delivery_status: partial`; it is not a completed
 PPTX delivery, even if a previous `.pptx` exists.
 
-When the image manifest has a background `layout_contract`, run
-`scripts/validate_image_layout_contract.js` after finalization and preserve its
-findings with the draft. Keep `outline.json`, `deck.json`, assets and reports beside
+When the image manifest has a background `layout_contract`, finalization runs
+`scripts/validate_image_layout_contract.js` and includes its result in the delivery
+status. Do not repeat it after finalization. Keep `outline.json`, `deck.json`, assets and reports beside
 the HTML. The saved HTML's embedded model is authoritative after user editing;
 the sibling `deck.json` is not automatically synchronized.
 
@@ -586,7 +610,7 @@ stale screenshots, or a single Quick Look thumbnail as an all-slide overview.
 If any slide is missing, omit the overview. Combine a complete set with:
 
 ```bash
-${BOX_AGENT_NODE:-node} scripts/make_contact_sheet.js qa/overview-slides --out qa/deck-overview.png --cols 4 --thumb-width 480
+"$BOX_AGENT_NODE" scripts/make_contact_sheet.js qa/overview-slides --out qa/deck-overview.png --cols 4 --thumb-width 480
 ```
 
 If stitching fails or the dependency is missing, skip the preview. The helper's

@@ -653,6 +653,22 @@ def test_verbatim_user_geometry_remains_a_hard_constraint(design_case, monkeypat
     assert "design_contract" in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("verbatim", [True, False])
+def test_hard_requirement_list_checks_each_item_against_user_request(design_case, monkeypatch, verbatim):
+    import base64
+    root, outline, _, _ = design_case
+    source = "请做三页演示，第1页必须使用金字塔结构，颜色使用蓝色。"
+    monkeypatch.setenv("BOX_AGENT_SOURCE_TEXT_B64", base64.b64encode(source.encode()).decode())
+    outline["slides"][0]["hard_requirements"] = [
+        "第1页必须使用金字塔结构", "颜色使用蓝色" if verbatim else "颜色使用红色",
+    ]
+    write(root / "outline.json", outline)
+    prepared = run("design_plan.js", "prepare", "outline.json", cwd=root)
+    assert (prepared.returncode == 0) == verbatim, prepared.stdout + prepared.stderr
+    if not verbatim:
+        assert "must quote the actual user request verbatim" in prepared.stderr
+
+
 def test_response_import_accepts_one_json_object_wrapped_in_prose(design_case):
     root, _, data, plan = design_case
     decision = {"theme_id": "blue-professional", "palette": plan["palette"], "slides": [{"layout_id": slide["layout_id"]} for slide in plan["slides"]]}

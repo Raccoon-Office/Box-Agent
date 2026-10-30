@@ -82,12 +82,13 @@ function makeInput(outline, title, sourceText = "") {
   const context = { title, outline, source_text: sourceText };
   const layoutHintsOnly = Boolean(sourceText);
   const hardSlides = outline.slides.map((slide, index) => {
-    const requirement = slide.hard_requirements || "";
-    if (requirement && (typeof requirement !== "string"
+    const requirements = slide.hard_requirements == null || slide.hard_requirements === ""
+      ? [] : Array.isArray(slide.hard_requirements) ? slide.hard_requirements : [slide.hard_requirements];
+    if (requirements.some(requirement => typeof requirement !== "string" || !requirement.trim()
       || (sourceText && !sourceText.replace(/\s/g, "").includes(requirement.replace(/\s/g, ""))))) {
       throw new Error(`outline.slides.${index}.hard_requirements: must quote the actual user request verbatim`);
     }
-    return { visual: requirement };
+    return { visual: requirements.join("；") };
   });
   const constraints = layoutHintsOnly
     ? inferDesignContract({ source_text: sourceText }, hardSlides) || null

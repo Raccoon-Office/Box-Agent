@@ -64,6 +64,16 @@ def test_rate_limit_error():
     assert classify_llm_error(exc).category == "rate_limit"
 
 
+def test_bad_request_with_status_digits_in_request_id_is_not_rate_limited():
+    exc = _FakeAPIError(
+        "Error code: 400 - A parameter specified in the request is not valid "
+        "Request id: 0217932929879831cb6d3ad1bdd7a7436196dd041d7fa42685429",
+        status_code=400,
+        body={"error": {"code": "400", "message": "A parameter specified in the request is not valid"}},
+    )
+    assert classify_llm_error(exc).category == "unknown"
+
+
 def test_quota_error():
     exc = Exception("You exceeded your current quota, please check your billing")
     assert classify_llm_error(exc).category == "quota"
