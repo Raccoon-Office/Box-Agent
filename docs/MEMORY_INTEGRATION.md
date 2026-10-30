@@ -1,15 +1,18 @@
 # Memory System Integration Guide
 
-## 桌面 MemoryV2 接入进度
+## 可选桌面记忆后端
 
 `memory_backend_type: desktop` 已注册到共同的 CLI/ACP 装配；私有配置为
 `memory_desktop.bootstrap_file` 和 `memory_desktop.identity_epoch`。构造及会话打开不访问代理，
 每真实轮次按 Host 返回的固定来源读取；不构造本地 MemoryManager、不加载纠错、不启动本地提取维护。
-桌面启动端尚未接线，默认 local 配置保持原行为。不要将通用 memsense 配置指向桌面代理。
+宿主通过私有启动元数据选择此后端，并提供兼容的原生代理；具体桌面产品的发布状态不由本仓库声明。
+默认 local 配置保持原行为，不需要桌面服务。不要将通用 memsense 配置指向桌面代理。
+启动、协议协商与恢复约定见 [Desktop memory contract](DESKTOP_MEMORY.md)。
 
 传输仅支持固定的 loopback 协议 V2，首次请求才读取私有 bootstrap，并固定 identity_epoch；
 无环境代理、重定向或 HTTP 重试。超时覆盖文件读取至响应体，已派发变更的失败保留 unknown。
-当前文件权限实现及实测针对 POSIX；Windows 私有文件权限适配尚未验证。
+POSIX 校验文件归属、权限与链接；Windows 使用句柄及私有 ACL 校验。
+对应自动化测试包含可移植的 Win32 接口替身；条件用例跳过不等于 Windows 实机通过。
 
 `CoreVisibilityGuard` 通过 `ModelInputGuard` 接入最终模型输入投影。完整读取仅形成 pending；
 实际请求提交且模型成功响应后才激活资格，后续投影移除正文或消费写入会撤销。
@@ -17,13 +20,18 @@
 已有 usage 估算与完整 UTF-8 JSON 字节上界的较大值，并保留 1,024 token 余量，可能保守拒绝大全文。
 宿主仍须实现代理和 commit/revoke 回调及最终写入门禁；合成 Host 测试不能代替真实宿主验收。
 最终 QA 捕获原轮次来源与事件键，只交接合格在线云端轮次；HTTP 超时不自动重发，
-durable_unknown 不计为云端已保存。新经验生成链路尚未完成。
+durable_unknown 不计为云端已保存。确认 QA 后，后台 `ExperienceRuntime` 可向宿主领取任务，
+使用固定证据和独立、无工具的模型请求生成提案，再通过宿主推进 Entity、Fact、Observation 保存。
+宿主负责持久任务、租约、证据和版本校验、幂等及未知结果恢复；Box-Agent 不直接写远端存储。
+没有可复用候选时可正常结束；不将助手声明本身当作执行成功证据。
 桌面轮次的诊断正文被省略，包含 full-payload 调试开关；真实模型输入和正式 SessionLog 保留原语义。
 私有 core/mutate 只返回 revision/正文摘要等元数据，由工具核对原候选，不回传另一份全文；
 原始 core/read 及 mutate 请求允许解码后 32 MiB，JSON 线上预算容纳最坏六倍转义。
 全文从最终投影移除后必须重新读取，恢复旧工具消息不能重新激活；认证/身份/关闭记忆信号清除预载和资格。
-测试入口为 `tests/test_desktop_memory_transport.py`、`tests/test_desktop_memory_visibility.py`，
-后者覆盖真实执行循环中成功、模型失败与截断响应。
+测试入口包括 `tests/test_desktop_memory_transport.py`、`tests/test_desktop_memory_visibility.py`、
+`tests/test_desktop_memory_evidence.py` 和 `tests/test_desktop_memory_experience.py`。
+源码测试覆盖传输、真实执行循环中的读取资格及后台生产者；不代表发布包已构建、安装、重启，
+也不代表任一外部宿主或后端已完成端到端验收。
 
 ## 后端选择与外部接入
 
