@@ -361,14 +361,15 @@ def test_confirm_action_is_ax_and_never_pixel_fallback(service):
     assert not any(n in {'get_window_state', 'bring_to_front'} for n, _ in driver.calls)
 
 
-def test_explicit_foreground_key_keeps_exact_target_for_driver_activation(service):
+def test_explicit_foreground_key_verifies_window_before_desktop_delivery(service):
     ok(service, 'get_app', app='TextEdit')
     driver = service.drivers[0]
     driver.calls.clear()
     ok(service, 'press_key', app='TextEdit', key='cmd+o', delivery_mode='foreground')
     names = [n for n, _ in driver.calls]
-    assert 'bring_to_front' not in names
+    assert [a for n, a in driver.calls if n == 'bring_to_front'] == [{'pid': 42, 'window_id': 7}]
     calls = [a for n, a in driver.calls if n == 'hotkey']
-    assert len(calls) == 1 and calls[0]['pid'] == 42 and calls[0]['window_id'] == 7
-    assert calls[0]['delivery_mode'] == 'foreground' and 'scope' not in calls[0]
+    assert len(calls) == 1 and calls[0]['scope'] == 'desktop'
+    assert calls[0]['delivery_mode'] == 'foreground'
     assert calls[0]['keys'] == ['cmd', 'o']
+    assert names.index('bring_to_front') < names.index('hotkey')

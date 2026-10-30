@@ -246,7 +246,7 @@ def test_keyboard_refresh_checks_current_state_before_paste(popover_app, monkeyp
     elif change == 'inactive':
         state['app_active'] = False
     start = len(driver.calls)
-    if change in {'focus', 'same_surface_control'}:
+    if change == 'same_surface_control':
         api.control('paste', 'app', {'text': 'Review'})
         assert driver.calls[-1][0] == 'hotkey'
     else:
