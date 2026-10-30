@@ -360,6 +360,8 @@ and must still protect existing user changes.
 
 ### Agent Trace diagnostics
 
+Desktop memory sessions omit private payloads from operational diagnostics, including ACP tool arguments/results, raw errors, model debug records, and title/summary utility requests. This applies at every log level and overrides full-payload debug flags. Tool names, call IDs, outcome events and timing metadata remain available. Model inputs, user-visible results and the protected Session Log keep their existing behavior. Historical logs are not rewritten by this protection.
+
 Run `box-agent trace-viewer` to open the packaged, offline developer viewer. Open `~/.box-agent/log/sessions/` for a newest-first overview of every trace, then select one run to inspect per-turn metrics, LLM/tool waterfalls, raw events, and the complete system → user → assistant/tool → final-response chain. You can still open one `.jsonl` file directly.
 
 Both ACP and CLI create session traces automatically. Each CLI invocation writes
