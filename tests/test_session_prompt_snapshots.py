@@ -380,7 +380,7 @@ async def test_sub_agent_drops_parent_only_blocks_and_keeps_constraints(name, tm
         assert marker not in child
     # (The Attention rule's conditional "若 `request_user_input` 可用" stays; a
     # child never has that tool, so the condition is simply false.)
-    parent_only_text = ["request_user_decision", "action_hint", "快照用户", "商汤小浣熊，由商汤科技研发，定位为",
+    parent_only_text = ["request_user_decision", "action_hint", "快照用户", "看山工作台，一款 AI 桌面工作平台，定位为",
                         "parent-only catalog"]
     if name == "acp_general_follow_up":
         parent_only_text.append("follow_up_suggestions")
