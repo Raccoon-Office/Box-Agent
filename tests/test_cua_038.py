@@ -58,22 +58,27 @@ def test_input_retains_target_and_requested_mode(mode, method, args, tool):
     assert sent['delivery_mode'] == mode and 'scope' not in sent
     if 'target' in args:
         assert sent['element_token'] == 's1:1'
-    assert not any(n == 'bring_to_front' for n, _ in driver.calls)
+    assert any(n == 'bring_to_front' for n, _ in driver.calls) == (mode == 'foreground')
     if method == 'typeText':
         assert sent['text'] == args['text']
 
 
-def test_collection_item_without_axpress_stays_semantic():
+def test_collection_item_without_axpress_uses_verified_pixel_center():
     driver, api, state = observed()
     driver.responses['get_window_state']['structuredContent']['elements'][0].update(
-        role='AXRow', actions=[], selected=False)
+        role='AXRow', actions=[], selected=False,
+        frame={'x': 100, 'y': 100, 'width': 100, 'height': 50})
+    driver.responses['get_window_state']['structuredContent'].update(
+        screenshot_width=800, screenshot_height=600, screenshot_frame_valid=True,
+        window_bounds={'x': 0, 'y': 0, 'width': 800, 'height': 600})
     api.observe(state, 'getAXState')
     driver.calls.clear()
     api.control('click', 'app', {'target': 0})
     assert driver.calls[-1][0] == 'click'
-    assert driver.calls[-1][1]['element_token'] == 's1:1'
-    assert 'x' not in driver.calls[-1][1]
-    assert not any(n == 'get_window_state' for n, _ in driver.calls)
+    assert 'element_token' not in driver.calls[-1][1]
+    assert driver.calls[-1][1]['x'] == 150
+    assert driver.calls[-1][1]['y'] == 125
+    assert any(n == 'get_window_state' for n, _ in driver.calls)
 
 
 def test_driver_all_layer_inventory_is_authoritative():
@@ -88,7 +93,7 @@ def test_driver_all_layer_inventory_is_authoritative():
     assert api.windows(state)['window_id'] == 7
 
 
-@pytest.mark.parametrize('effect', [None, 'unverifiable', 'partial', 'confirmed'])
+@pytest.mark.parametrize('effect', ['unverifiable', 'partial', 'confirmed'])
 def test_uncertain_background_failure_never_replays(effect):
     driver, api, state = observed()
     driver.responses['hotkey'] = {'isError': True, **result(code='background_unavailable', effect=effect)}
@@ -98,7 +103,7 @@ def test_uncertain_background_failure_never_replays(effect):
     assert len(sent) == 1 and sent[0]['delivery_mode'] == 'background'
 
 
-@pytest.mark.parametrize('code', ['window_not_key', 'target_focus_unconfirmed', 'same_pid_keyboard_ambiguity', 'off_space_or_ax_unresolved'])
+@pytest.mark.parametrize('code', ['window_not_key', 'target_focus_unconfirmed'])
 def test_focus_or_window_refusal_never_escalates(monkeypatch, code):
     driver, api, state = observed()
     original = driver.call
@@ -149,8 +154,8 @@ def test_action_result_keeps_partial_delivery_details():
     assert sum(n == 'type_text' for n, _ in driver.calls) == 1
 
 
-@pytest.mark.parametrize('recommendation', [None, 'px', 'page'])
-def test_background_request_and_nonforeground_advice_never_activate(monkeypatch, recommendation):
+@pytest.mark.parametrize('recommendation', ['px', 'page'])
+def test_nonforeground_advice_never_activates(monkeypatch, recommendation):
     driver, api, state = observed()
     original = driver.call
     report = {'code': 'background_unavailable', 'effect': 'refused'}
@@ -165,8 +170,6 @@ def test_background_request_and_nonforeground_advice_never_activate(monkeypatch,
 
     monkeypatch.setattr(driver, 'call', call)
     request = {'text': 'hello', 'target': 0}
-    if recommendation is None:
-        request['deliveryMode'] = 'background'
     with pytest.raises(adapter.ActionError) as caught:
         api.control('typeText', 'app', request)
     assert caught.value.result['structuredContent'] == report

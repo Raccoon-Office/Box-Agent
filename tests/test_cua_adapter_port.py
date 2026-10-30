@@ -19,6 +19,8 @@ PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAD0lEQVR4nGP4jwMwDC0JALoev
 @pytest.fixture(autouse=True)
 def no_native_input_in_fake_driver_tests(monkeypatch):
     monkeypatch.setattr(adapter, 'native_focused_window_id', lambda pid: None)
+    monkeypatch.setattr(adapter, 'deliver_panel_key', lambda *args, **kwargs: None)
+    monkeypatch.setattr(adapter, 'verify_file_panel_front', lambda *args, **kwargs: None)
 
 
 def result(**state):
@@ -537,7 +539,7 @@ def test_only_explicit_background_refusal_retries_once(monkeypatch, effect, code
             return {'isError': True, **result(code=code, effect=effect)}
         return response
     monkeypatch.setattr(driver, 'call', call)
-    retry = effect == 'refused' and code == 'background_unavailable'
+    retry = effect == 'refused' or (effect is None and code == 'background_unavailable')
     if retry:
         api.control('typeText', 'app', {'text': 'hello'})
     else:
@@ -545,7 +547,7 @@ def test_only_explicit_background_refusal_retries_once(monkeypatch, effect, code
             api.control('typeText', 'app', {'text': 'hello'})
     calls = [a for n, a in driver.calls if n == 'type_text']
     assert [a['delivery_mode'] for a in calls] == (['background', 'foreground'] if retry else ['background'])
-    assert sum(n == 'bring_to_front' for n, _ in driver.calls) == 0
+    assert sum(n == 'bring_to_front' for n, _ in driver.calls) == int(retry)
 
 
 def test_unverifiable_success_does_not_replay():
@@ -676,22 +678,22 @@ def test_window_change_blocks_foreground_retry(monkeypatch):
     assert sum(n == 'type_text' for n, _ in driver.calls) == 1
 
 
-def test_drag_defaults_to_background_without_activation():
+def test_drag_retains_pr225_foreground_default():
     driver = FakeDriver()
     api = adapter.Adapter(driver)
     api.handles['app'] = state = {'pid': 42}
     api.observe(state, 'getAXStateAndScreenshot')
     api.control('drag', 'app', {'from': [1, 1], 'to': [2, 2]})
     assert driver.calls[-1][0] == 'drag'
-    assert driver.calls[-1][1]['delivery_mode'] == 'background'
-    assert sum(n == 'bring_to_front' for n, _ in driver.calls) == 0
+    assert driver.calls[-1][1]['delivery_mode'] == 'foreground'
+    assert sum(n == 'bring_to_front' for n, _ in driver.calls) == 1
 
 @pytest.mark.parametrize('method,args,expected_tool,expected', [
     ('pressKey', {'key': 'return'}, 'press_key', {'key': 'return'}),
     ('pressKey', {'key': 'cmd+o'}, 'hotkey', {'keys': ['cmd', 'o']}),
     ('paste', {'text': 'hello'}, 'hotkey', {'keys': ['cmd', 'v']}),
 ])
-def test_keyboard_refusal_keeps_exact_window_on_foreground_route(monkeypatch, method, args, expected_tool, expected):
+def test_keyboard_refusal_verifies_window_before_desktop_foreground_route(monkeypatch, method, args, expected_tool, expected):
     driver = FakeDriver()
     api = adapter.Adapter(driver)
     api.handles['app'] = state = {'pid': 42}
@@ -705,12 +707,14 @@ def test_keyboard_refusal_keeps_exact_window_on_foreground_route(monkeypatch, me
     monkeypatch.setattr(driver, 'call', call)
     api.control(method, 'app', args)
     name, values = driver.calls[-1]
-    assert name == expected_tool and values['pid'] == 42 and values['window_id'] == 7
-    assert values['delivery_mode'] == 'foreground' and 'scope' not in values
+    assert name == expected_tool and values['scope'] == 'desktop'
+    assert values['delivery_mode'] == 'foreground'
     assert all(values[k] == v for k, v in expected.items())
-    assert values['window_id'] == 7
+    focuses = [a for n, a in driver.calls if n == 'bring_to_front']
+    assert focuses == [{'pid': 42, 'window_id': 7}]
     names = [name for name, _ in driver.calls]
-    assert names.count(expected_tool) == 2 and 'bring_to_front' not in names
+    assert names.count(expected_tool) == 2
+    assert names.index('bring_to_front') < len(names) - 1
 
 
 
@@ -799,7 +803,7 @@ def test_explicit_foreground_find_keeps_requested_route(monkeypatch):
     api.handles['app'] = state = {'pid': 42}
     api.observe(state, 'getAXState')
     api.control('pressKey', 'app', {'key': 'cmd+f', 'deliveryMode': 'foreground'})
-    assert not any(n == 'bring_to_front' for n, _ in driver.calls)
+    assert [a for n, a in driver.calls if n == 'bring_to_front'] == [{'pid': 42, 'window_id': 7}]
     assert driver.calls[-1][0] == 'hotkey'
 
 
@@ -846,7 +850,7 @@ def test_background_refusal_keeps_existing_foreground_fallback(monkeypatch, meth
         return original(name, values)
     monkeypatch.setattr(driver, 'call', call)
     api.control(method, 'app', args)
-    assert not any(n == 'bring_to_front' for n, _ in driver.calls)
+    assert [a for n, a in driver.calls if n == 'bring_to_front'] == [{'pid': 42, 'window_id': 7}]
     assert driver.calls[-1][0] == 'hotkey'
 
 
@@ -928,4 +932,4 @@ def test_explicit_input_target_never_corrects_to_another_window(monkeypatch, met
     assert len(inputs) == (1 if route == 'explicit' else 2)
     assert all(p.get('pid') == 42 and p.get('window_id') == 7
                and p.get('element_token') == 's1:1' and 'scope' not in p for p in inputs)
-    assert not any(n == 'bring_to_front' for n, _ in driver.calls)
+    assert [a for n, a in driver.calls if n == 'bring_to_front'] == [{'pid': 42, 'window_id': 7}]

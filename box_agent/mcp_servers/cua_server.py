@@ -107,8 +107,8 @@ TOOLS = [
     ),
     _tool(
         "click",
-        "Click an element ID or screenshot point. Driver resolves semantic element actions; "
-        "coordinate clicks require verified screenshot geometry.",
+        "Click an element ID or screenshot point. Elements without AXPress are clicked at the "
+        "center of their visible frame when screenshot geometry is verified.",
         {
             "app": _APP,
             "target": _TARGET,
@@ -169,8 +169,13 @@ TOOLS = [
 for _definition in TOOLS:
     if _definition.name in {"click", "drag", "scroll", "type_text", "press_key", "paste"}:
         _definition.inputSchema["properties"]["delivery_mode"] = {
-            "type": "string", "enum": ["background", "foreground"], "default": "background",
-            "description": "Prefer background. Use foreground only when observation confirms the background action was ineffective or unavailable; may interrupt user input.",
+            "type": "string", "enum": ["background", "foreground"],
+            "default": "foreground" if _definition.name == "drag" else "background",
+            "description": (
+                "Drag defaults to foreground; request background to try Driver background delivery. "
+                if _definition.name == "drag" else "Prefer background-first delivery. "
+            ) + "Known pre-delivery refusals may use verified foreground fallback. "
+                "Explicit foreground may interrupt user input; observe before retrying an unverified effect.",
         }
 
 _SCREENSHOT_ONLY = "getScreenshot"

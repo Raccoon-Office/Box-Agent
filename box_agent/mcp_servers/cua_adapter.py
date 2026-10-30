@@ -1,8 +1,9 @@
 """Native macOS App adapter for CuaDriver 0.38.
 
-Driver owns window enumeration, semantic actions, input focus and foreground
-activation. The adapter owns app handles, snapshot IDs and attachment checks.
-All input is delivered by Driver; unknown or partial outcomes are never replayed.
+Driver owns window enumeration and input delivery. The adapter retains PR225
+focus verification, attachment checks, pixel routing and foreground fallback.
+A bounded remote file-panel key helper supplements Driver delivery; unknown or
+partial effects are not replayed.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ import sys
 import threading
 import time
 import uuid
+
+from box_agent.mcp_servers.cua_panel_keyboard import PanelFocusSession, deliver_panel_key, verify_file_panel_front
 
 
 PROTOCOL = '2024-11-05'
@@ -363,6 +366,7 @@ class Adapter:
 
     def __init__(self, driver, evidence=None):
         self.driver = driver
+        self.panel_focus = PanelFocusSession()
         # A cua-driver session belongs to this transport, not the REPL service.
         self.session = 'repl-' + uuid.uuid4().hex
         self.handles = {}
@@ -372,6 +376,7 @@ class Adapter:
         self.evidence = evidence
         self.deadline = None
         self.record_counts = {}
+        self.screen_ratio = None
         self.event_sink = None
         self.action_app_inventory = None
 
@@ -421,6 +426,44 @@ class Adapter:
             entry['error'] = str(error)
             self.record({'phase': 'error', **entry})
             raise
+        if failed(result) and name == 'bring_to_front':
+            report = data(result)
+            pid, wid = args.get('pid'), args.get('window_id')
+            if (type(pid) is int and type(wid) is int
+                    and report.get('pid') == pid and report.get('window_id') == wid
+                    and report.get('code') in {'bring_to_front_exact_window_unverified',
+                                               'bring_to_front_window_not_ordinary'}):
+                # Driver 0.38 excludes layer-8 file panels from its postcondition.
+                # Do not activate again or trust a stale success flag: independently
+                # prove the exact live panel. Failure preserves the original error.
+                try:
+                    proof = verify_file_panel_front(pid, wid, timeout=self.driver.timeout)
+                    self.record({'phase': 'file_panel_front_verification',
+                                 'pid': pid, 'window_id': wid, 'result': proof})
+                except Exception as error:
+                    self.record({'phase': 'file_panel_front_verification_failed',
+                                 'pid': pid, 'window_id': wid, 'reason': str(error)})
+                    proof = None
+                if (isinstance(proof, dict) and proof.get('effect') == 'confirmed'
+                        and proof.get('pid') == pid and proof.get('window_id') == wid
+                        and proof.get('code') == 'file_panel_front_verified'):
+                    corrected = {**report, 'status': 'activated', 'activated': True,
+                                 'code': 'bring_to_front_exact_window_verified',
+                                 'process_activated': True,
+                                 'exact_window_effect': {
+                                     **report.get('exact_window_effect', {}),
+                                     'focused': True, 'front_in_process_on_display': True,
+                                     'verified': True},
+                                 'observed': {**report.get('observed', {}),
+                                              'focused_window_id': wid,
+                                              'process_front_window_on_display': wid},
+                                 'verification_source': 'adaptor_file_panel',
+                                 'verification': proof, 'driver_result': report}
+                    result = {'content': [{'type': 'text', 'text':
+                              'Exact file panel verified in front by adaptor after Driver layer-filter refusal.'}],
+                              'structuredContent': corrected}
+                    self.record({'phase': 'file_panel_front_corrected', **entry,
+                                 'result': result})
         if failed(result):
             # Only this exact daemon rejection proves the action never ran.
             # Restore the reported identity: sessionless tools use the MCP id.
@@ -555,6 +598,16 @@ class Adapter:
         return self.selected_window(state, self.interaction_windows(state))
 
     def selected_window(self, state, rows):
+        if any(w.get('is_focused') is True for w in rows):
+            state.pop('focus_hint', None)
+            return self.current_window(rows)
+        hint = state.get('focus_hint')
+        frames = [self.frame(w) for w in sorted(rows, key=lambda w: w['window_id'])]
+        if hint and hint['frames'] == frames:
+            matches = [w for w in rows if w['window_id'] == hint['window_id']]
+            if len(matches) == 1:
+                return matches[0]
+        state.pop('focus_hint', None)
         return self.current_window(rows)
 
     @staticmethod
@@ -577,6 +630,47 @@ class Adapter:
     @staticmethod
     def frame(window):
         return (window['window_id'], window.get('bounds'))
+
+
+    def focus_window(self, state, active_window, allow_correction=False,
+                     keyboard=False, observation_fresh=False, activate=False):
+        try:
+            return self._focus_window(state, active_window, allow_correction,
+                                      keyboard, observation_fresh, activate)
+        except (ValueError, ActionError) as error:
+            self.record({'phase': 'attachment_rejected', 'window_id': active_window['window_id'],
+                         'reason': str(error)})
+            raise
+
+    def current_file_panel(self, state, window):
+        """Fresh, exact Driver AX root proof; never infer a panel from its title."""
+        result = self.call('get_window_state', {
+            'pid': state['pid'], 'window_id': window['window_id'],
+            'include_accessibility_tree': True, 'include_screenshot': False})
+        roots = [e for e in data(result).get('elements', [])
+                 if e.get('depth') == 0 and e.get('role') in {'AXWindow', 'AXSheet'}]
+        if len(roots) != 1:
+            return False
+        # Driver 0.38 omits AXIdentifier from structured elements but includes
+        # it in the AX root's textual representation. Match only that root.
+        for item in result.get('content', []):
+            if item.get('type') != 'text':
+                continue
+            for line in item.get('text', '').splitlines():
+                if re.match(r'^- \[0\] AX(?:Window|Sheet) ', line):
+                    return re.search(r'\[id=(?:open-panel|save-panel|GoToWindow)(?: |\])', line) is not None
+        return False
+
+    def verified_nonordinary_window(self, state, window):
+        """PR225 supplemental-window proof, using Driver 0.38's own inventory."""
+        if type(window.get('layer')) is not int or window['layer'] == 0:
+            return False
+        observed = state.get('window_states', {}).get(window['window_id'], {})
+        roots = [e for e in observed.get('raw_elements', [])
+                 if e.get('depth', 0) == 0 and e.get('role') == 'AXWindow']
+        return (observed.get('pid') == state['pid'] and len(roots) == 1
+                and observed.get('window') is not None
+                and self.frame(observed['window']) == self.frame(window))
 
 
     def verify_frame(self, state, window):
@@ -747,6 +841,10 @@ class Adapter:
                 raise ValueError('AttachmentUnverified: keyboard AX refresh failed; input not sent')
             if len(chain) == 1 and not state['attachment_ax'][window['window_id']]:
                 raise ValueError('AttachmentUnverified: no proven AX parent or accessible target; input not sent')
+            if (state.get('attachment_focus_reported')
+                    and (state.get('attachment_focus_count') != 1
+                         or state.get('attachment_focused') != {window['window_id']})):
+                raise ValueError('AttachmentUnverified: focused-control evidence conflicts with target; input not sent')
             self.record({'phase': 'keyboard_focus_refreshed', 'window_id': window['window_id'],
                          'chain': chain, 'focus_reported': state.get('attachment_focus_reported'),
                          'focus_count': state.get('attachment_focus_count')})
@@ -754,6 +852,103 @@ class Adapter:
             self.record({'phase': 'keyboard_focus_rejected', 'window_id': window['window_id'],
                          'reason': str(error)})
             raise
+
+
+    def _focus_window(self, state, active_window, allow_correction=False,
+                      keyboard=False, observation_fresh=False, activate=False):
+        wid = active_window['window_id']
+        if (wid in state.get('attachments', {}) or wid in state.get('unresolved_windows', set())
+                or wid in state.get('attachment_conflicts', set())):
+            rows = self.interaction_windows(state)
+            chain = self.attachment_chain(state, wid, rows)
+            if len(chain) < 2:
+                raise ValueError('AttachmentUnverified: no proven AX parent; input not sent')
+            if activate and state.get('app_active') is not True:
+                # Attached sheets are not necessarily ordinary layer-0 windows.
+                # Activate the owning app, then prove the exact surface below.
+                try:
+                    self.call('bring_to_front', {'pid': state['pid'], 'window_id': chain[-1]})
+                except ActionError as error:
+                    # A sheet may retain AX focus when its owning document is
+                    # activated. Re-prove foreground ownership and the complete
+                    # attachment chain below; no input has been sent yet.
+                    if data(error.result).get('code') != 'bring_to_front_exact_window_unverified':
+                        raise
+                rows = self.interaction_windows(state)
+                self.inspect_window_relationships(state, active_window, rows)
+                if self.attachment_chain(state, wid, rows) != chain:
+                    raise ValueError('WindowChanged: attachment changed during activation; input not sent')
+                observation_fresh = True
+            if state.get('app_active') is not True:
+                raise ValueError('AttachmentUnverified: owning app is not confirmed foreground')
+            ranked = [row for row in rows if type(row.get('z_index')) is int]
+            if len(ranked) != len(rows):
+                raise ValueError('AttachmentUnverified: frontmost surface is unknown')
+            top = max(row['z_index'] for row in ranked)
+            front = [row['window_id'] for row in ranked if row['z_index'] == top]
+            if len(front) != 1:
+                raise ValueError('AttachmentUnverified: ambiguous frontmost surface')
+            front_chain = self.attachment_chain(state, front[0], rows)
+            if wid not in front_chain:
+                raise ValueError('AttachmentUnverified: another surface blocks the target')
+            focus_evidence = 'not_required'
+            if keyboard:
+                if not observation_fresh:
+                    raise ValueError('AttachmentUnverified: fresh focused-control observation is missing; observe again')
+                if state.get('attachment_focus_reported'):
+                    if (state.get('attachment_focus_count') != 1
+                            or state.get('attachment_focused') != {wid}):
+                        raise ValueError('AttachmentUnverified: focused-control evidence conflicts with target; input not sent')
+                    focus_evidence = 'explicit'
+                else:
+                    # Missing AX focus is unknown, not a negative report. Let macOS
+                    # deliver keys only when this verified surface is itself frontmost.
+                    if front[0] != wid:
+                        raise ValueError('AttachmentUnverified: keyboard target is not the frontmost surface')
+                    focus_evidence = 'unreported_frontmost_surface'
+            self.record({'phase': 'attachment_verified', 'window_id': wid, 'chain': chain,
+                         'front_chain': front_chain, 'keyboard': keyboard, 'focus_evidence': focus_evidence,
+                         'edges': [state['attachments'][child] for child in chain[:-1]]})
+            return active_window
+        if self.verified_nonordinary_window(state, active_window):
+            if state.get('app_active') is not True:
+                raise ValueError('Window focus was not verified; input not sent. Observe again.')
+            return active_window
+        try:
+            focus = self.call('bring_to_front', {'pid': state['pid'], 'window_id': active_window['window_id']})
+        except ActionError as error:
+            focus = error.result
+        if data(focus).get('exact_window_effect', {}).get('verified') is not True:
+            report = data(focus)
+            observed = report.get('observed', {})
+            wid = observed.get('focused_window_id')
+            # One bounded correction before input; never reinterpret screenshot coordinates.
+            if (not allow_correction
+                    or report.get('code') != 'bring_to_front_exact_window_unverified'
+                    or report.get('pid') != state['pid']
+                    or report.get('window_id') != active_window['window_id']
+                    or type(wid) is not int or wid == active_window['window_id']
+                    or observed.get('front_process_matches_target') is not True
+                    or observed.get('frontmost_pid') != state['pid']
+                    or observed.get('workspace_frontmost_pid') != state['pid']
+                    or observed.get('frontmost_ordinary_window_id') != wid):
+                if failed(focus):
+                    raise ActionError(focus)
+                raise ValueError('Window focus was not verified; input not sent. Observe again.')
+            rows = self.interaction_windows(state)
+            matches = [w for w in rows if w['window_id'] == wid]
+            if len(matches) != 1:
+                raise ValueError('WindowChanged: reported focus is not a visible app window; input not sent')
+            corrected = matches[0]
+            focus = self.call('bring_to_front', {'pid': state['pid'], 'window_id': wid})
+            if data(focus).get('exact_window_effect', {}).get('verified') is not True:
+                raise ValueError('Window focus correction was not verified; input not sent')
+            active_window = corrected
+            state.update(window=corrected, focus_hint={
+                'window_id': wid,
+                'frames': [self.frame(w) for w in sorted(rows, key=lambda w: w['window_id'])]})
+            clear_image(state)
+        return active_window
 
 
     def observe(self, state, method, disable_diff=False):
@@ -975,12 +1170,57 @@ class Adapter:
         return {'x': x, 'y': y}
 
 
-    def pixel_click_route(self, state, window, params, *, foreground=False):
-        # Keep the exact window and its screenshot coordinate space on both paths.
-        return ({'pid': state['pid'], 'window_id': window['window_id']},
-                {**params, 'delivery_mode': 'foreground' if foreground else 'background'})
+    def element_point(self, state, element):
+        if state.get('image_frame') != self.frame(state['window']):
+            raise ValueError('UnsupportedCapability: indexed pixel fallback requires a current screenshot')
+        bounds = state.get('image_bounds')
+        frame = rectangle(element.get('frame'))
+        size = state.get('image_size')
+        if (not bounds or not frame or not isinstance(size, tuple) or len(size) != 2
+                or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                       for value in (*size, bounds[2], bounds[3], frame[2], frame[3]))):
+            raise ValueError('UnsupportedCapability: element lacks verified screenshot geometry')
+        left, top = max(frame[0], bounds[0]), max(frame[1], bounds[1])
+        right = min(frame[0] + frame[2], bounds[0] + bounds[2])
+        bottom = min(frame[1] + frame[3], bounds[1] + bounds[3])
+        if right <= left or bottom <= top:
+            raise ValueError('UnsupportedCapability: element is outside the current screenshot')
+        x = ((left + right) / 2 - bounds[0]) * size[0] / bounds[2]
+        y = ((top + bottom) / 2 - bounds[1]) * size[1] / bounds[3]
+        return {'x': round(x, 2), 'y': round(y, 2)}
 
-    def verify_attached_point(self, state, window, params, rows):
+
+    def pixel_click_route(self, state, window, params, *, foreground=False):
+        attached = window['window_id'] in state.get('attachments', {})
+        if not attached and not self.verified_nonordinary_window(state, window):
+            return ({'pid': state['pid'], 'window_id': window['window_id']},
+                    {**params, 'delivery_mode': 'foreground' if foreground else 'background'})
+        report = state.get('image_background_input') or {}
+        exact = report.get('exact_window') or {}
+        bounds = state.get('image_bounds')
+        size = state.get('image_size')
+        if (exact.get('pid') != state['pid'] or exact.get('window_id') != window['window_id']
+                or exact.get('status') not in ({'matched', 'ax_unresolved'} if attached else {'matched'})
+                or not bounds or not isinstance(size, tuple) or len(size) != 2
+                or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                       for value in (*size, bounds[2], bounds[3]))):
+            raise ValueError('UnsupportedCapability: supplemental window lacks exact screenshot geometry')
+        if not foreground:
+            # A supplemental window is still an exact window target. Only the
+            # foreground fallback needs the legacy desktop-coordinate mapping.
+            return ({'pid': state['pid'], 'window_id': window['window_id']},
+                    {**params, 'delivery_mode': 'background'})
+        screen_x = bounds[0] + params['x'] * bounds[2] / size[0]
+        screen_y = bounds[1] + params['y'] * bounds[3] / size[1]
+        # Desktop-scope x/y are native desktop-screenshot pixels, which
+        # the driver divides by the display backing scale. Pre-multiply so the
+        # logical screen point computed above is the point actually clicked.
+        ratio = self.desktop_ratio()
+        return ({'scope': 'desktop'},
+                {**params, 'x': round(screen_x * ratio, 2), 'y': round(screen_y * ratio, 2),
+                 'delivery_mode': 'foreground'})
+
+    def verify_attached_point(self, state, window, params, rows, *, desktop=False):
         """Upstream chain/occlusion checks using Box-Agent screenshot pixels."""
         chain = self.attachment_chain(state, window['window_id'], rows)
         bounds, size = state.get('image_bounds'), state.get('image_size')
@@ -988,8 +1228,12 @@ class Adapter:
                 or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
                        for v in (*size, bounds[2], bounds[3]))):
             raise ValueError('AttachmentUnverified: pixel input requires verified screenshot geometry')
-        x = bounds[0] + params['x'] * bounds[2] / size[0]
-        y = bounds[1] + params['y'] * bounds[3] / size[1]
+        if desktop:
+            ratio = self.desktop_ratio()
+            x, y = params['x'] / ratio, params['y'] / ratio
+        else:
+            x = bounds[0] + params['x'] * bounds[2] / size[0]
+            y = bounds[1] + params['y'] * bounds[3] / size[1]
         containing = [row for row in rows if row['window_id'] in chain
                       and (b := rectangle(row.get('bounds')))
                       and b[0] <= x < b[0] + b[2] and b[1] <= y < b[1] + b[3]]
@@ -1015,6 +1259,9 @@ class Adapter:
             'click', 'drag', 'scroll', 'setValue', 'typeText', 'paste', 'pressKey'} else None
         try:
             return self._control(method, handle, args)
+        except BaseException:
+            self.panel_focus.close()
+            raise
         finally:
             self.action_app_inventory = previous
 
@@ -1056,6 +1303,8 @@ class Adapter:
         if handle not in self.handles:
             raise ValueError('Invalid app reference; acquire it again with cua.getApp')
         state = self.handles[handle]
+        if self.panel_focus.identity is not None and self.panel_focus.identity[0] != state['pid']:
+            self.panel_focus.close()
         if method == 'listWindows':
             rows = self.interaction_windows(state)
             if not rows:
@@ -1084,6 +1333,7 @@ class Adapter:
             raise ValueError('WindowUnavailable: no current window for keyboard or coordinate input; observe again')
         identity = {'pid': state['pid'], 'window_id': target_window['window_id']}
         name, params = '', {}
+        pixel_fallback = False
         if method == 'click':
             opts = args.get('options', {})
             if not isinstance(opts, dict) or opts.keys() - {'mouseButton', 'clickCount', 'action'}:
@@ -1105,6 +1355,15 @@ class Adapter:
                 if ax_actions[action] not in state['elements'][args['target']].get('actions', []):
                     raise ValueError('AX action not advertised by this element; observe again')
                 params['action'] = action
+            if (action == 'press' and 'element_token' in params and count == 1 and button == 'left'
+                    and 'AXPress' not in state['elements'][args['target']].get('actions', [])):
+                element = state['elements'][args['target']]
+                self.observe(state, 'getScreenshot')
+                active_window = state['window']
+                target_window = active_window
+                identity['window_id'] = active_window['window_id']
+                params = self.element_point(state, element)
+                pixel_fallback = True
             if 'element_token' in params and count != 1:
                 if count != 2 or button != 'left':
                     raise ValueError('UnsupportedCapability: indexed clicks support one click or left double click')
@@ -1126,7 +1385,7 @@ class Adapter:
             if 'x' not in start:
                 raise ValueError('drag requires two coordinate pairs')
             name = 'drag'
-            params = dict(from_x=start['x'], from_y=start['y'], to_x=end['x'], to_y=end['y'], delivery_mode='background')
+            params = dict(from_x=start['x'], from_y=start['y'], to_x=end['x'], to_y=end['y'], delivery_mode='foreground')
         elif method == 'scroll':
             direction = args.get('direction')
             direction = {'u': 'up', 'd': 'down', 'l': 'left', 'r': 'right'}.get(direction, direction)
@@ -1173,6 +1432,12 @@ class Adapter:
             if mode not in {'background', 'foreground'} or method not in {'click', 'drag', 'scroll', 'typeText', 'pressKey', 'paste'}:
                 raise ValueError('Invalid delivery mode for this action')
             params['delivery_mode'] = mode
+        panel_confirm_frame = None
+        if method == 'pressKey' and targeted_input and keys == ['return']:
+            element = state['elements'][args['target']]
+            surface = state.get('element_surfaces', {}).get(args['target'], target_window)
+            if element.get('role') == 'AXTextField' and surface['window_id'] == active_window['window_id']:
+                panel_confirm_frame = rectangle(element.get('frame'))
         # A token belongs to the AX snapshot's source window. Driver 0.38
         # derives keyboard delivery's window from that token, even if another
         # window_id is supplied. Never send parent-scoped keys to an attachment.
@@ -1216,7 +1481,8 @@ class Adapter:
                 if method == 'drag' or (method == 'scroll' and 'x' in params):
                     raise ValueError('UnsupportedCapability: attached-surface drag/coordinate scroll needs occlusion proof')
                 if 'x' in params:
-                    self.verify_attached_point(state, active_window, params, rows)
+                    self.verify_attached_point(state, active_window, params, rows,
+                                               desktop=identity.get('scope') == 'desktop')
             if (active_window['window_id'] in state.get('unresolved_windows', set())
                     and active_window['window_id'] not in state.get('attachments', {})
                     and not any(e.get('role') == 'AXToolbar' for e in state.get('elements', {}).values())):
@@ -1231,16 +1497,81 @@ class Adapter:
         check_windows()
         self.invalidate()
         def foreground_delivery(reason):
+            nonlocal active_window, target_window, identity, params
+            self.panel_focus.close()
             self.clear_action_app_inventory()
-            check_windows()
             self.record({'phase': 'foreground_delivery', 'tool': name, 'reason': reason,
-                         **identity})
+                         'pid': state['pid'], 'window_id': target_window['window_id']})
+            # Retain the original adapter's verified focus and desktop-key route.
+            focus_target = (state.get('element_surfaces', {}).get(args.get('target'), active_window)
+                            if indexed and not pixel_fallback else active_window)
+            corrected = self.focus_window(
+                state, focus_target,
+                not targeted_input and ((indexed and not pixel_fallback)
+                                        or method in {'pressKey', 'typeText', 'paste'}),
+                keyboard=method in {'pressKey', 'typeText', 'paste'}, observation_fresh=True, activate=True)
+            if corrected['window_id'] != focus_target['window_id']:
+                active_window = corrected
+                if not indexed:
+                    target_window = corrected
+                    if 'window_id' in identity:
+                        identity['window_id'] = corrected['window_id']
+            if method == 'click' and 'x' in params and state.get('image_frame') != self.frame(active_window):
+                # Activation may invalidate the earlier capture. Obtain geometry
+                # after activation instead of dispatching with a cleared image.
+                self.observe(state, 'getScreenshot')
+                if self.frame(state['window']) != self.frame(active_window):
+                    raise ValueError('WindowChanged: click target changed during activation; observe again')
+                if pixel_fallback:
+                    params = {**self.element_point(state, element), 'button': button, 'count': count,
+                              'delivery_mode': 'background'}
+                    identity = {'pid': state['pid'], 'window_id': active_window['window_id']}
+            check_windows()
+            # Explicit fields keep their snapshot token, PID and source window;
+            # Driver resolves/focuses that field and rejects stale identities.
+            # Desktop keys are reserved for unaddressed keyboard input.
+            if method in {'pressKey', 'paste'} and not targeted_input:
+                chord = ['cmd', 'v'] if method == 'paste' else keys
+                return self.call('hotkey' if len(chord) > 1 else 'press_key', {
+                    'scope': 'desktop', 'delivery_mode': 'foreground',
+                    **({'keys': chord} if len(chord) > 1 else {'key': chord[0]})})
+            if method == 'click' and 'x' in params:
+                click_identity, click_params = self.pixel_click_route(
+                    state, target_window, params, foreground=True)
+                return self.call(name, {**click_identity, **click_params})
             return self.call(name, {**identity, **params, 'delivery_mode': 'foreground'})
 
         def deliver():
             if params.get('delivery_mode') == 'foreground':
                 return foreground_delivery('explicit_request')
-            # Driver establishes and verifies focus.
+            # Remote AppKit panels receive keys in a separate system process.
+            # Driver 0.38 still posts these keys to the logical host PID. Resolve
+            # the live panel receiver before delivery; never retry an unknown post.
+            # Indexed Return is eligible only when the native helper can prove
+            # this exact frame is the currently focused GoToWindow PathTextField.
+            # Other indexed keys retain the Driver's element contract unchanged.
+            if method == 'pressKey' and (not targeted_input or panel_confirm_frame is not None):
+                report = deliver_panel_key(
+                    state['pid'], active_window['window_id'], keys[-1], keys[:-1],
+                    timeout=self.driver.timeout, session=self.panel_focus,
+                    field_frame=panel_confirm_frame)
+                if report is not None:
+                    self.record({'phase': 'panel_keyboard', 'tool': name, **report})
+                    if report['effect'] != 'not_sent':
+                        return {'structuredContent': report}
+                    if (not targeted_input and report.get('code') in {
+                            'panel_focus_unavailable', 'panel_lease_unavailable',
+                            'native_helper_permission_unavailable', 'native_helper_build_failed',
+                            'native_helper_unavailable', 'native_helper_launch_failed'}
+                            and self.current_file_panel(state, active_window)):
+                        check_windows()
+                        self.record({'phase': 'foreground_fallback', 'tool': name,
+                                     'reason': report['code'], 'source': 'panel_helper',
+                                     'pid': state['pid'], 'window_id': active_window['window_id']})
+                        return foreground_delivery(report['code'])
+            if method in {'pressKey', 'typeText', 'paste'}:
+                self.panel_focus.close()
+            # Prefer Driver background delivery before the verified foreground route.
             try:
                 return self.call(name, {**identity, **params})
             except ActionError as error:
@@ -1259,11 +1590,13 @@ class Adapter:
                 # Only a definite pre-delivery refusal can enter another route.
                 # Stale targets, transport failures and partial/unknown effects stop.
                 if (params.get('delivery_mode') != 'background'
-                        or args.get('deliveryMode') == 'background'
-                        or report.get('code') != 'background_unavailable'
+                        or not (report.get('code') == 'background_unavailable'
+                                or (report.get('code') in {'same_pid_keyboard_ambiguity',
+                                                          'off_space_or_ax_unresolved'}
+                                    and report.get('effect') == 'refused'))
                         or report.get('escalation', {}).get('recommended') not in {None, 'foreground'}
                         or target_window['window_id'] != active_window['window_id']
-                        or report.get('effect') not in {'not_sent', 'refused'}):
+                        or report.get('effect') not in {None, 'not_sent', 'refused'}):
                     raise
                 check_windows()
                 self.record({'phase': 'foreground_fallback', 'tool': name,
@@ -1310,7 +1643,17 @@ class Adapter:
         return {'max_image_dimension': MAX_IMAGE_DIMENSION} if 'max_image_dimension' in props else {}
 
 
+    def desktop_ratio(self):
+        if self.screen_ratio is None:
+            screen = data(self.call('get_screen_size', {})) if 'get_screen_size' in self.driver.tools else {}
+            scale = screen.get('scale_factor')
+            self.screen_ratio = (float(scale) if type(scale) in (int, float)
+                                 and math.isfinite(scale) and scale >= 1 else 1.0)
+        return self.screen_ratio
+
+
     def close(self):
+        self.panel_focus.close()
         self.deadline = None
         self.driver.deadline = None
         if self.started and 'end_session' in self.driver.tools:
