@@ -252,9 +252,9 @@
     },
     "skills/sn-ppt-dazzle/scripts/artifact_metadata.py": {
       "input_path": "box_agent/artifact_metadata.py",
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
       "source_path": "skills/sn-ppt-dazzle/scripts/artifact_metadata.py",
-      "source_sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1"
+      "source_sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4"
     },
     "skills/sn-ppt-dazzle/scripts/render_deck.py": {
       "sha256": "a49fe283b43839979eca02d672de815c6efb62bed69da006125dca1c0c91c767",
@@ -293,9 +293,9 @@
     },
     "skills/sn-ppt-entry/scripts/artifact_metadata.py": {
       "input_path": "box_agent/artifact_metadata.py",
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
       "source_path": "skills/sn-ppt-entry/scripts/artifact_metadata.py",
-      "source_sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1"
+      "source_sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4"
     },
     "skills/sn-ppt-entry/scripts/parse_user_docs.py": {
       "sha256": "4be3eb83b91731206665bbb7ff9cb69834e01cbc905a4a70ef36642b9fdb7672",
@@ -406,9 +406,9 @@
     },
     "skills/sn-ppt-standard/scripts/artifact_metadata.py": {
       "input_path": "box_agent/artifact_metadata.py",
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
       "source_path": "skills/sn-ppt-standard/scripts/artifact_metadata.py",
-      "source_sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1"
+      "source_sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4"
     },
     "skills/sn-ppt-standard/scripts/deck.py": {
       "sha256": "f32494b4c5638419975e1269cc3de4ea164eeeecf4d747f8999d4aab5e7cf100",

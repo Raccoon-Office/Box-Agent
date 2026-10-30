@@ -15,7 +15,7 @@ from ...artifacts import (
     make_artifact as _make_artifact,
 )
 from ...events import ArtifactEvent
-from ...artifact_metadata import is_metadata_record
+from ...artifact_metadata import is_metadata_record, iter_metadata_records
 from ...artifact_publication import (
     STAGING_DIRECTORY, intermediate_fingerprints, is_intermediate, is_publication_sidecar,
     is_publication_metadata,
@@ -156,6 +156,8 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
     An incomplete walk returns None, distinct from a valid empty snapshot, so
     callers can skip the entire pre/post diff. Structured and text-referenced
     tool outputs remain the fallback artifact-discovery path.
+    Publication scans propagate read errors so callers cannot mistake unreadable
+    provenance for an empty store; file/time limits still return None.
     """
     try:
         out = _artifact_scan_root(workspace_dir)
@@ -190,11 +192,19 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
             if perf_counter() >= deadline:
                 _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
                 return None
-            dirnames[:] = sorted(
-                name for name in dirnames if (name not in _IGNORE_DIRS
-                    or include_publication_metadata and name == ".box-agent")
-            )
             current = Path(current_root)
+            if include_publication_metadata and ".box-agent" in dirnames:
+                # Read the validated store explicitly: os.walk must not follow
+                # links, but the configured global profile may be relocated.
+                for entry in iter_metadata_records(current):
+                    if perf_counter() >= deadline:
+                        _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
+                        return None
+                    files.add(entry)
+                    if len(files) > max_files:
+                        _warn_scan_limit(out, f"{max_files} file limit")
+                        return None
+            dirnames[:] = sorted(name for name in dirnames if name not in _IGNORE_DIRS)
             if current.name == ".box-agent":
                 dirnames[:] = [name for name in dirnames if name == "artifact-metadata"]
                 continue
@@ -217,19 +227,21 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
                 if len(files) > max_files:
                     _warn_scan_limit(out, f"{max_files} file limit")
                     return None
-    except OSError:
+    except (OSError, RuntimeError):
+        if include_publication_metadata:
+            raise
         return None
     return files
 
 
 def _publication_fingerprints(workspace_dir: str) -> dict[int, set[str]] | None:
     """Return None when publication provenance cannot be read safely."""
-    files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
     try:
+        files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
         return intermediate_fingerprints(
             (path for path in (files or ()) if is_publication_sidecar(path) or is_metadata_record(path)), workspace_dir
         )
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         # Unknown intermediate provenance must not publish copied work files,
         # nor prevent the successful tool result from reaching the caller.
         _log.warning("Artifact discovery skipped for %s: cannot read publication metadata: %s", workspace_dir, exc)
