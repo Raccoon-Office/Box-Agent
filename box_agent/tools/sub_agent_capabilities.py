@@ -115,12 +115,19 @@ def _is_managed_browser_tool(name: str) -> bool:
 
 
 def _tool_capability_metadata(name: str, tool: Tool) -> ToolCapabilityMetadata | None:
+    from ..desktop_memory.tools import DesktopMemoryTool
     from .memory_tool import (
         ExternalMemoryReadTool, ExternalMemorySearchTool,
         MemsenseMemoryMutationTool, is_memory_tool,
     )
 
     # Local and remote memory share names, but have different permission boundaries.
+    if isinstance(tool, DesktopMemoryTool):
+        if tool.operation in {"search", "managed_read", "experience_search"}:
+            return ToolCapabilityMetadata(read=True, network=True)
+        # Core reads establish candidates for parent-owned model qualification.
+        return ToolCapabilityMetadata(read=tool.operation == "read", write=tool.operation != "read",
+                                      network=True, external_side_effect=True)
     if isinstance(tool, (ExternalMemoryReadTool, ExternalMemorySearchTool)):
         return ToolCapabilityMetadata(read=True, network=True)
     if isinstance(tool, MemsenseMemoryMutationTool):

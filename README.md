@@ -337,6 +337,8 @@ For endpoints that reject `reasoning_effort: "none"`, see
 
 See [isolated runtime profiles](docs/isolated-runtime-profile.md) and the no-background-startup [example configuration](box_agent/config/isolated-profile-example.yaml). This is path/configuration isolation, not an OS sandbox or permission to call a model.
 
+The optional desktop memory backend hands off bounded, redacted evidence from the current canonical Session Log through a native control capability. The host durably records QA and evidence together; missing evidence does not prevent ordinary QA, and unknown results retain the original input for recovery. Once QA is confirmed, a background producer can generate an Experience proposal from host-frozen evidence and advance host-validated Entity/Fact/Observation persistence. The default local backend does not require a desktop service. See the [desktop memory contract and verification boundary](docs/DESKTOP_MEMORY.md), [evidence collection](box_agent/desktop_memory/evidence.py), and [producer regression tests](tests/test_desktop_memory_experience.py). Packaged hosts require a runtime rebuild, installation and restart before using these source changes.
+
 ## CLI Usage
 
 ```bash
@@ -375,6 +377,8 @@ state has not been checked. The agent can inspect Git through tools when needed
 and must still protect existing user changes.
 
 ### Agent Trace diagnostics
+
+Desktop memory sessions omit private payloads from operational diagnostics, including ACP tool arguments/results, raw errors, model debug records, and title/summary utility requests. This applies at every log level and overrides full-payload debug flags. Tool names, call IDs, outcome events and timing metadata remain available. Model inputs, user-visible results and the protected Session Log keep their existing behavior. Historical logs are not rewritten by this protection.
 
 Run `box-agent trace-viewer` to open the packaged, offline developer viewer. Open `~/.box-agent/log/sessions/` for a newest-first overview of every trace, then select one run to inspect per-turn metrics, LLM/tool waterfalls, raw events, and the complete system → user → assistant/tool → final-response chain. You can still open one `.jsonl` file directly.
 

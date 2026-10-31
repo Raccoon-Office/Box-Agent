@@ -264,6 +264,20 @@ class SessionLog:
                    and event["data"].get("turn_id") == turn_id
                    for event in self._events)
 
+    @property
+    def event_count(self) -> int:
+        """Return a stable exclusive cursor without copying session history."""
+        return len(self._events)
+
+    def event_page(self, start: int, *, limit: int = 64) -> tuple[dict[str, Any], ...]:
+        """Read a detached bounded page; callers own their end cursor and flush."""
+        if (type(start) is not int or not 0 <= start <= len(self._events)
+                or type(limit) is not int or not 1 <= limit <= 256):
+            raise ValueError("invalid session event page")
+        if self._closed or self._failed:
+            raise SessionLogDurabilityError("session log unavailable")
+        return tuple(deepcopy(self._events[start:start + limit]))
+
     def next_turn_number(self) -> int:
         """Inspect recorded starts without copying history or reserving a turn."""
 

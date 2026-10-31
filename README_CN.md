@@ -269,6 +269,8 @@ box-agent doctor                    # 检查环境与 API 连通性
 box-agent doctor --json             # 机器可读健康检查
 ```
 
+可选桌面记忆后端从当前轮次的真实 Session Log 固定有界、脱敏的证据，通过原生控制凭据交接；普通工具不能上传证据。宿主将 QA 意图与证据一起持久化，证据缺失不阻止普通 QA，结果未知保留原输入恢复。确认 QA 接收后，后台生产者可基于宿主固定的证据生成新经验提案，并通过宿主校验推进 Entity、Fact、Observation 保存。默认 local 后端不依赖桌面服务。参见 [桌面记忆契约与验证边界](docs/DESKTOP_MEMORY.md)、[证据采集](box_agent/desktop_memory/evidence.py) 与 [生产者回归测试](tests/test_desktop_memory_experience.py)。打包宿主须重新构建、安装并重启运行时，不能将源码测试通过视为外部宿主或后端已完成端到端验收。
+
 ## CLI 用法
 
 ```bash

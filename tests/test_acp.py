@@ -9017,3 +9017,66 @@ def test_display_output_identity_changes_for_continuation_snapshot(streamed):
     assert first["outputId"] != second_snapshot["outputId"]
     if streamed:
         assert second == second_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool_success', [True, False])
+async def test_desktop_memory_acp_keeps_tool_bodies_in_protocol_and_model_but_out_of_stderr(
+    tmp_path, monkeypatch, capsys, tool_success,
+):
+    from box_agent.acp.debug_logger import ACPDebugLogger
+    from box_agent.payload_privacy import private_payloads
+
+    canary = 'MV2-ACP-PRIVATE-short-memory-body'
+    monkeypatch.setenv('BOX_AGENT_LOG_LEVEL', 'debug')
+    monkeypatch.setenv('BOX_AGENT_LOG_FORMAT', 'json')
+    monkeypatch.setenv('BOX_AGENT_LOG_FULL_PAYLOAD', '1')
+    monkeypatch.setenv('BOX_AGENT_LOG_FILE', str(tmp_path / 'runtime.log'))
+    logger = ACPDebugLogger()
+    monkeypatch.setattr(acp_module, 'log', logger)
+
+    class MemoryReadTool(Tool):
+        name = 'privacy_echo'
+        description = 'Synthetic memory read'
+        parameters = {'type': 'object', 'properties': {'content': {'type': 'string'}}}
+
+        async def execute(self, **arguments):
+            assert arguments['content'] == canary
+            assert private_payloads()
+            return ToolResult(success=tool_success, content=canary if tool_success else '',
+                              error=None if tool_success else canary)
+
+    class MemoryLLM(DoneLLM):
+        calls = 0
+        saw_result = False
+
+        async def generate_stream(self, messages, tools=None, **_):
+            assert private_payloads()
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type='finish', finish_reason='tool', tool_calls=[ToolCall(
+                    id='memory-privacy-1', type='function', function=FunctionCall(
+                        name='privacy_echo', arguments={'content': canary},
+                    ),
+                )])
+            else:
+                self.saw_result = any(canary in str(message.content) for message in messages if message.role == 'tool')
+                yield StreamEvent(type='text', delta=canary)
+                yield StreamEvent(type='finish', finish_reason='stop')
+
+    config = Config(llm=LLMConfig(api_key='test-key'), agent=AgentConfig(
+        max_steps=3, workspace_dir=str(tmp_path), memory_backend_type='desktop', enable_memory=False,
+    ), tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False, allow_full_access=True))
+    conn, llm = DummyConn(), MemoryLLM()
+    agent = BoxACPAgent(conn, config, llm, [MemoryReadTool()], 'system')
+    try:
+        session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        capsys.readouterr()
+        result = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{'text': 'test memory privacy'}]))
+        assert result.stopReason == 'end_turn'
+        assert llm.saw_result
+        assert any(canary in str(update.model_dump()) for update in conn.updates)
+        assert canary not in capsys.readouterr().err + (tmp_path / 'runtime.log').read_text()
+        assert not private_payloads()
+    finally:
+        logger.close()
