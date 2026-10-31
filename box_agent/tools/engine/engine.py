@@ -484,6 +484,11 @@ class DefaultToolEngine:
                     call.call_id, call.name, outcome.visible_content, result.raw_output,
                     call.before_files, after, context.workspace_dir,
                 )
+                if (result.raw_output or {}).get("type") == "intermediate_asset":
+                    _, protected = _detect_regex_artifacts(
+                        call.call_id, call.name, "", result.raw_output, context.workspace_dir,
+                    )
+                    emitted_paths.update(protected)
             # Only use the tool-owned evidence when hooks did not replace its
             # result text. Never infer an evidence path from model-visible text.
             if call.artifact_evidence_files and (not call.parallel or call.user_visible):
@@ -627,18 +632,20 @@ class DefaultToolEngine:
                         emitted.add(artifact.abs_path)
                         self._retain_displayed_file(artifact)
                         yield artifact
-                    for artifact in _detect_file_artifacts(
-                        call_id, tool_name, evidence_files, context.workspace_dir,
-                        before, after, emitted,
-                    ):
+                    extra = _detect_file_artifacts(
+                        call_id, tool_name, evidence_files,
+                        context.workspace_dir, before, after, emitted,
+                    )
+                    for artifact in extra:
                         emitted.add(artifact.abs_path)
                         self._retain_displayed_file(artifact)
                         yield artifact
                     if evidence_text:
-                        for artifact in _detect_text_artifacts(
-                            call_id, tool_name, evidence_text, context.workspace_dir,
-                            before, after, emitted,
-                        ):
+                        extra = _detect_text_artifacts(
+                            call_id, tool_name, evidence_text,
+                            context.workspace_dir, before, after, emitted,
+                        )
+                        for artifact in extra:
                             emitted.add(artifact.abs_path)
                             self._retain_displayed_file(artifact)
                             yield artifact

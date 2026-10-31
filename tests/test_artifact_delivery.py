@@ -52,6 +52,48 @@ def test_complete_output_discovers_split_path_without_including_other_changes(tm
     assert [event.filename for event in events] == ["报告.pdf"]
 
 
+def test_unrelated_output_windows_skip_repeated_artifact_scans(tmp_path, monkeypatch):
+    import box_agent.tools.engine.artifact_results as artifact_results
+
+    before = _snapshot_workspace_signatures(str(tmp_path))
+    for index in range(100):
+        (tmp_path / f"report_{index}.pdf").write_text("report")
+    after = _snapshot_workspace_signatures(str(tmp_path))
+    calls = []
+
+    def observe(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("unrelated output must not trigger artifact scans")
+
+    monkeypatch.setattr(artifact_results, "_detect_changed_files", observe)
+    monkeypatch.setattr(artifact_results, "_detect_regex_artifacts", observe)
+    evidence = tmp_path / ".output.txt"
+    evidence.write_text("ordinary diagnostic output\n" * 40000)
+    assert _detect_file_artifacts("call", "execute_code", (evidence,), str(tmp_path), before, after) == []
+    assert calls == []
+
+
+def test_repeated_missing_references_do_not_repeat_file_scans(tmp_path, monkeypatch):
+    import box_agent.tools.engine.artifact_results as artifact_results
+
+    before = _snapshot_workspace_signatures(str(tmp_path))
+    for index in range(100):
+        (tmp_path / f"report_{index}.pdf").write_text("report")
+    after = _snapshot_workspace_signatures(str(tmp_path))
+    calls = []
+    original_regex = artifact_results._detect_regex_artifacts
+
+    def observe(*args, **kwargs):
+        calls.append(1)
+        return original_regex(*args, **kwargs)
+
+    monkeypatch.setattr(artifact_results, "_detect_regex_artifacts", observe)
+    evidence = tmp_path / ".output.txt"
+    evidence.write_text("[missing.pdf]\n" * 75000)
+    assert _detect_file_artifacts("call", "execute_code", (evidence,), str(tmp_path), before, after) == []
+    assert len(calls) == 1
+
+
 def test_unreadable_complete_output_does_not_break_artifact_detection(tmp_path):
     assert _detect_file_artifacts("call", "execute_code", (tmp_path / "missing",), str(tmp_path)) == []
 

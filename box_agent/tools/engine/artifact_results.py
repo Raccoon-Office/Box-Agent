@@ -8,6 +8,7 @@ import os
 import re
 import stat
 from collections.abc import Iterator
+from collections import OrderedDict
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -474,7 +475,29 @@ def _detect_artifacts_in_chunks(
 ) -> list[ArtifactEvent]:
     emitted = set(already_emitted or ())
     artifacts: list[ArtifactEvent] = []
+    # Most output windows contain no file references. Resolve changed paths
+    # once and avoid repeated workspace scans for those windows.
+    candidates_by_file: dict[Path, set[str]] = {}
+    if pre_files is not None and post_files is not None:
+        root = Path(workspace_dir).resolve()
+        for path, signature in post_files.items():
+            if pre_files.get(path) == signature:
+                continue
+            try:
+                resolved = path.resolve()
+                relative = resolved.relative_to(root).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            candidates = {str(resolved), relative}
+            if os.name == "nt":
+                candidates.add(relative.replace("/", "\\"))
+                candidates.add(resolved.as_posix())
+                candidates.update(json.dumps(value, ensure_ascii=False)[1:-1] for value in tuple(candidates))
+            candidates_by_file[path] = candidates
+    candidate_paths = {candidate for candidates in candidates_by_file.values() for candidate in candidates}
+    candidate_pattern = re.compile("|".join(re.escape(path) for path in sorted(candidate_paths))) if candidate_paths else None
     overlap = 8192
+    recent_references: OrderedDict[str, None] = OrderedDict()
     previous = ""
     current = next(chunks, "")
     while current:
@@ -483,9 +506,30 @@ def _detect_artifacts_in_chunks(
         window = ("x" if previous else "") + previous + current
         if following:
             window += following[:overlap] + "x"
-        found = _detect_tool_artifacts(
-            tool_call_id, tool_name, window, None, pre_files, post_files, workspace_dir,
-        )
+        references = []
+        for match in _ARTIFACT_REF_RE.finditer(window):
+            reference = match.group(1)
+            if reference in recent_references:
+                recent_references.move_to_end(reference)
+                continue
+            recent_references[reference] = None
+            if len(recent_references) > 4096:
+                recent_references.popitem(last=False)
+            references.append(f"[{reference}]")
+        found = []
+        if references:
+            found, _ = _detect_regex_artifacts(
+                tool_call_id, tool_name, "\n".join(references), None, workspace_dir,
+            )
+        if candidate_pattern and candidate_pattern.search(window):
+            matching = {
+                path: post_files[path] for path, candidates in candidates_by_file.items()
+                if any(candidate in window for candidate in candidates)
+            }
+            found.extend(_detect_changed_files(
+                tool_call_id, pre_files, matching,
+                emitted | {artifact.abs_path for artifact in found}, workspace_dir, content=window,
+            ))
         for artifact in found:
             if artifact.abs_path not in emitted:
                 emitted.add(artifact.abs_path)

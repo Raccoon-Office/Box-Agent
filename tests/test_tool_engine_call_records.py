@@ -76,6 +76,41 @@ async def test_oversized_output_preserves_artifacts_without_bypassing_hooks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("delivery", ["captured", "shared"])
+async def test_oversized_output_does_not_publish_structured_intermediate(tmp_path, parallel, delivery):
+    class Intermediate(Tool):
+        name = "large_intermediate_output"
+        description = "Create an intermediate file."
+        parallel_safe = parallel
+        parameters = {"type": "object", "properties": {"name": {"type": "string"}}}
+
+        async def execute(self, name):
+            (tmp_path / name).write_text("private")
+            text = "x" * 300000 + f"\n[{name}]\n" + "y" * 300000
+            if delivery == "captured":
+                capture = OutputCapture(tmp_path / ".box-agent" / "tool-results")
+                capture.append(text)
+                reply = capture.finish(with_reference=True)
+                result = ToolResult(success=True, content=str(reply),
+                                    raw_output={"type": "intermediate_asset", "path": name})
+                result._artifact_evidence_files = (reply.complete_path,)
+                return result
+            return ToolResult(success=True, content=text,
+                              raw_output={"type": "intermediate_asset", "path": name})
+
+    tool = Intermediate()
+    names = ["one.png", "two.png"] if parallel else ["one.png"]
+    events = [event async for event in run_agent_loop(
+        llm=CallsThenDone(tool.name, [{"name": name} for name in names]),
+        tools={tool.name: tool}, messages=[Message(role="user", content="Work on images")],
+        workspace_dir=str(tmp_path), max_steps=2,
+    )]
+    assert len([event for event in events if isinstance(event, ToolCallResult)]) == len(names)
+    assert not [event for event in events if isinstance(event, ArtifactEvent)]
+
+
+@pytest.mark.asyncio
 async def test_parallel_search_results_use_their_own_site_filters():
     class Search(Tool):
         name = "web_search"
