@@ -49,6 +49,14 @@ Most agent frameworks are either too simple (no sandbox, no tools) or too comple
 
 ## Key Features
 
+### Local Video Reading
+
+`read_video` samples timestamped frames through the existing image-understanding
+path, transcribes speech with the desktop Volc ASR service, and supports time-range
+reads and continuation. It requires ffmpeg/ffprobe and the corresponding vision
+and speech-service configuration. See [video reading](docs/VIDEO_READING.md) for
+runtime setup, sampling limits, partial results and streaming-ASR latency.
+
 ### Local Email Analysis
 
 `read_email` decodes local `.eml` headers, plain/HTML bodies and attachment

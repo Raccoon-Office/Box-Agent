@@ -703,10 +703,10 @@ class Agent:
         self._thinking_enabled = enabled
         # ACP can inspect attachments before run_events starts. Keep the proxy
         # aligned when the session is created or its thinking choice changes.
-        image_tool = self.tools.get("inspect_images")
-        set_thinking = getattr(image_tool, "set_thinking_enabled", None)
-        if callable(set_thinking):
-            set_thinking(enabled)
+        for tool_name in ("inspect_images", "read_video"):
+            set_thinking = getattr(self.tools.get(tool_name), "set_thinking_enabled", None)
+            if callable(set_thinking):
+                set_thinking(enabled)
 
     def _persist_goal(self) -> None:
         if self.session_log is None:

@@ -63,7 +63,7 @@ _LIST_SKILLS_SCHEMA = {
 _ALWAYS_WORKSPACE = {
     "request_user_input", "request_user_decision", "report_execution_result",
     "obsidian_create_note", "obsidian_update_note", "obsidian_daily_note",
-    "publish_artifact",
+    "publish_artifact", "read_video",
 }
 _FILES = {
     "read_file", "query_jsonl", "search_files", "write_file", "append_file", "edit_file",
@@ -160,6 +160,9 @@ _CONNECTOR_SEARCH_SCHEMA = json.loads(
 )
 _EMAIL_SCHEMAS = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/email_schemas.json").read_text(encoding="utf-8")
+)
+_VIDEO_SCHEMA = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/video_schema.json").read_text(encoding="utf-8")
 )
 _MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
     "bash": (
@@ -387,6 +390,7 @@ def _assert_schema_contract(tools, profile):
     expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
     expected["ensure_cua_ready"] = deepcopy(_ENSURE_CUA_READY_SCHEMA)
     expected.update(deepcopy(_EMAIL_SCHEMAS))
+    expected["read_video"] = deepcopy(_VIDEO_SCHEMA)
     expected["get_skill"]["schema"]["description"] = (
         "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
         "when paged. Read required_skills before their steps; related_skills are optional. "

@@ -78,6 +78,7 @@ from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
 from box_agent.tools.image_inspection_tool import ImageInspectionTool
+from box_agent.tools.video_tool import ReadVideoTool
 
 from box_agent.user_paths import configured_box_agent_home, state_path
 
@@ -906,6 +907,15 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             )
         )
         _out(f"{Colors.GREEN}✅ Loaded image inspection tool (inspect_images){Colors.RESET}")
+
+    tools.append(ReadVideoTool(
+        llm=llm, workspace_dir=str(workspace_dir),
+        allow_full_access=allow_full_access, permission_engine=permission_engine,
+        relative_root_dir=str(relative_root),
+        proxy_llm_resolver=lambda: _image_capable_llm(llm),
+        runtime_env=runtime_env, scratch_dir=skill_scratch_dir.path,
+    ))
+    _out(f"{Colors.GREEN}✅ Loaded video reading tool (read_video){Colors.RESET}")
 
     # Image generation tool — standard Box-Agent capability shared by CLI and ACP.
     # Only register when an endpoint is configured (via config or env): an

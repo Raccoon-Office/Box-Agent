@@ -79,6 +79,7 @@ BUILTIN_TOOL_CAPABILITIES: dict[str, ToolCapabilityMetadata] = {
     "web_search": ToolCapabilityMetadata(read=True, network=True),
     "web_extract": ToolCapabilityMetadata(read=True, network=True),
     "inspect_images": ToolCapabilityMetadata(read=True, network=True),
+    "read_video": ToolCapabilityMetadata(read=True, network=True, process=True),
     "generate_image": ToolCapabilityMetadata(write=True, network=True),
     "get_skill": ToolCapabilityMetadata(read=True),
     "list_skills": ToolCapabilityMetadata(read=True),
