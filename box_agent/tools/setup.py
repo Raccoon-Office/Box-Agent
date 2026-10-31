@@ -913,7 +913,8 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         allow_full_access=allow_full_access, permission_engine=permission_engine,
         relative_root_dir=str(relative_root),
         proxy_llm_resolver=lambda: _image_capable_llm(llm),
-        runtime_env=runtime_env, scratch_dir=skill_scratch_dir.path,
+        # Skill runtime values are overrides, not a complete host environment.
+        runtime_env={**os.environ, **runtime_env}, scratch_dir=skill_scratch_dir.path,
     ))
     _out(f"{Colors.GREEN}✅ Loaded video reading tool (read_video){Colors.RESET}")
 

@@ -339,6 +339,42 @@ def test_shared_workspace_setup_registers_video_without_bash_or_sandbox(tmp_path
     assert isinstance(next(t for t in tools if t.name == "read_video"), ReadVideoTool)
 
 
+async def test_shared_workspace_video_inherits_desktop_asr_and_media_paths(tmp_path, media, monkeypatch):
+    for name in tuple(os.environ):
+        if name.startswith(("VOLC_ASR_", "DOUBAO_ASR_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("VOLC_ASR_APPID", "desktop-test-app")
+    monkeypatch.setenv("VOLC_ASR_AT", "desktop-test-token")
+    monkeypatch.setenv("VOLC_ASR_RESOURCE_ID", "desktop-test-resource")
+    monkeypatch.setenv("HYPERFRAMES_FFMPEG_PATH", "/desktop/ffmpeg")
+    monkeypatch.setenv("HYPERFRAMES_FFPROBE_PATH", "/desktop/ffprobe")
+    received = []
+
+    def executable(name, env):
+        assert env[f"HYPERFRAMES_{name.upper()}_PATH"] == f"/desktop/{name}"
+        return name
+
+    async def transcribe(path, *, config, **kwargs):
+        received.append(config)
+        return {"status": "transcribed", "text": "desktop speech", "segments": []}
+
+    monkeypatch.setattr(module, "_executable", executable)
+    monkeypatch.setattr(module, "transcribe_pcm", transcribe)
+    config = SimpleNamespace(tools=SimpleNamespace(enable_bash=False, enable_file_tools=False,
+                                                   enable_todo=False, enable_sub_agent=False))
+    tools = []
+    add_workspace_tools(tools, config, tmp_path, llm=Vision(), output=lambda *_: None)
+    video = next(tool for tool in tools if tool.name == "read_video")
+    result = await video.invoke({"path": "clip.mp4", "instruction": "Describe"})
+    assert result.success, result.error
+    assert result.raw_output["audio"]["status"] == "transcribed"
+    assert result.raw_output["visual"]["status"] == "native_frames"
+    assert received[0].app_id == "desktop-test-app"
+    assert received[0].access_key == "desktop-test-token"
+    assert received[0].resource_id == "desktop-test-resource"
+    assert "desktop-test-token" not in result.model_dump_json()
+
+
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg/ffprobe unavailable")
 async def test_real_video_frames_and_clipped_pcm_reach_existing_vision_chain(tmp_path, monkeypatch):
     source = tmp_path / "real video.mp4"
