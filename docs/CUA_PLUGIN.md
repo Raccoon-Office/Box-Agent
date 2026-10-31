@@ -5,7 +5,9 @@
 
 CUA 是可选插件。Box-Agent 核心只读取并保留通用的 `plugins` 命名空间，具体字段由 CUA 插件自己校验；核心 `tools` 配置不包含 `cua` 字段。
 
-当前托管安装器固定使用 CuaDriver **0.28.2**。CLI 通过 `box-agent install-cua` 安装驱动，由 `ensure_cua_ready` 按需启动自持 daemon 并连接 MCP；桌面客户端负责安装、权限和 embedded daemon，Box-Agent 以 external 模式连接宿主提供的私有 endpoint。驱动不随 Python 包携带，两端共享 `~/.box-agent/resources/cua-driver/` 下的已验证资源，但不共享权限和 daemon 所有权。
+当前托管安装器固定使用 CuaDriver **0.38.0**。CLI 通过 `box-agent install-cua` 安装驱动，由 `ensure_cua_ready` 按需启动自持 daemon 并连接 MCP；桌面客户端负责安装、权限和 embedded daemon，Box-Agent 以 external 模式连接宿主提供的私有 endpoint。驱动不随 Python 包携带，两端共享 `~/.box-agent/resources/cua-driver/` 下的已验证资源，但不共享权限和 daemon 所有权。
+
+本仓库的版本固定只控制 CLI 安装器。桌面客户端使用其自身随包的 `runtimeResources.manifest.json` 选择下载版本；更新 Box-Agent 不会更新客户端清单。客户端必须同步升级 Driver 并重新连接，才能使用本次 0.38 adaptor；共享资源目录不代表版本配置会自动同步。
 
 历史 0.32.0 独立 App / 手工 MCP 配置及验收记录不代表当前托管模式。不要直接复用旧的 `args: ["mcp"]` 配置；迁移方法见下文。
 
