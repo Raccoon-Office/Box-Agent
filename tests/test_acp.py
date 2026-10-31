@@ -631,6 +631,11 @@ async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tm
         async def ext_method(self, method, payload):
             assert method == "session/runtime_environment"
             assert payload["sessionId"] == capable.sessionId
+            if payload["capability"] == "chromium":
+                return {"status": "ready", "env": {
+                    "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": str(tmp_path / "chromium"),
+                    "BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": str(tmp_path / "chromium"),
+                }}
             if payload["capability"] == "git":
                 return {"status": "ready", "env": {"BOX_AGENT_BUNDLED_BASH": str(installed_bash)}}
             return {"status": "missing", "logTail": "not installed"}
@@ -661,6 +666,80 @@ async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tm
     assert shell_tool.shell_name == "bash"
     assert json.loads(installed.content)["shell"]["name"] == "bash"
     assert "syntax" in json.loads(installed.content)["shell"]["instruction"]
+    chromium = await tools["local_environment"].execute("chromium", "ensure")
+    assert chromium.success
+    for key in ("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"):
+        assert shell_tool._subprocess_env[key] == str(tmp_path / "chromium")
+        assert tools["execute_code"].runtime_env[key] == str(tmp_path / "chromium")
+
+
+@pytest.mark.asyncio
+async def test_acp_chromium_install_continues_execution_in_the_same_prompt(tmp_path):
+    started, installed = asyncio.Event(), asyncio.Event()
+    executed = []
+    expected = str(tmp_path / "chromium")
+
+    class RuntimeConn(DummyConn):
+        async def ext_method(self, method, payload):
+            assert method == "session/runtime_environment"
+            assert payload["capability"] == "chromium"
+            if payload["action"] == "status":
+                return {"status": "missing"}
+            started.set()
+            await installed.wait()
+            return {"status": "ready", "env": {"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": expected}}
+
+    class RenderProbe(Tool):
+        name = "render_probe"
+        description = "Verify the next execution sees the prepared Chromium."
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self):
+            tools = host._sessions[session.sessionId].agent.tools
+            assert tools["bash"]._subprocess_env["PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"] == expected
+            executed.append(True)
+            return ToolResult(success=True, content="rendered")
+
+    class ContinueLLM(DummyLLM):
+        async def generate_stream(self, messages, tools, **_):
+            self.calls += 1
+            if self.calls <= 2:
+                name, args = (("local_environment", {"capability": "chromium", "action": "ensure"})
+                              if self.calls == 1 else ("render_probe", {}))
+                yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[ToolCall(
+                    id=f"continuation-{self.calls}", type="function",
+                    function=FunctionCall(name=name, arguments=args),
+                )])
+            else:
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = ContinueLLM()
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_sub_agent=False))
+    host = BoxACPAgent(RuntimeConn(), config, llm, [RenderProbe()], "system")
+    session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "host_capabilities": {"runtime_environment": 1},
+    }))
+    prompt = asyncio.create_task(host.prompt(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Prepare Chromium and render."}], field_meta={},
+    )))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        assert not prompt.done()
+        assert llm.calls == 1
+        assert not executed
+        installed.set()
+        response = await asyncio.wait_for(prompt, 10)
+        assert response.stopReason == "end_turn"
+        assert response.field_meta["ok"] is True
+        assert executed == [True]
+        assert llm.calls == 3
+    finally:
+        if not prompt.done():
+            prompt.cancel()
+            await asyncio.gather(prompt, return_exceptions=True)
 
 
 @pytest.mark.asyncio
