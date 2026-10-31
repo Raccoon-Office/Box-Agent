@@ -44,7 +44,7 @@ from ..file_result_adapter import (
 from ..web_search_policy import SearchBatch, WebSearchPolicy
 from .artifact_results import (
     _snapshot_workspace_signatures, _detect_tool_artifacts,
-    _detect_regex_artifacts, _detect_changed_files,
+    _detect_regex_artifacts, _detect_changed_files, _detect_file_artifacts, _detect_text_artifacts,
 )
 from .budget import ToolBudgetState
 from .call_contracts import (
@@ -464,6 +464,13 @@ class DefaultToolEngine:
         artifacts = []
         temporary = (result.raw_output or {}).get("temporary") is True
         if self._options.artifact_detection_enabled and result.success and context.workspace_dir and not temporary:
+            if content == result.content:
+                call.artifact_evidence_files = result._artifact_evidence_files
+            # Shared delivery may bound a large tool result after hooks have
+            # filtered it. Scan that already-existing text in bounded chunks.
+            if (call.name != "web_search" and len(content) > 65536
+                    and len(outcome.visible_content) < len(content)):
+                call.artifact_evidence_text = content
             if call.parallel:
                 if call.user_visible:
                     artifacts, paths = _detect_regex_artifacts(
@@ -477,6 +484,28 @@ class DefaultToolEngine:
                     call.call_id, call.name, outcome.visible_content, result.raw_output,
                     call.before_files, after, context.workspace_dir,
                 )
+            # Only use the tool-owned evidence when hooks did not replace its
+            # result text. Never infer an evidence path from model-visible text.
+            if call.artifact_evidence_files and (not call.parallel or call.user_visible):
+                extra = _detect_file_artifacts(
+                    call.call_id, call.name, call.artifact_evidence_files,
+                    context.workspace_dir,
+                    None if call.parallel else call.before_files,
+                    None if call.parallel else after,
+                    {artifact.abs_path for artifact in artifacts} | emitted_paths,
+                )
+                artifacts.extend(extra)
+                emitted_paths.update(artifact.abs_path for artifact in extra)
+            if call.artifact_evidence_text and (not call.parallel or call.user_visible):
+                extra = _detect_text_artifacts(
+                    call.call_id, call.name, call.artifact_evidence_text,
+                    context.workspace_dir,
+                    None if call.parallel else call.before_files,
+                    None if call.parallel else after,
+                    {artifact.abs_path for artifact in artifacts} | emitted_paths,
+                )
+                artifacts.extend(extra)
+                emitted_paths.update(artifact.abs_path for artifact in extra)
         # Commit retention before exposing either the structured result or its
         # artifact events. A consumer may render a file from either channel.
         if self._references is not None and call.user_visible and result.success and not temporary:
@@ -582,17 +611,37 @@ class DefaultToolEngine:
                         if isinstance(event, ToolCallResult):
                             outcomes[call.call_id] = event.success
                             if call.user_visible and not (event.raw_output or {}).get("temporary"):
-                                artifact_results[call.call_id] = event.content
+                                artifact_results[call.call_id] = (
+                                    event.content,
+                                    call.artifact_evidence_files,
+                                    call.artifact_evidence_text,
+                                    call.name,
+                                )
                         yield event
             if self._options.artifact_detection_enabled and context.workspace_dir:
                 after = _snapshot_workspace_signatures(context.workspace_dir)
-                for call_id, content in artifact_results.items():
+                for call_id, (content, evidence_files, evidence_text, tool_name) in artifact_results.items():
                     for artifact in _detect_changed_files(
                         call_id, before, after, emitted, context.workspace_dir, content=content,
                     ):
                         emitted.add(artifact.abs_path)
                         self._retain_displayed_file(artifact)
                         yield artifact
+                    for artifact in _detect_file_artifacts(
+                        call_id, tool_name, evidence_files, context.workspace_dir,
+                        before, after, emitted,
+                    ):
+                        emitted.add(artifact.abs_path)
+                        self._retain_displayed_file(artifact)
+                        yield artifact
+                    if evidence_text:
+                        for artifact in _detect_text_artifacts(
+                            call_id, tool_name, evidence_text, context.workspace_dir,
+                            before, after, emitted,
+                        ):
+                            emitted.add(artifact.abs_path)
+                            self._retain_displayed_file(artifact)
+                            yield artifact
             if context.is_cancelled():
                 return
         for duplicate, source in duplicates:

@@ -8,7 +8,9 @@ import pytest
 
 from box_agent.artifact_publication import delivery_scope, apply_delivery_policy
 from box_agent.artifact_publication import write_metadata
-from box_agent.tools.engine.artifact_results import _detect_tool_artifacts, _snapshot_workspace_signatures
+from box_agent.tools.engine.artifact_results import (
+    _detect_file_artifacts, _detect_tool_artifacts, _snapshot_workspace_signatures,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 FAST = REPO / "box_agent/skills/document-skills/pptx/scripts"
@@ -34,6 +36,59 @@ def test_json_output_requires_changed_file_and_exact_path(tmp_path, reference, c
     assert [event.filename for event in events] == (
         [target.name] if changed and reference == "exact" else []
     )
+
+
+def test_complete_output_discovers_split_path_without_including_other_changes(tmp_path):
+    folder = tmp_path / "nested"
+    folder.mkdir()
+    before = _snapshot_workspace_signatures(str(tmp_path))
+    for name in ("报告.pdf", "other.pdf"):
+        (folder / name).write_text("report")
+    after = _snapshot_workspace_signatures(str(tmp_path))
+    evidence = tmp_path / "complete-output.txt"
+    path = "nested/报告.pdf"
+    evidence.write_text("x" * 65530 + "\n" + path + "\n" + "y" * 100000)
+    events = _detect_file_artifacts("call", "execute_code", (evidence,), str(tmp_path), before, after)
+    assert [event.filename for event in events] == ["报告.pdf"]
+
+
+def test_unreadable_complete_output_does_not_break_artifact_detection(tmp_path):
+    assert _detect_file_artifacts("call", "execute_code", (tmp_path / "missing",), str(tmp_path)) == []
+
+
+def test_complete_output_does_not_follow_replaced_symlink(tmp_path):
+    (tmp_path / "report.pdf").write_text("report")
+    actual = tmp_path / "other.txt"
+    actual.write_text("[report.pdf]")
+    link = tmp_path / "output.txt"
+    try:
+        link.symlink_to(actual)
+    except OSError:
+        pytest.skip("Symlinks are unavailable")
+    assert _detect_file_artifacts("call", "execute_code", (link,), str(tmp_path)) == []
+
+
+def test_chunk_boundary_does_not_turn_a_partial_path_into_an_artifact(tmp_path):
+    target = tmp_path / "report.pdf"
+    before = _snapshot_workspace_signatures(str(tmp_path))
+    target.write_text("report")
+    after = _snapshot_workspace_signatures(str(tmp_path))
+    evidence = tmp_path / "evidence.txt"
+    evidence.write_text(" " * (65536 - len("report.pdf")) + "report.pdfx")
+    assert _detect_file_artifacts("call", "execute_code", (evidence,), str(tmp_path), before, after) == []
+
+
+def test_complete_output_keeps_intermediate_and_outside_files_private(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    intermediate = workspace / "draft.png"
+    intermediate.write_bytes(b"private image")
+    write_metadata(intermediate, {"type": "intermediate_asset"})
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"outside")
+    evidence = workspace / ".output.txt"
+    evidence.write_text("x" * 70000 + f"\n[draft.png] [{outside}]\n" + "y" * 70000)
+    assert _detect_file_artifacts("call", "execute_code", (evidence,), str(workspace)) == []
 
 
 def published(root):

@@ -36,7 +36,7 @@ def test_large_output_keeps_head_tail_and_complete_utf8_file(tmp_path, single_ch
     for chunk in [text] if single_chunk else chunks:
         capture.append(chunk)
         assert len(capture._preview) <= OUTPUT_PREVIEW_BYTES
-    reply = capture.finish()
+    reply = capture.finish(with_reference=True)
     assert len(reply.encode("utf-8")) < OUTPUT_REPLY_BYTES
     assert "HEAD\n" in reply and "TAIL\n" in reply
     assert "middle omitted" in reply
@@ -93,13 +93,14 @@ def test_output_persistence_failures_keep_draining_and_report_data_loss(
     capture = OutputCapture(directory)
     capture.append("HEAD" + "x" * 100_000)
     capture.append("TAIL")
-    reply = capture.finish()
+    reply = capture.finish(with_reference=True)
     assert "Full output unavailable" in reply
     assert "Full output saved to:" not in reply
     assert "cannot be recovered" in reply
     assert "HEAD" in reply and "TAIL" in reply
     assert len(reply.encode("utf-8")) < OUTPUT_REPLY_BYTES
     assert capture._stream is None
+    assert not hasattr(reply, "complete_path")
 
 
 class _OutputKernelClient:
@@ -223,6 +224,8 @@ async def test_real_kernel_large_print_is_recoverable_and_next_call_keeps_state(
         assert result.success, result.error
         assert len(result.content.encode("utf-8")) < OUTPUT_REPLY_BYTES
         path = _saved_path(result.content)
+        assert result._artifact_evidence_files == (path,)
+        assert "_artifact_evidence_files" not in result.model_dump()
         assert path.stat().st_size > 4 * 1024 * 1024
         data = path.read_bytes()
         assert data == ("HEAD\n" + "中文\\x00\n" * 400_000 + "TAIL\n").encode("utf-8")
@@ -232,5 +235,20 @@ async def test_real_kernel_large_print_is_recoverable_and_next_call_keeps_state(
         next_result = await tool.execute("print(counter + 1)", session_id="output-regression", timeout=30)
         assert next_result.success and next_result.content == "18"
         assert len(list(path.parent.iterdir())) == 1
+        from box_agent.tools.engine.artifact_results import _detect_file_artifacts, _snapshot_workspace_signatures
+        before = _snapshot_workspace_signatures(str(tmp_path))
+        result = await tool.execute(
+            "from pathlib import Path\nPath('nested').mkdir(exist_ok=True)\n"
+            "Path('nested/report.pdf').write_text('report')\n"
+            "print('x' * 65530 + '\\nnested/report.pdf\\n' + 'y' * 100000)",
+            session_id="output-regression", timeout=30,
+        )
+        assert result.success, result.error
+        assert "nested/report.pdf" not in result.content
+        events = _detect_file_artifacts(
+            "call", "execute_code", result._artifact_evidence_files, str(tmp_path),
+            before, _snapshot_workspace_signatures(str(tmp_path)),
+        )
+        assert [event.filename for event in events] == ["report.pdf"]
     finally:
         await tool.shutdown_owned_sessions()

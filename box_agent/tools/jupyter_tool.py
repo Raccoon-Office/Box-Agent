@@ -23,7 +23,7 @@ from typing import Any, Mapping, Optional
 
 from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
-from .output_capture import OutputCapture, bound_output_text
+from .output_capture import CapturedOutput, OutputCapture, bound_output_text
 from .python_environment import probe_python
 
 from box_agent.user_paths import state_path
@@ -1338,7 +1338,7 @@ except ImportError:
             error = errors.finish()
 
         errors.finish()  # Also close partial error output on a kernel timeout.
-        return output.finish(), images, error
+        return output.finish(with_reference=True), images, error
 
     async def stop(self):
         """Stop the kernel."""
@@ -1538,7 +1538,7 @@ except ImportError:
             error = errors.finish()
 
         errors.finish()
-        return output.finish(), images, error
+        return output.finish(with_reference=True), images, error
 
     async def stop(self):
         """Stop the in-process kernel."""
@@ -2090,6 +2090,9 @@ Output formats:
                 )
 
             # Detect NEW files created during execution
+            evidence_files = []
+            if isinstance(stdout, CapturedOutput):
+                evidence_files.append(stdout.complete_path)
             post_files = set(workspace.iterdir()) if workspace.exists() else set()
             new_files = post_files - pre_files
             artifact_exts = {
@@ -2112,8 +2115,12 @@ Output formats:
 
             content = "\n".join(content_parts) if content_parts else "(No output)"
             # Also covers custom kernels and many generated file references.
-            content = bound_output_text(content, workspace / ".box-agent" / "tool-results")
-            return ToolResult(success=True, content=content, model_context=content)
+            content = bound_output_text(content, workspace / ".box-agent" / "tool-results", with_reference=True)
+            if isinstance(content, CapturedOutput):
+                evidence_files.append(content.complete_path)
+            result = ToolResult(success=True, content=str(content), model_context=str(content))
+            result._artifact_evidence_files = tuple(evidence_files)
+            return result
 
         except (asyncio.TimeoutError, TimeoutError):
             # The kernel is still blocked executing this code in a thread-pool

@@ -102,6 +102,8 @@ class ToolCallRecord:
     invoked: bool = False
     executed: bool = False
     hook_rejection: dict[str, Any] | None = None
+    artifact_evidence_text: str | None = None
+    artifact_evidence_files: tuple[Path, ...] = ()
 
 
 @dataclass(slots=True)

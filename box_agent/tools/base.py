@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -27,6 +28,7 @@ class ToolResult(BaseModel):
     # serialized into protocol/session-log payloads.
     _invocation_rejected: bool = PrivateAttr(default=False)
     _written_file_sha256: str | None = PrivateAttr(default=None)
+    _artifact_evidence_files: tuple[Path, ...] = PrivateAttr(default=())
 
     success: bool
     content: str = ""

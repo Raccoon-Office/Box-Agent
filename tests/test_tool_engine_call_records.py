@@ -9,6 +9,7 @@ from box_agent.events import ArtifactEvent, ToolCallResult
 from box_agent.hooks import BaseHook
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.output_capture import OutputCapture
 
 
 class CallsThenDone:
@@ -27,6 +28,51 @@ class CallsThenDone:
         else:
             yield StreamEvent(type="text", delta="Done.")
             yield StreamEvent(type="finish", finish_reason="stop")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("hook_replaces_output", [False, True])
+@pytest.mark.parametrize("delivery", ["captured", "shared"])
+async def test_oversized_output_preserves_artifacts_without_bypassing_hooks(
+    tmp_path, parallel, hook_replaces_output, delivery,
+):
+    class OutputTool(Tool):
+        name = "large_artifact_output"
+        description = "Create one report."
+        parallel_safe = parallel
+        parameters = {"type": "object", "properties": {"name": {"type": "string"}}}
+
+        async def execute(self, name):
+            folder = tmp_path / "nested"
+            folder.mkdir(exist_ok=True)
+            (folder / name).write_text("report")
+            if delivery == "shared":
+                return ToolResult(success=True, content="x" * 300000 + f"\nnested/{name}\n" + "y" * 300000)
+            capture = OutputCapture(tmp_path / ".box-agent" / "tool-results")
+            capture.append("x" * 65530 + f"\nnested/{name}\n" + "y" * 100000)
+            reply = capture.finish(with_reference=True)
+            result = ToolResult(success=True, content=str(reply))
+            result._artifact_evidence_files = (reply.complete_path,)
+            return result
+
+    class ReplaceOutput(BaseHook):
+        async def on_tool_result(self, **kwargs):
+            return ("Output withheld by hook.", kwargs["error"])
+
+    tool = OutputTool()
+    names = ["one.pdf", "two.pdf"] if parallel else ["one.pdf"]
+    events = [event async for event in run_agent_loop(
+        llm=CallsThenDone(tool.name, [{"name": name} for name in names]),
+        tools={tool.name: tool}, messages=[Message(role="user", content="Generate reports")],
+        hooks=[ReplaceOutput()] if hook_replaces_output else [],
+        workspace_dir=str(tmp_path), max_steps=2,
+    )]
+    outputs = [event for event in events if isinstance(event, ToolCallResult)]
+    assert len(outputs) == len(names)
+    assert all(len(event.content.encode()) < 65536 for event in outputs)
+    artifacts = [event for event in events if isinstance(event, ArtifactEvent)]
+    assert sorted(event.filename for event in artifacts) == ([] if hook_replaces_output else names)
 
 
 @pytest.mark.asyncio

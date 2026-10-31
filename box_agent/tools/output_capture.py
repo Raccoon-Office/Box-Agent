@@ -13,6 +13,15 @@ _CHUNK_CHARS = 8 * 1024
 _OMITTED = b"\n...[middle omitted from preview]...\n"
 
 
+class CapturedOutput(str):
+    """A bounded reply with an internal reference to its complete output."""
+
+    def __new__(cls, value: str, path: Path):
+        instance = super().__new__(cls, value)
+        instance.complete_path = path
+        return instance
+
+
 class OutputCapture:
     """Keep a bounded head/tail; spill the complete text only on overflow.
 
@@ -70,7 +79,7 @@ class OutputCapture:
                 pass
             self._stream = None
 
-    def finish(self) -> str:
+    def finish(self, *, with_reference: bool = False) -> str:
         if self._stream is not None:
             try:
                 self._stream.close()
@@ -95,14 +104,18 @@ class OutputCapture:
             )
             if self._path is not None:
                 status += f"\nPartial output file (not complete): {self._path}"
-        return (
+        reply = (
             f"<persisted-output>\nOutput too large ({self.total_bytes} UTF-8 bytes). "
             f"{status}\n\nPreview (head + tail):\n{preview}\n</persisted-output>"
         )
+        if with_reference and self._storage_error is None and self._path is not None:
+            return CapturedOutput(reply, self._path)
+        return reply
 
 
 def bound_output_text(
     text: str, directory: Path, label: str = "result", *, inline_limit: int = OUTPUT_REPLY_BYTES,
+    with_reference: bool = False,
 ) -> str:
     """Last defense for final text, including custom kernels and result hooks."""
     if len(text) <= inline_limit // 4:
@@ -116,4 +129,4 @@ def bound_output_text(
             return text.encode("utf-8", errors="replace").decode("utf-8")
     capture = OutputCapture(directory, label)
     capture.append(text)
-    return capture.finish()
+    return capture.finish(with_reference=with_reference)
