@@ -203,8 +203,8 @@ def _tool_message_content_for_model(
 ) -> str:
     """Return the content stored in conversation history for a tool result.
 
-    ToolCallResult events and logs keep full visible output.  This path controls
-    only what future LLM calls receive in ``messages``.
+    This path selects what future LLM calls receive in ``messages``. The shared
+    delivery guard subsequently bounds both model and host output if needed.
     """
     if not result.success:
         return f"Error: {visible_error}"

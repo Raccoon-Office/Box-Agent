@@ -6,6 +6,9 @@ import json
 import logging
 import os
 import re
+import stat
+from collections.abc import Iterator
+from collections import OrderedDict
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -459,3 +462,125 @@ def _detect_tool_artifacts(
         tool_call_id, pre_files, post_files, already, workspace_dir, content=content
     )
     return [*regex_artifacts, *diff_artifacts]
+
+
+def _detect_artifacts_in_chunks(
+    tool_call_id: str,
+    tool_name: str,
+    chunks: Iterator[str],
+    workspace_dir: str,
+    pre_files: dict[Path, tuple[int, int]] | None = None,
+    post_files: dict[Path, tuple[int, int]] | None = None,
+    already_emitted: set[str] | None = None,
+) -> list[ArtifactEvent]:
+    emitted = set(already_emitted or ())
+    artifacts: list[ArtifactEvent] = []
+    # Most output windows contain no file references. Resolve changed paths
+    # once and avoid repeated workspace scans for those windows.
+    candidates_by_file: dict[Path, set[str]] = {}
+    if pre_files is not None and post_files is not None:
+        root = Path(workspace_dir).resolve()
+        for path, signature in post_files.items():
+            if pre_files.get(path) == signature:
+                continue
+            try:
+                resolved = path.resolve()
+                relative = resolved.relative_to(root).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            candidates = {str(resolved), relative}
+            if os.name == "nt":
+                candidates.add(relative.replace("/", "\\"))
+                candidates.add(resolved.as_posix())
+                candidates.update(json.dumps(value, ensure_ascii=False)[1:-1] for value in tuple(candidates))
+            candidates_by_file[path] = candidates
+    candidate_paths = {candidate for candidates in candidates_by_file.values() for candidate in candidates}
+    candidate_pattern = re.compile("|".join(re.escape(path) for path in sorted(candidate_paths))) if candidate_paths else None
+    overlap = 8192
+    recent_references: OrderedDict[str, None] = OrderedDict()
+    previous = ""
+    current = next(chunks, "")
+    while current:
+        following = next(chunks, "")
+        # Sentinels prevent false path boundaries at cuts.
+        window = ("x" if previous else "") + previous + current
+        if following:
+            window += following[:overlap] + "x"
+        references = []
+        for match in _ARTIFACT_REF_RE.finditer(window):
+            reference = match.group(1)
+            if reference in recent_references:
+                recent_references.move_to_end(reference)
+                continue
+            recent_references[reference] = None
+            if len(recent_references) > 4096:
+                recent_references.popitem(last=False)
+            references.append(f"[{reference}]")
+        found = []
+        if references:
+            found, _ = _detect_regex_artifacts(
+                tool_call_id, tool_name, "\n".join(references), None, workspace_dir,
+            )
+        if candidate_pattern and candidate_pattern.search(window):
+            matching = {
+                path: post_files[path] for path, candidates in candidates_by_file.items()
+                if any(candidate in window for candidate in candidates)
+            }
+            found.extend(_detect_changed_files(
+                tool_call_id, pre_files, matching,
+                emitted | {artifact.abs_path for artifact in found}, workspace_dir, content=window,
+            ))
+        for artifact in found:
+            if artifact.abs_path not in emitted:
+                emitted.add(artifact.abs_path)
+                artifacts.append(artifact)
+        previous = current[-overlap:]
+        current = following
+    return artifacts
+
+
+def _detect_text_artifacts(
+    tool_call_id: str, tool_name: str, text: str, workspace_dir: str,
+    pre_files: dict[Path, tuple[int, int]] | None = None,
+    post_files: dict[Path, tuple[int, int]] | None = None,
+    already_emitted: set[str] | None = None,
+) -> list[ArtifactEvent]:
+    chunks = (text[offset:offset + 65536] for offset in range(0, len(text), 65536))
+    return _detect_artifacts_in_chunks(
+        tool_call_id, tool_name, chunks, workspace_dir, pre_files, post_files, already_emitted,
+    )
+
+
+def _detect_file_artifacts(
+    tool_call_id: str, tool_name: str, evidence_files: tuple[Path, ...], workspace_dir: str,
+    pre_files: dict[Path, tuple[int, int]] | None = None,
+    post_files: dict[Path, tuple[int, int]] | None = None,
+    already_emitted: set[str] | None = None,
+) -> list[ArtifactEvent]:
+    """Scan tool-owned complete output in bounded overlapping text windows."""
+    emitted = set(already_emitted or ())
+    artifacts: list[ArtifactEvent] = []
+    for path in evidence_files:
+        try:
+            if path.is_symlink():
+                continue
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            descriptor = os.open(path, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    continue
+                stream = os.fdopen(descriptor, encoding="utf-8", errors="replace")
+                descriptor = -1
+            finally:
+                if descriptor != -1:
+                    os.close(descriptor)
+            with stream:
+                found = _detect_artifacts_in_chunks(
+                    tool_call_id, tool_name, iter(lambda: stream.read(65536), ""),
+                    workspace_dir, pre_files, post_files, emitted,
+                )
+                artifacts.extend(found)
+                emitted.update(artifact.abs_path for artifact in found)
+        except (OSError, UnicodeError, ValueError):
+            _log.warning("Unable to read complete tool output for artifact discovery")
+    return artifacts

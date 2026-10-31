@@ -69,12 +69,13 @@ async def test_query_jsonl_locates_records_on_both_sides_of_raw_read_limit(
         path="events.jsonl", offset=record["line"], limit=1,
     )
 
-    assert read.success is can_read
+    assert read.success is True
     if can_read:
         assert f"1|{original.decode().rstrip()}" in read.content
     else:
-        assert read.content == ""
-        assert "safety limit" in read.error
+        assert read.raw_output["partial"] is True
+        assert read.raw_output["next_byte_offset"]
+        assert "query_jsonl" in read.content
     assert source.read_bytes() == original
 
 

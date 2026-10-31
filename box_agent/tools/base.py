@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -27,12 +28,16 @@ class ToolResult(BaseModel):
     # serialized into protocol/session-log payloads.
     _invocation_rejected: bool = PrivateAttr(default=False)
     _written_file_sha256: str | None = PrivateAttr(default=None)
+    _artifact_evidence_files: tuple[Path, ...] = PrivateAttr(default=())
 
     success: bool
     content: str = ""
     error: str | None = None
     permission_request: dict | None = None  # capability request payload
     raw_output: dict | None = None  # optional structured payload for host UIs
+    # Tool-owned host projection, used only when the full raw output is saved.
+    # Never serialize this private handoff or treat it as the complete result.
+    raw_output_preview: dict | None = Field(default=None, exclude=True, repr=False)
     model_context: str | None = None  # optional compact content for future LLM turns
     # Complete persistable text when ``content`` is intentionally bounded by
     # the tool. The shared result-storage seam consumes it before the

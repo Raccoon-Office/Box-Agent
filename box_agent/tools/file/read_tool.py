@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import math
+import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from ...context_resources import (
     CONTEXT_RESOURCE_RAW_KEY,
@@ -23,6 +26,8 @@ if TYPE_CHECKING:
 DEFAULT_READ_LIMIT = 500
 MAX_READ_LINES = 2_000
 MAX_READ_CHARS = 100_000
+READ_BLOCK_BYTES = 64 * 1024
+READ_FRAGMENT_BYTES = 16 * 1024
 _BLOCKED_POSIX_DEVICES = {
     "/dev/full", "/dev/null", "/dev/random", "/dev/stdin", "/dev/tty",
     "/dev/urandom", "/dev/zero",
@@ -42,6 +47,73 @@ def _normalize_read_pagination(
     normalized_offset = offset if isinstance(offset, int) and not isinstance(offset, bool) else 1
     normalized_limit = limit if isinstance(limit, int) and not isinstance(limit, bool) else DEFAULT_READ_LIMIT
     return max(1, normalized_offset), max(1, min(normalized_limit, MAX_READ_LINES))
+
+
+@dataclass
+class _ReadPage:
+    lines: list[str]
+    source_chars: int
+    selected_chars: int
+    selected_lines: int
+    total_lines: int
+    start_byte: int
+    content_version: str
+    replacement_seen: bool
+
+
+def _scan_read_page(stream: BinaryIO, offset: int, limit: int) -> _ReadPage:
+    """Keep at most one normal page while hashing/counting in bounded pieces."""
+    hasher = hashlib.sha256()
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    source_chars = selected_chars = selected_lines = total_lines = 0
+    start_byte = 0
+    byte_offset = 0
+    lines: list[str] = []
+    line_parts: list[str] = []
+    pending_cr = ""
+    replacement_seen = False
+    selected_started = False
+    raw = stream.readline(READ_BLOCK_BYTES)
+    while raw:
+        following = stream.readline(READ_BLOCK_BYTES)
+        line_end = raw.endswith(b"\n") or not following
+        text = pending_cr + decoder.decode(raw, final=line_end)
+        pending_cr = ""
+        if not line_end and text.endswith("\r"):
+            text, pending_cr = text[:-1], "\r"
+        text = text.replace("\r\n", "\n")
+        if line_end and text.endswith("\r"):
+            text = text[:-1] + "\n"
+        source_chars += len(text)
+        replacement_seen |= "\ufffd" in text
+        hasher.update(raw)
+        line_number = total_lines + 1
+        if offset <= line_number < offset + limit:
+            if not selected_started:
+                start_byte = byte_offset
+                selected_started = True
+            selected_chars += len(text)
+            if selected_chars <= MAX_READ_CHARS:
+                line_parts.append(text)
+            else:
+                # Even an unselected or unterminated huge line must not collect
+                # in memory. Byte mode will seek back to the selected start.
+                lines.clear()
+                line_parts.clear()
+            if line_end:
+                selected_lines += 1
+                if selected_chars <= MAX_READ_CHARS:
+                    lines.append("".join(line_parts))
+                line_parts.clear()
+        if line_end:
+            total_lines += 1
+            decoder.reset()
+        byte_offset += len(raw)
+        raw = following
+    return _ReadPage(
+        lines, source_chars, selected_chars, selected_lines, total_lines,
+        start_byte, hasher.hexdigest(), replacement_seen,
+    )
 
 
 def _blocked_device_error(file_path: Path) -> str | None:
@@ -185,7 +257,11 @@ class ReadTool(Tool):
             "and project fields instead of returning raw records. "
             "For .eml emails use read_email to decode MIME bodies and attachments. "
             "Binary and structured document files are rejected with an actionable error. "
-            "Call it repeatedly to read different files or page through one file."
+            "Call it repeatedly to read different files or page through one file. "
+            "For large text or long lines, set byte_offset (zero-based) to read up to 16 KiB "
+            "without line numbering. Continue with next_byte_offset until it is null. "
+            "Byte mode overrides offset/limit and reads toward EOF. Oversized line pages "
+            "automatically return the first byte chunk from their starting line."
         )
 
     @property
@@ -218,9 +294,62 @@ class ReadTool(Tool):
                     ),
                     "default": False,
                 },
+                "byte_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Starting byte (zero-based) for a text chunk of up to 16 KiB. "
+                        "Use the returned next_byte_offset to continue, including mid-line. "
+                        "Overrides offset/limit."
+                    ),
+                },
             },
             "required": ["path"],
         }
+
+    def _read_fragment_result(
+        self, file_path: Path, stream: BinaryIO, byte_offset: int,
+    ) -> ToolResult:
+        size = os.fstat(stream.fileno()).st_size
+        stream.seek(byte_offset)
+        raw = stream.read(READ_FRAGMENT_BYTES)
+        # Leave an incomplete UTF-8 character for the next chunk. Byte mode
+        # preserves original newlines, so CRLF needs no cross-chunk state.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        text = decoder.decode(raw, final=byte_offset + len(raw) >= size)
+        pending = decoder.getstate()[0]
+        if pending:
+            raw = raw[:-len(pending)]
+        end_byte = byte_offset + len(raw)
+        next_byte_offset = end_byte if raw and end_byte < size else None
+        hint = (
+            f"Continue with the same path and byte_offset={next_byte_offset}."
+            if next_byte_offset is not None else "End of file."
+        )
+        if file_path.suffix.casefold() in {".jsonl", ".ndjson"}:
+            hint += " For JSONL fields/filtering, use query_jsonl with fields/where."
+        elif file_path.suffix.casefold() == ".eml":
+            hint += " Use read_email to decode email bodies and attachments."
+        if "\ufffd" in text:
+            hint += " Non-UTF-8 bytes were replaced with \\ufffd."
+        # A fragment cannot claim full-line resource coverage: doing so would
+        # let context deduplication suppress later parts of the same line.
+        return ToolResult(
+            success=True,
+            content=(
+                f"[File fragment: bytes {byte_offset}:{end_byte} of {size} "
+                "(zero-based, end exclusive; byte mode reads toward EOF).]\n"
+                f"{text}\n[Hint: {hint}]"
+            ),
+            raw_output={
+                "source_size_bytes": size,
+                "selected_char_count": len(text),
+                "start_byte": byte_offset, "end_byte": end_byte,
+                "partial": byte_offset > 0 or next_byte_offset is not None,
+                "truncated": False, "has_more": next_byte_offset is not None,
+                "next_byte_offset": next_byte_offset,
+            },
+        )
 
     async def execute(
         self,
@@ -228,6 +357,7 @@ class ReadTool(Tool):
         offset: int | None = None,
         limit: int | None = None,
         refresh: bool = False,
+        byte_offset: int | None = None,
     ) -> ToolResult:
         """Execute read file."""
         try:
@@ -237,64 +367,21 @@ class ReadTool(Tool):
             if validation_error:
                 return validation_error
 
-            # Count while retaining only the requested page. This keeps memory
-            # bounded even when the source file is very large.
             start = offset - 1
             end = start + limit
-            selected_lines: list[str] = []
-            source_char_count = 0
-            total_lines = 0
-            replacement_seen = False
-            content_hasher = hashlib.sha256()
             with open(file_path, "rb") as stream:
-                for index, raw_line in enumerate(stream):
-                    content_hasher.update(raw_line)
-                    line = raw_line.decode("utf-8", errors="replace")
-                    # Match text-mode universal newline behavior while hashing
-                    # the original bytes for change detection.
-                    if line.endswith("\r\n"):
-                        line = line[:-2] + "\n"
-                    elif line.endswith("\r"):
-                        line = line[:-1] + "\n"
-                    total_lines = index + 1
-                    source_char_count += len(line)
-                    replacement_seen = replacement_seen or "\ufffd" in line
-                    if start <= index < end:
-                        selected_lines.append(line)
+                if byte_offset is not None:
+                    if not isinstance(byte_offset, int) or isinstance(byte_offset, bool) or byte_offset < 0:
+                        return ToolResult(success=False, error="byte_offset must be a non-negative integer.")
+                    return self._read_fragment_result(file_path, stream, byte_offset)
+                page = _scan_read_page(stream, offset, limit)
+                if page.selected_chars > MAX_READ_CHARS:
+                    return self._read_fragment_result(file_path, stream, page.start_byte)
 
-            selected_char_count = sum(len(line) for line in selected_lines)
-            selected_line_count = len(selected_lines)
-
-            if selected_char_count > MAX_READ_CHARS:
-                largest_index, largest_line = max(
-                    enumerate(selected_lines, start=offset),
-                    key=lambda item: len(item[1]),
-                )
-                retry_hint = f"Retry with a smaller limit from offset={offset}."
-                if file_path.suffix.casefold() == ".eml":
-                    retry_hint = "Use read_email to decode the email instead of reading raw MIME data."
-                if file_path.suffix.casefold() == ".jsonl":
-                    retry_hint = (
-                        f"JSONL record at line {largest_index} contains "
-                        f"{len(largest_line):,} characters. Use query_jsonl with fields/where "
-                        "to return a bounded structured projection instead of the raw record."
-                    )
-                return ToolResult(
-                    success=False,
-                    content="",
-                    error=(
-                        f"Read produced {selected_char_count:,} characters, exceeding the "
-                        f"{MAX_READ_CHARS:,}-character safety limit. The file has "
-                        f"{total_lines:,} lines. {retry_hint}"
-                    ),
-                    raw_output={
-                        "source_char_count": source_char_count,
-                        "selected_char_count": selected_char_count,
-                        "selected_line_count": selected_line_count,
-                        "total_lines": total_lines,
-                        "truncated": False,
-                    },
-                )
+            selected_lines = page.lines
+            selected_char_count = page.selected_chars
+            selected_line_count = page.selected_lines
+            total_lines = page.total_lines
 
             # Format with line numbers (1-indexed)
             numbered_lines: list[str] = []
@@ -303,7 +390,7 @@ class ReadTool(Tool):
                 line_content = line.rstrip("\n")
                 numbered_lines.append(f"{i:6d}|{line_content}")
 
-            if replacement_seen:
+            if page.replacement_seen:
                 numbered_lines.insert(
                     0,
                     "[Warning: File contains non-UTF-8 bytes; invalid bytes were replaced with \ufffd.]",
@@ -323,7 +410,7 @@ class ReadTool(Tool):
 
             descriptor = ResourceDescriptor(
                 resource_id=str(file_path.resolve()),
-                content_version=content_hasher.hexdigest(),
+                content_version=page.content_version,
                 start_line=offset,
                 end_line=(offset + selected_line_count - 1),
                 total_lines=total_lines,
@@ -336,7 +423,7 @@ class ReadTool(Tool):
                 success=True,
                 content=content,
                 raw_output={
-                    "source_char_count": source_char_count,
+                    "source_char_count": page.source_chars,
                     "selected_char_count": selected_char_count,
                     "selected_line_count": selected_line_count,
                     "total_lines": total_lines,

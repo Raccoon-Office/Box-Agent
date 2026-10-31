@@ -137,6 +137,33 @@ as follows:
 | Tool-result preparation and capability adaptations | `tools/engine/results.py` and tools adapters; final history commit in `kernel/tool_messages.py` |
 | Legacy helper imports and timing-default monkeypatch behavior | `core.py` re-exports/wrappers |
 
+## Host connector snapshots in model context
+
+The system prompt treats connector status as background host metadata. It is
+discussed only when the task needs a connector or the user asks about connectivity.
+ACP supplies trusted connector state separately from user text. Rows are sorted
+by ID/name/status; comparison ignores row ordering. Agent appends a full snapshot
+only on the first supplied state or a change. Updates explicitly supersede earlier
+snapshots; unavailable state invalidates earlier state, and recovery emits a fresh
+snapshot. A missing update is not an empty catalog or an unavailable snapshot.
+
+Already sent messages, including legacy snapshots, are never deleted or rewritten
+for deduplication. This preserves their prefix across user turns, but does not
+guarantee cache hits when tools, routing, compaction, or provider cache policy
+change. The last host snapshot is authoritative; runtime permissions are unchanged.
+
+`Message.host_connector_status` persists current trusted state even on unchanged
+turns without adding it to model text or request trace metadata. Replay restores
+this state for comparison. If normal compaction drops the visible snapshot,
+`restore_connector_status` restores it from retained metadata at stable positions
+in the compacted state runs, without relying on the generated summary. Previously
+recovered runs remain stable even when later turns change state. It never
+deletes old snapshots or parses user-authored XML. There is no cross-session cache.
+
+Comparison failures append the current snapshot to the new message; recovery
+failures return the original history. Logs contain only the exception type.
+Custom replacement Context Engines own their recovery policy.
+
 ## Static plugins, registries, and replacement
 
 Plugin catalogs are static and follow the existing lifecycle:
