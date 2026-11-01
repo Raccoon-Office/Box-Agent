@@ -422,10 +422,11 @@ async def test_judge_waits_for_slow_llm_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_underlying_llm_timeout_is_handled_as_failed_judge() -> None:
+@pytest.mark.parametrize("timeout_error", [TimeoutError, asyncio.TimeoutError])
+async def test_underlying_llm_timeout_is_handled_as_failed_judge(timeout_error) -> None:
     class ProviderTimeoutLLM(JudgeLLM):
         async def generate(self, messages, tools=None, **kwargs):
-            raise TimeoutError("provider request timed out")
+            raise timeout_error("provider request timed out")
 
     with pytest.raises(TimeoutError, match="continuation judge"):
         await model_says_continue(

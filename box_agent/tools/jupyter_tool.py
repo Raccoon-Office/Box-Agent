@@ -1772,7 +1772,7 @@ class JupyterSandboxTool(Tool):
                 logging.getLogger(__name__).warning(
                     "Kernel cleanup after startup failure failed: %s", session_key, exc_info=True,
                 )
-            if isinstance(exc, TimeoutError):
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
                 raise RuntimeError(
                     f"KERNEL_START_TIMEOUT: kernel startup exceeded {_KERNEL_START_TIMEOUT_SECONDS:g}s"
                 ) from exc
@@ -1994,7 +1994,7 @@ Output formats:
                     raise RuntimeError(
                         "Host reported ready but supplied no usable sandbox Python path."
                     )
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 return self._preparation_timeout_result()
             except RuntimeError as exc:
                 return ToolResult(
@@ -2015,7 +2015,7 @@ Output formats:
                     "dependency_install" if "install" in msg.lower() else "environment_probe",
                 )), timeout=_SANDBOX_PREPARE_TIMEOUT_SECONDS,
             )
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             return self._preparation_timeout_result()
         except RuntimeError as e:
             return ToolResult(

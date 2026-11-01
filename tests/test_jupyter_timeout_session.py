@@ -78,7 +78,8 @@ def test_previous_requests_idle_cannot_finish_current_execution(tmp_path, sessio
 
 
 @pytest.mark.asyncio
-async def test_environment_preparation_returns_diagnostic_before_call_hangs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("preparation", ["sandbox", "host"])
+async def test_environment_preparation_returns_diagnostic_before_call_hangs(tmp_path, monkeypatch, preparation):
     closed = asyncio.Event()
     class WaitingEnvironment:
         async def ensure_ready(self, on_progress=None):
@@ -89,6 +90,8 @@ async def test_environment_preparation_returns_diagnostic_before_call_hangs(tmp_
     monkeypatch.setattr(jupyter_tool, "_SANDBOX_PREPARE_TIMEOUT_SECONDS", 0.01, raising=False)
     monkeypatch.setattr(JupyterSandboxTool, "_get_sandbox_env", lambda _: WaitingEnvironment())
     tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    if preparation == "host":
+        tool.runtime_preparer = WaitingEnvironment().ensure_ready
     result = await asyncio.wait_for(tool.execute("print(1)"), 0.5)
     assert not result.success
     assert "SANDBOX_PREPARE_TIMEOUT" in result.error

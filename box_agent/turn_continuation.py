@@ -318,7 +318,7 @@ async def model_says_continue(
         if not isinstance(response.content, str):
             return False
         decision = json.loads(response.content.strip())
-    except TimeoutError as exc:
+    except (asyncio.TimeoutError, TimeoutError) as exc:
         log.warning("turn_continuation/judge_timeout session_id=%s timeout_seconds=%s",
                     session_id or "-", timeout_seconds)
         raise ContinuationJudgeTimeout("continuation judge timed out without a verdict") from exc
