@@ -42,6 +42,7 @@ class CompletionChecks:
     def __init__(self, context: CompletionContext):
         self.context = context
         self.gates: dict[str, CompletionCheck] = {}
+        self._tool_gates: dict[int, CompletionCheck] = {}
         self.failures: list[CompletionIssue] = []
         self.repairs = 0
 
@@ -54,7 +55,7 @@ class CompletionChecks:
     async def include_inputs(self, tools: Mapping, context: CompletionContext) -> None:
         """Extend capability gates after a user supplement, preserving receipts."""
         seen: set[int] = set()
-        for tool in tools.values():
+        for registered_name, tool in tools.items():
             if id(tool) in seen:
                 continue
             seen.add(id(tool))
@@ -62,18 +63,19 @@ class CompletionChecks:
             if factory is None:
                 continue
             try:
-                gate = self.gates.get(tool.name)
+                gate = self._tool_gates.get(id(tool))
                 if gate is None:
                     gate = await factory(context)
                     if gate is not None:
                         self.gates[tool.name] = gate
+                        self._tool_gates[id(tool)] = gate
                 else:
                     include_inputs = getattr(gate, "include_inputs", None)
                     if include_inputs is not None:
                         await include_inputs(context)
             except Exception as exc:
                 self.failures.append(CompletionIssue(
-                    "COMPLETION_CHECK_FAILED", f"{tool.name}: {exc}", False,
+                    "COMPLETION_CHECK_FAILED", f"{registered_name}: {exc}", False,
                 ))
 
     async def check(self) -> list[CompletionIssue]:

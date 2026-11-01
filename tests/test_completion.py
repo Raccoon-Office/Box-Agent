@@ -24,6 +24,9 @@ async def test_completion_proof_is_private_to_each_run_and_aliases_share_one_gat
     second = await CompletionChecks.create({"gated": tool}, context)
     assert len(first.gates) == 1
     first.gates["gated"].passed = True
+    # Supplements can arrive through an alias without replacing the receipt or
+    # asking ordinary tools to implement completion-specific properties.
+    await first.include_inputs({"alias": tool, "ordinary": Tool(), "gated": tool}, context)
     assert await first.check() == []
     assert (await second.check())[0].code == "MISSING"
 
