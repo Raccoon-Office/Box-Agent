@@ -126,6 +126,140 @@ def stable_runtime(label: str = "one") -> dict[str, Any]:
     }
 
 
+def test_rate_limit_recovery_preserves_both_attempts_and_shared_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch_runner_module, '_runtime_identity', lambda *_: stable_runtime())
+    dataset = write_dataset(tmp_path / 'data', [record('limited')])
+    repo = make_fake_repo(tmp_path / 'repo', 'rate-limit-once')
+    output = tmp_path / 'out'
+    assert run_batch(dataset, output, repo, 10, 1, [], rate_limit_backoff_seconds=0.02) == 0
+    summary = read_json(output / 'summary.json')
+    series = summary['cases'][0]
+    assert [a['acp_status'] for a in series['attempts']] == ['error', 'completed']
+    assert series['retry_wait_seconds'] >= 0.02
+    assert summary['attempt_counts']['acp_failed'] == 1
+    assert summary['initial_attempt_counts']['acp_failed'] == 1
+    documents = [read_json(output / a['attempt_path'] / 'run.json') for a in series['attempts']]
+    assert documents[0]['assistant_text_length'] == 36  # ACP's synthetic error notice.
+    assert len({d['session_id'] for d in documents}) == 2
+    assert documents[1]['timeout_budget']['effective_task_seconds'] < 10
+    assert all(d['evaluation_timeout_budget']['effective_task_seconds'] == 10 for d in documents)
+    assert not (output / series['attempts'][0]['attempt_path'] / 'workspace/output/answer.txt').exists()
+    assert (output / series['attempts'][1]['attempt_path'] / 'workspace/output/answer.txt').exists()
+    original = [(output / a['attempt_path'] / 'run.json').read_bytes() for a in series['attempts']]
+    assert run_batch(dataset, output, repo, 10, 1, [], rate_limit_backoff_seconds=0.02) == 0
+    assert read_json(output / 'summary.json')['cases'][0]['disposition'] == 'skipped_terminal'
+    assert [(output / a['attempt_path'] / 'run.json').read_bytes() for a in series['attempts']] == original
+
+
+def test_persistent_rate_limit_opens_circuit_before_later_cases(tmp_path):
+    dataset = write_dataset(tmp_path / 'data', [record('first'), record('second')])
+    repo = make_fake_repo(tmp_path / 'repo', 'rate-limit')
+    output = tmp_path / 'out'
+    assert run_batch(dataset, output, repo, 10, 1, [], rate_limit_retries=2, rate_limit_backoff_seconds=0.01) == 1
+    summary = read_json(output / 'summary.json')
+    assert len(summary['cases'][0]['attempts']) == 3
+    assert summary['cases'][0]['retry_stop_reason'] == 'retry_limit'
+    assert summary['cases'][1]['disposition'] == 'deferred_rate_limit'
+    assert not list((output / 'cases/second').glob('attempts/*'))
+
+
+@pytest.mark.parametrize('mode', ['rate-limit-after-tool', 'rate-limit-after-content', 'provider-error'])
+def test_rate_limit_retry_does_not_repeat_tools_or_other_provider_errors(tmp_path, mode):
+    dataset = write_dataset(tmp_path / 'data', [record('unsafe')])
+    repo = make_fake_repo(tmp_path / 'repo', mode)
+    output = tmp_path / 'out'
+    assert run_batch(dataset, output, repo, 10, 1, [], rate_limit_backoff_seconds=0.01) == 1
+    assert len(read_json(output / 'summary.json')['cases'][0]['attempts']) == 1
+
+
+@pytest.mark.parametrize('unsafe', [
+    'partial_content', 'partial_thinking', 'response', 'tool', 'permission',
+    'missing_error', 'missing_partial_content', 'missing_partial_thinking',
+    'duplicate_request', 'mismatched_turn_error', 'extra_text', 'missing_text', 'invalid_trace',
+])
+def test_rate_limit_notice_requires_complete_evidence_of_no_model_output(tmp_path, unsafe):
+    details = {'source': 'llm_provider', 'httpStatus': 429, 'retryable': True}
+    message = 'Too many requests'
+    notice = f'Error: {message}'
+    run = {'acp_status': 'error', 'response_metadata': {'error': message, 'errorDetails': details},
+           'completeness_status': 'complete', 'input_consistency': {'status': 'matched'},
+           'assistant_text_length': len(notice), 'permission_request_count': 0}
+    events = [{'event': 'llm.request'},
+              {'event': 'llm.error', 'data': {'partial_content': '', 'partial_thinking': None}},
+              {'event': 'turn.error', 'data': {'message': message, 'error_details': details}}]
+    (tmp_path / 'assistant.txt').write_text(notice)
+    (tmp_path / 'agent').mkdir()
+    trace = tmp_path / 'agent/trace.jsonl'
+
+    def save():
+        (tmp_path / 'run.json').write_text(json.dumps(run))
+        trace.write_text(''.join(json.dumps(e) + '\n' for e in events))
+
+    save()
+    assert batch_runner_module._rate_limit_before_tools(tmp_path)
+    if unsafe in {'partial_content', 'partial_thinking'}:
+        events[1]['data'][unsafe] = 'real model output'
+    elif unsafe in {'missing_partial_content', 'missing_partial_thinking'}:
+        del events[1]['data'][unsafe.removeprefix('missing_')]
+    elif unsafe == 'missing_error':
+        events.pop(1)
+    elif unsafe == 'duplicate_request':
+        events.append({'event': 'llm.request'})
+    elif unsafe == 'mismatched_turn_error':
+        events[2]['data']['message'] = 'different error'
+    elif unsafe in {'response', 'tool'}:
+        events.append({'event': 'llm.response' if unsafe == 'response' else 'tool.request'})
+    elif unsafe == 'permission':
+        run['permission_request_count'] = 1
+    elif unsafe == 'extra_text':
+        (tmp_path / 'assistant.txt').write_text('real answer' + notice)
+    elif unsafe == 'missing_text':
+        (tmp_path / 'assistant.txt').unlink()
+    save()
+    if unsafe == 'invalid_trace':
+        trace.write_text('{broken')
+    assert not batch_runner_module._rate_limit_before_tools(tmp_path)
+
+
+def test_rate_limit_backoff_cannot_extend_case_deadline(tmp_path):
+    dataset = write_dataset(tmp_path / 'data', [record('budget')])
+    repo = make_fake_repo(tmp_path / 'repo', 'rate-limit')
+    output = tmp_path / 'out'
+    assert run_batch(dataset, output, repo, 2, 1, [], rate_limit_backoff_seconds=10) == 1
+    case = read_json(output / 'summary.json')['cases'][0]
+    assert len(case['attempts']) == 1
+    assert case['retry_stop_reason'] == 'evaluation_deadline'
+    assert case['retry_wait_seconds'] == 0
+
+
+def test_rate_limit_cooldown_is_shared_exponential_capped_and_stoppable(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(batch_runner_module, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(batch_runner_module, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    gate = batch_runner_module._RateLimitCooldown(120)
+    assert gate.defer() == 120
+    # A second worker sees the same gate and extends the common cooldown.
+    assert gate.defer() == 240
+    assert gate.wait(1000) == (240, None)
+    assert gate.defer() == 480
+    assert gate.defer() == 600
+    assert gate.wait(500) == (0, 'evaluation_deadline')
+    gate.stop()
+    assert gate.wait(1000) == (0, 'circuit_open')
+
+
+@pytest.mark.parametrize('settings', [
+    {'rate_limit_retries': -1}, {'rate_limit_retries': 6}, {'rate_limit_retries': True},
+    {'rate_limit_backoff_seconds': 0}, {'rate_limit_backoff_seconds': float('nan')},
+    {'rate_limit_backoff_seconds': float('inf')}, {'rate_limit_backoff_seconds': 601},
+])
+def test_invalid_rate_limit_policy_is_rejected_before_writing_output(tmp_path, settings):
+    output = tmp_path / 'out'
+    with pytest.raises(ValueError, match='rate_limit'):
+        run_batch(tmp_path / 'unused', output, tmp_path, 10, 1, [], **settings)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize(
     ("lines", "message"),
     [
@@ -331,6 +465,36 @@ def test_model_settings_change_produces_new_attempt_and_preserves_old_result(
 
     assert run_batch(dataset, output, repo, 2.0, 1, [], **changed_settings) == 0
     assert len(list(attempts.iterdir())) == 2
+    assert read_json(output / "summary.json")["counts"]["skipped_terminal"] == 1
+
+
+@pytest.mark.parametrize("changed_timeout,changed_wait", [(3.0, 0.1), (2.0, 0.2)])
+def test_budget_change_creates_new_attempt_and_freezes_child_wait(
+    tmp_path, monkeypatch, changed_timeout, changed_wait,
+):
+    import os
+    dataset = write_dataset(tmp_path / "dataset", [record("budget-resume")])
+    repo = make_fake_repo(tmp_path / "repo")
+    output = tmp_path / "outputs" / "budget"
+    monkeypatch.setattr(batch_runner_module, "_runtime_identity", lambda *_: stable_runtime())
+    wait = [0.1]
+    monkeypatch.setattr(batch_runner_module, "_command_value", lambda *_: json.dumps({
+        "provider_stale_seconds": wait[0], "max_provider_stale_recoveries": 3,
+    }))
+    monkeypatch.setenv("BOX_AGENT_PROVIDER_STALE_SECONDS", "99")
+    assert run_batch(dataset, output, repo, 2.0, 1, []) == 0
+    attempts = output / "cases" / "budget-resume" / "attempts"
+    first = next(attempts.iterdir())
+    original = (first / "run.json").read_bytes()
+    assert read_json(first / "run.json")["timeout_budget"] == read_json(output / "manifest.json")["timeout_budget"]
+    trace = next((first / "agent").glob("*.jsonl"))
+    assert json.loads(trace.read_text().splitlines()[0])["provider_stale_seconds"] == "0.1"
+    assert os.environ["BOX_AGENT_PROVIDER_STALE_SECONDS"] == "99"
+    wait[0] = changed_wait
+    assert run_batch(dataset, output, repo, changed_timeout, 1, []) == 0
+    assert len(list(attempts.iterdir())) == 2
+    assert (first / "run.json").read_bytes() == original
+    assert run_batch(dataset, output, repo, changed_timeout, 1, []) == 0
     assert read_json(output / "summary.json")["counts"]["skipped_terminal"] == 1
 
 

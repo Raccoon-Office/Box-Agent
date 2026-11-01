@@ -10,6 +10,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
@@ -101,8 +102,265 @@ def request_inventory(records: list[dict]) -> list[dict]:
     return requests
 
 
-def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
+def routing_inventory(records: list[dict]) -> list[dict]:
+    """Summarize observed decisions; never infer a route from a model request."""
+    routes = []
+    for record in records:
+        if record.get("event") != "model.routing":
+            continue
+        data = record.get("data")
+        if not isinstance(data, dict):
+            continue
+        if (not isinstance(data.get("routing_id"), str) or not data["routing_id"]
+                or not isinstance(data.get("phase"), str)
+                or data.get("phase") not in {
+                    "decision", "bound", "inherited", "binding_failed", "persisted", "preparation_failed",
+                }):
+            continue
+        decision = data.get("decision")
+        if not isinstance(decision, dict):
+            continue
+        row = {key: data[key] for key in ("routing_id", "engine", "phase", "strategy", "actual_model")
+               if isinstance(data.get(key), str)}
+        row.update({key: decision[key] for key in ("reason", "selected_model", "status", "mode")
+                    if isinstance(decision.get(key), str)})
+        if isinstance(record.get("turn_id"), str):
+            row["turn_id"] = record["turn_id"]
+        routes.append(row)
+    return routes
+
+
+def _python_reads_path(code: str, target: Path, workspace: Path, *, whole_file: bool = False) -> bool | None:
+    """Recognize straight-line Python reads without executing captured code.
+
+    This is deliberately partial: unrecognized programs require manual review,
+    rather than being rejected merely for choosing another tool or language.
+    """
+    names: dict[str, Path] = {}
+    unknown = False
+
+    def path_of(node: ast.AST) -> Path | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return (workspace / node.value).resolve()
+        if isinstance(node, ast.Name):
+            return names.get(node.id)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left = path_of(node.left)
+            if left is not None and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+                return (left / node.right.value).resolve()
+        if isinstance(node, ast.Call):
+            name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            if name == "Path" and len(node.args) == 1:
+                return path_of(node.args[0])
+            if ast.unparse(node.func) in {"Path.cwd", "pathlib.Path.cwd", "os.getcwd"} and not node.args:
+                return workspace
+            if ast.unparse(node.func) == "os.path.join" and node.args:
+                first = path_of(node.args[0])
+                if first is not None and all(isinstance(part, ast.Constant) and isinstance(part.value, str)
+                                             for part in node.args[1:]):
+                    return first.joinpath(*(part.value for part in node.args[1:])).resolve()
+            if name == "open" and node.args:
+                mode = node.args[1] if len(node.args) > 1 else next(
+                    (kw.value for kw in node.keywords if kw.arg == "mode"), ast.Constant("r"))
+                if isinstance(mode, ast.Constant) and mode.value in {"r", "rb", "rt"}:
+                    return path_of(node.args[0])
+        return None
+
+    tree = ast.parse(code)
+    statements = list(reversed(tree.body))
+    while statements:
+        statement = statements.pop()
+        if isinstance(statement, ast.With):
+            for item in statement.items:
+                if isinstance(item.optional_vars, ast.Name):
+                    names.pop(item.optional_vars.id, None)
+                    resolved = path_of(item.context_expr)
+                    if resolved is not None:
+                        names[item.optional_vars.id] = resolved
+            statements.extend(reversed(statement.body))
+            continue
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr)):
+            if whole_file and not isinstance(statement, (ast.Import, ast.ImportFrom)):
+                # Do not infer execution of conditional/loop/function bodies.
+                unknown |= any(path_of(node) == target for node in ast.walk(statement))
+            continue
+        value = statement.value
+        pending = [value] if value is not None else []
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.Lambda, ast.IfExp, ast.BoolOp, ast.ListComp,
+                                 ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                if whole_file:
+                    unknown |= any(path_of(child) == target for child in ast.walk(node))
+                continue
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in {"read", "read_text", "read_bytes", "readlines"}:
+                    source = path_of(node.func.value)
+                    if source == target:
+                        if not whole_file:
+                            return True
+                        if node.func.attr in {"read_text", "read_bytes"} or not (node.args or node.keywords):
+                            return True
+                        size = node.args[0] if node.args else node.keywords[0].value
+                        try:
+                            size_value = ast.literal_eval(size)
+                        except (ValueError, TypeError):
+                            unknown = True
+                            size_value = 'unknown'
+                        if (size_value is None or type(size_value) is int
+                                and (size_value < 0 or node.func.attr == 'readlines' and size_value == 0)):
+                            return True
+                        if type(size_value) is not int:
+                            unknown = True
+                    elif whole_file and source is None:
+                        unknown = True
+                if node.func.attr == "load" and node.args and path_of(node.args[0]) == target:
+                    return True
+            if (whole_file and isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in {"list", "tuple"} and node.args and path_of(node.args[0]) == target):
+                return True
+            if whole_file and isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, 'attr', '')
+                if name not in {
+                    'open', 'Path', 'print', 'str', 'repr', 'list', 'tuple', 'load', 'loads', 'dump', 'dumps',
+                    'read', 'readlines', 'readline', 'read_text', 'read_bytes', 'write', 'write_text', 'write_bytes',
+                    'close', 'len', 'enumerate', 'get', 'keys', 'items', 'values', 'decode', 'encode', 'join',
+                    'cwd', 'getcwd', 'splitlines', 'strip', 'int', 'float', 'bool',
+                }:
+                    unknown = True
+                elif name not in {'open', 'Path', 'print', 'str', 'repr', 'list', 'tuple', 'load'}:
+                    unknown |= any(path_of(arg) == target for arg in node.args)
+            pending.extend(ast.iter_child_nodes(node))
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            resolved = path_of(value) if value is not None else None
+            for name in targets:
+                if isinstance(name, ast.Name):
+                    names.pop(name.id, None)
+                    if resolved is not None:
+                        names[name.id] = resolved
+    return None if whole_file and unknown else False
+
+
+def _shell_reads_whole_path(command: str, target: Path, workspace: Path) -> bool | None:
+    heredoc = re.fullmatch(r"\s*python(?:3(?:\.\d+)?)?\s+(?:-\s+)?<<\s*['\"]?(\w+)['\"]?\s*\n([\s\S]*?)\n\1\s*", command)
+    if heredoc:
+        return _python_reads_path(heredoc[2], target, workspace, whole_file=True)
+    if '$(' in command or '`' in command:
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()<>\n')
+    lexer.whitespace = ' \t\r'
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    if any(token in {"||", "|", ";", "&", "<", ">", ">>", "(", ")", "\n"} for token in tokens):
+        return None
+    groups: list[list[str]] = [[]]
+    for token in tokens:
+        if token == "&&":
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    unknown = False
+    for parts in groups:
+        if not parts:
+            return None
+        name = Path(parts[0]).name
+        if name == "cd" and len(parts) == 2:
+            workspace = (workspace / parts[1]).resolve()
+        elif name == "cat" and len(parts) == 2:
+            if (workspace / parts[1]).resolve() == target:
+                return True
+        elif name in {"echo", "printf", "wc", "shasum", "sha256sum"}:
+            # Metadata/checksum scans do not materialize or return full contents.
+            continue
+        elif re.fullmatch(r"python(?:3(?:\.\d+)?)?", name) and len(parts) == 3 and parts[1] == "-c":
+            read = _python_reads_path(parts[2], target, workspace, whole_file=True)
+            if read is True:
+                return True
+            unknown |= read is None
+        else:
+            unknown = True
+    return None if unknown else False
+
+
+def _no_full_file_read(rule: dict, attempt: Path, calls: list[dict]) -> bool | None:
+    """Reject observed whole reads; leave opaque execution for independent review."""
+    workspace = (attempt / "workspace").resolve()
+    target = contained(workspace, rule["path"])
+    unknown = False
+    for call in calls:
+        tool = call.get("tool_name")
+        args = call.get("arguments", {})
+        read = False
+        try:
+            if tool == "read_file" and (workspace / args.get("path", "")).resolve() == target:
+                start, limit = args.get("offset", 1), args.get("limit")
+                if not (type(start) is int and type(limit) is int and start > 0 and limit > 0):
+                    read = None
+                elif target.is_file():
+                    read = start == 1 and limit >= len(target.read_bytes().splitlines())
+            elif tool in {"execute_code", "bash"}:
+                if tool == "bash":
+                    read = _shell_reads_whole_path(args.get("command", ""), target, workspace)
+                else:
+                    read = _python_reads_path(args.get("code", ""), target, workspace, whole_file=True)
+        except (SyntaxError, ValueError):
+            read = None
+        if read is True and call.get("success") is True:
+            return False
+        unknown |= read is None or read is True
+    return None if unknown else True
+
+
+def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool | None:
     kind = rule["kind"]
+    if kind == "no_full_file_read":
+        return _no_full_file_read(rule, attempt, calls)
+    if kind == "artifact_readback":
+        workspace = (attempt / "workspace").resolve()
+        target = contained(workspace, rule["path"])
+        unknown = False
+        for call in calls:
+            if call.get("success") is not True:
+                continue
+            arguments = call.get("arguments", {})
+            if call.get("tool_name") == "read_file":
+                if (workspace / arguments.get("path", "")).resolve() == target:
+                    return True
+            elif call.get("tool_name") in {"bash", "execute_code"}:
+                unknown = True
+                code = arguments.get("code", "")
+                try:
+                    if call["tool_name"] == "bash":
+                        tokens = shlex.split(arguments.get("command", ""))
+                        # A Python snippet appearing in echo, a skipped shell
+                        # branch or another command's arguments is not a read.
+                        code = (tokens[2] if len(tokens) == 3
+                                and re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(tokens[0]).name)
+                                and tokens[1] == "-c" else "")
+                    if _python_reads_path(code, target, workspace):
+                        return True
+                except (SyntaxError, ValueError):
+                    pass
+        return None if unknown else False
+    if kind == "query_rows_match":
+        # Inspect returned rows, not internal scanning or failed query attempts.
+        target = contained(attempt / "workspace", rule["path"])
+        observed = False
+        for call in calls:
+            if call.get("tool_name") != "query_jsonl" or call.get("success") is not True:
+                continue
+            if (attempt / "workspace" / call.get("arguments", {}).get("path", "")).resolve() != target:
+                continue
+            records = json.loads(call["content"])["records"]
+            observed = True
+            field = rule["field"]
+            pointer = "/" + field.replace("~", "~0").replace("/", "~1")
+            if pointer in call.get("arguments", {}).get("fields", []):
+                field = pointer
+            if any(row["data"].get(field) != rule["value"] for row in records):
+                return False
+        return True if observed else None
     if kind == "tool":
         return any(call.get("tool_name") == rule["name"]
                    and (not rule.get("success") or call.get("success") is True)
@@ -170,6 +428,9 @@ def check_rule(rule: dict, attempt: Path, calls: list[dict]) -> bool:
         return not path.exists()
     if not path.is_file():
         return False
+    if kind == "bytes_equal":
+        source = contained(attempt / "workspace", rule["source"])
+        return source.is_file() and path.read_bytes() == source.read_bytes()
     if kind == "json":
         return json.loads(path.read_text(encoding="utf-8")) == rule["value"]
     if kind == "text":
@@ -282,16 +543,29 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
         if run.get("started_at") and run.get("finished_at"):
             result["latency_seconds"] = (datetime.fromisoformat(run["finished_at"].replace("Z", "+00:00"))
                                          - datetime.fromisoformat(run["started_at"].replace("Z", "+00:00"))).total_seconds()
+        metadata = run.get("response_metadata") or {}
+        timed_out = (run.get("acp_status") == "timeout"
+                     or metadata.get("errorCode") in {
+                         "TURN_COMPLETION_CHECK_TIMEOUT", "LLM_PROVIDER_STALE_TIMEOUT",
+                     })
+        result["timeout_budget"] = run.get("timeout_budget")
+        result["evaluation_timeout_budget"] = run.get("evaluation_timeout_budget", run.get("timeout_budget"))
+        if timed_out:
+            result["timeout_details"] = (run.get("timeout_details") or metadata.get("errorDetails")
+                                         or {"source": "evaluation_deadline"})
         completeness = read_json(attempt / "completeness.json")
         if (run.get("completeness_status") not in {"complete", "complete_with_warnings"}
                 or completeness.get("status") not in {"complete", "complete_with_warnings"}
                 or run.get("input_consistency", {}).get("status") != "matched"):
-            result["reason"] = "incomplete or inconsistent capture"
+            result["reason"] = ("task timeout; incomplete or inconsistent capture" if timed_out
+                                else "incomplete or inconsistent capture")
             return result
         details = (run.get("response_metadata") or {}).get("errorDetails") or {}
-        provider_error = run.get("acp_status") == "error" and details.get("source") == "llm_provider"
+        provider_error = (not timed_out and run.get("acp_status") == "error"
+                          and details.get("source") == "llm_provider")
         records = trace_records(attempt)
         result["requests"] = request_inventory(records)
+        result["routing"] = routing_inventory(records)
         if not result["requests"]:
             raise ValueError("missing model request")
         calls = tool_calls(records)
@@ -327,8 +601,9 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
             # error; a forbidden action already captured is a conclusive failure.
             result["checks"] = [check_rule(rule, attempt, calls) for rule in spec["checks"]
                                 if rule["kind"] in {"no_tool", "tool_args_not_matching", "no_unknown_tool",
-                                                    "reply_not_contains", "workspace_not_contains", "tool_args_not_contains"}]
-            if not all(result["checks"]):
+                                                    "reply_not_contains", "workspace_not_contains", "tool_args_not_contains",
+                                                    "no_full_file_read"}]
+            if any(check is False for check in result["checks"]):
                 result["quality"] = "failed"
                 result["reason"] = "observed constraint violation before model provider error"
             else:
@@ -351,7 +626,14 @@ def evaluate_attempt(attempt: Path, spec: dict, pack: Path = PACK) -> dict:
         # acceptable; the checks decide whether the agent fabricated anything.
         state_matches = {"completed": completed, "waiting_for_user": waiting,
                          "completed_or_waiting": completed or waiting}[expected_state]
-        result["quality"] = "passed" if all(result["checks"]) and state_matches else "failed"
+        if timed_out:
+            result["reason"] = "task timeout; delivery not completed"
+        elif any(check is False for check in result["checks"]) or not state_matches:
+            result["quality"] = "failed"
+        elif any(check is None for check in result["checks"]):
+            result["reason"] = "read/query evidence requires independent review"
+        else:
+            result["quality"] = "passed"
     except (OSError, ValueError, KeyError, TypeError, IndexError, BadZipFile, ElementTree.ParseError) as error:
         result["reason"] = f"invalid evidence: {type(error).__name__}"
     return result
@@ -405,7 +687,10 @@ def _total_tokens(usage: object) -> int | None:
     return sum(numbers) if numbers else None
 
 
-def _side(directories: list[Path], pack: Path, expected_model_config: str | None = None) -> dict[str, dict]:
+def _side(
+    directories: list[Path], pack: Path, expected_model_config: str | None = None,
+    expected_timeout_budget: dict | None = None,
+) -> dict[str, dict]:
     per_case: dict[str, dict] = {}
     for directory in directories:
         for result in evaluate_run(directory.resolve(), pack)["results"]:
@@ -413,8 +698,11 @@ def _side(directories: list[Path], pack: Path, expected_model_config: str | None
             if expected_model_config and (model_config is not None or result["quality"] != "unverified"):
                 if model_config != expected_model_config:
                     raise ValueError("incompatible comparison context: attempt model differs from run manifest")
+            if result.get("evaluation_timeout_budget", result.get("timeout_budget")) != expected_timeout_budget:
+                raise ValueError("incompatible comparison context: attempt timeout budget differs from run manifest")
             row = per_case.setdefault(result["case_id"], {
                 "passed": 0, "failed": 0, "unverified": 0, "tokens": [], "tool_calls": [], "failed_tool_calls": [],
+                "latencies": [], "request_models": {}, "routing_decisions": 0, "routing_observed_attempts": 0,
             })
             row[result["quality"]] += 1
             if result["quality"] == "unverified":
@@ -425,6 +713,16 @@ def _side(directories: list[Path], pack: Path, expected_model_config: str | None
             for key in ("tool_calls", "failed_tool_calls"):
                 if isinstance(result.get(key), int):
                     row[key].append(result[key])
+            latency = result.get("latency_seconds")
+            if isinstance(latency, (int, float)) and latency >= 0:
+                row["latencies"].append(latency)
+            for request in result.get("requests", []):
+                model = request.get("model")
+                if isinstance(model, str) and model:
+                    row["request_models"][model] = row["request_models"].get(model, 0) + 1
+            routing = result.get("routing", [])
+            row["routing_observed_attempts"] += bool(routing)
+            row["routing_decisions"] += sum(route.get("phase") == "decision" for route in routing)
     return per_case
 
 
@@ -437,36 +735,60 @@ def _comparison_context(directory: Path) -> dict:
         raise ValueError("missing comparison context; capture both sides with the current runner")
     return {**{key: context[key] for key in keys},
             "model_config_sha256": manifest["model_config_sha256"],
+            "source_sha256": context.get("source_sha256"),
+            "timeout_seconds": manifest.get("timeout_seconds"),
+            "timeout_budget": manifest.get("timeout_budget"),
+            "rate_limit_retry_policy": manifest.get("rate_limit_retry_policy"),
             "schema_version": manifest.get("schema_version")}
 
 
-def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK) -> dict:
-    """Per-case pass counts and mean cost for two groups of repeated runs.
+def compare_runs(
+    baseline: list[Path], candidate: list[Path], pack: Path = PACK, *, compare_models: bool = False,
+) -> dict:
+    """Per-case pass counts and observed resource use for repeated runs.
 
     Pass rate is over verified attempts (passed + failed); unverified ones
     (provider errors, timeouts, incomplete capture) are reported separately so
     infrastructure noise neither hides nor fakes a regression. A regression is
     any case whose candidate pass rate is lower than the baseline's.
     """
-    contexts = [_comparison_context(directory.resolve()) for directory in [*baseline, *candidate]]
     if not baseline or not candidate:
         raise ValueError("both comparison sides require runs")
-    if any(context != contexts[0] for context in contexts[1:]):
+    contexts = [_comparison_context(directory.resolve()) for directory in [*baseline, *candidate]]
+    before_model = contexts[0].get("model_config_sha256")
+    after_model = contexts[len(baseline)].get("model_config_sha256")
+    # Default comparisons vary source policy while keeping the model fixed.
+    # Model comparisons vary only the model binding and require identical source.
+    ignored = {"model_config_sha256"} if compare_models else {"source_sha256"}
+    comparable = [{key: value for key, value in context.items() if key not in ignored} for context in contexts]
+    if compare_models:
+        if any(not context.get("source_sha256") for context in contexts):
+            raise ValueError("missing source provenance for model comparison")
+        for group, expected in ((contexts[:len(baseline)], before_model), (contexts[len(baseline):], after_model)):
+            if any(context.get("model_config_sha256") != expected for context in group):
+                raise ValueError("mixed model configurations within a comparison side")
+    if any(context != comparable[0] for context in comparable[1:]):
         raise ValueError("incompatible comparison context: model, runner, pack, profile or environment differs")
-    before = _side(baseline, pack, contexts[0].get("model_config_sha256"))
-    after = _side(candidate, pack, contexts[0].get("model_config_sha256"))
+    before = _side(baseline, pack, before_model, contexts[0].get("timeout_budget"))
+    after = _side(candidate, pack, after_model, contexts[len(baseline)].get("timeout_budget"))
     mean = lambda values: round(sum(values) / len(values), 1) if values else None
     cases = []
     for case_id in sorted(set(before) | set(after)):
         rows = {}
         for label, side in (("baseline", before), ("candidate", after)):
             row = side.get(case_id, {"passed": 0, "failed": 0, "unverified": 0,
-                                     "tokens": [], "tool_calls": [], "failed_tool_calls": []})
+                                     "tokens": [], "tool_calls": [], "failed_tool_calls": [],
+                                     "latencies": [], "request_models": {}, "routing_decisions": 0,
+                                     "routing_observed_attempts": 0})
             verified = row["passed"] + row["failed"]
             rows[label] = {"passed": row["passed"], "verified": verified, "unverified": row["unverified"],
                            "pass_rate": row["passed"] / verified if verified else None,
                            "mean_tokens": mean(row["tokens"]), "mean_tool_calls": mean(row["tool_calls"]),
-                           "mean_failed_tool_calls": mean(row["failed_tool_calls"])}
+                           "mean_failed_tool_calls": mean(row["failed_tool_calls"]),
+                           "mean_latency_seconds": mean(row["latencies"]),
+                           "request_models": row["request_models"],
+                           "routing_decisions": row["routing_decisions"],
+                           "routing_observed_attempts": row["routing_observed_attempts"]}
         cases.append({"case_id": case_id, **rows})
     inconclusive = [case["case_id"] for case in cases
                     if case["baseline"]["pass_rate"] is None or case["candidate"]["pass_rate"] is None]
@@ -474,11 +796,15 @@ def compare_runs(baseline: list[Path], candidate: list[Path], pack: Path = PACK)
                    and case["baseline"]["pass_rate"] > case["candidate"]["pass_rate"]]
     return {"pack": str(pack), "baseline_runs": [str(p) for p in baseline],
             "candidate_runs": [str(p) for p in candidate], "cases": cases,
+            "comparison_mode": "model_configs" if compare_models else "same_model",
+            "model_configs": {"baseline": before_model, "candidate": after_model},
             "regressions": regressions, "inconclusive": inconclusive, "context": contexts[0]}
 
 
 def render_comparison(report: dict) -> str:
-    lines = ["| case | baseline pass (unverified) | candidate pass (unverified) | baseline tokens "
+    lines = [f"comparison mode: {report.get('comparison_mode', 'same_model')}",
+             f"model configuration hashes: {json.dumps(report.get('model_configs', {}), sort_keys=True)}", "",
+             "| case | baseline pass (unverified) | candidate pass (unverified) | baseline tokens "
              "| candidate tokens | baseline tool calls (failed) | candidate tool calls (failed) |",
              "|---|---|---|---|---|---|---|"]
     for case in report["cases"]:
@@ -490,6 +816,18 @@ def render_comparison(report: dict) -> str:
             f"| {b['mean_tool_calls']} ({b['mean_failed_tool_calls']}) "
             f"| {c['mean_tool_calls']} ({c['mean_failed_tool_calls']}) |"
         )
+    lines.append("")
+    lines.extend([
+        "Metrics below cover verified attempts; request models include auxiliary calls.",
+        "| case | side | mean seconds | request model counts | routing decisions | attempts with routing evidence |",
+        "|---|---|---|---|---|---|",
+    ])
+    for case in report["cases"]:
+        for label in ("baseline", "candidate"):
+            row = case[label]
+            models = json.dumps(row["request_models"], ensure_ascii=False).replace("|", "\\|")
+            lines.append(f"| {case['case_id']} | {label} | {row['mean_latency_seconds']} | {models} "
+                         f"| {row['routing_decisions']} | {row['routing_observed_attempts']}/{row['verified']} |")
     lines.append("")
     lines.append(f"regressions: {', '.join(report['regressions']) or 'none'}")
     lines.append(f"inconclusive: {', '.join(report['inconclusive']) or 'none'}")
@@ -505,6 +843,7 @@ def main(argv: list[str] | None = None) -> int:
     models.add_argument("--catalog-model")
     run.add_argument("--case-id", action="append", required=True)
     run.add_argument("--pack", type=Path, default=PACK)
+    run.add_argument("--timeout-seconds", type=float, help="显式短时评测；默认沿用标准 ACP 预算")
     check = sub.add_parser("check")
     check.add_argument("run_dir", type=Path)
     check.add_argument("--pack", type=Path, default=PACK)
@@ -512,11 +851,14 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--pack", type=Path, default=PACK)
     compare.add_argument("--baseline", type=Path, nargs="+", required=True)
     compare.add_argument("--candidate", type=Path, nargs="+", required=True)
+    compare.add_argument("--compare-models", action="store_true",
+                         help="allow different model bindings with identical source and evaluation conditions")
     args = parser.parse_args(argv)
     pack = args.pack.resolve()
     if args.command == "compare":
         try:
-            report = compare_runs(args.baseline, args.candidate, pack)
+            report = compare_runs(args.baseline, args.candidate, pack,
+                                  **({"compare_models": True} if args.compare_models else {}))
         except (OSError, ValueError, KeyError) as error:
             print(f"comparison unavailable: {type(error).__name__}: {error}")
             return 2
@@ -527,7 +869,9 @@ def main(argv: list[str] | None = None) -> int:
         title = f"q0-{uuid4().hex[:8]}"
         identity = source_identity(pack)
         arguments = ["--dataset", str(pack / "dataset.jsonl"), "--title", title,
-                     "--timeout-seconds", "180", "--parallelism", "1", "--seed", "13"]
+                     "--parallelism", "1", "--seed", "13"]
+        if args.timeout_seconds is not None:
+            arguments += ["--timeout-seconds", str(args.timeout_seconds)]
         if args.catalog_model:
             catalog = read_json(ROOT / "test_workspace/evaluation_models.json")
             binding = next(item["binding"] for item in catalog["models"] if item["id"] == args.catalog_model)

@@ -496,7 +496,7 @@ def test_malformed_frame_remains_in_raw_and_marks_attempt_corrupt(tmp_path: Path
 
 
 def test_timeout_records_cancel_shutdown_and_terminal_stream_events(tmp_path: Path) -> None:
-    result, attempt, _, _ = run_mode(tmp_path, "timeout", timeout=0.1)
+    result, attempt, _, _ = run_mode(tmp_path, "timeout", timeout=0.5)
 
     protocol = read_jsonl(attempt / "protocol.jsonl")
     assert any(
@@ -514,6 +514,54 @@ def test_timeout_records_cancel_shutdown_and_terminal_stream_events(tmp_path: Pa
     }
     assert result.acp_status == "timeout"
     assert read_json(attempt / "manifest.json")["status"] == "incomplete"
+    assert read_json(attempt / "run.json")["timeout_details"] == {
+        "source": "evaluation_deadline", "phase": "prompt", "timeout_seconds": 0.5,
+    }
+    run = read_json(attempt / "run.json")
+    assert run["response_metadata"] is None
+    assert run["turn_id"] == "eval-acp-timeout-turn-1"
+    assert run["turn_id_source"] == "request"
+    completeness = read_json(attempt / "completeness.json")
+    assert not any("identity_mismatch" in issue for issue in completeness["issues"])
+    assert run["completeness_status"] == completeness["status"]
+
+
+def test_attempt_deadline_also_bounds_blocked_stdin_writes(tmp_path, monkeypatch):
+    import asyncio
+    cancelled = []
+
+    async def blocked_send(*_):
+        try:
+            await asyncio.sleep(0.25)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(case_runner_module, "_send", blocked_send)
+    started = time.monotonic()
+    result, attempt, _, _ = run_mode(tmp_path, "normal", timeout=0.05)
+    assert time.monotonic() - started < 2
+    assert cancelled == [True]
+    assert result.acp_status == "timeout"
+    assert read_json(attempt / "run.json")["timeout_details"]["phase"] == "initialize"
+
+
+def test_timeout_shutdown_does_not_wait_forever_to_send_cancel(tmp_path, monkeypatch):
+    import asyncio
+    original_send = case_runner_module._send
+
+    async def send(process, recorder, message):
+        if message.get("method") == "session/cancel":
+            await asyncio.Event().wait()
+        await original_send(process, recorder, message)
+
+    monkeypatch.setattr(case_runner_module, "_send", send)
+    started = time.monotonic()
+    result, attempt, _, _ = run_mode(tmp_path, "timeout", timeout=0.5)
+    assert time.monotonic() - started < 5
+    assert result.acp_status == "timeout"
+    assert any(row["event"] == "cancel.not_sent" and row["reason"] == "send-timeout"
+               for row in read_jsonl(attempt / "process.jsonl"))
 
 
 def test_slow_drip_without_newline_uses_one_absolute_attempt_deadline(
@@ -530,6 +578,25 @@ def test_slow_drip_without_newline_uses_one_absolute_attempt_deadline(
     assert raw.endswith(b"{")
     assert b"\n" not in raw.rsplit(b"\n", 1)[-1]
     assert read_json(attempt / "completeness.json")["status"] == "corrupt"
+
+
+@pytest.mark.parametrize("mode,phase", [
+    ("initialize-timeout", "initialize"), ("new-session-timeout", "session_new"),
+])
+def test_startup_timeout_records_phase_without_cancelling_unknown_session(tmp_path, mode, phase):
+    result, attempt, _, _ = run_mode(tmp_path, mode, timeout=0.5)
+    assert result.acp_status == "timeout"
+    assert read_json(attempt / "run.json")["timeout_details"]["phase"] == phase
+    assert not any(row["message"].get("method") == "session/cancel"
+                   for row in read_jsonl(attempt / "protocol.jsonl"))
+
+
+def test_completion_arriving_after_deadline_does_not_replace_timeout(tmp_path):
+    result, attempt, _, _ = run_mode(tmp_path, "late-completion", timeout=0.5)
+    assert result.acp_status == "timeout"
+    run = read_json(attempt / "run.json")
+    assert run["response_metadata"]["completed"] is True
+    assert run["timeout_details"]["source"] == "evaluation_deadline"
 
 
 def test_trailing_stderr_is_drained_and_classified(tmp_path: Path) -> None:

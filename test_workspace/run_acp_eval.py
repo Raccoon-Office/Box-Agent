@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import secrets
@@ -71,13 +72,15 @@ def build_command(
     dataset: Path,
     output_dir: Path,
     case_ids: Sequence[str],
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     parallelism: int,
     effect_eval_url: str | None = None,
     effect_eval_timeout_seconds: float = 180.0,
     model: str | None = None,
     model_max_tokens: int | None = None,
     model_binding: dict[str, Any] | None = None,
+    rate_limit_retries: int = 2,
+    rate_limit_backoff_seconds: float = 120.0,
 ) -> list[str]:
     command = [
         "uv",
@@ -91,11 +94,13 @@ def build_command(
         str(dataset),
         "--run-dir",
         str(output_dir),
-        "--timeout-seconds",
-        str(timeout_seconds),
         "--parallelism",
         str(parallelism),
+        "--rate-limit-retries", str(rate_limit_retries),
+        "--rate-limit-backoff-seconds", str(rate_limit_backoff_seconds),
     ]
+    if timeout_seconds is not None:
+        command.extend(("--timeout-seconds", str(timeout_seconds)))
     for case_id in case_ids:
         command.extend(("--case-id", case_id))
     if effect_eval_url:
@@ -129,8 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--title", default="smoke-test")
     parser.add_argument("--case-id", action="append", default=[])
-    parser.add_argument("--timeout-seconds", type=float, default=2700.0)
+    parser.add_argument("--timeout-seconds", type=float,
+                        help="显式指定单次 ACP 时限；默认按运行时等待预算计算，至少 2700 秒")
     parser.add_argument("--parallelism", type=int)
+    parser.add_argument("--rate-limit-retries", type=int, choices=range(6), default=2,
+                        help="尚未执行工具的 429 最多重试次数，默认 2；0 禁用重试")
+    parser.add_argument("--rate-limit-backoff-seconds", type=float, default=120.0,
+                        help="批内共享指数退避起点，默认 120 秒，单次最多 600 秒")
     parser.add_argument(
         "--effect-eval-url",
         default=os.environ.get("BOX_AGENT_EFFECT_EVAL_URL"),
@@ -157,10 +167,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     dataset = (args.dataset or repo_root / DEFAULT_DATASET).resolve()
     if not dataset.is_file():
         raise FileNotFoundError(f"评测集不存在: {dataset}")
-    if args.timeout_seconds <= 0:
-        raise ValueError("--timeout-seconds 必须大于 0")
+    if args.timeout_seconds is not None and (not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0):
+        raise ValueError("--timeout-seconds 必须为有限正数")
     if args.effect_eval_timeout_seconds <= 0:
         raise ValueError("--effect-eval-timeout-seconds 必须大于 0")
+    if not math.isfinite(args.rate_limit_backoff_seconds) or not 0 < args.rate_limit_backoff_seconds <= 600:
+        raise ValueError("--rate-limit-backoff-seconds 必须在 (0, 600] 内")
     if args.model_max_tokens is not None and args.model_max_tokens < 1:
         raise ValueError("--model-max-tokens 必须大于 0")
     if args.model is not None and not args.model.strip():
@@ -214,6 +226,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "model": args.model,
         "model_max_tokens": args.model_max_tokens,
         "model_binding": model_binding,
+        "requested_timeout_seconds": args.timeout_seconds,
+        "rate_limit_retries": args.rate_limit_retries,
+        "rate_limit_backoff_seconds": args.rate_limit_backoff_seconds,
     }
     (output_dir / "selection.json").write_text(
         json.dumps(selection, ensure_ascii=False, indent=2) + "\n",
@@ -232,6 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.model,
         args.model_max_tokens,
         model_binding,
+        args.rate_limit_retries,
+        args.rate_limit_backoff_seconds,
     )
     print(f"输出目录: {output_dir}")
     print(f"随机种子: {seed}")

@@ -10,8 +10,11 @@ import subprocess
 import sys
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
+from time import monotonic, sleep
 from typing import Any, Mapping, Sequence
 
 from acp_eval import SCHEMA_VERSION
@@ -166,6 +169,50 @@ def _runtime_identity(repo_root: Path, python_executable: str) -> dict[str, Any]
             "git_commit": git_commit,
             "git_commit_status": "available" if git_commit is not None else "unavailable",
         },
+    }
+
+
+def _timeout_budget(
+    repo_root: Path, python_executable: str, requested_seconds: float | None,
+) -> dict[str, Any]:
+    # Read only numeric policy from the same interpreter/config/environment as
+    # ACP. Do not duplicate runtime defaults or print the user's configuration.
+    output = _command_value([
+        python_executable, "-c",
+        "import json; from box_agent.config import Config; "
+        "from box_agent.kernel.loop import _resolve_provider_stale_seconds, MAX_PROVIDER_STALE_RECOVERIES; "
+        "print(json.dumps({'provider_stale_seconds': "
+        "_resolve_provider_stale_seconds(Config.from_yaml(Config.find_config_file('config.yaml')).agent.provider_stale_seconds), "
+        "'max_provider_stale_recoveries': MAX_PROVIDER_STALE_RECOVERIES}))",
+    ], repo_root)
+    wait = recoveries = minimum = None
+    try:
+        policy = json.loads(output or "null")
+        wait = policy["provider_stale_seconds"]
+        recoveries = policy["max_provider_stale_recoveries"]
+        if (type(wait) not in {float, int} or not math.isfinite(wait) or wait <= 0
+                or type(recoveries) is not int or recoveries < 0):
+            raise ValueError("invalid runtime wait policy")
+        # One main request, its bounded stale recoveries, one final judge,
+        # and 60s for ACP startup/transport. Tools and further steps may need more.
+        minimum = (recoveries + 2) * wait + 60.0
+        if not math.isfinite(minimum):
+            raise ValueError("invalid runtime wait budget")
+    except (ValueError, KeyError, TypeError):
+        wait = recoveries = minimum = None
+    effective = (requested_seconds if requested_seconds is not None
+                 else max(2700.0, minimum or 0.0))
+    status = ("unavailable" if minimum is None
+              else "aligned" if effective >= minimum else "constrained")
+    return {
+        "mode": "auto" if requested_seconds is None else "explicit",
+        "requested_task_seconds": requested_seconds,
+        "effective_task_seconds": effective,
+        "provider_stale_seconds": wait,
+        "max_provider_stale_recoveries": recoveries,
+        "startup_allowance_seconds": 60.0,
+        "minimum_task_seconds": minimum,
+        "status": status,
     }
 
 
@@ -367,6 +414,7 @@ def _terminal_attempt(
     current_fingerprint: Mapping[str, Any],
     current_runtime: Mapping[str, Any],
     model_config_sha256: str,
+    timeout_budget: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     _validate_case_storage(output_dir, case_id)
     case_dir = output_dir / "cases" / case_id
@@ -427,6 +475,8 @@ def _terminal_attempt(
     if result.get("case_fingerprint") != current_fingerprint:
         return None
     if result.get("model_config_sha256") != model_config_sha256:
+        return None
+    if result.get("evaluation_timeout_budget", result.get("timeout_budget")) != timeout_budget:
         return None
     stored_runtime = _stable_runtime_identity(result.get("runtime"))
     comparable_runtime = _stable_runtime_identity(current_runtime)
@@ -507,6 +557,7 @@ def _write_attempt_batch_metadata(
     expected_fingerprint: Mapping[str, Any],
     runtime: Mapping[str, Any],
     model_config_sha256: str,
+    evaluation_timeout_budget: Mapping[str, Any] | None = None,
 ) -> None:
     attempt_dir = (
         output_dir / "cases" / result.case_id / "attempts" / result.attempt_id
@@ -518,6 +569,8 @@ def _write_attempt_batch_metadata(
     run_document["case_fingerprint"] = dict(case_fingerprint)
     run_document["runtime"] = dict(runtime)
     run_document["model_config_sha256"] = model_config_sha256
+    if evaluation_timeout_budget is not None:
+        run_document["evaluation_timeout_budget"] = dict(evaluation_timeout_budget)
     matches = case_fingerprint == expected_fingerprint
     run_document["input_consistency"] = {
         "status": "matched" if matches else "mismatch",
@@ -624,11 +677,102 @@ def _batch_error(
     }
 
 
+class _RateLimitCooldown:
+    """One batch-wide gate; in-flight attempts finish, queued work cools down."""
+
+    def __init__(self, base_seconds: float):
+        self.base_seconds = base_seconds
+        self.not_before = 0.0
+        self.failures = 0
+        self.stopped = False
+        self.lock = Lock()
+
+    def defer(self) -> float:
+        with self.lock:
+            self.failures += 1
+            delay = min(600.0, self.base_seconds * (2 ** min(self.failures - 1, 10)))
+            self.not_before = max(self.not_before, monotonic() + delay)
+            return delay
+
+    def stop(self) -> None:
+        with self.lock:
+            self.stopped = True
+
+    def wait(self, deadline: float) -> tuple[float, str | None]:
+        started = monotonic()
+        waited = False
+        while True:
+            with self.lock:
+                now = monotonic()
+                reason = 'circuit_open' if self.stopped else None
+                delay = max(0.0, self.not_before - now)
+            if reason or now + delay >= deadline:
+                return (now - started if waited else 0.0), reason or 'evaluation_deadline'
+            if not delay:
+                return (now - started if waited else 0.0), None
+            sleep(min(delay, 1.0))
+            waited = True
+
+
+def _provider_rate_limit(run: Mapping[str, Any]) -> bool:
+    metadata = run.get('response_metadata') or {}
+    details = metadata.get('errorDetails') or {}
+    return (run.get('acp_status') == 'error' and details.get('source') == 'llm_provider'
+            and details.get('httpStatus') == 429)
+
+
+def _rate_limit_before_tools(attempt: Path) -> bool:
+    """Replay only a fully captured, explicitly retryable provider 429 with no effects."""
+    run = _read_mapping(attempt / 'run.json') or {}
+    details = (run.get('response_metadata') or {}).get('errorDetails') or {}
+    if not (_provider_rate_limit(run) and details.get('retryable') is True
+            and run.get('completeness_status') in {'complete', 'complete_with_warnings'}
+            and run.get('input_consistency', {}).get('status') == 'matched'
+            and run.get('permission_request_count', 0) == 0):
+        return False
+    paths = list((attempt / 'agent').glob('*.jsonl'))
+    if not paths:
+        return False
+    requests = 0
+    errors = []
+    turn_errors = []
+    try:
+        for path in paths:
+            with path.open() as stream:
+                for line in stream:
+                    event = json.loads(line)
+                    if event.get('event') in {'tool.request', 'tool.response', 'llm.response'}:
+                        return False
+                    requests += event.get('event') == 'llm.request'
+                    if event.get('event') == 'llm.error':
+                        errors.append(event.get('data') or {})
+                    if event.get('event') == 'turn.error':
+                        turn_errors.append(event.get('data') or {})
+        if any(e.get('partial_content') or e.get('partial_thinking') for e in errors):
+            return False
+        if run.get('assistant_text_length') == 0:
+            return requests > 0
+        # ACP renders fatal ErrorEvents as an assistant message. Accept only
+        # that exact notice, corroborated by a single empty provider attempt.
+        message = (run.get('response_metadata') or {}).get('error')
+        notice = f'Error: {message}'
+        return (requests == 1 and len(errors) == 1
+                and errors[0].get('partial_content') == ''
+                and 'partial_thinking' in errors[0]
+                and len(turn_errors) == 1 and isinstance(message, str) and bool(message)
+                and turn_errors[0].get('message') == message
+                and turn_errors[0].get('error_details') == details
+                and run.get('assistant_text_length') == len(notice)
+                and (attempt / 'assistant.txt').read_text(encoding='utf-8') == notice)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def run_batch(
     dataset: Path,
     output_dir: Path,
     repo_root: Path,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     parallelism: int,
     case_ids: Sequence[str],
     *,
@@ -638,13 +782,19 @@ def run_batch(
     model: str | None = None,
     model_max_tokens: int | None = None,
     model_binding: Mapping[str, Any] | None = None,
+    rate_limit_retries: int = 2,
+    rate_limit_backoff_seconds: float = 120.0,
 ) -> int:
     """Run selected cases, atomically index attempts, and return a process code."""
 
-    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+    if timeout_seconds is not None and (not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
         raise ValueError("timeout_seconds must be finite and greater than zero")
     if parallelism < 1:
         raise ValueError("parallelism must be at least one")
+    if type(rate_limit_retries) is not int or not 0 <= rate_limit_retries <= 5:
+        raise ValueError('rate_limit_retries must be an integer between 0 and 5')
+    if not math.isfinite(rate_limit_backoff_seconds) or not 0 < rate_limit_backoff_seconds <= 600:
+        raise ValueError('rate_limit_backoff_seconds must be finite and in (0, 600]')
     if not math.isfinite(effect_eval_timeout_seconds) or effect_eval_timeout_seconds <= 0:
         raise ValueError(
             "effect_eval_timeout_seconds must be finite and greater than zero"
@@ -680,6 +830,12 @@ def run_batch(
     run_id = prior_run_id or new_run_id()
     python_executable = _python_executable(repo_root)
     runtime = _runtime_identity(repo_root, python_executable)
+    timeout_budget = _timeout_budget(repo_root, python_executable, timeout_seconds)
+    timeout_seconds = timeout_budget["effective_task_seconds"]
+    if timeout_budget["status"] != "aligned":
+        print(f"acp-eval: timeout budget {timeout_budget['status']}: "
+              f"task={timeout_seconds:g}s, minimum={timeout_budget['minimum_task_seconds']}; "
+              "timeouts do not establish task-quality failure", file=sys.stderr)
     case_fingerprints = {
         record["id"]: _case_fingerprint(record, dataset.parent)
         for record in all_records
@@ -697,8 +853,11 @@ def run_batch(
         "repo_root": str(repo_root),
         "selected_case_ids": selected_ids,
         "timeout_seconds": timeout_seconds,
+        "timeout_budget": timeout_budget,
         "parallelism": parallelism,
         "retry_terminal": retry_terminal,
+        "rate_limit_retry_policy": {"max_retries": rate_limit_retries, "base_seconds": rate_limit_backoff_seconds,
+                                    "max_delay_seconds": 600, "budget_scope": "case_including_backoff"},
         "dataset_fingerprint": dataset_fingerprint,
         "runtime": runtime,
         "model_config_sha256": model_config_sha256,
@@ -721,6 +880,7 @@ def run_batch(
                     case_fingerprints[record["id"]],
                     runtime,
                     model_config_sha256,
+                    timeout_budget,
                 )
         except LatestIndexError as error:
             summaries[record["id"]] = _batch_error(
@@ -737,6 +897,7 @@ def run_batch(
         evaluation_dir=output_dir,
         dataset_root=dataset.parent,
         timeout_seconds=timeout_seconds,
+        timeout_budget=timeout_budget,
         python_executable=python_executable,
         effect_eval_url=effect_eval_url,
         effect_eval_timeout_seconds=effect_eval_timeout_seconds,
@@ -744,61 +905,117 @@ def run_batch(
         model_max_tokens=model_max_tokens,
         model_binding=dict(model_binding) if model_binding is not None else None,
     )
+    cooldown = _RateLimitCooldown(rate_limit_backoff_seconds)
+
+    def execute_attempt(record: dict[str, Any], attempt_config: CaseConfig) -> dict[str, Any]:
+        case_id = record['id']
+        try:
+            result = run_case(record, attempt_config)
+        except Exception as error:
+            return _batch_error(case_id, 'batch_error', error)
+        result_payload = result.to_dict()
+        try:
+            copied_fingerprint = _copied_case_fingerprint(
+                output_dir,
+                record=selected_records[case_id],
+                result=result,
+            )
+        except Exception as error:
+            case_summary = _case_summary(result_payload, "indexing_error")
+            case_summary["error"] = f"{type(error).__name__}: {error}"
+            return case_summary
+        result_payload["case_fingerprint"] = copied_fingerprint
+        result_payload["runtime"] = runtime
+        mismatch = copied_fingerprint != case_fingerprints[case_id]
+        if mismatch:
+            result_payload["completeness_status"] = "corrupt"
+        case_summary = _case_summary(result_payload, "executed")
+        try:
+            _write_attempt_batch_metadata(
+                output_dir,
+                result,
+                copied_fingerprint,
+                case_fingerprints[case_id],
+                runtime,
+                model_config_sha256,
+                timeout_budget,
+            )
+            if mismatch:
+                raise InputFingerprintMismatch(
+                    "input fingerprint mismatch between source and copied workspace"
+                )
+            atomic_write_json(
+                output_dir / "cases" / case_id / "latest.json",
+                {
+                    "attempt_id": result.attempt_id,
+                    "path": f"attempts/{result.attempt_id}",
+                },
+            )
+        except Exception as error:
+            case_summary["disposition"] = "indexing_error"
+            case_summary["error"] = f"{type(error).__name__}: {error}"
+        return case_summary
+
+    def execute_case(record: dict[str, Any]) -> dict[str, Any]:
+        started = monotonic()
+        deadline = started + timeout_seconds
+        attempts: list[dict[str, Any]] = []
+        wait_seconds = 0.0
+        stop_reason = None
+        while True:
+            waited, stop_reason = cooldown.wait(deadline)
+            wait_seconds += waited
+            if stop_reason:
+                break
+            remaining = deadline - monotonic() if attempts or waited else timeout_seconds
+            if remaining <= 0:
+                stop_reason = 'evaluation_deadline'
+                break
+            attempt_budget = {**timeout_budget, 'effective_task_seconds': remaining}
+            if timeout_budget['minimum_task_seconds'] is not None and remaining < timeout_budget['minimum_task_seconds']:
+                attempt_budget['status'] = 'constrained'
+            current = execute_attempt(record, replace(config, timeout_seconds=remaining, timeout_budget=attempt_budget))
+            attempts.append(current)
+            # Persist each attempt before waiting or retrying. Raw attempt files
+            # and first-attempt failures remain available to scoring/billing.
+            atomic_write_json(output_dir / 'cases' / record['id'] / 'retry-history.json', {
+                'attempts': attempts, 'initial_timeout_budget': timeout_budget,
+                'retry_wait_seconds': wait_seconds,
+            })
+            if (current['disposition'] != 'executed'
+                    or not _rate_limit_before_tools(output_dir / current['attempt_path'])):
+                stop_reason = 'not_retryable' if current['acp_status'] == 'error' else 'finished'
+                if current.get('attempt_path') and _provider_rate_limit(
+                        _read_mapping(output_dir / current['attempt_path'] / 'run.json') or {}):
+                    # An unsafe-to-replay 429 still signals that queued work
+                    # must stop; do not start fresh cases against that limit.
+                    cooldown.stop()
+                break
+            if len(attempts) > rate_limit_retries:
+                stop_reason = 'retry_limit'
+                cooldown.stop()
+                break
+            cooldown.defer()
+        final = dict(attempts[-1]) if attempts else _batch_error(
+            record['id'], 'deferred_rate_limit', RuntimeError(stop_reason))
+        final.update(attempts=attempts, retry_wait_seconds=wait_seconds,
+                     evaluation_elapsed_seconds=monotonic() - started, retry_stop_reason=stop_reason)
+        atomic_write_json(output_dir / 'cases' / record['id'] / 'retry-history.json', {
+            'attempts': attempts, 'initial_timeout_budget': timeout_budget,
+            'retry_wait_seconds': wait_seconds, 'evaluation_elapsed_seconds': final['evaluation_elapsed_seconds'],
+            'stop_reason': stop_reason,
+        })
+        return final
+
     if pending:
         with ThreadPoolExecutor(max_workers=min(parallelism, len(pending))) as executor:
-            futures = {
-                executor.submit(run_case, record, config): record["id"]
-                for record in pending
-            }
+            futures = {executor.submit(execute_case, record): record['id'] for record in pending}
             for future in as_completed(futures):
                 case_id = futures[future]
                 try:
-                    result = future.result()
+                    summaries[case_id] = future.result()
                 except Exception as error:
-                    summaries[case_id] = _batch_error(case_id, "batch_error", error)
-                    continue
-                result_payload = result.to_dict()
-                try:
-                    copied_fingerprint = _copied_case_fingerprint(
-                        output_dir,
-                        record=selected_records[case_id],
-                        result=result,
-                    )
-                except Exception as error:
-                    case_summary = _case_summary(result_payload, "indexing_error")
-                    case_summary["error"] = f"{type(error).__name__}: {error}"
-                    summaries[case_id] = case_summary
-                    continue
-                result_payload["case_fingerprint"] = copied_fingerprint
-                result_payload["runtime"] = runtime
-                mismatch = copied_fingerprint != case_fingerprints[case_id]
-                if mismatch:
-                    result_payload["completeness_status"] = "corrupt"
-                case_summary = _case_summary(result_payload, "executed")
-                try:
-                    _write_attempt_batch_metadata(
-                        output_dir,
-                        result,
-                        copied_fingerprint,
-                        case_fingerprints[case_id],
-                        runtime,
-                        model_config_sha256,
-                    )
-                    if mismatch:
-                        raise InputFingerprintMismatch(
-                            "input fingerprint mismatch between source and copied workspace"
-                        )
-                    atomic_write_json(
-                        output_dir / "cases" / case_id / "latest.json",
-                        {
-                            "attempt_id": result.attempt_id,
-                            "path": f"attempts/{result.attempt_id}",
-                        },
-                    )
-                except Exception as error:
-                    case_summary["disposition"] = "indexing_error"
-                    case_summary["error"] = f"{type(error).__name__}: {error}"
-                summaries[case_id] = case_summary
+                    summaries[case_id] = _batch_error(case_id, 'batch_error', error)
 
     ordered = [summaries[case_id] for case_id in selected_ids]
     counts = _counts(ordered, len(records))
@@ -809,12 +1026,16 @@ def run_batch(
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "status": status,
+        "timeout_budget": timeout_budget,
         "started_at": started_at,
         "finished_at": finished_at,
         "dataset_fingerprint": dataset_fingerprint,
         "runtime": runtime,
         "model_config_sha256": model_config_sha256,
         "counts": counts,
+        "attempt_counts": _counts([a for case in ordered for a in case.get('attempts', [])], len(records)),
+        "initial_attempt_counts": _counts([case['attempts'][0] for case in ordered if case.get('attempts')], len(records)),
+        "rate_limit_retry_policy": manifest['rate_limit_retry_policy'],
         "cases": ordered,
     }
     atomic_write_json(output_dir / "summary.json", summary)
