@@ -103,6 +103,16 @@ incomplete scans, changed inputs, failed checks or exhausted repair attempts end
 with `COMPLETION_GATE_UNSATISFIED`. Scanned field contracts cannot be relaxed,
 and later turns must revalidate.
 
+Interactive user questions and plan-approval pauses retain pending checks.
+`completion.paused` stores capability-owned inputs, hashes, locked contracts,
+roles and scan receipts in Session Log; a reopened session restores them before
+adding any newly supplied inputs. An in-memory conversation uses a scoped
+checkpoint on its existing tools. Transcript text and public tool JSON are never
+replayed as validation evidence. Resumed checks recheck current file hashes;
+missing capabilities or unsupported checkpoints block completion. A terminal
+success, failure or cancellation closes the pending task with `completion.closed`,
+so an unrelated later task starts fresh. Only Session Log provides durable state.
+
 Declare `purpose` before the first scan: `diagnosis` only inspects/reports errors;
 `computation` requires valid inputs and is the initial default. Omitted later
 calls inherit the run's locked purpose. The `table.purpose` event records this

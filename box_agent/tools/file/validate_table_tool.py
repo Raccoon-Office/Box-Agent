@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -75,6 +76,34 @@ class TableCompletionGate:
         self.validation_locks: dict[Path, asyncio.Lock] = {}
         self.contracts: dict[Path, dict] = {}
         self.purpose: str | None = None
+
+    def snapshot(self) -> dict:
+        return deepcopy({
+            "version": 1,
+            "sources": {str(p): sha for p, sha in self.sources.items()},
+            "contracts": {str(p): value for p, value in self.contracts.items()},
+            "source_modes": {str(p): mode for p, mode in self.source_modes.items()},
+            "receipts": {str(p): asdict(value) for p, value in self.receipts.items()},
+            "original_receipts": {str(p): asdict(value) for p, value in self.original_receipts.items()},
+            "original_is_current": [str(p) for p, value in self.receipts.items()
+                                    if value is self.original_receipts.get(p)],
+            "purpose": self.purpose,
+        })
+
+    @classmethod
+    def restore(cls, tool: ValidateTableTool, context: CompletionContext, state: dict) -> TableCompletionGate:
+        if state.get("version") != 1:
+            raise ValueError("Unsupported table completion checkpoint")
+        gate = cls(tool, context, set())
+        gate.sources = {Path(p): sha for p, sha in state["sources"].items()}
+        gate.contracts = {Path(p): deepcopy(value) for p, value in state["contracts"].items()}
+        gate.source_modes = {Path(p): mode for p, mode in state["source_modes"].items()}
+        gate.receipts = {Path(p): TableScan(**deepcopy(value)) for p, value in state["receipts"].items()}
+        gate.original_receipts = {Path(p): TableScan(**deepcopy(value)) for p, value in state["original_receipts"].items()}
+        for path in state["original_is_current"]:
+            gate.receipts[Path(path)] = gate.original_receipts[Path(path)]
+        gate.purpose = state["purpose"]
+        return gate
 
     async def include_inputs(self, context: CompletionContext) -> None:
         latest = next((m.content for m in reversed(context.messages)
@@ -265,6 +294,9 @@ class ValidateTableTool(ReadTool):
         gate = TableCompletionGate(self, context, set())
         await gate.include_inputs(context)
         return gate if gate.sources else None
+
+    async def restore_completion_gate(self, context: CompletionContext, state: dict) -> TableCompletionGate:
+        return TableCompletionGate.restore(self, context, state)
 
     async def _invoke_validated(self, arguments: dict, *, context: ToolInvocationContext | None) -> ToolResult:
         gate = context.completion_gate if context is not None else None

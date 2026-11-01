@@ -341,6 +341,9 @@ async def test_session_log_separates_completed_validation_data_quality_and_compl
 
 
 class ScriptedLLM:
+    model = "test-model"
+    max_output_tokens = 1024
+
     def __init__(self, responses):
         self.responses = iter(responses)
 
@@ -355,6 +358,117 @@ def scripted_call(name, arguments, call_id):
     return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
         id=call_id, type="function", function=FunctionCall(name=name, arguments=arguments),
     )])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("storage", ["memory", "log", "reopen"])
+@pytest.mark.parametrize("state", ["missing", "invalid", "valid", "diagnosis", "changed"])
+async def test_agent_resumes_original_table_requirements_after_user_interaction(
+    tmp_path, monkeypatch, storage, state,
+):
+    from box_agent.agent import Agent
+    from box_agent.session_log import SessionLog
+    from box_agent.tools.request_user_input_tool import RequestUserInputTool
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    tool, _, path = await setup_gate(tmp_path, rows=[row(1, amount="-1" if state in {"invalid", "diagnosis"} else "1")])
+    log = SessionLog.create(tmp_path / "logs", session_id="resume", cwd=tmp_path) if storage != "memory" else None
+    purpose = "diagnosis" if state == "diagnosis" else "computation"
+    before = []
+    if state != "missing":
+        before.append(scripted_call(tool.name, {"path": str(path), "fields": FIELDS, "purpose": purpose,
+                                              "profile": "transaction_v1"}, "original"))
+    before.append(scripted_call("request_user_input", {"question": "Continue?", "missing_fields": ["decision"]}, "ask"))
+    after = []
+    if state == "invalid":
+        after.append(scripted_call(tool.name, {"path": str(path), "fields": FIELDS, "purpose": "diagnosis"}, "downgrade"))
+    after += [LLMResponse(content="Done", finish_reason="stop")] * 5
+
+    def agent_with(tool, responses):
+        return Agent(llm_client=ScriptedLLM(responses), system_prompt="system", tools=[tool, RequestUserInputTool()],
+                     workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, session_log=log, max_steps=6)
+
+    agent = agent_with(tool, before + after)
+    agent.add_user_message(f"Process {path} completely")
+    try:
+        first = [event async for event in agent.run_events()]
+        assert next(e for e in first if isinstance(e, DoneEvent)).stop_reason == StopReason.WAITING_FOR_USER
+        if state == "changed":
+            write_table(path, [row(2)])
+        if storage == "reopen":
+            log.close()
+            log = SessionLog.open(tmp_path / "logs", session_id="resume", cwd=tmp_path)
+            agent = agent_with(ValidateTableTool(str(tmp_path)), after)
+        agent.add_user_message("好的，继续")
+        resumed = [event async for event in agent.run_events()]
+        assert next(e for e in resumed if isinstance(e, DoneEvent)).stop_reason == (
+            StopReason.END_TURN if state in {"valid", "diagnosis"} else StopReason.ERROR
+        )
+        if state == "invalid":
+            result = next(e for e in resumed if isinstance(e, ToolCallResult))
+            assert not result.success and "TABLE_PURPOSE_CHANGED" in result.error
+        if log is not None:
+            assert any(e["type"] == "completion.paused" for e in log.events)
+            assert any(e["type"] == "completion.closed" for e in log.events)
+        # The completed/failed task must not contaminate a later independent turn.
+        agent.add_user_message("Hello")
+        independent = [event async for event in agent.run_events()]
+        assert next(e for e in independent if isinstance(e, DoneEvent)).stop_reason == StopReason.END_TURN
+    finally:
+        if log is not None:
+            log.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["edit_target", "replace_target", "delete_target"])
+async def test_reopened_session_retains_planned_file_operations_and_final_schema(tmp_path, monkeypatch, mode):
+    from box_agent.agent import Agent
+    from box_agent.session_log import SessionLog
+    from box_agent.tools.request_user_input_tool import RequestUserInputTool
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    path = tmp_path / "table.csv"
+    path.write_text("old\nvalue\n")
+    tool = ValidateTableTool(str(tmp_path))
+    arguments = {"path": str(path), "source_mode": mode}
+    if mode == "edit_target":
+        arguments.update(fields={"old": {"type": "text"}}, output_fields={"new": {"type": "text"}})
+    elif mode == "replace_target":
+        arguments["fields"] = {"new": {"type": "text"}}
+    log = SessionLog.create(tmp_path / "logs", session_id="operation", cwd=tmp_path)
+    first_model = ScriptedLLM([
+        scripted_call(tool.name, arguments, "prepare"),
+        scripted_call("request_user_input", {"question": "Apply the requested change?", "missing_fields": ["decision"]}, "ask"),
+    ])
+    agent = Agent(llm_client=first_model, system_prompt="system", tools=[tool, RequestUserInputTool()],
+                  workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, session_log=log)
+    agent.add_user_message(f"{mode} {path}")
+    first = [event async for event in agent.run_events()]
+    assert next(e for e in first if isinstance(e, DoneEvent)).stop_reason == StopReason.WAITING_FOR_USER
+    log.close()
+    if mode == "delete_target":
+        path.unlink()
+    else:
+        path.write_text("new\nvalue\n")
+    log = SessionLog.open(tmp_path / "logs", session_id="operation", cwd=tmp_path)
+    responses = [] if mode == "delete_target" else [scripted_call(tool.name, {"path": str(path)}, "final")]
+    responses.append(LLMResponse(content="Done", finish_reason="stop"))
+    try:
+        resumed_agent = Agent(llm_client=ScriptedLLM(responses), system_prompt="system", tools=[ValidateTableTool(str(tmp_path))],
+                              workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, session_log=log)
+        resumed_agent.add_user_message("Applied the change, continue.")
+        resumed = [event async for event in resumed_agent.run_events()]
+        assert next(e for e in resumed if isinstance(e, DoneEvent)).stop_reason == StopReason.END_TURN
+    finally:
+        log.close()
 
 
 @pytest.mark.asyncio

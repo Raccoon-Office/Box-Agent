@@ -52,3 +52,54 @@ async def test_failed_completion_check_is_fatal_not_silent_success(stage):
     issues = await checks.check()
     assert len(issues) == 1 and not issues[0].repairable
     assert issues[0].code == "COMPLETION_CHECK_FAILED"
+
+
+class ResumableTool(GatedTool):
+    async def create_completion_gate(self, context):
+        gate = await super().create_completion_gate(context)
+        gate.snapshot = lambda: {"passed": gate.passed}
+        return gate
+
+    async def restore_completion_gate(self, context, state):
+        gate = await self.create_completion_gate(context)
+        gate.passed = state["passed"]
+        return gate
+
+
+@pytest.mark.asyncio
+async def test_in_memory_checkpoint_is_scoped_and_ends_with_the_task():
+    tool, scope = ResumableTool(), []
+    context = CompletionContext((), lambda: False, resume_scope=scope)
+    original = await CompletionChecks.create({"gated": tool}, context)
+    original.gates["gated"].passed = True
+    original.suspend()
+    other_context = CompletionContext((), lambda: False, resume_scope=[])
+    unrelated = await CompletionChecks.create({"gated": tool}, other_context)
+    assert (await unrelated.check())[0].code == "MISSING"
+    unrelated.gates["gated"].passed = True
+    unrelated.suspend()
+    resumed = await CompletionChecks.create({"alias": tool}, context)
+    assert await resumed.check() == []
+    resumed.close()
+    fresh = await CompletionChecks.create({"gated": tool}, context)
+    assert (await fresh.check())[0].code == "MISSING"
+    other_resumed = await CompletionChecks.create({"gated": tool}, other_context)
+    assert await other_resumed.check() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing_tool", "unknown_version"])
+async def test_unrestorable_checkpoint_blocks_completion(tmp_path, failure):
+    from box_agent.session_log import SessionLog
+    log = SessionLog.create(tmp_path / "logs", session_id="check", cwd=tmp_path)
+    context = CompletionContext((), lambda: False, log)
+    try:
+        tool = ResumableTool()
+        checks = await CompletionChecks.create({"gated": tool}, context)
+        checks.suspend()
+        if failure == "unknown_version":
+            context.record("completion.paused", {"version": 999, "checks": {}})
+        restored = await CompletionChecks.create({}, context)
+        assert (await restored.check())[0].code == "COMPLETION_RESTORE_FAILED"
+    finally:
+        log.close()

@@ -619,6 +619,7 @@ async def _run_agent_loop_impl(
     *,
     _runtime_defaults: _LoopRuntimeDefaults,
     _services: KernelServices,
+    _on_completion_checks: Callable[[CompletionChecks], None] | None = None,
     messages: list[Message],
     max_steps: int = _DEFAULT_AGENT_CONFIG.max_steps,
     tool_limits: ToolLimitsConfig | None = None,
@@ -947,8 +948,10 @@ async def _run_agent_loop_impl(
     turn_continuation = TurnContinuationController()
     completion_checks = await CompletionChecks.create(
         tools,
-        CompletionContext(tuple(messages), cancelled, session_log, turn_id),
+        CompletionContext(tuple(messages), cancelled, session_log, turn_id, resume_scope=messages),
     )
+    if _on_completion_checks is not None:
+        _on_completion_checks(completion_checks)
     stream_recovery = StreamInterruptionRecovery()
     repetitive_recovery = RepetitiveStreamRecovery()
 
@@ -2727,6 +2730,7 @@ async def _run_agent_loop_impl(
             ).apply(messages)
 
         if completed_turn_ending_tool is not None:
+            completion_checks.suspend()
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -2751,6 +2755,7 @@ async def _run_agent_loop_impl(
             return
 
         if plan_approval_gate_completed:
+            completion_checks.suspend()
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -2884,13 +2889,22 @@ class AgentLoopKernel:
 
     async def run(self) -> AsyncIterator[AgentEvent]:
         """Run this kernel instance and yield its existing event stream."""
+        completion_checks = None
+
+        def bind_checks(checks: CompletionChecks) -> None:
+            nonlocal completion_checks
+            completion_checks = checks
+
         events = _run_agent_loop_impl(
             _runtime_defaults=self._runtime_defaults,
             _services=self._services,
+            _on_completion_checks=bind_checks,
             **self._run_arguments,
         )
         try:
             async for event in events:
+                if isinstance(event, DoneEvent) and completion_checks is not None and not completion_checks.suspended:
+                    completion_checks.close()
                 yield event
         finally:
             await events.aclose()
