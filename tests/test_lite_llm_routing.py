@@ -110,7 +110,7 @@ def test_optional_vision_capacity_does_not_abort_text_session_setup(tmp_path, vi
     assert (vision is not None) is available
     if available:
         assert vision.llm.model == "vision"
-        assert vision.llm.max_output_tokens == 8192
+        assert vision.llm.max_output_tokens == 16_384
     assert llm.max_output_tokens == 64_000 and llm.model == "model-text"
     assert any(tool.name == "read_file" for tool in tools)
 
