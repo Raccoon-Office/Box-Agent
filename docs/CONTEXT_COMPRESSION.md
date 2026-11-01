@@ -151,6 +151,9 @@ match user instructions, not be used to skip validation of calculation inputs.
 For a rename or move, declare `source_mode="move_target"`, `destination_path`
 and the complete original `fields` before the first scan and before moving.
 The destination must be different and absent, and is locked with the contract.
+Both the declared absolute path and its resolved target are retained; the
+declared path must still resolve to that target before and after hashing,
+including after Session Log restore.
 Unlike deletion preparation, this call still scans every original field and
 record to EOF. After the authorized move, completion requires the original
 path to be absent and the destination to be readable, without replaced symlinks,

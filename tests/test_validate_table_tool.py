@@ -424,8 +424,11 @@ async def test_agent_resumes_original_table_requirements_after_user_interaction(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["edit_target", "replace_target", "delete_target", "move_target"])
-async def test_reopened_session_retains_planned_file_operations_and_final_schema(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("mode,retarget", [
+    ("edit_target", None), ("replace_target", None), ("delete_target", None),
+    ("move_target", None), ("move_target", False), ("move_target", True),
+])
+async def test_reopened_session_retains_planned_file_operations_and_final_schema(tmp_path, monkeypatch, mode, retarget):
     from box_agent.agent import Agent
     from box_agent.session_log import SessionLog
     from box_agent.tools.request_user_input_tool import RequestUserInputTool
@@ -437,6 +440,11 @@ async def test_reopened_session_retains_planned_file_operations_and_final_schema
     monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
     path = tmp_path / "table.csv"
     path.write_text("old\nvalue\n")
+    destination = tmp_path / "moved.csv"
+    if retarget is not None:
+        (tmp_path / "archive").mkdir()
+        (tmp_path / "current").symlink_to(tmp_path / "archive", target_is_directory=True)
+        destination = tmp_path / "current" / "moved.csv"
     tool = ValidateTableTool(str(tmp_path))
     arguments = {"path": str(path), "source_mode": mode}
     if mode == "edit_target":
@@ -444,7 +452,7 @@ async def test_reopened_session_retains_planned_file_operations_and_final_schema
     elif mode == "replace_target":
         arguments["fields"] = {"new": {"type": "text"}}
     elif mode == "move_target":
-        arguments.update(fields={"old": {"type": "text"}}, destination_path=str(tmp_path / "moved.csv"))
+        arguments.update(fields={"old": {"type": "text"}}, destination_path=str(destination))
     log = SessionLog.create(tmp_path / "logs", session_id="operation", cwd=tmp_path)
     first_model = ScriptedLLM([
         scripted_call(tool.name, arguments, "prepare"),
@@ -459,21 +467,30 @@ async def test_reopened_session_retains_planned_file_operations_and_final_schema
     if mode == "delete_target":
         path.unlink()
     elif mode == "move_target":
-        path.rename(tmp_path / "moved.csv")
+        path.rename(destination)
+        if retarget:
+            (tmp_path / "other").mkdir()
+            (tmp_path / "other" / "moved.csv").write_text("old\nunvalidated\n")
+            destination.parent.unlink()
+            destination.parent.symlink_to(tmp_path / "other", target_is_directory=True)
     else:
         path.write_text("new\nvalue\n")
     log = SessionLog.open(tmp_path / "logs", session_id="operation", cwd=tmp_path)
     responses = [] if mode in {"delete_target", "move_target"} else [scripted_call(tool.name, {"path": str(path)}, "final")]
-    responses.append(LLMResponse(content="Done", finish_reason="stop"))
+    responses.extend([LLMResponse(content="Done", finish_reason="stop")] * 4)
     try:
         resumed_agent = Agent(llm_client=ScriptedLLM(responses), system_prompt="system", tools=[ValidateTableTool(str(tmp_path))],
-                              workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, session_log=log)
+                              workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, session_log=log, max_steps=6)
         resumed_agent.add_user_message(
-            f"Moved to {tmp_path / 'moved.csv'}, continue." if mode == "move_target"
+            f"Moved to {destination}, continue." if mode == "move_target" and not retarget
             else "Applied the change, continue."
         )
         resumed = [event async for event in resumed_agent.run_events()]
-        assert next(e for e in resumed if isinstance(e, DoneEvent)).stop_reason == StopReason.END_TURN
+        assert next(e for e in resumed if isinstance(e, DoneEvent)).stop_reason == (
+            StopReason.ERROR if retarget else StopReason.END_TURN
+        )
+        if retarget:
+            assert any(isinstance(e, ErrorEvent) and e.error_code == "COMPLETION_GATE_UNSATISFIED" for e in resumed)
     finally:
         log.close()
 
@@ -701,6 +718,50 @@ async def test_move_checks_destination_read_permission_before_opening_it(tmp_pat
         pytest.fail("permission-denied destination must not be opened")
 
     monkeypatch.setattr(module, "fingerprint", forbidden)
+    assert (await gate.check()).code == "TABLE_MOVE_UNVERIFIED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retarget_during_hash", [False, True])
+async def test_move_rejects_retargeted_declared_parent_link(tmp_path, monkeypatch, retarget_during_hash):
+    import box_agent.tools.file.validate_table_tool as module
+
+    tool, gate, path = await setup_gate(tmp_path)
+    (tmp_path / "archive").mkdir()
+    (tmp_path / "other").mkdir()
+    link = tmp_path / "current"
+    link.symlink_to(tmp_path / "archive", target_is_directory=True)
+    destination = link / "moved.csv"
+    context = ToolInvocationContext(completion_gate=gate)
+    result = await tool.invoke({
+        "path": str(path), "fields": FIELDS, "source_mode": "move_target",
+        "destination_path": "current/moved.csv",
+    }, context=context)
+    assert result.success
+    rebound = await tool.invoke({
+        "path": str(path), "destination_path": str(tmp_path / "archive" / "moved.csv"),
+    }, context=context)
+    assert not rebound.success and "TABLE_CONTRACT_CHANGED" in rebound.error
+    assert (await tool.invoke({"path": str(path)}, context=context)).success
+    path.rename(destination)
+    assert await gate.check() is None
+    write_table(tmp_path / "other" / "moved.csv", [row(99)])
+
+    def retarget():
+        link.unlink()
+        link.symlink_to(tmp_path / "other", target_is_directory=True)
+
+    if retarget_during_hash:
+        original_fingerprint = module.fingerprint
+
+        def fingerprint_then_retarget(*args, **kwargs):
+            result = original_fingerprint(*args, **kwargs)
+            retarget()
+            return result
+
+        monkeypatch.setattr(module, "fingerprint", fingerprint_then_retarget)
+    else:
+        retarget()
     assert (await gate.check()).code == "TABLE_MOVE_UNVERIFIED"
 
 

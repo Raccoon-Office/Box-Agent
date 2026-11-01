@@ -154,10 +154,13 @@ class TableCompletionGate:
         return None
 
     async def check_move(self, source: Path, expected: str | None) -> CompletionIssue | None:
-        destination = self.contracts.get(source, {}).get("destination_path")
-        if not destination or expected is None:
+        contract = self.contracts.get(source, {})
+        destination = contract.get("destination_path")
+        declared_destination = contract.get("declared_destination_path")
+        if not destination or not declared_destination or expected is None:
             return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{source}: missing pre-move validation contract.", False)
         target = Path(destination)
+        declared_target = Path(declared_destination)
         try:
             try:
                 source.lstat()
@@ -165,12 +168,16 @@ class TableCompletionGate:
                 pass
             else:
                 return CompletionIssue("TABLE_MOVE_PENDING", f"{source}: original path still exists; move to {target}.")
-            if target.is_symlink() or target.resolve() != target:
+            if (declared_target.is_symlink() or declared_target.resolve() != target
+                    or target.is_symlink() or target.resolve() != target):
                 return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{target}: destination resolves through a changed link.", False)
             denial = self.tool._validate_readable_file(target, str(target), text_only=False)
             if denial:
                 return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{target}: {denial.error}", False)
             digest, _ = await _in_thread(fingerprint, target, cancelled=self.context.is_cancelled)
+            if (declared_target.is_symlink() or declared_target.resolve() != target
+                    or target.is_symlink() or target.resolve() != target):
+                return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{declared_target}: destination changed during verification.", False)
             if digest != expected:
                 return CompletionIssue("TABLE_SOURCE_CHANGED", f"{target}: moved content differs from the validated original.", False)
         except (OSError, ValueError, RuntimeError) as exc:
@@ -404,10 +411,11 @@ class ValidateTableTool(ReadTool):
             scan_fields = normalize_fields(fields if fields is not None else expected_fields, profile=selected_profile)
             contract = {"fields": scan_fields, "encoding": encoding, "profile": selected_profile}
             if selected_mode == "move_target":
-                destination = destination_path if destination_path is not None else (previous or {}).get("destination_path")
+                destination = destination_path if destination_path is not None else (previous or {}).get("declared_destination_path")
                 if not isinstance(destination, str) or not destination.strip():
                     raise ValueError("move_target requires destination_path before the first scan")
-                target = self._resolve_file_path(destination)
+                target = self._resolve_file_path(destination).absolute()
+                contract["declared_destination_path"] = str(target)
                 if previous is None:
                     try:
                         target.lstat()
@@ -427,6 +435,7 @@ class ValidateTableTool(ReadTool):
                 if (scan_fields != expected_fields or encoding != previous["encoding"]
                         or selected_profile != previous["profile"]
                         or contract.get("destination_path") != previous.get("destination_path")
+                        or contract.get("declared_destination_path") != previous.get("declared_destination_path")
                         or (output_fields is not None and contract["output_fields"] != previous.get("output_fields"))):
                     return ToolResult(success=False, error="TABLE_CONTRACT_CHANGED: cannot relax or replace a declared contract")
             allow_edit = False
