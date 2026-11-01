@@ -155,6 +155,39 @@ def render_code_search_tools(tools: Collection[str] | None) -> str:
     return "".join(parts) + "仅依据已取得的源码判断，缺少读取或搜索能力时明确说明验证边界，避免凭印象修改。"
 
 
+def _render_tabular_processing(tools: Collection[str] | None) -> str:
+    validation = (
+        "\n- CSV/TSV 完成门禁：本轮明确提供的原始输入必须调用 `validate_table`，"
+        "为每列按任务规则声明类型、必填性、枚举、金额范围与精度；先验证所有原始记录，再筛选或去重。"
+        "首次校验前按任务声明 purpose：仅检查并报告错误用 diagnosis；要求有效数据的计算用 computation（默认）。"
+        "用途在本轮锁定，不得发现错误后改为诊断来放行。"
+        "程序检查 EOF、文件哈希和逐字段计数；缺少证据、扫描未完成或输入变化会阻止正常完成。"
+        "validation_complete 表示检查是否完成，data_valid 表示数据是否合格；"
+        "完整诊断可以发现错误并正常完成，计算任务仍要求数据合格。诊断须如实报告错误并交付要求的产物。"
+        "失败后不能放宽已扫描的字段规则，须保留并报告诊断。此门禁不替代输出计算及读回校验。"
+        if _has(tools, "validate_table") else ""
+    )
+    if _has(tools, "execute_code"):
+        execution = "用 `execute_code`"
+    elif _has(tools, "bash"):
+        execution = "用 `bash` 调用已有 Python 解释器"
+    else:
+        return (
+            "\n- 大表计算：缺少程序执行能力时，明确全量计算和校验尚未验证，"
+            "不能用样例推断总体；用户指定全文或逐条语义审阅时仍须覆盖所需记录。" + validation
+        )
+    return (
+        "\n- 大表计算（CSV/TSV/Excel）：先" + execution + "提取表头、少量样例和数据概况，"
+        "不要为汇总、对账把整表或大页明细打印进对话。随后按任务规则解析全部输入记录（可分块），"
+        "用正确的格式解析器处理编码、分隔符、引号及字段内换行；预览不代表全量处理，"
+        "不得以 head、nrows 或抽样代替全量计算。校验记录数、类型、缺失值、解析错误及任务要求的"
+        "去重、过滤和汇总勾稽；不得静默跳过错误记录，发现问题须报告具体位置并按任务约定处理，"
+        "无法确定时标记未完成。对话只返回统计、校验结果和有界异常样例；保存后重新读取产物，"
+        "核对格式、记录数与关键汇总。用户指定全文或需要逐条语义审阅时仍须覆盖全部必要记录，"
+        "不能用程序汇总或预览替代。" + validation
+    )
+
+
 def _render_file_operations(tools: Collection[str] | None) -> str:
     email_rule = (
         "\n- EML 邮件用 `read_email` 只读解码邮件头、正文并列出附件；长正文按 next_offset 继续读取，"
@@ -167,7 +200,7 @@ def _render_file_operations(tools: Collection[str] | None) -> str:
             "提取，再用相应文件工具处理。此操作需要写权限，不能覆盖现有文件。"
         )
     if _has(tools, "read_file", "search_files", "query_jsonl"):
-        return _FILE_OPERATIONS_FULL + email_rule
+        return _FILE_OPERATIONS_FULL + _render_tabular_processing(tools) + email_rule
     directory = _FILE_OPERATIONS_FULL.splitlines()[0]
     if not _has(tools, "search_files"):
         directory = directory.replace("先用 `search_files` 查看 cwd", "先依据已提供的工作区信息确认位置")
@@ -180,7 +213,7 @@ def _render_file_operations(tools: Collection[str] | None) -> str:
         parts.append("- JSONL/NDJSON 使用 `query_jsonl` 做字段投影和游标分页。")
     parts.append("- 缺少必要的文件能力时请求用户提供正文或明确位置；不要猜测文件内容或声称已读取。")
     parts.append("- 不要用 bash 拼接常规搜索，也不要因 JSONL 超长记录改用 `execute_code` 整体读取。")
-    return "\n".join(parts) + email_rule
+    return "\n".join(parts) + _render_tabular_processing(tools) + email_rule
 
 
 def _render_analysis_execution(tools: Collection[str] | None) -> str:

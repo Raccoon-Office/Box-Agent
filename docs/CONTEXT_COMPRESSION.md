@@ -62,6 +62,66 @@ request-only token estimate, which is subtracted from the text-history estimate
 before adding the current request's overlay. Image cost is estimated from pixel
 dimensions; base64 length is used for transport budgets, not conversational text.
 
+## Large-table processing before context growth
+
+For CSV/TSV/Excel calculations, shared capability-gated guidance prefers a small
+schema/sample and data profile, then full-record processing with `execute_code`
+or an existing Python interpreter through `bash`. Parsing may be chunked, but
+sampling is not evidence of complete computation. Validate record counts,
+types, missing values, parse errors and task-specific reconciliation; never
+silently drop bad records. Return aggregates, validation results and bounded
+exceptions, then reopen saved outputs and verify their format and key totals.
+
+With file tools enabled, `validate_table` enforces a completion gate for existing
+local CSV/TSV inputs explicitly referenced by the current user turn. After read
+authorization it pins source SHA-256 and parses every original record to EOF,
+including superseded, cancelled and tail records. The declared contract must
+cover every column: required/nullable, text, integer, finite decimal with bounds
+and scale, date, boolean or explicit enum values.
+
+Tables containing `amount/status/revision` and at least one of `id/order_id/refund_id`
+also enforce the `transaction_v1` baseline: required IDs, integer revision >= 1,
+finite nonnegative amount with at most two decimal places, status and present
+region/currency as enums, date as a date, and is_test as a boolean. These fields
+cannot be weakened to nullable/text. This convention covers the order/refund
+tasks; identically shaped tables with negative amounts, greater precision or
+different semantics cannot currently obtain this completion certification.
+Other table shapes do not inherit the transaction amount restrictions.
+
+Receipts contain source/contract hashes, logical record counts, per-field counts
+and at most 20 error samples. Session Log events `table.inputs`, `table.validation`
+and `completion.check` retain audit evidence. Model claims and public result JSON
+cannot credit a gate. Missing receipts allow at most two repair prompts;
+incomplete scans, changed inputs, failed checks or exhausted repair attempts end
+with `COMPLETION_GATE_UNSATISFIED`. Scanned field contracts cannot be relaxed,
+and later turns must revalidate.
+
+Declare `purpose` before the first scan: `diagnosis` only inspects/reports errors;
+`computation` requires valid inputs and is the initial default. Omitted later
+calls inherit the run's locked purpose. The `table.purpose` event records this
+decision; it cannot be changed after discovering invalid data. Both purposes
+still require every original input/field, EOF and unchanged hashes. Diagnosis
+must truthfully report findings and deliver/read back requested artifacts;
+computation additionally requires every input to be valid.
+
+Tool `success` and `validation_complete` now mean the validation ran completely.
+`data_valid` independently reports data quality, or `null` for an incomplete
+scan. A completed diagnosis can return `success=true, validation_complete=true,
+data_valid=false` and finish normally; the same invalid data still blocks a
+computation task. Legacy `valid` keeps its original meaning. Consumers must not
+use tool success as a substitute for data validity. Task termination,
+`completion.check`, and `table.validation` retain their separate outcomes.
+Purpose must match the user's task; this declaration neither infers user intent
+nor replaces business-delivery acceptance.
+
+This proves **whole-source validation against the declared contract**. Business
+meaning, allowed enums and bounds still come from task requirements; the gate
+does not infer them or prove subsequent calculations/output correctness. Compute
+and readback reconciliation remain necessary. Excel, paths discovered only in
+tool output and sessions without this tool are outside this gate. Plan approval
+and waiting for user input are not evidence of completed data processing.
+`read_file` pagination, JSONL policy, 600-second waits and 429 behavior are unchanged.
+
 ## Oversized tool-result storage
 
 `ToolResultStorage` in `box_agent/tool_result_storage.py` owns persistence, preview rendering, and per-conversation deduplication. The shared loop invokes it for both sequential and parallel tools; CLI and ACP do not duplicate this policy.

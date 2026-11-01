@@ -155,6 +155,28 @@ async def test_read_tool_defaults_to_bounded_page_with_continuation_hint(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_csv_preview_guidance_preserves_explicit_full_range_reads(tmp_path):
+    path = tmp_path / "table.csv"
+    content = "id,value\n" + "".join(f"{index},{index * 7}\n" for index in range(1, 600))
+    content += "600,999999\n"
+    path.write_text(content, encoding="utf-8")
+    tool = ReadTool(workspace_dir=str(tmp_path))
+
+    preview = await tool.execute(path="table.csv", limit=8)
+    complete = await tool.execute(path="table.csv", limit=2_000)
+
+    assert preview.success and complete.success
+    assert preview.raw_output["has_more"] is True
+    assert "600,999999" not in preview.content
+    assert complete.raw_output["has_more"] is False
+    assert complete.raw_output["selected_line_count"] == 601
+    assert "600,999999" in complete.content
+    assert path.read_text(encoding="utf-8") == content
+    assert "small header/sample page" in tool.description
+    assert "full-file processing and validation" in tool.description
+
+
+@pytest.mark.asyncio
 async def test_read_tool_returns_a_continuation_for_an_oversized_page(tmp_path):
     path = tmp_path / "long-line.txt"
     path.write_text("x" * 100_001, encoding="utf-8")

@@ -26,6 +26,7 @@ from typing import Any, Callable, Final
 from urllib.parse import urlsplit
 
 from ..cache_fingerprint import build_cache_fingerprint
+from ..tools.completion_checks import CompletionChecks, CompletionContext
 from ..config import AgentConfig, ToolLimitsConfig
 from ..context_resources import (
     ContextResourceLedger,
@@ -944,6 +945,10 @@ async def _run_agent_loop_impl(
     # preserve existing behavior.
     no_progress_steps = 0
     turn_continuation = TurnContinuationController()
+    completion_checks = await CompletionChecks.create(
+        tools,
+        CompletionContext(tuple(messages), cancelled, session_log, turn_id),
+    )
     stream_recovery = StreamInterruptionRecovery()
     repetitive_recovery = RepetitiveStreamRecovery()
 
@@ -1039,6 +1044,7 @@ async def _run_agent_loop_impl(
             validate_followup=validate_followup,
             policy_error=browser_intent_policy.tool_call_error,
             session_log=session_log,
+            completion_gates=completion_checks.gates,
             workspace_dir=workspace_dir,
             session_id=session_id, turn_id=turn_id,
             permission_negotiator=permission_negotiator, logger=logger,
@@ -1910,6 +1916,14 @@ async def _run_agent_loop_impl(
                 # assistant reply — the turn ended cleanly, it's not a crash.
                 # No "Error:" prefix, no red banner; persisted to history.
                 messages.append(Message(role="assistant", content=msg, tool_calls=None))
+                if completion_checks.gates or completion_checks.failures:
+                    msg += "\nCompletion was not verified: the model refused before the capability checks completed."
+                    if hook_mgr.hooks:
+                        await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                        await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+                    yield ErrorEvent(message=msg, is_fatal=True, error_code="COMPLETION_GATE_UNSATISFIED")
+                    yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                    return
                 if hook_mgr.hooks:
                     await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=msg)
                 yield ContentEvent(content=msg)
@@ -2562,6 +2576,34 @@ async def _run_agent_loop_impl(
                     total_elapsed_seconds=total,
                 )
                 continue
+
+            # Capability checks are deterministic and cannot be waived by the
+            # model judge, a completion claim, or a serialized tool result.
+            completion_issues = await completion_checks.check()
+            if cancelled() or (inject_queue is not None and not inject_queue.empty()):
+                continue
+            if completion_issues:
+                message = "Completion blocked: " + "\n".join(
+                    f"{issue.code}: {issue.message}" for issue in completion_issues
+                )
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(
+                        step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total,
+                    )
+                yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                if (completion_checks.repairs < 2 and step + 1 < max_steps
+                        and all(issue.repairable for issue in completion_issues)):
+                    completion_checks.repairs += 1
+                    yield MessageInjection(InjectionKind.TASK_CONTINUATION, message).apply(messages)
+                    continue
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(message=message, is_fatal=True, exception=None)
+                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=message)
+                yield ErrorEvent(message=message, is_fatal=True, error_code="COMPLETION_GATE_UNSATISFIED")
+                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=message)
+                return
 
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
