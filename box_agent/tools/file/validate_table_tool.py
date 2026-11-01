@@ -269,7 +269,7 @@ class ValidateTableTool(ReadTool):
                     "description": "Task purpose, fixed before the first scan. Omit to inherit; initially computation. Diagnosis only inspects/reports data errors, not calculations requiring valid input.",
                 },
                 "fields": {
-                    "type": "object", "minProperties": 1, "maxProperties": 256,
+                    "type": "object", "minProperties": 1,
                     "additionalProperties": {
                         "type": "object", "additionalProperties": False,
                         "properties": {

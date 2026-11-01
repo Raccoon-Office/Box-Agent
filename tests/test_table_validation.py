@@ -77,6 +77,21 @@ def test_every_original_amount_requires_finite_nonnegative_exact_scale(tmp_path,
     assert result.errors[0]["field"] == "amount"
 
 
+@pytest.mark.parametrize("width", [257, 1024])
+@pytest.mark.parametrize("extension,delimiter", [("csv", ","), ("tsv", "\t")])
+def test_wide_tables_validate_every_record_and_column(tmp_path, width, extension, delimiter):
+    path = tmp_path / f"wide.{extension}"
+    fields = {f"column_{index}": {"type": "integer"} for index in range(width)}
+    with path.open("w", newline="") as stream:
+        writer = csv.writer(stream, delimiter=delimiter)
+        writer.writerow(fields)
+        writer.writerows([["1"] * width, ["2"] * width])
+    result = scan_table(path, fields)
+    assert result.complete and result.valid and result.records == 2
+    assert set(result.fields) == set(fields)
+    assert all(stats["checked"] == 2 for stats in result.fields.values())
+
+
 def test_many_errors_are_counted_completely_but_only_bounded_samples_returned(tmp_path):
     path = tmp_path / "input.csv"
     write_table(path, [row(i, amount="oops") for i in range(2500)])

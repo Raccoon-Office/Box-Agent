@@ -39,7 +39,6 @@
           "fields": {
             "type": "object",
             "minProperties": 1,
-            "maxProperties": 256,
             "additionalProperties": {
               "type": "object",
               "additionalProperties": false,
@@ -93,7 +92,6 @@
           "output_fields": {
             "type": "object",
             "minProperties": 1,
-            "maxProperties": 256,
             "additionalProperties": {
               "type": "object",
               "additionalProperties": false,

@@ -88,8 +88,8 @@ def _require_transaction_fields(fields: dict[str, dict[str, Any]]) -> None:
 
 def normalize_fields(fields: dict[str, dict[str, Any]], *, profile: str = "declared_fields") -> dict[str, dict[str, Any]]:
     """Validate the entire declarative contract; no omitted/unknown rules."""
-    if not isinstance(fields, dict) or not 1 <= len(fields) <= 256:
-        raise ValueError("A contract for every column is required (1–256 columns)")
+    if not isinstance(fields, dict) or not fields:
+        raise ValueError("A nonempty contract for every column is required")
     normalized = {}
     for name, supplied in fields.items():
         if not isinstance(name, str) or not 1 <= len(name) <= 128 or not isinstance(supplied, dict):

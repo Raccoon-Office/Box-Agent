@@ -647,6 +647,53 @@ async def test_original_scan_cannot_certify_a_declared_final_schema_without_the_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("suffix,delimiter", [("csv", ","), ("tsv", "\t")])
+@pytest.mark.parametrize("validation", ["valid", "invalid_last_column", "omitted_last_column"])
+async def test_wide_original_table_requires_every_column_before_completion(
+    tmp_path, monkeypatch, suffix, delimiter, validation,
+):
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    path = tmp_path / f"wide.{suffix}"
+    fields = {f"column_{index}": {"type": "integer"} for index in range(257)}
+    values = ["1"] * len(fields)
+    final_values = [*values[:-1], "invalid" if validation == "invalid_last_column" else "2"]
+    path.write_text("\n".join(delimiter.join(row) for row in [list(fields), values, final_values]) + "\n")
+    contract = dict(fields)
+    if validation == "omitted_last_column":
+        contract.pop("column_256")
+    tool = ValidateTableTool(str(tmp_path))
+    responses = [LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+        id="wide", type="function", function=FunctionCall(
+            name=tool.name, arguments={"path": str(path), "fields": contract},
+        ),
+    )])] + [LLMResponse(content="Done", finish_reason="stop")] * 4
+    events = [event async for event in run_agent_loop(
+        llm=ScriptedLLM(responses), messages=[Message(role="user", content=f"Analyze {path}")],
+        tools={tool.name: tool}, workspace_dir=str(tmp_path), max_steps=6,
+    )]
+    done = next(e for e in events if isinstance(e, DoneEvent))
+    assert done.stop_reason == (StopReason.END_TURN if validation == "valid" else StopReason.ERROR)
+    result = next(e for e in events if isinstance(e, ToolCallResult))
+    if validation == "omitted_last_column":
+        assert not result.success and "all 257 columns" in result.error
+    else:
+        assert result.success and result.raw_output["validation_complete"]
+        assert result.raw_output["data_valid"] == (validation == "valid")
+        assert result.raw_output["records"] == 2
+        assert set(result.raw_output["fields"]) == set(fields)
+        assert all(stats["checked"] == 2 for stats in result.raw_output["fields"].values())
+        if validation == "invalid_last_column":
+            assert result.raw_output["fields"]["column_256"]["invalid"] == 1
+    if validation != "valid":
+        assert any(isinstance(e, ErrorEvent) and e.error_code == "COMPLETION_GATE_UNSATISFIED" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_generic_ledger_completes_with_negative_amount_zero_revision_and_extra_precision(tmp_path, monkeypatch):
     from box_agent.turn_continuation import TurnContinuationController
 
