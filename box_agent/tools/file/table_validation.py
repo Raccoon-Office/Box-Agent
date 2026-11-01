@@ -68,17 +68,10 @@ def fingerprint(path: Path, cancelled: Callable[[], bool] = lambda: False) -> tu
     return digest.hexdigest(), before
 
 
-def validation_profile(fields: dict) -> str:
-    """Recognize the transaction contract by columns, never by filenames."""
-    return "transaction_v1" if (
-        {"amount", "revision", "status"} <= fields.keys()
-        and {"id", "order_id", "refund_id"} & fields.keys()
-    ) else "declared_fields"
-
-
 def _require_transaction_fields(fields: dict[str, dict[str, Any]]) -> None:
-    if validation_profile(fields) != "transaction_v1":
-        return
+    if not ({"amount", "revision", "status"} <= fields.keys()
+            and {"id", "order_id", "refund_id"} & fields.keys()):
+        raise ValueError("TRANSACTION_CONTRACT: amount, revision, status and an ID column are required")
     types = {"amount": "decimal", "revision": "integer", "status": "enum",
              "date": "date", "is_test": "boolean", "region": "enum", "currency": "enum"}
     for name, rule in fields.items():
@@ -93,7 +86,7 @@ def _require_transaction_fields(fields: dict[str, dict[str, Any]]) -> None:
         raise ValueError("TRANSACTION_CONTRACT: amount requires scale <= 2")
 
 
-def normalize_fields(fields: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def normalize_fields(fields: dict[str, dict[str, Any]], *, profile: str = "declared_fields") -> dict[str, dict[str, Any]]:
     """Validate the entire declarative contract; no omitted/unknown rules."""
     if not isinstance(fields, dict) or not 1 <= len(fields) <= 256:
         raise ValueError("A contract for every column is required (1–256 columns)")
@@ -132,7 +125,10 @@ def normalize_fields(fields: dict[str, dict[str, Any]]) -> dict[str, dict[str, A
         elif "values" in rule:
             raise ValueError(f"Only enum fields accept values: {name}")
         normalized[name] = rule
-    _require_transaction_fields(normalized)
+    if profile == "transaction_v1":
+        _require_transaction_fields(normalized)
+    elif profile != "declared_fields":
+        raise ValueError("Unknown validation profile")
     return normalized
 
 
@@ -194,6 +190,7 @@ def scan_table(
     fields: dict[str, dict[str, Any]],
     *,
     encoding: str = "utf-8-sig",
+    profile: str = "declared_fields",
     cancelled: Callable[[], bool] = lambda: False,
 ) -> TableScan:
     """Read to EOF and validate every original field with bounded diagnostics."""
@@ -202,9 +199,9 @@ def scan_table(
     path = path.absolute()
     if path.suffix.lower() not in {".csv", ".tsv"}:
         raise ValueError("Only CSV and TSV are supported")
-    contract = normalize_fields(fields)
+    contract = normalize_fields(fields, profile=profile)
     schema_sha = hashlib.sha256(json.dumps(
-        {"fields": contract, "encoding": encoding, "profile": validation_profile(contract)},
+        {"fields": contract, "encoding": encoding, "profile": profile},
         sort_keys=True, ensure_ascii=False,
     ).encode()).hexdigest()
     source_sha, stamp = fingerprint(path, cancelled)
@@ -262,4 +259,4 @@ def scan_table(
     if fingerprint(path, cancelled) != (source_sha, stamp):
         raise ValueError("Table source changed after parsing")
     return TableScan(str(path), source_sha, schema_sha, records, complete,
-                     invalid_records, error_count, counts, errors, validation_profile(contract))
+                     invalid_records, error_count, counts, errors, profile)

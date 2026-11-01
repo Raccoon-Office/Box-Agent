@@ -170,8 +170,9 @@ class ValidateTableTool(ReadTool):
             "text/integer/decimal/date(YYYY-MM-DD)/boolean(true,false)/enum. Required by default; "
             "use nullable=true only when allowed. Decimal is finite and supports minimum/maximum "
             "as strings and scale. Enum requires explicit values. Schema is locked after a scan, "
-            "including failures. Transaction tables (amount/status/revision plus id/order_id/refund_id) "
-            "enforce required IDs, revision integer minimum>=1, amount decimal minimum>=0 scale<=2, "
+            "including failures. Default profile='declared_fields' uses the task's actual rules; "
+            "column names never select domain rules. Explicit profile='transaction_v1' for matching "
+            "order/refund tasks enforces required IDs, revision integer minimum>=1, amount decimal minimum>=0 scale<=2, "
             "status/region/currency enums, date as date and is_test as boolean when present; "
             "these checks cannot be weakened to text or nullable. Other tables use the declared rules. "
             "Inputs must stay unchanged by default. Only for a user-requested in-place edit/append, "
@@ -195,6 +196,10 @@ class ValidateTableTool(ReadTool):
             "type": "object", "additionalProperties": False,
             "properties": {
                 "path": {"type": "string"},
+                "profile": {
+                    "type": "string", "enum": ["declared_fields", "transaction_v1"],
+                    "description": "Explicit domain contract, locked with fields. Default declared_fields follows the user's actual rules. Choose transaction_v1 only for tasks requiring its order/refund constraints, never from column names alone. Omit later calls to inherit.",
+                },
                 "source_mode": {
                     "type": "string", "enum": ["input", "edit_target"],
                     "description": "Per-file role locked before its first scan. Default input is immutable. Use edit_target only for user-requested in-place edits/appends; validate the full original before writing and the valid final version afterward. Omit later calls to inherit.",
@@ -230,12 +235,14 @@ class ValidateTableTool(ReadTool):
         return await self._validate(**arguments, gate=gate)
 
     async def execute(self, path: str, fields: dict, encoding: str = "utf-8-sig",
-                      purpose: str | None = None, source_mode: str | None = None) -> ToolResult:
-        return await self._validate(path, fields, encoding, purpose=purpose, source_mode=source_mode)
+                      purpose: str | None = None, source_mode: str | None = None,
+                      profile: str | None = None) -> ToolResult:
+        return await self._validate(path, fields, encoding, purpose=purpose, source_mode=source_mode, profile=profile)
 
     async def _validate(self, path: str, fields: dict, encoding: str = "utf-8-sig",
                         gate: TableCompletionGate | None = None,
-                        purpose: str | None = None, source_mode: str | None = None) -> ToolResult:
+                        purpose: str | None = None, source_mode: str | None = None,
+                        profile: str | None = None) -> ToolResult:
         try:
             source = self._resolve_file_path(path).resolve()
             if gate is not None and source not in gate.sources:
@@ -251,7 +258,8 @@ class ValidateTableTool(ReadTool):
             selected_mode = source_mode if source_mode is not None else (gate.source_modes.get(source) if gate else None) or "input"
             if selected_mode not in {"input", "edit_target"}:
                 raise ValueError("Invalid table source mode")
-            contract = {"fields": normalize_fields(fields), "encoding": encoding}
+            selected_profile = profile if profile is not None else (gate.contracts.get(source, {}).get("profile") if gate else None) or "declared_fields"
+            contract = {"fields": normalize_fields(fields, profile=selected_profile), "encoding": encoding, "profile": selected_profile}
             allow_edit = False
             if gate is not None:
                 if source in gate.source_modes and gate.source_modes[source] != selected_mode:
@@ -265,7 +273,7 @@ class ValidateTableTool(ReadTool):
                     return ToolResult(success=False, error="TABLE_CONTRACT_CHANGED: cannot relax or replace a scanned contract")
                 gate.bind_purpose(selected_purpose)
             receipt = await _in_thread(
-                scan_table, source, fields, encoding=encoding,
+                scan_table, source, fields, encoding=encoding, profile=selected_profile,
                 cancelled=gate.context.is_cancelled if gate else lambda: False,
             )
             payload = {

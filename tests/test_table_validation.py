@@ -116,7 +116,20 @@ def test_transaction_contract_cannot_omit_or_weaken_critical_field_checks(tmp_pa
     path = tmp_path / "transactions.csv"
     write_table(path, [row(1)])
     with pytest.raises(ValueError, match="TRANSACTION_CONTRACT"):
-        scan_table(path, {**FIELDS, field: rule})
+        scan_table(path, {**FIELDS, field: rule}, profile="transaction_v1")
+
+
+def test_common_column_names_do_not_override_a_generic_ledger_contract(tmp_path):
+    path = tmp_path / "ledger.csv"
+    fields = {"id": {"type": "text"}, "status": {"type": "text"},
+              "revision": {"type": "integer", "minimum": "0"},
+              "amount": {"type": "decimal", "minimum": "-100", "scale": 4}}
+    path.write_text("id,status,revision,amount\nA,draft,0,-1.2345\n")
+    result = scan_table(path, fields)
+    assert result.complete and result.valid and result.profile == "declared_fields"
+    assert all(f["checked"] == 1 for f in result.fields.values())
+    with pytest.raises(ValueError, match="TRANSACTION_CONTRACT"):
+        scan_table(path, fields, profile="transaction_v1")
 
 
 def test_nontransaction_tables_do_not_inherit_nonnegative_money_constraints(tmp_path):

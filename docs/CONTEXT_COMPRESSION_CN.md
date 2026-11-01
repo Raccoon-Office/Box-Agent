@@ -52,12 +52,12 @@ CSV/TSV/Excel 计算通过共享、按能力渲染的指引，先取得表头、
 CSV 解析器至少支持 16 Mi 字符的单字段，并保留进程已有的更高额度；解析错误仍不能
 证明已扫描至 EOF。
 
-包含 `amount/status/revision` 及 `id/order_id/refund_id` 中至少一个标识列的交易表，
-额外执行 `transaction_v1` 固定基线：标识必填，revision 为至少 1 的整数，amount 为有限、
+默认 `profile="declared_fields"` 使用用户实际字段规则，支持合法负金额、零版本和更高精度；
+不能仅凭列名推断领域含义。仅明确符合订单/退款要求的任务选择 `profile="transaction_v1"`，
+执行固定基线：标识必填，revision 为至少 1 的整数，amount 为有限、
 非负、最多两位小数的金额；status 和存在的 region/currency 必须声明枚举，date 必须是
 日期，is_test 必须是布尔，均不可设为可空或普通文本。模型只能声明满足此基线的契约。
-此约定适用于本批订单/退款任务；同名结构但允许负金额、更多小数位或不同字段语义的数据
-目前不支持该完成认证，不能通过放宽规则绕过。其他表不继承交易表金额限制。
+profile 随字段契约锁定，后续省略则继承；发现坏数据后不能降级已选规则绕过门禁。
 
 每次扫描记录源哈希、契约哈希、逻辑记录数、逐字段检查/缺失/错误计数与最多 20 个异常
 样例。Session Log 的 `table.inputs`、`table.validation`、`completion.check` 提供审计证据；

@@ -159,6 +159,7 @@ def _render_tabular_processing(tools: Collection[str] | None) -> str:
     validation = (
         "\n- CSV/TSV 完成门禁：本轮明确提供的原始输入必须调用 `validate_table`，"
         "为每列按任务规则声明类型、必填性、枚举、金额范围与精度；先验证所有原始记录，再筛选或去重。"
+        "profile 默认 declared_fields，按用户实际规则验证；仅明确要求订单/退款固定约束的任务选 transaction_v1，不能凭列名推断。"
         "首次校验前按任务声明 purpose：仅检查并报告错误用 diagnosis；要求有效数据的计算用 computation（默认）。"
         "用途在本轮锁定，不得发现错误后改为诊断来放行。"
         "计算输入默认不可变；仅用户要求原地编辑/追加的文件，首次扫描前声明 source_mode=edit_target，"

@@ -352,6 +352,46 @@ class ScriptedLLM:
 
 
 @pytest.mark.asyncio
+async def test_generic_ledger_completes_with_negative_amount_zero_revision_and_extra_precision(tmp_path, monkeypatch):
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    path = tmp_path / "ledger.csv"
+    path.write_text("id,status,revision,amount\nA,draft,0,-1.2345\n")
+    fields = {"id": {"type": "text"}, "status": {"type": "text"},
+              "revision": {"type": "integer", "minimum": "0"},
+              "amount": {"type": "decimal", "minimum": "-100", "scale": 4}}
+    tool = ValidateTableTool(str(tmp_path))
+    responses = [LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+        id="ledger", type="function", function=FunctionCall(name=tool.name, arguments={"path": str(path), "fields": fields}),
+    )]), LLMResponse(content="Done", finish_reason="stop")]
+    events = [event async for event in run_agent_loop(
+        llm=ScriptedLLM(responses), messages=[Message(role="user", content=f"Analyze {path}")],
+        tools={tool.name: tool}, workspace_dir=str(tmp_path), max_steps=3,
+    )]
+    assert next(e for e in events if isinstance(e, DoneEvent)).stop_reason == StopReason.END_TURN
+    result = next(e for e in events if isinstance(e, ToolCallResult))
+    assert result.raw_output["data_valid"] and result.raw_output["profile"] == "declared_fields"
+
+
+@pytest.mark.asyncio
+async def test_explicit_transaction_profile_is_inherited_and_cannot_be_downgraded(tmp_path):
+    tool, gate, path = await setup_gate(tmp_path, rows=[row(1, amount="-1")])
+    context = ToolInvocationContext(completion_gate=gate)
+    arguments = {"path": str(path), "fields": FIELDS}
+    first = await tool.invoke({**arguments, "profile": "transaction_v1"}, context=context)
+    assert first.success and not first.raw_output["data_valid"]
+    inherited = await tool.invoke(arguments, context=context)
+    assert inherited.raw_output["profile"] == "transaction_v1"
+    changed = await tool.invoke({**arguments, "profile": "declared_fields"}, context=context)
+    assert not changed.success and "TABLE_CONTRACT_CHANGED" in changed.error
+    assert (await gate.check()).code == "TABLE_VALIDATION_FAILED"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("suffix,delimiter", [("csv", ","), ("tsv", "\t")])
 @pytest.mark.parametrize("operation", ["write", "edit", "append"])
 @pytest.mark.parametrize("validation", ["both", "original_only", "final_only"])

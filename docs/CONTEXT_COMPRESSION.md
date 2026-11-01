@@ -85,14 +85,15 @@ Quoted and Markdown paths are matched as whole paths, not as extra bare filename
 The CSV parser supports fields up to at least 16 Mi characters, retaining any
 higher process-wide allowance; parser errors still leave EOF coverage unverified.
 
-Tables containing `amount/status/revision` and at least one of `id/order_id/refund_id`
-also enforce the `transaction_v1` baseline: required IDs, integer revision >= 1,
+The default `profile="declared_fields"` applies the user's actual field rules,
+including legitimate negative amounts, revision zero or higher precision.
+Column names never select domain semantics. Explicit `profile="transaction_v1"`
+for matching order/refund requirements enforces required IDs, integer revision >= 1,
 finite nonnegative amount with at most two decimal places, status and present
 region/currency as enums, date as a date, and is_test as a boolean. These fields
-cannot be weakened to nullable/text. This convention covers the order/refund
-tasks; identically shaped tables with negative amounts, greater precision or
-different semantics cannot currently obtain this completion certification.
-Other table shapes do not inherit the transaction amount restrictions.
+cannot be weakened to nullable/text. The selected profile is locked with the
+field contract and inherited by later calls; it cannot be downgraded after
+discovering invalid data.
 
 Receipts contain source/contract hashes, logical record counts, per-field counts
 and at most 20 error samples. Session Log events `table.inputs`, `table.validation`
