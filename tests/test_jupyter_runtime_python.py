@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -70,6 +72,51 @@ async def test_sandbox_bootstrap_process_timeout_terminates_child() -> None:
         )
 
     assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sandbox_preparation_terminates_child() -> None:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(60)",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    task = asyncio.create_task(_communicate_sandbox_process(proc, operation="probe", timeout=60))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 1)
+    assert proc.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_kernel_readiness_does_not_block_host_event_loop(tmp_path, monkeypatch):
+    import jupyter_client
+    from jupyter_client.kernelspec import KernelSpec
+    heartbeat = threading.Event()
+    class Client:
+        def start_channels(self):
+            pass
+        def wait_for_ready(self, timeout):
+            assert heartbeat.wait(0.5), "host event loop was blocked by readiness wait"
+    class Manager:
+        async def _async_start_kernel(self, **kwargs):
+            pass
+        def client(self):
+            return Client()
+    class Environment:
+        def get_kernel_spec_dir(self):
+            return tmp_path
+        def _subprocess_env(self, **kwargs):
+            return {}
+    monkeypatch.setattr(jupyter_client, "KernelManager", Manager)
+    monkeypatch.setattr(KernelSpec, "from_resource_dir", lambda _: object())
+    monkeypatch.setattr(JupyterKernelSession, "_patch_provisioner_factory", staticmethod(lambda: None))
+    session = JupyterKernelSession("s", tmp_path, Environment())
+    monkeypatch.setattr(session, "execute", lambda *args: ("", [], None))
+    async def host_heartbeat():
+        await asyncio.sleep(0.01)
+        heartbeat.set()
+    await asyncio.wait_for(asyncio.gather(session.start(), host_heartbeat()), 1)
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from box_agent.core import run_agent_loop
-from box_agent.events import DoneEvent, InjectedMessageEvent, StopReason, ToolCallResult
+from box_agent.events import DoneEvent, ErrorEvent, InjectedMessageEvent, StepEnd, StepStart, StopReason, ToolCallResult
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
@@ -427,10 +427,39 @@ async def test_underlying_llm_timeout_is_handled_as_failed_judge() -> None:
         async def generate(self, messages, tools=None, **kwargs):
             raise TimeoutError("provider request timed out")
 
-    result = await model_says_continue(
-        ProviderTimeoutLLM(), messages=_history("制作 PPT", "请选择用途。"),
-    )
-    assert result is False
+    with pytest.raises(TimeoutError, match="continuation judge"):
+        await model_says_continue(
+            ProviderTimeoutLLM(), messages=_history("制作 PPT", "请选择用途。"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_judge_deadline_cancels_request_instead_of_assuming_completion():
+    llm = BlockingJudgeLLM()
+    with pytest.raises(TimeoutError, match="continuation judge"):
+        await asyncio.wait_for(model_says_continue(
+            llm, messages=_history("执行任务", "已经完成"), timeout_seconds=0.01,
+        ), 0.5)
+    assert llm.judge_closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_agent_reports_incomplete_delivery_when_completion_check_times_out(monkeypatch):
+    monkeypatch.delenv("BOX_AGENT_PROVIDER_STALE_SECONDS", raising=False)
+    llm = BlockingJudgeLLM()
+    tool = SearchTool()
+    events = await asyncio.wait_for(_collect_events(run_agent_loop(
+        llm=llm, messages=_history("执行任务", "已经完成")[:-1],
+        tools={tool.name: tool}, max_steps=3, provider_stale_seconds=0.01,
+    )), 0.5)
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+    assert errors[-1].error_code == "TURN_COMPLETION_CHECK_TIMEOUT"
+    assert [event for event in events if isinstance(event, DoneEvent)][-1].stop_reason is StopReason.ERROR
+    assert [event.step for event in events if isinstance(event, StepEnd)] == [
+        event.step for event in events if isinstance(event, StepStart)
+    ]
+    assert isinstance(events[-3], StepEnd)
+    assert llm.judge_closed.is_set()
 
 
 @pytest.mark.asyncio

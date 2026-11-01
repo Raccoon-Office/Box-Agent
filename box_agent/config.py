@@ -274,7 +274,9 @@ class AgentConfig(BaseModel):
     # the loop treats it as stale and triggers bounded recovery. The default
     # matches the shared runtime fallback; raise it for slow/deep-thinking
     # models whose single step can legitimately exceed it, or lower it to fail
-    # faster. The ``BOX_AGENT_PROVIDER_STALE_SECONDS`` env var overrides this.
+    # faster. Also bounds the non-streaming completion judge's total wait;
+    # expiry reports an incomplete task, not a successful completion verdict.
+    # The ``BOX_AGENT_PROVIDER_STALE_SECONDS`` env var overrides this.
     provider_stale_seconds: float = 300.0
     # Per-call token budget for sub-agent child contexts before they summarize.
     # The child runs in an isolated context, so this is independent of the main

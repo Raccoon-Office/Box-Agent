@@ -5936,6 +5936,9 @@ async def test_provider_stale_retries_three_empty_responses_before_stopping(tmp_
     assert llm._idx == 4
     errors = [event for event in events if isinstance(event, ErrorEvent)]
     assert len(errors) == 1 and errors[0].is_fatal is True
+    assert errors[0].error_code == "LLM_PROVIDER_STALE_TIMEOUT"
+    assert errors[0].error_category == "timeout"
+    assert errors[0].error_details["recoveryAttempts"] == 3
     done = [event for event in events if isinstance(event, DoneEvent)]
     assert done and done[-1].stop_reason == StopReason.ERROR
 
