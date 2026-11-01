@@ -88,6 +88,33 @@ def test_lite_llm_aliases_main_when_omitted(tmp_path):
     assert agent._lite_llm is lite  # same object
 
 
+@pytest.mark.parametrize("vision_context,available", [(32_000, True), (1_000, False)])
+def test_optional_vision_capacity_does_not_abort_text_session_setup(tmp_path, vision_context, available):
+    from box_agent.tools.setup import add_workspace_tools
+
+    llm = _DummyLLM("text")
+    llm.max_output_tokens = 64_000
+    llm.capabilities = {"image_input": False}
+    llm.auto_model_candidates = (
+        {"model": llm.model, "tags": ["code"], "abilityLevel": 4,
+         "contextWindow": 180_000, "maxTokens": 64_000},
+        {"model": "vision", "tags": ["vision"], "abilityLevel": 4,
+         "contextWindow": vision_context},
+    )
+    config = Config(llm=LLMConfig(api_key="test"), agent=AgentConfig(), tools=ToolsConfig(
+        enable_bash=False, enable_todo=False, enable_sub_agent=False,
+    ))
+    tools = []
+    add_workspace_tools(tools, config, tmp_path, llm=llm, output=lambda *a: None)
+    vision = next((tool for tool in tools if tool.name == "inspect_images"), None)
+    assert (vision is not None) is available
+    if available:
+        assert vision.llm.model == "vision"
+        assert vision.llm.max_output_tokens == 8192
+    assert llm.max_output_tokens == 64_000 and llm.model == "model-text"
+    assert any(tool.name == "read_file" for tool in tools)
+
+
 def test_routing_diagnostic_explains_scores_and_each_exclusion_without_task_contents():
     selected, diagnostic = select_auto_model([
         {"model": "small", "tags": ["code"], "abilityLevel": 1, "contextWindow": 1_000},

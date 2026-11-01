@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from box_agent.config import Config, ToolLimitsConfig
 from box_agent.llm.capabilities import image_input_support, model_candidate_has_tag
-from box_agent.llm.model_routing import resolve_model_client
+from box_agent.llm.model_routing import ModelRoutingError, resolve_model_client
 from box_agent.tools.base import Tool
 from box_agent.tools.argument_limits import RECOMMENDED_GENERATED_BODY_CHARS
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
@@ -120,14 +120,20 @@ def _image_capable_llm(llm: Any | None) -> Any | None:
         )
         if not vision_candidates:
             return None
-        resolved, diagnostic = resolve_model_client(
-            llm,
-            task="分析图片内容并执行视觉质量审查",
-            strategy="utility",
-            auto_model_candidates=vision_candidates,
-            task_tags=("vision", "analysis"),
-            required_ability_level=3,
-        )
+        try:
+            resolved, diagnostic = resolve_model_client(
+                llm,
+                task="分析图片内容并执行视觉质量审查",
+                strategy="utility",
+                auto_model_candidates=vision_candidates,
+                task_tags=("vision", "analysis"),
+                required_ability_level=3,
+                max_output_tokens_cap=8192,
+            )
+        except ModelRoutingError:
+            # Routing already recorded the rejection. This optional capability
+            # must not prevent an otherwise valid text session from opening.
+            return None
         return resolved if diagnostic.get("mode") == "auto" else None
 
     return None if current_support is False else llm
