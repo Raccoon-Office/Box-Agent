@@ -1259,6 +1259,9 @@ async def _run_agent_loop_impl(
                     injected_event = injection.apply(messages)
                 if injection.kind is InjectionKind.USER_SUPPLEMENT:
                     continuation_user_request = injection.content
+                    await completion_checks.include_inputs(
+                        tools, CompletionContext(tuple(messages), cancelled, session_log, turn_id),
+                    )
                 yield injected_event
 
         has_plan_tool = "plan_write" in tools

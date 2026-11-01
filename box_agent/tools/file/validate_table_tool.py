@@ -29,9 +29,15 @@ def _input_paths(content: Any, tool: ReadTool) -> set[Path]:
         return set()
     # Quoted paths/Markdown preserve spaces. Bare names and paths cover ordinary
     # prose and attachments represented as JSON by hosts.
-    candidates = re.findall(r'''["'`<]([^"'`<>\n]+\.(?:csv|tsv))["'`>]''', content, re.I)
-    candidates += re.findall(r'\]\(([^)\n]+\.(?:csv|tsv))\)', content, re.I)
-    candidates += re.findall(r'''(?<![\w./\\:])[\w./\\:~%-]+\.(?:csv|tsv)(?!\w)''', content, re.I)
+    candidates = []
+
+    def capture_path(match: re.Match[str]) -> str:
+        candidates.append(match.group(1))
+        return " " * len(match.group(0))
+
+    remaining = re.sub(r'\[[^\]\n]*\]\(([^)\n]+\.(?:csv|tsv))\)', capture_path, content, flags=re.I)
+    remaining = re.sub(r'''["'`<]([^"'`<>\n]+\.(?:csv|tsv))["'`>]''', capture_path, remaining, flags=re.I)
+    candidates += re.findall(r'''(?<![\w./\\:])[\w./\\:~%-]+\.(?:csv|tsv)(?!\w)''', remaining, re.I)
     paths = set()
     for value in candidates:
         if "://" in value:
@@ -66,6 +72,17 @@ class TableCompletionGate:
         self.receipts: dict[Path, TableScan] = {}
         self.contracts: dict[Path, dict] = {}
         self.purpose: str | None = None
+
+    async def include_inputs(self, context: CompletionContext) -> None:
+        latest = next((m.content for m in reversed(context.messages)
+                       if m.role == "user" and m.source == "user"), "")
+        added = _input_paths(latest, self.tool) - self.sources.keys()
+        for path in sorted(added):
+            self.sources[path] = None
+            # Read authorization can still be negotiated by the tool invocation.
+            await self.pin(path)
+        if added:
+            context.record("table.inputs", {"sources": {str(p): sha for p, sha in self.sources.items()}})
 
     def bind_purpose(self, purpose: str) -> None:
         if self.purpose is not None and self.purpose != purpose:
@@ -183,18 +200,9 @@ class ValidateTableTool(ReadTool):
         }
 
     async def create_completion_gate(self, context: CompletionContext) -> TableCompletionGate | None:
-        latest = next((m.content for m in reversed(context.messages)
-                       if m.role == "user" and m.source == "user"), "")
-        paths = _input_paths(latest, self)
-        if not paths:
-            return None
-        gate = TableCompletionGate(self, context, paths)
-        for path in paths:
-            # Permission denial is deferred to the actual tool invocation, where
-            # the existing permission negotiation can authorize the read.
-            await gate.pin(path)
-        context.record("table.inputs", {"sources": {str(p): sha for p, sha in gate.sources.items()}})
-        return gate
+        gate = TableCompletionGate(self, context, set())
+        await gate.include_inputs(context)
+        return gate if gate.sources else None
 
     async def _invoke_validated(self, arguments: dict, *, context: ToolInvocationContext | None) -> ToolResult:
         gate = context.completion_gate if context is not None else None

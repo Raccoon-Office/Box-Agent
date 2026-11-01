@@ -23,6 +23,7 @@ from typing import Any
 
 
 MAX_ERROR_SAMPLES = 20
+MIN_CSV_FIELD_LIMIT = 16 * 1024 * 1024
 FIELD_TYPES = ("text", "integer", "decimal", "date", "boolean", "enum")
 _INTEGER = re.compile(r"[+-]?[0-9]+\Z")
 _DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
@@ -218,6 +219,9 @@ def scan_table(
         if len(errors) < MAX_ERROR_SAMPLES:
             errors.append({"record": record, "field": field, "value": (value or "")[:160], "code": code})
 
+    # csv's limit is process-wide. Raise it to a stable supported floor instead
+    # of restoring a smaller limit while another validation thread is reading.
+    csv.field_size_limit(max(csv.field_size_limit(), MIN_CSV_FIELD_LIMIT))
     with _open_regular(path) as raw:
         if _stamp(os.fstat(raw.fileno())) != stamp:
             raise ValueError("Table source changed before parsing")

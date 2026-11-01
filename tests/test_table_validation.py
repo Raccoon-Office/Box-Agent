@@ -59,6 +59,15 @@ def test_bom_and_embedded_delimiters_and_newlines_count_logical_records(tmp_path
     assert result.errors == []
 
 
+@pytest.mark.parametrize("extension,delimiter", [("csv", ","), ("tsv", "\t")])
+def test_large_text_fields_are_validated_through_eof(tmp_path, extension, delimiter):
+    path = tmp_path / f"input.{extension}"
+    write_table(path, [row(1, note="长文本\n" * 40_000), row(2)], delimiter=delimiter)
+    result = scan_table(path, FIELDS)
+    assert result.complete and result.valid and result.records == 2
+    assert all(field["checked"] == 2 for field in result.fields.values())
+
+
 @pytest.mark.parametrize("value", ["NaN", "Infinity", "-0.01", "1.001", "1_000", ""])
 def test_every_original_amount_requires_finite_nonnegative_exact_scale(tmp_path, value):
     path = tmp_path / "input.csv"

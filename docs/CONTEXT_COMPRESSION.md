@@ -79,6 +79,12 @@ including superseded, cancelled and tail records. The declared contract must
 cover every column: required/nullable, text, integer, finite decimal with bounds
 and scale, date, boolean or explicit enum values.
 
+User supplements received during a run add their explicitly referenced inputs to
+the same gate without discarding earlier receipts or relaxing the locked purpose.
+Quoted and Markdown paths are matched as whole paths, not as extra bare filenames.
+The CSV parser supports fields up to at least 16 Mi characters, retaining any
+higher process-wide allowance; parser errors still leave EOF coverage unverified.
+
 Tables containing `amount/status/revision` and at least one of `id/order_id/refund_id`
 also enforce the `transaction_v1` baseline: required IDs, integer revision >= 1,
 finite nonnegative amount with at most two decimal places, status and present

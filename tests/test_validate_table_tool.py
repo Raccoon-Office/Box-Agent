@@ -217,6 +217,20 @@ def test_explicit_paths_support_spaces_links_structured_content_and_ignore_outpu
     assert _input_paths("save new-output.csv; https://example.com/a.csv", tool) == set()
 
 
+@pytest.mark.parametrize("reference", [
+    '"customer data.csv"', "`customer data.csv`", "<customer data.csv>",
+    "[input](customer data.csv)", "[data.csv](customer data.csv)",
+])
+def test_quoted_input_does_not_require_an_unrelated_trailing_filename(tmp_path, reference):
+    requested = tmp_path / "customer data.csv"
+    unrelated = tmp_path / "data.csv"
+    write_table(requested, [row(1)])
+    write_table(unrelated, [row(2)])
+    tool = ValidateTableTool(str(tmp_path))
+    assert _input_paths(f"Analyze {reference}.", tool) == {requested}
+    assert _input_paths(f"Analyze {reference} and data.csv.", tool) == {requested, unrelated}
+
+
 @pytest.mark.asyncio
 async def test_only_current_user_inputs_activate_gate_and_previous_receipts_are_not_replayed(tmp_path):
     tool, gate, path = await setup_gate(tmp_path)
@@ -276,6 +290,57 @@ class ScriptedLLM:
         if response.content:
             yield StreamEvent(type="text", delta=response.content)
         yield StreamEvent(type="finish", finish_reason=response.finish_reason, tool_calls=response.tool_calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_input", [False, True])
+@pytest.mark.parametrize("validate_added", [False, True])
+async def test_supplemented_table_requires_a_new_receipt_without_losing_existing_validation(
+    tmp_path, monkeypatch, initial_input, validate_added,
+):
+    import asyncio
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    tool, _, first = await setup_gate(tmp_path)
+    added = tmp_path / "added.csv"
+    write_table(added, [row(3)])
+    queue = asyncio.Queue()
+
+    def validate(path, call_id):
+        return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id=call_id, type="function", function=FunctionCall(
+                name=tool.name, arguments={"path": str(path), "fields": FIELDS},
+            ),
+        )])
+
+    class SupplementedLLM(ScriptedLLM):
+        supplied = False
+
+        async def generate_stream(self, *args, **kwargs):
+            if not self.supplied:
+                queue.put_nowait(f"Also process {added}")
+                self.supplied = True
+            async for event in super().generate_stream(*args, **kwargs):
+                yield event
+
+    responses = [validate(first, "first")]
+    if validate_added:
+        responses.append(validate(added, "added"))
+    responses += [LLMResponse(content="Done", finish_reason="stop")] * 4
+    events = [event async for event in run_agent_loop(
+        llm=SupplementedLLM(responses),
+        messages=[Message(role="user", content=str(first) if initial_input else "Start the task")],
+        tools={tool.name: tool}, inject_queue=queue, max_steps=6, workspace_dir=str(tmp_path),
+    )]
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.stop_reason == (StopReason.END_TURN if validate_added else StopReason.ERROR)
+    if not validate_added:
+        assert any(isinstance(event, ErrorEvent) and event.error_code == "COMPLETION_GATE_UNSATISFIED"
+                   for event in events)
 
 
 @pytest.mark.asyncio
