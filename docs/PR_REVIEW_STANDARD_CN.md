@@ -88,6 +88,14 @@ Review Agent 必须按以下顺序工作：
 Review Agent 默认只读。除非任务明确要求修复，否则不得提交代码、推送分支、
 修改 PR 或改变 GitHub 状态。
 
+### 4.1 G2 投票模式（可选）
+
+`general_review/vote/review.py` 以“多个视角并行找问题 + 独立验证代理逐条投票”的方式
+执行 G2。只有确认票达到请求验证者数量三分之二（Standard 2/3，Deep 4/5）的 finding
+才会发出；有确认票但未达阈值的 P0/P1 列入“存疑·需人工复核”，不阻塞。计票、严重级别、
+Pre-existing 标签和 Verdict 均由代码确定，沿用第 8 节格式与第 9 节规则；任一代理失败时
+结论不会是 `APPROVE`。审查代理只读，该工具不随包发布。详见 `general_review/vote/README.md`。
+
 ## 5. Ownership 与架构边界
 
 - 共享 Agent 循环、事件、调度、取消、tool-call closure、goal 和 completion

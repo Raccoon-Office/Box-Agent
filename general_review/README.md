@@ -5,6 +5,9 @@ CI infrastructure. It does not contain a deployment configuration for
 `teamwork_review_agents`.
 
 - `ci/preflight.sh` is the deterministic Box-Agent CI command.
+- `vote/` is the optional G2 vote review: parallel read-only hunters,
+  independent verifier votes, and a deterministic tally. See
+  `vote/README.md`.
 - `../docs/PR_REVIEW_STANDARD.md` and
   `../docs/PR_REVIEW_STANDARD_CN.md` define the repository-specific review
   standard.

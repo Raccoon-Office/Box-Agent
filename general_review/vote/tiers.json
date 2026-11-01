@@ -1,0 +1,35 @@
+{
+  "_comment": "Risk tier path rules for the G2 vote review. Patterns use fnmatch on repo-relative POSIX paths; '*' also matches '/'. The highest tier across changed files wins; unmatched files use 'default'.",
+  "default": "medium",
+  "high": [
+    "box_agent/core.py",
+    "box_agent/runtime.py",
+    "box_agent/events.py",
+    "box_agent/kernel/*",
+    "box_agent/acp/*",
+    "box_agent/tools/safety.py",
+    "box_agent/tools/permissions.py",
+    "box_agent/auth.py",
+    "box_agent/turn_secrets.py",
+    "scripts/build_runtime.py",
+    ".github/workflows/*",
+    "general_review/ci/*",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "medium": [
+    "box_agent/*",
+    "tests/*",
+    "scripts/*",
+    "general_review/*"
+  ],
+  "low": [
+    "docs/*",
+    "*.md"
+  ],
+  "depths": {
+    "low": "quick",
+    "medium": "standard",
+    "high": "deep"
+  }
+}

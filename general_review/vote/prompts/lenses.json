@@ -1,0 +1,33 @@
+{
+  "lenses": {
+    "correctness": {
+      "title": "Correctness and regressions",
+      "focus": "Behavioral errors, regressions against existing callers, races, cancellation paths, error handling, resource cleanup, and mismatches between the stated task and the implementation."
+    },
+    "architecture": {
+      "title": "Ownership and architecture boundaries",
+      "focus": "Shared behavior duplicated in CLI and ACP instead of the shared core, provider wire behavior leaking outside box_agent/llm/, tool semantics outside box_agent/tools/, imports that violate the layering checked by tests/test_architecture_boundaries.py, and PPT/document logic added to the core loop instead of Skills. Use docs/design/README.md to find the relevant design document."
+    },
+    "security": {
+      "title": "Security, permissions and protocol safety",
+      "focus": "Path escape from the workspace, credential or secret exposure (logs, prompts, errors), command injection, permission or grant bypass, unsafe deserialization, and anything that writes non-protocol output to ACP stdout."
+    },
+    "cross-platform": {
+      "title": "macOS / Windows / Linux and packaged runtime",
+      "focus": "Path separators and drive letters, POSIX-only APIs (termios, fcntl, signals) on Windows, case sensitivity, encoding defaults, subprocess quoting, and differences between source runs and the frozen PyInstaller runtime (IS_FROZEN, bundled packages, external sandbox)."
+    },
+    "proof": {
+      "title": "Proof coverage",
+      "focus": "Whether the tests and checks in the change actually exercise the changed behavior and its key failure paths, per the minimum-proof table in docs/PR_REVIEW_STANDARD_CN.md. Report missing coverage only where a concrete regression could slip through."
+    },
+    "history": {
+      "title": "History and target-branch consistency",
+      "focus": "Whether the change reverts or conflicts with recent fixes on the base branch for the same files (see the history file in the context pack), reintroduces a previously fixed bug, or breaks a documented compatibility contract."
+    }
+  },
+  "depths": {
+    "quick": {"lenses": ["correctness", "security"], "verifiers": 3},
+    "standard": {"lenses": ["correctness", "architecture", "security", "cross-platform"], "verifiers": 3},
+    "deep": {"lenses": ["correctness", "architecture", "security", "cross-platform", "proof", "history"], "verifiers": 5}
+  }
+}

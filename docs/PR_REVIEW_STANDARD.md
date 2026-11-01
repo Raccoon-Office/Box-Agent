@@ -95,6 +95,17 @@ All automated roles are read-only. Unless a separate authorized repair task says
 otherwise, they must not modify code, push branches, comment on the PR, or change
 GitHub state.
 
+### 4.1 Optional G2 vote mode
+
+`general_review/vote/review.py` runs G2 as parallel lens-specific hunters plus
+independent verifiers that vote on every finding. Only findings confirmed by at
+least two thirds of the requested verifiers (2/3 standard, 4/5 deep) are posted;
+P0/P1 findings with some but not enough confirmations are listed for human
+review without blocking. The tally, severities, Pre-existing labels and verdict
+are computed by code, use the section 8 format and the section 9 rules, and a
+failed agent never yields `APPROVE`. Agents are read-only and the tool is not
+packaged. See `general_review/vote/README.md`.
+
 ## 5. Ownership boundaries
 
 - Shared loop invariants, events, scheduling, cancellation, tool-call closure,
