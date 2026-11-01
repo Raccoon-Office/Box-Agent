@@ -1,5 +1,6 @@
 """End-to-end vote review through the real Box-Agent SDK path with a scripted LLM."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -63,7 +64,8 @@ HUNTER_PAYLOADS = {
         {"file": "app.py", "line": 3, "category": "architecture", "severity": "P2",
          "title": "module-level state", "trigger": "t", "impact": "i"},
     ]},
-    "macOS / Windows / Linux and packaged runtime": None,  # no parseable JSON
+    "macOS / Windows / Linux and packaged runtime": None,  # no parseable JSON, even after the repair turn
+    "History and target-branch consistency": {"findings": []},
 }
 
 
@@ -147,7 +149,7 @@ async def test_vote_review_end_to_end_through_sdk(repo, tmp_path):
     # Read-only tools work inside the repository and refuse paths outside it.
     assert any("compute()" in result for result in llm.tool_results)
     assert not any("secret outside the repo" in result for result in llm.tool_results)
-    assert llm.calls["hunter"] == 5  # four lenses, one extra turn after the tool call
+    assert llm.calls["hunter"] == 7  # five lenses, one turn after the tool call, one repair turn
     assert llm.calls["verifier"] == 3
 
     assert report["verifiers_per_finding"] == 3
@@ -169,7 +171,10 @@ async def test_vote_review_end_to_end_through_sdk(repo, tmp_path):
     assert not pre_existing["blocking"]
 
     assert report["tpr"] == "complete"
+    assert report["tpr_details"]["Proof"] == "unavailable"  # standard depth runs no proof lens
     assert report["verdict"] == "REQUEST_CHANGES"
+    assert report["coverage"]["lenses_failed"] == ["cross-platform"]
+    assert not report["coverage"]["complete"]
 
     markdown = R.render_markdown(report)
     assert "Verdict: REQUEST_CHANGES" in markdown
@@ -178,6 +183,9 @@ async def test_vote_review_end_to_end_through_sdk(repo, tmp_path):
     assert "投票：2/3 CONFIRMED（需 2）" in markdown
     assert "## 存疑·需人工复核" in markdown and "possible injection" in markdown
     assert "hunter-cross-platform" in markdown
+    assert "Coverage: incomplete（4/5 个视角完成；未完成视角：cross-platform" in markdown
+    assert "本次审查不完整，不能作为 G2 结论" in markdown
+    assert "Proof: unavailable（PR 已填写" in markdown
 
     # The repository itself is untouched apart from the git-ignored-by-convention context pack.
     status = subprocess.run(
@@ -241,3 +249,301 @@ def test_since_limits_hunter_diff_but_not_pre_existing_baseline(repo):
     _git(repo, "checkout", "-q", "feature")
     with pytest.raises(R.ReviewError, match="not an ancestor"):
         R.build_context(repo, base="main", head="HEAD", since=side, tpr_file=None, out_dir=None)
+
+
+def _advance_main(repo, path="connector.py", text="snapshot = True\n"):
+    """Move the target branch past the merge-base, the way main moves while a PR is open."""
+    _git(repo, "checkout", "-q", "main")
+    (repo / path).write_text(text, encoding="utf-8")
+    _git(repo, "add", path)
+    _git(repo, "commit", "-q", "-m", f"target: touch {path}")
+    _git(repo, "checkout", "-q", "feature")
+
+
+def _rev(repo, ref="HEAD"):
+    return subprocess.run(["git", "rev-parse", ref], cwd=repo, capture_output=True, text=True).stdout.strip()
+
+
+def test_context_shows_the_merge_result_for_files_the_pr_never_touched(repo):
+    _advance_main(repo)
+    head, refs_before = _rev(repo), subprocess.run(
+        ["git", "for-each-ref"], cwd=repo, capture_output=True, text=True).stdout
+
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=None, out_dir=None)
+
+    assert ctx.files == ["app.py"]  # the PR does not touch connector.py
+    assert ctx.target.ahead == 1 and ctx.target.merge_check == "clean"
+    assert ctx.target.changed == ["connector.py"] and ctx.target.overlap == []
+    assert (ctx.out_dir / "merged" / "connector.py").read_text(encoding="utf-8") == "snapshot = True\n"
+    assert "+snapshot = True" in (ctx.out_dir / "target.patch").read_text(encoding="utf-8")
+    assert "target: touch connector.py" in (ctx.out_dir / "target-commits.txt").read_text(encoding="utf-8")
+
+    message = R._context_message(ctx)
+    assert "1 commits ahead of the merge-base" in message and "Merge check: clean." in message
+    assert f"{ctx.pack['merged']}/<repo-relative path>" in message
+    assert "target: touch connector.py" in message
+
+    # Only unreachable objects are written: same head, same refs, clean tree.
+    assert _rev(repo) == head
+    assert subprocess.run(["git", "for-each-ref"], cwd=repo, capture_output=True, text=True).stdout == refs_before
+    assert not (repo / "connector.py").exists()
+
+
+def test_merged_view_carries_both_sides_of_a_shared_file(repo):
+    _git(repo, "checkout", "-q", "main")
+    lines = (repo / "app.py").read_text(encoding="utf-8").splitlines()
+    lines[18] = "line_19 = 'target'"
+    (repo / "app.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "target: line 19")
+    _git(repo, "checkout", "-q", "feature")
+
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=None, out_dir=None)
+
+    merged = (ctx.out_dir / "merged" / "app.py").read_text(encoding="utf-8")
+    assert "compute()" in merged and "line_19 = 'target'" in merged
+    assert ctx.target.overlap == ["app.py"]
+    assert "compute()" not in (ctx.out_dir / "target.patch").read_text(encoding="utf-8").split("\n@@")[0]
+
+
+def test_context_without_target_commits_adds_nothing_and_clears_a_stale_pack(repo):
+    _advance_main(repo)
+    first = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=None, out_dir=None)
+    assert (first.out_dir / "merged").is_dir()
+
+    # Same head reviewed against a base that has not moved: the old merged view must not survive.
+    ctx = R.build_context(repo, base="HEAD~1", head="HEAD", since=None, tpr_file=None, out_dir=None)
+    assert ctx.target.ahead == 0 and ctx.target.merge_check == "up-to-date"
+    assert "merged" not in ctx.pack and "target_diff" not in ctx.pack
+    assert not (ctx.out_dir / "merged").exists() and not (ctx.out_dir / "target.patch").exists()
+    assert "no commits beyond the merge-base" in R._context_message(ctx)
+
+
+def test_conflicts_with_the_target_are_listed_and_block_approval(repo, tmp_path):
+    _advance_main(repo, path="app.py", text="rewritten = True\n")
+    tpr_file = tmp_path / "tpr.md"
+    tpr_file.write_text(TPR, encoding="utf-8")
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=tpr_file, out_dir=None)
+    assert ctx.target.merge_check == "conflicts" and ctx.target.conflicts == ["app.py"]
+    assert "Conflicted files:" in R._context_message(ctx)
+
+    async def runner(role, _system, _message, _agent):
+        return '{"findings": []}'
+
+    report = asyncio.run(R.run_review(ctx, depth="quick", tier="low", runner=runner, preflight="success"))
+    assert report["verdict"] == "COMMENT"
+    assert "1 个文件有冲突" in R.render_markdown(report)
+
+
+def test_git_without_merge_tree_falls_back_to_the_target_diff(repo, monkeypatch):
+    _advance_main(repo)
+    monkeypatch.setattr(R, "_merge_tree", lambda *_: (None, []))
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=None, out_dir=None)
+    assert ctx.target.merge_check == "unavailable" and "merged" not in ctx.pack
+    assert "+snapshot = True" in (ctx.out_dir / "target.patch").read_text(encoding="utf-8")
+    assert "git could not compute a merge result" in R._context_message(ctx)
+
+
+def test_stale_local_base_is_flagged(repo):
+    _advance_main(repo)
+    _git(repo, "update-ref", "refs/remotes/origin/main", _rev(repo, "main"))
+    _git(repo, "update-ref", "refs/heads/main", _rev(repo, "main~1"))
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=None, out_dir=None)
+    assert ctx.target.remote_differs == "origin/main"
+
+
+def _scripted_runner(findings, votes=None):
+    async def runner(role, _system, _message, agent_id):
+        if role == "hunter":
+            return json.dumps({"findings": findings if "correctness" in agent_id else []})
+        return json.dumps({"votes": votes or []})
+    return runner
+
+
+async def test_target_interaction_finding_blocks_outside_changed_lines(repo):
+    _advance_main(repo)
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=None, out_dir=None)
+    finding = {
+        "file": f"{ctx.pack['merged']}/connector.py", "line": 1, "category": T.TARGET_INTERACTION,
+        "severity": "P1", "title": "snapshot breaks matching", "trigger": "after merge", "impact": "no evidence",
+    }
+    vote = {"id": "F1", "verdict": "CONFIRMED", "severity": "P1", "reachability": "normal",
+            "evidence": [{"file": "connector.py", "line": 1, "note": "read"}]}
+    report = await R.run_review(
+        ctx, depth="quick", tier="low", runner=_scripted_runner([finding], [vote]), preflight="success",
+    )
+    outcome = report["outcomes"][0]
+    assert outcome["finding"]["file"] == "connector.py"  # pack prefix removed
+    assert outcome["pre_existing"] is False and outcome["blocking"] is True
+    assert report["verdict"] == "REQUEST_CHANGES"
+
+
+async def test_wrong_json_shape_is_a_failure_not_an_empty_lens(repo):
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=None, out_dir=None)
+
+    async def runner(*_):
+        return '{"result": "looks fine"}'
+
+    report = await R.run_review(ctx, depth="quick", tier="low", runner=runner, preflight="success")
+    assert report["coverage"]["lenses_completed"] == []
+    assert "no 'findings' list" in report["agent_failures"][0]["error"]
+    assert report["verdict"] == "COMMENT"
+
+
+async def test_complete_coverage_with_proof_lens_marks_proof_sufficient(repo, tmp_path):
+    tpr_file = tmp_path / "tpr.md"
+    tpr_file.write_text(TPR, encoding="utf-8")
+    ctx = R.build_context(repo, base="main", head="HEAD", since=None, tpr_file=tpr_file, out_dir=None)
+    report = await R.run_review(ctx, depth="deep", tier="high", runner=_scripted_runner([]), preflight="success")
+    assert report["coverage"]["complete"] and report["tpr_details"]["Proof"] == "sufficient"
+    assert report["verdict"] == "APPROVE"
+    markdown = R.render_markdown(report)
+    assert "Coverage: complete（6/6 个视角完成）" in markdown and "本次审查不完整" not in markdown
+    assert "- Proof: sufficient" in markdown
+
+
+@pytest.mark.parametrize("text, expected", [
+    ('Done.\n```json\n{"findings": []}\n```', {"findings": []}),
+    ('```json\n{"findings": []}```', {"findings": []}),
+    ('I checked {not json} and: {"findings": [{"file": "a"}]} as promised.', {"findings": [{"file": "a"}]}),
+    ('I will report one P3 finding.', None),
+])
+def test_extract_json(text, expected):
+    assert R.extract_json(text) == expected
+
+
+class _RateLimitError(Exception):
+    status_code = 429
+
+
+class _FlakyLLM:
+    """Fails the first ``failures`` requests, then answers the role's payload."""
+
+    def __init__(self, failures, error=None, final='```json\n{"findings": []}\n```', first_answer=None):
+        self.failures = failures
+        self.error = error or _RateLimitError("Error code: 429 - rpm exhausted")
+        self.final = final
+        self.first_answer = first_answer
+        self.requests = 0
+
+    async def generate_stream(self, *_args, **_kwargs):
+        self.requests += 1
+        if self.requests <= self.failures:
+            raise self.error
+        text = self.first_answer if self.first_answer and self.requests == self.failures + 1 else self.final
+        yield StreamEvent(type="text", delta=text)
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+
+def _fast_gate():
+    """A gate on a fake clock, so backoff is instant and the waits still add up."""
+    now = {"t": 0.0}
+
+    async def sleep(seconds):
+        now["t"] += seconds
+
+    return R.RateGate(sleep=sleep, clock=lambda: now["t"])
+
+
+def _sdk_runner(repo, llm, **kwargs):
+    return R.make_sdk_runner(
+        config=_config(repo), llms={"hunter": llm, "verifier": llm}, repo=repo, max_steps=4, timeout=60, **kwargs,
+    )
+
+
+async def test_rate_limit_waits_and_keeps_the_agent_running(repo):
+    gate = _fast_gate()
+    llm = _FlakyLLM(failures=2)
+    answer = await _sdk_runner(repo, R.PacedLLM(llm, gate))("hunter", "system", "go", "hunter-x")
+    assert R.extract_json(answer) == {"findings": []}
+    assert llm.requests == 3 and gate.rate_limited == 2
+
+
+async def test_exhausted_rate_limit_reports_the_real_cause(repo):
+    gate = _fast_gate()
+    llm = _FlakyLLM(failures=99)
+    with pytest.raises(RuntimeError, match="429"):
+        await _sdk_runner(repo, R.PacedLLM(llm, gate))("hunter", "system", "go", "hunter-x")
+    assert llm.requests == R.RATE_LIMIT_RETRIES + 1
+
+
+async def test_other_errors_are_not_retried_and_keep_their_cause(repo):
+    llm = _FlakyLLM(failures=99, error=ValueError("upstream rejected the request"))
+    with pytest.raises(RuntimeError, match="upstream rejected the request"):
+        await _sdk_runner(repo, R.PacedLLM(llm, _fast_gate()))("hunter", "system", "go", "hunter-x")
+    assert llm.requests == 1
+
+
+async def test_rate_limit_after_output_started_is_not_retried():
+    class Partial:
+        requests = 0
+
+        async def generate_stream(self):
+            self.requests += 1
+            yield StreamEvent(type="text", delta="partial")
+            raise _RateLimitError("429")
+
+    client = Partial()
+    with pytest.raises(_RateLimitError):
+        async for _ in R.PacedLLM(client, _fast_gate()).generate_stream():
+            pass
+    assert client.requests == 1
+
+
+async def test_gate_pause_holds_every_request_and_rpm_spaces_them():
+    now = {"t": 100.0}
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        now["t"] += seconds
+
+    gate = R.RateGate(30, sleep=sleep, clock=lambda: now["t"])
+    await gate.acquire()
+    await gate.acquire()
+    assert slept == [2.0]
+    gate.pause(45)
+    await gate.acquire()
+    assert slept[-1] == pytest.approx(45)
+
+
+def test_retry_after_header_sets_the_delay():
+    class Response:
+        headers = {"retry-after": "7"}
+
+    error = _RateLimitError("429")
+    error.response = Response()
+    assert R._rate_limit_delay(error, 0) == 7.0
+    assert R._rate_limit_delay(_RateLimitError("429"), 0) == R.RATE_LIMIT_DELAY
+    assert R._rate_limit_delay(_RateLimitError("429"), 9) == R.RATE_LIMIT_MAX_DELAY
+
+
+async def test_missing_json_gets_one_repair_turn(repo):
+    stats = R.RunnerStats()
+    llm = _FlakyLLM(failures=0, first_answer="I'll report the finding as a P3.")
+    answer = await _sdk_runner(repo, llm, stats=stats)("hunter", "system", "go", "hunter-x")
+    assert R.extract_json(answer) == {"findings": []}
+    assert llm.requests == 2 and stats.repaired == ["hunter-x"]
+
+
+async def test_repair_turn_is_not_used_when_the_answer_is_valid(repo):
+    stats = R.RunnerStats()
+    llm = _FlakyLLM(failures=0)
+    await _sdk_runner(repo, llm, stats=stats)("hunter", "system", "go", "hunter-x")
+    assert llm.requests == 1 and stats.repaired == []
+
+
+@pytest.mark.parametrize("arguments, message", [
+    (["--tpr-file", "missing.md"], "--tpr-file is not readable"),
+    (["--previous", "missing.json"], "--previous is not a usable"),
+    (["--previous", "bad.json"], "--previous is not a usable"),
+    (["--previous", "wrong_shape.json"], "--previous is not a usable"),
+    (["--config", "bad.yaml"], "config is not usable"),
+    (["--config", "missing.yaml"], "config is not usable"),
+])
+def test_invalid_input_exits_2_with_a_message(repo, tmp_path, monkeypatch, capsys, arguments, message):
+    (tmp_path / "bad.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "wrong_shape.json").write_text('{"outcomes": [{"status": "posted"}]}', encoding="utf-8")
+    (tmp_path / "bad.yaml").write_text("llm: [unclosed\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert R.main(["--repo", str(repo), "--preflight", "success", *arguments]) == 2
+    assert message in capsys.readouterr().err

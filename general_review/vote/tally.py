@@ -14,8 +14,11 @@ Rules implemented here (see ``general_review/vote/README.md``):
   kept as "disputed" for human review instead of being dropped.
 * Final severity is the median of the confirming verifiers' severities; ties
   resolve toward the more severe level.
+* A majority of confirmers calling the trigger "contrived" caps a non-P0
+  finding at P3: the defect may be real, but it does not block.
 * A finding outside the changed lines of the merge-base diff is Pre-existing
-  and only blocks when it is P0.
+  and only blocks when it is P0. A target-interaction finding is exempt: it is
+  caused by this change meeting the target branch, wherever its line falls.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ SEVERITIES: tuple[str, ...] = ("P0", "P1", "P2", "P3")
 BLOCKING_SEVERITIES = frozenset({"P0", "P1", "P2"})
 DROPPED_CATEGORIES = frozenset({"style", "naming", "formatting", "cleanup"})
 VERDICTS = frozenset({"CONFIRMED", "REJECTED", "UNSURE"})
+REACHABILITY = frozenset({"normal", "edge", "contrived"})
+TARGET_INTERACTION = "target-interaction"
 LINE_WINDOW = 3
 
 POSTED = "posted"
@@ -112,6 +117,7 @@ class Vote:
     severity: str | None
     evidence: tuple[dict[str, Any], ...]
     reason: str
+    reachability: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +127,7 @@ class Vote:
             "severity": self.severity,
             "evidence": [dict(item) for item in self.evidence],
             "reason": self.reason,
+            "reachability": self.reachability,
         }
 
 
@@ -134,6 +141,7 @@ class Outcome:
     severity: str
     pre_existing: bool
     votes: list[Vote]
+    reachability_capped: bool = False
 
     @property
     def label(self) -> str:
@@ -160,6 +168,7 @@ class Outcome:
             "label": self.label,
             "pre_existing": self.pre_existing,
             "blocking": self.blocking,
+            "reachability_capped": self.reachability_capped,
             "votes": [vote.to_dict() for vote in self.votes],
         }
 
@@ -295,6 +304,7 @@ def parse_votes(raw: Any, *, voter: str, finding_ids: Iterable[str]) -> tuple[li
         )
         if verdict != "UNSURE" and not evidence:
             verdict = "UNSURE"
+        reachability = str(item.get("reachability") or "").strip().lower()
         votes[finding_id] = Vote(
             finding_id=finding_id,
             voter=voter,
@@ -302,6 +312,7 @@ def parse_votes(raw: Any, *, voter: str, finding_ids: Iterable[str]) -> tuple[li
             severity=_normalize_severity(item.get("severity")),
             evidence=evidence,
             reason=str(item.get("reason") or "").strip(),
+            reachability=reachability if reachability in REACHABILITY else None,
         )
     return list(votes.values()), errors
 
@@ -326,6 +337,10 @@ def tally_finding(
     confirmed = [vote for vote in votes if vote.verdict == "CONFIRMED"]
     confirm_severities = [vote.severity for vote in confirmed if vote.severity]
     severity = _median_severity(confirm_severities) if confirm_severities else finding.severity
+    contrived = sum(1 for vote in confirmed if vote.reachability == "contrived")
+    capped = severity in BLOCKING_SEVERITIES - {"P0"} and contrived * 2 > len(confirmed)
+    if capped:
+        severity = "P3"
     if len(confirmed) >= required:
         status = POSTED
     elif confirmed and severity in {"P0", "P1"}:
@@ -341,6 +356,7 @@ def tally_finding(
         severity=severity,
         pre_existing=pre_existing,
         votes=list(votes),
+        reachability_capped=capped,
     )
 
 
@@ -374,7 +390,11 @@ def changed_lines(unified_diff_u0: str) -> dict[str, set[int]]:
     return result
 
 
-def is_pre_existing(finding: Finding, changes: Mapping[str, set[int]]) -> bool:
+def is_pre_existing(
+    finding: Finding, changes: Mapping[str, set[int]], *, target_ahead: bool = False,
+) -> bool:
+    if target_ahead and finding.category == TARGET_INTERACTION:
+        return False
     return finding.line not in changes.get(finding.file, set())
 
 
@@ -404,7 +424,11 @@ _TEMPLATE_LABEL_ONLY = re.compile(r"^\s*-\s*[^:]+:\s*$")
 
 
 def tpr_status(tpr_text: str | None) -> tuple[str, dict[str, str]]:
-    """Check that Task/Proof/Risk sections exist and contain more than template labels."""
+    """Check that Task/Proof/Risk sections exist and contain more than template labels.
+
+    A filled Proof section is only "provided"; ``assess_proof`` decides whether
+    it is sufficient, because a non-empty section says nothing about coverage.
+    """
 
     if not tpr_text or not tpr_text.strip():
         return "not provided by runtime", {name: "unavailable" for name in ("Task", "Proof", "Risk")}
@@ -420,17 +444,28 @@ def tpr_status(tpr_text: str | None) -> tuple[str, dict[str, str]]:
         elif current is not None:
             sections[current].append(line)
     details: dict[str, str] = {}
-    for name, filled in (("Task", "complete"), ("Proof", "sufficient"), ("Risk", "complete")):
+    for name, filled in (("Task", "complete"), ("Proof", "provided"), ("Risk", "complete")):
         body = [line for line in sections.get(name, []) if line.strip() and not _TEMPLATE_LABEL_ONLY.match(line)]
         details[name] = filled if body else ("insufficient" if name == "Proof" else "incomplete")
-    complete = all(value in {"complete", "sufficient"} for value in details.values())
+    complete = all(value in {"complete", "provided"} for value in details.values())
     return ("complete" if complete else "incomplete"), details
+
+
+def assess_proof(proof: str, *, lens_completed: bool, blocked: bool) -> str:
+    """Map a provided Proof section to the standard's values using the proof lens result."""
+
+    if proof != "provided":
+        return proof
+    if not lens_completed:
+        return "unavailable"
+    return "insufficient" if blocked else "sufficient"
 
 
 def decide_verdict(
     *, preflight: str, tpr: str, outcomes: Sequence[Outcome], agent_failures: int,
+    merge_conflicts: int = 0,
 ) -> str:
-    """PR_REVIEW_STANDARD section 9, plus: failed agents can never yield APPROVE."""
+    """PR_REVIEW_STANDARD section 9, plus: failed agents or merge conflicts can never yield APPROVE."""
 
     if preflight != "success":
         return "REQUEST_CHANGES"
@@ -438,7 +473,7 @@ def decide_verdict(
         return "REQUEST_CHANGES"
     if any(outcome.blocking for outcome in outcomes):
         return "REQUEST_CHANGES"
-    if tpr != "complete" or agent_failures:
+    if tpr != "complete" or agent_failures or merge_conflicts:
         return "COMMENT"
     if any(outcome.status == DISPUTED for outcome in outcomes):
         return "COMMENT"
@@ -453,8 +488,11 @@ __all__ = [
     "Finding",
     "Outcome",
     "POSTED",
+    "REACHABILITY",
     "SEVERITIES",
+    "TARGET_INTERACTION",
     "Vote",
+    "assess_proof",
     "changed_lines",
     "classify_tier",
     "decide_verdict",

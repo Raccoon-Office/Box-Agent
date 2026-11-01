@@ -184,7 +184,7 @@ def test_tpr_status():
     assert details == {"Task": "incomplete", "Proof": "insufficient", "Risk": "incomplete"}
     filled = template.replace("- What changed:", "- What changed: add vote review").replace(
         "- Tests or checks run:", "- Tests or checks run: pytest").replace("- Rollback:", "- Rollback: revert")
-    assert T.tpr_status(filled) == ("complete", {"Task": "complete", "Proof": "sufficient", "Risk": "complete"})
+    assert T.tpr_status(filled) == ("complete", {"Task": "complete", "Proof": "provided", "Risk": "complete"})
 
 
 def test_verdict_rules():
@@ -199,3 +199,60 @@ def test_verdict_rules():
     assert verdict(preflight="success", tpr="complete", outcomes=[nit], agent_failures=1) == "COMMENT"
     assert verdict(preflight="success", tpr="complete", outcomes=[disputed], agent_failures=0) == "COMMENT"
     assert verdict(preflight="success", tpr="not provided by runtime", outcomes=[], agent_failures=0) == "COMMENT"
+    assert verdict(preflight="success", tpr="complete", outcomes=[nit], agent_failures=0, merge_conflicts=1) == "COMMENT"
+    assert verdict(preflight="success", tpr="complete", outcomes=[posted], agent_failures=0, merge_conflicts=1) == "REQUEST_CHANGES"
+
+
+@pytest.mark.parametrize("proof, lens_completed, blocked, expected", [
+    ("provided", False, False, "unavailable"),
+    ("provided", True, False, "sufficient"),
+    ("provided", True, True, "insufficient"),
+    ("insufficient", True, False, "insufficient"),
+    ("unavailable", True, False, "unavailable"),
+])
+def test_filled_proof_section_is_not_sufficient_by_itself(proof, lens_completed, blocked, expected):
+    assert T.assess_proof(proof, lens_completed=lens_completed, blocked=blocked) == expected
+
+
+def _reachable(reach, severity="P2"):
+    return T.Vote(
+        finding_id="F1", voter="v", verdict="CONFIRMED", severity=severity,
+        evidence=({"file": "box_agent/core.py", "line": 10, "note": ""},), reason="", reachability=reach,
+    )
+
+
+def test_contrived_majority_caps_severity_and_stops_blocking():
+    votes = [_reachable("contrived")] * 3 + [_reachable("edge")] * 2
+    outcome = T.tally_finding(_finding(severity="P2"), votes, voters=5, pre_existing=False)
+    assert outcome.status == T.POSTED and outcome.severity == "P3" and not outcome.blocking
+    assert outcome.reachability_capped and outcome.to_dict()["reachability_capped"] is True
+
+
+def test_contrived_minority_or_missing_reachability_keeps_severity():
+    votes = [_reachable("contrived")] * 2 + [_reachable("edge")] * 3
+    assert T.tally_finding(_finding(severity="P2"), votes, voters=5, pre_existing=False).severity == "P2"
+    unlabelled = T.tally_finding(_finding(severity="P2"), [_reachable(None)] * 3, voters=3, pre_existing=False)
+    assert unlabelled.severity == "P2" and unlabelled.blocking and not unlabelled.reachability_capped
+
+
+def test_contrived_does_not_cap_p0():
+    outcome = T.tally_finding(_finding(severity="P0"), [_reachable("contrived", "P0")] * 3, voters=3, pre_existing=False)
+    assert outcome.severity == "P0" and outcome.blocking and not outcome.reachability_capped
+
+
+def test_parse_votes_keeps_only_known_reachability():
+    payload = {"votes": [
+        {"id": "F1", "verdict": "CONFIRMED", "severity": "P2", "reachability": "Contrived",
+         "evidence": [{"file": "a.py", "line": 1}]},
+        {"id": "F2", "verdict": "CONFIRMED", "severity": "P2", "reachability": "maybe",
+         "evidence": [{"file": "a.py", "line": 1}]},
+    ]}
+    votes, _ = T.parse_votes(payload, voter="v", finding_ids=["F1", "F2"])
+    assert [vote.reachability for vote in votes] == ["contrived", None]
+
+
+def test_target_interaction_is_not_pre_existing_only_when_the_target_moved():
+    finding = _finding(category=T.TARGET_INTERACTION, file="box_agent/agent.py", line=900)
+    assert T.is_pre_existing(finding, {}, target_ahead=True) is False
+    assert T.is_pre_existing(finding, {}, target_ahead=False) is True
+    assert T.is_pre_existing(_finding(file="box_agent/agent.py", line=900), {}, target_ahead=True) is True

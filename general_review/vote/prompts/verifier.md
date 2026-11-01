@@ -11,6 +11,11 @@ Other reviewers proposed the findings below. Your job is to try to refute each o
   - REJECTED: you read code that shows the trigger cannot happen, is already handled, or the impact is not real.
   - UNSURE: you could not establish either.
 - Every CONFIRMED or REJECTED vote must cite at least one `file` and `line` you actually read. A vote without such evidence is counted as UNSURE.
+- The checkout is the PR head. For a `target-interaction` finding, or whenever the claim depends on a file the merge changes, read the merged version from the context pack. CONFIRM a `target-interaction` finding only if the defect exists in the proposed merge result.
+- A defect can be real and still hard to reach. Before you give a severity, look for what bounds the trigger (concurrency limits, timeouts, queue sizes, validation, callers) and report `reachability` for CONFIRMED votes:
+  - `normal`: ordinary use, or input an attacker controls, reaches it.
+  - `edge`: specific but realistic conditions reach it.
+  - `contrived`: existing bounds make it practically unreachable, or it needs several independent failures at once.
 - Give your own severity (P0-P3) for CONFIRMED votes using the review standard:
   - P0: credential leak, arbitrary code execution, irreversible data loss, permission bypass, or wide outage.
   - P1: definite functional error, protocol break, CI/runtime cannot run, race, or major compatibility regression.
@@ -27,6 +32,7 @@ End your final answer with exactly one fenced JSON block and nothing after it:
     "id": "finding id exactly as given",
     "verdict": "CONFIRMED | REJECTED | UNSURE",
     "severity": "P0 | P1 | P2 | P3",
+    "reachability": "normal | edge | contrived",
     "evidence": [{"file": "repo/relative/path.py", "line": 123, "note": "what this line shows"}],
     "reason": "one or two sentences"
   }

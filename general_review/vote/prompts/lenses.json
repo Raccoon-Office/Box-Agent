@@ -22,12 +22,12 @@
     },
     "history": {
       "title": "History and target-branch consistency",
-      "focus": "Whether the change reverts or conflicts with recent fixes on the base branch for the same files (see the history file in the context pack), reintroduces a previously fixed bug, or breaks a documented compatibility contract."
+      "focus": "Whether this change still works once merged with the target branch. List the inputs, formats, callers and shared APIs the new code relies on, then check the target-branch commits and the merge diff in the context pack for changes to them, including in files this PR does not touch, and read the merged versions. Also report changes that revert or conflict with recent base-branch fixes (see the history file), reintroduce a previously fixed bug, or break a documented compatibility contract."
     }
   },
   "depths": {
     "quick": {"lenses": ["correctness", "security"], "verifiers": 3},
-    "standard": {"lenses": ["correctness", "architecture", "security", "cross-platform"], "verifiers": 3},
+    "standard": {"lenses": ["correctness", "architecture", "security", "cross-platform", "history"], "verifiers": 3},
     "deep": {"lenses": ["correctness", "architecture", "security", "cross-platform", "proof", "history"], "verifiers": 5}
   }
 }
