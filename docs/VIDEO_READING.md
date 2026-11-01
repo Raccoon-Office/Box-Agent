@@ -45,6 +45,15 @@ The desktop HyperFrames video plugin includes both binaries. Frame extraction
 supports its FFmpeg 4.4 build as well as newer FFmpeg versions; Homebrew is not
 required when the host supplies the plugin paths.
 
+Missing binaries return a failed `runtime_component_required` result (schema
+version 1, `component_id: "video"`) alongside `VIDEO_RUNTIME_UNAVAILABLE`.
+Hosts can map that component ID to their trusted installer, offer installation,
+then retry the original request after refreshing the runtime environment. The
+result never supplies download URLs or shell commands. Invalid explicit
+`BOX_AGENT_FFMPEG_PATH` / `BOX_AGENT_FFPROBE_PATH` overrides remain configuration
+errors without an installation action, since installing a plugin cannot repair
+those overrides.
+
 Speech uses the same Volc ASR configuration and binary WebSocket protocol as the
 desktop voice-input client. No LLM API key is repurposed for ASR. Supported
 environment variables match that client:

@@ -331,6 +331,28 @@ def test_media_runtime_prefers_desktop_paths_and_reports_missing_override(tmp_pa
         _executable("ffmpeg", {"BOX_AGENT_FFMPEG_PATH": str(tmp_path / "missing")})
 
 
+@pytest.mark.parametrize("extra_env", [{}, {"BOX_AGENT_FFMPEG_PATH": sys.executable},
+                                      {"HYPERFRAMES_FFMPEG_PATH": "/missing/host/ffmpeg"}])
+async def test_missing_video_component_offers_host_installation_before_decoding(tmp_path, extra_env):
+    (tmp_path / "clip.mp4").write_bytes(b"unread video")
+    tool = ReadVideoTool(workspace_dir=str(tmp_path), runtime_env={"PATH": str(tmp_path), **extra_env})
+    result = await tool.invoke({"path": "clip.mp4", "instruction": "Read"})
+    assert not result.success
+    assert result.raw_output == {"type": "runtime_component_required", "schema_version": 1,
+                                 "component_id": "video", "code": "VIDEO_RUNTIME_UNAVAILABLE"}
+    assert result.image_content is None
+    assert "Do not install dependencies with other tools" in result.model_context
+
+
+async def test_invalid_custom_video_binary_does_not_offer_an_install_that_cannot_repair_it(tmp_path):
+    (tmp_path / "clip.mp4").write_bytes(b"unread video")
+    tool = ReadVideoTool(workspace_dir=str(tmp_path),
+                         runtime_env={"BOX_AGENT_FFMPEG_PATH": str(tmp_path / "missing")})
+    result = await tool.invoke({"path": "clip.mp4", "instruction": "Read"})
+    assert not result.success
+    assert result.raw_output == {"code": "VIDEO_RUNTIME_UNAVAILABLE"}
+
+
 def test_shared_workspace_setup_registers_video_without_bash_or_sandbox(tmp_path):
     config = SimpleNamespace(tools=SimpleNamespace(enable_bash=False, enable_file_tools=False,
                                                    enable_todo=False, enable_sub_agent=False))

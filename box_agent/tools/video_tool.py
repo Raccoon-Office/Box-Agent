@@ -20,6 +20,7 @@ from box_agent.llm.capabilities import image_input_support
 from .base import EventEmittingTool, ToolResult, check_tool_cancellation
 from .file.read_tool import ReadTool
 from .image_inspection_tool import ImageInspectionTool
+from .runtime_components import runtime_component_required
 from .video_transcription import TranscriptionError, VolcAsrConfig, transcribe_pcm
 
 
@@ -36,9 +37,10 @@ _PTS = re.compile(r"\bn:\s*\d+\s+.*?\bpts_time:([\d.eE+-]+)")
 
 
 class VideoReadError(ValueError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, component_id: str | None = None):
         super().__init__(message)
         self.code = code
+        self.component_id = component_id
 
 
 def _executable(name: str, env: Mapping[str, str]) -> str:
@@ -47,10 +49,14 @@ def _executable(name: str, env: Mapping[str, str]) -> str:
             resolved = shutil.which(value, path=env.get("PATH"))
             if resolved:
                 return resolved
-            raise VideoReadError("VIDEO_RUNTIME_UNAVAILABLE", f"Configured {key} is not executable")
+            raise VideoReadError(
+                "VIDEO_RUNTIME_UNAVAILABLE", f"Configured {key} is not executable",
+                component_id="video" if key.startswith("HYPERFRAMES_") else None,
+            )
     if resolved := shutil.which(name, path=env.get("PATH")):
         return resolved
-    raise VideoReadError("VIDEO_RUNTIME_UNAVAILABLE", f"{name} is unavailable; provision the host media runtime")
+    raise VideoReadError("VIDEO_RUNTIME_UNAVAILABLE", f"{name} is unavailable; provision the host media runtime",
+                         component_id="video")
 
 
 async def _run_process(args: list[str]) -> tuple[bytes, bytes]:
@@ -279,6 +285,8 @@ class ReadVideoTool(EventEmittingTool):
                               image_source=vision.image_source,
                               image_context_eligible=vision.image_context_eligible)
         except VideoReadError as exc:
+            if exc.component_id:
+                return runtime_component_required(exc.component_id, code=exc.code, message=str(exc))
             return ToolResult(success=False, error=f"{exc.code}: {exc}", raw_output={"code": exc.code})
         except (OSError, ValueError):
             return ToolResult(success=False, error="VIDEO_READ_FAILED: Could not read this video",
