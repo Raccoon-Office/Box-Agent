@@ -108,7 +108,11 @@ class TableCompletionGate:
     async def include_inputs(self, context: CompletionContext) -> None:
         latest = next((m.content for m in reversed(context.messages)
                        if m.role == "user" and m.source == "user"), "")
-        added = _input_paths(latest, self.tool) - self.sources.keys()
+        # A reply may refer to the new name after a move. Its original gate
+        # still verifies absence, destination permissions, full hash and data.
+        moved_paths = {Path(contract["destination_path"]) for path, contract in self.contracts.items()
+                       if self.source_modes.get(path) == "move_target" and "destination_path" in contract}
+        added = _input_paths(latest, self.tool) - self.sources.keys() - moved_paths
         for path in sorted(added):
             self.sources[path] = None
             # Read authorization can still be negotiated by the tool invocation.
@@ -149,6 +153,37 @@ class TableCompletionGate:
             self.sources[path] = digest
         return None
 
+    async def check_move(self, source: Path, expected: str | None) -> CompletionIssue | None:
+        contract = self.contracts.get(source, {})
+        destination = contract.get("destination_path")
+        declared_destination = contract.get("declared_destination_path")
+        if not destination or not declared_destination or expected is None:
+            return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{source}: missing pre-move validation contract.", False)
+        target = Path(destination)
+        declared_target = Path(declared_destination)
+        try:
+            try:
+                source.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                return CompletionIssue("TABLE_MOVE_PENDING", f"{source}: original path still exists; move to {target}.")
+            if (declared_target.is_symlink() or declared_target.resolve() != target
+                    or target.is_symlink() or target.resolve() != target):
+                return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{target}: destination resolves through a changed link.", False)
+            denial = self.tool._validate_readable_file(target, str(target), text_only=False)
+            if denial:
+                return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{target}: {denial.error}", False)
+            digest, _ = await _in_thread(fingerprint, target, cancelled=self.context.is_cancelled)
+            if (declared_target.is_symlink() or declared_target.resolve() != target
+                    or target.is_symlink() or target.resolve() != target):
+                return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{declared_target}: destination changed during verification.", False)
+            if digest != expected:
+                return CompletionIssue("TABLE_SOURCE_CHANGED", f"{target}: moved content differs from the validated original.", False)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return CompletionIssue("TABLE_MOVE_UNVERIFIED", f"{target}: {exc}", False)
+        return None
+
     async def check(self) -> CompletionIssue | None:
         missing = []
         for path, expected in self.sources.items():
@@ -161,7 +196,13 @@ class TableCompletionGate:
                     return CompletionIssue("TABLE_SOURCE_UNVERIFIED", f"{path}: {exc}", False)
                 return CompletionIssue("TABLE_DELETE_PENDING", f"{path}: declared deletion has not completed.")
             receipt = self.receipts.get(path)
-            denial = await self.pin(path)
+            if self.source_modes.get(path) == "move_target":
+                issue = await self.check_move(path, expected)
+                if issue:
+                    return issue
+                denial = None
+            else:
+                denial = await self.pin(path)
             if denial:
                 if self.can_validate_edit(path) and (denial.error or "").startswith("TABLE_SOURCE_CHANGED:"):
                     return CompletionIssue(
@@ -237,7 +278,13 @@ class ValidateTableTool(ReadTool):
             "whole-file replacement without processing old records, first declare replace_target "
             "with the final fields, then replace and validate the full new file. For deletion, "
             "first declare delete_target without fields, then delete through an authorized writer. "
-            "These preparation calls return operation_ready, not data-validation evidence; "
+            "For rename/move, first scan ALL original data with source_mode='move_target', fields "
+            "and destination_path naming a different, absent destination. That destination is locked. "
+            "Then use an authorized writer to move the file without changing its bytes. Completion "
+            "requires the original path to be absent, the destination to be readable without changed "
+            "symlinks, its full hash to match the original scan, and all original data checks to pass "
+            "for the declared purpose. Copying, changing content or skipping validation does not suffice. "
+            "Deletion/replacement preparation calls return operation_ready, not data-validation evidence; "
             "completion checks the actual final file state. Roles never authorize a write. "
             "Returns hashes, full row and "
             "field counts, and at most 20 error samples. Declare purpose='diagnosis' BEFORE the first "
@@ -261,8 +308,12 @@ class ValidateTableTool(ReadTool):
                     "description": "Explicit domain contract, locked with fields. Default declared_fields follows the user's actual rules. Choose transaction_v1 only for tasks requiring its order/refund constraints, never from column names alone. Omit later calls to inherit.",
                 },
                 "source_mode": {
-                    "type": "string", "enum": ["input", "edit_target", "replace_target", "delete_target"],
-                    "description": "Declare before any file operation; role is locked. input is immutable. edit_target validates original and final data. replace_target prepares a user-requested whole-file replacement without processing old records: fields describes the required final schema. delete_target prepares a user-requested deletion without parsing data or fields. These declarations do not authorize writes. Omit later calls to inherit.",
+                    "type": "string", "enum": ["input", "edit_target", "replace_target", "delete_target", "move_target"],
+                    "description": "Declare before any file operation; role is locked. input is immutable. edit_target validates original and final data. replace_target prepares a user-requested whole-file replacement without processing old records: fields describes the required final schema. delete_target prepares a user-requested deletion without parsing data or fields. move_target requires a full original scan with fields and a locked destination_path before moving unchanged bytes. These declarations do not authorize writes. Omit later calls to inherit.",
+                },
+                "destination_path": {
+                    "type": "string", "minLength": 1,
+                    "description": "Only for move_target: declare a different, absent destination before the first scan. Locked with the contract; omit later calls to inherit. Does not perform or authorize a move.",
                 },
                 "purpose": {
                     "type": "string", "enum": ["diagnosis", "computation"],
@@ -312,14 +363,16 @@ class ValidateTableTool(ReadTool):
 
     async def execute(self, path: str, fields: dict | None = None, encoding: str = "utf-8-sig",
                       purpose: str | None = None, source_mode: str | None = None,
-                      profile: str | None = None, output_fields: dict | None = None) -> ToolResult:
+                      profile: str | None = None, output_fields: dict | None = None,
+                      destination_path: str | None = None) -> ToolResult:
         return await self._validate(path, fields, encoding, purpose=purpose, source_mode=source_mode,
-                                    profile=profile, output_fields=output_fields)
+                                    profile=profile, output_fields=output_fields, destination_path=destination_path)
 
     async def _validate(self, path: str, fields: dict | None = None, encoding: str = "utf-8-sig",
                         gate: TableCompletionGate | None = None,
                         purpose: str | None = None, source_mode: str | None = None,
-                        profile: str | None = None, output_fields: dict | None = None) -> ToolResult:
+                        profile: str | None = None, output_fields: dict | None = None,
+                        destination_path: str | None = None) -> ToolResult:
         try:
             source = self._resolve_file_path(path).resolve()
             if gate is not None and source not in gate.sources:
@@ -333,12 +386,14 @@ class ValidateTableTool(ReadTool):
             if selected_purpose not in {"diagnosis", "computation"}:
                 raise ValueError("Invalid table task purpose")
             selected_mode = source_mode if source_mode is not None else (gate.source_modes.get(source) if gate else None) or "input"
-            if selected_mode not in {"input", "edit_target", "replace_target", "delete_target"}:
+            if selected_mode not in {"input", "edit_target", "replace_target", "delete_target", "move_target"}:
                 raise ValueError("Invalid table source mode")
             if gate is not None and source in gate.source_modes and gate.source_modes[source] != selected_mode:
                 return ToolResult(success=False, error="TABLE_SOURCE_MODE_CHANGED: cannot change a file's declared role")
-            if selected_mode in {"delete_target", "replace_target"} and gate is None:
+            if selected_mode in {"delete_target", "replace_target", "move_target"} and gate is None:
                 raise ValueError("File operations require an explicitly referenced source and an active completion gate")
+            if destination_path is not None and selected_mode != "move_target":
+                raise ValueError("destination_path is only supported for move_target")
             if selected_mode == "delete_target":
                 if fields is not None or output_fields is not None or profile is not None or purpose is not None:
                     raise ValueError("Deletion preparation does not accept data-validation contracts")
@@ -355,6 +410,23 @@ class ValidateTableTool(ReadTool):
             selected_profile = profile if profile is not None else (previous or {}).get("profile", "declared_fields")
             scan_fields = normalize_fields(fields if fields is not None else expected_fields, profile=selected_profile)
             contract = {"fields": scan_fields, "encoding": encoding, "profile": selected_profile}
+            if selected_mode == "move_target":
+                destination = destination_path if destination_path is not None else (previous or {}).get("declared_destination_path")
+                if not isinstance(destination, str) or not destination.strip():
+                    raise ValueError("move_target requires destination_path before the first scan")
+                target = self._resolve_file_path(destination).absolute()
+                contract["declared_destination_path"] = str(target)
+                if previous is None:
+                    try:
+                        target.lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise ValueError("Move destination must be absent and different from the original input")
+                target = target.resolve()
+                if target == source:
+                    raise ValueError("Move destination must differ from the original input")
+                contract["destination_path"] = str(target)
             if output_fields is not None:
                 if selected_mode != "edit_target":
                     raise ValueError("output_fields is only supported for edit_target")
@@ -362,6 +434,8 @@ class ValidateTableTool(ReadTool):
             if previous:
                 if (scan_fields != expected_fields or encoding != previous["encoding"]
                         or selected_profile != previous["profile"]
+                        or contract.get("destination_path") != previous.get("destination_path")
+                        or contract.get("declared_destination_path") != previous.get("declared_destination_path")
                         or (output_fields is not None and contract["output_fields"] != previous.get("output_fields"))):
                     return ToolResult(success=False, error="TABLE_CONTRACT_CHANGED: cannot relax or replace a declared contract")
             allow_edit = False
@@ -386,6 +460,8 @@ class ValidateTableTool(ReadTool):
                 "purpose": selected_purpose,
                 "source_mode": selected_mode,
             }
+            if selected_mode == "move_target":
+                payload["destination_path"] = contract["destination_path"]
             if gate is not None:
                 if receipt.source_sha256 != gate.sources[source] and not allow_edit:
                     return ToolResult(success=False, error="TABLE_SOURCE_CHANGED: scan does not match the original input")

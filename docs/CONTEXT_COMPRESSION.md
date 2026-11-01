@@ -148,6 +148,23 @@ deletion or final validation blocks completion. Other inputs remain mandatory,
 and roles/contracts cannot be switched after declaration. These roles must
 match user instructions, not be used to skip validation of calculation inputs.
 
+For a rename or move, declare `source_mode="move_target"`, `destination_path`
+and the complete original `fields` before the first scan and before moving.
+The destination must be different and absent, and is locked with the contract.
+Both the declared absolute path and its resolved target are retained; the
+declared path must still resolve to that target before and after hashing,
+including after Session Log restore.
+Unlike deletion preparation, this call still scans every original field and
+record to EOF. After the authorized move, completion requires the original
+path to be absent and the destination to be readable, without replaced symlinks,
+with the full SHA-256 matching the original receipt. The existing computation
+or diagnosis validity rule still applies. Copying without removing the source,
+changing bytes, missing scans, or missing validation of other inputs blocks
+completion. The original receipt and destination survive an interactive pause
+and Session Log restore. This declaration neither moves a file nor changes
+writer permissions or chat-reference protection; it verifies an already
+completed move. A rename that also changes data is not covered by this role.
+
 For scan calls, tool `success` and `validation_complete` mean the validation ran completely.
 `data_valid` independently reports data quality, or `null` for an incomplete
 scan. A completed diagnosis can return `success=true, validation_complete=true,
