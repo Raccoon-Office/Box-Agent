@@ -351,6 +351,187 @@ class ScriptedLLM:
         yield StreamEvent(type="finish", finish_reason=response.finish_reason, tool_calls=response.tool_calls)
 
 
+def scripted_call(name, arguments, call_id):
+    return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+        id=call_id, type="function", function=FunctionCall(name=name, arguments=arguments),
+    )])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared,remove", [(True, True), (True, False), (False, True)])
+async def test_declared_file_deletion_completes_only_when_the_file_is_actually_gone(
+    tmp_path, monkeypatch, posix_shell, declared, remove,
+):
+    import shlex
+    from box_agent.tools.bash_tool import BashTool
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    path = tmp_path / "obsolete.csv"
+    path.write_text('not even a parseable CSV\n"unterminated')
+    tool = ValidateTableTool(str(tmp_path))
+    bash = BashTool(workspace_dir=str(tmp_path))
+    approvals = []
+
+    class Approver:
+        async def negotiate(self, request):
+            approvals.append(request)
+            if "chat_reference_delete" in request:
+                assert request["chat_reference_delete"]["paths"] == [str(path)]
+            return True
+    responses = [scripted_call(tool.name, {"path": str(path), "source_mode": "delete_target"}, "prepare")] if declared else []
+    if remove:
+        responses.append(scripted_call(bash.name, {"command": f"rm -- {shlex.quote(str(path))}"}, "delete"))
+    responses += [LLMResponse(content="Done", finish_reason="stop")] * 4
+    events = [event async for event in run_agent_loop(
+        llm=ScriptedLLM(responses), messages=[Message(role="user", content=f"Delete {path}")],
+        tools={tool.name: tool, bash.name: bash}, workspace_dir=str(tmp_path), max_steps=7,
+        permission_negotiator=Approver(),
+    )]
+    if remove:
+        deletion = next(e for e in events if isinstance(e, ToolCallResult) and e.tool_name == bash.name)
+        assert deletion.success, deletion.error
+        assert any("chat_reference_delete" in request for request in approvals)
+    assert next(e for e in events if isinstance(e, DoneEvent)).stop_reason == (
+        StopReason.END_TURN if declared and remove else StopReason.ERROR
+    )
+    assert path.exists() is not remove
+    if declared:
+        result = next(e for e in events if isinstance(e, ToolCallResult) and e.tool_name == tool.name)
+        assert result.success and result.raw_output["operation_ready"]
+        assert result.raw_output["validation_complete"] is None and result.raw_output["data_valid"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["edit_target", "replace_target"])
+@pytest.mark.parametrize("verify_final", [False, True])
+async def test_schema_edit_and_replacement_require_the_predeclared_final_contract(
+    tmp_path, monkeypatch, mode, verify_final,
+):
+    from box_agent.tools.file_tools import WriteTool
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    path = tmp_path / "change.csv"
+    path.write_text("old_col,value\nA,1\nB,2\n" if mode == "edit_target" else 'bad old file\n"unterminated')
+    fields = {"old_col": {"type": "text"}, "value": {"type": "integer"}}
+    output_fields = {"new_col": {"type": "text"}, "value": {"type": "integer"}}
+    final = "new_col,value\nA,1\nB,2\n"
+    tool, writer = ValidateTableTool(str(tmp_path)), WriteTool(workspace_dir=str(tmp_path))
+    arguments = {"path": str(path), "source_mode": mode, "fields": fields if mode == "edit_target" else output_fields}
+    if mode == "edit_target":
+        arguments["output_fields"] = output_fields
+    responses = [scripted_call(tool.name, arguments, "prepare"),
+                 scripted_call(writer.name, {"path": str(path), "content": final}, "write")]
+    if verify_final:
+        responses.append(scripted_call(tool.name, {"path": str(path)}, "final"))
+    responses += [LLMResponse(content="Done", finish_reason="stop")] * 4
+    events = [event async for event in run_agent_loop(
+        llm=ScriptedLLM(responses), messages=[Message(role="user", content=f"{mode} {path}, rename old_col to new_col")],
+        tools={tool.name: tool, writer.name: writer}, workspace_dir=str(tmp_path), max_steps=8,
+    )]
+    assert next(e for e in events if isinstance(e, DoneEvent)).stop_reason == (
+        StopReason.END_TURN if verify_final else StopReason.ERROR
+    )
+    assert path.read_text() == final
+    results = [e for e in events if isinstance(e, ToolCallResult) and e.tool_name == tool.name]
+    assert all(e.success for e in results)
+    if verify_final:
+        assert results[-1].raw_output["records"] == 2 and results[-1].raw_output["data_valid"]
+        assert set(results[-1].raw_output["fields"]) == set(output_fields)
+        if mode == "edit_target":
+            assert results[0].raw_output["records"] == 2
+            assert set(results[0].raw_output["fields"]) == set(fields)
+
+
+@pytest.mark.asyncio
+async def test_file_roles_and_final_schemas_cannot_be_changed_after_their_declaration(tmp_path):
+    import asyncio
+    tool, gate, path = await setup_gate(tmp_path)
+    context = ToolInvocationContext(completion_gate=gate)
+    first, second = await asyncio.gather(
+        tool.invoke({"path": str(path), "fields": FIELDS}, context=context),
+        tool.invoke({"path": str(path), "source_mode": "delete_target"}, context=context),
+    )
+    assert first.success and not second.success and "TABLE_SOURCE_MODE_CHANGED" in second.error
+    changed = await tool.invoke({"path": str(path), "fields": FIELDS, "source_mode": "replace_target"}, context=context)
+    assert not changed.success and "TABLE_SOURCE_MODE_CHANGED" in changed.error
+    tool, gate, path = await setup_gate(tmp_path, name="replace.csv")
+    context = ToolInvocationContext(completion_gate=gate)
+    ready = await tool.invoke({"path": str(path), "fields": FIELDS, "source_mode": "replace_target"}, context=context)
+    assert ready.success and not gate.receipts
+    relaxed = copy.deepcopy(FIELDS)
+    relaxed["amount"]["minimum"] = "-100"
+    result = await tool.invoke({"path": str(path), "fields": relaxed}, context=context)
+    assert not result.success and "TABLE_CONTRACT_CHANGED" in result.error
+    write_table(path, [row(2, amount="-1")])
+    result = await tool.invoke({"path": str(path)}, context=context)
+    assert result.success and not result.raw_output["data_valid"]
+    assert (await gate.check()).code == "TABLE_VALIDATION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_deletion_does_not_accept_a_dangling_symlink_or_exempt_other_inputs(tmp_path):
+    tool, _, path = await setup_gate(tmp_path)
+    other = tmp_path / "other.csv"
+    write_table(other, [row(2)])
+    gate = await tool.create_completion_gate(CompletionContext((Message(
+        role="user", content=f"Delete {path} and analyze {other}",
+    ),), lambda: False))
+    context = ToolInvocationContext(completion_gate=gate)
+    result = await tool.invoke({"path": str(path), "source_mode": "delete_target"}, context=context)
+    assert result.success
+    path.unlink()
+    assert (await gate.check()).code == "TABLE_VALIDATION_MISSING"
+    assert (await tool.invoke({"path": str(other), "fields": FIELDS}, context=context)).success
+    assert await gate.check() is None
+    path.symlink_to(tmp_path / "missing.csv")
+    assert (await gate.check()).code == "TABLE_DELETE_PENDING"
+
+
+@pytest.mark.asyncio
+async def test_schema_edit_cannot_add_a_new_final_contract_after_original_scan(tmp_path):
+    tool, gate, path = await setup_gate(tmp_path)
+    context = ToolInvocationContext(completion_gate=gate)
+    assert (await tool.invoke({"path": str(path), "fields": FIELDS, "source_mode": "edit_target"}, context=context)).success
+    relaxed = copy.deepcopy(FIELDS)
+    relaxed["amount"]["minimum"] = "-100"
+    result = await tool.invoke({"path": str(path), "fields": FIELDS, "output_fields": relaxed}, context=context)
+    assert not result.success and "TABLE_CONTRACT_CHANGED" in result.error
+
+
+@pytest.mark.asyncio
+async def test_failed_deletion_preparation_cannot_credit_a_later_removal(tmp_path):
+    tool, gate, path = await setup_gate(tmp_path)
+    write_table(path, [row(4)])
+    result = await tool.invoke({"path": str(path), "source_mode": "delete_target"},
+                               context=ToolInvocationContext(completion_gate=gate))
+    assert not result.success and "TABLE_SOURCE_CHANGED" in result.error
+    assert path not in gate.source_modes
+    path.unlink()
+    issue = await gate.check()
+    assert issue.code == "TABLE_SOURCE_UNVERIFIED" and not issue.repairable
+
+
+@pytest.mark.asyncio
+async def test_original_scan_cannot_certify_a_declared_final_schema_without_the_edit(tmp_path):
+    tool, gate, path = await setup_gate(tmp_path)
+    final_fields = {key: value for key, value in FIELDS.items() if key != "note"}
+    result = await tool.invoke(
+        {"path": str(path), "fields": FIELDS, "output_fields": final_fields, "source_mode": "edit_target"},
+        context=ToolInvocationContext(completion_gate=gate),
+    )
+    assert result.success and result.raw_output["data_valid"]
+    issue = await gate.check()
+    assert issue.code == "TABLE_EDIT_VALIDATION_MISSING" and issue.repairable
+
+
 @pytest.mark.asyncio
 async def test_generic_ledger_completes_with_negative_amount_zero_revision_and_extra_precision(tmp_path, monkeypatch):
     from box_agent.turn_continuation import TurnContinuationController

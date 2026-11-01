@@ -72,6 +72,7 @@ class TableCompletionGate:
         self.receipts: dict[Path, TableScan] = {}
         self.original_receipts: dict[Path, TableScan] = {}
         self.source_modes: dict[Path, str] = {}
+        self.validation_locks: dict[Path, asyncio.Lock] = {}
         self.contracts: dict[Path, dict] = {}
         self.purpose: str | None = None
 
@@ -95,7 +96,16 @@ class TableCompletionGate:
 
     def can_validate_edit(self, path: Path) -> bool:
         original = self.original_receipts.get(path)
+        if self.source_modes.get(path) == "replace_target":
+            return path in self.contracts
         return self.source_modes.get(path) == "edit_target" and original is not None and original.complete
+
+    def prepared_operation(self, path: Path) -> ToolResult:
+        payload = {"path": str(path), "source_mode": self.source_modes[path],
+                   "source_sha256": self.sources[path], "operation_ready": True,
+                   "validation_complete": None, "data_valid": None}
+        self.context.record("table.file_operation", payload)
+        return ToolResult(success=True, content=json.dumps(payload, ensure_ascii=False), raw_output=payload)
 
     async def pin(self, path: Path, *, allow_edit: bool = False) -> ToolResult | None:
         denial = self.tool._validate_readable_file(path, str(path), text_only=False)
@@ -113,6 +123,14 @@ class TableCompletionGate:
     async def check(self) -> CompletionIssue | None:
         missing = []
         for path, expected in self.sources.items():
+            if self.source_modes.get(path) == "delete_target":
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    return CompletionIssue("TABLE_SOURCE_UNVERIFIED", f"{path}: {exc}", False)
+                return CompletionIssue("TABLE_DELETE_PENDING", f"{path}: declared deletion has not completed.")
             receipt = self.receipts.get(path)
             denial = await self.pin(path)
             if denial:
@@ -124,6 +142,12 @@ class TableCompletionGate:
                 return CompletionIssue("TABLE_SOURCE_UNVERIFIED", f"{path}: {denial.error}", False)
             if receipt is None:
                 missing.append(str(path))
+            elif ("output_fields" in self.contracts.get(path, {})
+                  and receipt is self.original_receipts.get(path)):
+                return CompletionIssue(
+                    "TABLE_EDIT_VALIDATION_MISSING",
+                    f"{path}: the declared final schema still requires a complete final scan.",
+                )
             elif receipt.source_sha256 != expected:
                 return CompletionIssue("TABLE_SOURCE_CHANGED", str(path), False)
             elif not receipt.complete:
@@ -132,7 +156,7 @@ class TableCompletionGate:
                     f"{path}: parsing did not reach EOF; full validation is unverified.",
                     False,
                 )
-            elif not receipt.valid and (self.purpose != "diagnosis" or self.source_modes.get(path) == "edit_target"):
+            elif not receipt.valid and (self.purpose != "diagnosis" or self.source_modes.get(path) in {"edit_target", "replace_target"}):
                 return CompletionIssue(
                     "TABLE_VALIDATION_FAILED",
                     f"{path}: EOF={receipt.complete}, original_records={receipt.records}, "
@@ -178,12 +202,19 @@ class ValidateTableTool(ReadTool):
             "Inputs must stay unchanged by default. Only for a user-requested in-place edit/append, "
             "declare source_mode='edit_target' for that file BEFORE its first scan and before writing. "
             "This role is locked per file. Scan the full original first, then rescan the full edited "
-            "version with the same field contract; final edited data must be valid. "
+            "version; final edited data must be valid. For schema edits, declare output_fields "
+            "alongside the original fields before the first scan; both contracts are locked. "
+            "Omit fields on later scans to inherit the applicable contract. For user-requested "
+            "whole-file replacement without processing old records, first declare replace_target "
+            "with the final fields, then replace and validate the full new file. For deletion, "
+            "first declare delete_target without fields, then delete through an authorized writer. "
+            "These preparation calls return operation_ready, not data-validation evidence; "
+            "completion checks the actual final file state. Roles never authorize a write. "
             "Returns hashes, full row and "
             "field counts, and at most 20 error samples. Declare purpose='diagnosis' BEFORE the first "
             "scan only when the task is to inspect/report data errors; otherwise use 'computation' "
             "(initial default). Purpose is locked for the run; omitted later calls inherit it. "
-            "success/validation_complete mean the scan finished; data_valid reports data quality "
+            "For scan calls, success/validation_complete mean the scan finished; data_valid reports data quality "
             "separately. A complete diagnosis may finish with data_valid=false; computation still "
             "requires valid input. Both require every input/field, EOF and hashes matching the validated version. "
             "Report all required findings and deliver/read back requested diagnostic artifacts. "
@@ -192,7 +223,7 @@ class ValidateTableTool(ReadTool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {
+        schema = {
             "type": "object", "additionalProperties": False,
             "properties": {
                 "path": {"type": "string"},
@@ -201,8 +232,8 @@ class ValidateTableTool(ReadTool):
                     "description": "Explicit domain contract, locked with fields. Default declared_fields follows the user's actual rules. Choose transaction_v1 only for tasks requiring its order/refund constraints, never from column names alone. Omit later calls to inherit.",
                 },
                 "source_mode": {
-                    "type": "string", "enum": ["input", "edit_target"],
-                    "description": "Per-file role locked before its first scan. Default input is immutable. Use edit_target only for user-requested in-place edits/appends; validate the full original before writing and the valid final version afterward. Omit later calls to inherit.",
+                    "type": "string", "enum": ["input", "edit_target", "replace_target", "delete_target"],
+                    "description": "Declare before any file operation; role is locked. input is immutable. edit_target validates original and final data. replace_target prepares a user-requested whole-file replacement without processing old records: fields describes the required final schema. delete_target prepares a user-requested deletion without parsing data or fields. These declarations do not authorize writes. Omit later calls to inherit.",
                 },
                 "purpose": {
                     "type": "string", "enum": ["diagnosis", "computation"],
@@ -222,8 +253,13 @@ class ValidateTableTool(ReadTool):
                     },
                 },
                 "encoding": {"type": "string", "enum": ["utf-8-sig", "utf-8", "utf-16", "gb18030"]},
-            }, "required": ["path", "fields"],
+            }, "required": ["path"],
         }
+        schema["properties"]["output_fields"] = {
+            **schema["properties"]["fields"],
+            "description": "Only for edit_target: declare a different final schema with the original fields before the first scan. Both schemas are locked; later scans use the final schema. Omit fields on later calls to inherit the applicable schema.",
+        }
+        return schema
 
     async def create_completion_gate(self, context: CompletionContext) -> TableCompletionGate | None:
         gate = TableCompletionGate(self, context, set())
@@ -232,17 +268,26 @@ class ValidateTableTool(ReadTool):
 
     async def _invoke_validated(self, arguments: dict, *, context: ToolInvocationContext | None) -> ToolResult:
         gate = context.completion_gate if context is not None else None
+        if gate is not None:
+            try:
+                source = self._resolve_file_path(arguments["path"]).resolve()
+            except (OSError, ValueError) as exc:
+                return ToolResult(success=False, error=f"TABLE_VALIDATION_FAILED: {exc}")
+            # One file's role and contracts must not race parallel first calls.
+            async with gate.validation_locks.setdefault(source, asyncio.Lock()):
+                return await self._validate(**arguments, gate=gate)
         return await self._validate(**arguments, gate=gate)
 
-    async def execute(self, path: str, fields: dict, encoding: str = "utf-8-sig",
+    async def execute(self, path: str, fields: dict | None = None, encoding: str = "utf-8-sig",
                       purpose: str | None = None, source_mode: str | None = None,
-                      profile: str | None = None) -> ToolResult:
-        return await self._validate(path, fields, encoding, purpose=purpose, source_mode=source_mode, profile=profile)
+                      profile: str | None = None, output_fields: dict | None = None) -> ToolResult:
+        return await self._validate(path, fields, encoding, purpose=purpose, source_mode=source_mode,
+                                    profile=profile, output_fields=output_fields)
 
-    async def _validate(self, path: str, fields: dict, encoding: str = "utf-8-sig",
+    async def _validate(self, path: str, fields: dict | None = None, encoding: str = "utf-8-sig",
                         gate: TableCompletionGate | None = None,
                         purpose: str | None = None, source_mode: str | None = None,
-                        profile: str | None = None) -> ToolResult:
+                        profile: str | None = None, output_fields: dict | None = None) -> ToolResult:
         try:
             source = self._resolve_file_path(path).resolve()
             if gate is not None and source not in gate.sources:
@@ -256,24 +301,50 @@ class ValidateTableTool(ReadTool):
             if selected_purpose not in {"diagnosis", "computation"}:
                 raise ValueError("Invalid table task purpose")
             selected_mode = source_mode if source_mode is not None else (gate.source_modes.get(source) if gate else None) or "input"
-            if selected_mode not in {"input", "edit_target"}:
+            if selected_mode not in {"input", "edit_target", "replace_target", "delete_target"}:
                 raise ValueError("Invalid table source mode")
-            selected_profile = profile if profile is not None else (gate.contracts.get(source, {}).get("profile") if gate else None) or "declared_fields"
-            contract = {"fields": normalize_fields(fields, profile=selected_profile), "encoding": encoding, "profile": selected_profile}
+            if gate is not None and source in gate.source_modes and gate.source_modes[source] != selected_mode:
+                return ToolResult(success=False, error="TABLE_SOURCE_MODE_CHANGED: cannot change a file's declared role")
+            if selected_mode in {"delete_target", "replace_target"} and gate is None:
+                raise ValueError("File operations require an explicitly referenced source and an active completion gate")
+            if selected_mode == "delete_target":
+                if fields is not None or output_fields is not None or profile is not None or purpose is not None:
+                    raise ValueError("Deletion preparation does not accept data-validation contracts")
+                denial = await gate.pin(source)
+                if denial:
+                    return denial
+                gate.source_modes[source] = selected_mode
+                return gate.prepared_operation(source)
+
+            previous = gate.contracts.get(source) if gate else None
+            expected_fields = previous["fields"] if previous else None
+            if previous and gate.can_validate_edit(source):
+                expected_fields = previous.get("output_fields", expected_fields)
+            selected_profile = profile if profile is not None else (previous or {}).get("profile", "declared_fields")
+            scan_fields = normalize_fields(fields if fields is not None else expected_fields, profile=selected_profile)
+            contract = {"fields": scan_fields, "encoding": encoding, "profile": selected_profile}
+            if output_fields is not None:
+                if selected_mode != "edit_target":
+                    raise ValueError("output_fields is only supported for edit_target")
+                contract["output_fields"] = normalize_fields(output_fields, profile=selected_profile)
+            if previous:
+                if (scan_fields != expected_fields or encoding != previous["encoding"]
+                        or selected_profile != previous["profile"]
+                        or (output_fields is not None and contract["output_fields"] != previous.get("output_fields"))):
+                    return ToolResult(success=False, error="TABLE_CONTRACT_CHANGED: cannot relax or replace a declared contract")
             allow_edit = False
             if gate is not None:
-                if source in gate.source_modes and gate.source_modes[source] != selected_mode:
-                    return ToolResult(success=False, error="TABLE_SOURCE_MODE_CHANGED: cannot change a scanned file's role")
                 gate.source_modes[source] = selected_mode
                 allow_edit = gate.can_validate_edit(source)
                 denial = await gate.pin(source, allow_edit=allow_edit)
                 if denial:
                     return denial
-                if source in gate.contracts and gate.contracts[source] != contract:
-                    return ToolResult(success=False, error="TABLE_CONTRACT_CHANGED: cannot relax or replace a scanned contract")
                 gate.bind_purpose(selected_purpose)
+                if selected_mode == "replace_target" and previous is None:
+                    gate.contracts[source] = contract
+                    return gate.prepared_operation(source)
             receipt = await _in_thread(
-                scan_table, source, fields, encoding=encoding, profile=selected_profile,
+                scan_table, source, scan_fields, encoding=encoding, profile=selected_profile,
                 cancelled=gate.context.is_cancelled if gate else lambda: False,
             )
             payload = {
@@ -287,9 +358,10 @@ class ValidateTableTool(ReadTool):
                 if receipt.source_sha256 != gate.sources[source] and not allow_edit:
                     return ToolResult(success=False, error="TABLE_SOURCE_CHANGED: scan does not match the original input")
                 gate.context.record("table.validation", {**payload, "contract": contract})
-                gate.contracts[source] = contract
+                gate.contracts.setdefault(source, contract)
                 gate.receipts[source] = receipt
-                gate.original_receipts.setdefault(source, receipt)
+                if selected_mode != "replace_target":
+                    gate.original_receipts.setdefault(source, receipt)
                 gate.sources[source] = receipt.source_sha256
             summary = json.dumps(payload, ensure_ascii=False)
             return ToolResult(

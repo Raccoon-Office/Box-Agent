@@ -115,15 +115,30 @@ For user-requested in-place edits/appends, declare `source_mode="edit_target"`
 on that file's first validation call, before writing. The default `input` role
 remains immutable, and roles cannot change after scanning starts. An edit target
 must first receive a complete original scan; the original receipt is retained.
-Each edited version must be fully rescanned with the same field contract and the
+Each edited version must be fully rescanned with the declared field contract and the
 final version must be valid, even in diagnosis mode. A write without a new scan
 requests validation instead of treating an expected edit as irreparable source
 damage. Other input files retain their immutable hashes. This declaration must
 match the user's instruction; it does not authorize writes or prove edit intent,
 and normal tool permissions and producer write receipts remain unchanged.
-Column/schema-changing edits are outside this locked-contract workflow.
+For schema-changing edits, declare `output_fields` alongside the original
+`fields` before the first scan. Both contracts are locked. Later calls can omit
+`fields` to inherit the applicable final contract; original and final scans must
+each cover every column and record.
 
-Tool `success` and `validation_complete` now mean the validation ran completely.
+Pure file management uses explicit roles before the operation. `delete_target`
+without fields prepares deletion, even for a malformed CSV; completion requires
+the path to be absent. `replace_target` with the required final `fields` prepares
+whole-file replacement without processing old records; after writing, call
+the validator again to fully validate the new file. These preparation calls
+return `operation_ready=true`, `validation_complete=null`, `data_valid=null`,
+and record `table.file_operation`, not data-scan evidence. They retain the old
+hash but never certify the old data or authorize the actual write. Missing
+deletion or final validation blocks completion. Other inputs remain mandatory,
+and roles/contracts cannot be switched after declaration. These roles must
+match user instructions, not be used to skip validation of calculation inputs.
+
+For scan calls, tool `success` and `validation_complete` mean the validation ran completely.
 `data_valid` independently reports data quality, or `null` for an incomplete
 scan. A completed diagnosis can return `success=true, validation_complete=true,
 data_valid=false` and finish normally; the same invalid data still blocks a
