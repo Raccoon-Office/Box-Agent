@@ -120,6 +120,35 @@ autoCompactThreshold = 0.9 * (context_window - max_output_tokens)
 
 ACP 模型绑定可以通过当前所选模型的 `contextWindow` 和 `maxTokens` 覆盖这两个值。Agent 在创建会话时推导输入阈值，并在轮次之间切换模型绑定时重新计算。绑定没有提供能力数据时回退 `config.yaml`；用户自定义模型预设仍由这里的配置值提供能力声明。
 
+自动选模也会在排序前检查候选输入预算。已知输出上限时复用 `derive_context_token_limit`，并计入本次辅助调用更小的输出额度；目录缺少输出上限时使用当前客户端的输出上限，两者均未知才保留窗口 80% 的旧预算。没有剩余输入预算的候选会被排除。候选池只要存在已知窗口，就只从已知且容量足够的候选中选择；全部不满足时返回 `AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED`，不再回退到仍然装不下的最大窗口，也不借容量未知的候选绕过约束。目录完全缺少窗口时保留兼容路由，并记录 `context_capacity=unknown`，这不代表容量安全；已知容量记录 `context_capacity=estimated` 和 `input_token_budget`。这里使用路由输入估算，不能替代下述完整请求计量与压缩。
+
+已通过容量检查的模型若无法绑定，会返回 `AUTO_MODEL_BINDING_FAILED`，不再静默继承上一客户端未经本次校验的预算。
+
+### 查看模型为什么被选中
+
+任务标签和文字复杂度会区分明确的翻译指令与待译内容：例如 `把这句话翻译成英文：这个错误已经修复。` 不因内容里的“错误／修复”产生 `debug` 标签或升到能力 3。此规则支持中英文翻译指令及成对引号、冒号后单行正文；额外分析／修复动作、未闭合引号和不明确的边界保留原分类。它只影响词法信号，原始请求、完整长度和 token 估算不变；图片、显式工具、能力要求及桌面思考／专家等信号继续有效，手动绑定和会话沿用规则不变。
+
+`resolve_model_client` 通过现有 Python INFO 日志输出 `model.routing`；处于会话 trace 范围内时，同时写入会话 JSONL。ACP 把 Python 日志发往 stderr，桌面宿主会收集到日志目录中的 `box-agent-stderr.log`。Trace 沿用 `BOX_AGENT_SESSION_TRACE_DIR` / `log/sessions` 路径和保留策略，设置 `BOX_AGENT_SESSION_TRACE_ENABLED=0` 可关闭该 trace 通道。其他宿主需启用 INFO 日志，才能保留 trace 范围外的路由记录。
+
+按 `routing_id` 关联一次选模尝试。Agent 先记录 `decision`，随后记录 `bound`、`inherited` 或 `binding_failed`；候选筛选直接被拒绝时只有 `decision`。`strategy` 用于区分子任务和辅助请求；会话 trace 外层还包含 `session_id`、`turn_id`。桌面主模型选择写入 Electron 日志，搜索 `[local-agent] model routing`，按其中的 `routing_id`、`session_id` 查看 `decision` 和后续 `persisted` / `preparation_failed`。两端 ID 分别标识各自的尝试，并非同一个跨进程事务。选中候选不等于绑定保存成功，也不等于模型请求成功。
+
+带版本的 `decision` 记录任务标签、所需能力、输入估算、容量是否已知，以及最多 64 条候选摘要。`candidate_count`、`candidates_truncated` 标明总数和省略数，最终被选候选始终保留。排查时看候选的 `input_token_budget`、`matched_tags`、`rejection_reasons`、`score_breakdown`：
+
+| 字段或原因 | 含义 |
+| --- | --- |
+| `rejection_reasons` 中的 `context_capacity`、`context_unknown`、`ability`、`vision` | 分别表示容量不足、容量未知、能力不足、缺少视觉能力；`score=null` 表示未进入评分排序。 |
+| `highest_score` | 满足约束后按既有评分胜出。 |
+| `catalog_order_tiebreak` | 合格候选同分，按目录顺序选择。 |
+| `previous_model_eligible`（桌面） | 当前模型仍满足约束，因此继续使用，即使其他模型得分更高；`minimum_ability_level` 包含当前模型的能力下限。 |
+| `manual_model`、`no_auto_model_pool`、`task_context_not_supplied` | 手动指定、无自动候选池或未提供新任务输入，沿用绑定而不重新自动排序。 |
+| `no_context_candidate`、`no_ability_candidate`、`no_vision_candidate` | 没有候选通过相应约束。 |
+
+评分保持既有策略：每个命中标签加 100 分；非简单任务加能力等级 × 20，简单任务减能力等级 × 5；简单任务的 `fast` 模型加 25；桌面目录默认模型额外加 2。约束优先于评分。例如能力 3 且命中 `code` 的候选为 160 分，同能力但无标签命中的候选为 60 分；容量或能力不合格的模型不能靠标签加分胜出。
+
+记录只摘取上述诊断字段，不复制任务正文、文件路径、凭据、完整模型绑定或异常正文；模型名、标签和候选数量均有界，日志失败不改变选模结果。这些记录解释本地策略及客户端准备过程，不能证明模型质量或网关最终使用的后端模型。
+
+离线规则基线及固定模型／自动模型的真实结果对照入口见[自动路由评测基线](../test_workspace/README.md#自动路由评测基线2026-10-31)。评测报告会引用已采集的路由记录，并将其与实际模型请求和独立任务判定分开呈现。
+
 ### 估算下一次请求
 
 Provider 会把真实 API 响应的 usage 附在对应 assistant message 上。压缩器找到最近一条带真实 usage 的响应，按以下方式得到当时完整上下文：
@@ -137,7 +166,7 @@ input_tokens
 
 ### 压缩后的消息组织
 
-压缩会在原始 message 列表末尾临时追加一条 `user` 摘要指令，并调用一次摘要模型。历史不会被序列化进新 prompt，也不会分块或滚动摘要，因此摘要请求保留完整的 provider message 前缀，可以复用 KV cache。ACP 通过会话模型路由器解析该调用，并把输出上限限制为 4,096 tokens。自动模式只能在宿主下发的 `autoRouting.models` 模型池中，按摘要任务标签、能力和上下文适配度排序选择；上下文适配使用当前 Agent 的安全输入上限，避免把大段历史交给小窗口工具模型。显式选择模式始终锁定原模型，不再切换独立 lite 模型。`routingMode=manual` 时，ACP 忽略宿主误传的 `autoRouting`，包括过期或格式错误的候选池；该规则统一作用于会话、子任务和辅助调用。未声明路由模式的旧版 builtin 绑定仍兼容候选池路由。其他 host 可传入独立摘要客户端，未提供时回退主模型。这次调用不提供工具并关闭 thinking。指令要求按时间顺序列出全部 user message，把所有结构化分析放进唯一的 `<summary>...</summary>` 块，并内置九节输出结构示例。响应必须严格由一个非空 summary 块组成；写入 `Summary:` 后只取标签内部文本，标签本身会被丢弃。摘要请求和本地写回的上限均为 8,000 字符；若重建请求仍超过安全输入限制，同一份摘要会在不增加 provider 调用的前提下依次收紧到 4,000、2,000 字符。摘要调用失败、格式错误或返回空内容时，使用明确标注为有损的确定性有界摘要兜底。若重建请求仍超限，本轮返回普通上下文超限错误，不进入任何领域恢复状态机。
+压缩会在原始 message 列表末尾临时追加一条 `user` 摘要指令，并调用一次摘要模型。历史不会被序列化进新 prompt，也不会分块或滚动摘要，因此摘要请求保留完整的 provider message 前缀，可以复用 KV cache。ACP 通过会话模型路由器解析该调用，并把输出上限限制为 8,192 tokens。自动模式只能在宿主下发的 `autoRouting.models` 模型池中，按摘要任务标签、能力和上下文适配度排序选择；上下文适配使用当前 Agent 的安全输入上限，避免把大段历史交给小窗口工具模型。显式选择模式始终锁定原模型，不再切换独立 lite 模型。`routingMode=manual` 时，ACP 忽略宿主误传的 `autoRouting`，包括过期或格式错误的候选池；该规则统一作用于会话、子任务和辅助调用。未声明路由模式的旧版 builtin 绑定仍兼容候选池路由。其他 host 可传入独立摘要客户端，未提供时回退主模型。这次调用不提供工具并关闭 thinking。指令要求按时间顺序列出全部 user message，把所有结构化分析放进唯一的 `<summary>...</summary>` 块，并内置九节输出结构示例。响应必须严格由一个非空 summary 块组成；写入 `Summary:` 后只取标签内部文本，标签本身会被丢弃。摘要请求和本地写回的上限均为 8,000 字符；若重建请求仍超过安全输入限制，同一份摘要会在不增加 provider 调用的前提下依次收紧到 4,000、2,000 字符。摘要调用失败、格式错误或返回空内容时，使用明确标注为有损的确定性有界摘要兜底。若重建请求仍超限，本轮返回普通上下文超限错误，不进入任何领域恢复状态机。
 
 模型输出包装成以下合成 `user` message：
 

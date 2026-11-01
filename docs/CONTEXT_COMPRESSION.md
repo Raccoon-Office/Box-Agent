@@ -163,6 +163,86 @@ session is created and recomputes it whenever the binding changes between
 turns. Missing binding capabilities fall back to `config.yaml`, which remains
 the capability source for user-configured model presets.
 
+Automatic routing also checks each candidate's input budget before ranking it.
+When the output limit is known, it uses the same `derive_context_token_limit`
+calculation, including any smaller output cap for that auxiliary call. A missing
+catalog output limit inherits the current client's output limit; if neither is
+known, routing retains the legacy 80% window budget. Candidates with no remaining
+input budget are excluded. If any candidate declares a context window, only
+candidates with known, sufficient capacity are eligible. An insufficient pool
+raises `AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED`; it never falls back to the largest
+insufficient window or to a candidate with unknown capacity. Entirely missing
+window metadata retains legacy routing with `context_capacity=unknown`; this
+does not establish capacity safety. Known-capacity diagnostics include
+`context_capacity=estimated` and `input_token_budget`. These checks use routing
+estimates and do not replace the full-request accounting and compaction below.
+If a capacity-checked model cannot be bound, `AUTO_MODEL_BINDING_FAILED` stops
+the call instead of silently inheriting the previous, unverified client budget.
+
+### Explaining a model-routing decision
+
+Lexical task signals separate clearly delimited translation source from the
+instruction. For example, translating a sentence containing “error” or “fixed”
+does not itself add a `debug` tag or require ability 3. This applies to direct
+Chinese/English translation requests with paired quotes or a single-line source
+after a colon. Additional analysis/fix actions, unclosed quotes, and ambiguous
+boundaries retain the original classification. Full request text, length
+thresholds, and token estimates are unchanged. Explicit image/tool/capability
+requirements and desktop thinking/expert signals still apply, as do manual
+bindings and session continuity rules.
+
+`resolve_model_client` emits `model.routing` records through the existing Python
+INFO logger and, when a session trace context is active, the session JSONL trace.
+ACP sends Python logs to stderr; the desktop host collects them in
+`box-agent-stderr.log` under its logs directory. Trace files use the existing
+`BOX_AGENT_SESSION_TRACE_DIR` / `log/sessions` location and retention policy;
+`BOX_AGENT_SESSION_TRACE_ENABLED=0` disables that trace transport. Other hosts
+must enable INFO logging to retain decisions made outside a trace context.
+
+Group records by `routing_id`. An Agent attempt records `decision`, followed by
+`bound`, `inherited`, or `binding_failed`; a rejected selection only records
+`decision`. `strategy` distinguishes child tasks and utility calls. Within a trace,
+the outer record also carries `session_id` and `turn_id`. The desktop's main-model
+selection uses `[local-agent] model routing` in its Electron log, with its own
+`routing_id` and `session_id`: `decision` is followed by `persisted` or
+`preparation_failed`. These IDs identify attempts within each engine, not one
+cross-process transaction. A selected candidate does not prove that a binding
+was saved or that a provider request succeeded.
+
+The versioned `decision` contains task tags, required ability, estimated input,
+capacity certainty, and up to 64 candidate summaries. `candidate_count` and
+`candidates_truncated` expose omissions; the selected candidate is always kept.
+For each candidate, inspect `input_token_budget`, `matched_tags`,
+`rejection_reasons`, and `score_breakdown`:
+
+| Field / reason | Meaning |
+| --- | --- |
+| `context_capacity`, `context_unknown`, `ability`, `vision` in `rejection_reasons` | Candidate failed the corresponding constraint; `score=null` means it did not enter ranking. |
+| `highest_score` | An eligible model won the existing score calculation. |
+| `catalog_order_tiebreak` | Eligible scores tied; the earlier catalog entry won. |
+| `previous_model_eligible` (desktop) | The current model still qualifies and was retained, even if another model scores higher. `minimum_ability_level` includes the current model's ability. |
+| `manual_model`, `no_auto_model_pool`, `task_context_not_supplied` | A fixed or existing binding was retained without a new automatic ranking. |
+| `no_context_candidate`, `no_ability_candidate`, `no_vision_candidate` | No candidate passed the relevant constraint. |
+
+Scores preserve the existing policy: 100 per matching tag, ability × 20 for
+non-simple tasks or ability × -5 for simple tasks, and 25 for a `fast` model on
+a simple task. The desktop also adds 2 for its catalog default. Constraint
+rejections take precedence over scores. For example, a model with a matching
+`code` tag and ability 3 scores 160; another ability-3 model without matching
+tags scores 60. A model with insufficient input capacity or ability cannot win
+by having more matching tags.
+
+Records project only these diagnostic fields: they do not copy the task text,
+file paths, credentials, full model bindings, or exception text. Model names and
+tags are bounded. Logging failures do not change routing outcomes. These records
+explain local policy and client preparation, not model quality or a gateway's
+eventual backend choice.
+
+See the [routing evaluation baseline](../test_workspace/README.md#自动路由评测基线2026-10-31)
+for offline policy checks and controlled comparisons of captured fixed-model and
+automatic runs. Reports keep observed routing decisions, actual model requests,
+and independent task outcomes separate.
+
 ### Estimating the next request
 
 Provider clients attach usage metadata to the assistant message produced by a real API response. Compaction finds the newest such message and computes its complete response context as:
@@ -178,7 +258,7 @@ It then estimates messages appended after that response conservatively. If no me
 
 ### Compacted message layout
 
-Compaction makes one summary request by appending a temporary `user` instruction to the exact existing message list. It does not serialize messages into a new prompt and does not split or roll the source. This preserves the complete provider message prefix so the summary request can reuse its KV cache. ACP resolves this call through the session model router and caps it at 4,096 output tokens. Automatic sessions may select only from the host-provided `autoRouting.models` pool, ranked by the summary task tags, ability, and context fit. Context fit uses the active Agent's safe input limit so a small-window utility model is not selected for a larger history. Explicitly selected sessions stay on that exact model; there is no independent lite-model switch. ACP ignores `autoRouting` when `routingMode=manual`, even if the host sends a stale or malformed pool. This applies to session, child-agent, and utility bindings; legacy builtin bindings without a routing mode retain pool-based routing. Other hosts may supply a dedicated summary client or fall back to the main client. Tools and thinking are disabled. The instruction requires a chronological list of every user message and places all structured analysis inside one `<summary>...</summary>` block, with an embedded nine-section output example. The response must consist of exactly one non-empty summary block; only its inner text is written after `Summary:` and the tags are discarded. The requested and locally enforced summary limit is 8,000 characters; if the rebuilt request still exceeds the safe input limit, the same summary is deterministically tightened to 4,000 and finally 2,000 characters without another provider call. If the call fails, is malformed, or returns empty output, an explicitly lossy deterministic bounded fallback is used. If the rebuilt request still exceeds the limit, the turn ends with a normal context-limit error; compaction does not invoke a domain recovery state machine.
+Compaction makes one summary request by appending a temporary `user` instruction to the exact existing message list. It does not serialize messages into a new prompt and does not split or roll the source. This preserves the complete provider message prefix so the summary request can reuse its KV cache. ACP resolves this call through the session model router and caps it at 8,192 output tokens. Automatic sessions may select only from the host-provided `autoRouting.models` pool, ranked by the summary task tags, ability, and context fit. Context fit uses the active Agent's safe input limit so a small-window utility model is not selected for a larger history. Explicitly selected sessions stay on that exact model; there is no independent lite-model switch. ACP ignores `autoRouting` when `routingMode=manual`, even if the host sends a stale or malformed pool. This applies to session, child-agent, and utility bindings; legacy builtin bindings without a routing mode retain pool-based routing. Other hosts may supply a dedicated summary client or fall back to the main client. Tools and thinking are disabled. The instruction requires a chronological list of every user message and places all structured analysis inside one `<summary>...</summary>` block, with an embedded nine-section output example. The response must consist of exactly one non-empty summary block; only its inner text is written after `Summary:` and the tags are discarded. The requested and locally enforced summary limit is 8,000 characters; if the rebuilt request still exceeds the safe input limit, the same summary is deterministically tightened to 4,000 and finally 2,000 characters without another provider call. If the call fails, is malformed, or returns empty output, an explicitly lossy deterministic bounded fallback is used. If the rebuilt request still exceeds the limit, the turn ends with a normal context-limit error; compaction does not invoke a domain recovery state machine.
 
 The model output is wrapped in this synthetic `user` message:
 

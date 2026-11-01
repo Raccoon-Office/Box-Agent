@@ -88,6 +88,144 @@ def test_lite_llm_aliases_main_when_omitted(tmp_path):
     assert agent._lite_llm is lite  # same object
 
 
+def test_routing_diagnostic_explains_scores_and_each_exclusion_without_task_contents():
+    selected, diagnostic = select_auto_model([
+        {"model": "small", "tags": ["code"], "abilityLevel": 1, "contextWindow": 1_000},
+        {"model": "code", "tags": ["code"], "abilityLevel": 3, "contextWindow": 20_000},
+        {"model": "other", "tags": [], "abilityLevel": 3, "contextWindow": 20_000},
+    ], task="编写代码 private-task-marker", estimated_input_tokens=900)
+    assert selected["model"] == "code"
+    assert diagnostic["reason"] == "highest_score"
+    assert diagnostic["schema_version"] == 1
+    assert diagnostic["candidates"][0]["rejection_reasons"] == ["context_capacity", "ability"]
+    assert diagnostic["candidates"][0]["score"] is None
+    assert diagnostic["candidates"][1]["score"] == 160
+    assert diagnostic["candidates"][1]["selected"] is True
+    assert diagnostic["candidates"][2]["score"] == 60
+    assert "private-task-marker" not in json.dumps(diagnostic)
+
+
+def test_routing_failure_carries_the_exclusion_diagnostic():
+    with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED") as caught:
+        select_auto_model([
+            {"model": "small", "tags": [], "abilityLevel": 3, "contextWindow": 1_000},
+            {"model": "unknown", "tags": ["vision"], "abilityLevel": 3},
+        ], task="private-task-marker", estimated_input_tokens=900, task_tags=["vision"])
+    diagnostic = caught.value.diagnostic
+    assert diagnostic["reason"] == "no_context_candidate"
+    assert diagnostic["status"] == "rejected"
+    assert diagnostic["candidates"][0]["rejection_reasons"] == ["context_capacity", "vision"]
+    assert diagnostic["candidates"][1]["rejection_reasons"] == ["context_unknown"]
+    assert "private-task-marker" not in json.dumps(diagnostic)
+
+
+def test_routing_records_correlated_decision_and_binding_in_session_trace(tmp_path):
+    from box_agent.session_trace import SessionTraceWriter, set_session_trace_writer, reset_session_trace_writer
+    writer = SessionTraceWriter(session_id="routing-session", acp_session_id="acp-routing", trace_dir=tmp_path, enabled=True)
+    token = set_session_trace_writer(writer, turn_id="turn-routing")
+    llm = _DummyLLM("automatic")
+    llm.auto_model_candidates = [{"model": "chosen", "tags": [], "abilityLevel": 3, "contextWindow": 20_000, "maxTokens": 1_000}]
+    try:
+        client, _ = resolve_model_client(llm, task="private-task-marker")
+    finally:
+        reset_session_trace_writer(token)
+    records = [json.loads(line) for line in writer.file_path.read_text().splitlines()]
+    assert [item["event"] for item in records] == ["model.routing", "model.routing"]
+    assert [item["data"]["phase"] for item in records] == ["decision", "bound"]
+    assert len({item["data"]["routing_id"] for item in records}) == 1
+    assert all(item["turn_id"] == "turn-routing" and item["session_id"] == "routing-session" for item in records)
+    assert records[-1]["data"]["actual_model"] == client.model == "chosen"
+    assert "private-task-marker" not in json.dumps(records)
+
+
+def test_routing_diagnostics_bound_candidates_and_keep_the_winner():
+    pool = [{"model": f"model-{index}", "tags": ["code"] if index == 70 else [], "abilityLevel": 3} for index in range(71)]
+    selected, diagnostic = select_auto_model(pool, task="code")
+    assert selected["model"] == "model-70"
+    assert diagnostic["candidate_count"] == 71
+    assert diagnostic["candidates_truncated"] == 7
+    assert len(diagnostic["candidates"]) == 64
+    assert diagnostic["candidates"][-1]["selected"] is True
+    selected, diagnostic = select_auto_model(pool[:2], task="hello")
+    assert selected["model"] == "model-0"
+    assert diagnostic["reason"] == "catalog_order_tiebreak"
+
+
+def test_routing_logging_failure_does_not_change_the_result(monkeypatch):
+    from box_agent.llm import model_routing
+    import box_agent.session_trace as trace
+    def fail(*args, **kwargs):
+        raise OSError("fixture private-log-error")
+    monkeypatch.setattr(model_routing.logger, "info", fail)
+    monkeypatch.setattr(trace, "emit_session_trace", fail)
+    llm = _DummyLLM("automatic")
+    llm.auto_model_candidates = [{"model": "chosen", "tags": [], "abilityLevel": 3}]
+    routed, _ = resolve_model_client(llm, task="hello")
+    assert routed.model == "chosen"
+
+
+def test_routing_logs_rejections_without_a_trace_context_or_stdout(caplog, capsys):
+    llm = _DummyLLM("automatic")
+    llm.auto_model_candidates = [
+        {"model": "small", "tags": [], "abilityLevel": 3, "contextWindow": 1_000}
+    ]
+    with caplog.at_level("INFO", logger="box_agent.llm.model_routing"):
+        with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
+            resolve_model_client(llm, task="private-task-marker", estimated_input_tokens=900)
+    records = [
+        json.loads(record.message.removeprefix("model.routing "))
+        for record in caplog.records if record.name == "box_agent.llm.model_routing"
+    ]
+    assert len(records) == 1
+    assert records[0]["phase"] == "decision"
+    assert records[0]["decision"]["reason"] == "no_context_candidate"
+    assert "private-task-marker" not in json.dumps(records)
+    assert capsys.readouterr().out == ""
+
+
+def test_routing_inheritance_records_actual_model_and_distinct_attempts(caplog):
+    llm = _DummyLLM("manual")
+    with caplog.at_level("INFO", logger="box_agent.llm.model_routing"):
+        for _ in range(2):
+            client, diagnostic = resolve_model_client(llm, task="hello")
+            assert client is llm
+            assert diagnostic == {"mode": "inherit", "reason": "no_auto_model_pool"}
+    records = [
+        json.loads(record.message.removeprefix("model.routing "))
+        for record in caplog.records if record.name == "box_agent.llm.model_routing"
+    ]
+    assert [record["phase"] for record in records] == ["decision", "inherited"] * 2
+    assert records[0]["routing_id"] == records[1]["routing_id"]
+    assert records[2]["routing_id"] == records[3]["routing_id"]
+    assert records[0]["routing_id"] != records[2]["routing_id"]
+    assert records[1]["actual_model"] == records[3]["actual_model"] == "model-manual"
+
+
+@pytest.mark.parametrize("failure", ["capacity", "binding", "unexpected"])
+def test_routing_failure_trace_never_reports_a_successful_binding(tmp_path, monkeypatch, failure):
+    from box_agent.session_trace import SessionTraceWriter, set_session_trace_writer, reset_session_trace_writer
+    writer = SessionTraceWriter(session_id="routing-session", acp_session_id="acp-routing", trace_dir=tmp_path, enabled=True)
+    token = set_session_trace_writer(writer, turn_id="turn-failed")
+    llm = _DummyLLM("automatic")
+    binding_failure = failure != "capacity"
+    llm.auto_model_candidates = [{"model": "chosen", "tags": [], "abilityLevel": 3, "contextWindow": 2_000 if binding_failure else 1_000, "maxTokens": 100}]
+    if binding_failure:
+        def fail(*args, **kwargs):
+            error_type = RuntimeError if failure == "unexpected" else ValueError
+            raise error_type("private-provider-secret")
+        monkeypatch.setattr(llm, "for_model", fail)
+    try:
+        with pytest.raises(RuntimeError if failure == "unexpected" else ValueError):
+            resolve_model_client(llm, task="private-task-marker", estimated_input_tokens=900)
+    finally:
+        reset_session_trace_writer(token)
+    records = [json.loads(line) for line in writer.file_path.read_text().splitlines()]
+    assert [item["data"]["phase"] for item in records] == (["decision", "binding_failed"] if binding_failure else ["decision"])
+    assert all("actual_model" not in item["data"] for item in records)
+    assert "private-provider-secret" not in json.dumps(records)
+    assert "private-task-marker" not in json.dumps(records)
+
+
 def test_lite_llm_distinct_when_provided(tmp_path):
     agent, main, lite = _make_agent(tmp_path, lite=False)
     other = _DummyLLM("other")
@@ -238,6 +376,166 @@ def test_automatic_routing_rejects_missing_hard_vision_capability():
             ],
             task="识别这张截图的内容",
         )
+
+
+@pytest.mark.parametrize("tokens, expected", [(800, "small"), (801, "large"), (1_600, "large")])
+def test_auto_routing_obeys_input_capacity_boundary(tokens, expected):
+    selected, diagnostic = select_auto_model(
+        [
+            {"model": "small", "tags": ["fast"], "abilityLevel": 3, "contextWindow": 1_000},
+            {"model": "large", "tags": [], "abilityLevel": 3, "contextWindow": 2_000},
+        ],
+        task="hello",
+        estimated_input_tokens=tokens,
+    )
+    assert selected["model"] == expected
+    assert diagnostic["context_capacity"] == "estimated"
+
+
+@pytest.mark.parametrize("explicit_estimate", [False, True])
+@pytest.mark.parametrize("include_unknown", [False, True])
+def test_auto_routing_rejects_insufficient_capacity_without_largest_or_unknown_fallback(
+    explicit_estimate, include_unknown,
+):
+    candidates = [
+        {"model": "small", "tags": [], "abilityLevel": 3, "contextWindow": 1_000},
+        {"model": "large", "tags": [], "abilityLevel": 3, "contextWindow": 2_000},
+    ]
+    if include_unknown:
+        candidates.append({"model": "unknown", "tags": ["fast"], "abilityLevel": 3})
+    with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
+        select_auto_model(
+            candidates,
+            task="x" * 3_202,
+            **({"estimated_input_tokens": 1_601} if explicit_estimate else {}),
+        )
+
+
+def test_auto_routing_prefers_known_capacity_and_marks_all_unknown_legacy_pools():
+    unknown = {"model": "unknown", "tags": ["fast"], "abilityLevel": 3}
+    known = {"model": "known", "tags": [], "abilityLevel": 3, "contextWindow": 1_000}
+    selected, diagnostic = select_auto_model([unknown, known], task="hello")
+    assert selected["model"] == "known"
+    assert diagnostic["context_capacity"] == "estimated"
+    selected, diagnostic = select_auto_model([unknown], task="hello", estimated_input_tokens=50_000)
+    assert selected["model"] == "unknown"
+    assert diagnostic["context_capacity"] == "unknown"
+
+
+@pytest.mark.parametrize("constraint", ["vision", "ability"])
+def test_auto_routing_does_not_relax_capabilities_to_fit_input(constraint):
+    with pytest.raises(ValueError, match=constraint):
+        select_auto_model(
+            [
+                {"model": "small", "tags": ["vision"], "abilityLevel": 3, "contextWindow": 1_000},
+                {"model": "large", "tags": [] if constraint == "vision" else ["vision"],
+                 "abilityLevel": 1 if constraint == "ability" else 3, "contextWindow": 2_000},
+            ],
+            task="hello", task_tags=["vision"], required_ability_level=3,
+            estimated_input_tokens=801,
+        )
+
+
+def test_model_resolver_stops_before_cloning_when_no_candidate_can_fit(monkeypatch):
+    llm = _DummyLLM("automatic")
+    llm.auto_model_candidates = [
+        {"model": "small", "tags": [], "abilityLevel": 3, "contextWindow": 1_000},
+    ]
+    calls = []
+    monkeypatch.setattr(llm, "for_model", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
+        resolve_model_client(llm, task="hello", estimated_input_tokens=801)
+    assert calls == []
+    assert llm.model == "model-automatic"
+
+
+@pytest.mark.parametrize("output, budget", [(100, 810), (400, 540)])
+def test_auto_routing_reserves_output_and_the_agent_safety_margin(output, budget):
+    candidates = [{"model": "small", "tags": [], "abilityLevel": 3,
+                   "contextWindow": 1_000, "maxTokens": output}]
+    selected, diagnostic = select_auto_model(candidates, task="hello", estimated_input_tokens=budget)
+    assert selected["model"] == "small"
+    assert diagnostic["input_token_budget"] == budget
+    with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
+        select_auto_model(candidates, task="hello", estimated_input_tokens=budget + 1)
+
+
+@pytest.mark.parametrize("output", [1_000, 1_001])
+def test_auto_routing_rejects_output_limits_that_leave_no_input_capacity(output):
+    with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
+        select_auto_model(
+            [{"model": "small", "tags": [], "abilityLevel": 3,
+              "contextWindow": 1_000, "maxTokens": output}],
+            task="a",
+        )
+
+
+def test_routing_uses_the_actual_auxiliary_output_cap_without_changing_the_pool():
+    llm = _DummyLLM("automatic")
+    candidate = {"model": "large", "tags": ["summary"], "abilityLevel": 3,
+                 "contextWindow": 1_000, "maxTokens": 400}
+    llm.auto_model_candidates = [candidate]
+    routed, diagnostic = resolve_model_client(
+        llm, task="hello", estimated_input_tokens=800, max_output_tokens_cap=100,
+    )
+    assert routed.model == "large"
+    assert routed.max_output_tokens == 100
+    assert diagnostic["input_token_budget"] == 810
+    assert candidate["maxTokens"] == 400
+    with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
+        resolve_model_client(llm, task="hello", estimated_input_tokens=811, max_output_tokens_cap=100)
+
+
+def test_routing_reserves_the_inherited_output_limit_when_the_catalog_omits_it():
+    llm = _DummyLLM("automatic")
+    llm.max_output_tokens = 200
+    llm.auto_model_candidates = [{"model": "small", "tags": [], "abilityLevel": 3, "contextWindow": 1_000}]
+    routed, diagnostic = resolve_model_client(llm, task="hello", estimated_input_tokens=700, max_output_tokens_cap=800)
+    assert routed.max_output_tokens == 200
+    assert diagnostic["input_token_budget"] == 720
+    with pytest.raises(ValueError, match="AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED"):
+        resolve_model_client(llm, task="hello", estimated_input_tokens=721, max_output_tokens_cap=800)
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "raises"])
+def test_capacity_checked_routing_does_not_fall_back_to_the_original_client_on_binding_failure(monkeypatch, failure):
+    llm = _DummyLLM("small")
+    llm.max_output_tokens = 100
+    llm.auto_model_candidates = [
+        {"model": "model-small", "tags": [], "abilityLevel": 3, "contextWindow": 1_000, "maxTokens": 100},
+        {"model": "large", "tags": [], "abilityLevel": 3, "contextWindow": 2_000, "maxTokens": 100},
+    ]
+    def fail(*args, **kwargs):
+        raise ValueError("fixture binding rejected")
+    monkeypatch.setattr(llm, "for_model", None if failure == "unavailable" else fail)
+    with pytest.raises(ValueError, match="AUTO_MODEL_BINDING_FAILED"):
+        resolve_model_client(llm, task="hello", estimated_input_tokens=900)
+    assert llm.model == "model-small"
+
+
+@pytest.mark.asyncio
+async def test_acp_session_with_large_context_can_prepare_its_bounded_compaction_model(tmp_path, monkeypatch):
+    agent, main, _ = _make_agent(tmp_path, lite=True)
+    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    binding = {
+        "source": "builtin", "model": "large", "contextWindow": 1_000_000, "maxTokens": 100_000,
+        "autoRouting": {"models": [{
+            "model": "large", "tags": ["summary"], "abilityLevel": 3,
+            "contextWindow": 1_000_000, "maxTokens": 100_000,
+        }]},
+    }
+    try:
+        session = await agent.newSession(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"llm_binding": binding},
+        ))
+        state = agent._sessions[session.sessionId]
+        assert state.agent.token_limit == 810_000
+        assert state.summary_llm.model == "large"
+        assert state.summary_llm.max_output_tokens == 8_192
+        assert main.last_messages is None
+    finally:
+        await agent.aclose()
 
 
 def test_llm_client_for_model_preserves_endpoint_auth_and_default(tmp_path):
