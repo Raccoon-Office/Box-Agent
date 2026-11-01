@@ -4,7 +4,7 @@ import json
 import pytest
 
 from box_agent.tools.completion_checks import CompletionChecks, CompletionContext
-from box_agent.events import DoneEvent, ErrorEvent, StopReason
+from box_agent.events import DoneEvent, ErrorEvent, StopReason, ToolCallResult
 from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.base import ToolInvocationContext
@@ -169,6 +169,65 @@ async def test_modified_source_cannot_use_old_or_new_receipt_to_complete(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_edit_role_is_locked_and_cannot_adopt_an_already_modified_source(tmp_path):
+    tool, gate, path = await setup_gate(tmp_path)
+    context = ToolInvocationContext(completion_gate=gate)
+    assert (await tool.invoke({"path": str(path), "fields": FIELDS}, context=context)).success
+    changed = await tool.invoke({"path": str(path), "fields": FIELDS, "source_mode": "edit_target"}, context=context)
+    assert not changed.success and "TABLE_SOURCE_MODE_CHANGED" in changed.error
+    tool, gate, path = await setup_gate(tmp_path, name="another.csv")
+    write_table(path, [row(3)])
+    result = await tool.invoke(
+        {"path": str(path), "fields": FIELDS, "source_mode": "edit_target"},
+        context=ToolInvocationContext(completion_gate=gate),
+    )
+    assert not result.success and "TABLE_SOURCE_CHANGED" in result.error
+    assert not gate.receipts and not (await gate.check()).repairable
+
+
+@pytest.mark.asyncio
+async def test_edit_target_retains_original_errors_and_requires_a_valid_final_version(tmp_path):
+    tool, gate, path = await setup_gate(tmp_path, rows=[row(1, amount="NaN")])
+    context = ToolInvocationContext(completion_gate=gate)
+    original = await tool.invoke(
+        {"path": str(path), "fields": FIELDS, "source_mode": "edit_target", "purpose": "diagnosis"},
+        context=context,
+    )
+    assert original.success and not original.raw_output["data_valid"]
+    assert (await gate.check()).code == "TABLE_VALIDATION_FAILED"
+    write_table(path, [row(1)])
+    issue = await gate.check()
+    assert issue.code == "TABLE_EDIT_VALIDATION_MISSING" and issue.repairable
+    final = await tool.invoke({"path": str(path), "fields": FIELDS}, context=context)
+    assert final.success and final.raw_output["source_mode"] == "edit_target"
+    assert await gate.check() is None
+    assert gate.original_receipts[path].source_sha256 == original.raw_output["source_sha256"]
+    assert not gate.original_receipts[path].valid and gate.receipts[path].valid
+    assert gate.receipts[path].source_sha256 != gate.original_receipts[path].source_sha256
+    write_table(path, [row(2)])
+    assert (await gate.check()).code == "TABLE_EDIT_VALIDATION_MISSING"
+
+
+@pytest.mark.asyncio
+async def test_edit_target_does_not_relax_other_inputs_or_allow_partial_final_scan(tmp_path):
+    tool, _, path = await setup_gate(tmp_path)
+    other = tmp_path / "source.csv"
+    write_table(other, [row(3)])
+    gate = await tool.create_completion_gate(CompletionContext((Message(role="user", content=f"Edit {path} using {other}"),), lambda: False))
+    context = ToolInvocationContext(completion_gate=gate)
+    for source, mode in [(path, "edit_target"), (other, "input")]:
+        assert (await tool.invoke({"path": str(source), "fields": FIELDS, "source_mode": mode}, context=context)).success
+    with path.open("a") as stream:
+        stream.write('"unterminated')
+    result = await tool.invoke({"path": str(path), "fields": FIELDS}, context=context)
+    assert not result.success and (await gate.check()).code == "TABLE_VALIDATION_INCOMPLETE"
+    write_table(path, [row(2)])
+    assert (await tool.invoke({"path": str(path), "fields": FIELDS}, context=context)).success
+    write_table(other, [row(4)])
+    assert (await gate.check()).code == "TABLE_SOURCE_UNVERIFIED"
+
+
+@pytest.mark.asyncio
 async def test_partial_contract_or_sample_copy_cannot_satisfy_original_input(tmp_path):
     tool, gate, path = await setup_gate(tmp_path)
     context = ToolInvocationContext(completion_gate=gate)
@@ -290,6 +349,73 @@ class ScriptedLLM:
         if response.content:
             yield StreamEvent(type="text", delta=response.content)
         yield StreamEvent(type="finish", finish_reason=response.finish_reason, tool_calls=response.tool_calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix,delimiter", [("csv", ","), ("tsv", "\t")])
+@pytest.mark.parametrize("operation", ["write", "edit", "append"])
+@pytest.mark.parametrize("validation", ["both", "original_only", "final_only"])
+async def test_in_place_table_writes_require_both_versions_and_preserve_write_receipts(
+    tmp_path, monkeypatch, suffix, delimiter, operation, validation,
+):
+    import hashlib
+    from box_agent.session_log import SessionLog
+    from box_agent.tools.file_tools import WriteTool, AppendTool, EditTool
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    path = tmp_path / f"orders.{suffix}"
+    before = f"id{delimiter}price\n1{delimiter}10\n"
+    after = before + f"2{delimiter}20\n" if operation == "append" else before.replace("10", "15")
+    path.write_text(before)
+    tool = ValidateTableTool(str(tmp_path))
+    writer = {"write": WriteTool, "edit": EditTool, "append": AppendTool}[operation](workspace_dir=str(tmp_path))
+    fields = {"id": {"type": "integer"}, "price": {"type": "decimal"}}
+
+    def call(name, arguments, call_id):
+        return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id=call_id, type="function", function=FunctionCall(name=name, arguments=arguments),
+        )])
+
+    responses = []
+    if validation != "final_only":
+        responses.append(call(tool.name, {"path": str(path), "fields": fields, "source_mode": "edit_target"}, "original"))
+    write_args = {"path": str(path)}
+    if operation == "edit":
+        write_args.update(old_str=f"1{delimiter}10", new_str=f"1{delimiter}15")
+    else:
+        write_args["content"] = after[len(before):] if operation == "append" else after
+    responses.append(call(writer.name, write_args, "write"))
+    if validation != "original_only":
+        responses.append(call(tool.name, {"path": str(path), "fields": fields, "source_mode": "edit_target"}, "final"))
+    responses += [LLMResponse(content="Done", finish_reason="stop")] * 4
+    log = SessionLog.create(tmp_path / "logs", session_id="edit", cwd=tmp_path)
+    try:
+        events = [event async for event in run_agent_loop(
+            llm=ScriptedLLM(responses),
+            messages=[Message(role="user", content=f"Please {operation} {path} in place.")],
+            tools={tool.name: tool, writer.name: writer}, max_steps=8,
+            workspace_dir=str(tmp_path), session_log=log,
+        )]
+        done = next(e for e in events if isinstance(e, DoneEvent))
+        assert done.stop_reason == (StopReason.END_TURN if validation == "both" else StopReason.ERROR)
+        result = next(e for e in events if isinstance(e, ToolCallResult) and e.tool_name == writer.name)
+        assert result.success and path.read_text() == after
+        assert result.raw_output["file_changes"] == [{
+            "path": path.name,
+            "before_sha256": hashlib.sha256(before.encode()).hexdigest(),
+            "after_sha256": hashlib.sha256(after.encode()).hexdigest(),
+        }]
+        if validation == "both":
+            scans = [e["data"] for e in log.events if e["type"] == "table.validation"]
+            assert len(scans) == 2 and scans[0]["source_sha256"] != scans[1]["source_sha256"]
+            assert [s["records"] for s in scans] == [1, 2 if operation == "append" else 1]
+            assert all(s["complete"] and all(f["checked"] == s["records"] for f in s["fields"].values()) for s in scans)
+    finally:
+        log.close()
 
 
 @pytest.mark.asyncio

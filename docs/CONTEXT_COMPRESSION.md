@@ -106,9 +106,21 @@ Declare `purpose` before the first scan: `diagnosis` only inspects/reports error
 `computation` requires valid inputs and is the initial default. Omitted later
 calls inherit the run's locked purpose. The `table.purpose` event records this
 decision; it cannot be changed after discovering invalid data. Both purposes
-still require every original input/field, EOF and unchanged hashes. Diagnosis
+still require every original input/field, EOF and hashes matching the validated version. Diagnosis
 must truthfully report findings and deliver/read back requested artifacts;
 computation additionally requires every input to be valid.
+
+For user-requested in-place edits/appends, declare `source_mode="edit_target"`
+on that file's first validation call, before writing. The default `input` role
+remains immutable, and roles cannot change after scanning starts. An edit target
+must first receive a complete original scan; the original receipt is retained.
+Each edited version must be fully rescanned with the same field contract and the
+final version must be valid, even in diagnosis mode. A write without a new scan
+requests validation instead of treating an expected edit as irreparable source
+damage. Other input files retain their immutable hashes. This declaration must
+match the user's instruction; it does not authorize writes or prove edit intent,
+and normal tool permissions and producer write receipts remain unchanged.
+Column/schema-changing edits are outside this locked-contract workflow.
 
 Tool `success` and `validation_complete` now mean the validation ran completely.
 `data_valid` independently reports data quality, or `null` for an incomplete
