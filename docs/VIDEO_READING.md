@@ -41,6 +41,9 @@ The tool needs ffmpeg and ffprobe. Discovery order for each executable is
 install or download binaries. A missing runtime returns
 `VIDEO_RUNTIME_UNAVAILABLE`. Existing host media-runtime provisioning can supply
 the binaries; standalone installations must supply them themselves.
+The desktop HyperFrames video plugin includes both binaries. Frame extraction
+supports its FFmpeg 4.4 build as well as newer FFmpeg versions; Homebrew is not
+required when the host supplies the plugin paths.
 
 Speech uses the same Volc ASR configuration and binary WebSocket protocol as the
 desktop voice-input client. No LLM API key is repurposed for ASR. Supported

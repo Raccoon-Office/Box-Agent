@@ -287,7 +287,7 @@ class ReadVideoTool(EventEmittingTool):
     async def _probe(self, ffprobe: str, source: Path) -> dict[str, Any]:
         output, _ = await _run_process([
             ffprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", _FORMATS,
-            "-show_entries", "format=duration,start_time,format_name:stream=index,codec_type,duration,width,height:stream_disposition=attached_pic",
+            "-show_entries", "format=duration,start_time,format_name:stream=index,codec_type,start_time,duration,width,height:stream_disposition=attached_pic",
             "-of", "json", str(source),
         ])
         try:
@@ -297,10 +297,20 @@ class ReadVideoTool(EventEmittingTool):
                          and not item.get("disposition", {}).get("attached_pic"))
             container = data.get("format", {})
             duration = float(container.get("duration") or video.get("duration", 0))
+            origin = float(container.get("start_time") or 0)
+            timed_streams = [item for item in streams if item.get("codec_type") in {"video", "audio"}
+                             and not item.get("disposition", {}).get("attached_pic")]
+            # FFprobe 4.4 includes a positive MP4 offset in format.duration;
+            # newer versions do not. Stream endpoints agree across versions.
+            if ("mov" in container.get("format_name", "").split(",") and origin > 0
+                    and all(item.get("start_time") is not None and item.get("duration") is not None
+                            for item in timed_streams)):
+                duration = max(float(item["start_time"]) + float(item["duration"])
+                               for item in timed_streams) - origin
             # Matroska Duration includes an initial positive timestamp offset.
             # -start_at_zero below normalizes that offset out of decoded frames.
-            if "matroska" in container.get("format_name", ""):
-                duration -= max(0, float(container.get("start_time") or 0))
+            elif "matroska" in container.get("format_name", ""):
+                duration -= max(0, origin)
             if not math.isfinite(duration) or duration <= 0:
                 raise ValueError()
             return {"duration_seconds": duration, "width": int(video["width"]),
@@ -325,7 +335,9 @@ class ReadVideoTool(EventEmittingTool):
                     "-protocol_whitelist", "file,pipe", "-format_whitelist", _FORMATS,
                 ]
                 scale = "scale=1568:1568:force_original_aspect_ratio=decrease,showinfo"
-                output = ["-fps_mode", "passthrough", "-q:v", "3"]
+                # The host video plugin ships FFmpeg 4.4, before -fps_mode.
+                # -vsync 0 preserves decoded timestamps on both old and new builds.
+                output = ["-vsync", "0", "-q:v", "3"]
                 try:
                     _, stderr = await _run_process([
                         *command, "-i", str(source), "-map", f"0:{metadata['video_stream_index']}",

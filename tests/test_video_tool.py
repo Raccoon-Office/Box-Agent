@@ -523,6 +523,25 @@ async def test_frame_cache_does_not_cache_model_analysis(tmp_path, media):
     assert "Read text" in llm.calls[-1][0][1].content[0]["text"]
 
 
+@pytest.mark.parametrize("legacy_duration", [False, True])
+@pytest.mark.parametrize("longer_audio", [False, True])
+async def test_mp4_duration_excludes_timestamp_offset_and_preserves_audio_tail(
+    tmp_path, media, legacy_duration, longer_audio,
+):
+    duration = 5 if longer_audio else 3
+    media.metadata["format"] = {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "start_time": "10",
+                                "duration": str(duration + (10 if legacy_duration else 0))}
+    media.metadata["streams"][0].update(start_time="10", duration="3")
+    media.metadata["streams"][1].update(start_time="11", duration="4" if longer_audio else "2")
+    tool = make_tool(tmp_path)
+    result = await tool.invoke({"path": "clip.mp4", "instruction": "Read"})
+    assert result.success, result.error
+    assert result.raw_output["duration_seconds"] == duration
+    assert result.raw_output["end_seconds"] == duration
+    outside = await tool.invoke({"path": "clip.mp4", "instruction": "Read", "start_seconds": duration})
+    assert outside.raw_output["code"] == "VIDEO_INPUT_INVALID"
+
+
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg/ffprobe unavailable")
 @pytest.mark.parametrize("extension", ["mp4", "mkv", "ts"])
 async def test_nonzero_container_timestamps_are_normalized_to_video_start(tmp_path, extension):
@@ -545,13 +564,35 @@ async def test_variable_frame_rate_reports_decoded_timestamps_instead_of_sample_
     await _run_process([shutil.which("ffmpeg"), "-v", "error", "-f", "lavfi", "-i",
                         "testsrc2=size=160x90:rate=10:duration=3", "-vf",
                         "select='eq(n,0)+eq(n,3)+eq(n,11)+eq(n,18)+eq(n,29)'",
-                        "-fps_mode", "vfr", "-c:v", "mpeg4", str(source)])
+                        "-vsync", "vfr", "-c:v", "mpeg4", str(source)])
     tool = make_tool(tmp_path)
     tool._runtime_env = dict(os.environ)
     result = await tool.invoke({"path": source.name, "instruction": "Read", "frame_count": 2,
                                 "start_seconds": 0, "end_seconds": 2})
     assert result.success, result.error
     assert [f["timestamp_seconds"] for f in result.raw_output["frames"]] == [1.1, 1.8]
+
+
+@pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg/ffprobe unavailable")
+async def test_video_uses_host_plugin_binaries_without_system_path(tmp_path, monkeypatch):
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    source = tmp_path / "managed.mp4"
+    await _run_process([ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc2=size=160x90:rate=5:duration=3", "-c:v", "mpeg4", str(source)])
+    monkeypatch.setenv("PATH", str(tmp_path / "no-system-binaries"))
+    monkeypatch.setenv("HYPERFRAMES_FFMPEG_PATH", ffmpeg)
+    monkeypatch.setenv("HYPERFRAMES_FFPROBE_PATH", ffprobe)
+    for name in ("BOX_AGENT_FFMPEG_PATH", "BOX_AGENT_FFPROBE_PATH"):
+        monkeypatch.delenv(name, raising=False)
+
+    result = await ReadVideoTool(Vision(), workspace_dir=str(tmp_path)).invoke(
+        {"path": source.name, "instruction": "Read", "start_seconds": 1,
+         "end_seconds": 2, "frame_count": 2, "transcribe": False})
+
+    assert result.success, result.error
+    assert result.raw_output["frames"] == [{"timestamp_seconds": 1.4}, {"timestamp_seconds": 1.8}]
+    assert result.raw_output["visual"]["status"] == "native_frames"
+    assert len([b for b in result.image_content if b["type"] == "input_image"]) == 2
 
 
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg/ffprobe unavailable")
