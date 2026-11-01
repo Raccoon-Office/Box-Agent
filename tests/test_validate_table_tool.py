@@ -424,7 +424,7 @@ async def test_agent_resumes_original_table_requirements_after_user_interaction(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["edit_target", "replace_target", "delete_target"])
+@pytest.mark.parametrize("mode", ["edit_target", "replace_target", "delete_target", "move_target"])
 async def test_reopened_session_retains_planned_file_operations_and_final_schema(tmp_path, monkeypatch, mode):
     from box_agent.agent import Agent
     from box_agent.session_log import SessionLog
@@ -443,6 +443,8 @@ async def test_reopened_session_retains_planned_file_operations_and_final_schema
         arguments.update(fields={"old": {"type": "text"}}, output_fields={"new": {"type": "text"}})
     elif mode == "replace_target":
         arguments["fields"] = {"new": {"type": "text"}}
+    elif mode == "move_target":
+        arguments.update(fields={"old": {"type": "text"}}, destination_path=str(tmp_path / "moved.csv"))
     log = SessionLog.create(tmp_path / "logs", session_id="operation", cwd=tmp_path)
     first_model = ScriptedLLM([
         scripted_call(tool.name, arguments, "prepare"),
@@ -456,15 +458,20 @@ async def test_reopened_session_retains_planned_file_operations_and_final_schema
     log.close()
     if mode == "delete_target":
         path.unlink()
+    elif mode == "move_target":
+        path.rename(tmp_path / "moved.csv")
     else:
         path.write_text("new\nvalue\n")
     log = SessionLog.open(tmp_path / "logs", session_id="operation", cwd=tmp_path)
-    responses = [] if mode == "delete_target" else [scripted_call(tool.name, {"path": str(path)}, "final")]
+    responses = [] if mode in {"delete_target", "move_target"} else [scripted_call(tool.name, {"path": str(path)}, "final")]
     responses.append(LLMResponse(content="Done", finish_reason="stop"))
     try:
         resumed_agent = Agent(llm_client=ScriptedLLM(responses), system_prompt="system", tools=[ValidateTableTool(str(tmp_path))],
                               workspace_dir=str(tmp_path), deferred_mcp_loading_enabled=False, session_log=log)
-        resumed_agent.add_user_message("Applied the change, continue.")
+        resumed_agent.add_user_message(
+            f"Moved to {tmp_path / 'moved.csv'}, continue." if mode == "move_target"
+            else "Applied the change, continue."
+        )
         resumed = [event async for event in resumed_agent.run_events()]
         assert next(e for e in resumed if isinstance(e, DoneEvent)).stop_reason == StopReason.END_TURN
     finally:
@@ -517,6 +524,184 @@ async def test_declared_file_deletion_completes_only_when_the_file_is_actually_g
         result = next(e for e in events if isinstance(e, ToolCallResult) and e.tool_name == tool.name)
         assert result.success and result.raw_output["operation_ready"]
         assert result.raw_output["validation_complete"] is None and result.raw_output["data_valid"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix,delimiter", [("csv", ","), ("tsv", "\t")])
+@pytest.mark.parametrize("subdirectory", [False, True])
+async def test_validated_table_rename_completes_after_external_move(
+    tmp_path, monkeypatch, suffix, delimiter, subdirectory,
+):
+    from box_agent.turn_continuation import TurnContinuationController
+
+    async def no_judge(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TurnContinuationController, "evaluate", no_judge)
+    path = tmp_path / f"sales.{suffix}"
+    path.write_text(f"id{delimiter}amount\n1{delimiter}12.50\n2{delimiter}20.00\n")
+    destination = tmp_path / "archive" / f"sales history.{suffix}" if subdirectory else tmp_path / f"archive.{suffix}"
+    destination.parent.mkdir(exist_ok=True)
+    before = path.read_bytes()
+    tool = ValidateTableTool(str(tmp_path))
+
+    class MovingLLM(ScriptedLLM):
+        calls = 0
+
+        async def generate_stream(self, *args, **kwargs):
+            if self.calls == 1:
+                # The user completes the filesystem move after the original
+                # scan. This tests completion, without bypassing writer policy.
+                path.rename(destination)
+            self.calls += 1
+            async for event in super().generate_stream(*args, **kwargs):
+                yield event
+
+    responses = [
+        scripted_call(tool.name, {
+            "path": path.name, "source_mode": "move_target",
+            "destination_path": str(destination.relative_to(tmp_path)),
+            "fields": {"id": {"type": "integer"}, "amount": {"type": "decimal"}},
+        }, "validate"),
+    ] + [LLMResponse(content="Done", finish_reason="stop")] * 4
+    events = [event async for event in run_agent_loop(
+        llm=MovingLLM(responses), messages=[Message(role="user", content=f"Validate {path}; I will rename it to {destination}.")],
+        tools={tool.name: tool}, workspace_dir=str(tmp_path), max_steps=6,
+    )]
+    assert not path.exists() and destination.read_bytes() == before
+    assert next(e for e in events if isinstance(e, DoneEvent)).stop_reason == StopReason.END_TURN
+    scan = next(e for e in events if isinstance(e, ToolCallResult) and e.tool_name == tool.name)
+    assert scan.success and scan.raw_output["validation_complete"] and scan.raw_output["data_valid"]
+    assert scan.raw_output["records"] == 2
+    assert all(field["checked"] == 2 for field in scan.raw_output["fields"].values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state,code", [
+    ("unchanged", "TABLE_MOVE_PENDING"), ("copied", "TABLE_MOVE_PENDING"),
+    ("missing_target", "TABLE_MOVE_UNVERIFIED"), ("changed_content", "TABLE_SOURCE_CHANGED"),
+    ("target_link", "TABLE_MOVE_UNVERIFIED"), ("source_link", "TABLE_MOVE_PENDING"),
+    ("parent_link", "TABLE_MOVE_UNVERIFIED"),
+])
+async def test_move_completion_rejects_missing_or_changed_file_state(tmp_path, state, code):
+    tool, gate, path = await setup_gate(tmp_path)
+    destination = tmp_path / "archive" / "moved.csv"
+    destination.parent.mkdir()
+    context = ToolInvocationContext(completion_gate=gate)
+    result = await tool.invoke({
+        "path": str(path), "fields": FIELDS, "source_mode": "move_target", "destination_path": str(destination),
+    }, context=context)
+    assert result.success and path.exists() and not destination.exists()
+    if state == "copied":
+        destination.write_bytes(path.read_bytes())
+    elif state != "unchanged":
+        path.rename(destination)
+        if state == "missing_target":
+            destination.unlink()
+        elif state == "changed_content":
+            write_table(destination, [row(1), row(2, amount="99.00")])
+        elif state == "target_link":
+            destination.rename(tmp_path / "real.csv")
+            destination.symlink_to(tmp_path / "real.csv")
+        elif state == "source_link":
+            path.symlink_to(tmp_path / "missing.csv")
+        elif state == "parent_link":
+            destination.parent.rename(tmp_path / "relocated")
+            destination.parent.symlink_to(tmp_path / "relocated", target_is_directory=True)
+    assert (await gate.check()).code == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validation", ["missing", "partial_contract", "partial_parse", "invalid", "diagnosis"])
+async def test_move_retains_full_scan_and_data_validity_requirements(tmp_path, validation):
+    rows = [row(1, amount="NaN"), row(2)] if validation in {"invalid", "diagnosis"} else None
+    tool, _, path = await setup_gate(tmp_path, rows=rows)
+    if validation == "partial_parse":
+        with path.open("a") as stream:
+            stream.write('"unterminated')
+    gate = await tool.create_completion_gate(CompletionContext((Message(role="user", content=str(path)),), lambda: False))
+    destination = tmp_path / "moved.csv"
+    if validation != "missing":
+        fields = {"amount": FIELDS["amount"]} if validation == "partial_contract" else FIELDS
+        result = await tool.invoke({
+            "path": str(path), "fields": fields, "source_mode": "move_target", "destination_path": str(destination),
+            "purpose": "diagnosis" if validation == "diagnosis" else "computation",
+        }, context=ToolInvocationContext(completion_gate=gate))
+        assert result.success == (validation in {"invalid", "diagnosis"})
+        if validation in {"invalid", "diagnosis"}:
+            assert not result.raw_output["data_valid"]
+            assert all(field["checked"] == 2 for field in result.raw_output["fields"].values())
+    path.rename(destination)
+    issue = await gate.check()
+    assert (issue is None) == (validation == "diagnosis")
+    if validation == "invalid":
+        assert issue.code == "TABLE_VALIDATION_FAILED"
+    elif validation == "partial_parse":
+        assert issue.code == "TABLE_VALIDATION_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("destination_kind", ["missing_argument", "same_path", "existing", "dangling_link"])
+async def test_move_requires_an_absent_distinct_destination(tmp_path, destination_kind):
+    tool, gate, path = await setup_gate(tmp_path)
+    destination = tmp_path / "target.csv"
+    if destination_kind == "existing":
+        destination.write_text("do not overwrite")
+    elif destination_kind == "dangling_link":
+        destination.symlink_to(tmp_path / "missing.csv")
+    arguments = {"path": str(path), "fields": FIELDS, "source_mode": "move_target"}
+    if destination_kind != "missing_argument":
+        arguments["destination_path"] = str(path if destination_kind == "same_path" else destination)
+    result = await tool.invoke(arguments, context=ToolInvocationContext(completion_gate=gate))
+    assert not result.success and path not in gate.contracts and path not in gate.source_modes
+    assert path.is_file()
+    if destination_kind == "existing":
+        assert destination.read_text() == "do not overwrite"
+
+
+@pytest.mark.asyncio
+async def test_move_destination_and_role_stay_locked_and_other_inputs_stay_required(tmp_path):
+    tool, _, path = await setup_gate(tmp_path)
+    other = tmp_path / "other.csv"
+    write_table(other, [row(3)])
+    gate = await tool.create_completion_gate(CompletionContext((Message(role="user", content=f"{path} {other}"),), lambda: False))
+    destination = tmp_path / "moved.csv"
+    context = ToolInvocationContext(completion_gate=gate)
+    arguments = {"path": str(path), "fields": FIELDS, "source_mode": "move_target", "destination_path": str(destination)}
+    assert (await tool.invoke(arguments, context=context)).success
+    assert (await tool.invoke({"path": str(path)}, context=context)).success
+    changed = await tool.invoke({**arguments, "destination_path": str(tmp_path / "different.csv")}, context=context)
+    assert not changed.success and "TABLE_CONTRACT_CHANGED" in changed.error
+    changed = await tool.invoke({"path": str(path), "source_mode": "delete_target"}, context=context)
+    assert not changed.success and "TABLE_SOURCE_MODE_CHANGED" in changed.error
+    path.rename(destination)
+    await gate.include_inputs(CompletionContext((Message(role="user", content=f"Continue with {destination} and {other}"),), lambda: False))
+    assert set(gate.sources) == {path, other}
+    assert (await gate.check()).code == "TABLE_VALIDATION_MISSING"
+    assert (await tool.invoke({"path": str(other), "fields": FIELDS}, context=context)).success
+    assert await gate.check() is None
+    write_table(destination, [row(5)])
+    assert (await gate.check()).code == "TABLE_SOURCE_CHANGED"
+
+
+@pytest.mark.asyncio
+async def test_move_checks_destination_read_permission_before_opening_it(tmp_path, monkeypatch):
+    import box_agent.tools.file.validate_table_tool as module
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool, gate, path = await setup_gate(workspace)
+    destination = tmp_path / "outside.csv"
+    result = await tool.invoke({
+        "path": str(path), "fields": FIELDS, "source_mode": "move_target", "destination_path": str(destination),
+    }, context=ToolInvocationContext(completion_gate=gate))
+    assert result.success
+    path.rename(destination)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("permission-denied destination must not be opened")
+
+    monkeypatch.setattr(module, "fingerprint", forbidden)
+    assert (await gate.check()).code == "TABLE_MOVE_UNVERIFIED"
 
 
 @pytest.mark.asyncio
