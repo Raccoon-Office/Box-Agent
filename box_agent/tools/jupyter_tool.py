@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from time import monotonic
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -37,6 +38,8 @@ IS_FROZEN = getattr(sys, "frozen", False)
 # timeout: it discards the (now busy, un-reusable) session so a fresh kernel is
 # built next time, instead of silently returning success with partial/no output.
 KERNEL_EXEC_TIMEOUT = "KERNEL_EXEC_TIMEOUT"
+_SANDBOX_PREPARE_TIMEOUT_SECONDS = 60.0
+_KERNEL_START_TIMEOUT_SECONDS = 60.0
 
 # Environment bootstrap runs before a tool call can return anything to the
 # model or TUI, so every child process needs a hard upper bound. Pip also gets
@@ -88,12 +91,14 @@ async def _communicate_sandbox_process(
     """Collect a sandbox bootstrap process without allowing an infinite wait."""
     try:
         return await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
         try:
             proc.kill()
         except ProcessLookupError:
             pass
         await proc.communicate()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise RuntimeError(
             f"{operation} timed out after {timeout:g} seconds"
         ) from exc
@@ -1135,6 +1140,7 @@ class JupyterKernelSession:
         self.sandbox_env = sandbox_env
         self._context = None  # run_kernel context
         self._kc = None
+        self._km = None
 
     async def start(self):
         """Start kernel using the sandbox venv's Python."""
@@ -1174,7 +1180,7 @@ class JupyterKernelSession:
         assign_pid_to_job(_kernel_pid)
         self._kc = km.client()
         self._kc.start_channels()
-        self._kc.wait_for_ready(timeout=30)
+        await asyncio.to_thread(self._kc.wait_for_ready, timeout=30)
 
         # Run setup code in the kernel
         setup_code = f"""
@@ -1191,15 +1197,9 @@ try:
 except ImportError:
     pass
 """
-        self._kc.execute(setup_code)
-        # Wait for setup to complete
-        try:
-            while True:
-                msg = self._kc.get_iopub_msg(timeout=10)
-                if msg.get("msg_type") == "status" and msg.get("content", {}).get("execution_state") == "idle":
-                    break
-        except Exception:
-            pass
+        _, _, setup_error = await asyncio.to_thread(self.execute, setup_code, 30)
+        if setup_error:
+            raise RuntimeError(f"KERNEL_SETUP_FAILED: {setup_error}")
 
     _provisioner_patched = False
 
@@ -1270,12 +1270,16 @@ except ImportError:
         if self._kc is None:
             return "", [], "Kernel not initialized"
 
-        # Drain any pending IOPub messages from previous operations
-        while True:
+        deadline = monotonic() + timeout
+        # Draining and receiving output share one wall-clock deadline.
+        while monotonic() < deadline:
             try:
                 self._kc.get_iopub_msg(timeout=0.1)
             except Exception:
                 break
+
+        if monotonic() >= deadline:
+            return "", [], KERNEL_EXEC_TIMEOUT
 
         output_dir = self.workspace / ".box-agent" / "tool-results"
         output = OutputCapture(output_dir)
@@ -1290,7 +1294,13 @@ except ImportError:
             idle_received = False
             while not idle_received:
                 try:
-                    msg = self._kc.get_iopub_msg(timeout=timeout)
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        break
+                    msg = self._kc.get_iopub_msg(timeout=remaining)
+                    parent_id = msg.get("parent_header", {}).get("msg_id")
+                    if parent_id and parent_id != msg_id:
+                        continue
                     msg_type = msg.get("msg_type")
                     content = msg.get("content", {})
 
@@ -1350,7 +1360,11 @@ except ImportError:
             self._kc = None
         if self._km:
             try:
-                self._km.shutdown_kernel(now=True)
+                shutdown = getattr(self._km, "_async_shutdown_kernel", None)
+                if callable(shutdown):
+                    await asyncio.wait_for(shutdown(now=True), timeout=5)
+                else:
+                    await asyncio.wait_for(asyncio.to_thread(self._km.shutdown_kernel, now=True), timeout=5)
             except Exception:
                 pass
             self._km = None
@@ -1478,12 +1492,16 @@ except ImportError:
         if self._kc is None:
             return "", [], "Kernel not initialized"
 
-        # Drain pending IOPub messages
-        while True:
+        deadline = monotonic() + timeout
+        # Match subprocess kernels: output does not reset the execution budget.
+        while monotonic() < deadline:
             try:
                 self._kc.get_iopub_msg(timeout=0.1)
             except Exception:
                 break
+
+        if monotonic() >= deadline:
+            return "", [], KERNEL_EXEC_TIMEOUT
 
         output_dir = self.workspace / ".box-agent" / "tool-results"
         output = OutputCapture(output_dir)
@@ -1496,7 +1514,13 @@ except ImportError:
             idle_received = False
             while not idle_received:
                 try:
-                    msg = self._kc.get_iopub_msg(timeout=timeout)
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        break
+                    msg = self._kc.get_iopub_msg(timeout=remaining)
+                    parent_id = msg.get("parent_header", {}).get("msg_id")
+                    if parent_id and parent_id != msg_id:
+                        continue
                     msg_type = msg.get("msg_type")
                     content = msg.get("content", {})
 
@@ -1740,17 +1764,31 @@ class JupyterSandboxTool(Tool):
     ) -> "JupyterKernelSession | InProcessKernelSession":
         session = self._create_session(session_key, workspace, env)
         try:
-            await session.start()
-        except BaseException:
+            await asyncio.wait_for(session.start(), timeout=_KERNEL_START_TIMEOUT_SECONDS)
+        except BaseException as exc:
             try:
                 await session.stop()
             except Exception:
                 logging.getLogger(__name__).warning(
                     "Kernel cleanup after startup failure failed: %s", session_key, exc_info=True,
                 )
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                raise RuntimeError(
+                    f"KERNEL_START_TIMEOUT: kernel startup exceeded {_KERNEL_START_TIMEOUT_SECONDS:g}s"
+                ) from exc
             raise
         self._sessions[session_key] = session
         return session
+
+    @staticmethod
+    def _preparation_timeout_result() -> ToolResult:
+        return ToolResult(
+            success=False,
+            error=f"SANDBOX_PREPARE_TIMEOUT: environment preparation exceeded "
+                  f"{_SANDBOX_PREPARE_TIMEOUT_SECONDS:g}s. Use local_environment "
+                  "to inspect/prepare the managed Python environment, then retry.",
+            raw_output={"phase": "environment_prepare", "timeout_seconds": _SANDBOX_PREPARE_TIMEOUT_SECONDS},
+        )
 
     @staticmethod
     def _execute_session_code(
@@ -1951,11 +1989,13 @@ Output formats:
         # Default execution checks host state; the model chooses when to prepare or retry.
         if selected_env is None and self.runtime_preparer is not None:
             try:
-                await self.runtime_preparer()
+                await asyncio.wait_for(self.runtime_preparer(), timeout=_SANDBOX_PREPARE_TIMEOUT_SECONDS)
                 if SandboxEnvironment._resolve_python_override(self.runtime_env) is None:
                     raise RuntimeError(
                         "Host reported ready but supplied no usable sandbox Python path."
                     )
+            except (asyncio.TimeoutError, TimeoutError):
+                return self._preparation_timeout_result()
             except RuntimeError as exc:
                 return ToolResult(
                     success=False,
@@ -1969,7 +2009,14 @@ Output formats:
                 )
         env = selected_env or self._get_sandbox_env()
         try:
-            await env.ensure_ready(on_progress=lambda msg: None)
+            await asyncio.wait_for(
+                env.ensure_ready(on_progress=lambda msg: logging.getLogger(__name__).info(
+                    "sandbox/prepare phase=%s",
+                    "dependency_install" if "install" in msg.lower() else "environment_probe",
+                )), timeout=_SANDBOX_PREPARE_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            return self._preparation_timeout_result()
         except RuntimeError as e:
             return ToolResult(
                 success=False,
@@ -1996,7 +2043,8 @@ Output formats:
             try:
                 await self._start_session(session_key, workspace, env)
             except RuntimeError as e:
-                return ToolResult(success=False, error=f"KERNEL_START_FAILED: {e}")
+                return ToolResult(success=False, error=f"KERNEL_START_FAILED: {e}",
+                                  raw_output={"phase": "kernel_start"})
             return ToolResult(
                 success=False,
                 content="",
@@ -2013,6 +2061,7 @@ Output formats:
                     success=False,
                     content="",
                     error=f"KERNEL_START_FAILED: {e}",
+                    raw_output={"phase": "kernel_start"},
                 )
 
         session = self._sessions[session_key]
@@ -2024,7 +2073,7 @@ Output formats:
         # Execute code — run synchronous kernel execute in a thread to avoid
         # blocking the event loop (pip installs inside %pip or auto-install can
         # take minutes).  Wrap with an overall timeout as a safety net.
-        _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
+        _EXEC_TIMEOUT = timeout + 15  # write-guard setup (10s) and cleanup (5s)
         from .chat_references import current_chat_policy
         reference_policy = current_chat_policy()
         execute_code = self._execute_session_code
@@ -2122,6 +2171,9 @@ Output formats:
             result._artifact_evidence_files = tuple(evidence_files)
             return result
 
+        except asyncio.CancelledError:
+            await self._discard_session(session_id)
+            raise
         except (asyncio.TimeoutError, TimeoutError):
             # The kernel is still blocked executing this code in a thread-pool
             # worker we cannot cancel. Discard the session so it is NOT reused

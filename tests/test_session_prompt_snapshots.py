@@ -47,7 +47,7 @@ FULL_TOOLS = frozenset("""
     generate_image get_skill glob goal_read goal_write grep inspect_images list_skills mcp_config memory_read memory_search
     memory_write plan_read plan_write publish_artifact query_jsonl read_email read_file report_execution_result
     request_user_decision request_user_input sandbox_status search_files sub_agent todo_read todo_write
-    tool_search write_file
+    tool_search validate_table write_file
 """.split())
 # No image service, no ripgrep, planning/delegation and bash disabled by config.
 MINIMAL_TOOLS = FULL_TOOLS - {
@@ -71,7 +71,7 @@ CASES = {
     "acp_code_agent_minimal_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS),
     "acp_code_agent_no_file_tools": ("acp", "code_agent", False, True, False, MINIMAL_TOOLS - {
         "read_file", "read_email", "extract_email_attachment", "search_files", "query_jsonl",
-        "write_file", "edit_file", "append_file",
+        "write_file", "edit_file", "append_file", "validate_table",
     }),
     "python_data_analysis_no_sandbox": ("python", "data_analysis", False, False, False,
                                         FULL_TOOLS - {"execute_code"}),

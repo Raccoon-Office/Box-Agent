@@ -54,6 +54,7 @@ class CaseConfig:
     model: str | None = None
     model_max_tokens: int | None = None
     model_binding: dict[str, Any] | None = None
+    timeout_budget: dict[str, Any] | None = None
 
 
 @dataclass
@@ -66,6 +67,10 @@ class _AttemptState:
     stdout_terminal: bool = False
     collection_error: bool = False
     finalization_errors: list[str] = field(default_factory=list)
+    timeout_budget: dict[str, Any] | None = None
+    phase: str = "starting"
+    timeout_details: dict[str, Any] | None = None
+    prompt_turn_id: str | None = None
 
 
 def _iso_now() -> str:
@@ -375,6 +380,7 @@ async def _exchange(
     if not isinstance(upstream_session_id, str) or not upstream_session_id:
         raise RuntimeError("ACP session/new request has no upstream session id")
     state.upstream_session_id = upstream_session_id
+    state.phase = "initialize"
     await _send(
         process,
         protocol,
@@ -401,6 +407,7 @@ async def _exchange(
     if "error" in initialize:
         raise RuntimeError(f"ACP initialize failed: {initialize['error']}")
 
+    state.phase = "session_new"
     await _send(
         process,
         protocol,
@@ -427,6 +434,9 @@ async def _exchange(
         raise RuntimeError("ACP session/new response has no sessionId")
     state.acp_session_id = acp_session_id
 
+    state.phase = "prompt"
+    prompt_params = _prompt_params(acp_session_id, query, case_id, metadata, input_files)
+    state.prompt_turn_id = prompt_params["_meta"]["turnId"]
     await _send(
         process,
         protocol,
@@ -434,7 +444,7 @@ async def _exchange(
             "jsonrpc": "2.0",
             "id": 3,
             "method": "session/prompt",
-            "params": _prompt_params(acp_session_id, query, case_id, metadata, input_files),
+            "params": prompt_params,
         },
     )
     response = await _read_until_response(
@@ -559,6 +569,8 @@ async def _run_process(
     process_group_id: int | None = None
     command = [config.python_executable, "-m", "box_agent.acp.server"]
     environment = os.environ.copy()
+    if config.timeout_budget and config.timeout_budget.get("provider_stale_seconds") is not None:
+        environment["BOX_AGENT_PROVIDER_STALE_SECONDS"] = str(config.timeout_budget["provider_stale_seconds"])
     trace_dir = _trace_directory(attempt_dir, environment)
     environment["BOX_AGENT_SESSION_TRACE_DIR"] = str(trace_dir)
     try:
@@ -582,7 +594,7 @@ async def _run_process(
         )
         stdout_reader = _ACPStdoutReader(process.stdout, protocol)
         try:
-            await _exchange(
+            await asyncio.wait_for(_exchange(
                 process,
                 stdout_reader,
                 protocol,
@@ -598,14 +610,19 @@ async def _run_process(
                 model=config.model,
                 model_max_tokens=config.model_max_tokens,
                 model_binding=config.model_binding,
-            )
+            ), timeout=config.timeout_seconds)
         except asyncio.TimeoutError:
             state.acp_status = "timeout"
             state.error = "ACP attempt timed out"
-            process_recorder.write("attempt.timeout", timeout_seconds=config.timeout_seconds)
+            state.timeout_details = {
+                "source": "evaluation_deadline", "phase": state.phase,
+                "timeout_seconds": config.timeout_seconds,
+            }
+            process_recorder.write("attempt.timeout", **state.timeout_details,
+                                   timeout_budget=config.timeout_budget)
             if state.acp_session_id is not None:
                 try:
-                    await _send(
+                    await asyncio.wait_for(_send(
                         process,
                         protocol,
                         {
@@ -613,9 +630,11 @@ async def _run_process(
                             "method": "session/cancel",
                             "params": {"sessionId": state.acp_session_id},
                         },
-                    )
+                    ), timeout=1.0)
                 except (BrokenPipeError, ConnectionResetError):
                     process_recorder.write("cancel.not_sent", reason="stdin-closed")
+                except asyncio.TimeoutError:
+                    process_recorder.write("cancel.not_sent", reason="send-timeout")
         except Exception as error:
             state.acp_status = "error"
             state.error = f"{type(error).__name__}: {error}"
@@ -1101,16 +1120,24 @@ def _run_payload(
     turn_id = metadata.get("turnId", metadata.get("turn_id"))
     if not isinstance(turn_id, str) and isinstance(usage, Mapping):
         turn_id = usage.get("turnId", usage.get("turn_id"))
+    turn_id_source = "response" if turn_id is not None else "request"
+    if turn_id is None:
+        # The request already identifies this attempt even if its final reply
+        # never arrives. Preserve any conflicting response identity for validation.
+        turn_id = state.prompt_turn_id
     payload.update(
         {
             "session_id": state.upstream_session_id,
             "acp_session_id": state.acp_session_id,
             "turn_id": turn_id if isinstance(turn_id, str) else None,
+            "turn_id_source": turn_id_source if isinstance(turn_id, str) else None,
             "token_usage": accumulator.token_usage,
             "permission_request_count": accumulator.permission_request_count,
             "assistant_text_length": len(accumulator.assistant_text),
             "response_metadata": accumulator.final_response_metadata,
             "error": state.error,
+            "timeout_budget": state.timeout_budget,
+            "timeout_details": state.timeout_details,
         }
     )
     return payload
@@ -1225,7 +1252,7 @@ def run_case(record: Mapping[str, Any], config: CaseConfig) -> RunResult:
         monotonic_ns=monotonic_ns,
     )
     accumulator = ACPAccumulator()
-    state = _AttemptState()
+    state = _AttemptState(timeout_budget=config.timeout_budget)
 
     try:
         _prepare_workspace(Path(config.dataset_root), workspace, WorkspaceSetup.from_record(record))

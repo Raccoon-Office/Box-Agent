@@ -326,6 +326,7 @@ class DefaultToolEngine:
             parent_tool_call_id=call.call_id, skill_reader=self._context.skill_reader,
             child_budgets=self._child_budgets, budget_charge=call.budget_charge,
             chat_references=self._references,
+            completion_gate=self._context.completion_gates.get(call.name),
         )
 
     def _log_result(self, call: ToolCallRecord, result: ToolResult) -> None:

@@ -4797,6 +4797,25 @@ async def test_acp_prompt_exposes_structured_points_insufficient_error(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_acp_completion_check_timeout_is_not_reported_as_success(tmp_path):
+    class TimeoutJudgeLLM(DummyLLM):
+        async def generate(self, messages, tools=None, **kwargs):
+            raise TimeoutError("fixture completion check deadline")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, TimeoutJudgeLLM(), [EchoTool()], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "echo ping"}]))
+    assert response.field_meta["ok"] is False
+    assert response.field_meta["errorCode"] == "TURN_COMPLETION_CHECK_TIMEOUT"
+    assert response.field_meta["errorCategory"] == "timeout"
+    assert response.field_meta["errorDetails"]["source"] == "turn_continuation"
+
+
+@pytest.mark.asyncio
 async def test_acp_prompt_exposes_structured_unsupported_model_error(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),

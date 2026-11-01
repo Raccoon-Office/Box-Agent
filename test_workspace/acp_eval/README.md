@@ -21,9 +21,54 @@ uv run --project test_workspace/acp_eval acp-eval \
   --repo-root . \
   --dataset test_workspace/inputs/hermes_antilia_v2/dataset.jsonl \
   --run-dir test_workspace/outputs/260821-acp \
-  --timeout-seconds 2700 \
   --parallelism 4
 ```
+
+Omitting `--timeout-seconds` resolves the runtime's effective model wait and stale
+recovery policy using the tested repository's interpreter and config. The attempt
+deadline is `max(2700, (max_stale_recoveries + 2) * provider_stale_seconds + 60)`.
+This allows one main request with recovery, one completion check and startup/transport
+allowance; it is not a guarantee that an arbitrary multi-step tool task will fit.
+The deadline covers ACP initialization through the prompt result; shutdown and
+evidence finalization happen afterward.
+Explicit shorter deadlines are retained, warned as `constrained`, and recorded in
+`timeout_budget` in the manifest, summary and attempt. An unavailable policy probe
+is labeled `unavailable`; no model wait is invented. Only the resolved wait is frozen
+in the child environment; the parent environment and user config are not changed.
+
+Deadline handling covers protocol reads and writes. `timeout_details` identifies
+the outer deadline and protocol phase; late replies do not replace that timeout.
+Without a final reply, the sent prompt supplies `turn_id` with `turn_id_source=request`.
+Budget changes require a new immutable attempt instead of reusing the old result.
+
+### Provider 429 cooldown
+
+The default policy is `--rate-limit-retries 2 --rate-limit-backoff-seconds 120`.
+Only an explicitly retryable LLM-provider HTTP 429 with complete capture and no tool
+calls, permission requests or displayed answer is replayed. Each retry creates a
+new workspace, upstream session and immutable attempt. Other errors, timeouts and
+quality failures are not retried; use `--rate-limit-retries 0` to disable replay.
+ACP's synthetic `Error: ...` notice alone is not a displayed model answer. The
+notice must exactly match the captured fatal error, with one provider request,
+one explicitly empty partial response, a matching turn error, and no successful
+LLM response. Missing or conflicting evidence prevents replay; raw output is
+preserved unchanged.
+
+Workers in one batch share an exponential cooldown (120, 240, ... seconds, capped
+at 600). Waiting and all attempts share the original case deadline. Each attempt's
+`timeout_budget` records its remaining allowance; `evaluation_timeout_budget`
+retains the initial total. Collection/shutdown finalization remains outside the
+ACP exchange deadline. SDK retries are still inside each attempt. The cooldown
+does not coordinate separate processes or remove server-side quotas.
+
+Repeated 429s exhaust the configured retry limit and stop queued cases with
+`deferred_rate_limit`; unsafe-to-replay 429s also stop new cases. In-flight work
+finishes collecting. `cases/<id>/retry-history.json` records all attempts, waiting,
+elapsed time and stop reason. Summary `initial_attempt_counts` and `attempt_counts`
+describe the current invocation's first/all attempts, while existing final case
+counts retain their meaning. A recovered final success never replaces the first
+failure; quality/cost analysis must include every immutable attempt/session.
+Model comparisons require matching initial budgets and retry policies.
 
 Run an exact subset by repeating `--case-id`:
 

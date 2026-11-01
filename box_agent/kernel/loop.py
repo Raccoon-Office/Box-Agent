@@ -26,6 +26,7 @@ from typing import Any, Callable, Final
 from urllib.parse import urlsplit
 
 from ..cache_fingerprint import build_cache_fingerprint
+from ..tools.completion_checks import CompletionChecks, CompletionContext
 from ..config import AgentConfig, ToolLimitsConfig
 from ..context_resources import (
     ContextResourceLedger,
@@ -182,6 +183,7 @@ from ..tools.browser_intent import BrowserToolIntentPolicy
 from ..tool_result_storage import ToolResultStorage
 from ..turn_continuation import (
     ContinuationJudgeFacts,
+    ContinuationJudgeTimeout,
     TurnContinuationController,
 )
 from ..turn_policy import (
@@ -617,6 +619,7 @@ async def _run_agent_loop_impl(
     *,
     _runtime_defaults: _LoopRuntimeDefaults,
     _services: KernelServices,
+    _on_completion_checks: Callable[[CompletionChecks], None] | None = None,
     messages: list[Message],
     max_steps: int = _DEFAULT_AGENT_CONFIG.max_steps,
     tool_limits: ToolLimitsConfig | None = None,
@@ -943,6 +946,12 @@ async def _run_agent_loop_impl(
     # preserve existing behavior.
     no_progress_steps = 0
     turn_continuation = TurnContinuationController()
+    completion_checks = await CompletionChecks.create(
+        tools,
+        CompletionContext(tuple(messages), cancelled, session_log, turn_id, resume_scope=messages),
+    )
+    if _on_completion_checks is not None:
+        _on_completion_checks(completion_checks)
     stream_recovery = StreamInterruptionRecovery()
     repetitive_recovery = RepetitiveStreamRecovery()
 
@@ -1038,6 +1047,7 @@ async def _run_agent_loop_impl(
             validate_followup=validate_followup,
             policy_error=browser_intent_policy.tool_call_error,
             session_log=session_log,
+            completion_gates=completion_checks.gates,
             workspace_dir=workspace_dir,
             session_id=session_id, turn_id=turn_id,
             permission_negotiator=permission_negotiator, logger=logger,
@@ -1252,6 +1262,9 @@ async def _run_agent_loop_impl(
                     injected_event = injection.apply(messages)
                 if injection.kind is InjectionKind.USER_SUPPLEMENT:
                     continuation_user_request = injection.content
+                    await completion_checks.include_inputs(
+                        tools, CompletionContext(tuple(messages), cancelled, session_log, turn_id),
+                    )
                 yield injected_event
 
         has_plan_tool = "plan_write" in tools
@@ -1909,6 +1922,14 @@ async def _run_agent_loop_impl(
                 # assistant reply — the turn ended cleanly, it's not a crash.
                 # No "Error:" prefix, no red banner; persisted to history.
                 messages.append(Message(role="assistant", content=msg, tool_calls=None))
+                if completion_checks.gates or completion_checks.failures:
+                    msg += "\nCompletion was not verified: the model refused before the capability checks completed."
+                    if hook_mgr.hooks:
+                        await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
+                        await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+                    yield ErrorEvent(message=msg, is_fatal=True, error_code="COMPLETION_GATE_UNSATISFIED")
+                    yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                    return
                 if hook_mgr.hooks:
                     await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=msg)
                 yield ContentEvent(content=msg)
@@ -2065,7 +2086,13 @@ async def _run_agent_loop_impl(
             if hook_mgr.hooks:
                 await hook_mgr.fire_error(message=msg, is_fatal=True, exception=None)
                 await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
-            yield ErrorEvent(message=msg, is_fatal=True)
+            yield ErrorEvent(
+                message=msg, is_fatal=True,
+                error_code="LLM_PROVIDER_STALE_TIMEOUT", error_category="timeout",
+                error_details={"source": "llm_provider", "phase": "stream_wait",
+                               "timeoutSeconds": effective_provider_stale_seconds,
+                               "recoveryAttempts": provider_stale_recoveries},
+            )
             yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
             return
 
@@ -2469,28 +2496,57 @@ async def _run_agent_loop_impl(
             # assistant_msg was appended above; pass the live transcript so the
             # judge can fork it without reconstructing or duplicating candidate
             # text.  The judge request itself is kept out of this list.
-            continuation = await turn_continuation.evaluate(
-                llm=llm,
-                messages=messages,
-                facts=ContinuationJudgeFacts(
-                    user_request=continuation_user_request,
-                    decision_tool_available=(
-                        "request_user_decision" in offered_tools_by_name
+            try:
+                continuation = await turn_continuation.evaluate(
+                    llm=llm,
+                    messages=messages,
+                    facts=ContinuationJudgeFacts(
+                        user_request=continuation_user_request,
+                        decision_tool_available=(
+                            "request_user_decision" in offered_tools_by_name
+                        ),
                     ),
-                ),
-                finish_reason=response.finish_reason,
-                tools_available=bool(tool_list),
-                thinking_enabled=thinking_enabled,
-                step=step,
-                max_steps=max_steps,
-                cancelled=cancelled(),
-                session_id=session_id,
-                turn_id=turn_id,
-                title=title,
-                should_interrupt=lambda: cancelled() or (
-                    inject_queue is not None and not inject_queue.empty()
-                ),
-            )
+                    finish_reason=response.finish_reason,
+                    tools_available=bool(tool_list),
+                    thinking_enabled=thinking_enabled,
+                    step=step,
+                    max_steps=max_steps,
+                    cancelled=cancelled(),
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    title=title,
+                    timeout_seconds=effective_provider_stale_seconds,
+                    should_interrupt=lambda: cancelled() or (
+                        inject_queue is not None and not inject_queue.empty()
+                    ),
+                )
+            except ContinuationJudgeTimeout as exc:
+                if cancelled() or (inject_queue is not None and not inject_queue.empty()):
+                    continuation = None
+                else:
+                    msg = "任务结束检查超时，暂时无法确认任务完成。已有输出已保留，请重试。"
+                    elapsed = perf_counter() - step_start
+                    total = perf_counter() - run_start
+                    if hook_mgr.hooks:
+                        await hook_mgr.fire_step_end(
+                            step=step + 1,
+                            elapsed_seconds=elapsed,
+                            total_elapsed_seconds=total,
+                        )
+                        await hook_mgr.fire_error(message=msg, is_fatal=True, exception=exc)
+                        await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)
+                    yield StepEnd(
+                        step=step + 1,
+                        elapsed_seconds=elapsed,
+                        total_elapsed_seconds=total,
+                    )
+                    yield ErrorEvent(
+                        message=msg, is_fatal=True, exception=exc,
+                        error_code="TURN_COMPLETION_CHECK_TIMEOUT", error_category="timeout",
+                        error_details={"source": "turn_continuation", "timeoutSeconds": effective_provider_stale_seconds},
+                    )
+                    yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
+                    return
             # Re-enter the existing cancellation/queue handlers before accepting
             # a verdict made while the user was cancelling or changing the task.
             if cancelled() or (inject_queue is not None and not inject_queue.empty()):
@@ -2526,6 +2582,34 @@ async def _run_agent_loop_impl(
                     total_elapsed_seconds=total,
                 )
                 continue
+
+            # Capability checks are deterministic and cannot be waived by the
+            # model judge, a completion claim, or a serialized tool result.
+            completion_issues = await completion_checks.check()
+            if cancelled() or (inject_queue is not None and not inject_queue.empty()):
+                continue
+            if completion_issues:
+                message = "Completion blocked: " + "\n".join(
+                    f"{issue.code}: {issue.message}" for issue in completion_issues
+                )
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(
+                        step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total,
+                    )
+                yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                if (completion_checks.repairs < 2 and step + 1 < max_steps
+                        and all(issue.repairable for issue in completion_issues)):
+                    completion_checks.repairs += 1
+                    yield MessageInjection(InjectionKind.TASK_CONTINUATION, message).apply(messages)
+                    continue
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(message=message, is_fatal=True, exception=None)
+                    await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=message)
+                yield ErrorEvent(message=message, is_fatal=True, error_code="COMPLETION_GATE_UNSATISFIED")
+                yield DoneEvent(stop_reason=StopReason.ERROR, final_content=message)
+                return
 
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
@@ -2646,6 +2730,7 @@ async def _run_agent_loop_impl(
             ).apply(messages)
 
         if completed_turn_ending_tool is not None:
+            completion_checks.suspend()
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -2670,6 +2755,7 @@ async def _run_agent_loop_impl(
             return
 
         if plan_approval_gate_completed:
+            completion_checks.suspend()
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -2803,13 +2889,22 @@ class AgentLoopKernel:
 
     async def run(self) -> AsyncIterator[AgentEvent]:
         """Run this kernel instance and yield its existing event stream."""
+        completion_checks = None
+
+        def bind_checks(checks: CompletionChecks) -> None:
+            nonlocal completion_checks
+            completion_checks = checks
+
         events = _run_agent_loop_impl(
             _runtime_defaults=self._runtime_defaults,
             _services=self._services,
+            _on_completion_checks=bind_checks,
             **self._run_arguments,
         )
         try:
             async for event in events:
+                if isinstance(event, DoneEvent) and completion_checks is not None and not completion_checks.suspended:
+                    completion_checks.close()
                 yield event
         finally:
             await events.aclose()

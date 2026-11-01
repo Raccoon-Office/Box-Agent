@@ -18,13 +18,15 @@ from uuid import uuid4
 
 from box_agent.config import Config, ToolLimitsConfig
 from box_agent.llm.capabilities import image_input_support, model_candidate_has_tag
-from box_agent.llm.model_routing import resolve_model_client
+from box_agent.llm.model_routing import ModelRoutingError, resolve_model_client
+from box_agent.llm.task_budgets import LONG_TASK_MAX_OUTPUT_TOKENS
 from box_agent.tools.base import Tool
 from box_agent.tools.argument_limits import RECOMMENDED_GENERATED_BODY_CHARS
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.execution_result_tool import ReportExecutionResultTool
 from box_agent.tools.file import JsonlQueryTool, ReadTool
 from box_agent.tools.file.email_tool import ExtractEmailAttachmentTool, ReadEmailTool
+from box_agent.tools.file.validate_table_tool import ValidateTableTool
 from box_agent.tools.file_tools import (
     AppendTool,
     EditTool,
@@ -119,15 +121,27 @@ def _image_capable_llm(llm: Any | None) -> Any | None:
         )
         if not vision_candidates:
             return None
-        resolved, diagnostic = resolve_model_client(
-            llm,
-            task="分析图片内容并执行视觉质量审查",
-            strategy="utility",
-            auto_model_candidates=vision_candidates,
-            task_tags=("vision", "analysis"),
-            required_ability_level=3,
-        )
-        return resolved if diagnostic.get("mode") == "auto" else None
+        # Preserve the selected client's budget when it already fits. Only retry
+        # capacity rejection with the largest existing vision per-call budget,
+        # so switching thinking on later still has its normal allowance.
+        for output_cap in (None, LONG_TASK_MAX_OUTPUT_TOKENS):
+            try:
+                resolved, diagnostic = resolve_model_client(
+                    llm,
+                    task="分析图片内容并执行视觉质量审查",
+                    strategy="utility",
+                    auto_model_candidates=vision_candidates,
+                    task_tags=("vision", "analysis"),
+                    required_ability_level=3,
+                    max_output_tokens_cap=output_cap,
+                )
+            except ModelRoutingError as exc:
+                if exc.diagnostic.get("reason") != "no_context_candidate":
+                    return None
+            else:
+                return resolved if diagnostic.get("mode") == "auto" else None
+        # Rejections are already recorded; this capability is optional.
+        return None
 
     return None if current_support is False else llm
 
@@ -781,6 +795,12 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                 relative_root_dir=str(relative_root),
             ),
             JsonlQueryTool(
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+                relative_root_dir=str(relative_root),
+            ),
+            ValidateTableTool(
                 workspace_dir=str(workspace_dir),
                 allow_full_access=allow_full_access,
                 permission_engine=permission_engine,

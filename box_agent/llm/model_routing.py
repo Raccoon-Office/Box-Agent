@@ -2,9 +2,38 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 import re
 from typing import Any, Iterable
+from uuid import uuid4
+
+from ..config import derive_context_token_limit
+
+logger = logging.getLogger(__name__)
+
+
+class ModelRoutingError(ValueError):
+    """A routing rejection with a bounded, task-content-free decision record."""
+
+    def __init__(self, message: str, diagnostic: dict[str, Any]):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def _record_routing(record: dict[str, Any]) -> None:
+    """Use existing trace/log transports without making logging a dependency."""
+    try:
+        from ..session_trace import emit_session_trace
+
+        emit_session_trace("model.routing", data=record)
+    except Exception:
+        pass
+    try:
+        logger.info("model.routing %s", json.dumps(record, ensure_ascii=False))
+    except Exception:
+        pass
 
 
 _TASK_TAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -64,6 +93,44 @@ _ADVANCED_TASK_TAGS = {
 }
 _STANDARD_TASK_TAGS = {"document", "html", "office", "presentation"}
 _IMAGE_FILE_RE = re.compile(r"\.(?:avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp)$", re.I)
+_TRANSLATION_REQUEST_RE = re.compile(
+    r"^(?:(?:请(?:帮我)?|帮我|麻烦你?)\s*)?(?:(?:把|将)[^:：\n]{0,80})?翻译|"
+    r"^(?:please\s+)?translate\b", re.I,
+)
+_TRANSLATION_QUOTES = {'“': '”', '「': '」', '『': '』', '"': '"', "'": "'"}
+_TRANSLATION_COMPOUND_RE = re.compile(r"然后|另外|接着|同时|并|以及|\b(?:and|then|also)\b", re.I)
+_TRANSLATION_FOLLOWUP_RE = re.compile(
+    r"(?:然后|另外|接着|同时)[，,\s]*(?:请|帮我)?|"
+    r"(?:并(?:且)?|再|以及)\s*(?:分析|比较|评估|解释|排查|修复|重构|编写|研究)|"
+    r"[\r\n。！？.!?；;]\s*(?:请|帮我|分析|解释|排查|修复|重构|编写|研究|"
+    r"(?:explain|fix|debug|analy[sz]e|refactor|implement|research)\b)|"
+    r"\b(?:then|also|and)\s+(?:please\s+)?(?:fix|debug|analy[sz]e|refactor|implement|research)\b", re.I,
+)
+
+
+def _routing_task_text(task: str) -> str:
+    """Exclude clearly delimited translation source from lexical task signals only."""
+    # Find one paired span without repeatedly scanning an unterminated quote.
+    opening = re.search(r'''[“「『"']''', task)
+    if opening:
+        end = task.find(_TRANSLATION_QUOTES[opening.group()], opening.end())
+        if end >= 0:
+            instruction = (task[:opening.start()] + " " + task[end + 1:]).strip()
+            if (_TRANSLATION_REQUEST_RE.search(instruction)
+                    and not _TRANSLATION_COMPOUND_RE.search(instruction)
+                    and not _TRANSLATION_FOLLOWUP_RE.search(instruction)):
+                return instruction
+    parts = re.split(r"[:：]", task, maxsplit=1)
+    if len(parts) == 2:
+        instruction, source = (part.strip() for part in parts)
+        if (source and _TRANSLATION_REQUEST_RE.search(instruction)
+                and not _TRANSLATION_COMPOUND_RE.search(instruction)
+                and not _TRANSLATION_FOLLOWUP_RE.search(instruction)
+                and not source.startswith(('“', '「', '『', '"', "'", '`'))
+                and "\n" not in source and "\r" not in source
+                and not _TRANSLATION_FOLLOWUP_RE.search(source)):
+            return instruction
+    return task
 
 
 def _positive_int(value: Any) -> int | None:
@@ -187,6 +254,8 @@ def select_auto_model(
     task_tags: Iterable[str] | None = None,
     required_ability_level: int | None = None,
     estimated_input_tokens: int | None = None,
+    max_output_tokens_cap: int | None = None,
+    fallback_max_output_tokens: int | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Choose one allowlisted model for an isolated child task."""
 
@@ -195,6 +264,7 @@ def select_auto_model(
         return None, {"mode": "inherit", "reason": "no_auto_model_pool"}
 
     file_names = list(files)
+    classification_task = _routing_task_text(task)
     resolved_task_tags = (
         sorted(
             {
@@ -205,7 +275,7 @@ def select_auto_model(
         )
         if task_tags is not None
         else _task_tags(
-            task,
+            classification_task,
             required_tools=required_tools,
             skills=skills,
             files=file_names,
@@ -218,11 +288,11 @@ def select_auto_model(
         expanded_task_tags.update(_TASK_TAG_ALIASES.get(tag, ()))
     resolved_task_tags = sorted(expanded_task_tags)
     task_tag_set = set(resolved_task_tags)
-    advanced_task = bool(_ADVANCED_TASK_RE.search(task)) or bool(
+    advanced_task = bool(_ADVANCED_TASK_RE.search(classification_task)) or bool(
         task_tag_set & _ADVANCED_TASK_TAGS
     )
     standard_task = (
-        bool(_STANDARD_TASK_RE.search(task))
+        bool(_STANDARD_TASK_RE.search(classification_task))
         or bool(task_tag_set & _STANDARD_TASK_TAGS)
         or len(task) > 600
         or (strategy == "general_loop" and bool(list(required_tools)))
@@ -241,68 +311,132 @@ def select_auto_model(
         1,
         math.ceil(len(task) / 2) + min(len(file_names), 8) * 16_000,
     )
+    if max_output_tokens_cap is not None and _positive_int(max_output_tokens_cap) is None:
+        raise ValueError("max_output_tokens_cap must be positive")
 
-    known_context_models = [model for model in pool if model.get("contextWindow")]
-    if estimated_input_tokens is not None and known_context_models:
+    def input_budget(model: dict[str, Any]) -> int:
+        context_window = model["contextWindow"]
+        output_tokens = _positive_int(model.get("maxTokens")) or _positive_int(
+            fallback_max_output_tokens
+        )
+        if max_output_tokens_cap is not None:
+            output_tokens = (
+                min(output_tokens, max_output_tokens_cap)
+                if output_tokens is not None
+                else max_output_tokens_cap
+            )
+        if output_tokens is None:
+            return context_window * 4 // 5
+        if context_window - output_tokens <= 1:
+            return 0
+        return derive_context_token_limit(context_window, output_tokens)
+
+    known_context_models = [
+        model for model in pool if _positive_int(model.get("contextWindow")) is not None
+    ]
+    # Entirely missing limits retain legacy routing, but unknown candidates cannot
+    # bypass a known input budget. Never fall back to an insufficient window.
+    if known_context_models:
         context_pool = [
             model
             for model in known_context_models
-            if resolved_input_tokens <= model["contextWindow"] * 0.8
+            if resolved_input_tokens <= input_budget(model)
         ]
     else:
-        context_pool = [
-            model
-            for model in pool
-            if not model.get("contextWindow")
-            or resolved_input_tokens <= model["contextWindow"] * 0.8
-        ]
-    if not context_pool:
-        if known_context_models:
-            largest_context_window = max(
-                model["contextWindow"] for model in known_context_models
+        context_pool = pool
+    required_tags = set(resolved_task_tags)
+
+    def score_breakdown(model: dict[str, Any]) -> dict[str, int]:
+        tags = set(model.get("tags", ()))
+        return {
+            "tags": len(tags & required_tags) * 100,
+            "ability": int(model.get("abilityLevel", 1)) * (20 if required_ability > 1 else -5),
+            "fast": 25 if required_ability <= 1 and "fast" in tags else 0,
+            "default": 0,
+        }
+
+    def score(model: dict[str, Any]) -> int:
+        return sum(score_breakdown(model).values())
+
+    def diagnostic(reason: str, selected: dict[str, Any] | None = None) -> dict[str, Any]:
+        shown = pool[:64]
+        if selected is not None and all(model is not selected for model in shown):
+            shown[-1] = selected
+        candidates = []
+        for model in shown:
+            known = _positive_int(model.get("contextWindow")) is not None
+            reasons = []
+            if model not in context_pool:
+                reasons.append("context_capacity" if known else "context_unknown")
+            if model.get("abilityLevel", 1) < required_ability:
+                reasons.append("ability")
+            if "vision" in required_tags and "vision" not in model.get("tags", ()):
+                reasons.append("vision")
+            candidates.append(
+                {
+                    "model": str(model["model"])[:200],
+                    "ability_level": model.get("abilityLevel", 1),
+                    **(
+                        {"context_window": model["contextWindow"], "input_token_budget": input_budget(model)}
+                        if known else {}
+                    ),
+                    "matched_tags": [
+                        tag[:64] for tag in sorted(set(model.get("tags", ())) & required_tags)[:32]
+                    ],
+                    "rejection_reasons": reasons,
+                    "score": None if reasons else score(model),
+                    "score_breakdown": score_breakdown(model),
+                    "selected": model is selected,
+                }
             )
-            context_pool = [
-                model
-                for model in known_context_models
-                if model["contextWindow"] == largest_context_window
-            ]
-        else:
-            context_pool = pool
+        return {
+            "schema_version": 1,
+            "mode": "auto",
+            "status": "selected" if selected is not None else "rejected",
+            "reason": reason,
+            **({"selected_model": str(selected["model"])[:200]} if selected is not None else {}),
+            "task_tags": [tag[:64] for tag in resolved_task_tags[:32]],
+            "required_ability_level": required_ability,
+            "minimum_ability_level": required_ability,
+            "estimated_input_tokens": resolved_input_tokens,
+            "context_capacity": "estimated" if known_context_models else "unknown",
+            **(
+                {"input_token_budget": input_budget(selected)}
+                if selected is not None and known_context_models else {}
+            ),
+            "candidate_count": len(pool),
+            "candidates_truncated": len(pool) - len(shown),
+            "candidates": candidates,
+        }
+
+    if not context_pool:
+        raise ModelRoutingError(
+            "AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED: "
+            f"estimated_input_tokens={resolved_input_tokens}",
+            diagnostic("no_context_candidate"),
+        )
     ability_pool = [
         model for model in context_pool if model.get("abilityLevel", 1) >= required_ability
     ]
     if not ability_pool:
-        raise ValueError(
-            f"no auto model satisfies required ability level: {required_ability}"
+        raise ModelRoutingError(
+            f"no auto model satisfies required ability level: {required_ability}",
+            diagnostic("no_ability_candidate"),
         )
 
-    required_tags = set(resolved_task_tags)
     if "vision" in required_tags:
         ability_pool = [
             model for model in ability_pool if "vision" in set(model.get("tags", ()))
         ]
         if not ability_pool:
-            raise ValueError("no auto model supports required capability: vision")
-
-    def score(model: dict[str, Any]) -> int:
-        tags = set(model.get("tags", ()))
-        value = len(tags & required_tags) * 100
-        if required_ability > 1:
-            value += int(model.get("abilityLevel", 1)) * 20
-        else:
-            value -= int(model.get("abilityLevel", 1)) * 5
-            if "fast" in tags:
-                value += 25
-        return value
+            raise ModelRoutingError(
+                "no auto model supports required capability: vision",
+                diagnostic("no_vision_candidate"),
+            )
 
     selected = max(enumerate(ability_pool), key=lambda item: (score(item[1]), -item[0]))[1]
-    return selected, {
-        "mode": "auto",
-        "selected_model": selected["model"],
-        "task_tags": resolved_task_tags,
-        "required_ability_level": required_ability,
-        "estimated_input_tokens": resolved_input_tokens,
-    }
+    tied = sum(score(model) == score(selected) for model in ability_pool) > 1
+    return selected, diagnostic("catalog_order_tiebreak" if tied else "highest_score", selected)
 
 
 def resolve_model_client(
@@ -334,22 +468,46 @@ def resolve_model_client(
     )
     if not isinstance(candidates, (list, tuple)):
         candidates = ()
-    selected, diagnostic = select_auto_model(
-        candidates,
-        task=task,
-        strategy=strategy,
-        required_tools=required_tools,
-        skills=skills,
-        files=files,
-        task_tags=task_tags,
-        required_ability_level=required_ability_level,
-        estimated_input_tokens=estimated_input_tokens,
-    )
-    if selected is None and max_output_tokens_cap is None:
-        return llm, diagnostic
-
     raw_model = getattr(llm, "model", "")
     current_model = raw_model.strip() if isinstance(raw_model, str) else ""
+    routing_id = uuid4().hex
+
+    def record(phase: str, decision: dict[str, Any], **fields: Any) -> None:
+        _record_routing(
+            {
+                "schema_version": 1,
+                "engine": "agent",
+                "routing_id": routing_id,
+                "strategy": strategy[:64],
+                "phase": phase,
+                "previous_model": current_model[:200],
+                "decision": decision,
+                **fields,
+            }
+        )
+
+    try:
+        selected, diagnostic = select_auto_model(
+            candidates,
+            task=task,
+            strategy=strategy,
+            required_tools=required_tools,
+            skills=skills,
+            files=files,
+            task_tags=task_tags,
+            required_ability_level=required_ability_level,
+            estimated_input_tokens=estimated_input_tokens,
+            max_output_tokens_cap=max_output_tokens_cap,
+            fallback_max_output_tokens=_positive_int(getattr(llm, "max_output_tokens", None)),
+        )
+    except ModelRoutingError as exc:
+        record("decision", exc.diagnostic)
+        raise
+    record("decision", diagnostic)
+    if selected is None and max_output_tokens_cap is None:
+        record("inherited", diagnostic, actual_model=current_model[:200])
+        return llm, diagnostic
+
     target_model = str((selected or {}).get("model") or current_model).strip()
     selected_limit = (selected or {}).get("maxTokens")
     target_limit = selected_limit if isinstance(selected_limit, int) else None
@@ -365,6 +523,7 @@ def resolve_model_client(
         )
 
     if not target_model:
+        record("inherited", diagnostic, binding_reason="current_model_unavailable", actual_model=current_model[:200])
         return llm, {
             **diagnostic,
             "mode": "inherit",
@@ -377,14 +536,24 @@ def resolve_model_client(
 
     clone_for_model = getattr(llm, "for_model", None)
     if not callable(clone_for_model):
+        if diagnostic.get("context_capacity") == "estimated":
+            record("binding_failed", diagnostic, binding_reason="model_clone_unavailable")
+            raise ModelRoutingError("AUTO_MODEL_BINDING_FAILED: model_clone_unavailable", diagnostic)
+        record("inherited", diagnostic, binding_reason="model_clone_unavailable", actual_model=current_model[:200])
         return llm, {
             **diagnostic,
             "mode": "inherit",
             "reason": "model_clone_unavailable",
         }
     try:
+        client = clone_for_model(target_model, max_output_tokens=target_limit)
+        record(
+            "bound", diagnostic,
+            actual_model=_clean_model_name(getattr(client, "model", "")),
+            max_output_tokens=_positive_int(getattr(client, "max_output_tokens", None)),
+        )
         return (
-            clone_for_model(target_model, max_output_tokens=target_limit),
+            client,
             {
                 **diagnostic,
                 "selected_model": target_model,
@@ -396,9 +565,17 @@ def resolve_model_client(
             },
         )
     except (TypeError, ValueError) as exc:
+        if diagnostic.get("context_capacity") == "estimated":
+            # The original client's capacity/output budget was not the one selected.
+            record("binding_failed", diagnostic, binding_reason="model_clone_failed")
+            raise ModelRoutingError("AUTO_MODEL_BINDING_FAILED: model_clone_failed", diagnostic) from exc
+        record("inherited", diagnostic, binding_reason="model_clone_failed", actual_model=current_model[:200])
         return llm, {
             **diagnostic,
             "mode": "inherit",
             "reason": "model_clone_failed",
             "error": str(exc),
         }
+    except Exception:
+        record("binding_failed", diagnostic, binding_reason="model_clone_failed")
+        raise

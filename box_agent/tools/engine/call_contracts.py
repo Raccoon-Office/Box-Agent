@@ -64,6 +64,7 @@ class ToolRunContext:
     skill_reader: Callable[..., ToolResult] | None = None
     correction_observer: Callable[[str, ToolResult, str | None, str, dict, bool], CorrectionNotice | None] | None = None
     session_log: Any = None
+    completion_gates: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

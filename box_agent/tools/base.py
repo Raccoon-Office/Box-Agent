@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -19,6 +19,9 @@ from .schema_validation import (
     ToolSchemaValidationError,
     validate_tool_arguments,
 )
+
+if TYPE_CHECKING:
+    from .completion_checks import CompletionCheck, CompletionContext
 
 
 class ToolResult(BaseModel):
@@ -103,6 +106,7 @@ class ToolInvocationContext:
     child_budgets: tuple[DelegatedBudget, ...] = ()
     budget_charge: BudgetCharge = field(default_factory=BudgetCharge)
     chat_references: Any = None
+    completion_gate: Any = None
 
 
 class Tool:
@@ -130,6 +134,10 @@ class Tool:
     def compaction_state(self) -> tuple[str, str] | None:
         """Return trusted read-only runtime state for history compaction."""
 
+        return None
+
+    async def create_completion_gate(self, context: CompletionContext) -> CompletionCheck | None:
+        """Optionally create a trusted capability-owned gate for this run."""
         return None
 
     @property

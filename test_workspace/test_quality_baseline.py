@@ -30,7 +30,7 @@ def attempt(tmp_path):
     (root / "agent").mkdir()
     records = [
         {"event": "llm.request", "data": {"model": "fixture", "messages": [{"role": "system", "content": "system"}], "tools": []}},
-        {"event": "tool.request", "tool_call_id": "1", "data": {"tool_name": "read_file"}},
+        {"event": "tool.request", "tool_call_id": "1", "data": {"tool_name": "read_file", "arguments": {"path": "result.json"}}},
         {"event": "tool.response", "tool_call_id": "1", "data": {"tool_name": "read_file", "success": True}},
     ]
     (root / "agent/trace.jsonl").write_text("\n".join(json.dumps(row) for row in records), encoding="utf-8")
@@ -43,6 +43,167 @@ def completion_spec():
                 if spec["id"] == "q0-complete")
 
 
+@pytest.mark.parametrize("tool,arguments", [
+    ("bash", {"command": "python3 -c \"from pathlib import Path; p=Path('result.json'); print(p.read_text())\""}),
+    ("execute_code", {"code": "from pathlib import Path\np = Path.cwd() / 'result.json'\nprint(p.read_text())"}),
+    ("execute_code", {"code": "import os, json\np = os.path.join(os.getcwd(), 'result.json')\nwith open(p, encoding='utf-8') as f:\n value = json.load(f)\nprint(value)"}),
+])
+def test_completion_accepts_successful_readback_outside_read_file(attempt, tool, arguments):
+    write_json(attempt / "workspace/result.json", 391)
+    trace = attempt / "agent/trace.jsonl"
+    records = [json.loads(line) for line in trace.read_text().splitlines()]
+    records[1]["data"] = {"tool_name": tool, "arguments": arguments}
+    records[2]["data"] = {"tool_name": tool, "success": True, "content": "391"}
+    trace.write_text("\n".join(json.dumps(row) for row in records))
+    assert baseline.evaluate_attempt(attempt, completion_spec())["quality"] == "passed"
+
+
+@pytest.mark.parametrize("code", [
+    "# print(Path('result.json').read_text())\nprint(391)",
+    "from pathlib import Path\nprint(Path('other.json').read_text())",
+    "def unused():\n return open('result.json').read()\nprint(391)",
+    "f = lambda: open('result.json').read()\nprint(391)",
+    "import os,json\np=os.path.join(os.getcwd(),'other.json')\nwith open(p) as f:\n value=json.load(f)\nprint(value)",
+])
+def test_readback_cannot_be_proven_by_comments_wrong_files_or_unused_code(attempt, code):
+    rule = {"kind": "artifact_readback", "path": "result.json"}
+    calls = [{"tool_name": "execute_code", "arguments": {"code": code},
+              "success": True, "content": "391"}]
+    assert baseline.check_rule(rule, attempt, calls) is not True
+
+
+@pytest.mark.parametrize("command", [
+    "echo python3 -c \"print(open('result.json').read())\"",
+    "true || python3 -c \"print(open('result.json').read())\"",
+])
+def test_shell_text_or_skipped_commands_do_not_prove_readback(attempt, command):
+    rule = {"kind": "artifact_readback", "path": "result.json"}
+    calls = [{"tool_name": "bash", "arguments": {"command": command},
+              "success": True, "content": "391"}]
+    assert baseline.check_rule(rule, attempt, calls) is not True
+
+
+def test_original_copy_preserves_trailing_newline(attempt):
+    (attempt / "workspace/source.json").write_bytes(b'{"value": 1}\n')
+    target = attempt / "workspace/result.json"
+    rule = {"kind": "bytes_equal", "path": "result.json", "source": "source.json"}
+    target.write_bytes(b'{"value": 1}')
+    assert baseline.check_rule(rule, attempt, []) is False
+    target.write_bytes(b'{"value": 1}\n')
+    assert baseline.check_rule(rule, attempt, []) is True
+
+
+def test_query_scope_checks_returned_records_not_internal_scan_count(attempt):
+    rule = {"kind": "query_rows_match", "path": "records.jsonl", "field": "id", "value": 731}
+    call = {"tool_name": "query_jsonl", "success": True, "arguments": {"path": "records.jsonl"},
+            "content": json.dumps({"records": [{"data": {"id": 731}}], "page": {"scanned_records": 1000}})}
+    assert baseline.check_rule(rule, attempt, [call]) is True
+    extra = {**call, "content": json.dumps({"records": [{"data": {"id": 0}}]})}
+    assert baseline.check_rule(rule, attempt, [extra, call]) is False
+    projected = {**call, "arguments": {"path": "records.jsonl", "fields": ["/id"]},
+                 "content": json.dumps({"records": [{"data": {"/id": 731}}]})}
+    assert baseline.check_rule(rule, attempt, [projected]) is True
+
+
+@pytest.mark.parametrize("tool,arguments,expected", [
+    ("execute_code", {"code": "print(open('records.jsonl').read().splitlines()[731])"}, False),
+    ("execute_code", {"code": "from pathlib import Path\np=Path('records.jsonl')\nprint(p.read_text())"}, False),
+    ("execute_code", {"code": "with open('records.jsonl') as f:\n print(f.readlines()[731])"}, False),
+    ("execute_code", {"code": "with open('records.jsonl') as f:\n rows=list(f)"}, False),
+    ("execute_code", {"code": "open('records.jsonl').readlines(0)"}, False),
+    ("bash", {"command": "python - <<'PY'\nprint(open('records.jsonl').readlines()[731])\nPY"}, False),
+    ("bash", {"command": "cat ./records.jsonl"}, False),
+    ("bash", {"command": "cd . && wc -lc records.jsonl && python -c \"print(open('records.jsonl').readlines()[731])\""}, False),
+    ("execute_code", {"code": "print(open('records.jsonl').read(8))"}, True),
+    ("execute_code", {"code": "print(open('records.jsonl').read(-0))"}, True),
+    ("execute_code", {"code": "print(open('records.jsonl').read(-1))"}, False),
+    ("execute_code", {"code": "print(open('other.jsonl').read())"}, True),
+    ("execute_code", {"code": "# open('records.jsonl').read()\nprint('ok')"}, True),
+    ("execute_code", {"code": "print(open('records.jsonl').read(size))"}, None),
+    ("execute_code", {"code": "if condition:\n print(open('records.jsonl').read())"}, None),
+    ("execute_code", {"code": "exec(\"open('records.jsonl').read()\")"}, None),
+    ("execute_code", {"code": "load_all('records.jsonl')"}, None),
+    ("execute_code", {"code": "read_records()"}, None),
+    ("bash", {"command": "node read-records.js records.jsonl"}, None),
+    ("bash", {"command": "echo 'cat records.jsonl'"}, True),
+    ("bash", {"command": "echo ok\ncat records.jsonl"}, None),
+    ("bash", {"command": "echo $(cat records.jsonl)"}, None),
+    ("read_file", {"path": "records.jsonl", "offset": 732, "limit": 1}, True),
+    ("read_file", {"path": "records.jsonl"}, None),
+])
+def test_source_read_constraint_checks_code_and_shell_without_executing_them(attempt, tool, arguments, expected):
+    rule = {"kind": "no_full_file_read", "path": "records.jsonl"}
+    calls = [{"tool_name": tool, "arguments": arguments, "success": True}]
+    assert baseline.check_rule(rule, attempt, calls) is expected
+
+
+def test_failed_code_read_is_inconclusive_and_does_not_hide_later_violation(attempt):
+    rule = {"kind": "no_full_file_read", "path": "records.jsonl"}
+    call = {"tool_name": "execute_code", "arguments": {"code": "open('records.jsonl').read()"}, "success": False}
+    assert baseline.check_rule(rule, attempt, [call]) is None
+    assert baseline.check_rule(rule, attempt, [call, {**call, "success": True}]) is False
+
+
+def test_jsonl_oracle_includes_full_file_read_constraint():
+    spec = next(s for s in baseline.read_json(baseline.PACK / "oracles.json")["cases"] if s['id'] == 'q0-long')
+    assert {"kind": "no_full_file_read", "path": "records.jsonl"} in spec['checks']
+
+
+@pytest.mark.parametrize('code,quality', [
+    ("open('records.jsonl').read()", 'failed'),
+    ("load_all('records.jsonl')", 'unverified'),
+])
+def test_provider_error_does_not_hide_proven_whole_read_or_turn_unknown_into_failure(attempt, code, quality):
+    run = baseline.read_json(attempt / 'run.json')
+    run.update(acp_status='error', response_metadata={'errorDetails': {'source': 'llm_provider', 'httpStatus': 429}})
+    write_json(attempt / 'run.json', run)
+    with (attempt / 'agent/trace.jsonl').open('a') as stream:
+        stream.write('\n' + json.dumps({'event': 'tool.response', 'tool_call_id': 'new', 'data': {
+            'tool_name': 'execute_code', 'success': True, 'arguments': {'code': code}}}))
+    spec = {**completion_spec(), 'checks': [{'kind': 'no_full_file_read', 'path': 'records.jsonl'}]}
+    assert baseline.evaluate_attempt(attempt, spec)['quality'] == quality
+
+
+def test_timeout_is_unverified_even_when_deliverable_and_cancel_metadata_look_complete(attempt):
+    write_json(attempt / "workspace/result.json", 391)
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="timeout", response_metadata={"completed": True})
+    write_json(attempt / "run.json", run)
+    result = baseline.evaluate_attempt(attempt, completion_spec())
+    assert result["quality"] == "unverified"
+    assert "timeout" in result["reason"]
+    assert result["checks"] == [True, True]
+
+
+@pytest.mark.parametrize("code,source", [
+    ("TURN_COMPLETION_CHECK_TIMEOUT", "turn_continuation"),
+    ("LLM_PROVIDER_STALE_TIMEOUT", "llm_provider"),
+])
+def test_completion_check_timeout_is_not_scored_as_content_failure(attempt, code, source):
+    write_json(attempt / "workspace/result.json", 391)
+    run = baseline.read_json(attempt / "run.json")
+    run.update(acp_status="error", response_metadata={
+        "errorCode": code,
+        "errorDetails": {"source": source},
+    })
+    write_json(attempt / "run.json", run)
+    result = baseline.evaluate_attempt(attempt, completion_spec())
+    assert result["quality"] == "unverified"
+    assert result["checks"] == [True, True]
+    assert result["timeout_details"]["source"] == source
+
+
+@pytest.mark.parametrize("key", ["timeout_seconds", "timeout_budget", "rate_limit_retry_policy"])
+def test_model_comparison_rejects_different_wait_budgets(model_comparison, key):
+    before, after = model_comparison
+    path = after / "manifest.json"
+    manifest = baseline.read_json(path)
+    manifest[key] = 180 if key == "timeout_seconds" else {"provider_stale_seconds": 30}
+    write_json(path, manifest)
+    with pytest.raises(ValueError, match="incompatible comparison context"):
+        baseline.compare_runs([before], [after], compare_models=True)
+
+
 @pytest.mark.parametrize("value,expected", [(391, "passed"), (390, "failed"), ("391", "failed")])
 def test_task_quality_checks_actual_file_value(attempt, value, expected):
     write_json(attempt / "workspace/result.json", value)
@@ -52,6 +213,174 @@ def test_task_quality_checks_actual_file_value(attempt, value, expected):
     assert result["token_usage"] is None
     assert result["cost"] is None
     assert result["tool_calls"] == 1
+
+
+def test_quality_report_includes_routing_evidence_without_copying_task_contents(attempt):
+    write_json(attempt / "workspace/result.json", 391)
+    trace = attempt / "agent/trace.jsonl"
+    with trace.open("a") as stream:
+        for phase in ("decision", "bound"):
+            stream.write("\n" + json.dumps({
+                "event": "model.routing", "turn_id": "turn", "data": {
+                    "routing_id": "route", "phase": phase, "engine": "agent", "strategy": "utility",
+                    **({"actual_model": "fixture"} if phase == "bound" else {}),
+                    "decision": {"reason": "highest_score", "selected_model": "fixture",
+                                 "status": "selected", "estimated_input_tokens": 100,
+                                 "task": "private-task-marker", "candidates": [{"api_key": "secret"}]},
+                },
+            }))
+    result = baseline.evaluate_attempt(attempt, completion_spec())
+    assert result["quality"] == "passed"
+    assert [row["phase"] for row in result["routing"]] == ["decision", "bound"]
+    assert result["routing"][0]["reason"] == "highest_score"
+    assert result["routing"][1]["actual_model"] == "fixture"
+    assert "private-task-marker" not in json.dumps(result["routing"])
+    assert "api_key" not in json.dumps(result["routing"])
+
+
+def test_legacy_trace_has_no_invented_routing_evidence(attempt):
+    write_json(attempt / "workspace/result.json", 391)
+    result = baseline.evaluate_attempt(attempt, completion_spec())
+    assert result["quality"] == "passed"
+    assert result["routing"] == []
+
+
+@pytest.mark.parametrize("data", [None, {"decision": {}},
+                                    {"routing_id": "r", "phase": "unknown", "decision": {}},
+                                    {"routing_id": "r", "phase": [], "decision": {}},
+                                    {"phase": "bound", "decision": {}}])
+def test_malformed_routing_record_is_not_counted_as_observed(data):
+    assert baseline.routing_inventory([{"event": "model.routing", "data": data}]) == []
+
+
+@pytest.fixture
+def model_comparison(tmp_path, monkeypatch):
+    before, after = tmp_path / "fixed", tmp_path / "auto"
+    context = {"runner_sha256": "runner", "oracle_sha256": "oracle", "pack_sha256": "pack",
+               "python": "3.13", "platform": "test", "profile_config_sha256": "profile",
+               "environment": {}, "source_sha256": "same-source"}
+    for directory in (before, after):
+        write_json(directory / "baseline-context.json", context)
+        write_json(directory / "manifest.json", {
+            "schema_version": "acp-eval/v1", "model_config_sha256": directory.name,
+        })
+    def results(directory, pack):
+        return {"results": [{
+            "case_id": "q0-complete", "quality": "passed", "model_config_sha256": directory.name,
+            "latency_seconds": 2 if directory == before else 1,
+            "token_usage": {"totalTokens": 100}, "tool_calls": 2, "failed_tool_calls": 0,
+            "requests": [{"model": "strong" if directory == before else "light"}],
+            "routing": [{"phase": "decision", "reason": "highest_score"}, {"phase": "bound"}],
+        }]}
+    monkeypatch.setattr(baseline, "evaluate_run", results)
+    return before, after
+
+
+def test_model_comparison_is_explicit_and_reports_each_sides_observed_models(model_comparison):
+    before, after = model_comparison
+    with pytest.raises(ValueError, match="incompatible comparison context"):
+        baseline.compare_runs([before], [after])
+    report = baseline.compare_runs([before], [after], compare_models=True)
+    case = report["cases"][0]
+    assert case["baseline"]["request_models"] == {"strong": 1}
+    assert case["candidate"]["request_models"] == {"light": 1}
+    assert case["candidate"]["mean_latency_seconds"] == 1
+    assert case["candidate"]["routing_decisions"] == 1
+    assert case["candidate"]["routing_observed_attempts"] == 1
+    assert report["model_configs"] == {"baseline": "fixed", "candidate": "auto"}
+    assert report["comparison_mode"] == "model_configs"
+    assert "light" in baseline.render_comparison(report)
+
+
+@pytest.mark.parametrize("field", ["source_sha256", "runner_sha256", "pack_sha256", "environment"])
+def test_model_comparison_still_rejects_other_changed_conditions(model_comparison, field):
+    before, after = model_comparison
+    path = after / "baseline-context.json"
+    context = baseline.read_json(path)
+    context[field] = "different"
+    write_json(path, context)
+    with pytest.raises(ValueError, match="incompatible comparison context"):
+        baseline.compare_runs([before], [after], compare_models=True)
+
+
+def test_model_comparison_rejects_attempt_with_a_different_wait_budget(model_comparison):
+    before, after = model_comparison
+    for directory in (before, after):
+        path = directory / "manifest.json"
+        manifest = baseline.read_json(path)
+        manifest["timeout_budget"] = {"effective_task_seconds": 2700}
+        write_json(path, manifest)
+    # Fixture attempts predate the budget metadata; do not mix them with the
+    # newly declared manifest budget when resuming/comparing a run.
+    with pytest.raises(ValueError, match="attempt timeout budget"):
+        baseline.compare_runs([before], [after], compare_models=True)
+
+
+def test_model_comparison_requires_source_provenance(model_comparison):
+    before, after = model_comparison
+    for directory in (before, after):
+        path = directory / "baseline-context.json"
+        context = baseline.read_json(path)
+        del context["source_sha256"]
+        write_json(path, context)
+    with pytest.raises(ValueError, match="source"):
+        baseline.compare_runs([before], [after], compare_models=True)
+
+
+def test_model_comparison_rejects_mixed_models_within_one_side(model_comparison):
+    before, after = model_comparison
+    with pytest.raises(ValueError, match="model configurations within"):
+        baseline.compare_runs([before, after], [after], compare_models=True)
+
+
+def test_model_comparison_still_checks_attempt_model_against_its_manifest(model_comparison):
+    before, after = model_comparison
+    write_json(after / "manifest.json", {"schema_version": "acp-eval/v1", "model_config_sha256": "other"})
+    with pytest.raises(ValueError, match="attempt model differs"):
+        baseline.compare_runs([before], [after], compare_models=True)
+
+
+def test_comparison_metrics_exclude_incomplete_attempts_and_keep_their_count(model_comparison, monkeypatch):
+    before, after = model_comparison
+    monkeypatch.setattr(baseline, "evaluate_run", lambda directory, pack: {"results": [{
+        "case_id": "q0-complete", "quality": "unverified", "model_config_sha256": directory.name,
+        "latency_seconds": 99, "requests": [{"model": "partial"}],
+        "routing": [{"phase": "decision"}],
+    }]})
+    report = baseline.compare_runs([before], [after], compare_models=True)
+    assert report["inconclusive"] == ["q0-complete"]
+    for side in ("baseline", "candidate"):
+        row = report["cases"][0][side]
+        assert row["unverified"] == 1
+        assert row["mean_latency_seconds"] is None
+        assert row["request_models"] == {}
+        assert row["routing_observed_attempts"] == 0
+
+
+def test_default_comparison_can_still_compare_changed_source_with_a_fixed_model(model_comparison):
+    before, after = model_comparison
+    path = after / "baseline-context.json"
+    context = baseline.read_json(path)
+    context["source_sha256"] = "new-source"
+    write_json(path, context)
+    # Reuse the fixed side as the candidate to keep its attempt model provenance valid.
+    # The default comparison intentionally ignores source hashes, unlike --compare-models.
+    context_before = baseline._comparison_context(before)
+    context_after = {**baseline._comparison_context(after), "model_config_sha256": "fixed"}
+    from unittest.mock import patch
+    with patch.object(baseline, "_comparison_context", side_effect=[context_before, context_after]):
+        report = baseline.compare_runs([before], [before])
+    assert report["comparison_mode"] == "same_model"
+
+
+def test_model_comparison_cli_passes_the_explicit_option(monkeypatch, capsys):
+    calls = []
+    def compare(*args, **kwargs):
+        calls.append(kwargs)
+        return {"cases": [], "regressions": [], "inconclusive": []}
+    monkeypatch.setattr(baseline, "compare_runs", compare)
+    assert baseline.main(["compare", "--baseline", "fixed", "--candidate", "auto", "--compare-models"]) == 0
+    assert calls == [{"compare_models": True}]
 
 
 def test_normal_stop_and_claim_of_completion_do_not_pass_missing_artifact(attempt):
@@ -192,7 +521,7 @@ def test_run_entry_uses_existing_acp_runner(monkeypatch):
     monkeypatch.setattr(baseline, "source_identity", lambda *_: {})
     monkeypatch.setattr(run_acp_eval, "main", lambda args: captured.extend(args) or 2)
     assert baseline.main(["run", "--model", "fixture", "--case-id", "q0-file"]) == 2
-    assert captured[captured.index("--timeout-seconds") + 1] == "180"
+    assert "--timeout-seconds" not in captured
     assert captured[captured.index("--parallelism") + 1] == "1"
     assert captured[captured.index("--model-max-tokens") + 1] == "4096"
 

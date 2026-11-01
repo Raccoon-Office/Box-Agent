@@ -12,6 +12,25 @@ from box_agent.schema import StreamEvent
 
 
 @pytest.mark.asyncio
+async def test_model_wait_deadline_does_not_wait_for_a_longer_activity_interval():
+    closed = asyncio.Event()
+
+    async def provider():
+        try:
+            await asyncio.Event().wait()
+            yield StreamEvent(type="text", delta="unreachable")
+        finally:
+            closed.set()
+
+    async with aclosing(stream_controller.stream_with_activity(
+        provider(), stale_seconds=0.02, activity_interval_seconds=15,
+    )) as stream:
+        event = await asyncio.wait_for(anext(stream), 0.5)
+        assert event.finish_reason == "provider_stale"
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["empty", "chunks", "provider_error", "close_after_chunk"])
 async def test_finished_stream_releases_request_and_read_tasks_without_gc(outcome):
     closed = asyncio.Event()

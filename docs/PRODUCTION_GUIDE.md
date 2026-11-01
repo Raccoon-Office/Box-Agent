@@ -305,6 +305,22 @@ batch synthesis setting caps only the tool-free request inferred from `files`.
 Setting the last value to `0` disables that extra cap, not the provider timeout.
 The inferred batch path also enforces file/count/content limits; see
 [Sub-agent Delegation](SUB_AGENT_DELEGATION.md).
+The same `provider_stale_seconds` budget bounds the total wait for the non-streaming
+completion check; `BOX_AGENT_PROVIDER_STALE_SECONDS` overrides it. A timeout returns
+`TURN_COMPLETION_CHECK_TIMEOUT`, preserving existing output and reporting an incomplete
+task instead of treating a missing verdict as completion. Stream checks wake at the
+remaining wait deadline even when the activity heartbeat interval is longer; exhausted
+stale recovery returns `LLM_PROVIDER_STALE_TIMEOUT`. Standard ACP evaluation derives
+its default attempt deadline from the runtime wait/recovery policy and records explicit
+shorter deadlines as constrained; see the [evaluation runner](../test_workspace/acp_eval/README.md).
+An explicit 180-second attempt can still expire before the default 300-second model wait.
+
+For the subprocess-kernel path of `execute_code`, the optional host preparation check,
+environment preparation, and kernel startup each have a separate 60-second limit with phase diagnostics. These stages
+are separate from code execution. The execution `timeout` is a wall-clock budget that output
+cannot reset; write-guard setup and cleanup have 15 seconds of additional allowance.
+Timeout or cancellation discards the busy kernel. After a preparation timeout, inspect or
+prepare the managed environment through `local_environment` before retrying.
 Tool-limit defaults live only in `box_agent/config.py` and are intentionally
 absent from newly generated user configs, so runtime upgrades can update them.
 Add only deliberate overrides under `tool_limits:`; inspect effective values

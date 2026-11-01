@@ -66,7 +66,7 @@ _ALWAYS_WORKSPACE = {
     "publish_artifact", "read_video",
 }
 _FILES = {
-    "read_file", "query_jsonl", "search_files", "write_file", "append_file", "edit_file",
+    "read_file", "query_jsonl", "validate_table", "search_files", "write_file", "append_file", "edit_file",
     "read_email", "extract_email_attachment",
 }
 _BASH = {"bash", "bash_output", "bash_kill"}
@@ -391,6 +391,9 @@ def _assert_schema_contract(tools, profile):
     expected["ensure_cua_ready"] = deepcopy(_ENSURE_CUA_READY_SCHEMA)
     expected.update(deepcopy(_EMAIL_SCHEMAS))
     expected["read_video"] = deepcopy(_VIDEO_SCHEMA)
+    expected.update(json.loads(
+        (Path(__file__).parent / "fixtures/tool_engine/table_validation_schema.json").read_text(encoding="utf-8")
+    ))
     expected["get_skill"]["schema"]["description"] = (
         "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
         "when paged. Read required_skills before their steps; related_skills are optional. "
@@ -450,6 +453,16 @@ def _assert_schema_contract(tools, profile):
                 "Do not reserialize query data as the original text. "
             ))
         if tool.name == "read_file":
+            anchor = "For JSONL logs, especially those with large records, use query_jsonl to filter "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                "For CSV/TSV calculations, start with a small header/sample page (e.g. limit=10), "
+                "then use available execution tools for full-file processing and validation "
+                "instead of dumping large raw pages into the conversation. A preview does not "
+                "prove full processing; explicit full-text or semantic-review requests still "
+                "require all relevant records. " + anchor,
+            )
             anchor = "Binary and structured document files are rejected with an actionable error. "
             assert entry["schema"]["description"].count(anchor) == 1
             entry["schema"]["description"] = entry["schema"]["description"].replace(
