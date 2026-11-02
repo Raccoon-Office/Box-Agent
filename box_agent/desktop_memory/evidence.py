@@ -8,6 +8,7 @@ import json
 import re
 from typing import Any
 
+from ..connector_context import matches_connector_snapshot
 from ..llm.debug_logging import sanitize_for_logging
 from ..session_log import SessionLog
 from ..turn_hints import with_turn_hints
@@ -53,6 +54,17 @@ def no_evidence(session_id: str, turn_id: str, event_id: str, reason: str) -> di
             "event_id": event_id, "status": "no_evidence", "reason": reason, "views": []}
 
 
+def _is_turn_user(event: dict[str, Any], variants: tuple[str, ...]) -> bool:
+    if event["type"] != "user/message":
+        return False
+    data = event["data"]
+    content = data.get("content")
+    return data.get("source") == "user" and (
+        content in variants
+        or matches_connector_snapshot(content, variants, data.get("host_connector_status"))
+    )
+
+
 @dataclass(frozen=True, repr=False)
 class EvidenceCursor:
     log: SessionLog
@@ -70,8 +82,7 @@ class EvidenceCursor:
             for event in reversed(log.event_page(max(0, start - 64))):
                 if event["type"] == "turn/end":
                     break
-                if (event["type"] == "user/message" and event["data"].get("source") == "user"
-                        and event["data"].get("content") in variants):
+                if _is_turn_user(event, variants):
                     start = event["seq"]
                     break
         return cls(log, start, "session-log:" + _hash(str(log.header["id"])), variants)
@@ -96,9 +107,7 @@ class EvidenceCursor:
         completed = [e for e in events if e["type"] == "turn/end"
                      and e["data"].get("reason", {}).get("kind") == "completed"]
         variants = self.user_variants if user in self.user_variants else (user, with_turn_hints(user))
-        explicit = [e for e in events if e["type"] == "user/message"
-                    and e["data"].get("source") == "user"
-                    and e["data"].get("content") in variants]
+        explicit = [e for e in events if _is_turn_user(e, variants)]
         final = [e for e in events if e["type"] == "assistant/message"
                  and e["data"].get("message", {}).get("content") == assistant]
         if not completed or not explicit or not final:

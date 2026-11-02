@@ -182,3 +182,54 @@ def test_inline_attachment_bytes_are_omitted_from_tool_evidence(log):
     assert bundle["status"] == "captured"
     encoded = json.dumps(bundle)
     assert "[OMITTED_ATTACHMENT]" in encoded and "A" * 100 not in encoded
+
+
+@pytest.mark.parametrize("prelogged", [False, True])
+@pytest.mark.parametrize("metadata", [None, "", 123, "<connector-status>different</connector-status>"])
+def test_connector_text_requires_matching_trusted_metadata(log, prelogged, metadata):
+    from box_agent.connector_context import append_connector_status
+
+    content = append_connector_status([], "question", "<connector-status>connected</connector-status>")
+    if not prelogged:
+        cursor = EvidenceCursor.begin(log, "question")
+    log.append("user/message", {"content": content, "source": "user", "host_connector_status": metadata})
+    if prelogged:
+        cursor = EvidenceCursor.begin(log, "question")
+        assert cursor.start == log.event_count
+    log.append("assistant/message", {"message": {"content": "answer"}})
+    log.append("turn/end", {"reason": {"kind": "completed"}})
+    assert capture(cursor, log)["status"] == "no_evidence"
+
+
+@pytest.mark.parametrize("prelogged", [False, True])
+@pytest.mark.parametrize("user", ["好", "好  \n\t"])
+def test_short_user_reply_does_not_collect_unfinished_previous_turn(log, prelogged, user):
+    from box_agent.agent import Agent
+    from box_agent.schema import Message
+
+    agent = Agent(llm_client=object(), tools=[], system_prompt="system", session_log=log)
+    snapshot = "<connector-status>connected</connector-status>"
+    agent.add_user_message("好的，把 a.txt 删掉", host_connector_status=snapshot)
+    agent._persist_unlogged_messages(turn=1, step=None)
+    log.append("tool/call", {"callId": "old", "name": "old_tool", "arguments": {}})
+    old_result = Message(role="tool", content="OLD_TURN_RESULT", tool_call_id="old")
+    agent.messages.append(old_result)
+    agent._persist_unlogged_messages(turn=1, step=None, tool_result_metadata={
+        "old": {"success": True, "content": "OLD_TURN_RESULT"},
+    })
+    # There is deliberately no turn/end for the old user message.
+    start = log.event_count
+    agent.add_user_message(user, host_connector_status="<connector-status>disconnected</connector-status>")
+    if prelogged:
+        agent._persist_unlogged_messages(turn=2, step=None)
+    cursor = EvidenceCursor.begin(log, user)
+    assert cursor.start == start
+    agent._persist_unlogged_messages(turn=2, step=None)
+    log.append("assistant/message", {"message": {"content": "answer"}})
+    log.append("turn/end", {"reason": {"kind": "completed"}})
+    bundle = capture(cursor, log, user=user)
+    assert bundle["status"] == "captured"
+    assert json.loads(bundle["views"][0]["text"]) == {"content": user}
+    assert all(v["source_ref"]["event_seqs"][0] >= start for v in bundle["views"])
+    assert "OLD_TURN_RESULT" not in json.dumps(bundle)
+    assert len(bundle["views"]) == 3

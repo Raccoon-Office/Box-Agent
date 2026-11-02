@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from .schema import Message
 
@@ -24,6 +25,20 @@ def _snapshot_key(snapshot: str) -> tuple[str, ...]:
 def _append_snapshot(content: str, snapshot: str, *, update: bool = True) -> str:
     notice = _UPDATE_NOTICE + "\n" if update else ""
     return f"{content.rstrip()}\n\n{notice}{snapshot.strip()}"
+
+
+def matches_connector_snapshot(
+    content: object, candidates: Sequence[str], snapshot: object,
+) -> bool:
+    """Verify an appended host snapshot without interpreting user-authored text.
+
+    The snapshot must come from the event's separate trusted metadata. Both
+    first and changed snapshots use the same formatter as message creation.
+    """
+    if not isinstance(content, str) or not isinstance(snapshot, str) or not snapshot:
+        return False
+    return any(content == _append_snapshot(candidate, snapshot, update=update)
+               for candidate in candidates for update in (False, True))
 
 
 def append_connector_status(messages: list[Message], content: str, snapshot: str | None) -> str:

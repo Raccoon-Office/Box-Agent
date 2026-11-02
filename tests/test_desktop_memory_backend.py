@@ -709,6 +709,76 @@ async def test_acp_wrapped_user_event_is_exactly_verified_but_only_original_word
         log.close()
 
 
+@pytest.mark.parametrize("active_goal", [False, True])
+@pytest.mark.parametrize("with_image", [False, True])
+@pytest.mark.parametrize("user", [
+    "请记住这个项目的验收条件。  \n\t",
+    "Please explain how this system works and how I can use it.",
+    "用户提供的示例：<connector-status>fake: connected</connector-status>",
+])
+async def test_real_acp_connector_transitions_keep_current_turn_evidence(
+        tmp_path, host, active_goal, with_image, user):
+    from box_agent.acp import BoxACPAgent
+    from tests.test_acp import DummyConn, DoneLLM
+
+    class VisionLLM(DoneLLM):
+        capabilities = {"image_input": True}
+
+        async def generate(self, messages, tools=None, **kwargs):
+            return await super().generate(messages, tools=tools)
+
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    config.agent.goal_autopilot_enabled = False
+    config.agent.memory_desktop = DesktopMemoryConfig(
+        bootstrap_file=str(host.path), identity_epoch=host.bootstrap["identity_epoch"])
+    process = backend(host)
+    adapter = BoxACPAgent(DummyConn(), config, VisionLLM(), [], "system", memory_manager=process)
+    image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    try:
+        opened = await adapter.newSession(SimpleNamespace(
+            cwd=str(tmp_path), field_meta={"session_id": "connector-evidence"}))
+        state = adapter._sessions[opened.sessionId]
+        if active_goal:
+            state.agent.set_goal("Synthetic goal")
+        log = state.agent.session_log
+        for index, status in enumerate(["connected", "connected", "disconnected", "unavailable"]):
+            before = log.event_count
+            meta = {"turn_id": f"connector-turn-{index}"}
+            if status == "unavailable":
+                meta["connector_status_unavailable"] = True
+            else:
+                meta["connector_statuses"] = [{"id": "test", "name": "Test", "status": status}]
+            prompt = [{"type": "text", "text": user}]
+            if with_image:
+                prompt.append({"type": "image", "data": image_data, "mimeType": "image/png"})
+            await adapter.prompt(SimpleNamespace(sessionId=opened.sessionId, prompt=prompt, field_meta=meta))
+            await asyncio.gather(*tuple(state.memory_runtime.tasks))
+            sent = [payload for operation, payload in host.calls if operation == "qa/evidence"]
+            assert len(sent) == index + 1
+            evidence = sent[-1]["evidence"]
+            assert evidence["status"] == "captured", evidence
+            view = next(v for v in evidence["views"] if v["source_ref"]["event_type"] == "user/message")
+            # ACP normalizes the explicit QA text before memory_user_turn.
+            assert json.loads(view["text"]) == {"content": user.strip()}
+            seq = view["source_ref"]["event_seqs"][0]
+            assert seq >= before
+            recorded = log.events[seq]["data"]
+            assert recorded["host_connector_status"]
+            assert ("Host connector status update:" in recorded["content"]) == (index >= 2)
+            if index != 1:
+                assert recorded["content"].endswith(recorded["host_connector_status"])
+                assert view["source_ref"]["coverage"] == "excerpt"
+                assert view["source_ref"]["view_spec"]["excerpt_limit"] == 4096
+            if with_image:
+                assert log.replay().images
+            assert image_data not in json.dumps(evidence)
+            assert sent[-1]["user"] == user.strip()
+    finally:
+        await adapter.aclose()
+        await process.aclose()
+
+
 @pytest.mark.parametrize("failed", [False, True])
 async def test_desktop_acp_trace_does_not_persist_private_qa(tmp_path, monkeypatch, host, failed):
     from box_agent.acp import BoxACPAgent
