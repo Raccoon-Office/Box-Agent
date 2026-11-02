@@ -6,6 +6,7 @@ import asyncio
 import gzip
 import json
 import struct
+from types import SimpleNamespace
 
 import pytest
 from websockets.asyncio.server import serve
@@ -19,11 +20,18 @@ from box_agent.tools.video_transcription import (
 def response(payload, *, final=True, compressed=True, sequence=True):
     body = json.dumps(payload, ensure_ascii=False).encode()
     if compressed:
-        body = gzip.compress(body)
+        body = gzip.compress(body, mtime=0)
     flags = int(sequence) | (2 if final else 0)
     return (bytes((0x11, 0x90 | flags, 0x10 | int(compressed), 0))
             + (struct.pack(">i", -1 if final else 1) if sequence else b"")
             + struct.pack(">I", len(body)) + body)
+
+
+def test_response_fixture_is_stable_across_wall_clock_changes(monkeypatch):
+    monkeypatch.setattr(gzip, "time", SimpleNamespace(time=lambda: 1_700_000_000))
+    first = response({})
+    monkeypatch.setattr(gzip, "time", SimpleNamespace(time=lambda: 1_700_001_000))
+    assert response({}) == first
 
 
 @pytest.mark.parametrize("env,header,value", [

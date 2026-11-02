@@ -263,8 +263,8 @@ Common development loop:
 # Run the smallest relevant test while iterating
 uv run pytest tests/test_bash_tool.py -q
 
-# Run the broader suite before handing off
-uv run pytest tests/ -q
+# Run the full suite when the change's impact or CI gate requires it
+bash general_review/ci/test.sh
 
 # Catch whitespace/patch formatting issues
 git diff --check
@@ -542,7 +542,7 @@ from the Lab root to build both clients. Neither command uploads artifacts.
 ## Testing
 
 ```bash
-uv run pytest tests/ -v          # all tests
+bash general_review/ci/test.sh       # all tests, up to four workers
 uv run pytest tests/test_core.py -v   # core + context compression
 uv run pytest --cov              # with coverage
 ```

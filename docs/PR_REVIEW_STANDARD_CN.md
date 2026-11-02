@@ -33,10 +33,13 @@ Preflight 在 detached 临时 worktree 中校验准确的 PR Head SHA，默认�
 ```bash
 uv sync --frozen --all-extras
 uv run python -m compileall -q box_agent
-uv run pytest tests/ -q --tb=short \
-  --deselect tests/test_mcp.py::test_connection_timeout_on_unreachable_server
+bash general_review/ci/test.sh
 uv build
 ```
+
+测试入口与 GitHub CI 共用，按文件分配至最多 4 个 worker，输出最慢的 20 个阶段；
+测试范围和既有超时用例排除不变。需要串行排查时设置
+`PYTEST_XDIST_AUTO_NUM_WORKERS=0`；局部迭代仍直接运行相关 pytest 文件。
 
 首个失败步骤阻止后续步骤和 Review Agent。代码失败或超时写入 GitHub
 `failure`；基础设施故障写入 `error` 并按策略重试。同一仓库、PR、Head SHA
@@ -218,8 +221,7 @@ git diff --check
 uv run python -m compileall -q box_agent
 
 # 完整 Preflight 测试命令
-uv run pytest tests/ -q --tb=short \
-  --deselect tests/test_mcp.py::test_connection_timeout_on_unreachable_server
+bash general_review/ci/test.sh
 
 # 常见聚焦测试
 uv run pytest tests/test_core.py -q

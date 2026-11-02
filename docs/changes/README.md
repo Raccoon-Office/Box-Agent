@@ -6,6 +6,21 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-02 — Bounded parallel full-suite test runner
+
+- Preflight and GitHub CI share `general_review/ci/test.sh`: pytest-xdist selects
+  at most four CPU-based workers, groups by file and reports the 20 slowest
+  phases. The full selection, existing timeout exclusion and fail-fast gate
+  ordering are preserved. Focused pytest commands retain serial defaults.
+- ASR response test fixtures pin gzip timestamps so worker collection does not
+  produce clock-dependent parameter IDs; a clock-change regression covers it.
+- The existing xdist worker override can force serial execution with
+  `PYTEST_XDIST_AUTO_NUM_WORKERS=0`. No dependency or application runtime changes;
+  reverting the runner and its callers restores serial CI.
+- A macOS ARM64 comparison passed the same 9,238 tests and skipped the same 305:
+  576.17 seconds serial versus 180.83 seconds with four workers. Linux/Windows
+  timings and live provider/browser probes remain separate validation.
+
 ## 2026-11-02 — Verification pages block extraction and request browser recovery
 
 - `web_extract` reports `WEB_VERIFICATION_REQUIRED` for the observed WeChat

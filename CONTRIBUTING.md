@@ -48,10 +48,11 @@ If you have an idea for a new feature, please create an Issue first to discuss i
    uv sync
    ```
 
-5. Run a quick local check:
+5. Run a focused local check for the area you are changing, for example:
    ```bash
-   uv run pytest tests/ -q
+   uv run pytest tests/test_core.py -q
    ```
+   Use `bash general_review/ci/test.sh` for the full suite with bounded parallelism.
 
 6. Start the development CLI when you need a manual smoke test:
    ```bash
