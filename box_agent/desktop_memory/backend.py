@@ -355,8 +355,11 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
             raise MemoryProxyError("MEMORY_READ_ONLY")
         if not user.strip() or not assistant.strip() or len((user + assistant).encode()) > 256 * 1024:
             raise MemoryProxyError("BUDGET_EXCEEDED")
+        clean_user, clean_assistant = _redact(user), _redact(assistant)
+        if "[REDACTED]" in (clean_user, clean_assistant):
+            return {"event_id": scope.qa_event_id, "state": "skipped_redacted"}
         payload = {"binding": dict(scope.binding), "event_id": scope.qa_event_id,
-                   "user": _redact(user), "assistant": _redact(assistant), "timestamp": timestamp}
+                   "user": clean_user, "assistant": clean_assistant, "timestamp": timestamp}
         if evidence is not None:
             payload["evidence"] = evidence
         data = await self.transport.request("qa/evidence" if evidence is not None else "qa", payload)

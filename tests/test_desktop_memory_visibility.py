@@ -327,7 +327,9 @@ async def test_real_kernel_qualifies_only_the_full_read_seen_by_successful_model
     lookup = SimpleNamespace(model_input_guard=guard, auto_match_context=lambda _: [], correction_curator=None)
     _ = [event async for event in run_agent_loop(
         llm=provider, messages=[Message(role="system", content="BASE"), Message(role="user", content="read")],
-        tools={"memory_read": Reader()}, memory_manager=lookup, max_steps=2, token_limit=30000,
+        # This fixture has no provider token meter, so budget for its UTF-8
+        # upper bound (~45 KB), including request framing and headroom.
+        tools={"memory_read": Reader()}, memory_manager=lookup, max_steps=2, token_limit=60000,
         truncation_continuation_enabled=False, logger=None)]
     assert len(provider.requests) == 2
     if result_kind == "success":

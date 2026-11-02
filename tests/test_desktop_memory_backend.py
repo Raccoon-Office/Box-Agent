@@ -622,16 +622,33 @@ async def test_old_background_rejection_only_revokes_the_matching_turn(host, ope
         await manager.aclose()
 
 
-async def test_ordinary_key_text_reaches_host_qa_without_being_redacted(host):
+@pytest.mark.parametrize("user", [
+    'The key: persistence matters', 'cache_key = "query-cache"',
+    'primary_key=True', 'total_token: 1200', '使用 Bearer token 认证',
+])
+async def test_ordinary_key_text_reaches_host_qa_without_being_redacted(host, user):
     manager = backend(host)
     try:
         await start_turn(manager)
-        user = 'The key: persistence matters'
         assistant = 'Example: {"key": "value"}'
         await manager.handoff(manager.current_scope, user, assistant, 123)
         payload = next(payload for operation, payload in host.calls if operation == "qa")
         assert payload["user"] == user
         assert payload["assistant"] == assistant
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.parametrize("side", ["user", "assistant"])
+async def test_redacted_qa_is_skipped_even_without_an_evidence_bundle(host, side):
+    manager = backend(host)
+    try:
+        await start_turn(manager)
+        qa = {"user": "question", "assistant": "answer"}
+        qa[side] = "密码：SYNTHETIC_SECRET"
+        receipt = await manager.handoff(manager.current_scope, **qa, timestamp=123)
+        assert receipt == {"event_id": manager.current_scope.qa_event_id, "state": "skipped_redacted"}
+        assert not any(operation in {"qa", "qa/evidence"} for operation, _ in host.calls)
     finally:
         await manager.aclose()
 
@@ -684,7 +701,8 @@ async def test_full_handoff_queue_still_closes_skipped_turn_without_blocking(hos
 
 @pytest.mark.parametrize("sample", CREDENTIAL_SAMPLES)
 @pytest.mark.parametrize("finish_sentence", [True, False])
-async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_path, host, sample, finish_sentence, caplog):
+@pytest.mark.parametrize("qa_secret", ["user", "assistant", None])
+async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_path, host, sample, finish_sentence, qa_secret, caplog, monkeypatch):
     from box_agent.agent_service import AgentService
     from box_agent.api import RunRequest
     from box_agent.session_log import SessionLog
@@ -706,7 +724,8 @@ async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_
                     id="fixture", type="function", function=FunctionCall(name="credential_fixture", arguments={
                         "env": {"DB_PASSWORD": "SYNTHETIC_NESTED_PASSWORD", "MY_API_KEY": "SYNTHETIC_NESTED_KEY"}}))])
             else:
-                yield StreamEvent(type="text", delta=sample + ("\nFixture response complete." if finish_sentence else ""))
+                answer = sample if qa_secret == "assistant" else "Safe fixture answer"
+                yield StreamEvent(type="text", delta=answer + ("\nFixture response complete." if finish_sentence else ""))
                 yield StreamEvent(type="finish", finish_reason="stop")
 
     log = SessionLog.create(tmp_path / "private-canonical", session_id="fixture", cwd=tmp_path)
@@ -717,20 +736,31 @@ async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_
     session = await AgentSession.open(config=config, host=HostBindings(
         llm_client=FixtureLLM(), memory_manager=manager, tools=[FixtureTool()],
         system_prompt="BASE", session_log=log), options=SessionOptions(profile="acp", workspace_dir=tmp_path))
+    experience_schedules = []
+    monkeypatch.setattr(session.memory_runtime._experience, "schedule", lambda *args: experience_schedules.append(args))
     try:
         await session.agent.tools["tool_search"].execute(tool_names=["credential_fixture"])
-        handle = await AgentService().start(RunRequest(run_id="fixture-turn", session_id="session-1", user_message=sample), session=session)
+        user = sample if qa_secret == "user" else "Run the fixture"
+        handle = await AgentService().start(RunRequest(run_id="fixture-turn", session_id="session-1", user_message=user), session=session)
         assert (await handle.result()).status.value == "completed"
         await asyncio.gather(*tuple(session.memory_runtime.tasks))
-        payload = next(payload for operation, payload in host.calls if operation == "qa/evidence")
-        assert payload["user"] == payload["assistant"] == "[REDACTED]"
-        assert "SYNTHETIC" not in json.dumps(payload) and "AKIAABCDEFGHIJKLMNOP" not in json.dumps(payload)
-        views = payload["evidence"]["views"]
-        assert payload["evidence"]["status"] == "captured"
-        assert {view["source_ref"]["event_type"] for view in views} >= {"tool/call", "tool/result"}
-        for view in views:
-            assert view["source_ref"]["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
+        payloads = [payload for operation, payload in host.calls if operation in {"qa", "qa/evidence"}]
+        assert len(payloads) == (0 if qa_secret else 1)
+        assert len(experience_schedules) == (1 if qa_secret else 2)
+        assert len([1 for operation, _ in host.calls if operation == "turn/close"]) == 1
+        if payloads:
+            payload = payloads[0]
+            assert payload["user"] == user
+            assert payload["assistant"].startswith("Safe fixture answer")
+            assert "SYNTHETIC" not in json.dumps(payload) and "AKIAABCDEFGHIJKLMNOP" not in json.dumps(payload)
+            views = payload["evidence"]["views"]
+            assert payload["evidence"]["status"] == "captured"
+            assert {view["source_ref"]["event_type"] for view in views} >= {"tool/call", "tool/result"}
+            for view in views:
+                assert view["source_ref"]["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
         assert any(event["type"] == "tool/result" and event["data"]["result"]["content"] == sample for event in log.events)
+        from box_agent.turn_hints import with_turn_hints
+        assert any(event["type"] == "user/message" and event["data"]["content"] == with_turn_hints(user) for event in log.events)
         assert "SYNTHETIC" not in caplog.text and "AKIAABCDEFGHIJKLMNOP" not in caplog.text
     finally:
         await session.aclose()

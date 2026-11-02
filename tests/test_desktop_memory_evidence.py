@@ -17,6 +17,7 @@ CREDENTIAL_SAMPLES = [
     "MY_API_KEY=SYNTHETIC_API_SECRET",
     "API key: SYNTHETIC_API_SECRET",
     "GITHUB_TOKEN=SYNTHETIC_GITHUB_SECRET",
+    "MY_TOKEN=SYNTHETIC_CUSTOM_SECRET",
     "token=SYNTHETIC_BARE_SECRET",
     "ghp_SYNTHETIC_GITHUB_TOKEN_1234567890",
     "github_pat_SYNTHETIC_GITHUB_TOKEN_1234567890",
@@ -28,6 +29,28 @@ CREDENTIAL_SAMPLES = [
     "env.DB_PASSWORD: 'SYNTHETIC secret with quotes'",
     "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_KEY\n-----END PRIVATE KEY-----",
     "-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETIC_UNTERMINATED_KEY",
+    "密码：SYNTHETIC_SECRET",
+    "密码=SYNTHETIC_SECRET",
+    "密钥: SYNTHETIC_SECRET",
+    "令牌=SYNTHETIC_SECRET",
+    "password：SYNTHETIC_SECRET",
+    "PGPASSWORD=SYNTHETIC_SECRET",
+    "DB_PASS=SYNTHETIC_SECRET",
+    "passphrase=SYNTHETIC_SECRET",
+    "password1=SYNTHETIC_SECRET",
+    "credentials=SYNTHETIC_SECRET",
+    "mysql --password SYNTHETIC_SECRET",
+    "mysql -pSYNTHETIC_SECRET",
+    "curl -u user:SYNTHETIC_SECRET https://example.test",
+    "curl -s --user user:SYNTHETIC_SECRET https://example.test",
+    '["--password", "SYNTHETIC_SECRET"]',
+    r'{\"password\":\"SYNTHETIC_SECRET\"}',
+    "glpat-SYNTHETIC_SECRET123456789",
+    "xoxb-SYNTHETIC_SECRET123456789",
+    "AIzaSYNTHETIC_SECRET123456789",
+    "sk_live_SYNTHETIC_SECRET123456789",
+    "hf_SYNTHETIC_SECRET123456789",
+    "npm_SYNTHETIC_SECRET123456789",
 ]
 
 
@@ -186,6 +209,12 @@ def test_prefixed_nested_credential_fields_are_filtered_without_losing_safe_resu
     "The key: persistence matters",
     '{"key": "value", "count": 2}',
     'Use key=value in this example',
+    'cache_key = "query-cache"',
+    'primary_key=True',
+    'total_token: 1200',
+    '使用 Bearer token 认证',
+    'python -u script.py',
+    'pip install --user example-package',
 ])
 def test_ordinary_key_text_survives_evidence_capture(log, text):
     cursor = EvidenceCursor.begin(log)
@@ -200,6 +229,35 @@ def test_prefixed_key_is_still_treated_as_sensitive():
     from box_agent.desktop_memory.evidence import _redact
     assert _redact("DB_KEY=SYNTHETIC_SECRET") == "[REDACTED]"
     assert _redact({"DB_KEY": "SYNTHETIC_SECRET"})["DB_KEY"] == "[REDACTED]"
+
+
+@pytest.mark.parametrize("field", ["密码", "密钥", "令牌", "PGPASSWORD", "DB_PASS", "passphrase", "password1", "credentials", "MY_TOKEN"])
+def test_labeled_credential_fields_are_removed_from_nested_data(field):
+    from box_agent.desktop_memory.evidence import _redact
+
+    assert _redact({"env": [{field: "SYNTHETIC_SECRET"}]}) == {"env": [{field: "[REDACTED]"}]}
+
+
+def test_ordinary_metadata_fields_survive_structured_redaction():
+    from box_agent.desktop_memory.evidence import _redact
+
+    value = {"cache_key": "cached", "primary_key": True, "total_token": 1200}
+    assert _redact(value) == value
+
+
+@pytest.mark.parametrize("size", [64 * 1024, 256 * 1024])
+def test_colon_heavy_url_filter_finishes_without_blocking(size):
+    # Isolate the deadline so an old quadratic regex cannot hang the test runner.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", (
+        "from box_agent.desktop_memory.evidence import _redact; "
+        f"text = 'postgres://' + ':' * {size}; "
+        "assert _redact(text) == text; "
+        "assert _redact(text + '@db') == '[REDACTED]'; "
+        "assert _redact('postgres://admin:密码@db') == '[REDACTED]'"
+    )], check=True, timeout=3)
 
 
 def test_pending_current_user_can_precede_refresh_but_completed_history_cannot(log):

@@ -144,6 +144,8 @@ class DesktopMemoryRuntime(MemoryRuntime):
                 receipt = await self.backend.handoff(scope, turn.user, result.final_content, turn.timestamp,
                                                      evidence=evidence)
             _log.info("memory backend=desktop operation=handoff state=%s", receipt["state"])
+            if receipt["state"] == "skipped_redacted":
+                return
             self._experience.schedule(turn.session_id, llm, token_limit, self.tasks)
         except asyncio.CancelledError:
             raise

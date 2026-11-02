@@ -20,18 +20,27 @@ MAX_EVENTS = 2048
 MAX_VIEWS = 12
 EXCERPT_BYTES = 4096
 _SENSITIVE_FIELD = re.compile(
-    r"(?i)(?:^|[_.-])(?:authorization|(?:set[_.-]?)?cookie|password|passwd|pwd|"
-    r"(?:api[_.-]?|access[_.-]?|[a-z0-9]+[_.-])key(?:[_.-]?id)?|(?:access[_.-]?|refresh[_.-]?)?token|"
-    r"(?:client[_.-]?)?secret|secret[_.-]?access[_.-]?key|private[_.-]?key)$"
+    r"(?i)(?!(?:[\w.-]+[_.-])?(?:total|input|output|prompt|completion)[_.-]token$)"
+    r"(?:[\w.-]+[_.-])?(?:authorization|(?:set[_.-]?)?cookie|password\d*|pgpassword|passwd|pwd|pass|passphrase|credentials|"
+    r"(?:api|access|private|secret|db|encryption|signing|ssh)[_.-]?key(?:[_.-]?id)?|"
+    r"(?:(?:access|refresh|session|auth|bearer|api)[_.-]?)?token|"
+    r"(?:client[_.-]?)?secret|secret[_.-]?access[_.-]?key|密码|密钥|令牌)"
 )
-_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*)[\"']?\s*[:=]")
+_ASSIGNMENT = re.compile(r"(?<![\w.-])([\w.-]+)[\\\"']*\s*[:=：]")
 _SECRET_TEXT = re.compile(
-    r"(?i)\bbearer\s+|\b(?:api|access|private|secret)\s+key\s*[:=]|"
+    r"(?i)\bbearer\s+(?!token\b)\S+|\b(?:api|access|private|secret)\s+key\s*[:=：]|"
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----|"
     r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+    r"glpat-[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]{12,}|"
+    r"sk_live_[A-Za-z0-9_]+|hf_[A-Za-z0-9_]+|npm_[A-Za-z0-9_]+|"
     r"(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b|"
-    r"://[^/\s@]+:[^/\s@]*@"
+    r"(?<![\w-])(?:--(?:password|passwd|passphrase|token|api-key|credentials)(?=[\s=\\\"'])|-p(?=\S))"
 )
+_CURL = re.compile(r"(?i)\bcurl\b")
+_USER_ARGUMENT = re.compile(r"(?<![\w-])(?:-u|--user)(?=[\s=\\\"'])")
+# Do not split userinfo with two overlapping quantifiers: colon-heavy input
+# without '@' otherwise causes quadratic backtracking on the event loop.
+_URL_USERINFO = re.compile(r"://([^/\s@]*)@")
 _ATTACHMENT = re.compile(r"(?i)data:(?:image|audio|video|application)/[^;,\s]+;base64,[A-Za-z0-9+/_=\r\n-]+")
 
 
@@ -46,14 +55,17 @@ def _hash(text: str) -> str:
 def _redact(value: Any) -> Any:
     value = sanitize_for_logging(value)
     if isinstance(value, dict):
-        return {key: "[REDACTED]" if _SENSITIVE_FIELD.search(str(key)) else _redact(item)
+        return {key: "[REDACTED]" if _SENSITIVE_FIELD.fullmatch(str(key)) else _redact(item)
                 for key, item in value.items()}
     if isinstance(value, list):
         return [_redact(item) for item in value]
     if isinstance(value, str):
         # Do not guess where an untrusted quoted/multiline credential ends.
         # Omit the whole suspect value rather than retaining a secret suffix.
-        if _SECRET_TEXT.search(value) or any(_SENSITIVE_FIELD.search(match[1]) for match in _ASSIGNMENT.finditer(value)):
+        if (_SECRET_TEXT.search(value)
+                or _CURL.search(value) and _USER_ARGUMENT.search(value)
+                or any(":" in match[1] for match in _URL_USERINFO.finditer(value))
+                or any(_SENSITIVE_FIELD.fullmatch(match[1]) for match in _ASSIGNMENT.finditer(value))):
             return "[REDACTED]"
         return _ATTACHMENT.sub("[OMITTED_ATTACHMENT]", value)
     return value
