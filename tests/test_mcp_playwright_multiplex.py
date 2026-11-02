@@ -23,11 +23,13 @@ import pytest
 from box_agent.tools import mcp_loader
 from box_agent.tools.browser_runtime_scope import (
     BrowserRuntimeCoordinator,
+    reset_browser_host_binding,
     release_browser_runtime,
     reset_browser_runtime_owner,
     reset_browser_session_key,
     set_browser_runtime_owner,
     set_browser_session_key,
+    set_browser_host_binding,
 )
 from box_agent.tools.mcp_loader import (
     ManagedHttpServerProcess,
@@ -199,6 +201,78 @@ def _make_tool(lease, remote_name="browser_navigate", timeout=1.0):
 def test_mcp_tool_requires_session_or_lease():
     with pytest.raises(ValueError):
         MCPTool(name="x", description="", parameters={}, session=None, server_name="s")
+
+
+@pytest.mark.parametrize("leased", [False, True])
+@pytest.mark.parametrize("binding", [None, "trusted-turn"])
+async def test_browser_binding_is_host_owned_transport_metadata(leased, binding):
+    session = _RecordingSession("ok")
+
+    @asynccontextmanager
+    async def lease():
+        yield session
+
+    tool = _make_tool(lease) if leased else MCPTool(
+        name="managed_browser_navigate", remote_name="browser_navigate",
+        description="", parameters={}, session=session, server_name="playwright",
+    )
+    arguments = {"url": "https://example.com", "_meta": {
+        "box_agent_browser_binding": "model-forged", "json": True,
+    }}
+    token = set_browser_host_binding(binding)
+    try:
+        result = await tool.execute(**arguments)
+    finally:
+        reset_browser_host_binding(token)
+    assert result.success
+    expected_meta = {"json": True}
+    if binding:
+        expected_meta["box_agent_browser_binding"] = binding
+    assert session.calls == [("browser_navigate", {
+        "url": "https://example.com", "_meta": expected_meta,
+    })]
+    assert arguments["_meta"]["box_agent_browser_binding"] == "model-forged"
+    assert "trusted-turn" not in result.content
+
+
+async def test_browser_binding_is_not_sent_to_other_mcp_servers():
+    session = _RecordingSession("ok")
+    tool = MCPTool(
+        name="echo", description="", parameters={}, session=session, server_name="other",
+    )
+    token = set_browser_host_binding("private")
+    try:
+        assert (await tool.execute(text="hello")).success
+    finally:
+        reset_browser_host_binding(token)
+    assert session.calls == [("echo", {"text": "hello"})]
+
+
+async def test_browser_close_cannot_close_tabs_before_host_binding_validation():
+    class ExpiredBindingSession(_RecordingSession):
+        tabs_closed = 0
+
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, dict(arguments)))
+            if arguments.get("_meta", {}).get("box_agent_browser_binding") == "expired":
+                return SimpleNamespace(content=[SimpleNamespace(text="binding expired")], isError=True)
+            self.tabs_closed += 1
+            return SimpleNamespace(content=[], isError=False)
+
+    session = ExpiredBindingSession("ctx")
+
+    @asynccontextmanager
+    async def lease():
+        yield session
+
+    token = set_browser_host_binding("expired")
+    try:
+        result = await _make_tool(lease, "browser_close").execute()
+    finally:
+        reset_browser_host_binding(token)
+    assert not result.success
+    assert session.tabs_closed == 0
+    assert [name for name, _ in session.calls] == ["browser_tabs", "browser_close"]
 
 
 async def test_leased_playwright_tool_skips_cross_turn_lease_and_routes_per_key():
@@ -473,10 +547,14 @@ _FAKE_PLAYWRIGHT_SERVER = textwrap.dedent(
     port = int(args[args.index("--port") + 1])
     host = args[args.index("--host") + 1]
     mcp = FastMCP("fake-playwright", host=host, port=port, log_level="WARNING")
+    # Retain observed sessions for this finite test server: after LRU eviction,
+    # Python may otherwise reuse a collected session's id for the next one.
+    observed_sessions = {}
 
     @mcp.tool()
     async def browser_navigate(url: str, ctx: Context) -> str:
         \"\"\"Navigate; echoes which server-side session handled the call.\"\"\"
+        observed_sessions[id(ctx.session)] = ctx.session
         return f"ctx={id(ctx.session)} url={url}"
 
     @mcp.tool()
@@ -599,6 +677,62 @@ async def test_derived_sub_agent_keys_get_distinct_server_sessions(monkeypatch):
 
     assert conn.server_process is None
     assert conn.session_pool is None
+
+
+async def test_http_session_deleted_on_server_recovers_through_real_sdk_without_replay():
+    from contextlib import AsyncExitStack
+
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    from box_agent.tools.playwright_session_pool import PlaywrightSessionPool
+
+    server = ManagedHttpServerProcess(
+        name="playwright", command=sys.executable,
+        args=["-c", _FAKE_PLAYWRIGHT_SERVER], env=None,
+    )
+    session_ids = []
+
+    async def factory(stack: AsyncExitStack):
+        read, write, get_id = await stack.enter_async_context(streamablehttp_client(server.url))
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        session_ids.append(get_id())
+        return session
+
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    navigate = MCPTool(
+        name="browser_navigate", description="navigate", parameters={},
+        session=None, server_name="playwright", session_lease=pool.lease,
+    )
+
+    async def call_as(key, url):
+        token = set_browser_session_key(key)
+        try:
+            return await navigate.execute(url=url)
+        finally:
+            reset_browser_session_key(token)
+
+    try:
+        await server.start(30)
+        assert (await call_as("A", "https://a/")).success
+        before_b = await call_as("B", "https://b/")
+        assert before_b.success
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(server.url, headers={"mcp-session-id": session_ids[0]})
+            response.raise_for_status()
+        failed = await call_as("A", "https://must-not-replay/")
+        assert not failed.success and "BROWSER_SESSION_RESET" in failed.error
+        assert pool.active_keys() == ["B"]
+        assert len(session_ids) == 2, "failed action must not create a replacement client"
+        after_b = await call_as("B", "https://b/still-alive")
+        assert after_b.success and _ctx_of(after_b.content) == _ctx_of(before_b.content)
+        assert (await call_as("A", "https://a/recovered")).success
+        assert len(session_ids) == 3 and session_ids[2] != session_ids[0]
+    finally:
+        await pool.close_all(final=True)
+        await server.stop()
 
 
 async def test_stdio_http_connect_failure_leaves_no_orphan_process():

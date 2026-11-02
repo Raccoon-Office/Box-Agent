@@ -75,6 +75,8 @@ class TokenUsage(BaseModel):
     # payload (prompt/completion/total) stable for hosts and trace consumers.
     input_tokens: int = Field(default=0, exclude=True)
     output_tokens: int = Field(default=0, exclude=True)
+    # Optional provider detail for diagnostics; already included in completion_tokens.
+    reasoning_tokens: int | None = Field(default=None, ge=0, exclude=True)
     cache_creation_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens_reported: bool = Field(default=False, exclude=True)
@@ -120,6 +122,9 @@ class Message(BaseModel):
     # but intentionally absent from the next durable request. Persist the
     # numeric adjustment so context estimation remains correct after resume.
     request_only_input_tokens: int = Field(default=0, ge=0)
+    # Current trusted host snapshot, even when unchanged and omitted from text.
+    # Persist for change detection/recovery; never infer state from user XML.
+    host_connector_status: str | None = None
     # Request-only multimodal overlays may carry raw image bytes to a provider
     # without persisting them in durable traces. Excluded from serialization so
     # this remains an internal observability directive.

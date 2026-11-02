@@ -42,6 +42,7 @@ def build_llm_client(
     max_request_body_bytes: int | None = None,
     reasoning_effort_when_disabled: str | None = None,
     image_input: bool | None = None,
+    context_window: int | None = None,
     client_factory: LLMClientFactory = LLMClient,
     retry_callback: RetryCallback | None = None,
 ) -> LLMClient:
@@ -72,6 +73,7 @@ def build_llm_client(
             else {}
         ),
         **({"image_input": image_input} if image_input is not None else {}),
+        **({"context_window": context_window} if context_window is not None else {}),
     )
     if retry_callback is not None:
         client.retry_callback = retry_callback
@@ -105,6 +107,7 @@ def build_agent(
     allowed_connector_ids_provider: Callable[[], frozenset[str]] | None = None,
     deferred_mcp_loading_enabled: bool = True,
     session_log: Any = _UNSET,
+    session_projection: Any = _UNSET,
     enable_builtin_tools: bool | object = _UNSET,
     skill_runtime: Any = _UNSET,
     session_id: str | None = None,
@@ -149,6 +152,8 @@ def build_agent(
         kwargs["hooks"] = hooks
     if session_log is not _UNSET:
         kwargs["session_log"] = session_log
+    if session_projection is not _UNSET:
+        kwargs["session_projection"] = session_projection
     if enable_builtin_tools is not _UNSET:
         kwargs["enable_builtin_tools"] = enable_builtin_tools
     if skill_runtime is not _UNSET:

@@ -170,6 +170,14 @@ def test_known_parameterized_shell_payload_is_inspected_after_expansion():
     assert inspection.invocations[-1].indirect
 
 
+def test_tracks_standalone_assignments_in_nested_and_top_level_shell_commands():
+    inspection = inspect_shell_command(
+        "FIRST=one SECOND=two; bash -c 'INNER=three; echo ok'", posix=True
+    )
+
+    assert inspection.assigned_variables == frozenset({"FIRST", "SECOND", "INNER"})
+
+
 @pytest.mark.parametrize(
     ("command", "expected"),
     [

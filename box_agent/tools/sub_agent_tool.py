@@ -1141,7 +1141,7 @@ class SubAgentTool(EventEmittingTool):
                     }
                 )
                 continue
-            if truncated or "[Content truncated:" in result.content:
+            if truncated or metadata.get("partial") is True or "[Content truncated:" in result.content:
                 failures.append(
                     {
                         "path": path,

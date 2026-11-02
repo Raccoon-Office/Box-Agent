@@ -1200,6 +1200,7 @@ async def test_tool_free_child_receives_required_skill_closure_only_as_reference
         yield StreamEvent(type="finish", finish_reason="stop")
 
     llm = AsyncMock()
+    llm.estimate_text_tokens = lambda text: len(text.encode("utf-8")) // 3
     llm.generate_stream = capture
     tool = SubAgentTool(llm=llm, parent_tools={}, workspace_dir=str(tmp_path), token_limit=token_limit)
     tool.set_skill_provider(lambda: loader)
@@ -1475,6 +1476,7 @@ async def test_oversized_child_skill_bundle_requires_granted_read_capability(tmp
         yield StreamEvent(type="finish", finish_reason="stop")
 
     llm = AsyncMock()
+    llm.estimate_text_tokens = lambda text: len(text.encode("utf-8")) // 3
     llm.generate.return_value = LLMResponse(content="done", finish_reason="stop")
     llm.generate_stream = capture
     parent_tools = {"get_skill": GetSkillTool(loader), "list_skills": ListSkillsTool(loader),
@@ -2162,6 +2164,18 @@ async def test_batch_files_uses_configurable_synthesis_timeout():
                 "selected_char_count": 10,
                 "selected_line_count": 1,
                 "truncated": True,
+            },
+            "FILE_CONTENT_TRUNCATED",
+        ),
+        (
+            "first fragment of a long line",
+            {
+                "source_char_count": 120_000,
+                "selected_char_count": 16_384,
+                "selected_line_count": 1,
+                "truncated": False,
+                "partial": True,
+                "next_byte_offset": 16_384,
             },
             "FILE_CONTENT_TRUNCATED",
         ),

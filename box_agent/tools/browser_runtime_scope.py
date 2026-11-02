@@ -26,6 +26,27 @@ _current_session_key: ContextVar[str | None] = ContextVar(
     "box_agent_browser_session_key", default=None
 )
 
+_current_host_binding: ContextVar[str | None] = ContextVar(
+    "box_agent_browser_host_binding", default=None
+)
+
+
+def set_browser_host_binding(binding: str | None) -> Token[str | None]:
+    """Carry an opaque host capability for this turn, including its child tasks.
+
+    It is transport metadata, never a model argument or durable session state.
+    The host owns validation and revocation when the originating turn ends.
+    """
+    return _current_host_binding.set(binding)
+
+
+def reset_browser_host_binding(token: Token[str | None]) -> None:
+    _current_host_binding.reset(token)
+
+
+def current_browser_host_binding() -> str | None:
+    return _current_host_binding.get()
+
 
 def set_browser_session_key(key: str) -> Token[str | None]:
     """Bind the current task (and its children) to a browser session key."""

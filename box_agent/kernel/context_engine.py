@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import math
 import re
@@ -480,8 +481,10 @@ def _bound_retained_messages(messages: list[Message]) -> list[Message]:
 def _fallback_context_estimate(
     messages: list[Message],
     tools: dict[str, Tool] | None,
+    *,
+    llm: Any | None = None,
 ) -> int:
-    """Estimate a complete request as characters / 4 when usage is absent."""
+    """Measure complete input with the runtime's conservative text counter."""
 
     chars = sum(_message_chars(message) for message in messages)
     serialized_parts = [_summary_message_text(message) for message in messages]
@@ -495,7 +498,15 @@ def _fallback_context_estimate(
         )
         chars += len(serialized_parts[-1])
     utf8_bytes = sum(len(part.encode("utf-8")) for part in serialized_parts)
-    return max(1, chars // 4, utf8_bytes // 3)
+    estimated = max(1, chars // 4, utf8_bytes // 3)
+    estimate_text = getattr(llm, "estimate_text_tokens", None)
+    if llm is not None:
+        text_tokens = (sum(estimate_text(part) for part in serialized_parts)
+                       if callable(estimate_text) and not inspect.iscoroutinefunction(estimate_text)
+                       else utf8_bytes)
+        estimated = max(estimated, text_tokens
+                        + sum(_budget_image_tokens(message.content) for message in messages))
+    return estimated
 
 
 def _estimate_context_from_latest_response(
@@ -504,16 +515,18 @@ def _estimate_context_from_latest_response(
     *,
     api_total_tokens: int = 0,
     api_prompt_tokens: int | None = None,
+    llm: Any | None = None,
 ) -> tuple[int, str]:
-    """Use the newest real response usage plus only subsequently added messages."""
+    """Keep the larger of previous usage plus delta and the current full input."""
 
+    fallback = _fallback_context_estimate(messages, tools, llm=llm)
     for index in range(len(messages) - 1, -1, -1):
         usage = messages[index].usage
         if messages[index].role != "assistant" or usage is None:
             continue
         added_messages = messages[index + 1 :]
         added_tokens = (
-            _fallback_context_estimate(added_messages, None)
+            _fallback_context_estimate(added_messages, None, llm=llm)
             if added_messages
             else 0
         )
@@ -522,25 +535,21 @@ def _estimate_context_from_latest_response(
             usage.context_tokens - messages[index].request_only_input_tokens,
         )
         usage_estimate = durable_usage_tokens + added_tokens
-        # The provider usage is the authoritative count for the complete
-        # request that was sent (including its tool schemas). Only content
-        # appended after that request needs a local incremental estimate.
-        # Do not compare against a full fallback estimate here: it can count
-        # the same history/tool schemas again and trigger compaction early.
-        return usage_estimate, "usage"
+        # Usage describes the previous request. The current projection or tool
+        # schemas may have changed since then. Take a maximum, rather than
+        # adding a complete estimate and counting the old request twice.
+        return (usage_estimate, "usage") if usage_estimate >= fallback else (fallback, "fallback")
 
     # Backward-compatible low-level callers may still provide a usage total
-    # without response metadata attached to a Message. Treat that supplied
-    # provider count as authoritative; there is no incremental boundary to
-    # add in this form. Fall back only when no provider usage exists at all.
+    # without response metadata attached to a Message. It remains a lower
+    # bound; the current messages and schemas still require a complete check.
     provided_usage = (
         api_prompt_tokens
         if api_prompt_tokens is not None and api_prompt_tokens > 0
         else api_total_tokens
     )
-    if provided_usage > 0:
+    if provided_usage > 0 and provided_usage >= fallback:
         return provided_usage, "usage"
-    fallback = _fallback_context_estimate(messages, tools)
     return fallback, "fallback"
 
 
@@ -672,6 +681,7 @@ async def _maybe_summarize(
         budget_tools,
         api_total_tokens=api_total_tokens,
         api_prompt_tokens=api_prompt_tokens,
+        llm=llm,
     )
     if estimated < token_limit and not force:
         return CompactionOutcome(
@@ -750,6 +760,7 @@ async def _maybe_summarize(
         if (summary_input_token_limit is not None
                 and _fallback_context_estimate(
                     [*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)], None,
+                    llm=summary_llm or llm,
                 ) > summary_input_token_limit):
             raise RuntimeError("Summary request exceeds the safe input budget")
         summary_calls = 1
@@ -799,7 +810,7 @@ async def _maybe_summarize(
     # Use the same request estimator as Context.prepare_request.  With the
     # pre-compaction usage metadata cleared above this deliberately falls back
     # to measuring the rebuilt messages and offered tool schemas.
-    estimated_after = request_input_tokens(new_messages, budget_tools)
+    estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     for summary_limit in (8_000, 4_000, 2_000):
         if estimated_after <= token_limit or len(bounded_summary) <= summary_limit:
             continue
@@ -809,7 +820,7 @@ async def _maybe_summarize(
             label="summary",
         )
         new_messages = build_compacted_messages(bounded_summary)
-        estimated_after = request_input_tokens(new_messages, budget_tools)
+        estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     if estimated_after > token_limit:
         mode = "blocked"
     _log.info(
@@ -861,10 +872,10 @@ def _is_compaction_metadata(msg: Message) -> bool:
     )
 
 
-def request_input_tokens(messages: list[Message], tools: Any) -> int:
+def request_input_tokens(messages: list[Message], tools: Any, *, llm: Any | None = None) -> int:
     """Estimate the current input with the exact offered schemas and usage guard."""
     tool_map = tools if isinstance(tools, dict) else {tool.name: tool for tool in (tools or ())}
-    estimated, _ = _estimate_context_from_latest_response(messages, tool_map)
+    estimated, _ = _estimate_context_from_latest_response(messages, tool_map, llm=llm)
     return estimated
 
 

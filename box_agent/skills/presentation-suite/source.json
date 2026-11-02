@@ -236,7 +236,7 @@
       "source_sha256": "644e0cae9b40f0b10ab729a01bd32032e3973bac22be3dccae01bf6ae7fde969"
     },
     "skills/sn-ppt-dazzle/SKILL.md": {
-      "sha256": "19fe0dec50600cc483b7beaed46462701799e261587b7159ccce9ae0873ea360",
+      "sha256": "6a8fc5b1b523f90f0c8c107ee82d129fe6256f7536073be3181258cb5a8d9d76",
       "source_path": "skills/sn-ppt-dazzle/SKILL.md",
       "source_sha256": "680f8c4eb578190e2ed4beffe415d7d94ce7d3bd50f160904b214c90de3fe147"
     },
@@ -252,9 +252,9 @@
     },
     "skills/sn-ppt-dazzle/scripts/artifact_metadata.py": {
       "input_path": "box_agent/artifact_metadata.py",
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
       "source_path": "skills/sn-ppt-dazzle/scripts/artifact_metadata.py",
-      "source_sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1"
+      "source_sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4"
     },
     "skills/sn-ppt-dazzle/scripts/render_deck.py": {
       "sha256": "250c853a24ebb00e3ba2a00b6b3fca2ad744e7b4cb287b640dc1944d8a53a529",
@@ -267,7 +267,7 @@
       "source_sha256": "fa1306bcf83baf9f6f8c06e20c8019896c60925b44e7f4e12ec8fb4b2df3165b"
     },
     "skills/sn-ppt-doctor/SKILL.md": {
-      "sha256": "ce178fbca5984ca1847f8840584a6a03689b16d2842af07f82f9fccfa3280485",
+      "sha256": "37ae64b5f26e030af8e486ff9cf078d04d10de5be4020c44bf094cfa48146c27",
       "source_path": "skills/sn-ppt-doctor/SKILL.md",
       "source_sha256": "bc2ba1b05b87aa0064e82a70359568368f5a00376c27759554e355039bb39caf"
     },
@@ -293,9 +293,9 @@
     },
     "skills/sn-ppt-entry/scripts/artifact_metadata.py": {
       "input_path": "box_agent/artifact_metadata.py",
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
       "source_path": "skills/sn-ppt-entry/scripts/artifact_metadata.py",
-      "source_sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1"
+      "source_sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4"
     },
     "skills/sn-ppt-entry/scripts/parse_user_docs.py": {
       "sha256": "4be3eb83b91731206665bbb7ff9cb69834e01cbc905a4a70ef36642b9fdb7672",
@@ -308,7 +308,7 @@
       "source_sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3"
     },
     "skills/sn-ppt-standard/SKILL.md": {
-      "sha256": "466d84889c2bd48555c1a753c20c462587483dfc8e73b9bb8c1ec1f2e9ac2508",
+      "sha256": "be78a1851e9e12cf498cc6b1f33ff2354d3e1f11a0a6def30ca530bb01c4da5f",
       "source_path": "skills/sn-ppt-standard/SKILL.md",
       "source_sha256": "6e32143cd1fcf07bca4fdb4414cff586fc2bfbe68e6684c213347782795fae5a"
     },
@@ -406,9 +406,9 @@
     },
     "skills/sn-ppt-standard/scripts/artifact_metadata.py": {
       "input_path": "box_agent/artifact_metadata.py",
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
       "source_path": "skills/sn-ppt-standard/scripts/artifact_metadata.py",
-      "source_sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1"
+      "source_sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4"
     },
     "skills/sn-ppt-standard/scripts/deck.py": {
       "sha256": "f32494b4c5638419975e1269cc3de4ea164eeeecf4d747f8999d4aab5e7cf100",
@@ -672,6 +672,7 @@
     "native-windows-rendering",
     "workspace-canvas-dimensions",
     "centralized-artifact-metadata",
+    "host-chromium-preparation",
     "desktop-offline-package"
   ],
   "repository": "https://gitlab.sh.sensetime.com/stc-fvg/sensenova-presentation-int.git",

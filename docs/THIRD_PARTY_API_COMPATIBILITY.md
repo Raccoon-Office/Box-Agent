@@ -99,7 +99,12 @@ GPT-6 Sol 和 Luna 在 Chat Completions 中携带 function tools 时，必须显
 | 思考开关 | HTTP 请求体顶层参数 |
 | --- | --- |
 | 未开启 `--deep-think` / `thinking_enabled=false` | `"reasoning_effort": "low"` |
-| 开启 `--deep-think` / `thinking_enabled=true` | `"reasoning_effort": "high"` |
+| 开启 `--deep-think` / `thinking_enabled=true` | `"reasoning_effort": "max"` |
+
+[Kimi K3 官方文档](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart)支持小写
+`low`、`high`、`max`，API 默认值为 `max`。
+[官方建议](https://forum.moonshot.ai/t/kimi-k3-is-here-our-most-capable-model/480)：
+`low` 优先速度，`high` 平衡速度与质量，`max` 用于最难的任务。
 
 Kimi K3 始终开启思考，因此关闭开关表示降低思考强度，不表示完全关闭思考。
 此映射不适用于 Kimi K2.x；通过第三方网关调用时，仍需验证网关是否透传参数。
@@ -123,16 +128,17 @@ Kimi K3 始终开启思考，因此关闭开关表示降低思考强度，不表
 
 当 `provider: openai` 且模型名以 `sensenova-` 或 `sn-sensenova-` 开头时，
 Box-Agent 会启用 SenseNova 协议兼容处理。使用 `--deep-think` 或 ACP 的
-`deep_think` 开关时，请求会附带：
+`deep_think` 开关时，SenseNova 6.8 Flash Lite 使用官方支持的 `max`，
+其他 SenseNova 型号继续使用 `high`。参数位于 HTTP 请求体顶层，例如：
 
 ```json
 {
-  "chat_template_kwargs": {
-    "thinking": true,
-    "reasoning_effort": "high"
-  }
+  "reasoning_effort": "max"
 }
 ```
+
+参见 [SenseNova 官方 API 文档](https://platform.sensenova.cn/docs)的
+“SenseNova 6.8 Flash Lite → 思考模式”，以及[各模型的开启档位](reasoning-configuration.md#enabled-thinking-effort)。
 
 部分 Flash-Lite 版本会把工具调用以 `<tool_call>` 标记输出到 reasoning，或
 输出到不含其他可见文本的 content。Box-Agent 会把这类标记恢复为标准工具调用，

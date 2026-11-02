@@ -131,6 +131,9 @@ def test_consecutive_skill_pages_charge_schemas_images_overlays_and_pending_enve
 class Provider:
     max_output_tokens = 64000
 
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     def __init__(self, *, summary_available=True):
         self.requests = []
         self.summary_calls = 0
@@ -161,7 +164,7 @@ class StepHook(BaseHook):
     async def on_step_start(self, *, step, max_steps): self.steps.append(step)
 
 
-def crowded_history(runtime, *, prior_read=False):
+def crowded_history(runtime, *, prior_read=False, summary_fits=False):
     history = [Message(role="system", content="BASE"), Message(role="user", content="old task")]
     if prior_read:
         context = SkillReferenceContext(runtime)
@@ -172,7 +175,11 @@ def crowded_history(runtime, *, prior_read=False):
                 function=FunctionCall(name="get_skill", arguments={"skill_name":"demo"}))]),
             Message(role="tool", name="get_skill", tool_call_id="old-read", content=read.model_context),
         ])
-    history.append(Message(role="assistant", content="old execution " * 18000))
+    history.append(Message(
+        role="assistant", content="old execution " * (3000 if summary_fits else 18000),
+        # Provider usage triggers compaction while the tool-free summary fits.
+        usage=TokenUsage(prompt_tokens=24000, total_tokens=24000) if summary_fits else None,
+    ))
     history.extend(Message(role="assistant", content=f"recent result {index}") for index in range(6))
     history.append(Message(role="user", content="continue the current task"))
     runtime.begin_turn()
@@ -223,7 +230,7 @@ async def test_loop_selected_body_recovers_with_summary_or_unavailable_summary_f
     runtime.loader.get_skill("demo").skill_path.write_text(
         "---\nname: demo\ndescription: example\n---\nEXACT_METHOD_BODY\n" + "method line\n" * 2500)
     runtime.select(["demo"])
-    history = crowded_history(runtime)
+    history = crowded_history(runtime, summary_fits=True)
     provider = Provider(summary_available=summary_available)
     events = [event async for event in run_agent_loop(llm=provider, messages=history, tools={},
         skill_engine=runtime, token_limit=24000, max_steps=1)]
@@ -264,7 +271,7 @@ async def test_loop_budget_recovery_preserves_summary_cancellation(runtime):
     runtime.loader.get_skill("demo").skill_path.write_text(
         "---\nname: demo\ndescription: example\n---\n" + "method line\n" * 2500)
     runtime.select(["demo"])
-    history = crowded_history(runtime)
+    history = crowded_history(runtime, summary_fits=True)
 
     class CancelledSummary(Provider):
         async def generate(self, messages, **kwargs):
@@ -280,13 +287,13 @@ async def test_loop_budget_recovery_preserves_summary_cancellation(runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_at,history_lines,skill_lines", [
-    ("summary_return", 18000, 2500),
-    ("summarization_event", 18000, 2500),
+    ("summary_return", 3000, 2500),
+    ("summarization_event", 3000, 2500),
     ("step_hook", 1, 2500),
     ("step_hook", 4000, 2500),
     ("step_event", 4000, 2500),
-    ("summary_return", 18000, 30000),
-    ("summarization_event", 18000, 30000),
+    ("summary_return", 3000, 30000),
+    ("summarization_event", 3000, 30000),
 ])
 async def test_loop_cancellation_before_request_commit_never_delivers(
     runtime, tmp_path, cancel_at, history_lines, skill_lines,
@@ -294,7 +301,7 @@ async def test_loop_cancellation_before_request_commit_never_delivers(
     runtime.loader.get_skill("demo").skill_path.write_text(
         "---\nname: demo\ndescription: example\n---\nEXACT_METHOD_BODY\n" + "method line\n" * skill_lines)
     runtime.select(["demo"])
-    history = crowded_history(runtime)
+    history = crowded_history(runtime, summary_fits=cancel_at in {"summary_return", "summarization_event"})
     history[2].content = "old execution " * history_lines
     cancelled = False
 

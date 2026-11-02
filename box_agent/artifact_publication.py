@@ -41,7 +41,7 @@ def is_publication_metadata(path: Path, workspace: str | Path | None = None) -> 
             pass
     return (any(path.parts[index:index + 2] == (".box-agent", "artifact-metadata")
                 for index in range(len(path.parts) - 1))
-            or path.absolute().is_relative_to(storage.retention_directory()))
+            or path.absolute().is_relative_to(storage.retention_directory().parent))
 
 
 def is_staging_file(path: Path, workspace: str | Path) -> bool:

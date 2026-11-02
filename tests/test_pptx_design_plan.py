@@ -496,6 +496,8 @@ def test_brief_is_bounded_and_details_are_loaded_only_when_needed(design_case):
     brief = json.loads(Path(metadata["request_file"]).read_text())
     assert "catalog" not in metadata
     assert len(Path(metadata["request_file"]).read_text()) < 8000
+    assert brief["media_policy"] == "local_only"
+    assert brief["offline_constraints"] == "No network or installs."
     assert "themes" not in brief and "outline" not in brief
     for item in brief["required_read_files"]:
         packet = Path(item["path"])
@@ -654,6 +656,22 @@ def test_verbatim_user_geometry_remains_a_hard_constraint(design_case, monkeypat
     result = import_plan(root, plan)
     assert result.returncode != 0
     assert "design_contract" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("verbatim", [True, False])
+def test_hard_requirement_list_checks_each_item_against_user_request(design_case, monkeypatch, verbatim):
+    import base64
+    root, outline, _, _ = design_case
+    source = "请做三页演示，第1页必须使用金字塔结构，颜色使用蓝色。"
+    monkeypatch.setenv("BOX_AGENT_SOURCE_TEXT_B64", base64.b64encode(source.encode()).decode())
+    outline["slides"][0]["hard_requirements"] = [
+        "第1页必须使用金字塔结构", "颜色使用蓝色" if verbatim else "颜色使用红色",
+    ]
+    write(root / "outline.json", outline)
+    prepared = run("design_plan.js", "prepare", "outline.json", cwd=root)
+    assert (prepared.returncode == 0) == verbatim, prepared.stdout + prepared.stderr
+    if not verbatim:
+        assert "must quote the actual user request verbatim" in prepared.stderr
 
 
 def test_response_import_accepts_one_json_object_wrapped_in_prose(design_case):

@@ -94,6 +94,8 @@ def test_profile_clients_keep_provider_and_endpoint_isolated(tmp_path, monkeypat
     )
     assert hosted.timeout == 1200.0
     assert custom.timeout == 1200.0
+    assert hosted.context_window == 180000
+    assert custom.context_window == 64000
     assert fallback.api_base == "https://fallback.example/v1"
 
 

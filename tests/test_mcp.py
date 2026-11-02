@@ -474,6 +474,13 @@ class TestMCPToolExecution:
             session=session,
         )
 
+    def test_hosted_web_search_time_range_branches_declare_string_type(self):
+        tool = self.hosted_web_search(SimpleNamespace())
+        branches = tool.parameters["properties"]["time_range"]["anyOf"]
+
+        assert len(branches) == 2
+        assert all(branch["type"] == "string" for branch in branches)
+
     @pytest.mark.asyncio
     async def test_hosted_web_search_exposes_lowercase_schema_and_maps_to_remote(self):
         class FakeSession:

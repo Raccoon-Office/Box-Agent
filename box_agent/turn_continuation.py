@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -29,6 +30,10 @@ DEFAULT_MAX_CONTINUATIONS: Final[int] = 2
 MAX_REQUEST_CHARS: Final[int] = 2_000
 MAX_RESPONSE_CHARS: Final[int] = 4_000
 _JUDGE_POLL_SECONDS: Final[float] = 0.1
+
+
+class ContinuationJudgeTimeout(TimeoutError):
+    """The completion check has no verdict; never interpret it as completed."""
 
 _NORMAL_FINISH_REASONS: Final[frozenset[str | None]] = frozenset(
     {None, "stop", "end_turn"}
@@ -235,6 +240,7 @@ async def model_says_continue(
     turn_id: str = "",
     title: str = "",
     should_interrupt: Callable[[], bool] | None = None,
+    timeout_seconds: float | None = None,
 ) -> bool:
     """Ask whether the copied conversation ended prematurely.
 
@@ -244,6 +250,8 @@ async def model_says_continue(
     """
     if should_interrupt is not None and should_interrupt():
         return False
+    if timeout_seconds is not None and (not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+        raise ValueError("timeout_seconds must be finite and positive")
 
     try:
         messages, facts = _resolve_judge_inputs(
@@ -277,10 +285,10 @@ async def model_says_continue(
             CONTINUATION_THINKING_MAX_OUTPUT_TOKENS
             if thinking_enabled else SMALL_TASK_MAX_OUTPUT_TOKENS,
         )
-        # The provider/client owns the request timeout.  This auxiliary judge
-        # must not impose a second, shorter deadline that turns a slow but
-        # valid verdict into ``continue=False``.  The polling loop below only
-        # checks caller interruption; it is not an overall time limit.
+        # The kernel supplies its existing provider-stale budget. Expiry is an
+        # explicit incomplete outcome, never a fabricated continue=False verdict.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds if timeout_seconds is not None else None
         judge_task = asyncio.create_task(
             judge_llm.generate(
                 judge_messages,
@@ -295,7 +303,10 @@ async def model_says_continue(
         while not judge_task.done():
             if should_interrupt is not None and should_interrupt():
                 return False
-            await asyncio.wait({judge_task}, timeout=_JUDGE_POLL_SECONDS)
+            remaining = deadline - loop.time() if deadline is not None else _JUDGE_POLL_SECONDS
+            if remaining <= 0:
+                raise ContinuationJudgeTimeout("continuation judge exceeded its response deadline")
+            await asyncio.wait({judge_task}, timeout=min(_JUDGE_POLL_SECONDS, remaining))
         response = judge_task.result()
         # The provider may finish in the same tick as cancellation or new input.
         if should_interrupt is not None and should_interrupt():
@@ -307,6 +318,10 @@ async def model_says_continue(
         if not isinstance(response.content, str):
             return False
         decision = json.loads(response.content.strip())
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        log.warning("turn_continuation/judge_timeout session_id=%s timeout_seconds=%s",
+                    session_id or "-", timeout_seconds)
+        raise ContinuationJudgeTimeout("continuation judge timed out without a verdict") from exc
     except Exception as exc:
         log.warning(
             "turn_continuation/judge_failed session_id=%s error=%s",
@@ -358,6 +373,7 @@ class TurnContinuationController:
         turn_id: str = "",
         title: str = "",
         should_interrupt: Callable[[], bool] | None = None,
+        timeout_seconds: float | None = None,
     ) -> TurnContinuationRequest | None:
         """Return a continuation request for a candidate premature stop."""
         if (
@@ -381,6 +397,7 @@ class TurnContinuationController:
             turn_id=turn_id,
             title=title,
             should_interrupt=should_interrupt,
+            timeout_seconds=timeout_seconds,
         ):
             return None
 

@@ -28,7 +28,7 @@ from .tools.setup import (
     build_file_delivery_prompt, build_image_generation_prompt, build_sandbox_info_prompt,
     render_system_prompt_template,
 )
-from .prompt_capabilities import resolve_capability_placeholders
+from .prompt_capabilities import render_web_access_policy, resolve_capability_placeholders
 from .project_context import (
     PROJECT_WORKSPACE_MODE_PROMPT, WORKSPACE_STATEMENT_PREFIX, append_prompt_segment, compose_prompt_segments,
     build_project_startup_context_prompt,
@@ -185,11 +185,16 @@ async def _bind_skill_runtime(resources: SessionResources) -> None:
             allow_partial_restore=options.profile == "acp",
         ))
         if options.resume_session_log:
+            from .session_log import run_session_io
+
             session_log = resources.context.host.session_log
             if session_log is None:
                 raise ValueError("resume_session_log requires a borrowed SessionLog")
-            await runtime.arestore_records(session_log.replay().skills)
-            session_log.prepare_resume()
+            projection = await run_session_io(session_log.replay)
+            await runtime.arestore_records(projection.skills)
+            resources.state["session_projection"] = await run_session_io(
+                lambda: session_log.prepare_resume_projection(projection)
+            )
 
 
 def _accepts_keyword(func: Any, name: str) -> bool:
@@ -395,6 +400,14 @@ async def prepare_prompt(resources: SessionResources) -> None:
         memory_block = await asyncio.to_thread(resources.memory_manager.recall) or None
         resources.state["memory_block"] = memory_block
 
+    # AgentSession creates normal Agents with builtin discovery enabled. The
+    # constructor adds tool_search after this assembly step, while deferred MCP
+    # tools stay catalog-only. Include that guaranteed capability now so a cold
+    # catalog cannot suppress routing guidance. Utility Agents do not add it.
+    available_tools = frozenset(tool.name for tool in resources.tools)
+    if not options.utility:
+        available_tools |= {"tool_search"}
+
     child_segments: list[str] = []
     resources.system_prompt = build_session_prompt(
         config, template,
@@ -414,7 +427,7 @@ async def prepare_prompt(resources: SessionResources) -> None:
         memory=resources.memory_manager,
         memory_block=memory_block,
         prompt_suffix=host.prompt_suffix,
-        available_tools=frozenset(tool.name for tool in resources.tools),
+        available_tools=available_tools,
     )
 
     resources.state["child_system_prompt"] = compose_prompt_segments(
@@ -719,6 +732,8 @@ def _compose_session_prompt(
         if child_prompt_segments is not None and inherit and (segment or not skip_empty):
             child_prompt_segments.append(segment or "")
         return append_prompt_segment(base_prompt, segment, skip_empty=skip_empty)
+
+    base_prompt = append(render_web_access_policy(available_tools))
 
     if workspace is not None:
         base_prompt = append(

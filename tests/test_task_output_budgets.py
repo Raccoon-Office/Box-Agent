@@ -145,10 +145,25 @@ async def test_memory_extraction_rejects_truncated_json_without_saving(tmp_path)
     assert not await extractor.maybe_extract(
         [Message(role="user", content="Remember I prefer concise replies")], "loop_end",
     )
-    assert llm.calls[-1]["max_tokens"] == 8_192
+    assert len(llm.calls) == 2
+    assert llm.calls[-1]["max_tokens"] == 100_000
     assert manager.read_core() == "- original core"
     assert manager.read_context() == ""
     assert llm.max_output_tokens == 100_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [4096, 100_000])
+async def test_memory_extraction_inherits_selected_model_output_limit(tmp_path, limit):
+    manager = MemoryManager(memory_dir=str(tmp_path))
+    llm = BudgetLLM('{"additions": [], "merges": []}', max_output_tokens=limit)
+    extractor = MemoryExtractor(llm=llm, memory_manager=manager)
+    assert await extractor.maybe_extract(
+        [Message(role="user", content="Remember this preference")], "loop_end",
+    )
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["max_tokens"] == limit
+    assert llm.max_output_tokens == limit
 
 
 @pytest.mark.asyncio

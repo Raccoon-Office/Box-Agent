@@ -30,6 +30,45 @@ wire 格式，但底层共享 core/tool 行为仍可能一致。
 
 ## 典型对接场景
 
+### 运行时限前收尾
+
+宿主可在当前 `session/prompt` 尚未结束时调用 `_request_wrap_up`：
+参数为 `sessionId`、`remainingSeconds`（1–10800 的整数），以及可选的
+`turnId`（必须与当前轮一致）。返回 `ok: true` 表示系统预算提醒已入队，
+重复请求返回 `deduplicated: true`；不表示模型已收到或任务已完成。
+提醒在下一安全边界进入模型上下文，不作为用户消息回显。它要求保存/导出、
+在剩余预算内核验需求与交付物、列出未完成项，不绕过既有质量门。
+本轮结束后不再自动续跑 Goal；下一次用户请求恢复正常策略。
+
+最终回包可包含 `_meta.wrapUp: {requested: true, goalIncomplete: boolean}`。
+未完成的 Goal 保留原状态，`completed` 为 false，正常收尾的 `runStatus`
+为 `incomplete`，`stopReason` 为 `max_turn_requests`；宿主不能当作任务成功。
+没有 Goal 时仍沿用原有完成与交付检查，预算提醒本身不是验收证明。
+
+硬截止仍由宿主计时并发送 `session/cancel`，保留原请求等待取消清理后的回包。
+宽限期内正常完成的回包应走原有交付校验；宽限期耗尽才能按原有恢复机制处理，
+未确认进程退出前不能向用户宣称已安全停止。旧 runtime 不支持此扩展时，
+宿主应继续执行取消/恢复流程，不把提醒降级成伪造的用户输入。
+
+### 查询结果与可恢复的工具拦截
+
+单条、无包装和控制语法的 POSIX `grep` / `rg` 无匹配以及 `diff` 有差异（结构识别忽略首尾空白），
+退出码仍为 1，但工具结果为成功，`rawOutput.command_outcome` 分别为
+`no_matches` / `differences`。该字段可选，旧宿主无需更改。PowerShell、复合命令、
+管道、重定向及无法确定来源的非零退出码不自动放行；优先使用独立 `grep` 工具。
+失败命令的 stdout 和 stderr 一起保留在模型错误诊断中，沿用 8,000 字符截断预算。
+
+托管浏览器收到明确的会话终止或已关闭传输错误后，丢弃当前会话缓存并返回
+`BROWSER_SESSION_RESET`；下一次调用重新建立浏览器上下文。其他会话不受影响。
+失败动作不会自动重放，可能已发生副作用；恢复后先导航、检查页面并获取新元素引用。
+普通页面错误和导航超时不触发会话重置。
+
+`CHAT_REFERENCE_PROTECTED`、`CHAT_REFERENCE_DELETE_DENIED` 和
+`BROAD_HOME_SEARCH_BLOCKED` 仍是失败结果，不能当作授权或执行成功。
+宿主可分别展示文件保留、删除取消及缩小搜索范围提示；Agent 对相同诊断的重复拦截给出停止重试提示，
+同一错误码下不同原因或目标的诊断仍完整保留。
+一次性脚本使用已有 `$BOX_AGENT_SCRATCH_DIR`，不将其发布或链接为交付物。
+
 ### 同一产品会话的并发请求
 
 `session/new._meta.session_id` 是宿主的稳定产品会话 ID，与返回的 ACP

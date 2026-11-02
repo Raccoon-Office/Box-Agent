@@ -18,6 +18,7 @@ async def test_openai_cache_reads_are_reported_without_increasing_prompt_total(s
         "completion_tokens": 30,
         "total_tokens": 1230,
         "prompt_tokens_details": {"cached_tokens": 896},
+        "completion_tokens_details": {"reasoning_tokens": 12},
     }
 
     def handler(_request):
@@ -61,6 +62,19 @@ async def test_openai_cache_reads_are_reported_without_increasing_prompt_total(s
     assert result_usage.cache_read_input_tokens == 896
     assert result_usage.context_tokens == 1230
     assert result_usage.reported_usage()["cached_tokens"] == 896
+    assert result_usage.reasoning_tokens == 12
+    assert "reasoning_tokens" not in result_usage.model_dump()
+    assert "reasoning_tokens" not in result_usage.reported_usage()
+
+
+@pytest.mark.parametrize("reasoning_tokens", [None, -1, True, "12", 0])
+def test_openai_reasoning_details_preserve_unknown_without_changing_totals(reasoning_tokens):
+    usage = _token_usage_from_openai({
+        "prompt_tokens": 1200, "completion_tokens": 30, "total_tokens": 1230,
+        "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
+    })
+    assert usage.reasoning_tokens == (0 if reasoning_tokens == 0 else None)
+    assert usage.context_tokens == 1230
 
 
 @pytest.mark.parametrize("details", [None, {"cached_tokens": 1201}, {"cached_tokens": "896"}])

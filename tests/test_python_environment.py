@@ -114,13 +114,44 @@ def execution(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_explicit_python_bypasses_host_and_persists_in_session(execution):
+@pytest.mark.parametrize("python_path", [None, "", " \t\n"])
+async def test_explicit_python_bypasses_host_and_persists_in_session(execution, python_path):
     tool, path = execution
     first = await tool.execute("print(1+1)", session_id="chosen", python_path=str(path))
-    second = await tool.execute("print(2)", session_id="chosen")
+    second = await tool.execute("print(2)", session_id="chosen", python_path=python_path)
     assert first.success and second.success
     assert tool._sessions["chosen"].sandbox_env.python_path == path
     tool.runtime_preparer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("python_path", ["", " \t\n"])
+@pytest.mark.parametrize("ready", [False, True])
+async def test_blank_python_path_uses_host_readiness_and_managed_runtime(
+    execution, monkeypatch, python_path, ready,
+):
+    tool, path = execution
+
+    async def prepare():
+        if not ready:
+            raise RuntimeError("host installing")
+        tool.update_runtime_env({"BOX_AGENT_SANDBOX_PYTHON": str(path)})
+
+    tool.runtime_preparer = AsyncMock(side_effect=prepare)
+    monkeypatch.setattr(jupyter.SandboxEnvironment, "ensure_ready", AsyncMock())
+    monkeypatch.setattr(jupyter.JupyterSandboxTool, "_sandbox_env", None)
+    monkeypatch.setattr(jupyter.JupyterSandboxTool, "_sandbox_env_key", None)
+
+    result = await tool.execute("print(2)", session_id="managed", python_path=python_path)
+
+    tool.runtime_preparer.assert_awaited_once()
+    assert result.success is ready
+    if ready:
+        assert result.content == "2"
+        assert tool._sessions["managed"].sandbox_env.python_path == path
+    else:
+        assert "RUNTIME_NOT_READY" in result.error
+        assert tool._sessions == {}
 
 
 @pytest.mark.asyncio

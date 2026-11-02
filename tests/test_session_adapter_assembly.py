@@ -201,6 +201,11 @@ async def test_acp_preparation_preserves_direct_prompt_and_tool_contract(tmp_pat
     resources = state.plugin_session.resources
     options = resources.context.options
     available_tools = frozenset(tool.name for tool in resources.tools)
+    # The real Agent adds discovery after resource preparation. Use its actual
+    # capability when comparing with the lower-level prompt builder.
+    if "tool_search" in state.agent.tools:
+        available_tools |= {"tool_search"}
+    assert ("tool_search" in state.agent.tools) is (not utility)
     expected = adapter._build_session_prompt(
         options.session_mode, workspace=tmp_path, policy=options.effective_policy,
         env_context=state.env_context, skill_runtime_context=state.skill_runtime_context,

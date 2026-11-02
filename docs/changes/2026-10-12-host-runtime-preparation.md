@@ -71,6 +71,14 @@ longer recommended to the model. This is prompt guidance, not a new execution ga
   parameter or second installer is added. Rebuild/install Box-Agent and restart the host
   before evaluating packaged-client behavior.
 
+### Empty optional parameters (2026-11-02)
+
+`execute_code` and `local_environment` treat an empty or whitespace-only `python_path`
+as omitted. Execution keeps the current kernel's interpreter or checks the default managed
+environment; `load` discovers runtime candidates. `local_environment` also treats `modules=[]`
+as omitted, so empty optional fields do not block `status` or `ensure`. Nonempty paths retain
+their existing validation, and nonempty Python options still require Python `load`.
+
 ## Windows shell refresh
 
 Windows shell refresh: when the host returns a prepared Git runtime, existing Bash tools
@@ -91,3 +99,18 @@ absolute executable path, so a stripped PATH does not prevent starting it.
 - `installationReady` does not prove a connected MCP. `mcp.state`, `toolCount` and `error`
   report the Agent's actual Playwright connection separately. Failed connection is not a
   reason to download browser files again. Runtime environment keys remain internal.
+
+
+## Standalone Python Chromium
+
+`local_environment(capability="chromium", action="ensure")` reuses the host's standalone
+Chromium installer. Ready results refresh browser paths for future subprocesses; this
+capability does not change Electron/MCP preparation or existing Python kernels.
+Standard, Dazzle and Doctor prefer this preparation before Chromium-dependent work.
+Unsupported hosts retain the original rendering workflow. On preparation failure, the
+Agent decides the next step using the error and existing environment, while respecting
+installer concurrency, user cancellation and existing acceptance gates.
+Chromium failures preserve bounded diagnostics in model-visible error summaries.
+Python/Node/Git behavior and Doctor's Python checks remain unchanged. Skills are generated
+through the host-chromium-preparation overlay with provenance validation. Client and
+Agent are packaged together; no per-capability negotiation or automatic retry is added.

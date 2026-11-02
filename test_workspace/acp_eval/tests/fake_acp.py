@@ -17,6 +17,9 @@ MODES = {
     "normal",
     "malformed",
     "timeout",
+    "initialize-timeout",
+    "new-session-timeout",
+    "late-completion",
     "trailing-stderr",
     "missing-trace",
     "large-frame",
@@ -30,6 +33,8 @@ MODES = {
     "mismatch-update-session",
     "mismatch-trace-session",
     "mismatch-trace-acp-session",
+    "rate-limit", "rate-limit-once", "rate-limit-after-tool", "provider-error",
+    "rate-limit-after-content",
 }
 
 
@@ -59,6 +64,7 @@ def write_trace(
     event = {
         "schema_version": "box-agent-session-trace/v1",
         "event": "session.start",
+        "provider_stale_seconds": os.environ.get("BOX_AGENT_PROVIDER_STALE_SECONDS"),
         "session_id": (
             "eval-acp-wrong"
             if mode == "mismatch-trace-session"
@@ -88,6 +94,8 @@ def run(mode: str) -> int:
         raise SystemExit(f"unknown fake ACP mode: {mode}")
 
     initialize = receive()
+    if mode == "initialize-timeout":
+        time.sleep(60)
     if mode == "initialize-error":
         write_trace(f"eval-acp-{mode}", "sess-initialize-error", mode)
         send(
@@ -107,6 +115,8 @@ def run(mode: str) -> int:
     )
 
     new_session = receive()
+    if mode == "new-session-timeout":
+        time.sleep(60)
     params = new_session["params"]
     upstream_session_id = params["_meta"]["session_id"]
     acp_session_id = "sess-0-fake"
@@ -123,8 +133,44 @@ def run(mode: str) -> int:
     if mode != "missing-trace":
         write_trace(upstream_session_id, acp_session_id, mode)
 
+    if mode in {"rate-limit", "rate-limit-once", "rate-limit-after-tool", "provider-error", "rate-limit-after-content"}:
+        marker = Path(__file__).with_suffix(".limited")
+        if mode != "rate-limit-once" or not marker.exists():
+            marker.touch()
+            error_message = "请求过于频繁，已触发服务限流（429）。请稍候片刻再重试。"
+            error_details = {"source": "llm_provider", "httpStatus": 500 if mode == "provider-error" else 429,
+                             "retryable": True}
+            partial_content = "Already started answering." if mode == "rate-limit-after-content" else ""
+            trace_path = Path(os.environ["BOX_AGENT_SESSION_TRACE_DIR"]) / f"{upstream_session_id}.jsonl"
+            with trace_path.open("a") as stream:
+                events = [("llm.request", {}),
+                          *([("tool.request", {})] if mode == "rate-limit-after-tool" else []),
+                          ("llm.error", {"partial_content": partial_content, "partial_thinking": None}),
+                          ("turn.error", {"message": error_message, "error_details": error_details})]
+                for event, data in events:
+                    stream.write(json.dumps({"event": event, "session_id": upstream_session_id,
+                                             "acp_session_id": acp_session_id, "data": data}) + "\n")
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": acp_session_id, "update": {"sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": partial_content + f"Error: {error_message}"}},
+            }})
+            send({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn", "_meta": {
+                "ok": False, "completed": False, "runStatus": "error", "errorCategory": "rate_limit",
+                "error": error_message, "errorDetails": error_details,
+                "usage": {"sessionId": upstream_session_id, "turnId": prompt["params"]["_meta"]["turnId"]},
+            }}})
+            return 0
+
     if mode == "timeout":
         time.sleep(60)
+        return 0
+
+    if mode == "late-completion":
+        cancel = receive()
+        assert cancel["method"] == "session/cancel"
+        send({"jsonrpc": "2.0", "id": prompt["id"], "result": {
+            "stopReason": "end_turn", "_meta": {"completed": True, "ok": True},
+        }})
         return 0
 
     if mode == "slow-drip":

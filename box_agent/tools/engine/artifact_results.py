@@ -6,6 +6,9 @@ import json
 import logging
 import os
 import re
+import stat
+from collections.abc import Iterator
+from collections import OrderedDict
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -15,7 +18,7 @@ from ...artifacts import (
     make_artifact as _make_artifact,
 )
 from ...events import ArtifactEvent
-from ...artifact_metadata import is_metadata_record
+from ...artifact_metadata import is_metadata_record, iter_metadata_records
 from ...artifact_publication import (
     STAGING_DIRECTORY, intermediate_fingerprints, is_intermediate, is_publication_sidecar,
     is_publication_metadata,
@@ -156,6 +159,8 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
     An incomplete walk returns None, distinct from a valid empty snapshot, so
     callers can skip the entire pre/post diff. Structured and text-referenced
     tool outputs remain the fallback artifact-discovery path.
+    Publication scans propagate read errors so callers cannot mistake unreadable
+    provenance for an empty store; file/time limits still return None.
     """
     try:
         out = _artifact_scan_root(workspace_dir)
@@ -190,11 +195,19 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
             if perf_counter() >= deadline:
                 _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
                 return None
-            dirnames[:] = sorted(
-                name for name in dirnames if (name not in _IGNORE_DIRS
-                    or include_publication_metadata and name == ".box-agent")
-            )
             current = Path(current_root)
+            if include_publication_metadata and ".box-agent" in dirnames:
+                # Read the validated store explicitly: os.walk must not follow
+                # links, but the configured global profile may be relocated.
+                for entry in iter_metadata_records(current):
+                    if perf_counter() >= deadline:
+                        _warn_scan_limit(out, f"{timeout_seconds:g}s timeout")
+                        return None
+                    files.add(entry)
+                    if len(files) > max_files:
+                        _warn_scan_limit(out, f"{max_files} file limit")
+                        return None
+            dirnames[:] = sorted(name for name in dirnames if name not in _IGNORE_DIRS)
             if current.name == ".box-agent":
                 dirnames[:] = [name for name in dirnames if name == "artifact-metadata"]
                 continue
@@ -217,19 +230,21 @@ def _snapshot_workspace(workspace_dir: str, *, include_publication_metadata: boo
                 if len(files) > max_files:
                     _warn_scan_limit(out, f"{max_files} file limit")
                     return None
-    except OSError:
+    except (OSError, RuntimeError):
+        if include_publication_metadata:
+            raise
         return None
     return files
 
 
 def _publication_fingerprints(workspace_dir: str) -> dict[int, set[str]] | None:
     """Return None when publication provenance cannot be read safely."""
-    files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
     try:
+        files = _snapshot_workspace(workspace_dir, include_publication_metadata=True)
         return intermediate_fingerprints(
             (path for path in (files or ()) if is_publication_sidecar(path) or is_metadata_record(path)), workspace_dir
         )
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         # Unknown intermediate provenance must not publish copied work files,
         # nor prevent the successful tool result from reaching the caller.
         _log.warning("Artifact discovery skipped for %s: cannot read publication metadata: %s", workspace_dir, exc)
@@ -447,3 +462,125 @@ def _detect_tool_artifacts(
         tool_call_id, pre_files, post_files, already, workspace_dir, content=content
     )
     return [*regex_artifacts, *diff_artifacts]
+
+
+def _detect_artifacts_in_chunks(
+    tool_call_id: str,
+    tool_name: str,
+    chunks: Iterator[str],
+    workspace_dir: str,
+    pre_files: dict[Path, tuple[int, int]] | None = None,
+    post_files: dict[Path, tuple[int, int]] | None = None,
+    already_emitted: set[str] | None = None,
+) -> list[ArtifactEvent]:
+    emitted = set(already_emitted or ())
+    artifacts: list[ArtifactEvent] = []
+    # Most output windows contain no file references. Resolve changed paths
+    # once and avoid repeated workspace scans for those windows.
+    candidates_by_file: dict[Path, set[str]] = {}
+    if pre_files is not None and post_files is not None:
+        root = Path(workspace_dir).resolve()
+        for path, signature in post_files.items():
+            if pre_files.get(path) == signature:
+                continue
+            try:
+                resolved = path.resolve()
+                relative = resolved.relative_to(root).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            candidates = {str(resolved), relative}
+            if os.name == "nt":
+                candidates.add(relative.replace("/", "\\"))
+                candidates.add(resolved.as_posix())
+                candidates.update(json.dumps(value, ensure_ascii=False)[1:-1] for value in tuple(candidates))
+            candidates_by_file[path] = candidates
+    candidate_paths = {candidate for candidates in candidates_by_file.values() for candidate in candidates}
+    candidate_pattern = re.compile("|".join(re.escape(path) for path in sorted(candidate_paths))) if candidate_paths else None
+    overlap = 8192
+    recent_references: OrderedDict[str, None] = OrderedDict()
+    previous = ""
+    current = next(chunks, "")
+    while current:
+        following = next(chunks, "")
+        # Sentinels prevent false path boundaries at cuts.
+        window = ("x" if previous else "") + previous + current
+        if following:
+            window += following[:overlap] + "x"
+        references = []
+        for match in _ARTIFACT_REF_RE.finditer(window):
+            reference = match.group(1)
+            if reference in recent_references:
+                recent_references.move_to_end(reference)
+                continue
+            recent_references[reference] = None
+            if len(recent_references) > 4096:
+                recent_references.popitem(last=False)
+            references.append(f"[{reference}]")
+        found = []
+        if references:
+            found, _ = _detect_regex_artifacts(
+                tool_call_id, tool_name, "\n".join(references), None, workspace_dir,
+            )
+        if candidate_pattern and candidate_pattern.search(window):
+            matching = {
+                path: post_files[path] for path, candidates in candidates_by_file.items()
+                if any(candidate in window for candidate in candidates)
+            }
+            found.extend(_detect_changed_files(
+                tool_call_id, pre_files, matching,
+                emitted | {artifact.abs_path for artifact in found}, workspace_dir, content=window,
+            ))
+        for artifact in found:
+            if artifact.abs_path not in emitted:
+                emitted.add(artifact.abs_path)
+                artifacts.append(artifact)
+        previous = current[-overlap:]
+        current = following
+    return artifacts
+
+
+def _detect_text_artifacts(
+    tool_call_id: str, tool_name: str, text: str, workspace_dir: str,
+    pre_files: dict[Path, tuple[int, int]] | None = None,
+    post_files: dict[Path, tuple[int, int]] | None = None,
+    already_emitted: set[str] | None = None,
+) -> list[ArtifactEvent]:
+    chunks = (text[offset:offset + 65536] for offset in range(0, len(text), 65536))
+    return _detect_artifacts_in_chunks(
+        tool_call_id, tool_name, chunks, workspace_dir, pre_files, post_files, already_emitted,
+    )
+
+
+def _detect_file_artifacts(
+    tool_call_id: str, tool_name: str, evidence_files: tuple[Path, ...], workspace_dir: str,
+    pre_files: dict[Path, tuple[int, int]] | None = None,
+    post_files: dict[Path, tuple[int, int]] | None = None,
+    already_emitted: set[str] | None = None,
+) -> list[ArtifactEvent]:
+    """Scan tool-owned complete output in bounded overlapping text windows."""
+    emitted = set(already_emitted or ())
+    artifacts: list[ArtifactEvent] = []
+    for path in evidence_files:
+        try:
+            if path.is_symlink():
+                continue
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            descriptor = os.open(path, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    continue
+                stream = os.fdopen(descriptor, encoding="utf-8", errors="replace")
+                descriptor = -1
+            finally:
+                if descriptor != -1:
+                    os.close(descriptor)
+            with stream:
+                found = _detect_artifacts_in_chunks(
+                    tool_call_id, tool_name, iter(lambda: stream.read(65536), ""),
+                    workspace_dir, pre_files, post_files, emitted,
+                )
+                artifacts.extend(found)
+                emitted.update(artifact.abs_path for artifact in found)
+        except (OSError, UnicodeError, ValueError):
+            _log.warning("Unable to read complete tool output for artifact discovery")
+    return artifacts

@@ -509,8 +509,9 @@ class SearchFilesTool(EventEmittingTool):
                     success=False,
                     error=(
                         "BROAD_HOME_SEARCH_BLOCKED: Recursive search from the entire user "
-                        "home is not allowed. Choose a specific likely directory such as "
-                        "~/Downloads or ~/Documents, or ask the user for the location."
+                        "home is not allowed. Do not retry the same scope with another tool. "
+                        "Use the project directory or the location named by the user "
+                        "(for example ~/Desktop); ask for the location only if it is unknown."
                     ),
                 )
             denied = self._permission_error(search_path)

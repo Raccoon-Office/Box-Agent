@@ -1,0 +1,57 @@
+{
+  "aliases": [],
+  "schema": {
+    "name": "read_video",
+    "description": "Read a local video: automatically sample timestamped frames using inspect_images and transcribe speech with the desktop Volc ASR service when configured. Specify start_seconds/end_seconds for a segment or a closer follow-up. Each call covers at most 600 seconds and 1-6 sampled frames, not every moment; longer videos return next_start_seconds for continuation. Check audio.status and visual.status before claiming either was understood. transcribe=false reads only frames. Native image pixels follow session retention; a text-only main model can use the configured vision proxy. Never changes the source.",
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Local video path; relative to the session cwd"
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 6000,
+          "description": "Question to answer from video frames and speech"
+        },
+        "start_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0
+        },
+        "end_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Exclusive end, defaults to video end; paginated at 600 seconds"
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6,
+          "default": 6
+        },
+        "transcribe": {
+          "type": "boolean",
+          "default": true
+        },
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "native",
+            "proxy"
+          ],
+          "description": "Same as inspect_images; omit for automatic selection"
+        }
+      },
+      "required": [
+        "path",
+        "instruction"
+      ]
+    }
+  }
+}

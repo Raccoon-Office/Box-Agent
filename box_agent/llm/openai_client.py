@@ -49,6 +49,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_TOKENS = 64000
 _EMPTY_ASSISTANT_CONTENT_PLACEHOLDER = "（该轮模型未返回可见回复。）"
 _DEEP_THINK_REASONING_EFFORT = "high"
+# Only opt documented model families into max; see docs/reasoning-configuration.md.
+_MAX_REASONING_EFFORT_MODELS = re.compile(
+    r"(?:^|/)(?:"
+    r"gpt-5\.6(?=$|[/:])|gpt-5\.6-(?:sol|terra|luna)|"
+    r"gpt-6-(?:astra|sol|luna)|gpt-6\.1-(?:sol|terra)|"
+    r"(?:sn-)?(?:kimi-k3\.1-pro|glm-5[.-][23]|sensenova-6[.-]8-flash-lite|"
+    r"deepseek-(?:v4-(?:pro|flash)|v4[.-]1-flash|flash))"
+    r")(?:$|[-/:])"
+)
 _DEFAULT_SENSENOVA_MODEL_PREFIXES = ("sensenova-", "sn-sensenova-")
 # This deployed model accepts low/medium/high, but rejects none (HTTP 422).
 _SENSENOVA_LOW_DEFAULT_MODELS = frozenset({
@@ -133,6 +142,10 @@ def _apply_thinking_params(
 ) -> None:
     """Map the session deep-think flag to the provider request dialect."""
     normalized_model = (model or "").strip().casefold()
+    deep_think_effort = (
+        "max" if _MAX_REASONING_EFFORT_MODELS.search(normalized_model)
+        else _DEEP_THINK_REASONING_EFFORT
+    )
     if (
         re.search(r"(?:^|/)gpt-6-(?:sol|luna)(?:$|[-/:])", normalized_model)
         and any(tool.get("type") == "function" for tool in params.get("tools", []))
@@ -143,15 +156,17 @@ def _apply_thinking_params(
         params["reasoning_effort"] = "none"
         return
     if re.search(r"(?:^|/)(?:sn-)?kimi-k3(?:$|[-:])", normalized_model):
-        params["reasoning_effort"] = "high" if thinking_enabled else "low"
+        params["reasoning_effort"] = "max" if thinking_enabled else "low"
         return
     if any(marker in normalized_model for marker in _GLM_5_3_MODEL_MARKERS):
-        params["reasoning_effort"] = "high" if thinking_enabled else "low"
+        params["reasoning_effort"] = deep_think_effort if thinking_enabled else "low"
         return
     if "deepseek" in normalized_model or "doubao" in normalized_model:
         params["extra_body"] = _litellm_extra_body(
             {"thinking": {"type": "enabled" if thinking_enabled else "disabled"}}
         )
+        if thinking_enabled and deep_think_effort == "max":
+            params["reasoning_effort"] = "max"
         return
     if "qwen" in normalized_model:
         params["extra_body"] = {"enable_thinking": thinking_enabled}
@@ -163,7 +178,7 @@ def _apply_thinking_params(
             params["reasoning_effort"] = reasoning_effort_when_disabled or "none"
         return
     if thinking_enabled:
-        params["reasoning_effort"] = _DEEP_THINK_REASONING_EFFORT
+        params["reasoning_effort"] = deep_think_effort
         return
     if _is_sensenova_model(model):
         default_effort = "low" if normalized_model in _SENSENOVA_LOW_DEFAULT_MODELS else "none"
@@ -497,12 +512,22 @@ def _token_usage_from_openai(provider_usage: Any) -> TokenUsage:
         and 0 <= cached_tokens <= prompt_tokens
     )
     cached_tokens = cached_tokens if cache_reported else 0
+    reasoning_tokens = _get_field(
+        _get_field(provider_usage, "completion_tokens_details"), "reasoning_tokens"
+    )
+    if (
+        not isinstance(reasoning_tokens, int)
+        or isinstance(reasoning_tokens, bool)
+        or reasoning_tokens < 0
+    ):
+        reasoning_tokens = None
     return TokenUsage(
         prompt_tokens=prompt_tokens,
         completion_tokens=_get_field(provider_usage, "completion_tokens") or 0,
         total_tokens=_get_field(provider_usage, "total_tokens") or 0,
         input_tokens=prompt_tokens - cached_tokens,
         output_tokens=_get_field(provider_usage, "completion_tokens") or 0,
+        reasoning_tokens=reasoning_tokens,
         cache_read_input_tokens=cached_tokens,
         cache_read_input_tokens_reported=cache_reported,
     )

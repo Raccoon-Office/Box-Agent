@@ -498,7 +498,16 @@ class ChatReferences:
         if any((request_hash, str(ref)) in self.denials for _, refs in impacted for ref in refs):
             return ToolResult(success=False, error="CHAT_REFERENCE_DELETE_DENIED: the user declined; stop deletion attempts."), frozenset()
         if any(change.operation != "delete" or not self.explicit_delete(change.path) for change, _ in impacted):
-            return ToolResult(success=False, error="CHAT_REFERENCE_PROTECTED: this operation would delete or move a file used by chat. Preserve it and its dependencies during cleanup. Normal edits and appends are allowed. Automatic cleanup must not request deletion approval."), frozenset()
+            paths = sorted({str(ref) for _, refs in impacted for ref in refs})
+            return ToolResult(success=False, error=(
+                "CHAT_REFERENCE_PROTECTED: Cleanup skipped; files used by chat were preserved: "
+                + ", ".join(paths[:5])
+                + (" (and more)" if len(paths) > 5 else "")
+                + ". Stop cleanup retries, including alternate tools or parent-directory deletion, "
+                "and continue the task. Normal edits and appends are allowed. "
+                "Put future disposable scripts in $BOX_AGENT_SCRATCH_DIR and let the session "
+                "clean them. Automatic cleanup must not request deletion approval."
+            )), frozenset()
         paths = {ref for _, refs in impacted for ref in refs}
         paths.update(change.path for change, _ in impacted)
         command = arguments.get("command", f"{name} " + json.dumps(arguments, sort_keys=True, ensure_ascii=False))
@@ -589,7 +598,7 @@ def chat_mutation_error(path: Path, operation="write", workspace: str | Path | N
         return None
     if operation == "delete" and current and path in current[1]:
         return None
-    return ToolResult(success=False, error=f"CHAT_REFERENCE_PROTECTED: keep {path} available to chat; do not {operation} it as cleanup. Normal edits and appends are allowed.")
+    return ToolResult(success=False, error=f"CHAT_REFERENCE_PROTECTED: Cleanup skipped; keep {path} available to chat; do not {operation} it as cleanup. Stop cleanup retries and continue the task. Normal edits and appends are allowed. Put future disposable scripts in $BOX_AGENT_SCRATCH_DIR and let the session clean them.")
 
 
 def bash_chat_mutation_error(command: str, workspace: Path, *, python_runtime=True, retention_workspace: str | Path | None = None) -> ToolResult | None:

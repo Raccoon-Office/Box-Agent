@@ -6,7 +6,9 @@ and user confirmation for destructive operations.
 
 import glob
 import os
+import platform
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -122,9 +124,21 @@ _RUNTIME_EXECUTABLE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "HYPERFRAMES_BROWSER_PATH": (),
     "PRODUCER_HEADLESS_SHELL_PATH": (),
 }
-_SHELL_ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+_SHELL_ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]+\])?\+?=")
 _SHELL_VARIABLE_NAME_RE = re.compile(
     r"^(?:\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|%([A-Za-z_][A-Za-z0-9_]*)%)$"
+)
+# Deliberately recognize only a literal path word, not general shell expansion.
+_LITERAL_PATH_WORD = (
+    r"(?:[\w./~+,:=@%\-]|\\[ \t])+"
+    r"|'[\w./~+,:=@% \-]+'"
+    r'|"[\w./~+,:=@% \-]+"'
+)
+_LITERAL_EXECUTABLE_PREFIX_RE = re.compile(
+    rf'^\s*(?:cd\s+(?P<directory>{_LITERAL_PATH_WORD})\s*&&\s*)?'
+    rf'(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<path>{_LITERAL_PATH_WORD})\s*&&\s*'
+    r'(?P<reference>"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")'
+    r'(?=\s|[;&|<>]|$)'
 )
 _MALFORMED_RUNTIME_FALLBACK_RE = re.compile(
     r"(?P<quote>['\"]?)\$(?P<name>BOX_AGENT_(?:PYTHON|PYTHON3|NPM|NPX|NODE))"
@@ -220,6 +234,49 @@ def trusted_runtime_executable_references(
     return frozenset(references)
 
 
+def _literal_executable_inspection_command(
+    command: str, inspection: ShellInspection, trusted_references: frozenset[str],
+) -> str | None:
+    """Rewrite one provably literal executable for inspection, never execution.
+
+    Restrict the prefix to an optional literal ``cd`` followed by an assignment
+    and an immediately adjacent quoted invocation joined by ``&&``.  General
+    shell control flow and variable expansion cannot be resolved by this parser.
+    """
+    if platform.system() == "Windows" or inspection.substitutions or inspection.ambiguous_regions:
+        return None
+    match = _LITERAL_EXECUTABLE_PREFIX_RE.match(command)
+    if match is None:
+        return None
+    if _shell_environment_mutations(inspection)[1]:
+        return None
+    name = match.group("name")
+    # Reassignment of a host-owned executable variable must not inherit trust.
+    if name in _RUNTIME_EXECUTABLE_FALLBACKS or any(
+        _shell_reference_variable(reference) == name for reference in trusted_references
+    ):
+        return None
+    if match.group("reference") not in {f'"${name}"', f'"${{{name}}}"'}:
+        return None
+
+    def literal_path(word: str) -> str | None:
+        words = shlex.split(word, posix=True)
+        if len(words) != 1:
+            return None
+        value = words[0]
+        if value.startswith("/") or (word.startswith("~/") and value.startswith("~/")):
+            return value
+        return None
+
+    if match.group("directory") and literal_path(match.group("directory")) is None:
+        return None
+    executable = literal_path(match.group("path"))
+    if executable is None:
+        return None
+    start, end = match.span("reference")
+    return command[:start] + shlex.quote(executable) + command[end:]
+
+
 def detect_dangerous_command(
     command: str,
     *,
@@ -239,6 +296,10 @@ def detect_dangerous_command(
         trusted_executable_references
     )
     inspection = inspect_shell_command(command)
+    if inspection_command := _literal_executable_inspection_command(
+        command, inspection, trusted_references
+    ):
+        inspection = inspect_shell_command(inspection_command)
     mutated_variables, unknown_environment_mutation = _shell_environment_mutations(
         inspection
     )
@@ -409,8 +470,8 @@ def _shell_reference_variable(reference: str) -> str | None:
 def _shell_environment_mutations(
     inspection: ShellInspection,
 ) -> tuple[set[str], bool]:
-    mutated: set[str] = set()
-    unknown = False
+    mutated = set(inspection.assigned_variables)
+    unknown = inspection.mutating_arithmetic
     for invocation in inspection.invocations:
         words = invocation.words
         executable = _normalized_executable(invocation.executable)
@@ -418,17 +479,21 @@ def _shell_environment_mutations(
             if match := _SHELL_ASSIGNMENT_WORD_RE.match(word):
                 mutated.add(match.group(1))
         if executable in {"read", "unset"}:
-            mutated.update(
-                word
-                for word in invocation.arguments
-                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word)
-            )
+            for word in invocation.arguments:
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word):
+                    mutated.add(word)
+                elif not word.startswith("-"):
+                    unknown = True
         if executable == "printf" and "-v" in invocation.arguments:
             index = invocation.arguments.index("-v")
             if index + 1 < len(invocation.arguments):
                 name = invocation.arguments[index + 1]
                 if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                     mutated.add(name)
+                else:
+                    unknown = True
+            else:
+                unknown = True
         if executable in {".", "eval", "source"}:
             unknown = True
     return mutated, unknown

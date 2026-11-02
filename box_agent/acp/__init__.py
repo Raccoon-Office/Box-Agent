@@ -72,7 +72,7 @@ from box_agent import __version__
 from box_agent.artifacts import is_intermediate_artifact
 from box_agent.agent_session import AgentSession
 from box_agent.acp.message_display import MessageDisplay
-from box_agent.injections import InjectionManager
+from box_agent.injections import InjectionKind, InjectionManager, MessageInjection
 from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.session_prompts import GENERAL_DIRECTORY_ORGANIZATION_PROMPT
 from box_agent.session_assembly import create_application_runtime
@@ -137,8 +137,10 @@ from box_agent.tools.skillhub_install_tool import (
 from box_agent.tools.mcp_loader import close_browser_session
 from box_agent.tools.browser_runtime_scope import (
     release_browser_runtime,
+    reset_browser_host_binding,
     reset_browser_runtime_owner,
     reset_browser_session_key,
+    set_browser_host_binding,
     set_browser_runtime_owner,
     set_browser_session_key,
 )
@@ -187,12 +189,10 @@ from box_agent.session_trace import (
     SessionTraceWriter, reset_session_trace_writer, scoped_session_trace,
     set_session_trace_writer,
 )
-from box_agent.session_log import SessionLog
+from box_agent.session_log import SessionLog, run_session_io
 from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import import_continuation_images, parse_session_continuation
-from box_agent.session_history import (
-    current_revision, prompt_fingerprint, revision_request, revise_agent_history,
-)
+from box_agent.session_history import prompt_fingerprint, revision_request, revise_agent_history
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -1039,6 +1039,7 @@ class SessionState(AgentSession):
     session_mode: str | None = None
     llm_binding: dict[str, Any] | None = None
     inject_queue: InjectionManager = field(default_factory=InjectionManager)
+    wrap_up_requested: bool = False
     connector_skill_grants: set[str] = field(default_factory=set)
     selected_connector_ids: set[str] = field(default_factory=set)
     connector_statuses: tuple[tuple[str, str, str], ...] | None = None
@@ -1201,6 +1202,14 @@ def _connector_skill_is_granted(skill: Any, connector_skill_grants: set[str]) ->
     ) in connector_skill_grants
 
 
+_UNAVAILABLE_CONNECTOR_STATUS = (
+    "<connector-status>\n"
+    "status: unavailable\n"
+    "连接器状态读取失败，请勿沿用之前轮次的连接状态。\n"
+    "</connector-status>"
+)
+
+
 def _connector_status_context(
     selected_connector_ids: set[str],
     connector_statuses: tuple[tuple[str, str, str], ...] | None = None,
@@ -1208,17 +1217,12 @@ def _connector_status_context(
 ) -> str:
     """Render connector-level state; individual MCP server health stays internal."""
     if connector_status_unavailable:
-        return (
-            "<connector-status>\n"
-            "status: unavailable\n"
-            "连接器状态读取失败，请勿沿用之前轮次的连接状态。\n"
-            "</connector-status>"
-        )
+        return _UNAVAILABLE_CONNECTOR_STATUS
     if connector_statuses is not None:
         lines = ["<connector-status>"]
         lines.extend(
             f"{connector_id} {connector_name}: {status}"
-            for connector_id, connector_name, status in connector_statuses
+            for connector_id, connector_name, status in sorted(connector_statuses)
         )
         lines.append("</connector-status>")
         return "\n".join(lines)
@@ -1399,18 +1403,35 @@ class BoxACPAgent:
         binding: dict[str, Any] | None,
         *,
         config: Config | None = None,
+        llm: Any | None = None,
     ) -> tuple[int, int]:
         """Resolve active-model capabilities with config fallback."""
 
         config = config if config is not None else self._config
-        context_window = (binding or {}).get(
-            "contextWindow",
-            config.llm.context_window,
-        )
-        max_output_tokens = (binding or {}).get(
-            "maxTokens",
-            config.llm.max_output_tokens,
-        )
+        windows = []
+        if binding is None or (
+            binding.get("source") == "builtin"
+            and binding.get("model") in {config.llm.model, getattr(self._llm, "model", None)}
+        ):
+            windows.append(config.llm.context_window)
+        for window in ((binding or {}).get("contextWindow"), getattr(llm, "context_window", None)):
+            if type(window) is int and window > 0:
+                windows.append(window)
+        for candidate in (binding or {}).get("autoRouting", {}).get("models", ()):
+            if candidate.get("model") == (binding or {}).get("model"):
+                window = candidate.get("contextWindow")
+                if type(window) is int and window > 0:
+                    windows.append(window)
+        if not windows:
+            model = (binding or {}).get("model")
+            if model is not None and model not in {config.llm.model, getattr(self._llm, "model", None)}:
+                raise ValueError("llm_binding.contextWindow is required for the selected model")
+            windows.append(config.llm.context_window)
+        context_window = min(windows)
+        output_limits = [value for value in (
+            (binding or {}).get("maxTokens"), getattr(llm, "max_output_tokens", None),
+        ) if type(value) is int and value > 0]
+        max_output_tokens = max(output_limits) if output_limits else config.llm.max_output_tokens
         return context_window, max_output_tokens
 
     def _summary_llm_for_session(
@@ -1891,8 +1912,10 @@ class BoxACPAgent:
         llm_binding = _normalize_llm_binding(meta) or self._default_llm_binding
         session_llm = SessionBoundLLM(self._llm_for_binding(llm_binding))
         session_context_window, session_max_output_tokens = (
-            self._context_capabilities_for_binding(llm_binding)
+            self._context_capabilities_for_binding(llm_binding, llm=session_llm)
         )
+        session_llm.context_window = session_context_window
+        session_llm.max_output_tokens = session_max_output_tokens
         session_token_limit = derive_context_token_limit(
             session_context_window,
             session_max_output_tokens,
@@ -2110,6 +2133,7 @@ class BoxACPAgent:
 
         recovery_prompt: str | None = None
         session_log: SessionLog | None = None
+        session_projection = None
         session_log_restored = False
         if upstream_session_id:
             for existing_handle, existing_state in list(self._sessions.items()):
@@ -2134,31 +2158,39 @@ class BoxACPAgent:
                         error=str(browser_error),
                     )
             session_root = state_path('sessions')
-            try:
-                session_log = SessionLog.open(
-                    session_root,
-                    session_id=upstream_session_id,
-                    cwd=workspace,
-                    recover=True,
-                )
-            except FileNotFoundError:
-                session_log = SessionLog.create(
-                    session_root,
-                    session_id=upstream_session_id,
-                    cwd=workspace,
-                )
-            else:
+
+            def open_log():
+                # Retain ownership even if cancellation arrives before the
+                # worker's result is delivered to this coroutine.
+                nonlocal session_log
                 try:
+                    session_log, projection = SessionLog.open_with_projection(
+                        session_root, session_id=upstream_session_id,
+                        cwd=workspace, recover=True,
+                    )
+                except FileNotFoundError:
+                    session_log = SessionLog.create(
+                        session_root, session_id=upstream_session_id, cwd=workspace,
+                    )
+                    return session_log.replay(), False
+                return projection, True
+
+            try:
+                session_projection, resumed = await run_session_io(open_log)
+                if resumed:
                     # Validate Skill sources before resume repair appends records.
-                    projection = session_log.replay()
                     restore_loader = (session_skill_loader if session_skill_loader is not None
                                       else AgentService.resolve_skill_loader(self._base_tools))
-                    await SkillRuntime(restore_loader, allow_partial_restore=True).arestore_records(projection.skills)
-                    session_log_restored = bool(projection.messages)
-                    session_log.prepare_resume()
-                except BaseException:
+                    await SkillRuntime(restore_loader, allow_partial_restore=True).arestore_records(session_projection.skills)
+                    session_log_restored = session_projection.has_messages
+                    session_projection = await run_session_io(
+                        lambda: session_log.prepare_resume_projection(session_projection)
+                    )
+            except BaseException:
+                if session_log is not None:
                     session_log.close()
-                    raise
+                raise
+            if resumed:
                 if session_log.recovery_source is not None:
                     recovery_prompt = (
                         "\n\nThe previous session runtime log could not be fully restored. "
@@ -2219,6 +2251,7 @@ class BoxACPAgent:
                     diagnostics=emit_diagnostic,
                 ),
                 agent_factory=Agent,
+                session_projection=session_projection,
                 allowed_connector_ids_provider=lambda: _connected_connector_ids(
                     selected_connector_ids
                 ),
@@ -2341,7 +2374,7 @@ class BoxACPAgent:
             "history_revision_versions": [1],
             "managed_mcp_config_versions": [1],
         }
-        response_meta["history_revision_id"] = current_revision(list(session_log.events)) if session_log else "initial"
+        response_meta["history_revision_id"] = session_log.current_revision() if session_log else "initial"
         if skillhub_search_enabled:
             response_meta["capabilities"]["skillhub_search_versions"] = [
                 SKILLHUB_SEARCH_CAPABILITY_VERSION
@@ -2611,7 +2644,7 @@ class BoxACPAgent:
                 history = state.agent.session_log
                 raise RequestError(-32011, str(exc), {
                     "code": str(exc),
-                    "history_revision_id": current_revision(list(history.events)) if history else "initial",
+                    "history_revision_id": history.current_revision() if history else "initial",
                 }) from exc
         elif state._history_restore_failed:
             raise ValueError("HISTORY_RESTORE_REQUIRED")
@@ -2629,8 +2662,7 @@ class BoxACPAgent:
             log_store = state.agent.session_log
             turn_id = _meta_string(meta, "turn_id", "turnId")
             if log_store is not None and turn_id:
-                if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
-                       for event in log_store.events):
+                if log_store.has_turn_binding(turn_id):
                     raise ValueError("TURN_ALREADY_ACCEPTED")
                 log_store.append("turn/binding", {
                     "turn_id": turn_id,
@@ -2643,7 +2675,7 @@ class BoxACPAgent:
                 history = state.agent.session_log
                 raise RequestError(-32011, str(exc), {
                     "code": str(exc),
-                    "history_revision_id": current_revision(list(history.events)) if history else "initial",
+                    "history_revision_id": history.current_revision() if history else "initial",
                 }) from exc
             raise
         finally:
@@ -2667,8 +2699,7 @@ class BoxACPAgent:
                 fingerprint=prompt_fingerprint(params.prompt),
             )
         checked_revision()
-        if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
-               for event in log_store.events):
+        if log_store.has_turn_binding(turn_id):
             raise ValueError("TURN_ALREADY_ACCEPTED")
         state._history_edit_in_progress = True
         state._history_cancel_requested = False
@@ -2684,8 +2715,7 @@ class BoxACPAgent:
                     raise ValueError("HISTORY_CANCEL_TIMEOUT") from exc
             if state.turn_active or state.run_handle.is_active:
                 raise ValueError("HISTORY_CANCEL_UNCONFIRMED")
-            if any(event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id
-                   for event in log_store.events):
+            if log_store.has_turn_binding(turn_id):
                 raise ValueError("TURN_ALREADY_ACCEPTED")
             suggestions = state.follow_up_suggestions_task
             if suggestions is not None and not suggestions.done():
@@ -2738,6 +2768,7 @@ class BoxACPAgent:
             pending_suggestions.cancel()
         state.follow_up_suggestions_task = None
         state.cancelled = False
+        state.wrap_up_requested = False
         prompt_images = _prompt_image_blocks(params.prompt)
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
         # Judge the language on the user's own words, before host prefixes are added.
@@ -2802,13 +2833,18 @@ class BoxACPAgent:
             )
         if hints and not state.utility_session:
             user_text = "\n\n".join([user_text.rstrip(), *hints])
+        host_connector_status = None
         if not state.utility_session:
-            connector_status = _connector_status_context(
-                state.selected_connector_ids,
-                state.connector_statuses,
-                state.connector_status_unavailable,
-            )
-            user_text = f"{user_text.rstrip()}\n\n{connector_status}"
+            try:
+                host_connector_status = _connector_status_context(
+                    state.selected_connector_ids,
+                    state.connector_statuses,
+                    state.connector_status_unavailable,
+                )
+            except Exception as exc:
+                log.warn("connector/context_unavailable", session_id=session_id,
+                         error_type=type(exc).__name__)
+                host_connector_status = _UNAVAILABLE_CONNECTOR_STATUS
         requested_llm_binding = _normalize_llm_binding(prompt_meta)
         if requested_llm_binding is not None and requested_llm_binding != state.llm_binding:
             if state.turn_active:
@@ -2818,7 +2854,7 @@ class BoxACPAgent:
             requested_llm = self._llm_for_binding(requested_llm_binding)
             requested_context_window, requested_max_output_tokens = (
                 self._context_capabilities_for_binding(
-                    requested_llm_binding, config=state.config,
+                    requested_llm_binding, config=state.config, llm=requested_llm,
                 )
             )
             requested_token_limit = derive_context_token_limit(
@@ -2826,6 +2862,8 @@ class BoxACPAgent:
                 requested_max_output_tokens,
             )
             state.session_llm.bind(requested_llm)
+            state.session_llm.context_window = requested_context_window
+            state.session_llm.max_output_tokens = requested_max_output_tokens
             state.session_llm.set_auto_model_candidates(
                 requested_llm_binding.get("autoRouting", {}).get("models", [])
             )
@@ -3189,7 +3227,9 @@ class BoxACPAgent:
             }
             if image_content else {}
         )
-        await state.agent.aadd_user_message(user_text, **image_kwargs)
+        await state.agent.aadd_user_message(
+            user_text, host_connector_status=host_connector_status, **image_kwargs,
+        )
 
         # Drain any stale injections from a previous turn
         for stale in state.inject_queue.begin_run(discard_pending=True):
@@ -3210,6 +3250,9 @@ class BoxACPAgent:
         # this turn (including nested sub-agent runs after they rebind the key)
         # starts from the MCP client owned by this session.
         browser_session_token = set_browser_session_key(session_id)
+        browser_host_token = set_browser_host_binding(
+            _meta_string(prompt_meta, "browser_host_binding") or None
+        )
         auto_enabled = (
             state.config.agent.goal_autopilot_enabled
             and state.config.agent.goal_autopilot_max_turns > 0
@@ -3244,6 +3287,7 @@ class BoxACPAgent:
                 )
                 while (
                     auto_enabled
+                    and not state.wrap_up_requested
                     and state.pending_plan_approval is None
                     and should_continue_goal_autopilot(state.agent, stop_reason)
                 ):
@@ -3367,15 +3411,23 @@ class BoxACPAgent:
             finally:
                 reset_browser_runtime_owner(browser_owner_token)
                 reset_browser_session_key(browser_session_token)
+                reset_browser_host_binding(browser_host_token)
             turn_meter = get_token_meter()
             reset_token_meter(meter_token)
         waiting_for_user = stop_reason == StopReason.WAITING_FOR_USER.value
         state.waiting_for_user_input = waiting_for_user
+        wrap_up_incomplete = bool(
+            state.wrap_up_requested
+            and state.agent.goal is not None
+            and state.agent.goal.status != "complete"
+        )
         execution_status = (
             "waiting_for_user"
             if waiting_for_user
             else "error"
             if stop_reason in {StopReason.ERROR.value, StopReason.INTERRUPTED.value}
+            else "incomplete"
+            if wrap_up_incomplete
             else "completed"
         )
         try:
@@ -3454,6 +3506,8 @@ class BoxACPAgent:
             stop_reason in {StopReason.ERROR.value, StopReason.INTERRUPTED.value}
             or bool(state.task_registry_error)
         )
+        if wrap_up_incomplete and stop_reason == StopReason.END_TURN.value:
+            acp_stop_reason = "max_turn_requests"
         # ACP has no generic error stop reason. Keep stopReason protocol-valid
         # and expose the internal outcome in stable response metadata instead.
         response_meta: dict[str, Any] = {
@@ -3474,11 +3528,14 @@ class BoxACPAgent:
                 if waiting_for_user
                 else "error"
                 if failed
+                else "incomplete"
+                if wrap_up_incomplete
                 else "completed"
             ),
             "completed": (
                 not failed
                 and not waiting_for_user
+                and not wrap_up_incomplete
             ),
             "paused": False,
             "usage": {
@@ -3494,7 +3551,7 @@ class BoxACPAgent:
         # 只在最外层用户请求结束时发布一次最终回答回执，不在每个内部 DoneEvent 时发布。
         # 自动续跑可能替换阶段性回答，资源清理失败也可能改变最终状态。
         # 因此必须在这些步骤完成后确认；等待审批、失败或预算耗尽都不触发成功折叠。
-        response_meta["history_revision_id"] = current_revision(list(state.agent.session_log.events)) if state.agent.session_log else "initial"
+        response_meta["history_revision_id"] = state.agent.session_log.current_revision() if state.agent.session_log else "initial"
         response_meta["messageDisplay"] = message_display.receipt(
             completed=(
                 not failed
@@ -3503,9 +3560,12 @@ class BoxACPAgent:
                 and stop_reason == StopReason.END_TURN.value
                 and not autopilot.budget_exhausted
                 and not autopilot.no_progress_exhausted
+                and not wrap_up_incomplete
             ),
             duration_ms=duration_ms,
         )
+        if state.wrap_up_requested:
+            response_meta["wrapUp"] = {"requested": True, "goalIncomplete": wrap_up_incomplete}
         if state.agent.goal is not None or autopilot.continuations > 0:
             response_meta["goalAutopilot"] = {
                 "enabled": auto_enabled,
@@ -3632,6 +3692,40 @@ class BoxACPAgent:
 
     async def extMethod(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
+        if method == "request_wrap_up":
+            state = self._sessions.get(params.get("sessionId", ""))
+            if state is None:
+                return {"error": "session_not_found"}
+            if not state.turn_active or state.cancelled:
+                return {"error": "no_active_turn"}
+            if params.get("turnId") and params["turnId"] != state.current_turn_id:
+                return {"error": "turn_mismatch"}
+            remaining = params.get("remainingSeconds")
+            if (
+                isinstance(remaining, bool)
+                or not isinstance(remaining, int)
+                or not 0 < remaining <= 10800
+            ):
+                return {"error": "invalid_remaining_seconds"}
+            if state.wrap_up_requested:
+                return {"ok": True, "deduplicated": True}
+            state.wrap_up_requested = True
+            state.inject_queue.submit(MessageInjection(
+                InjectionKind.BUDGET,
+                f"The host execution time budget has about {remaining} seconds remaining. "
+                "Begin wrapping up the current task now. Do not expand scope or start new research. "
+                "Use the remaining time for necessary saves/exports and bounded verification "
+                "against the user's requirements, pending work, and expected deliverables. "
+                "Check that produced files exist and are usable when applicable; retain existing "
+                "workflow quality gates. Report what is completed and verified, file locations, "
+                "unchecked or unfinished items, and a concrete continuation point. "
+                "Do not claim success solely because a file was created or time is running out. "
+                "Do not mark an unfinished goal complete. Finish with a concise final response "
+                "in the user's language before the deadline; no automatic goal continuation "
+                "will follow this run.",
+                injection_id=f"wrap-up:{uuid4()}",
+            ))
+            return {"ok": True}
         if method == "inject":
             session_id = params.get("sessionId", "")
             text = params.get("text", "")
@@ -5277,6 +5371,7 @@ class BoxACPAgent:
                             suggestions = getattr(llm, "follow_up_suggestions", [])
                             if (
                                 state.follow_up_suggestions_enabled
+                                and not state.wrap_up_requested
                                 and reason == StopReason.END_TURN
                                 and state.pending_plan_approval is None
                                 and (state.agent.goal is None or state.agent.goal.status != "active")
@@ -6014,6 +6109,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 exponential_base=rcfg.exponential_base,
             ),
             max_output_tokens=config.llm.max_output_tokens,
+            context_window=config.llm.context_window,
             max_request_body_bytes=config.llm.max_request_body_bytes,
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,

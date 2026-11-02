@@ -17,12 +17,14 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from time import monotonic
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ._win_job import assign_pid_to_job
 from .base import Tool, ToolResult
+from .output_capture import CapturedOutput, OutputCapture, bound_output_text
 from .python_environment import probe_python
 
 from box_agent.user_paths import state_path
@@ -36,6 +38,8 @@ IS_FROZEN = getattr(sys, "frozen", False)
 # timeout: it discards the (now busy, un-reusable) session so a fresh kernel is
 # built next time, instead of silently returning success with partial/no output.
 KERNEL_EXEC_TIMEOUT = "KERNEL_EXEC_TIMEOUT"
+_SANDBOX_PREPARE_TIMEOUT_SECONDS = 60.0
+_KERNEL_START_TIMEOUT_SECONDS = 60.0
 
 # Environment bootstrap runs before a tool call can return anything to the
 # model or TUI, so every child process needs a hard upper bound. Pip also gets
@@ -87,12 +91,14 @@ async def _communicate_sandbox_process(
     """Collect a sandbox bootstrap process without allowing an infinite wait."""
     try:
         return await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
         try:
             proc.kill()
         except ProcessLookupError:
             pass
         await proc.communicate()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise RuntimeError(
             f"{operation} timed out after {timeout:g} seconds"
         ) from exc
@@ -1134,6 +1140,7 @@ class JupyterKernelSession:
         self.sandbox_env = sandbox_env
         self._context = None  # run_kernel context
         self._kc = None
+        self._km = None
 
     async def start(self):
         """Start kernel using the sandbox venv's Python."""
@@ -1173,7 +1180,7 @@ class JupyterKernelSession:
         assign_pid_to_job(_kernel_pid)
         self._kc = km.client()
         self._kc.start_channels()
-        self._kc.wait_for_ready(timeout=30)
+        await asyncio.to_thread(self._kc.wait_for_ready, timeout=30)
 
         # Run setup code in the kernel
         setup_code = f"""
@@ -1190,15 +1197,9 @@ try:
 except ImportError:
     pass
 """
-        self._kc.execute(setup_code)
-        # Wait for setup to complete
-        try:
-            while True:
-                msg = self._kc.get_iopub_msg(timeout=10)
-                if msg.get("msg_type") == "status" and msg.get("content", {}).get("execution_state") == "idle":
-                    break
-        except Exception:
-            pass
+        _, _, setup_error = await asyncio.to_thread(self.execute, setup_code, 30)
+        if setup_error:
+            raise RuntimeError(f"KERNEL_SETUP_FAILED: {setup_error}")
 
     _provisioner_patched = False
 
@@ -1269,16 +1270,20 @@ except ImportError:
         if self._kc is None:
             return "", [], "Kernel not initialized"
 
-        # Drain any pending IOPub messages from previous operations
-        while True:
+        deadline = monotonic() + timeout
+        # Draining and receiving output share one wall-clock deadline.
+        while monotonic() < deadline:
             try:
                 self._kc.get_iopub_msg(timeout=0.1)
             except Exception:
                 break
 
-        stdout_parts = []
-        stderr_parts = []
-        error_parts = []
+        if monotonic() >= deadline:
+            return "", [], KERNEL_EXEC_TIMEOUT
+
+        output_dir = self.workspace / ".box-agent" / "tool-results"
+        output = OutputCapture(output_dir)
+        errors = OutputCapture(output_dir, "error")
         images = []
 
         try:
@@ -1289,7 +1294,13 @@ except ImportError:
             idle_received = False
             while not idle_received:
                 try:
-                    msg = self._kc.get_iopub_msg(timeout=timeout)
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        break
+                    msg = self._kc.get_iopub_msg(timeout=remaining)
+                    parent_id = msg.get("parent_header", {}).get("msg_id")
+                    if parent_id and parent_id != msg_id:
+                        continue
                     msg_type = msg.get("msg_type")
                     content = msg.get("content", {})
 
@@ -1302,15 +1313,16 @@ except ImportError:
                         text = content.get("text", "")
                         # Strip ANSI escape codes
                         text = re.sub(r"\x1b\[[0-9;]*m", "", text)
-                        if name == "stdout":
-                            stdout_parts.append(text)
-                        elif name == "stderr":
-                            # Collect stderr separately — only treat as error
-                            # if there's also an explicit error message
-                            stderr_parts.append(text)
+                        if name in ("stdout", "stderr"):
+                            # Warnings remain ordinary output, not execution
+                            # errors. Both streams share one bounded preview.
+                            output.append(text)
 
                     elif msg_type == "error":
-                        error_parts.append(f"{content.get('ename')}: {content.get('evalue')}")
+                        errors.append(str(content.get("ename")))
+                        errors.append(": ")
+                        errors.append(str(content.get("evalue")))
+                        errors.append("\n")
 
                     elif msg_type in ("display_data", "execute_result"):
                         data = content.get("data", {})
@@ -1328,23 +1340,15 @@ except ImportError:
             # stderr often contains warnings, pip notices, etc.
             error = (
                 KERNEL_EXEC_TIMEOUT if not idle_received
-                else "\n".join(error_parts) or None
+                else errors.finish().strip() or None
             )
 
         except Exception as e:
-            error = f"Execution failed: {str(e)}"
+            errors.append(f"Execution failed: {str(e)}")
+            error = errors.finish()
 
-        # Include stderr as part of stdout (warnings, pip output, etc.)
-        all_output = "".join(stdout_parts)
-        if stderr_parts:
-            stderr_text = "".join(stderr_parts).strip()
-            if stderr_text:
-                if all_output:
-                    all_output += "\n" + stderr_text
-                else:
-                    all_output = stderr_text
-
-        return all_output, images, error
+        errors.finish()  # Also close partial error output on a kernel timeout.
+        return output.finish(with_reference=True), images, error
 
     async def stop(self):
         """Stop the kernel."""
@@ -1356,7 +1360,11 @@ except ImportError:
             self._kc = None
         if self._km:
             try:
-                self._km.shutdown_kernel(now=True)
+                shutdown = getattr(self._km, "_async_shutdown_kernel", None)
+                if callable(shutdown):
+                    await asyncio.wait_for(shutdown(now=True), timeout=5)
+                else:
+                    await asyncio.wait_for(asyncio.to_thread(self._km.shutdown_kernel, now=True), timeout=5)
             except Exception:
                 pass
             self._km = None
@@ -1484,16 +1492,20 @@ except ImportError:
         if self._kc is None:
             return "", [], "Kernel not initialized"
 
-        # Drain pending IOPub messages
-        while True:
+        deadline = monotonic() + timeout
+        # Match subprocess kernels: output does not reset the execution budget.
+        while monotonic() < deadline:
             try:
                 self._kc.get_iopub_msg(timeout=0.1)
             except Exception:
                 break
 
-        stdout_parts = []
-        stderr_parts = []
-        error_parts = []
+        if monotonic() >= deadline:
+            return "", [], KERNEL_EXEC_TIMEOUT
+
+        output_dir = self.workspace / ".box-agent" / "tool-results"
+        output = OutputCapture(output_dir)
+        errors = OutputCapture(output_dir, "error")
         images = []
 
         try:
@@ -1502,7 +1514,13 @@ except ImportError:
             idle_received = False
             while not idle_received:
                 try:
-                    msg = self._kc.get_iopub_msg(timeout=timeout)
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        break
+                    msg = self._kc.get_iopub_msg(timeout=remaining)
+                    parent_id = msg.get("parent_header", {}).get("msg_id")
+                    if parent_id and parent_id != msg_id:
+                        continue
                     msg_type = msg.get("msg_type")
                     content = msg.get("content", {})
 
@@ -1514,15 +1532,14 @@ except ImportError:
                         name = content.get("name", "")
                         text = content.get("text", "")
                         text = re.sub(r"\x1b\[[0-9;]*m", "", text)
-                        if name == "stdout":
-                            stdout_parts.append(text)
-                        elif name == "stderr":
-                            stderr_parts.append(text)
+                        if name in ("stdout", "stderr"):
+                            output.append(text)
 
                     elif msg_type == "error":
-                        error_parts.append(
-                            f"{content.get('ename')}: {content.get('evalue')}"
-                        )
+                        errors.append(str(content.get("ename")))
+                        errors.append(": ")
+                        errors.append(str(content.get("evalue")))
+                        errors.append("\n")
 
                     elif msg_type in ("display_data", "execute_result"):
                         data = content.get("data", {})
@@ -1537,22 +1554,15 @@ except ImportError:
 
             error = (
                 KERNEL_EXEC_TIMEOUT if not idle_received
-                else "\n".join(error_parts) or None
+                else errors.finish().strip() or None
             )
 
         except Exception as e:
-            error = f"Execution failed: {str(e)}"
+            errors.append(f"Execution failed: {str(e)}")
+            error = errors.finish()
 
-        all_output = "".join(stdout_parts)
-        if stderr_parts:
-            stderr_text = "".join(stderr_parts).strip()
-            if stderr_text:
-                if all_output:
-                    all_output += "\n" + stderr_text
-                else:
-                    all_output = stderr_text
-
-        return all_output, images, error
+        errors.finish()
+        return output.finish(with_reference=True), images, error
 
     async def stop(self):
         """Stop the in-process kernel."""
@@ -1754,17 +1764,31 @@ class JupyterSandboxTool(Tool):
     ) -> "JupyterKernelSession | InProcessKernelSession":
         session = self._create_session(session_key, workspace, env)
         try:
-            await session.start()
-        except BaseException:
+            await asyncio.wait_for(session.start(), timeout=_KERNEL_START_TIMEOUT_SECONDS)
+        except BaseException as exc:
             try:
                 await session.stop()
             except Exception:
                 logging.getLogger(__name__).warning(
                     "Kernel cleanup after startup failure failed: %s", session_key, exc_info=True,
                 )
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                raise RuntimeError(
+                    f"KERNEL_START_TIMEOUT: kernel startup exceeded {_KERNEL_START_TIMEOUT_SECONDS:g}s"
+                ) from exc
             raise
         self._sessions[session_key] = session
         return session
+
+    @staticmethod
+    def _preparation_timeout_result() -> ToolResult:
+        return ToolResult(
+            success=False,
+            error=f"SANDBOX_PREPARE_TIMEOUT: environment preparation exceeded "
+                  f"{_SANDBOX_PREPARE_TIMEOUT_SECONDS:g}s. Use local_environment "
+                  "to inspect/prepare the managed Python environment, then retry.",
+            raw_output={"phase": "environment_prepare", "timeout_seconds": _SANDBOX_PREPARE_TIMEOUT_SECONDS},
+        )
 
     @staticmethod
     def _execute_session_code(
@@ -1935,6 +1959,9 @@ Output formats:
                 ),
             )
 
+        if python_path is not None and not python_path.strip():
+            python_path = None
+
         # A live session owns its interpreter. Never silently migrate variables
         # or switch a user-selected environment back to the host default.
         requested_session_id = session_id or self._session_id
@@ -1965,11 +1992,13 @@ Output formats:
         # Default execution checks host state; the model chooses when to prepare or retry.
         if selected_env is None and self.runtime_preparer is not None:
             try:
-                await self.runtime_preparer()
+                await asyncio.wait_for(self.runtime_preparer(), timeout=_SANDBOX_PREPARE_TIMEOUT_SECONDS)
                 if SandboxEnvironment._resolve_python_override(self.runtime_env) is None:
                     raise RuntimeError(
                         "Host reported ready but supplied no usable sandbox Python path."
                     )
+            except (asyncio.TimeoutError, TimeoutError):
+                return self._preparation_timeout_result()
             except RuntimeError as exc:
                 return ToolResult(
                     success=False,
@@ -1983,7 +2012,14 @@ Output formats:
                 )
         env = selected_env or self._get_sandbox_env()
         try:
-            await env.ensure_ready(on_progress=lambda msg: None)
+            await asyncio.wait_for(
+                env.ensure_ready(on_progress=lambda msg: logging.getLogger(__name__).info(
+                    "sandbox/prepare phase=%s",
+                    "dependency_install" if "install" in msg.lower() else "environment_probe",
+                )), timeout=_SANDBOX_PREPARE_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            return self._preparation_timeout_result()
         except RuntimeError as e:
             return ToolResult(
                 success=False,
@@ -2010,7 +2046,8 @@ Output formats:
             try:
                 await self._start_session(session_key, workspace, env)
             except RuntimeError as e:
-                return ToolResult(success=False, error=f"KERNEL_START_FAILED: {e}")
+                return ToolResult(success=False, error=f"KERNEL_START_FAILED: {e}",
+                                  raw_output={"phase": "kernel_start"})
             return ToolResult(
                 success=False,
                 content="",
@@ -2027,6 +2064,7 @@ Output formats:
                     success=False,
                     content="",
                     error=f"KERNEL_START_FAILED: {e}",
+                    raw_output={"phase": "kernel_start"},
                 )
 
         session = self._sessions[session_key]
@@ -2038,7 +2076,7 @@ Output formats:
         # Execute code — run synchronous kernel execute in a thread to avoid
         # blocking the event loop (pip installs inside %pip or auto-install can
         # take minutes).  Wrap with an overall timeout as a safety net.
-        _EXEC_TIMEOUT = max(timeout * 3, 180)  # at least 3 min overall
+        _EXEC_TIMEOUT = timeout + 15  # write-guard setup (10s) and cleanup (5s)
         from .chat_references import current_chat_policy
         reference_policy = current_chat_policy()
         execute_code = self._execute_session_code
@@ -2086,7 +2124,12 @@ Output formats:
                 )
 
             if error:
-                error = self._simplify_error(error)
+                # Keep an already-bounded file receipt intact, including the
+                # distinction between complete output and persistence failure.
+                error = bound_output_text(error, workspace / ".box-agent" / "tool-results", "error")
+                if not error.startswith("<persisted-output>"):
+                    error = self._simplify_error(error)
+                stdout = bound_output_text(stdout, workspace / ".box-agent" / "tool-results")
                 output = stdout.strip()
                 # Failed tool history uses error, not content. Keep diagnostics
                 # in both the visible output and the model's error message.
@@ -2099,6 +2142,9 @@ Output formats:
                 )
 
             # Detect NEW files created during execution
+            evidence_files = []
+            if isinstance(stdout, CapturedOutput):
+                evidence_files.append(stdout.complete_path)
             post_files = set(workspace.iterdir()) if workspace.exists() else set()
             new_files = post_files - pre_files
             artifact_exts = {
@@ -2120,8 +2166,17 @@ Output formats:
                 content_parts.append("\n".join(images))
 
             content = "\n".join(content_parts) if content_parts else "(No output)"
-            return ToolResult(success=True, content=content)
+            # Also covers custom kernels and many generated file references.
+            content = bound_output_text(content, workspace / ".box-agent" / "tool-results", with_reference=True)
+            if isinstance(content, CapturedOutput):
+                evidence_files.append(content.complete_path)
+            result = ToolResult(success=True, content=str(content), model_context=str(content))
+            result._artifact_evidence_files = tuple(evidence_files)
+            return result
 
+        except asyncio.CancelledError:
+            await self._discard_session(session_id)
+            raise
         except (asyncio.TimeoutError, TimeoutError):
             # The kernel is still blocked executing this code in a thread-pool
             # worker we cannot cancel. Discard the session so it is NOT reused

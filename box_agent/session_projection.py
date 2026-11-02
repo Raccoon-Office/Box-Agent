@@ -50,6 +50,10 @@ class SessionProjection:
         object.__setattr__(self, "_model_round", model_round)
 
     @property
+    def has_messages(self) -> bool:
+        return bool(self._messages)
+
+    @property
     def messages(self) -> list[Message]:
         return deepcopy(list(self._messages))
 

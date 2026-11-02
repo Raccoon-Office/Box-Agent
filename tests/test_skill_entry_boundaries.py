@@ -19,6 +19,9 @@ from box_agent.tools.skill_tool import GetSkillTool
 
 
 class CapturingProvider:
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     model = "offline-test"
     max_output_tokens = 1024
 

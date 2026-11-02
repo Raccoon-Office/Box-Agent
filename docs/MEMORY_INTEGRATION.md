@@ -406,6 +406,19 @@ The extractor can write explicit user-stated profile facts, preferences, and loc
 
 Project context, task patterns, historical notes, decisions, deadlines, and behavioral feedback still go to topic-sharded v2 experience memory. This keeps one-off task details out of core memory, and avoids running a memory extraction pass after every trivial stop.
 
+Lifecycle extraction inherits the selected model's configured output limit; it does not
+apply the generic 8,192-token utility cap. It requests concise JSON and validates the
+complete response before writing. Truncated responses, invalid JSON, and malformed
+operations count as failures; a valid response with empty arrays counts as success.
+Request or validation failures get at most one retry with the same prepared input.
+After a failed extraction, all triggers respect a separate 30-second failure backoff;
+the successful-extraction cooldown and step counter are not reset. Persistence errors
+are not retried within the call, and cancellation propagates. These background failures
+do not stop the main task. Response diagnostics include the requested output limit,
+finish reason, completion tokens, and reasoning tokens when the provider reports them,
+without logging the extracted memory text. Failed batches are not durably queued;
+later lifecycle triggers still use the latest conversation window.
+
 New v2 experience entries may include provenance metadata in the entry header:
 
 ```text

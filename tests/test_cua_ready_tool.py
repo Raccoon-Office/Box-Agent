@@ -27,7 +27,7 @@ def test_host_environment_selects_external_and_enables_plugin(monkeypatch):
     config = SimpleNamespace(plugins={})
     service = create_cua_service(config)
     assert service.config.mode == "external"
-    assert service.server_config["args"] == ["mcp", "--socket", "/host/socket", "--embedded"]
+    assert service.driver_server_config["args"] == ["mcp", "--socket", "/host/socket", "--embedded"]
     assert config.plugins["cua"]["runtime"]["enabled"]
 
 
@@ -123,7 +123,7 @@ def test_sessions_reject_conflicting_cua_runtime_ownership(monkeypatch, server_n
 
 
 @pytest.mark.asyncio
-async def test_cua_conflict_does_not_remove_other_server_definitions(tmp_path, monkeypatch):
+async def test_managed_cua_replaces_legacy_registration_and_preserves_other_servers(tmp_path, monkeypatch):
     file = tmp_path / "mcp.json"
     file.write_text(json.dumps({"mcpServers": {
         "computer-use": {"command": "legacy-cua"}, "other": {"command": "other-mcp"}}}))
@@ -131,7 +131,7 @@ async def test_cua_conflict_does_not_remove_other_server_definitions(tmp_path, m
     monkeypatch.setattr(loader, "_cua_service", service)
     try:
         definitions = loader._resolve_registered_sources(str(file))
-        assert definitions["computer-use"].config["disabled"]
+        assert definitions["computer-use"].config == service.server_config
         assert definitions["other"].config["command"] == "other-mcp"
     finally:
         await loader.cleanup_mcp_connections()
@@ -139,6 +139,7 @@ async def test_cua_conflict_does_not_remove_other_server_definitions(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_managed_cua_is_lazy_and_disabled_config_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":false,"mode":"standalone"}')
     file = tmp_path / "mcp.json"
     file.write_text(json.dumps({"mcpServers": {"computer-use": {"disabled": True}}}))
     service = CuaService(CuaConfig(runtime=CuaRuntimeConfig(enabled=True, driver_path="/trusted/driver")))
@@ -149,9 +150,73 @@ async def test_managed_cua_is_lazy_and_disabled_config_wins(tmp_path, monkeypatc
         assert tools == []
         result = await loader.reconnect_mcp_server(service.name)
         assert not result["success"] and result["error"] == "Server is disabled"
+        requirement = await EnsureCuaReadyTool(service).execute()
+        assert not requirement.success
+        assert requirement.error == "COMPUTER_USE_UNAVAILABLE: Server is disabled"
+        assert requirement.raw_output == {
+            "type": "runtime_component_required", "schema_version": 1,
+            "component_id": "computer-use", "code": "COMPUTER_USE_UNAVAILABLE",
+        }
+        assert "plugin settings" in requirement.model_context
+        assert "OS permissions" in requirement.model_context
         service.prepare.assert_not_awaited()
     finally:
         await loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    "Install and configure a trusted CuaDriver",
+    "Host CUA daemon is unavailable",
+    "CUA requires Accessibility and Screen Recording",
+])
+async def test_host_cua_failure_offers_component_setup_without_installing(monkeypatch, error):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":true}')
+    reconnect = AsyncMock(return_value={"success": False, "error": error})
+    monkeypatch.setattr(loader, "reconnect_mcp_server", reconnect)
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=True))
+    result = await EnsureCuaReadyTool(SimpleNamespace(name="computer-use")).execute()
+    assert result.raw_output["component_id"] == "computer-use"
+    assert error in result.error and error in result.model_context
+    assert "before retrying the original request" in result.model_context
+    assert "Do not install drivers" in result.model_context
+    reconnect.assert_awaited_once_with("computer-use")
+
+
+@pytest.mark.asyncio
+async def test_standalone_cua_failure_keeps_existing_error_contract(monkeypatch):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.delenv("BOX_AGENT_CUA_RUNTIME_CONFIG", raising=False)
+    monkeypatch.setattr(loader, "reconnect_mcp_server", AsyncMock(return_value={
+        "success": False, "error": "Install and configure a trusted CuaDriver",
+    }))
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=True))
+    result = await EnsureCuaReadyTool(SimpleNamespace(name="computer-use")).execute()
+    assert result.error == "Install and configure a trusted CuaDriver"
+    assert result.raw_output is None
+
+
+@pytest.mark.asyncio
+async def test_cua_discovery_loading_does_not_request_component_setup(monkeypatch):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":false}')
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=False))
+    result = await EnsureCuaReadyTool(None).execute()
+    assert not result.success and "still loading" in result.error
+    assert result.raw_output is None
+
+
+@pytest.mark.asyncio
+async def test_ready_host_cua_preserves_action_discovery_instructions(monkeypatch):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":true}')
+    monkeypatch.setattr(loader, "reconnect_mcp_server", AsyncMock(return_value={"success": True}))
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=True))
+    service = SimpleNamespace(name="computer-use", settings=SimpleNamespace(tool_interface="app"))
+    result = await EnsureCuaReadyTool(service).execute()
+    assert result.success and result.raw_output is None
+    assert "CUA ready. Use get_app" in result.content
 
 
 @pytest.mark.asyncio
@@ -167,3 +232,43 @@ async def test_cold_load_publishes_cua_without_starting_daemon(tmp_path, monkeyp
         service.prepare.assert_not_awaited()
     finally:
         await loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+async def test_app_interface_replaces_legacy_driver_registration_with_host_endpoint(tmp_path, monkeypatch):
+    from box_agent.plugins.cua import config as cua_config
+    monkeypatch.setattr(cua_config.sys, 'platform', 'darwin')
+    monkeypatch.setenv('BOX_AGENT_CUA_RUNTIME_CONFIG', json.dumps({
+        'enabled': True, 'mode': 'external',
+        'driver_path': '/host/driver', 'endpoint': '/host/socket',
+    }))
+    service = create_cua_service(SimpleNamespace(plugins={}))
+    assert service.settings.tool_interface == 'app'
+    file = tmp_path / 'mcp.json'
+    file.write_text(json.dumps({'mcpServers': {'computer-use': service.driver_server_config}}))
+    monkeypatch.setattr(loader, '_cua_service', service)
+    try:
+        definitions = loader._resolve_registered_sources(str(file))
+        config = definitions['computer-use'].config
+        assert config == service.server_config
+        assert not config['disabled']
+        file.write_text(json.dumps({'mcpServers': {
+            'computer-use': {**service.driver_server_config, 'args': ['mcp', '--socket', '/other/socket']}}}))
+        definitions = loader._resolve_registered_sources(str(file))
+        assert definitions['computer-use'].config == service.server_config
+    finally:
+        await loader.cleanup_mcp_connections()
+
+
+def test_live_cua_interface_cannot_be_silently_reused_after_switch(monkeypatch):
+    runtime = CuaRuntimeConfig(enabled=True, mode='external',
+                               driver_path='/host/driver', endpoint='/host/socket')
+    first = CuaService(CuaConfig(tool_interface="driver", runtime=runtime))
+    second = CuaService(CuaConfig(tool_interface='app', runtime=runtime))
+    monkeypatch.setattr(loader, '_cua_service', first)
+    try:
+        with pytest.raises(RuntimeError, match='already registered'):
+            loader.register_cua_service(second)
+    finally:
+        first.adapter.cleanup()
+        second.adapter.cleanup()

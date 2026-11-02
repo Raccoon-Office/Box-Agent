@@ -155,7 +155,8 @@ class SessionImageStore:
                 temporary = None
             # Flush reused blobs too: callers may have imported files from an
             # older producer that did not establish the same durability bound.
-            with target.open("rb") as handle:
+            # Windows requires a writable handle for _commit, used by fsync.
+            with target.open("r+b" if os.name == "nt" else "rb") as handle:
                 os.fsync(handle.fileno())
             if os.name != "nt":
                 for directory in (self.directory, self.directory.parent):

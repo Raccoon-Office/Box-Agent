@@ -48,6 +48,22 @@ _META_REFRESH_RE = re.compile(
     r'content=["\']?\d+;\s*url=([^"\'\s>]+)',
     re.IGNORECASE,
 )
+_VERIFICATION_HEADINGS = {
+    "安全验证", "人机验证", "security check", "security verification",
+    "verify you are human", "just a moment",
+}
+_VERIFICATION_INSTRUCTIONS = (
+    "请完成验证", "请完成安全验证", "请完成人机验证",
+    "verify you are human to continue", "verifying you are human",
+    "checking your browser", "complete the security check",
+    "enable javascript and cookies to continue",
+)
+
+
+class _VerificationRequiredError(Exception):
+    def __init__(self, final_url: str) -> None:
+        super().__init__("Page requires verification")
+        self.final_url = final_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +97,10 @@ class WebExtractTool(Tool):
             "Fetch and extract text from one public web page URL. Pages up to "
             "5,000 characters are returned directly; longer pages are summarized "
             "with the current LLM, or with the optional requested model. This uses "
-            "direct HTTP fetching and does not execute JavaScript."
+            "direct HTTP fetching and does not execute JavaScript, open a visible "
+            "browser, or interact with page controls. Verification pages return "
+            "WEB_VERIFICATION_REQUIRED; continue in an available browser and ask "
+            "the user to take over if human verification is needed."
         )
 
     @property
@@ -127,6 +146,25 @@ class WebExtractTool(Tool):
             result = await asyncio.wait_for(
                 self._fetch(normalized_url),
                 timeout=_FETCH_TIMEOUT_SECONDS,
+            )
+        except _VerificationRequiredError as exc:
+            return ToolResult(
+                success=False,
+                error=(
+                    "WEB_VERIFICATION_REQUIRED: The page is a verification challenge, "
+                    f"not article content. Continue at {normalized_url} "
+                    "in an available browser selected by Web Access Routing; "
+                    "discover browser tools if deferred. If human verification is needed, "
+                    "show the page and ask the user to take over. Wait for their confirmation, "
+                    "then read a fresh page in the same browser. Do not solve or bypass "
+                    "verification, repeatedly retry HTTP extraction, or claim the article "
+                    "was read. If no browser is available, report the blocker and URL."
+                ),
+                raw_output={
+                    "type": "web_extract", "status": "verification_required",
+                    "url": normalized_url, "final_url": exc.final_url,
+                    "next_action": "open_browser",
+                },
             )
         except asyncio.TimeoutError:
             return ToolResult(
@@ -327,6 +365,36 @@ def _validate_public_url(url: str) -> tuple[str, str | None]:
     return normalized, None
 
 
+def _is_verification_response(response: httpx.Response) -> bool:
+    if response.headers.get("cf-mitigated", "").strip().casefold() == "challenge":
+        return True
+
+    html = re.sub(
+        r"<!--.*?-->|<(script|style|template)\b[^>]*>.*?</\1\s*>",
+        "", response.text, flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = " ".join(_extract_simple_text(html).casefold().split())
+    headings = [
+        " ".join(_extract_simple_text(match.group(2)).casefold().split()).rstrip(" .…!！。")
+        for match in re.finditer(r"<(title|h1)\b[^>]*>(.*?)</\1\s*>", html, re.IGNORECASE | re.DOTALL)
+    ]
+    # Only leading interstitial instructions count, not article quotations.
+    leading = text
+    for heading in headings:
+        if heading and leading.startswith(heading):
+            leading = leading[len(heading):].lstrip(" .…!！。")
+    compact = "".join(leading.split())[:500]
+    if (
+        compact.startswith(("环境异常当前环境异常", "当前环境异常"))
+        and "完成验证后即可继续访问" in compact and "去验证" in compact
+    ):
+        return True
+    return bool(set(headings) & _VERIFICATION_HEADINGS) and any(
+        leading.removeprefix("please ").startswith(instruction)
+        for instruction in _VERIFICATION_INSTRUCTIONS
+    )
+
+
 async def _get_following_safe_redirects(
     url: str,
     timeout: httpx.Timeout,
@@ -335,6 +403,8 @@ async def _get_following_safe_redirects(
     for _ in range(_MAX_REDIRECTS + 1):
         response = await _send_public_request(current_url, timeout)
         if not response.is_redirect:
+            if _is_verification_response(response):
+                raise _VerificationRequiredError(current_url)
             response.raise_for_status()
             return response, current_url
 

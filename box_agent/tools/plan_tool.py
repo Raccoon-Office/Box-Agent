@@ -95,6 +95,39 @@ def _plan_snapshot(plan: dict[str, Any] | None, *, action: str | None = None) ->
     return payload
 
 
+def _plan_snapshot_preview(plan: dict[str, Any], *, action: str | None = None) -> dict[str, Any]:
+    """Keep the plan-card schema; shorten narrative fields, never its identity."""
+    def text(value: str, limit: int) -> str:
+        value = str(value or "")
+        if len(value) > limit:
+            marker = "\n...[details omitted]...\n"
+            side = (limit - len(marker)) // 2
+            value = value[:side] + marker + value[-side:]
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+
+    compact = {key: plan[key] for key in ("id", "status", "created_at", "updated_at") if key in plan}
+    compact.update({
+        key: text(plan.get(key, ""), 600 if key in {"objective", "scope"} else 200)
+        for key in ("title", "objective", "scope")
+    })
+    compact["steps"] = []
+    for key in ("verification", "risks", "assumptions"):
+        compact[key] = [text(value, 160) for value in plan.get(key, [])[:8]]
+    preview = _plan_snapshot(plan, action=action)
+    steps = plan.get("steps", [])
+    preview.update(plan=compact, preview=True, omitted_steps=len(steps))
+    for index, step in enumerate(steps[:64], start=1):
+        compact["steps"].append({
+            "id": step.get("id", str(index)), "title": text(step.get("title", ""), 160),
+            "details": text(step.get("details", ""), 512),
+        })
+        if len(json.dumps(preview, ensure_ascii=False).encode("utf-8")) > 48 * 1024:
+            compact["steps"].pop()
+            break
+    preview["omitted_steps"] = len(steps) - len(compact["steps"])
+    return preview
+
+
 class PlanStore:
     """Single-plan store for the current session."""
 
@@ -303,6 +336,7 @@ class PlanWriteTool(Tool):
             success=True,
             content=f"Set plan #{plan['id']}: {plan['title']}",
             raw_output=_plan_snapshot(plan, action="set"),
+            raw_output_preview=_plan_snapshot_preview(plan, action="set"),
         )
 
 
@@ -340,6 +374,7 @@ class PlanReadTool(Tool):
             success=True,
             content=self._format_plan(plan),
             raw_output=_plan_snapshot(plan),
+            raw_output_preview=_plan_snapshot_preview(plan),
         )
 
     @staticmethod

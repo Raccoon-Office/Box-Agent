@@ -75,6 +75,50 @@ def _has(tools: Collection[str] | None, *names: str) -> bool:
     return tools is None or all(name in tools for name in names)
 
 
+def render_web_access_policy(tools: Collection[str] | None) -> str:
+    """One routing contract, including sessions with discoverable MCP tools.
+
+    Keep this inherited block capability-neutral. Discovery instructions and
+    tool inventories belong to each agent's own tool surface, not its parent.
+    """
+    known = set(tools or ())
+    managed = any(name.startswith("managed_browser_") for name in known)
+    user = any(name.startswith("user_browser_") for name in known)
+    if tools is not None and not (
+        managed or user or known & {"web_search", "web_extract", "tool_search"}
+    ):
+        return ""
+    return "\n".join([
+        "## Web Access Routing",
+        "网页访问统一按以下优先级选择；Skill 负责选定通道内的执行细节，不另设跨通道优先级。",
+        "1. 显式目标优先：用户指定浏览器、标签页或读取方式时遵从指定；不可用就说明原因，不擅自替换。",
+        "2. 延续有效上下文：追问沿用最近成功操作的通道和页面；先确认目标仍有效。标签页失效先在原浏览器重新定位。"
+        "“当前页面”按会话目标解析，不因出现这几个字就改用系统浏览器；无关新任务重新选路。",
+        "3. 依赖用户日常浏览器的当前页、已有登录态、Cookie、扩展或内网环境时，使用系统浏览器。"
+        "已知登录态属于内置浏览器时继续使用该内置上下文；同域名已有标签页不能单独作为切入用户状态的理由。",
+        "4. 独立任务需要打开给用户看、交互、填表、截图或 JavaScript 渲染时，使用内置浏览器。"
+        "“打开百度”“在百度搜索北京天气”属于页面操作；“让我看/检查”本身不要求系统浏览器。"
+        "用户要亲自提交时停在提交前。",
+        "5. 已知公开 URL 且只需正文、分析或摘要时，优先正文读取（Web Fetch）；这不等于在可视面板打开页面。",
+        "6. 信息检索尚无目标 URL 时先搜索来源，再按以上规则读取；“查北京天气”不要求操作百度页面。"
+        "明确网址或能可靠确定的站点无需额外搜索，不能猜测未知路径。",
+        "失败后按原任务重新评估，不执行无条件 Fetch→内置→系统降级。"
+        "正文缺失且确认需要 JS 时可改用内置浏览器；某通道不可用不代表其他通道不可用。"
+        "只有未指定通道、不依赖该通道状态且替代方式能完成同一目标时才允许切换；Fetch 不能替代交互或展示。"
+        "权限拒绝和访问限制不能靠切换绕过；动作结果不确定先核验，不重放点击或提交。",
+        "正文读取返回 WEB_VERIFICATION_REQUIRED 或明确验证页时，该次没有取得正文，不得当作读取成功或用于文章摘要，"
+        "不要反复 HTTP 重试。用户未限定读取通道时，按上述规则用可用浏览器打开原 URL 继续访问；"
+        "浏览器工具未展示时按当前发现机制查找，不要直接断言不可用。",
+        "浏览器仍需人工验证时，先展示或保留可见验证页面，提示用户接管并等待用户确认；"
+        "不替用户完成或绕过验证，不反复触发挑战。确认后在同一浏览器读取新快照，核实验证已通过并取得正文后再继续。"
+        "没有可用浏览器、无法展示验证页面或验证仍未通过时，说明具体阻塞和目标链接，不得声称已读正文。",
+        "切换通道重新开始页面操作，不复用跨通道的标签页、元素引用、快照或 Cookie。"
+        "保持浏览器选择、页面操作结果和是否展示三个事实分开，不能把读取正文说成已打开给用户看。",
+        "工具名称和可用范围以当前任务实际提供的工具清单及发现机制为准；未展示不等于不可用。"
+        "委派任务缺少能力时向父 Agent 报告，由父 Agent 决定补充工具或重新选路；不得调用未获分配的工具。",
+    ])
+
+
 def render_planning_tools(tools: Collection[str] | None) -> str:
     """Planning/progress/delegation tool guidance for the Plan workflow step."""
     plan, todo = _has(tools, "plan_write"), _has(tools, "todo_write")
@@ -117,6 +161,63 @@ def render_code_search_tools(tools: Collection[str] | None) -> str:
     return "".join(parts) + "仅依据已取得的源码判断，缺少读取或搜索能力时明确说明验证边界，避免凭印象修改。"
 
 
+def _render_tabular_processing(tools: Collection[str] | None) -> str:
+    validation = (
+        "\n- CSV/TSV 完成门禁：本轮明确提供的原始输入必须调用 `validate_table`，"
+        "为每列按任务规则声明类型、必填性、枚举、金额范围与精度；先验证所有原始记录，再筛选或去重。"
+        "profile 默认 declared_fields，按用户实际规则验证；仅明确要求订单/退款固定约束的任务选 transaction_v1，不能凭列名推断。"
+        "首次校验前按任务声明 purpose：仅检查并报告错误用 diagnosis；要求有效数据的计算用 computation（默认）。"
+        "用途在本轮锁定，不得发现错误后改为诊断来放行。"
+        "计算输入默认不可变；仅用户要求原地编辑/追加的文件，首次扫描前声明 source_mode=edit_target，"
+        "先全量校验原版，写入后全量复验，新版本必须合格；改列时首次调用同时声明 output_fields，前后契约均锁定。"
+        "纯文件删除须事先声明 delete_target（不传 fields），纯替换且不处理旧记录须事先声明 replace_target 和新版 fields；"
+        "准备调用只返回 operation_ready，不是数据校验证据；删除验收实际不存在，替换验收新版全量合格。"
+        "重命名/移动须在首次扫描前声明 move_target、destination_path 和完整 fields；目标须不存在且声明后锁定。"
+        "原版仍须全量校验，移动后旧路径须消失、目标须可读且完整哈希一致；复制或改内容不算移动完成。"
+        "声明不授予写权限；文件角色不能事后切换，后续校验可省略 fields 继承对应契约。"
+        "程序检查 EOF、文件哈希和逐字段计数；缺少证据、扫描未完成或未声明的输入变化会阻止正常完成。"
+        "validation_complete 表示检查是否完成，data_valid 表示数据是否合格；"
+        "完整诊断可以发现错误并正常完成，计算任务仍要求数据合格。诊断须如实报告错误并交付要求的产物。"
+        "失败后不能放宽已扫描的字段规则，须保留并报告诊断。此门禁不替代输出计算及读回校验。"
+        if _has(tools, "validate_table") else ""
+    )
+    if _has(tools, "execute_code"):
+        execution = "用 `execute_code`"
+    elif _has(tools, "bash"):
+        execution = "用 `bash` 调用已有 Python 解释器"
+    else:
+        return (
+            "\n- 大表计算：缺少程序执行能力时，明确全量计算和校验尚未验证，"
+            "不能用样例推断总体；用户指定全文或逐条语义审阅时仍须覆盖所需记录。" + validation
+        )
+    return (
+        "\n- 大表计算（CSV/TSV/Excel）：先" + execution + "提取表头、少量样例和数据概况，"
+        "不要为汇总、对账把整表或大页明细打印进对话。随后按任务规则解析全部输入记录（可分块），"
+        "用正确的格式解析器处理编码、分隔符、引号及字段内换行；预览不代表全量处理，"
+        "不得以 head、nrows 或抽样代替全量计算。校验记录数、类型、缺失值、解析错误及任务要求的"
+        "去重、过滤和汇总勾稽；不得静默跳过错误记录，发现问题须报告具体位置并按任务约定处理，"
+        "无法确定时标记未完成。对话只返回统计、校验结果和有界异常样例；保存后重新读取产物，"
+        "核对格式、记录数与关键汇总。用户指定全文或需要逐条语义审阅时仍须覆盖全部必要记录，"
+        "不能用程序汇总或预览替代。" + validation
+    )
+
+
+def _render_docx_reading(tools: Collection[str] | None) -> str:
+    prefix = "\n- DOCX（.docx）读取："
+    no_text_probe = "不要先用文本读取工具试读。"
+    if _has(tools, "execute_code"):
+        execution = "直接用 `execute_code`"
+    elif _has(tools, "bash"):
+        execution = "直接用 `bash` 调用已有的应用托管 Python"
+    else:
+        return prefix + "缺少文档解析执行能力时说明限制，请用户提供文本；" + no_text_probe
+    return (
+        prefix + execution + " 配合 `python-docx`（`from docx import Document`），"
+        "按用户提供的路径打开文档，读取所需段落和表格。" + no_text_probe
+        + "只需正文时不依赖样式；需要样式时先判断 style 是否为空。"
+    )
+
+
 def _render_file_operations(tools: Collection[str] | None) -> str:
     email_rule = (
         "\n- EML 邮件用 `read_email` 只读解码邮件头、正文并列出附件；长正文按 next_offset 继续读取，"
@@ -129,7 +230,7 @@ def _render_file_operations(tools: Collection[str] | None) -> str:
             "提取，再用相应文件工具处理。此操作需要写权限，不能覆盖现有文件。"
         )
     if _has(tools, "read_file", "search_files", "query_jsonl"):
-        return _FILE_OPERATIONS_FULL + email_rule
+        return _FILE_OPERATIONS_FULL + _render_docx_reading(tools) + _render_tabular_processing(tools) + email_rule
     directory = _FILE_OPERATIONS_FULL.splitlines()[0]
     if not _has(tools, "search_files"):
         directory = directory.replace("先用 `search_files` 查看 cwd", "先依据已提供的工作区信息确认位置")
@@ -142,7 +243,7 @@ def _render_file_operations(tools: Collection[str] | None) -> str:
         parts.append("- JSONL/NDJSON 使用 `query_jsonl` 做字段投影和游标分页。")
     parts.append("- 缺少必要的文件能力时请求用户提供正文或明确位置；不要猜测文件内容或声称已读取。")
     parts.append("- 不要用 bash 拼接常规搜索，也不要因 JSONL 超长记录改用 `execute_code` 整体读取。")
-    return "\n".join(parts) + email_rule
+    return "\n".join(parts) + _render_docx_reading(tools) + _render_tabular_processing(tools) + email_rule
 
 
 def _render_analysis_execution(tools: Collection[str] | None) -> str:
@@ -185,5 +286,6 @@ __all__ = [
     "PLANNING_TOOLS_PLACEHOLDER",
     "render_code_search_tools",
     "render_planning_tools",
+    "render_web_access_policy",
     "resolve_capability_placeholders",
 ]

@@ -14,6 +14,8 @@ inferences, subject to encoded-byte and provider request-body limits. Pixels sta
 outside durable message content; SessionLog records references and lifecycle
 metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
+Before sending a summary request, Box-Agent estimates the complete history plus the appended summary instruction against the session's safe input budget. Both ordinary and forced compaction apply this check. An over-budget summary skips the provider call and uses the local bounded fallback; the rebuilt main request is then checked before sending.
+
 ## Request lifecycle
 
 ```text
@@ -61,6 +63,127 @@ Provider usage includes image input. The assistant message retains the numeric
 request-only token estimate, which is subtracted from the text-history estimate
 before adding the current request's overlay. Image cost is estimated from pixel
 dimensions; base64 length is used for transport budgets, not conversational text.
+
+## Large-table processing before context growth
+
+For CSV/TSV/Excel calculations, shared capability-gated guidance prefers a small
+schema/sample and data profile, then full-record processing with `execute_code`
+or an existing Python interpreter through `bash`. Parsing may be chunked, but
+sampling is not evidence of complete computation. Validate record counts,
+types, missing values, parse errors and task-specific reconciliation; never
+silently drop bad records. Return aggregates, validation results and bounded
+exceptions, then reopen saved outputs and verify their format and key totals.
+
+With file tools enabled, `validate_table` enforces a completion gate for existing
+local CSV/TSV inputs explicitly referenced by the current user turn. After read
+authorization it pins source SHA-256 and parses every original record to EOF,
+including superseded, cancelled and tail records. The declared contract must
+cover every column: required/nullable, text, integer, finite decimal with bounds
+and scale, date, boolean or explicit enum values.
+
+User supplements received during a run add their explicitly referenced inputs to
+the same gate without discarding earlier receipts or relaxing the locked purpose.
+Quoted and Markdown paths are matched as whole paths, not as extra bare filenames.
+The CSV parser supports fields up to at least 16 Mi characters, retaining any
+higher process-wide allowance; parser errors still leave EOF coverage unverified.
+
+The default `profile="declared_fields"` applies the user's actual field rules,
+including legitimate negative amounts, revision zero or higher precision.
+Column names never select domain semantics. Explicit `profile="transaction_v1"`
+for matching order/refund requirements enforces required IDs, integer revision >= 1,
+finite nonnegative amount with at most two decimal places, status and present
+region/currency as enums, date as a date, and is_test as a boolean. These fields
+cannot be weakened to nullable/text. The selected profile is locked with the
+field contract and inherited by later calls; it cannot be downgraded after
+discovering invalid data.
+
+Receipts contain source/contract hashes, logical record counts, per-field counts
+and at most 20 error samples. Session Log events `table.inputs`, `table.validation`
+and `completion.check` retain audit evidence. Model claims and public result JSON
+cannot credit a gate. Missing receipts allow at most two repair prompts;
+incomplete scans, changed inputs, failed checks or exhausted repair attempts end
+with `COMPLETION_GATE_UNSATISFIED`. Scanned field contracts cannot be relaxed,
+and later turns must revalidate.
+
+Interactive user questions and plan-approval pauses retain pending checks.
+`completion.paused` stores capability-owned inputs, hashes, locked contracts,
+roles and scan receipts in Session Log; a reopened session restores them before
+adding any newly supplied inputs. An in-memory conversation uses a scoped
+checkpoint on its existing tools. Transcript text and public tool JSON are never
+replayed as validation evidence. Resumed checks recheck current file hashes;
+missing capabilities or unsupported checkpoints block completion. A terminal
+success, failure or cancellation closes the pending task with `completion.closed`,
+so an unrelated later task starts fresh. Only Session Log provides durable state.
+
+Declare `purpose` before the first scan: `diagnosis` only inspects/reports errors;
+`computation` requires valid inputs and is the initial default. Omitted later
+calls inherit the run's locked purpose. The `table.purpose` event records this
+decision; it cannot be changed after discovering invalid data. Both purposes
+still require every original input/field, EOF and hashes matching the validated version. Diagnosis
+must truthfully report findings and deliver/read back requested artifacts;
+computation additionally requires every input to be valid.
+
+For user-requested in-place edits/appends, declare `source_mode="edit_target"`
+on that file's first validation call, before writing. The default `input` role
+remains immutable, and roles cannot change after scanning starts. An edit target
+must first receive a complete original scan; the original receipt is retained.
+Each edited version must be fully rescanned with the declared field contract and the
+final version must be valid, even in diagnosis mode. A write without a new scan
+requests validation instead of treating an expected edit as irreparable source
+damage. Other input files retain their immutable hashes. This declaration must
+match the user's instruction; it does not authorize writes or prove edit intent,
+and normal tool permissions and producer write receipts remain unchanged.
+For schema-changing edits, declare `output_fields` alongside the original
+`fields` before the first scan. Both contracts are locked. Later calls can omit
+`fields` to inherit the applicable final contract; original and final scans must
+each cover every column and record.
+
+Pure file management uses explicit roles before the operation. `delete_target`
+without fields prepares deletion, even for a malformed CSV; completion requires
+the path to be absent. `replace_target` with the required final `fields` prepares
+whole-file replacement without processing old records; after writing, call
+the validator again to fully validate the new file. These preparation calls
+return `operation_ready=true`, `validation_complete=null`, `data_valid=null`,
+and record `table.file_operation`, not data-scan evidence. They retain the old
+hash but never certify the old data or authorize the actual write. Missing
+deletion or final validation blocks completion. Other inputs remain mandatory,
+and roles/contracts cannot be switched after declaration. These roles must
+match user instructions, not be used to skip validation of calculation inputs.
+
+For a rename or move, declare `source_mode="move_target"`, `destination_path`
+and the complete original `fields` before the first scan and before moving.
+The destination must be different and absent, and is locked with the contract.
+Both the declared absolute path and its resolved target are retained; the
+declared path must still resolve to that target before and after hashing,
+including after Session Log restore.
+Unlike deletion preparation, this call still scans every original field and
+record to EOF. After the authorized move, completion requires the original
+path to be absent and the destination to be readable, without replaced symlinks,
+with the full SHA-256 matching the original receipt. The existing computation
+or diagnosis validity rule still applies. Copying without removing the source,
+changing bytes, missing scans, or missing validation of other inputs blocks
+completion. The original receipt and destination survive an interactive pause
+and Session Log restore. This declaration neither moves a file nor changes
+writer permissions or chat-reference protection; it verifies an already
+completed move. A rename that also changes data is not covered by this role.
+
+For scan calls, tool `success` and `validation_complete` mean the validation ran completely.
+`data_valid` independently reports data quality, or `null` for an incomplete
+scan. A completed diagnosis can return `success=true, validation_complete=true,
+data_valid=false` and finish normally; the same invalid data still blocks a
+computation task. Legacy `valid` keeps its original meaning. Consumers must not
+use tool success as a substitute for data validity. Task termination,
+`completion.check`, and `table.validation` retain their separate outcomes.
+Purpose must match the user's task; this declaration neither infers user intent
+nor replaces business-delivery acceptance.
+
+This proves **whole-source validation against the declared contract**. Business
+meaning, allowed enums and bounds still come from task requirements; the gate
+does not infer them or prove subsequent calculations/output correctness. Compute
+and readback reconciliation remain necessary. Excel, paths discovered only in
+tool output and sessions without this tool are outside this gate. Plan approval
+and waiting for user input are not evidence of completed data processing.
+`read_file` pagination, JSONL policy, 600-second waits and 429 behavior are unchanged.
 
 ## Oversized tool-result storage
 
@@ -163,6 +286,86 @@ session is created and recomputes it whenever the binding changes between
 turns. Missing binding capabilities fall back to `config.yaml`, which remains
 the capability source for user-configured model presets.
 
+Automatic routing also checks each candidate's input budget before ranking it.
+When the output limit is known, it uses the same `derive_context_token_limit`
+calculation, including any smaller output cap for that auxiliary call. A missing
+catalog output limit inherits the current client's output limit; if neither is
+known, routing retains the legacy 80% window budget. Candidates with no remaining
+input budget are excluded. If any candidate declares a context window, only
+candidates with known, sufficient capacity are eligible. An insufficient pool
+raises `AUTO_MODEL_CONTEXT_CAPACITY_EXCEEDED`; it never falls back to the largest
+insufficient window or to a candidate with unknown capacity. Entirely missing
+window metadata retains legacy routing with `context_capacity=unknown`; this
+does not establish capacity safety. Known-capacity diagnostics include
+`context_capacity=estimated` and `input_token_budget`. These checks use routing
+estimates and do not replace the full-request accounting and compaction below.
+If a capacity-checked model cannot be bound, `AUTO_MODEL_BINDING_FAILED` stops
+the call instead of silently inheriting the previous, unverified client budget.
+
+### Explaining a model-routing decision
+
+Lexical task signals separate clearly delimited translation source from the
+instruction. For example, translating a sentence containing “error” or “fixed”
+does not itself add a `debug` tag or require ability 3. This applies to direct
+Chinese/English translation requests with paired quotes or a single-line source
+after a colon. Additional analysis/fix actions, unclosed quotes, and ambiguous
+boundaries retain the original classification. Full request text, length
+thresholds, and token estimates are unchanged. Explicit image/tool/capability
+requirements and desktop thinking/expert signals still apply, as do manual
+bindings and session continuity rules.
+
+`resolve_model_client` emits `model.routing` records through the existing Python
+INFO logger and, when a session trace context is active, the session JSONL trace.
+ACP sends Python logs to stderr; the desktop host collects them in
+`box-agent-stderr.log` under its logs directory. Trace files use the existing
+`BOX_AGENT_SESSION_TRACE_DIR` / `log/sessions` location and retention policy;
+`BOX_AGENT_SESSION_TRACE_ENABLED=0` disables that trace transport. Other hosts
+must enable INFO logging to retain decisions made outside a trace context.
+
+Group records by `routing_id`. An Agent attempt records `decision`, followed by
+`bound`, `inherited`, or `binding_failed`; a rejected selection only records
+`decision`. `strategy` distinguishes child tasks and utility calls. Within a trace,
+the outer record also carries `session_id` and `turn_id`. The desktop's main-model
+selection uses `[local-agent] model routing` in its Electron log, with its own
+`routing_id` and `session_id`: `decision` is followed by `persisted` or
+`preparation_failed`. These IDs identify attempts within each engine, not one
+cross-process transaction. A selected candidate does not prove that a binding
+was saved or that a provider request succeeded.
+
+The versioned `decision` contains task tags, required ability, estimated input,
+capacity certainty, and up to 64 candidate summaries. `candidate_count` and
+`candidates_truncated` expose omissions; the selected candidate is always kept.
+For each candidate, inspect `input_token_budget`, `matched_tags`,
+`rejection_reasons`, and `score_breakdown`:
+
+| Field / reason | Meaning |
+| --- | --- |
+| `context_capacity`, `context_unknown`, `ability`, `vision` in `rejection_reasons` | Candidate failed the corresponding constraint; `score=null` means it did not enter ranking. |
+| `highest_score` | An eligible model won the existing score calculation. |
+| `catalog_order_tiebreak` | Eligible scores tied; the earlier catalog entry won. |
+| `previous_model_eligible` (desktop) | The current model still qualifies and was retained, even if another model scores higher. `minimum_ability_level` includes the current model's ability. |
+| `manual_model`, `no_auto_model_pool`, `task_context_not_supplied` | A fixed or existing binding was retained without a new automatic ranking. |
+| `no_context_candidate`, `no_ability_candidate`, `no_vision_candidate` | No candidate passed the relevant constraint. |
+
+Scores preserve the existing policy: 100 per matching tag, ability × 20 for
+non-simple tasks or ability × -5 for simple tasks, and 25 for a `fast` model on
+a simple task. The desktop also adds 2 for its catalog default. Constraint
+rejections take precedence over scores. For example, a model with a matching
+`code` tag and ability 3 scores 160; another ability-3 model without matching
+tags scores 60. A model with insufficient input capacity or ability cannot win
+by having more matching tags.
+
+Records project only these diagnostic fields: they do not copy the task text,
+file paths, credentials, full model bindings, or exception text. Model names and
+tags are bounded. Logging failures do not change routing outcomes. These records
+explain local policy and client preparation, not model quality or a gateway's
+eventual backend choice.
+
+See the [routing evaluation baseline](../test_workspace/README.md#自动路由评测基线2026-10-31)
+for offline policy checks and controlled comparisons of captured fixed-model and
+automatic runs. Reports keep observed routing decisions, actual model requests,
+and independent task outcomes separate.
+
 ### Estimating the next request
 
 Provider clients attach usage metadata to the assistant message produced by a real API response. Compaction finds the newest such message and computes its complete response context as:
@@ -174,11 +377,15 @@ input_tokens
 + output_tokens
 ```
 
-It then estimates messages appended after that response conservatively. If no message has real API usage, the entire pending request—including tool schemas—is estimated with the larger of `characters / 4` and UTF-8 bytes `/ 3`. This avoids severe under-counting for CJK and other multibyte text.
+It then estimates messages appended after that response and independently measures the complete current request, including its actual offered tool schemas. The larger estimate is used, so old usage cannot hide newly activated tools or changed request material. The two complete estimates are not added together.
+
+Runtime requests use a conservative UTF-8 byte bound for text when the endpoint tokenizer is unknown; image payload bytes are excluded and the existing image-token estimate is added separately. A custom client may provide `estimate_text_tokens(text)` when it has a trustworthy model-specific counter. Legacy low-level estimates without a client retain their character/byte heuristic. Unknown-tokenizer requests may compact earlier than an exact tokenizer would require. After one bounded compaction, the final request is measured again and rejected locally if it still exceeds the safe input budget.
+
+The run budget is capped by the active client's known context window and matching catalog entry, after reserving its actual output cap. ACP takes the smallest known window from the binding, resolved profile/client, and matching catalog entry. A binding for a different model without any known window is rejected locally instead of inheriting another model's global window. Profile output limits are retained when host metadata omits them. These checks depend on accurate capability declarations; a service that silently lowers its own limit cannot be detected from local configuration alone.
 
 ### Compacted message layout
 
-Compaction makes one summary request by appending a temporary `user` instruction to the exact existing message list. It does not serialize messages into a new prompt and does not split or roll the source. This preserves the complete provider message prefix so the summary request can reuse its KV cache. ACP resolves this call through the session model router and caps it at 4,096 output tokens. Automatic sessions may select only from the host-provided `autoRouting.models` pool, ranked by the summary task tags, ability, and context fit. Context fit uses the active Agent's safe input limit so a small-window utility model is not selected for a larger history. Explicitly selected sessions stay on that exact model; there is no independent lite-model switch. ACP ignores `autoRouting` when `routingMode=manual`, even if the host sends a stale or malformed pool. This applies to session, child-agent, and utility bindings; legacy builtin bindings without a routing mode retain pool-based routing. Other hosts may supply a dedicated summary client or fall back to the main client. Tools and thinking are disabled. The instruction requires a chronological list of every user message and places all structured analysis inside one `<summary>...</summary>` block, with an embedded nine-section output example. The response must consist of exactly one non-empty summary block; only its inner text is written after `Summary:` and the tags are discarded. The requested and locally enforced summary limit is 8,000 characters; if the rebuilt request still exceeds the safe input limit, the same summary is deterministically tightened to 4,000 and finally 2,000 characters without another provider call. If the call fails, is malformed, or returns empty output, an explicitly lossy deterministic bounded fallback is used. If the rebuilt request still exceeds the limit, the turn ends with a normal context-limit error; compaction does not invoke a domain recovery state machine.
+Compaction makes one summary request by appending a temporary `user` instruction to the exact existing message list. It does not serialize messages into a new prompt and does not split or roll the source. This preserves the complete provider message prefix so the summary request can reuse its KV cache. ACP resolves this call through the session model router and caps it at 8,192 output tokens. Automatic sessions may select only from the host-provided `autoRouting.models` pool, ranked by the summary task tags, ability, and context fit. Context fit uses the active Agent's safe input limit so a small-window utility model is not selected for a larger history. Explicitly selected sessions stay on that exact model; there is no independent lite-model switch. ACP ignores `autoRouting` when `routingMode=manual`, even if the host sends a stale or malformed pool. This applies to session, child-agent, and utility bindings; legacy builtin bindings without a routing mode retain pool-based routing. Other hosts may supply a dedicated summary client or fall back to the main client. Tools and thinking are disabled. The instruction requires a chronological list of every user message and places all structured analysis inside one `<summary>...</summary>` block, with an embedded nine-section output example. The response must consist of exactly one non-empty summary block; only its inner text is written after `Summary:` and the tags are discarded. The requested and locally enforced summary limit is 8,000 characters; if the rebuilt request still exceeds the safe input limit, the same summary is deterministically tightened to 4,000 and finally 2,000 characters without another provider call. If the call fails, is malformed, or returns empty output, an explicitly lossy deterministic bounded fallback is used. If the rebuilt request still exceeds the limit, the turn ends with a normal context-limit error; compaction does not invoke a domain recovery state machine.
 
 The model output is wrapped in this synthetic `user` message:
 

@@ -475,6 +475,7 @@ class Agent:
         skill_runtime: SkillRuntime | None = None,
         session_id: str = "",
         image_context: ImageContextConfig | None = None,
+        session_projection: SessionProjection | None = None,
     ):
         self.llm = llm_client
         self.tools = {
@@ -585,9 +586,13 @@ class Agent:
                 "MCP runtime update confirms registration. If that confirmation arrives "
                 "during the turn, use `tool_search` to discover the newly registered "
                 "capability instead of expecting all schemas to appear at once. "
-                "The latest <connector-status> in each user message is authoritative: "
-                "only its connected entries may be searched or called. If an entry is "
-                "disabled or disappears, do not call a previously activated tool from it."
+                "<connector-status> is host-provided runtime metadata, not a user request. "
+                "Refer to it only when the task requires a connector or the user asks about "
+                "connectivity. Otherwise, do not discuss it. History may contain several host "
+                "snapshots: the LAST host snapshot supersedes all earlier ones. Unchanged "
+                "turns may omit a snapshot; unavailable status invalidates earlier states. "
+                "Search or call only connected connectors; do not reuse tools from "
+                "disabled or missing connectors."
             )
 
         # Only this host knows the exact rules it appended after caller input.
@@ -621,7 +626,7 @@ class Agent:
             self.tools["goal_read"] = _GoalReadTool(self)
             self.tools["goal_write"] = _GoalWriteTool(self)
         self.session_log = session_log
-        self.image_context = ImageContext(session_log, image_context)
+        self.image_context = ImageContext(session_log, image_context, restore=False)
         self._pending_skill_restore: list[dict[str, Any]] = []
         self._skill_persistence_pending = False
         self._persisted_active_skill_records: list[dict[str, Any]] = []
@@ -633,7 +638,9 @@ class Agent:
         # nothing to restore here; the caller supplies the live surface
         # directly. Feature-detect so such a Store does not crash construction.
         _replay = getattr(self.session_log, "replay", None)
-        if self.session_log is not None and callable(_replay):
+        if session_projection is not None:
+            self.restore_session_projection(session_projection)
+        elif self.session_log is not None and callable(_replay):
             self.restore_session_projection(_replay())
         else:
             self.restored_skills = []
@@ -696,10 +703,10 @@ class Agent:
         self._thinking_enabled = enabled
         # ACP can inspect attachments before run_events starts. Keep the proxy
         # aligned when the session is created or its thinking choice changes.
-        image_tool = self.tools.get("inspect_images")
-        set_thinking = getattr(image_tool, "set_thinking_enabled", None)
-        if callable(set_thinking):
-            set_thinking(enabled)
+        for tool_name in ("inspect_images", "read_video"):
+            set_thinking = getattr(self.tools.get(tool_name), "set_thinking_enabled", None)
+            if callable(set_thinking):
+                set_thinking(enabled)
 
     def _persist_goal(self) -> None:
         if self.session_log is None:
@@ -871,14 +878,17 @@ class Agent:
                 ) from exc
 
     async def aadd_user_message(self, content: str, *, image_content: list[dict[str, Any]] | None = None,
-                                image_source: str = "user_upload", image_context_eligible: bool = True) -> None:
+                                image_source: str = "user_upload", image_context_eligible: bool = True,
+                                host_connector_status: str | None = None) -> None:
         validation = await self.skill_runtime.avalidate_references(self.skill_runtime.selected_names)
         with self.skill_runtime.reference_scope(validation):
             self.add_user_message(content, image_content=image_content, image_source=image_source,
-                                  image_context_eligible=image_context_eligible)
+                                  image_context_eligible=image_context_eligible,
+                                  host_connector_status=host_connector_status)
 
     def add_user_message(self, content: str, *, image_content: list[dict[str, Any]] | None = None,
-                         image_source: str = "user_upload", image_context_eligible: bool = True) -> None:
+                         image_source: str = "user_upload", image_context_eligible: bool = True,
+                         host_connector_status: str | None = None) -> None:
         """Add a user message and materialize selected Skills beside it."""
         self._restore_session_surface_after_replay_failure()
         if self.goal is not None and self.goal.status == "active":
@@ -888,7 +898,9 @@ class Agent:
         # ContextEngine does not need to rediscover Skill bodies per request.
         materialize = getattr(self.skill_runtime, "materialize_selected_messages", None)
         materialized = materialize(self.messages) if callable(materialize) else ()
-        user_message = Message(role="user", content=content)
+        from .connector_context import append_connector_status
+        content = append_connector_status(self.messages, content, host_connector_status)
+        user_message = Message(role="user", content=content, host_connector_status=host_connector_status)
         if image_content:
             self.image_context.register(user_message, image_content, source=image_source,
                                         eligible=image_context_eligible)

@@ -9,9 +9,13 @@ import math
 import os
 import shutil
 import time
+from collections.abc import AsyncIterator
+from contextlib import aclosing, suppress
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
+from subprocess import list2cmdline
 from typing import TYPE_CHECKING, Any, Mapping
 
 from .base import Tool, ToolResult
@@ -30,6 +34,10 @@ MAX_STDERR_BYTES = 8 * 1024
 DEFAULT_TIMEOUT_SECONDS = 60.0
 _FILTER_TYPE = "boxagent"
 _MAX_GLOB_ALTERNATIVES = 256
+_MAX_SEARCH_TARGETS = 128
+_MAX_SEARCH_TARGET_BYTES = 16 * 1024
+_MAX_SEARCH_COMMAND_CHARS = 32_767 if os.name == "nt" else None
+_DISCOVERY_BATCH_WAIT_SECONDS = 0.05
 
 
 def _unescaped(value: str, start: int = 0):
@@ -119,12 +127,27 @@ def _normalize_glob_pattern(pattern: str) -> str:
 
 
 def _to_fnmatch(part: str) -> str:
-    """Translate ripgrep glob escapes (``\\*``, ``\\{``...) to fnmatch syntax."""
+    """Translate ripgrep character classes and escapes to fnmatch syntax."""
 
     translated: list[str] = []
     index = 0
     while index < len(part):
         character = part[index]
+        if character == "[":
+            start = index + 1
+            negated = start < len(part) and part[start] in "!^"
+            first_member = start + int(negated)
+            search_from = first_member + int(part[first_member:first_member + 1] == "]")
+            # Backslashes inside rg character classes are literal members,
+            # not escapes. Preserve them instead of applying the outer rule.
+            closing = part.find("]", search_from)
+            if closing >= 0:
+                members = part[start:closing]
+                if members.startswith("^"):
+                    members = "!" + members[1:]
+                translated.append("[" + members + "]")
+                index = closing + 1
+                continue
         if character == "\\" and index + 1 < len(part):
             escaped = part[index + 1]
             translated.append(f"[{escaped}]" if escaped in "*?[" else escaped)
@@ -149,7 +172,7 @@ def _compile_file_patterns(pattern: str) -> tuple[tuple[str, ...], ...]:
 def _file_filter_args(
     pattern: str, compiled_patterns: tuple[tuple[str, ...], ...]
 ) -> list[str]:
-    """Let ripgrep filter name globs; path globs are filtered after discovery.
+    """Let ripgrep filter name globs; path globs are filtered during discovery.
 
     Escaped patterns are also post-filtered only: ripgrep treats ``\\`` as a
     path separator rather than an escape on Windows.
@@ -161,6 +184,64 @@ def _file_filter_args(
         f"--type-add={_FILTER_TYPE}:{_normalize_glob_pattern(pattern)}",
         f"--type={_FILTER_TYPE}",
     ]
+
+
+def _recursive_file_filter_args(pattern: str) -> list[str]:
+    """Compile literal-prefix/**/simple-name globs without whitelisting paths."""
+    if "\\" in pattern or len(pattern) > _MAX_SEARCH_TARGET_BYTES:
+        return []
+    prefix: tuple[str, ...] | None = None
+    names: list[str] = []
+    for alternative in _expand_braces(_normalize_glob_pattern(pattern)):
+        parts = tuple(part for part in alternative.split("/") if part)
+        if len(parts) < 2 or parts[-2] != "**":
+            return []
+        directories, name = parts[:-2], parts[-1]
+        if any(
+            part in {".", ".."}
+            or any(not ch.isascii() or not (ch.isalnum() or ch in "._-") for ch in part)
+            for part in directories
+        ):
+            return []
+        if "**" in name or any(
+            not ch.isascii() or not (ch.isalnum() or ch in "._-*") for ch in name
+        ):
+            return []
+        if prefix is not None and directories != prefix:
+            return []
+        prefix = directories
+        names.append(name)
+    assert prefix is not None
+    # Prefix components must be directories. Otherwise the type filter could
+    # admit a same-named file when a directory disappears during the search.
+    if any(fnmatchcase(directory, name) for directory in prefix for name in names):
+        return []
+
+    filters = [f"--type-add={_FILTER_TYPE}:{name}" for name in dict.fromkeys(names)]
+    filters.append(f"--type={_FILTER_TYPE}")
+    filter_bytes = sum(len(arg) + 1 for arg in filters)
+
+    def append(arg: str) -> bool:
+        nonlocal filter_bytes
+        filter_bytes += len(arg) + 1
+        if filter_bytes > _MAX_SEARCH_TARGET_BYTES:
+            return False
+        filters.append(arg)
+        return True
+
+    parent = "/"
+    for directory in prefix:
+        # Exclude shorter names, different characters and longer names at
+        # this depth. Negative globs prune siblings without overriding ignores.
+        for index, char in enumerate(directory):
+            if index and not append(f"--glob=!{parent}{directory[:index]}"):
+                return []
+            if not append(f"--glob=!{parent}{directory[:index]}[!{char}]*"):
+                return []
+        if not append(f"--glob=!{parent}{directory}?*"):
+            return []
+        parent += directory + "/"
+    return filters if filter_bytes <= _MAX_SEARCH_TARGET_BYTES else []
 
 
 def _matches_file_pattern(
@@ -203,6 +284,28 @@ def _matches_file_pattern(
     return False
 
 
+def _literal_file_glob(path: str) -> str:
+    """Anchor one discovered filename without giving glob metacharacters meaning."""
+    escapes = {
+        "[": "[[]", "]": "[]]", "*": "[*]", "?": "[?]",
+        "{": "[{]", "}": "[}]", "\\": "[\\]",
+    }
+    relative = Path(path).as_posix().removeprefix("./")
+    return "/" + "".join(escapes.get(char, char) for char in relative)
+
+
+def _content_search_args(pattern: str, filters: list[str], targets: list[str]) -> list[str]:
+    return [
+        "--no-config", "--no-messages", "--color=never", "--hidden",
+        "--json", *filters, "--glob=!**/.git/**", "--", pattern, *targets,
+    ]
+
+
+def _windows_command_chars(args: list[str]) -> int:
+    """Count CreateProcess UTF-16 code units, including quoting and the final NUL."""
+    return len(list2cmdline(args).encode("utf-16-le")) // 2 + 1
+
+
 def _json_data_bytes(value: Any) -> bytes | None:
     """Return raw bytes for ripgrep's ``{"text": ...}`` / ``{"bytes": ...}`` data."""
 
@@ -216,6 +319,16 @@ def _json_data_bytes(value: Any) -> bytes | None:
         except (ValueError, TypeError):
             return None
     return None
+
+
+@dataclass
+class _SearchStatus:
+    timed_out: bool = False
+    partial: bool = False
+    oversized_record: bool = False
+    undecodable_paths: bool = False
+    has_results: bool = False
+    error: ToolResult | None = None
 
 
 def resolve_ripgrep_executable(
@@ -306,7 +419,9 @@ class _RipgrepTool(Tool):
                 success=False,
                 error=(
                     "BROAD_HOME_SEARCH_BLOCKED: Recursive search from the entire user "
-                    "home is not allowed. Choose a more specific directory."
+                    "home is not allowed. Do not retry the same scope with another tool. "
+                    "Use the project directory or the location named by the user "
+                    "(for example ~/Desktop); ask for the location only if it is unknown."
                 ),
             )
         if self._is_git_metadata(search_path):
@@ -361,14 +476,24 @@ class _RipgrepTool(Tool):
 
     @staticmethod
     async def _stop_process(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        process.terminate()
+        async def drain_stdout() -> None:
+            if process.stdout is not None:
+                while await process.stdout.read(64 * 1024):
+                    pass
+
+        # A paused stdout pipe can keep wait() pending after the child exits.
+        drain_task = asyncio.create_task(drain_stdout())
         try:
+            if process.returncode is None:
+                with suppress(ProcessLookupError):
+                    process.terminate()
             await asyncio.wait_for(process.wait(), timeout=1.0)
         except asyncio.TimeoutError:
-            process.kill()
+            with suppress(ProcessLookupError):
+                process.kill()
             await process.wait()
+        finally:
+            await drain_task
 
     @staticmethod
     def _exit_status(
@@ -631,8 +756,8 @@ class GrepTool(_RipgrepTool):
             "Search file contents with ripgrep regular expressions. Optionally filter files "
             "with an include glob relative to the selected search path while retaining "
             "ignore-file semantics. Includes hidden files and skips .git. Supports path "
-            "and brace patterns. The include glob only filters results; put a known "
-            "directory in path to limit how much is scanned."
+            "and brace patterns. The include glob selects files before their contents "
+            "are searched; put a known directory in path to narrow file discovery."
         )
 
     @property
@@ -669,6 +794,217 @@ class GrepTool(_RipgrepTool):
             "additionalProperties": False,
         }
 
+    def _direct_search_filters(
+        self, pattern: str, include: str | None,
+        compiled_include: tuple[tuple[str, ...], ...] | None,
+    ) -> list[str]:
+        if include is None or compiled_include is None:
+            return []
+        filters = _file_filter_args(include, compiled_include)
+        if filters:
+            return filters
+        filters = _recursive_file_filter_args(include)
+        if (filters and _MAX_SEARCH_COMMAND_CHARS is not None
+                and _windows_command_chars([
+                    self.executable, *_content_search_args(pattern, filters, ["."]),
+                ]) > _MAX_SEARCH_COMMAND_CHARS):
+            return []
+        return filters
+
+    async def _search_batches(
+        self,
+        search_path: Path,
+        pattern: str,
+        include: str | None,
+        compiled_include: tuple[tuple[str, ...], ...] | None,
+        deadline: float,
+        status: _SearchStatus,
+    ) -> AsyncIterator[list[str]]:
+        """Select non-ignored files before searching their contents, in bounded batches."""
+        if compiled_include is None:
+            yield ["." if search_path.is_dir() else search_path.name]
+            return
+        assert include is not None
+        if not search_path.is_dir():
+            yield (
+                [search_path.name]
+                if _matches_file_pattern(search_path.name, compiled_include) else ["-"]
+            )
+            return
+        if self._direct_search_filters(pattern, include, compiled_include):
+            # Equivalent native filters avoid discovery and repeated walks.
+            yield ["."]
+            return
+
+        process, status.error = await self._spawn(cwd=search_path, args=[
+            "--no-config", "--no-messages", "--color=never", "--hidden",
+            "--null", "--files",
+            "--glob=!**/.git/**", ".",
+        ])
+        if status.error:
+            return
+        assert process is not None and process.stdout is not None
+        assert process.stderr is not None
+        stderr_task = asyncio.create_task(self._read_stderr(process.stderr))
+        batch: list[str] = []
+        batch_bytes = 0
+        batch_chars = 0
+        batch_started: float | None = None
+        base_chars = _windows_command_chars([
+            self.executable, *_content_search_args(pattern, [], ["."]),
+        ])
+        found = False
+        read_task: asyncio.Task[bytes] | None = None
+        try:
+            while True:
+                now = time.monotonic()
+                remaining = deadline - now
+                if remaining <= 0:
+                    status.timed_out = True
+                    break
+                if batch_started is not None:
+                    flush_remaining = batch_started + _DISCOVERY_BATCH_WAIT_SECONDS - now
+                    if flush_remaining <= 0:
+                        yield batch
+                        batch, batch_bytes, batch_chars, batch_started = [], 0, 0, None
+                        continue
+                    remaining = min(remaining, flush_remaining)
+                if read_task is None:
+                    read_task = asyncio.create_task(process.stdout.readuntil(b"\0"))
+                done, _ = await asyncio.wait({read_task}, timeout=remaining)
+                if not done:
+                    continue
+                try:
+                    record = read_task.result()
+                except asyncio.IncompleteReadError as exc:
+                    record = exc.partial
+                finally:
+                    read_task = None
+                if not record:
+                    break
+                try:
+                    relative = record.rstrip(b"\0").decode("utf-8")
+                except UnicodeDecodeError:
+                    status.undecodable_paths = True
+                    continue
+                if not _matches_file_pattern(relative, compiled_include):
+                    continue
+                # This includes the escaped glob, quoting and its separating space.
+                path_chars = _windows_command_chars([f"--glob={_literal_file_glob(relative)}"])
+                path_bytes = 2 * len(record) + 2
+                if (_MAX_SEARCH_COMMAND_CHARS is not None
+                        and base_chars + path_chars > _MAX_SEARCH_COMMAND_CHARS):
+                    status.error = ToolResult(
+                        success=False,
+                        error="Search pattern and file filter exceed the command-line limit; narrow the search.",
+                    )
+                    return
+                if batch and (
+                    len(batch) >= _MAX_SEARCH_TARGETS
+                    or batch_bytes + path_bytes > _MAX_SEARCH_TARGET_BYTES
+                    or (_MAX_SEARCH_COMMAND_CHARS is not None
+                        and base_chars + batch_chars + path_chars > _MAX_SEARCH_COMMAND_CHARS)
+                ):
+                    yield batch
+                    batch, batch_bytes, batch_chars, batch_started = [], 0, 0, None
+                if batch_started is None:
+                    batch_started = time.monotonic()
+                batch.append(relative)
+                batch_bytes += path_bytes
+                batch_chars += path_chars
+                found = True
+            if status.timed_out:
+                return
+            await process.wait()
+            stderr = await stderr_task
+            status.error, partial = self._exit_status(
+                process.returncode, has_results=found, stderr=stderr,
+            )
+            status.partial |= partial
+            if status.error:
+                return
+            if batch:
+                yield batch
+            elif not found:
+                # Validate the regex even when the include selects no files.
+                # stdin is DEVNULL, so this never falls back to searching cwd.
+                yield ["-"]
+        finally:
+            if read_task is not None:
+                read_task.cancel()
+                await asyncio.gather(read_task, return_exceptions=True)
+            await self._stop_process(process)
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+
+    async def _search_records(
+        self,
+        search_path: Path,
+        pattern: str,
+        include: str | None,
+        compiled_include: tuple[tuple[str, ...], ...] | None,
+        deadline: float,
+        status: _SearchStatus,
+    ) -> AsyncIterator[bytes]:
+        cwd = search_path if search_path.is_dir() else search_path.parent
+        async with aclosing(self._search_batches(
+            search_path, pattern, include, compiled_include, deadline, status,
+        )) as batches:
+            async for targets in batches:
+                if time.monotonic() >= deadline:
+                    status.timed_out = True
+                    return
+                filter_args = self._direct_search_filters(pattern, include, compiled_include)
+                if (
+                    search_path.is_dir() and compiled_include is not None
+                    and not filter_args and targets != ["-"]
+                ):
+                    # Walk recursively so rg keeps its no-follow semantics even
+                    # if a discovered file or parent becomes a symlink meanwhile.
+                    filter_args = [f"--glob={_literal_file_glob(path)}" for path in targets]
+                    targets = ["."]
+                process, status.error = await self._spawn(
+                    cwd=cwd, args=_content_search_args(pattern, filter_args, targets),
+                )
+                if status.error:
+                    return
+                assert process is not None and process.stdout is not None
+                assert process.stderr is not None
+                stderr_task = asyncio.create_task(self._read_stderr(process.stderr))
+                try:
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            status.timed_out = True
+                            break
+                        try:
+                            record = await asyncio.wait_for(
+                                process.stdout.readline(), timeout=remaining,
+                            )
+                        except asyncio.TimeoutError:
+                            status.timed_out = True
+                            break
+                        except ValueError:
+                            status.oversized_record = True
+                            continue
+                        if not record:
+                            break
+                        yield record
+                    if status.timed_out:
+                        return
+                    await process.wait()
+                    stderr = await stderr_task
+                    status.error, partial = self._exit_status(
+                        process.returncode, has_results=status.has_results, stderr=stderr,
+                    )
+                    status.partial |= partial
+                    if status.error:
+                        return
+                finally:
+                    await self._stop_process(process)
+                    stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
+
     async def execute(
         self,
         pattern: str,
@@ -693,57 +1029,16 @@ class GrepTool(_RipgrepTool):
             return ToolResult(success=False, error=str(exc))
         normalized_limit = self._normalize_limit(limit)
         cwd = search_path if search_path.is_dir() else search_path.parent
-        target = "." if search_path.is_dir() else search_path.name
-        filter_args = (
-            _file_filter_args(include, compiled_include)
-            if include is not None and compiled_include is not None
-            else []
-        )
-        args = [
-            "--no-config",
-            "--no-messages",
-            "--color=never",
-            "--hidden",
-            "--json",
-            *filter_args,
-            "--glob=!**/.git/**",
-            "--",
-            pattern,
-            target,
-        ]
-        process, spawn_error = await self._spawn(cwd=cwd, args=args)
-        if spawn_error:
-            return spawn_error
-        assert process is not None and process.stdout is not None
-        assert process.stderr is not None
-
-        stderr_task = asyncio.create_task(self._read_stderr(process.stderr))
         deadline = time.monotonic() + self.timeout_seconds
+        status = _SearchStatus()
         matches: list[dict[str, Any]] = []
         rendered: list[str] = []
         output_chars = 0
         truncated = False
-        timed_out = False
-        oversized_record = False
-        undecodable_paths = False
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                try:
-                    raw_line = await asyncio.wait_for(
-                        process.stdout.readline(), timeout=remaining
-                    )
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    break
-                except ValueError:
-                    oversized_record = True
-                    continue
-                if not raw_line:
-                    break
+        async with aclosing(self._search_records(
+            search_path, pattern, include, compiled_include, deadline, status,
+        )) as records:
+            async for raw_line in records:
                 try:
                     event = json.loads(raw_line)
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -764,7 +1059,7 @@ class GrepTool(_RipgrepTool):
                 try:
                     raw_path = path_bytes.decode("utf-8")
                 except UnicodeDecodeError:
-                    undecodable_paths = True
+                    status.undecodable_paths = True
                     continue
                 text = line_bytes.decode("utf-8", errors="replace")
                 if compiled_include is not None and not _matches_file_pattern(
@@ -774,9 +1069,6 @@ class GrepTool(_RipgrepTool):
                 if len(matches) >= normalized_limit:
                     truncated = True
                     break
-                preview = text.rstrip("\r\n")
-                if len(preview) > MAX_LINE_CHARS:
-                    preview = preview[:MAX_LINE_CHARS] + "... [line truncated]"
                 first = (
                     submatches[0]
                     if submatches and isinstance(submatches[0], dict)
@@ -789,6 +1081,17 @@ class GrepTool(_RipgrepTool):
                     if isinstance(start, int)
                     else 1
                 )
+                preview = text.rstrip("\r\n")
+                if len(preview) > MAX_LINE_CHARS:
+                    preview_start = max(0, min(
+                        column - 1 - MAX_LINE_CHARS // 4,
+                        len(preview) - MAX_LINE_CHARS,
+                    ))
+                    preview = (
+                        ("... " if preview_start else "")
+                        + preview[preview_start:preview_start + MAX_LINE_CHARS]
+                        + "... [line truncated]"
+                    )
                 display_path = self._display_path(cwd, raw_path)
                 line = f"{display_path}:{line_number}:{column}:{preview}"
                 extra_chars = len(line) + (1 if rendered else 0)
@@ -805,28 +1108,14 @@ class GrepTool(_RipgrepTool):
                 )
                 rendered.append(line)
                 output_chars += extra_chars
+                status.has_results = True
 
-            if truncated or timed_out:
-                await self._stop_process(process)
-            else:
-                await process.wait()
-            stderr = await stderr_task
-        except asyncio.CancelledError:
-            await self._stop_process(process)
-            stderr_task.cancel()
-            await asyncio.gather(stderr_task, return_exceptions=True)
-            raise
-        finally:
-            if process.returncode is None:
-                await self._stop_process(process)
-
-        partial = False
-        if not truncated and not timed_out and process.returncode not in {0, 1}:
-            exit_error, partial = self._exit_status(
-                process.returncode, has_results=bool(matches), stderr=stderr
-            )
-            if exit_error:
-                return exit_error
+        if status.error:
+            return status.error
+        timed_out = status.timed_out
+        partial = status.partial
+        oversized_record = status.oversized_record
+        undecodable_paths = status.undecodable_paths
 
         content = "\n".join(rendered) or "No matches found."
         if truncated:

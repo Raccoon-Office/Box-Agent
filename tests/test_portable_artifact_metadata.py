@@ -176,7 +176,7 @@ def test_offline_migration_converts_legacy_renderer_and_adds_verified_helpers(tm
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     marker = bundle / "source.json"
     marker.write_text(json.dumps({"name": sync["BUNDLE_NAME"], "revision": sync["PINNED_REVISION"],
-        "overlays": sync["OVERLAYS"][:-1],
+        "overlays": sync["OVERLAYS"][:sync["OVERLAYS"].index("centralized-artifact-metadata")],
         "files": {relative: {"source_sha256": digest, "sha256": digest}}}))
     first = sync["refresh_host_overlays"](bundle)
     image = tmp_path / "preview.png"
@@ -301,7 +301,7 @@ def test_offline_migration_rolls_back_if_a_managed_file_replacement_fails(tmp_pa
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     marker = tmp_path / "source.json"
     marker.write_text(json.dumps({"name": sync["BUNDLE_NAME"], "revision": sync["PINNED_REVISION"],
-        "overlays": sync["OVERLAYS"][:-1],
+        "overlays": sync["OVERLAYS"][:sync["OVERLAYS"].index("centralized-artifact-metadata")],
         "files": {relative: {"source_sha256": digest, "sha256": digest}}}))
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     replace = Path.replace

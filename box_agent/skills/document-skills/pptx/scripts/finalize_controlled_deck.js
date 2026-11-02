@@ -148,6 +148,17 @@ function reportSummary(reportPath) {
   }
 }
 
+function correctionAlreadyUsed(reportDir, deckPath) {
+  try {
+    const delivery = readJson(path.join(reportDir, "design_delivery.json"));
+    const planHash = readJson(deckPath).design_plan?.plan_hash;
+    return Boolean(planHash && delivery.plan_hash === planHash &&
+      (delivery.status === "correction_failed" || delivery.correction_used === true));
+  } catch (_error) {
+    return false;
+  }
+}
+
 function tail(value, limit = 4000) {
   const text = String(value || "").trim();
   return text.length > limit ? text.slice(-limit) : text;
@@ -166,11 +177,12 @@ function fail(stage, result, reportPath = null) {
     const { deckPath, outputPath, reportDir, requirePptx } = failureContext;
     const quality = stage === "html_self_check" && summary
       ? renderQuality(readJson(reportPath), null) : null;
-    const next = quality && !quality.ok ? correctionNext(quality)
+    const used = correctionAlreadyUsed(reportDir, deckPath);
+    const next = quality && !quality.ok ? correctionNext(quality, used)
       : `Repair the reported ${stage} failure before retrying. Preserve existing artifacts; do not reset the deck.`;
     const qualityPath = path.join(reportDir, "render_quality.json");
     if (quality) writeJson(qualityPath, { ...quality, advisory: false,
-      correction_required: !quality.ok, next });
+      correction_required: !quality.ok && !used, next });
     const payload = {
       ok: false, stage, blocking: true, delivery_status: "partial",
       deck: deckPath, html: fs.existsSync(outputPath) ? outputPath : null, pptx: null,
@@ -178,7 +190,7 @@ function fail(stage, result, reportPath = null) {
       blocking_issues: summary?.issues.length ? summary.issues
         : [tail(result.error?.message || `${result.stdout || ""}\n${result.stderr || ""}`) || `${stage} failed`],
       warnings: summary?.warnings || [],
-      correction_required: Boolean(quality && !quality.ok),
+      correction_required: Boolean(quality && !quality.ok && !used),
       render_quality: quality, next,
       qa_reports: [reportPath, quality ? qualityPath : null].filter(Boolean),
     };
@@ -537,15 +549,31 @@ function main() {
     [outputPath, "--viewport", "1440x900", "--report", reports.runtime],
     reports.runtime
   );
+  let imageLayoutReport = null;
+  try {
+    const manifest = readJson(manifestPath);
+    const imagePlan = Array.isArray(manifest) ? manifest : manifest.image_plan;
+    if (Array.isArray(imagePlan) && imagePlan.some(item => item && item.layout_contract)) {
+      reports.imageLayout = path.join(reportDir, "image_layout_contract.json");
+      imageLayoutReport = runPostRenderStage(
+        "image_layout_contract", "validate_image_layout_contract.js",
+        [outputPath, manifestPath, "--report", reports.imageLayout], reports.imageLayout
+      );
+    }
+  } catch (error) {
+    // Missing or invalid manifests are already covered by image_manifest.
+    console.warn(`Image layout contract inspection skipped: ${error.message}`);
+  }
 
   const exportError = pptxPath
     ? exportRequiredPptx(outputPath, pptxPath, deck.slides.length, reportDir)
     : null;
   const quality = renderQuality(htmlReport, runtimeReport);
   reports.quality = path.join(reportDir, "render_quality.json");
-  const qualityNext = correctionNext(quality);
+  const used = correctionAlreadyUsed(reportDir, deckPath);
+  const qualityNext = correctionNext(quality, used);
   writeJson(reports.quality, { ...quality, advisory: false,
-    correction_required: !quality.ok, next: qualityNext });
+    correction_required: !quality.ok && !used, next: qualityNext });
   if (!quality.ok) {
     console.error(`FINALIZE_FAIL stage=render_quality pages=${quality.affected_pages.join(",")} report=${reports.quality}`);
     console.error(qualityNext);
@@ -562,6 +590,7 @@ function main() {
     runtimeReport.advisory === true
       || (runtimeReport.editor?.componentContrast?.failures?.length || 0) > 0
       ? "runtime_probe" : null,
+    imageLayoutReport?.advisory === true ? "image_layout_contract" : null,
     !quality.ok ? "render_quality" : null,
   ].filter(Boolean);
   const blockingImageIssues = Array.isArray(imageReport.blockingIssues)
@@ -588,7 +617,7 @@ function main() {
     degraded,
     degraded_stages: degradedStages,
     render_quality: quality,
-    correction_required: !quality.ok,
+    correction_required: !quality.ok && !used,
     next: qualityNext,
     blocking_issues: [...quality.issues.map(issue => `Page ${issue.page}: ${issue.detail}`),
       ...blockingImageIssues, ...(exportError ? [`PPTX export failed: ${exportError}`] : [])],

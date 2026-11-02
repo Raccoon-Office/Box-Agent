@@ -5,6 +5,9 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 
 import pytest
+from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 
 from box_agent.tools.browser_runtime_scope import (
     reset_browser_session_key,
@@ -13,6 +16,7 @@ from box_agent.tools.browser_runtime_scope import (
 from box_agent.tools.playwright_session_pool import (
     DEFAULT_SESSION_KEY,
     BrowserSessionLimitError,
+    BrowserSessionExpiredError,
     PlaywrightSessionPool,
 )
 
@@ -54,6 +58,101 @@ class FakeFactory:
 
         exit_stack.push_async_callback(_close)
         return session
+
+
+@pytest.mark.parametrize("error", [
+    McpError(ErrorData(code=-32000, message="Session terminated")),
+    McpError(ErrorData(code=-32000, message="Connection closed")),
+    McpError(ErrorData(code=32600, message="Session terminated")),
+    BrokenResourceError(), ClosedResourceError(), EndOfStream(),
+])
+async def test_terminated_session_is_rebuilt_on_next_call_without_replay_or_cross_session_reset(error):
+    from box_agent.tools.mcp_loader import MCPTool
+    factory = FakeFactory()
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    token = set_browser_session_key("A")
+    try:
+        async with pool.lease() as failed:
+            pass
+        other = await pool.resolve("B")
+        calls = []
+        async def fail(name, arguments=None):
+            calls.append(name)
+            raise error
+        failed.call_tool = fail
+        tool = MCPTool(name="browser_click", description="click", parameters={},
+                       session=None, session_lease=pool.lease, server_name="playwright")
+        result = await tool.execute(ref="old-ref")
+        assert not result.success
+        assert "BROWSER_SESSION_RESET" in result.error
+        assert "not replayed" in result.error
+        assert calls == ["browser_click"]
+        assert failed.closed
+        assert len(factory.created) == 2  # no automatic replay/reconnect
+        assert await pool.resolve("B") is other and not other.closed
+        async with pool.lease() as fresh:
+            await fresh.call_tool("browser_navigate", {"url": "about:blank"})
+        assert fresh is not failed and len(factory.created) == 3
+        assert [name for name, _ in fresh.calls] == ["browser_tabs", "browser_navigate"]
+    finally:
+        reset_browser_session_key(token)
+        await pool.close_all(final=True)
+
+
+@pytest.mark.parametrize("error", [
+    RuntimeError("element not found"), TimeoutError("navigation timed out"),
+    McpError(ErrorData(code=-32602, message="Session terminated")),
+    McpError(ErrorData(code=-32000, message="selector not found")),
+    McpError(ErrorData(code=32600, message="invalid tool request")),
+])
+async def test_page_or_tool_error_does_not_discard_browser_context(error):
+    factory = FakeFactory()
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    original = await pool.resolve("A")
+    try:
+        with pytest.raises(type(error)):
+            async with pool.lease("A"):
+                raise error
+        assert await pool.resolve("A") is original
+        assert not original.closed
+    finally:
+        await pool.close_all(final=True)
+
+
+async def test_terminated_warmup_is_retired_before_executing_user_action():
+    factory = FakeFactory()
+    async def failing_first(stack):
+        session = await factory(stack)
+        if len(factory.created) == 1:
+            async def fail(name, arguments=None):
+                session.calls.append((name, arguments))
+                raise McpError(ErrorData(code=-32000, message="Session terminated"))
+            session.call_tool = fail
+        return session
+    pool = PlaywrightSessionPool(failing_first, idle_timeout=0)
+    try:
+        with pytest.raises(BrowserSessionExpiredError):
+            async with pool.lease("A"):
+                pytest.fail("dead warmup must not yield a session")
+        assert factory.created[0].closed
+        assert len(factory.created[0].calls) == 1
+        async with pool.lease("A") as fresh:
+            assert fresh is factory.created[1]
+    finally:
+        await pool.close_all(final=True)
+
+
+async def test_finished_transport_owner_is_not_reused():
+    factory = FakeFactory()
+    pool = PlaywrightSessionPool(factory, idle_timeout=0)
+    try:
+        old = await pool.resolve("A")
+        pool._clients["A"].close_requested.set()
+        await pool._clients["A"].runner
+        assert await pool.resolve("A") is not old
+        assert old.closed
+    finally:
+        await pool.close_all(final=True)
 
 
 class Clock:

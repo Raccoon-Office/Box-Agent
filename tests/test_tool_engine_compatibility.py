@@ -63,10 +63,10 @@ _LIST_SKILLS_SCHEMA = {
 _ALWAYS_WORKSPACE = {
     "request_user_input", "request_user_decision", "report_execution_result",
     "obsidian_create_note", "obsidian_update_note", "obsidian_daily_note",
-    "publish_artifact",
+    "publish_artifact", "read_video",
 }
 _FILES = {
-    "read_file", "query_jsonl", "search_files", "write_file", "append_file", "edit_file",
+    "read_file", "query_jsonl", "validate_table", "search_files", "write_file", "append_file", "edit_file",
     "read_email", "extract_email_attachment",
 }
 _BASH = {"bash", "bash_output", "bash_kill"}
@@ -160,6 +160,9 @@ _CONNECTOR_SEARCH_SCHEMA = json.loads(
 )
 _EMAIL_SCHEMAS = json.loads(
     (Path(__file__).parent / "fixtures/tool_engine/email_schemas.json").read_text(encoding="utf-8")
+)
+_VIDEO_SCHEMA = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/video_schema.json").read_text(encoding="utf-8")
 )
 _MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
     "bash": (
@@ -387,6 +390,10 @@ def _assert_schema_contract(tools, profile):
     expected["publish_artifact"] = deepcopy(_PUBLISH_ARTIFACT_SCHEMA)
     expected["ensure_cua_ready"] = deepcopy(_ENSURE_CUA_READY_SCHEMA)
     expected.update(deepcopy(_EMAIL_SCHEMAS))
+    expected["read_video"] = deepcopy(_VIDEO_SCHEMA)
+    expected.update(json.loads(
+        (Path(__file__).parent / "fixtures/tool_engine/table_validation_schema.json").read_text(encoding="utf-8")
+    ))
     expected["get_skill"]["schema"]["description"] = (
         "Read a Skill's method and resource paths. Follow next_offset with the returned revision "
         "when paged. Read required_skills before their steps; related_skills are optional. "
@@ -433,13 +440,57 @@ def _assert_schema_contract(tools, profile):
                 target[field] = change["after"]
         if tool.name == "tool_search":
             entry["schema"] = _CONNECTOR_SEARCH_SCHEMA
+        if tool.name == "query_jsonl":
+            before = (
+                "If a one-line read exceeds that limit, use another permitted file-copy "
+                "method without printing the record, or report the limit; do not reserialize query "
+                "data as the original text. "
+            )
+            assert entry["schema"]["description"].count(before) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(before, (
+                "Larger source lines return bounded fragments: follow read_file's "
+                "next_byte_offset as byte_offset with the same path to read toward EOF. "
+                "Do not reserialize query data as the original text. "
+            ))
         if tool.name == "read_file":
+            anchor = "Read a text file with line numbers and bounded pagination. "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                anchor + "For Word .docx files, use an available Python execution tool (prefer execute_code) "
+                "with python-docx (from docx import Document) to read paragraphs and tables directly; "
+                "do not try read_file first. ",
+            )
+            anchor = "For JSONL logs, especially those with large records, use query_jsonl to filter "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                "For CSV/TSV calculations, start with a small header/sample page (e.g. limit=10), "
+                "then use available execution tools for full-file processing and validation "
+                "instead of dumping large raw pages into the conversation. A preview does not "
+                "prove full processing; explicit full-text or semantic-review requests still "
+                "require all relevant records. " + anchor,
+            )
             anchor = "Binary and structured document files are rejected with an actionable error. "
             assert entry["schema"]["description"].count(anchor) == 1
             entry["schema"]["description"] = entry["schema"]["description"].replace(
                 anchor,
                 "For .eml emails use read_email to decode MIME bodies and attachments. " + anchor,
             )
+            entry["schema"]["description"] += (
+                " For large text or long lines, set byte_offset (zero-based) to read up to 16 KiB "
+                "without line numbering. Continue with next_byte_offset until it is null. "
+                "Byte mode overrides offset/limit and reads toward EOF. Oversized line pages "
+                "automatically return the first byte chunk from their starting line."
+            )
+            entry["schema"]["input_schema"]["properties"]["byte_offset"] = {
+                "type": "integer", "minimum": 0,
+                "description": (
+                    "Starting byte (zero-based) for a text chunk of up to 16 KiB. "
+                    "Use the returned next_byte_offset to continue, including mid-line. "
+                    "Overrides offset/limit."
+                ),
+            }
         if tool.name == "sub_agent":
             read_tools = "read/search tools (`read_file`, `query_jsonl`, "
             assert entry["schema"]["description"].count(read_tools) == 1
@@ -483,6 +534,14 @@ def _assert_schema_contract(tools, profile):
                 "  - Files referenced by chat and their local dependencies must remain available. "
                 "Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.\n"
                 "  - For temporary script outputs elsewhere,",
+            )
+            scratch_anchor = '  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm\n'
+            assert entry["schema"]["description"].count(scratch_anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                scratch_anchor,
+                '  - Put disposable patch/check scripts and other intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm or publish/link temporary scripts as deliverables\n'
+                '  - If cleanup returns CHAT_REFERENCE_PROTECTED, leave those files in place and continue the task. Do not retry via another command/tool or ask for automatic-cleanup approval\n'
+                '  - Prefer the grep tool for searches (no matches is a normal empty result). Shell grep/rg exit 1 means no matches; diff exit 1 means differences. Use separate calls for queries: compound commands and pipelines retain native failure/short-circuit semantics. Do not mask errors with blanket `|| true`\n',
             )
             entry["schema"]["input_schema"]["properties"]["temporary_files"] = {
                 "type": "array", "items": {"type": "string"}, "maxItems": 64,

@@ -33,6 +33,91 @@ def test_email_guidance_is_only_present_when_the_decoder_is_available():
     assert 'attachment_index' in with_extraction
 
 
+@pytest.mark.parametrize("tools,executor", [
+    (None, "execute_code"),
+    ({"read_file", "search_files", "query_jsonl", "execute_code", "bash"}, "execute_code"),
+    ({"execute_code"}, "execute_code"),
+    ({"read_file", "bash"}, "bash"),
+])
+def test_docx_guidance_routes_directly_to_available_python_execution(tools, executor):
+    prompt = resolve_capability_placeholders("{FILE_OPERATIONS}", tools)
+    rule = next(line for line in prompt.splitlines() if line.startswith("- DOCX"))
+
+    assert f"直接用 `{executor}`" in rule
+    assert "python-docx" in rule
+    assert "from docx import Document" in rule
+    assert "段落和表格" in rule
+    assert "不要先用文本读取工具试读" in rule
+    assert "style" in rule and "为空" in rule
+    if executor == "bash":
+        assert "`execute_code`" not in rule
+        assert "应用托管 Python" in rule
+
+
+@pytest.mark.parametrize("tools", [set(), {"read_file"}])
+def test_docx_without_execution_reports_missing_parsing_capability(tools):
+    prompt = resolve_capability_placeholders("{FILE_OPERATIONS}", tools)
+    rule = next(line for line in prompt.splitlines() if line.startswith("- DOCX"))
+
+    assert "缺少文档解析执行能力" in rule
+    assert "提供文本" in rule
+    assert "不要先用文本读取工具试读" in rule
+    assert "`execute_code`" not in rule
+    assert "`bash`" not in rule
+
+
+def test_table_gate_guidance_requires_registered_validator():
+    without = resolve_capability_placeholders('{FILE_OPERATIONS}', {'read_file', 'bash'})
+    enabled = resolve_capability_placeholders('{FILE_OPERATIONS}', {'read_file', 'bash', 'validate_table'})
+    assert '`validate_table`' not in without
+    assert '`validate_table`' in enabled
+    assert '程序检查 EOF' in enabled
+    assert 'validation_complete' in enabled and 'data_valid' in enabled
+    assert '用途在本轮锁定' in enabled
+    assert '计算任务仍要求数据合格' in enabled
+    assert '此门禁不替代输出计算及读回校验' in enabled
+
+
+@pytest.mark.parametrize("tools,executor", [
+    (None, "execute_code"),
+    ({"read_file", "execute_code", "bash"}, "execute_code"),
+    ({"execute_code"}, "execute_code"),
+    ({"read_file", "bash"}, "bash"),
+])
+def test_large_table_guidance_requires_full_processing_and_validation(tools, executor):
+    prompt = resolve_capability_placeholders("{FILE_OPERATIONS}", tools)
+    table_rule = next(line for line in prompt.splitlines() if line.startswith("- 大表计算"))
+
+    assert f"`{executor}`" in table_rule
+    assert "表头、少量样例和数据概况" in table_rule
+    assert "全部输入记录" in table_rule
+    assert "可分块" in table_rule
+    assert "预览不代表全量处理" in table_rule
+    assert "不得静默跳过" in table_rule
+    assert "解析错误" in table_rule
+    assert "记录数" in table_rule
+    assert "保存后重新读取" in table_rule
+    assert "逐条语义审阅" in table_rule
+    assert "指定全文" in table_rule
+    if executor == "bash":
+        assert "`execute_code`" not in table_rule
+        assert "已有 Python" in table_rule
+    if tools is not None and "read_file" not in tools:
+        assert "`read_file`" not in table_rule
+
+
+@pytest.mark.parametrize("tools", [set(), {"read_file"}])
+def test_large_table_without_execution_does_not_claim_full_validation(tools):
+    prompt = resolve_capability_placeholders("{FILE_OPERATIONS}", tools)
+    table_rule = next(line for line in prompt.splitlines() if line.startswith("- 大表计算"))
+
+    assert "缺少程序执行能力" in table_rule
+    assert "全量计算和校验尚未验证" in table_rule
+    assert "不能用样例推断总体" in table_rule
+    assert "`execute_code`" not in table_rule
+    assert "`bash`" not in table_rule
+
+
 @pytest.mark.parametrize("source", ["config", "env"])
 def test_missing_image_tool_does_not_misdiagnose_configured_service(monkeypatch, source):
     config = Config(llm=LLMConfig(api_key="test"), agent=AgentConfig(), tools=ToolsConfig())

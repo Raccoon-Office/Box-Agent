@@ -77,6 +77,7 @@ def test_acp_session_prompt_builder_preserves_overlay_order(monkeypatch, tmp_pat
 
     monkeypatch.setattr(session_assembly, "build_sandbox_info_prompt", lambda *_args: "sandbox")
     monkeypatch.setattr(session_assembly, "build_file_delivery_prompt", lambda *_: "delivery")
+    monkeypatch.setattr(session_assembly, "render_web_access_policy", lambda _: "web-routing")
     monkeypatch.setattr(session_assembly, "_workspace_layout_prompt", lambda **_: "layout")
     monkeypatch.setattr(session_assembly, "build_project_startup_context_prompt", lambda _: "startup")
     monkeypatch.setattr(session_assembly, "build_env_context_prompt", lambda _: "env")
@@ -98,6 +99,7 @@ def test_acp_session_prompt_builder_preserves_overlay_order(monkeypatch, tmp_pat
     expected = (
         "base sandbox delivery\n\n"
         f"{PROJECT_WORKSPACE_MODE_PROMPT}\n\n"
+        "web-routing\n\n"
         "filesystem\n\nlayout\n\nstartup\n\nenv\n\nskills\n\nhints\n\nfollow-up"
     )
     assert actual == expected

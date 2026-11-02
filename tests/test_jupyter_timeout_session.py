@@ -11,6 +11,8 @@ session on timeout so a fresh kernel is built next time.
 from __future__ import annotations
 
 import queue
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -20,7 +22,128 @@ from box_agent.tools.jupyter_tool import (
     JupyterKernelSession,
     JupyterSandboxTool,
     SandboxStatusTool,
+    InProcessKernelSession,
 )
+from box_agent.tools import jupyter_tool
+
+
+@pytest.mark.parametrize("session_class", [JupyterKernelSession, InProcessKernelSession])
+def test_continuous_kernel_output_cannot_extend_execution_deadline(tmp_path, monkeypatch, session_class):
+    clock = [0.0]
+    monkeypatch.setattr(jupyter_tool, "monotonic", lambda: clock[0], raising=False)
+    class ChattyClient:
+        started = False
+        reads = 0
+        def execute(self, code, silent=False):
+            self.started = True
+            return "current"
+        def get_iopub_msg(self, timeout=None):
+            if not self.started:
+                raise queue.Empty()
+            self.reads += 1
+            clock[0] += 0.4
+            if self.reads == 8:
+                return {"msg_type": "status", "content": {"execution_state": "idle"}}
+            return {"msg_type": "stream", "content": {"name": "stdout", "text": "still running\n"}}
+    session = (session_class("s", tmp_path, object()) if session_class is JupyterKernelSession
+               else session_class("s", tmp_path))
+    session._kc = ChattyClient()
+    stdout, _, error = session.execute("while True: print('still running')", timeout=1)
+    assert error == KERNEL_EXEC_TIMEOUT
+    assert session._kc.reads < 8
+    assert stdout
+
+
+@pytest.mark.parametrize("session_class", [JupyterKernelSession, InProcessKernelSession])
+def test_previous_requests_idle_cannot_finish_current_execution(tmp_path, session_class):
+    class MixedClient:
+        messages = []
+        def execute(self, code, silent=False):
+            self.messages = [
+                {"parent_header": {"msg_id": "previous"}, "msg_type": "status", "content": {"execution_state": "idle"}},
+                {"parent_header": {"msg_id": "current"}, "msg_type": "stream", "content": {"name": "stdout", "text": "actual result"}},
+                {"parent_header": {"msg_id": "current"}, "msg_type": "status", "content": {"execution_state": "idle"}},
+            ]
+            return "current"
+        def get_iopub_msg(self, timeout=None):
+            if not self.messages:
+                raise queue.Empty()
+            return self.messages.pop(0)
+    session = (session_class("s", tmp_path, object()) if session_class is JupyterKernelSession
+               else session_class("s", tmp_path))
+    session._kc = MixedClient()
+    stdout, _, error = session.execute("print('actual result')", timeout=1)
+    assert error is None
+    assert stdout == "actual result"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preparation", ["sandbox", "host"])
+async def test_environment_preparation_returns_diagnostic_before_call_hangs(tmp_path, monkeypatch, preparation):
+    closed = asyncio.Event()
+    class WaitingEnvironment:
+        async def ensure_ready(self, on_progress=None):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+    monkeypatch.setattr(jupyter_tool, "_SANDBOX_PREPARE_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(JupyterSandboxTool, "_get_sandbox_env", lambda _: WaitingEnvironment())
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    if preparation == "host":
+        tool.runtime_preparer = WaitingEnvironment().ensure_ready
+    result = await asyncio.wait_for(tool.execute("print(1)"), 0.5)
+    assert not result.success
+    assert "SANDBOX_PREPARE_TIMEOUT" in result.error
+    assert result.raw_output["phase"] == "environment_prepare"
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_kernel_start_timeout_discards_partially_started_session(tmp_path, monkeypatch, ready_sandbox):
+    class WaitingSession:
+        stopped = False
+        async def start(self):
+            await asyncio.Event().wait()
+        async def stop(self):
+            self.stopped = True
+    session = WaitingSession()
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    monkeypatch.setattr(jupyter_tool, "_KERNEL_START_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(tool, "_create_session", lambda *args: session)
+    result = await asyncio.wait_for(tool.execute("print(1)", session_id="start-timeout"), 0.5)
+    assert not result.success
+    assert "KERNEL_START_TIMEOUT" in result.error
+    assert session.stopped
+    assert tool._session_key("start-timeout") not in tool._sessions
+
+
+@pytest.mark.asyncio
+async def test_cancelled_execution_stops_busy_kernel_before_reuse(tmp_path, ready_sandbox):
+    started, stopped = threading.Event(), threading.Event()
+    class BusySession:
+        workspace = tmp_path
+        def is_alive(self):
+            return True
+        def execute(self, *args):
+            started.set()
+            stopped.wait(1)
+            return "", [], None
+        async def stop(self):
+            stopped.set()
+    tool = JupyterSandboxTool(workspace_dir=str(tmp_path))
+    key = tool._session_key("cancelled")
+    tool._sessions[key] = BusySession()
+    task = asyncio.create_task(tool.execute("print(1)", session_id="cancelled"))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stopped.is_set()
+        assert key not in tool._sessions
+    finally:
+        stopped.set()
 
 
 # ── Low-level: the real session.execute must return the timeout sentinel ─────

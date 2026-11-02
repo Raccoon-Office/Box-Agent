@@ -21,6 +21,9 @@ class DummyLLM:
 
 
 class ReferenceCapturingLLM:
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     model = "test-model"
     max_output_tokens = 1024
 

@@ -18,6 +18,7 @@ _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PARAMETER_EXPANSION_RE = re.compile(
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}\n]+\}|[@*#?$!0-9_-])"
 )
+_ARITHMETIC_MUTATION_RE = re.compile(r"\+\+|--|<<=|>>=|(?<![!<>=])=(?!=)")
 _HEREDOC_RE = re.compile(
     r"(?<!<)<<(?P<strip_tabs>-)?(?!<)\s*"
     r"(?P<word>(?:\\.|'[^']*'|\"[^\"]*\"|[^\s;&|<>])+)"
@@ -174,6 +175,8 @@ class ShellInspection:
     redirections: tuple[ShellRedirection, ...]
     ambiguous_regions: tuple[str, ...]
     shell_text: str
+    assigned_variables: frozenset[str] = frozenset()
+    mutating_arithmetic: bool = False
 
 
 def _newline_only(value: str) -> str:
@@ -345,10 +348,11 @@ def _substitution_marker(index: int) -> str:
     return chr(_SUBSTITUTION_MARKER_BASE + index)
 
 
-def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...]]:
+def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...], bool]:
     """Return top-level shell text plus nested command/process substitutions."""
     chars = list(value)
     substitutions: list[str] = []
+    mutating_arithmetic = False
     quote: str | None = None
     escaped = False
     index = 0
@@ -376,8 +380,9 @@ def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...]]:
                 chars[index:] = " " * (len(value) - index)
                 break
             arithmetic = value[index + 3 : end - 1]
-            _, nested_substitutions = _extract_and_mask_substitutions(arithmetic)
+            _, nested_substitutions, nested_mutation = _extract_and_mask_substitutions(arithmetic)
             substitutions.extend(nested_substitutions)
+            mutating_arithmetic |= bool(_ARITHMETIC_MUTATION_RE.search(arithmetic)) or nested_mutation
             span = end + 1 - index
             chars[index : end + 1] = list(
                 _SUBSTITUTION_PLACEHOLDER[:span].ljust(span)
@@ -390,8 +395,9 @@ def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...]]:
                 chars[index:] = " " * (len(value) - index)
                 break
             arithmetic = value[index + 2 : end - 1]
-            _, nested_substitutions = _extract_and_mask_substitutions(arithmetic)
+            _, nested_substitutions, nested_mutation = _extract_and_mask_substitutions(arithmetic)
             substitutions.extend(nested_substitutions)
+            mutating_arithmetic |= bool(_ARITHMETIC_MUTATION_RE.search(arithmetic)) or nested_mutation
             chars[index : end + 1] = " " * (end + 1 - index)
             index = end + 1
             continue
@@ -428,7 +434,7 @@ def _extract_and_mask_substitutions(value: str) -> tuple[str, tuple[str, ...]]:
             index = end + 1
             continue
         index += 1
-    return "".join(chars), tuple(substitutions)
+    return "".join(chars), tuple(substitutions), mutating_arithmetic
 
 
 def _dequote_shell_word(value: str, *, posix: bool) -> str:
@@ -795,13 +801,14 @@ def inspect_shell_command(
     if posix is None:
         posix = platform.system() != "Windows"
     shell_text = _mask_shell_comments(_mask_heredoc_bodies(command))
-    top_level_text, substitutions = _extract_and_mask_substitutions(shell_text)
+    top_level_text, substitutions, mutating_arithmetic = _extract_and_mask_substitutions(shell_text)
     command_text, redirections, redirect_ambiguous = _extract_and_mask_redirections(
         top_level_text,
         posix=posix,
     )
     segments, has_control = _split_shell_segments(command_text)
     invocations: list[ShellInvocation] = []
+    assigned_variables: set[str] = set()
     all_redirections = list(redirections)
     ambiguous = list(redirect_ambiguous)
     variables = dict(_variables or {})
@@ -827,6 +834,7 @@ def inspect_shell_command(
         segment_assignments = _leading_assignments(words)
         executable_index = _executable_index(words)
         if executable_index is None:
+            assigned_variables.update(segment_assignments)
             variables.update(segment_assignments)
             continue
         substitution_sources = tuple(
@@ -884,6 +892,8 @@ def inspect_shell_command(
                     replace(redirection, indirect=True)
                     for redirection in nested.redirections
                 )
+                assigned_variables.update(nested.assigned_variables)
+                mutating_arithmetic |= nested.mutating_arithmetic
                 ambiguous.extend(nested.ambiguous_regions)
             else:
                 ambiguous.append(script)
@@ -904,6 +914,8 @@ def inspect_shell_command(
                     replace(redirection, indirect=True)
                     for redirection in nested.redirections
                 )
+                assigned_variables.update(nested.assigned_variables)
+                mutating_arithmetic |= nested.mutating_arithmetic
                 ambiguous.extend(nested.ambiguous_regions)
             else:
                 ambiguous.append(embedded_command)
@@ -924,6 +936,8 @@ def inspect_shell_command(
                 replace(redirection, indirect=True)
                 for redirection in nested.redirections
             )
+            assigned_variables.update(nested.assigned_variables)
+            mutating_arithmetic |= nested.mutating_arithmetic
             ambiguous.extend(nested.ambiguous_regions)
     else:
         ambiguous.extend(substitutions)
@@ -935,4 +949,6 @@ def inspect_shell_command(
         redirections=tuple(all_redirections),
         ambiguous_regions=tuple(ambiguous),
         shell_text=shell_text,
+        assigned_variables=frozenset(assigned_variables),
+        mutating_arithmetic=mutating_arithmetic,
     )

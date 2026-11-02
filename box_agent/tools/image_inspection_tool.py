@@ -42,6 +42,8 @@ _UNSUPPORTED_IMAGE_INPUT_MARKERS = (
     "image input is not supported",
     "image inputs are not supported",
     "unsupported content type: image",
+    "messages.content.type 参数非法，取值范围 ['text']",
+    "当前纯文本模型不支持",
 )
 
 
@@ -168,7 +170,8 @@ class ImageInspectionTool(Tool):
             return self._error(
                 "IMAGE_NATIVE_UNSUPPORTED",
                 "the active main model is not known to accept image input; "
-                "use strategy='proxy'",
+                "use strategy='proxy' if available. If proxy inspection also fails, "
+                "continue with available text and tools and report visual details as unverified",
             )
 
         proxy_llm = self.llm
@@ -303,7 +306,8 @@ class ImageInspectionTool(Tool):
                     continue
                 if self._is_unsupported_image_input_error(str(exc)):
                     self._unsupported_error = (
-                        "the configured model or provider does not support image input"
+                        "the configured model or provider does not support image input; "
+                        "continue with available text and tools and report visual details as unverified"
                     )
                     return self._error("IMAGE_INPUT_UNSUPPORTED", self._unsupported_error)
                 return self._provider_error(exc)
@@ -340,7 +344,7 @@ class ImageInspectionTool(Tool):
 
     def _native_input_supported(self) -> bool:
         if self._native_capability_llm is not None:
-            return image_input_support(self._native_capability_llm) is not False
+            return image_input_support(self._native_capability_llm) is True
         return self.native_supported
 
     @staticmethod

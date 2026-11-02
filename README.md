@@ -49,6 +49,14 @@ Most agent frameworks are either too simple (no sandbox, no tools) or too comple
 
 ## Key Features
 
+### Local Video Reading
+
+`read_video` samples timestamped frames through the existing image-understanding
+path, transcribes speech with the desktop Volc ASR service, and supports time-range
+reads and continuation. It requires ffmpeg/ffprobe and the corresponding vision
+and speech-service configuration. See [video reading](docs/VIDEO_READING.md) for
+runtime setup, sampling limits, partial results and streaming-ASR latency.
+
 ### Local Email Analysis
 
 `read_email` decodes local `.eml` headers, plain/HTML bodies and attachment
@@ -98,6 +106,13 @@ limits, compatibility behavior, and host diagnostics.
 
 Python runs in an isolated Jupyter kernel with pre-installed data science packages (`pandas`, `numpy`, `matplotlib`, `scikit-learn`, `openpyxl`, `xlrd`). Generated files (charts, CSVs, PDFs) are automatically detected and surfaced as structured artifacts.
 
+`execute_code` keeps a bounded 32 KiB head/tail preview of stdout/stderr.
+Larger output is streamed in full to an internal file; model replies, UI events,
+and traces carry the preview and file reference instead of the full text.
+Read that file in bounded pages to recover omitted content. If output persistence
+fails, the reply explicitly reports that the full output is unavailable and keeps
+the preview, without interrupting the Agent loop or rerunning the code.
+
 ### Multi-Provider LLM
 
 One config, any provider:
@@ -121,7 +136,18 @@ model: "your-model"
 
 ### Staged Context Compression
 
+`read_file` preserves its existing line pagination (`offset`, `limit`, default
+500 lines, maximum 2000). Set `byte_offset=0` to read at most 16 KiB of text,
+then pass the returned `next_byte_offset` until it is null. Byte mode seeks
+directly, preserves UTF-8 characters and original newlines, and overrides
+`offset`/`limit`. A line page above 100,000 characters automatically returns
+the first byte chunk starting at that page's first line; byte continuation
+reads toward EOF. Line scanning uses bounded 64 KiB reads. Fragments report
+their byte range without claiming complete-line context coverage. Reads use
+the current file, not a snapshot; existing model-context budgets still apply.
+
 - **Oversized tool results**: Individual results are persisted immediately when needed; fresh parallel results also share a 50k-character pre-request budget. The model receives a stable preview while full text remains on disk. Read results are exempt and stay bounded by Read's own line/character controls.
+- **Tool output delivery**: All tools share a final guard before model history, host events and diagnostic traces. Text above 512 KiB and structured metadata above 64 KiB are externalized; a 1 MiB serialized result budget accounts for combined fields and JSON escaping below the 4 MiB event limit. Valid Read pages and small semantic model projections remain intact. Tools may supply a private `raw_output_preview` for their own host schema: Plan preserves identity, titles and step structure while bounding narrative fields; Todo preserves execution state and prioritizes active work. Both previews are capped at 48 KiB and 64 steps/items. The shared layer validates these previews, saves the complete original JSON, and adds `_persisted_output` with `path`, `output_truncated` and `file_complete`. It does not recursively rewrite unknown business fields; results without a valid tool-owned preview retain only verbatim small fields and the file reference. Output-storage/serialization failures produce an explicit partial/unavailable notice without repeating the tool or stopping the Agent Loop; cancellation and durable session-commit failures retain their existing behavior. This guard cannot prevent memory used to construct the original output inside a tool.
 - **Usage-aware auto-summary**: The next request is estimated from the latest real API usage plus subsequent messages. When it reaches the model-derived safety threshold, older history is summarized into a `user` message while bounded recent messages and todo, plan, and skill state are restored.
 - **Tool-call arguments**: Write/edit arguments remain verbatim until a whole-history summary replaces their turn; they are not independently compacted.
 - **Legacy safety guard**: Internal history placeholders from older or externally supplied sessions are rejected if a model tries to reuse them as executable file/code arguments; Box-Agent requests one clean regeneration instead of writing the placeholder to disk.
@@ -237,8 +263,8 @@ Common development loop:
 # Run the smallest relevant test while iterating
 uv run pytest tests/test_bash_tool.py -q
 
-# Run the broader suite before handing off
-uv run pytest tests/ -q
+# Run the full suite when the change's impact or CI gate requires it
+bash general_review/ci/test.sh
 
 # Catch whitespace/patch formatting issues
 git diff --check
@@ -402,6 +428,22 @@ Requires Node.js ≥ 18 on `PATH`. Chromium lands in `~/.box-agent/browsers/` (s
 
 **ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to the same `~/.box-agent/browsers/` path. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp` (our setdefault won't override it).
 
+**Web access routing** is shared by CLI, ACP and child agents through the
+capability-gated `Web Access Routing` prompt. Explicit browser/tab/reader choices
+come first, followed by continuation of an existing page, dependencies on the
+user's browser state, independent visible/interactive browser work, and public
+URL body retrieval. Source discovery uses search before choosing a reader.
+For example, “open Baidu” uses the managed browser, while “summarize this public
+article URL” prefers `web_extract`. A request to review a new form does not itself
+require the user's system browser; stop before submission when the user owns it.
+
+Skills provide execution and evidence procedures for the selected channel.
+Unavailable tools must be discovered or reported, never invented. Recovery may
+select another channel only when it preserves the task and does not replace an
+explicit target or required browser state; uncertain actions must be verified
+before any retry. This is a shared model-facing policy, not an unconditional
+Fetch-to-managed-to-user-browser fallback or a guarantee of model compliance.
+
 In-session commands: `/help`, `/clear`, `/clear_all`, `/history`, `/stats`, `/sandbox_status`, `/log`, `/goal`, `/memory review`, `/exit`
 
 CLI Skill subprocesses receive the original user requests, including constraints
@@ -500,7 +542,7 @@ from the Lab root to build both clients. Neither command uploads artifacts.
 ## Testing
 
 ```bash
-uv run pytest tests/ -v          # all tests
+bash general_review/ci/test.sh       # all tests, up to four workers
 uv run pytest tests/test_core.py -v   # core + context compression
 uv run pytest --cov              # with coverage
 ```

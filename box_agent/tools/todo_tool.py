@@ -150,6 +150,33 @@ def _context_item(item: dict) -> dict[str, Any]:
     }
 
 
+def _todo_snapshot_preview(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Keep todo identity/state, with active work first and bounded task text."""
+    def item_preview(item: dict) -> dict[str, Any]:
+        item = _context_item(item)
+        item["task"] = item["task"].encode("utf-8", errors="replace").decode("utf-8")
+        return item
+
+    preview = {"type": "todo_snapshot", "summary": snapshot["summary"], "items": [], "preview": True}
+    if "action" in snapshot:
+        preview["action"] = snapshot["action"]
+    if "item" in snapshot:
+        preview["item"] = item_preview(snapshot["item"])
+    if "transition" in snapshot:
+        preview["transition"] = dict(snapshot["transition"])
+    for status in ("in_progress", "pending", "completed"):
+        for item in snapshot["items"]:
+            if item["status"] != status:
+                continue
+            preview["items"].append(item_preview(item))
+            if len(preview["items"]) > 64 or len(json.dumps(preview, ensure_ascii=False).encode("utf-8")) > 48 * 1024:
+                preview["items"].pop()
+                preview["omitted_items"] = len(snapshot["items"]) - len(preview["items"])
+                return preview
+    preview["omitted_items"] = len(snapshot["items"]) - len(preview["items"])
+    return preview
+
+
 def _todo_next_instruction(items: list[dict]) -> str:
     unfinished = [item for item in items if item.get("status") != "completed"]
     if not unfinished:
@@ -533,6 +560,7 @@ class TodoWriteTool(Tool):
             success=True,
             content=content,
             raw_output=raw_output,
+            raw_output_preview=_todo_snapshot_preview(raw_output),
             model_context=_todo_model_context(
                 items,
                 action=action,
@@ -819,6 +847,7 @@ class TodoReadTool(Tool):
                 success=True,
                 content=self._format_items([item]),
                 raw_output=snapshot,
+                raw_output_preview=_todo_snapshot_preview(snapshot),
             )
 
         # List (optionally filtered)
@@ -829,11 +858,13 @@ class TodoReadTool(Tool):
                 success=True,
                 content=f"No todo items{label}.",
                 raw_output=snapshot,
+                raw_output_preview=_todo_snapshot_preview(snapshot),
             )
         return ToolResult(
             success=True,
             content=self._format_items(items),
             raw_output=snapshot,
+            raw_output_preview=_todo_snapshot_preview(snapshot),
         )
 
     @staticmethod

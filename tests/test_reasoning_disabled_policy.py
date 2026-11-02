@@ -104,9 +104,71 @@ async def test_gpt6_chat_function_tools_require_explicit_none(
             assert payload["reasoning_effort"] == "none"
             assert payload["tools"] == [tool]
         elif enabled:
-            assert payload["reasoning_effort"] == "high"
+            assert payload["reasoning_effort"] == "max"
         else:
             assert "reasoning_effort" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("model,enabled_effort,disabled_effort", [
+    ("gpt-5.6", "max", None),
+    ("gpt-5.6-sol", "max", None),
+    ("gpt-5.6-terra", "max", None),
+    ("gpt-5.6-luna", "max", None),
+    ("gpt-6-astra", "max", None),
+    ("gpt-6.1-sol", "max", None),
+    ("gpt-6.1-terra", "max", None),
+    ("openai/gpt-6.1-sol-2026-10-01", "max", None),
+    ("vendor/gpt-5.6-luna/azure_L/qwb", "max", None),
+    ("kimi-k3.1-pro", "max", None),
+    (" SN-Kimi-K3.1-Pro-Highspeed ", "max", None),
+    ("glm-5.2", "max", None),
+    ("sn-glm-5-2", "max", None),
+    ("glm-5.3-flash", "max", "low"),
+    ("deepseek-v4-pro", "max", None),
+    ("deepseek-v4-flash", "max", None),
+    ("deepseek-v4.1-flash", "max", None),
+    ("sn-deepseek-v4-1-flash-261017", "max", None),
+    ("deepseek-flash", "max", None),
+    ("sensenova-6.8-flash-lite", "max", "none"),
+    ("SN-SenseNova-6-8-Flash-Lite", "max", "none"),
+    ("gpt-5.5", "high", None),
+    ("gpt-5.6-unknown", "high", None),
+    ("gpt-6.1-solstice", "high", None),
+    ("glm-5.20", "high", None),
+    ("deepseek-v3.2", None, None),
+    ("deepseek-v40-pro", None, None),
+    ("kimi-k2.5", "high", None),
+    ("gemini-3.1-pro", "high", None),
+    ("SenseNova-Flash-Lite-test", "high", "none"),
+    ("SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp", "high", "low"),
+    ("qwen3.8-max", None, None),
+    ("doubao-seed-evolving", None, None),
+])
+async def test_model_effort_is_compatible_with_enabled_and_disabled_thinking(
+    stream, enabled, model, enabled_effort, disabled_effort,
+):
+    async with wire_client(model=model) as (client, requests):
+        messages = [Message(role="user", content="hello")]
+        if stream:
+            events = [event async for event in client.generate_stream(
+                messages, thinking_enabled=enabled)]
+            assert events[-1].type == "finish"
+        else:
+            await client.generate(messages, thinking_enabled=enabled)
+        assert len(requests) == 1
+        payload = requests[0]
+        expected = enabled_effort if enabled else disabled_effort
+        if expected is None:
+            assert "reasoning_effort" not in payload
+        else:
+            assert payload["reasoning_effort"] == expected
+        if "deepseek" in model:
+            assert payload["extra_body"] == {
+                "thinking": {"type": "enabled" if enabled else "disabled"},
+            }
 
 
 @pytest.mark.asyncio

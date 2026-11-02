@@ -211,9 +211,9 @@ class JsonlQueryTool(ReadTool):
             "explicit summaries with original sizes. Results are parsed data, not original source text. "
             f"For source lines within read_file's {MAX_READ_CHARS:,}-character output limit "
             "(including the newline), copy verbatim with offset set to the returned record's line "
-            "and limit=1. If a one-line read exceeds that limit, use another permitted file-copy "
-            "method without printing the record, or report the limit; do not reserialize query "
-            "data as the original text. "
+            "and limit=1. Larger source lines return bounded fragments: follow read_file's "
+            "next_byte_offset as byte_offset with the same path to read toward EOF. "
+            "Do not reserialize query data as the original text. "
             "Continue with next_cursor until has_more "
             "is false. The source file is never modified."
         )

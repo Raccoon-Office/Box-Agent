@@ -54,6 +54,7 @@ workspace/
 # Local test, browser, and rendered-artifact output
 output/
 .playwright-cli/
+.playwright-mcp/
 .pytest_cache/
 
 # OS

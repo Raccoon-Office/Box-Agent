@@ -203,8 +203,8 @@ def _tool_message_content_for_model(
 ) -> str:
     """Return the content stored in conversation history for a tool result.
 
-    ToolCallResult events and logs keep full visible output.  This path controls
-    only what future LLM calls receive in ``messages``.
+    This path selects what future LLM calls receive in ``messages``. The shared
+    delivery guard subsequently bounds both model and host output if needed.
     """
     if not result.success:
         return f"Error: {visible_error}"
@@ -246,6 +246,11 @@ def _repeatable_framework_error(
         return f"{tool_name}:{visible_error}", code
     if visible_error.startswith("INTERNAL_MODEL_HISTORY_PLACEHOLDER:"):
         return f"{tool_name}:{visible_error}", "INTERNAL_MODEL_HISTORY_PLACEHOLDER"
+    for code in ("CHAT_REFERENCE_PROTECTED", "CHAT_REFERENCE_DELETE_DENIED", "BROAD_HOME_SEARCH_BLOCKED"):
+        if visible_error.startswith(f"{code}:"):
+            # Different causes and targets can share one policy code. Collapse
+            # only the same diagnostic, even when retried through another tool.
+            return visible_error, code
     return None
 
 

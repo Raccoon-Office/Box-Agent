@@ -71,6 +71,23 @@ def apply(relative, data):
     if not relative.startswith("skills/") or not relative.endswith((".md", ".py", ".mjs")):
         return data
     text = data.decode("utf-8")
+    if relative in {
+        "skills/sn-ppt-standard/SKILL.md",
+        "skills/sn-ppt-dazzle/SKILL.md",
+        "skills/sn-ppt-doctor/SKILL.md",
+    }:
+        text = section(text, "## Chromium 准备\n", {
+            "skills/sn-ppt-standard/SKILL.md": "## 整册 HTML 完成条件\n",
+            "skills/sn-ppt-dazzle/SKILL.md": "## 0. Entry / Story 输入契约（最高优先级）\n",
+            "skills/sn-ppt-doctor/SKILL.md": "## 持久配置\n",
+        }[relative], """## Chromium 准备
+
+离线任务只使用随包或宿主已配置的本地 Chromium，沿用宿主 Playwright 渲染流程。
+缺失或不可用时报告“离线安装包不完整”，由打包方补齐；任务中不调用环境安装、
+不下载浏览器、不修改依赖。尊重用户只检查的要求。保留已有文件和原有验收标准，
+无法完成渲染时如实标记 partial，不把 Electron/MCP 就绪当作独立 Chromium 就绪。
+
+""")
     if relative.endswith("/SKILL.md") or "/subagents/" in relative:
         heading = re.search(r"(?m)^# [^\n]+\n", text)
         if not heading or "## 离线包执行边界" in text:

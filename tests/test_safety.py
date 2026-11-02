@@ -1,6 +1,7 @@
 """Test cases for safety utilities."""
 
 import asyncio
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -187,6 +188,93 @@ class TestDetectDangerousCommand:
     def test_dynamic_executable_construction_requires_approval(self, command):
         assert detect_dangerous_command(command) is not None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell grammar")
+    @pytest.mark.usefixtures("posix_command_parser")
+    @pytest.mark.parametrize(
+        "command",
+        [
+            (
+                r'cd /private/tmp/browser-screenshot-task && '
+                r'CH=~/Library/Caches/ms-playwright/chromium-1234/'
+                r'chrome-mac-arm64/Google\ Chrome\ for\ Testing.app/'
+                r'Contents/MacOS/Google\ Chrome\ for\ Testing && '
+                r'"$CH" --headless=new --disable-gpu --hide-scrollbars '
+                r'--force-device-scale-factor=2 --window-size=1200,700 --screenshot=shot.png '
+                r'"file://$PWD/input.svg" 2>/dev/null; '
+                r'''python3 -c "from PIL import Image;print(Image.open('shot.png').size)"'''
+            ),
+            'TOOL=/usr/bin/printf && "${TOOL}" hello',
+            "TOOL='/opt/browser with spaces/browser' && \"$TOOL\" --version",
+            'cd "/tmp/task with spaces" && TOOL="/opt/browser with spaces/browser" '
+            '&& "$TOOL" --version',
+            'cd "/tmp/截图任务" && TOOL="/Users/用户/浏览器 Chrome" && "$TOOL" --version',
+        ],
+    )
+    def test_literal_executable_path_used_immediately_does_not_require_approval(self, command):
+        assert detect_dangerous_command(command) is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell grammar")
+    @pytest.mark.usefixtures("posix_command_parser")
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'TOOL=/bin/rm && "$TOOL" file',
+            'TOOL=/bin/sh && "$TOOL" -c "rm file"',
+            'TOOL=/usr/bin/env && "$TOOL" rm file',
+            'TOOL=/bin/echo && "$TOOL" ok && rm file',
+            'TOOL=/bin/echo && "$TOOL" ok > /etc/unsafe',
+            'TOOL=/bin/echo && "$TOOL" ok; OTHER=/bin/rm && "$OTHER" file',
+        ],
+    )
+    def test_literal_executable_path_still_checks_dangerous_operations(self, command):
+        assert detect_dangerous_command(command) is not None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell grammar")
+    @pytest.mark.usefixtures("posix_command_parser")
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'TOOL=/bin/rm; true || TOOL=/bin/echo; "$TOOL" file',
+            'TOOL=/bin/rm; (TOOL=/bin/echo); "$TOOL" file',
+            'TOOL=/bin/echo && TOOL=/bin/rm && "$TOOL" file',
+            'TOOL=$(printf /bin/echo) && "$TOOL" file',
+            'TOOL="$HOME/tool" && "$TOOL" file',
+            'TOOL=/bin/echo && "$TOOL"suffix file',
+            'TOOL=/bin/echo && "$OTHER" file',
+            'TOOL=relative && "$TOOL" file',
+            'TOOL=/bin/echo; "$TOOL" file',
+            'TOOL=/bin/echo && $TOOL file',
+            'TOOL=/bin/echo && "$TOOL" ok; source env.sh',
+            'TOOL=/bin/echo && "$TOOL" "$(rm file)"',
+        ],
+    )
+    def test_ambiguous_dynamic_executable_still_requires_approval(self, command):
+        assert detect_dangerous_command(command) is not None
+
+    def test_windows_dynamic_executable_still_requires_approval(self, monkeypatch):
+        monkeypatch.setattr(
+            "box_agent.tools.shell_inspection.platform.system", lambda: "Windows"
+        )
+
+        assert detect_dangerous_command('TOOL=/bin/echo && "$TOOL" hello') is not None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell grammar")
+    @pytest.mark.parametrize(
+        "name", ["BOX_AGENT_NODE", "HYPERFRAMES_BROWSER_PATH", "BOX_AGENT_DINGTALK_CLI"]
+    )
+    def test_reassigned_runtime_executable_reference_still_requires_approval(self, name):
+        command = f'{name}=/bin/echo && "${name}" hello'
+
+        assert detect_dangerous_command(command) is not None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell grammar")
+    def test_reassigned_custom_trusted_reference_still_requires_approval(self):
+        command = 'TOOL=/bin/echo && "$TOOL" hello'
+
+        assert detect_dangerous_command(
+            command, trusted_executable_references={"$TOOL"}
+        ) is not None
+
     @pytest.mark.parametrize(
         ("name", "reference"),
         [
@@ -255,6 +343,19 @@ class TestDetectDangerousCommand:
         "command",
         [
             "BOX_AGENT_NODE=rm; $BOX_AGENT_NODE cache.tmp",
+            "BOX_AGENT_NODE=rm; ${BOX_AGENT_NODE:-node} cache.tmp",
+            'BOX_AGENT_NODE=rm && "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'OTHER=ok BOX_AGENT_NODE=rm && "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'BOX_AGENT_NODE=rm; true || BOX_AGENT_NODE=echo; "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'BOX_AGENT_NODE[0]=rm; "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'BOX_AGENT_NODE+=rm; "${BOX_AGENT_NODE:-node}" cache.tmp',
+            '((BOX_AGENT_NODE=123)); "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'OTHER=$((BOX_AGENT_NODE=123)); "${BOX_AGENT_NODE:-node}" cache.tmp',
+            '((BOX_AGENT_NODE++)); "${BOX_AGENT_NODE:-node}" cache.tmp',
+            '((BOX_AGENT_NODE<<=1)); "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'NAME=BOX_AGENT_NODE; printf -v "$NAME" rm; "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'NAME=BOX_AGENT_NODE; unset "$NAME"; "${BOX_AGENT_NODE:-node}" cache.tmp',
+            'NAME=BOX_AGENT_NODE; read "$NAME"; "${BOX_AGENT_NODE:-node}" cache.tmp',
             "export BOX_AGENT_NODE=rm; ${BOX_AGENT_NODE:-node} cache.tmp",
             "BOX_AGENT_NODE=$(printf rm); ${BOX_AGENT_NODE} cache.tmp",
             "printf -v BOX_AGENT_NODE rm; $BOX_AGENT_NODE cache.tmp",
@@ -273,6 +374,22 @@ class TestDetectDangerousCommand:
             command,
             trusted_executable_references=trusted,
         ) is not None
+
+    def test_unrelated_assignment_does_not_revoke_trusted_runtime_reference(self, tmp_path):
+        executable = tmp_path / "node"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        trusted = trusted_runtime_executable_references({"BOX_AGENT_NODE": str(executable)})
+
+        assert detect_dangerous_command(
+            'OTHER=ok && "${BOX_AGENT_NODE:-node}" script.js',
+            trusted_executable_references=trusted,
+        ) is None
+        for expression in ("2+3", "2==3", "2>=3", "2!=3", "2<=3"):
+            assert detect_dangerous_command(
+                f'OTHER=$(({expression})) && "${{BOX_AGENT_NODE:-node}}" script.js',
+                trusted_executable_references=trusted,
+            ) is None
 
     @pytest.mark.parametrize(
         "command",

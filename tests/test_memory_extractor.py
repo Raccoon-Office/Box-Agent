@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -394,10 +396,12 @@ async def test_loop_end_waits_for_periodic_extraction_and_keeps_final_feedback(
 
 @pytest.mark.parametrize("outcome", ["failure", "cancelled"])
 async def test_extraction_can_retry_after_failure_or_cancellation(
-    mgr: MemoryManager, outcome,
+    mgr: MemoryManager, outcome, monkeypatch,
 ):
     from box_agent.schema import Message
 
+    clock = [1000.0]
+    monkeypatch.setattr("box_agent.memory.monotonic", lambda: clock[0])
     extractor = _make_extractor(
         mgr, '{"additions": [], "merges": []}', cooldown=0, step_interval=1,
     )
@@ -411,6 +415,10 @@ async def test_extraction_can_retry_after_failure_or_cancellation(
             await extractor.maybe_extract(messages, "step_interval")
     else:
         assert await extractor.maybe_extract(messages, "step_interval") is False
+        assert generate.await_count == 2
+        assert await extractor.maybe_extract(messages, "loop_end") is False
+        assert generate.await_count == 2
+        clock[0] += 30
 
     generate.side_effect = None
     assert await extractor.maybe_extract(messages, "step_interval") is True
@@ -454,8 +462,89 @@ async def test_invalid_json_from_llm(mgr: MemoryManager):
     messages = [Message(role="user", content="Remember this preference")]
 
     result = await extractor.maybe_extract(messages, "loop_end")
-    assert result is True
+    assert result is False
+    assert extractor._llm.generate.await_count == 2
+    assert extractor._last_time == 0
     assert mgr.read_context() == ""
+
+
+@pytest.mark.parametrize("invalid", [
+    "not JSON", "[]", '{}',
+    '{"core_additions": ["- must not write"], "additions": "invalid"}',
+    '{"core_additions": ["- must not write"], "merges": ["invalid"]}',
+    '{"core_additions": ["- must not write"], "additions": [{"text": 5}]}',
+])
+async def test_invalid_extraction_never_partially_writes_memory(mgr, invalid):
+    from box_agent.schema import Message
+
+    mgr.write_core("- original core")
+    mgr.write_context("- original context")
+    extractor = _make_extractor(mgr, invalid)
+    assert not await extractor.maybe_extract(
+        [Message(role="user", content="Remember this preference")], "loop_end",
+    )
+    assert mgr.read_core() == "- original core"
+    assert mgr.read_context() == "- original context"
+
+
+@pytest.mark.parametrize("failure", ["invalid_json", "invalid_schema", "length", "max_tokens"])
+async def test_extraction_retries_same_input_and_applies_valid_result_once(mgr, failure, caplog):
+    from box_agent.schema import LLMResponse, Message, TokenUsage
+
+    messages = [Message(role="user", content="Remember that I prefer concise replies")]
+    valid = json.dumps({"additions": ["- prefers concise replies"], "merges": []})
+    extractor = _make_extractor(mgr, valid)
+    generate = extractor._llm.generate
+    first = LLMResponse(
+        content="invalid" if failure == "invalid_json" else (
+            '{"additions": null}' if failure == "invalid_schema" else valid
+        ),
+        finish_reason=failure if failure in ("length", "max_tokens") else "stop",
+        usage=TokenUsage(completion_tokens=8192, reasoning_tokens=8000),
+    )
+    second = LLMResponse(content=valid, finish_reason="stop")
+
+    async def respond(**kwargs):
+        if generate.await_count == 1:
+            messages[0].content = "A later unrelated message"
+            return first
+        return second
+
+    generate.side_effect = respond
+    with caplog.at_level(logging.INFO, logger="box_agent.memory"):
+        assert await extractor.maybe_extract(messages, "loop_end")
+    assert generate.await_count == 2
+    prompts = [call.kwargs["messages"][1].content for call in generate.await_args_list]
+    assert prompts[0] == prompts[1]
+    assert "prefer concise replies" in prompts[1]
+    assert "later unrelated" not in prompts[1]
+    assert mgr.read_context().count("prefers concise replies") == 1
+    assert "completion_tokens=8192 reasoning_tokens=8000" in caplog.text
+    assert "prefers concise replies" not in caplog.text
+
+
+async def test_valid_empty_extraction_enters_success_cooldown(mgr, monkeypatch):
+    from box_agent.schema import Message
+
+    monkeypatch.setattr("box_agent.memory.monotonic", lambda: 1000.0)
+    extractor = _make_extractor(mgr, '{"additions": [], "merges": []}', step_interval=1)
+    messages = [Message(role="user", content="Remember this preference")]
+    assert await extractor.maybe_extract(messages, "loop_end")
+    assert not await extractor.maybe_extract(messages, "step_interval")
+    assert extractor._llm.generate.await_count == 1
+
+
+async def test_persistence_failure_is_not_replayed_as_an_extraction_retry(mgr, monkeypatch):
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(mgr, '{"additions": ["- prefers concise replies"]}')
+    apply = MagicMock(side_effect=OSError("write failed"))
+    monkeypatch.setattr(mgr, "apply_context_operations", apply)
+    assert not await extractor.maybe_extract(
+        [Message(role="user", content="Remember this preference")], "loop_end",
+    )
+    assert extractor._llm.generate.await_count == 1
+    assert apply.call_count == 1
 
 
 async def test_extract_with_markdown_fences(mgr: MemoryManager):

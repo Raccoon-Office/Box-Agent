@@ -33,6 +33,35 @@ independent retrieval, and preserves the mode for follow-up actions. Existing
 user tabs and login state still require Browser Connector; a headed managed
 window does not inherit them.
 
+## Embedded host ownership
+
+A host can supply an opaque, revocable capability in
+`session/prompt._meta.browser_host_binding`. ACP scopes it to the current turn
+and its child tasks. Immediately before calling the `playwright` MCP server,
+Box-Agent adds it as `arguments._meta.box_agent_browser_binding`, including
+the tab-close calls used by an explicit `browser_close`. It is not added to
+model-visible tool schemas, recorded arguments, or session state. Other MCP
+servers and hosts that omit the capability retain their existing behavior.
+
+Raccoon Lab's embedded adapter validates that capability with its native host
+before executing a tool. The host binds the browser context to the owning task
+and reveals its first page before navigation can wait for certificate approval.
+Ended or replaced turns cannot start another browser action with the old token.
+The host must keep tokens out of renderer/debug events and revoke them on turn
+completion, cancellation, or owner removal. Already-started operations retain
+the existing cancellation semantics.
+
+Per-session MCP pooling remains required: external `--config` files still
+disable multiplexing because they can change browser ownership. The embedded
+adapter loads its bundled viewport-only default internally. Each task and child
+Agent owns separate pages; the Lab host intentionally shares browser login
+storage within the same client account. This differs from standalone Chromium
+contexts and does not provide access to the system browser's login state.
+
+Deploy both the matching Agent runtime and host adapter to enable early
+binding. Older runtimes use the final-result receipt path, so a first navigation
+waiting on certificate approval may remain hidden until the call completes.
+
 Verification: run `uv run pytest tests/test_playwright_session_pool.py
 tests/test_mcp_playwright_multiplex.py tests/test_mcp_config_tool.py
 tests/test_browser_use_builtin_skill.py`. A packaged host additionally needs a

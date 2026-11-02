@@ -607,10 +607,10 @@ def test_research_instructions_preserve_depth_without_rephrased_query_loops() ->
 
     assert "covering distinct evidence gaps" in skill
     assert "do not rerun a near-equivalent" in skill
-    assert "Prefer `web_extract`, or a user-selected MCP reader" in skill
-    assert "`managed_browser_*` is also valid for independent public-web" in skill
-    assert "Use `user_browser_*` when the read depends on the user's current page" in skill
-    assert "does not require a\n  separate authorization prompt" in skill
+    assert "shared **Web Access Routing**" in skill
+    assert "not another channel priority" in skill
+    assert "`managed_browser_navigate` and `managed_browser_snapshot` together" in skill
+    assert "Navigation metadata alone is not a failed body read" in skill
     assert "Do not route between browser modes through a" in skill
     assert "five distinct evidence intents" in routes
     assert "reworded versions of an already-run entity/fact query do not add depth" in routes

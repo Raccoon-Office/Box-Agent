@@ -82,12 +82,13 @@ function makeInput(outline, title, sourceText = "") {
   const context = { title, outline, source_text: sourceText };
   const layoutHintsOnly = Boolean(sourceText);
   const hardSlides = outline.slides.map((slide, index) => {
-    const requirement = slide.hard_requirements || "";
-    if (requirement && (typeof requirement !== "string"
+    const requirements = slide.hard_requirements == null || slide.hard_requirements === ""
+      ? [] : Array.isArray(slide.hard_requirements) ? slide.hard_requirements : [slide.hard_requirements];
+    if (requirements.some(requirement => typeof requirement !== "string" || !requirement.trim()
       || (sourceText && !sourceText.replace(/\s/g, "").includes(requirement.replace(/\s/g, ""))))) {
       throw new Error(`outline.slides.${index}.hard_requirements: must quote the actual user request verbatim`);
     }
-    return { visual: requirement };
+    return { visual: requirements.join("；") };
   });
   const constraints = layoutHintsOnly
     ? inferDesignContract({ source_text: sourceText }, hardSlides) || null
@@ -105,7 +106,7 @@ function makeInput(outline, title, sourceText = "") {
     protocol_version: 2,
     palette_contract_version: 2,
     visual_contract_version: 1,
-    input_hash: hash({ protocol_version: 2, brief_version: 10, outline: contentOutline, source_text: sourceText, title, constraints, catalog_hash: catalogHash }),
+    input_hash: hash({ protocol_version: 2, brief_version: 11, outline: contentOutline, source_text: sourceText, title, constraints, catalog_hash: catalogHash }),
     catalog_hash: catalogHash,
     title, outline: clone(outline), user_constraints: constraints,
     source_text: sourceText, layout_hints_only: layoutHintsOnly,

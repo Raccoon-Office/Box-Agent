@@ -219,7 +219,7 @@ def test_timeline_numbers_retain_room_for_two_digits_in_editable_export(tmp_path
         assert shape.width / 914400 * 72 >= font_size * 1.2
 
 
-def test_subject_identity_guides_asset_prompts_and_survives_designer_refinement(design_case, monkeypatch):
+def test_offline_subject_identity_survives_refinement_without_online_media(design_case, monkeypatch):
     import base64
     monkeypatch.setenv('BOX_AGENT_SOURCE_TEXT_B64', base64.b64encode('制作李白与唐诗的介绍，简洁清晰'.encode()).decode())
     root, outline, _, plan = design_case
@@ -237,6 +237,7 @@ def test_subject_identity_guides_asset_prompts_and_survives_designer_refinement(
     deck = json.loads((root/'deck.json').read_text())
     assert deck['design_plan']['visual_profile']['motifs'] == ['ink-landscape','moon']
     manifest = json.loads((root/'assets/generated/manifest.json').read_text())
-    prompt = manifest['image_plan'][0]['prompt']
-    assert '水墨山月与人物剪影' in prompt
-    assert 'Subject visual identity: Conceptual Chinese ink landscape' in prompt
+    assert manifest['mode'] == 'local_only'
+    assert all(row['prompt'] == '' and row['decision'] != 'generate'
+               and row['acquire_via'] == 'none' for row in manifest['image_plan'])
+    assert json.loads((root/'outline.json').read_text())['slides'][0]['visual'] == '水墨山月与人物剪影'

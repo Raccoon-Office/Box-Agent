@@ -25,6 +25,22 @@ from box_agent.tools.publish_artifact_tool import PublishArtifactTool
 from box_agent.tools.staged_file_write_tool import StagedFileWriteTool
 
 
+@pytest.mark.asyncio
+async def test_cleanup_block_preserves_file_and_provides_actionable_scratch_guidance(tmp_path):
+    path = tmp_path / "patch.py"
+    path.write_text("print('keep')")
+    guard = ChatReferences(tmp_path)
+    guard.retain(path)
+    tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True)
+    result = await invoke_tool_once(tool, {"command": "rm patch.py"}, ToolInvocationContext(chat_references=guard))
+    assert not result.success
+    assert path.read_text() == "print('keep')"
+    assert str(path) in result.error
+    assert "Stop cleanup retries" in result.error
+    assert "$BOX_AGENT_SCRATCH_DIR" in result.error
+    assert result.permission_request is None
+
+
 @pytest.mark.parametrize("relative", ["qa/.check.txt.artifact.json", "qa/.artifact-delivery.json"])
 def test_protocol_metadata_never_gets_recursive_retention_sidecars(tmp_path, relative):
     from types import SimpleNamespace

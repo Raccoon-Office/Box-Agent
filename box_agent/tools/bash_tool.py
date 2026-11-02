@@ -148,6 +148,36 @@ def _format_bash_result_content(
 
 # Shells supporting the explicit pipeline failure contract.
 _PIPEFAIL_SHELLS = frozenset({"bash", "zsh", "ksh"})
+
+
+def _query_exit_outcome(command: str, exit_code: int, stderr: str) -> str | None:
+    """Recognize exit 1 only when it belongs to one unambiguous query.
+
+    Pipelines, wrappers and conditionals can fail for unrelated reasons. Keep
+    their native failure status rather than guessing from the last command.
+    """
+    if exit_code != 1 or stderr:
+        return None
+    inspected = inspect_shell_command(command.strip(), posix=True)
+    if (
+        inspected.has_control_operators
+        or inspected.substitutions
+        or inspected.redirections
+        or inspected.ambiguous_regions
+        or len(inspected.invocations) != 1
+    ):
+        return None
+    invocation = inspected.invocations[0]
+    if invocation.prefix or invocation.indirect or invocation.dynamic_executable_sources:
+        return None
+    name = invocation.executable
+    if name in {"grep", "rg"}:
+        return "no_matches"
+    if name == "diff":
+        return "differences"
+    return None
+
+
 _LARK_CLI_RE = re.compile(
     r"(?:\blark-cli(?:\.(?:cmd|exe))?\b|\$BOX_AGENT_LARK_CLI\b|\$\{BOX_AGENT_LARK_CLI\}|%BOX_AGENT_LARK_CLI%)",
     re.IGNORECASE,
@@ -526,6 +556,10 @@ class BashOutputResult(ToolResult):
             lifetime=self.lifetime,
             exit_code=self.exit_code,
         )
+        outcome = (self.raw_output or {}).get("command_outcome")
+        if self.success and outcome in {"no_matches", "differences"}:
+            label = "No matches found" if outcome == "no_matches" else "Differences found"
+            self.content = f"{label} (normal query result; exit code 1).\n{self.content}"
         return self
 
 
@@ -1488,7 +1522,9 @@ Tips:
   - Quote file paths with spaces: cd "My Documents"
   - Chain dependent commands with &&: npm install && npm test
   - Use absolute paths instead of cd when possible
-  - Put disposable intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm
+  - Put disposable patch/check scripts and other intermediate files under "$BOX_AGENT_SCRATCH_DIR"; the session cleans this reserved directory safely, so do not remove it with rm or publish/link temporary scripts as deliverables
+  - If cleanup returns CHAT_REFERENCE_PROTECTED, leave those files in place and continue the task. Do not retry via another command/tool or ask for automatic-cleanup approval
+  - Prefer the grep tool for searches (no matches is a normal empty result). Shell grep/rg exit 1 means no matches; diff exit 1 means differences. Use separate calls for queries: compound commands and pipelines retain native failure/short-circuit semantics. Do not mask errors with blanket `|| true`
   - Keep retained QA reports, requested previews, and delivery dependencies in the task directory. Do not recursively delete QA/task directories as delivery housekeeping; leave undeclared files in place.
   - Files referenced by chat and their local dependencies must remain available. Never delete or move them as cleanup. Normal edits and appends are allowed. Only a current explicit user deletion request may enter the dedicated confirmation flow.
   - For temporary script outputs elsewhere, declare temporary_files before creation. Paths must be new and parent directories must exist. Clean unchanged, unpublished files with exact rm targets in a separate command, optionally `cd ... && rm ... && ls`.
@@ -1987,23 +2023,28 @@ Examples:
                         )
 
                     # Create result (content auto-formatted by model_validator)
-                    is_success = process.returncode == 0
+                    outcome = None
+                    if not original_stderr_chars and (
+                        not self.is_windows or self._bundled_win_bash is not None
+                    ):
+                        outcome = _query_exit_outcome(command, process.returncode, stderr_text)
+                    is_success = process.returncode == 0 or outcome is not None
+                    if outcome:
+                        raw_output = {**(raw_output or {}), "command_outcome": outcome}
                     if is_success:
                         self.owned_file_cleanup.finish(reservations)
                     error_msg = None
                     if not is_success:
                         error_msg = f"Command failed with exit code {process.returncode}"
-                        if dropped:
-                            # Failed tool messages use ``error`` (not ``content``)
-                            # in model history. Keep a smaller bounded diagnostic
-                            # there so the model can still diagnose the failure
-                            # without duplicating the full 50K visible result.
+                        if stdout_text or stderr_text:
+                            # Failed tool messages use ``error`` in model history.
+                            # Preserve both streams, including short diff/patch
+                            # output, within the existing diagnostic budget.
                             diagnostic, _ = _truncate_bash_output(
-                                stdout_text, "error context", limit=8_000
+                                _format_bash_result_content(stdout_text, stderr_text),
+                                "error context", limit=8_000,
                             )
                             error_msg += f"\n{diagnostic.strip()}"
-                        elif stderr_text:
-                            error_msg += f"\n{stderr_text.strip()}"
 
                     return BashOutputResult(
                         success=is_success,

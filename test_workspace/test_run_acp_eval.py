@@ -66,6 +66,15 @@ def test_command_uses_only_acp_eval(tmp_path: Path):
     assert "box-agent" not in command
 
 
+def test_rate_limit_policy_defaults_and_overrides_reach_acp(tmp_path):
+    args = build_parser().parse_args([])
+    assert (args.rate_limit_retries, args.rate_limit_backoff_seconds) == (2, 120)
+    command = build_command(tmp_path, tmp_path/'dataset', tmp_path/'out', [], None, 1,
+                            rate_limit_retries=0, rate_limit_backoff_seconds=240)
+    assert command[command.index('--rate-limit-retries') + 1] == '0'
+    assert command[command.index('--rate-limit-backoff-seconds') + 1] == '240'
+
+
 def test_command_passes_optional_effect_service_without_credentials(tmp_path: Path):
     command = build_command(
         tmp_path,
@@ -130,6 +139,15 @@ def test_command_passes_complete_auto_model_binding_to_acp_eval(tmp_path: Path):
     assert "--model" not in command
 
 
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_invalid_attempt_deadline_is_rejected_before_creating_output(tmp_path, timeout):
+    dataset = tmp_path / "dataset.jsonl"
+    dataset.write_text('{"id":"Q1"}\n')
+    with pytest.raises(ValueError, match="有限正数"):
+        main(["--repo-root", str(tmp_path), "--dataset", str(dataset), "--timeout-seconds", timeout])
+    assert not (tmp_path / "test_workspace/outputs").exists()
+
+
 def test_main_records_selection_and_invokes_acp(monkeypatch, tmp_path: Path):
     dataset = tmp_path / "dataset.jsonl"
     dataset.write_text(
@@ -150,6 +168,7 @@ def test_main_records_selection_and_invokes_acp(monkeypatch, tmp_path: Path):
     assert len(selection["case_ids"]) == 5
     assert selection["seed"] == 7
     assert "acp-eval" in calls[0][0]
+    assert "--timeout-seconds" not in calls[0][0]
 
 
 def test_main_uses_title_for_directory_and_records_it(monkeypatch, tmp_path: Path):

@@ -52,8 +52,17 @@ Runtime callers provide their workspace explicitly. Producer subprocesses inheri
 `BOX_AGENT_WORKSPACE_DIR`, so changing a script's cwd does not change the metadata
 root. Standalone producers infer an enclosing workspace or use their output
 directory when no workspace is available. Internal storage must not redirect
-through symlinks. In a Git workspace, the internal `.box-agent` directory is
-excluded locally without editing the user's `.gitignore`.
+through symlinks or junctions. The runtime and shared Python metadata helper
+allow the configured global data root (`BOX_AGENT_HOME`, default `~/.box-agent`)
+to be a directory symlink or Windows NTFS junction: they resolve that root to an
+existing target, then validate and access metadata beneath the resolved root.
+Broken or cyclic links fail; workspace-local `.box-agent` directories and
+metadata subdirectories remain subject to the redirect guard. In a Git
+workspace, the internal `.box-agent` directory is excluded locally without
+editing the user's `.gitignore`.
+Record classification and bounded publication scans also use the resolved store,
+so changing the profile target's directory name preserves retention protection
+and intermediate-file provenance.
 
 Chat-reference protection also has a shared derived cache under
 `<BOX_AGENT_HOME>/artifact-metadata/retained/` (default

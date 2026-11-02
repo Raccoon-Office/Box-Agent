@@ -79,7 +79,7 @@ function writeInput(file, input, root) {
     { title: input.title, outline: input.outline, source_text: input.source_text });
   const brief = {
     media_policy: "local_only",
-    offline_constraints: "Local files and model inference only. No search, generation, downloads or installs. Avoid required media without supplied local assets; disclose unmet requirements. See design-role.md.",
+    offline_constraints: "No network or installs.",
     title: input.title, goal: input.outline.deck_goal, audience: input.outline.audience,
     tone: input.outline.tone, source_text: input.source_text, user_constraints: input.user_constraints,
     theme_recommendation: { theme_id: recommendation.theme_id, confidence: recommendation.confidence,
@@ -129,7 +129,8 @@ function accept(inputPath, planPath) {
       plan_hash: plans.hash(plan), input_hash: input.input_hash,
       sources: selected.map(item => ({ session_id: item.session_id, response_hash: item.response_hash })) });
     checkScaffold(planPath, inputPath);
-    write(path.join(root,"qa","design_delivery.json"), { ok:true, status:"design_accepted", correction_fields:merged.correction_fields, warnings:merged.warnings || [] });
+    write(path.join(root,"qa","design_delivery.json"), { ok:true, status:"design_accepted", plan_hash: plans.hash(plan),
+      correction_used: selected.length > 1, correction_fields:merged.correction_fields, warnings:merged.warnings || [] });
     return { ok: true, plan: planPath, source_session: response.session_id,
       plan_hash: plans.hash(plan), theme_match: plan.theme_match, attempts: responses.length, warnings:merged.warnings || [] };
   } catch (error) {
@@ -142,7 +143,7 @@ function accept(inputPath, planPath) {
         try {
           plans.readValidatedPlan(planPath, inputPath);
           const report = { ok: false, status: "correction_failed", terminal: true,
-            retained_plan: planPath, attempts: responses.length, issues: [error.message],
+            retained_plan: planPath, plan_hash: plans.hash(JSON.parse(previousPlan)), attempts: responses.length, issues: [error.message],
             next: "Keep the accepted plan, palette and page count. Do not restart design. Apply the retained plan if needed, finalize the existing deck and report remaining visual defects as a degraded draft." };
           write(path.join(root, "qa", "design_delivery.json"), report);
           console.error(JSON.stringify(report));
@@ -160,13 +161,14 @@ function accept(inputPath, planPath) {
       originalDecision = source.parseDecision(response.text);
       fields = recovery.correction(originalDecision, {}, error.message).fields;
     } catch (_) {}
+    const fullReplacement = !originalDecision || recovery.needsFullReplacement(error.message);
     const correctionFile = path.join(path.dirname(input.request_file), "correction.json");
     const layoutIds = [...new Set((originalDecision?.slides || []).map(slide => slide.layout_id))];
     writeCorrection(correctionFile, { brief_file: input.request_file,
       base_session_id: response.session_id, base_response_hash: response.response_hash,
       // A parsed original decision is sufficient for a bounded correction;
       // require a full reread only when no trustworthy decision exists.
-      requires_full_read: !originalDecision,
+      requires_full_read: fullReplacement,
       page_count: input.outline.slides.length, original_decision: originalDecision,
       editable_fields: fields, issues: [error.message],
       layout_options: plans.catalog().layouts.filter(layout => layoutIds.includes(layout.id))

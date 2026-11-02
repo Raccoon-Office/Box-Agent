@@ -67,6 +67,7 @@ def test_core_config_rejects_invalid_plugin_namespace_shapes(
 def test_cua_config_validates_only_the_cua_namespace() -> None:
     assert CuaConfig.model_validate({}).model_dump() == {
         "server_name": "computer-use",
+        "tool_interface": "app" if sys.platform == "darwin" else "driver",
         "feed_screenshots": True,
         "persist_images": True,
         "runtime": None,

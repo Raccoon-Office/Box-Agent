@@ -14,7 +14,7 @@ import pytest
 from box_agent.agent import Agent
 from box_agent.events import DoneEvent, StopReason, SummarizationEvent
 from box_agent.hooks import BaseHook
-from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall, TokenUsage
 from box_agent.session_log import (
     SessionLog,
     SessionLogDurabilityError,
@@ -341,6 +341,9 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
         model = "test-model"
         max_output_tokens = 1024
 
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
         async def generate_stream(self, *, messages, **kwargs):
             if any(marker in str(message.content) for message in messages):
                 interrupt(messages, "provider")
@@ -348,15 +351,19 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
                 # Grow history after the first request so compaction and the
                 # wrap-up injection both happen on the next step.
                 history.extend(Message(role="user" if index % 2 == 0 else "assistant",
-                                       content=f"history-{index}:" + "x" * 2000)
+                                       content=f"history-{index}:" + "x" * 200)
                                for index in range(24))
-            yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[
+            yield StreamEvent(type="finish", finish_reason="tool",
+                              usage=TokenUsage(prompt_tokens=8000, total_tokens=8000), tool_calls=[
                 ToolCall(id="failed-call", type="function", function=FunctionCall(
                     name="failing_probe", arguments={},
                 )),
             ])
 
     class Summary:
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
         async def generate(self, *, messages, **kwargs):
             interrupt(messages, "summary")
 
@@ -392,6 +399,9 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
 
 
 class _SummaryCheckpointLLM:
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.saw_start = False
@@ -416,6 +426,9 @@ class _SummaryCheckpointLLM:
 
 
 class _PostCompactionLLM:
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     model = "test-model"
     max_output_tokens = 1024
 
@@ -743,14 +756,15 @@ async def test_compaction_is_durable_before_live_context_switch(tmp_path):
         tools=[],
         workspace_dir=str(tmp_path),
         # Keep room for tool_search's local/connector schema after compaction,
-        # while the long history still forces the real summary path below.
+        # while provider usage triggers compaction with an in-budget summary.
         token_limit=8_000,
         deferred_mcp_loading_enabled=False,
         session_log=log,
     )
     for index in range(24):
         role = "user" if index % 2 == 0 else "assistant"
-        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 2_000))
+        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 200))
+    agent.messages[-1].usage = TokenUsage(prompt_tokens=8000, total_tokens=8000)
     agent.add_user_message("latest request")
     options = replace(agent.default_run_options(), summary_llm=summary_llm)
 
@@ -792,7 +806,8 @@ async def test_compaction_replaces_live_messages_from_post_flush_replay(tmp_path
     )
     for index in range(24):
         role = "user" if index % 2 == 0 else "assistant"
-        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 2_000))
+        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 200))
+    agent.messages[-1].usage = TokenUsage(prompt_tokens=8000, total_tokens=8000)
     agent.add_user_message("latest request")
 
     events = [event async for event in agent.run_events(
@@ -822,7 +837,8 @@ async def test_compaction_replay_failure_does_not_close_turn_with_old_live_surfa
     )
     for index in range(24):
         role = "user" if index % 2 == 0 else "assistant"
-        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 2_000))
+        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 200))
+    agent.messages[-1].usage = TokenUsage(prompt_tokens=8000, total_tokens=8000)
     agent.add_user_message("latest request")
 
     with pytest.raises(SessionLogReplayError, match="committed"):
@@ -858,8 +874,9 @@ async def test_replay_recovery_preserves_next_user_input_without_restoring_stale
     for index in range(24):
         agent.messages.append(Message(
             role="user" if index % 2 == 0 else "assistant",
-            content=f"old-{index}:" + "x" * 2_000,
+            content=f"old-{index}:" + "x" * 200,
         ))
+    agent.messages[-1].usage = TokenUsage(prompt_tokens=8000, total_tokens=8000)
     agent.add_user_message("original request")
     options = replace(agent.default_run_options(), summary_llm=_SummaryCheckpointLLM(log.path))
     try:
@@ -911,7 +928,8 @@ async def test_compaction_without_native_replay_keeps_in_memory_surface(tmp_path
     )
     for index in range(24):
         role = "user" if index % 2 == 0 else "assistant"
-        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 2_000))
+        agent.messages.append(Message(role=role, content=f"old-{index}:" + "x" * 200))
+    agent.messages[-1].usage = TokenUsage(prompt_tokens=8000, total_tokens=8000)
     agent.add_user_message("latest request")
 
     events = [event async for event in agent.run_events(

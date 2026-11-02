@@ -6,6 +6,93 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-02 — Bounded parallel full-suite test runner
+
+- Preflight and GitHub CI share `general_review/ci/test.sh`: pytest-xdist selects
+  at most four CPU-based workers, groups by file and reports the 20 slowest
+  phases. The full selection, existing timeout exclusion and fail-fast gate
+  ordering are preserved. Focused pytest commands retain serial defaults.
+- ASR response test fixtures pin gzip timestamps so worker collection does not
+  produce clock-dependent parameter IDs; a clock-change regression covers it.
+- The existing xdist worker override can force serial execution with
+  `PYTEST_XDIST_AUTO_NUM_WORKERS=0`. No dependency or application runtime changes;
+  reverting the runner and its callers restores serial CI.
+- A macOS ARM64 comparison passed the same 9,238 tests and skipped the same 305:
+  576.17 seconds serial versus 180.83 seconds with four workers. Linux/Windows
+  timings and live provider/browser probes remain separate validation.
+
+## 2026-11-02 — Verification pages block extraction and request browser recovery
+
+- `web_extract` reports `WEB_VERIFICATION_REQUIRED` for the observed WeChat
+  verification screen, verification headings paired with challenge instructions,
+  and Cloudflare's documented [`cf-mitigated: challenge` header](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/).
+  Detection precedes HTTP status handling, summarization and caching, so challenge
+  text is neither returned as article content nor cached as a successful read.
+  Text recognition ignores script/style/comment/template headings and requires
+  leading challenge instructions, preserving articles that quote verification
+  messages. Unclassified HTTP denials retain their existing behavior.
+- Shared routing and the MCP error direct the model to discover an available
+  browser and revisit the original URL, preserving explicit channel choices.
+  Human verification requires a visible page, user takeover and confirmation,
+  then a fresh read in the same browser. Unavailable browsers remain an explicit
+  blocker; permissions and access restrictions cannot be bypassed.
+- The standalone extractor does not own browser sessions: browser recovery is
+  model-directed through existing tools. Parser/MCP/prompt tests do not prove
+  live model compliance or site access. Consuming hosts need a runtime rebuild,
+  install, restart and fresh-task verification. No config, dependency or stored
+  data migration; reverting this change restores the previous extraction policy.
+
+## 2026-11-02 — DOCX reading selects Python before text tools
+
+- Shared file guidance routes `.docx` directly to `execute_code` with
+  `python-docx`, or an available managed Python through `bash` when the sandbox
+  tool is absent. Sessions without execution report the missing capability.
+  The `read_file` description also directs DOCX away from text reads before
+  the first call. Guidance covers paragraphs, tables and nullable styles.
+- This changes model-facing guidance, not parsers, tool results or permissions.
+  Prompt/schema tests do not prove live model compliance. Installed hosts need
+  a runtime rebuild, install and restart; revert the guidance to roll back.
+
+## 2026-11-02 — Single-walk recursive grep includes
+
+- `grep` routes `**/*.py` and shared literal-prefix forms such as
+  `src/app/**/*.{ts,tsx}` to native file types and negative sibling globs.
+  The search keeps its original cwd and recursive no-follow walker; no
+  positive whitelist overrides ignore files. These patterns need one content
+  search instead of file discovery plus repeated root walks.
+- The optimization accepts ASCII literal directory components and simple
+  basename globs using ASCII letters, digits, `._-` and `*`. Ambiguous prefix
+  files, complex patterns, oversized filters and tight Windows command lines
+  retain the bounded discovery/batch implementation described below.
+- Native fixed prefixes use actual platform directory boundaries: on POSIX,
+  a sibling named `src\file.py` is excluded from `src/**/*.py` rather than
+  treated as a virtual subpath. The fallback's legacy backslash normalization
+  is outside this optimization.
+- Tests cover single-process execution, ignore precedence, prefix siblings,
+  prefix-file collisions, symlink replacement and both execution paths. No
+  public arguments, dependencies, config or persistence changes. Source-only
+  checks do not update installed runtimes; revert this optimization to restore
+  discovery and batching for every recursive path include.
+
+## 2026-11-02 — Ripgrep selection and long-line previews
+
+- `glob` and `grep.include` preserve ripgrep character-class negation and
+  escaped literals during Python path filtering. Path includes select
+  non-ignored files before content search; unrelated oversized files no longer
+  make the selected results incomplete. Selected files become anchored literal
+  globs on a recursive search, preserving rg's no-follow behavior if files or
+  parent directories become symlinks after discovery. Selection uses the
+  ignore rules observed during discovery. File batches share one result limit
+  and timeout; pending candidates flush by batch age even during continuous
+  nonmatching discovery. Windows batches budget the fully escaped and quoted
+  command line, including the regex and UTF-16 size.
+  Early stops drain stdout, and cancellation closes both discovery and search.
+- Long-line grep previews retain the first match and its original character
+  column, with explicit truncation markers. Public arguments, configuration,
+  dependencies and stored-session formats are unchanged. Source regression
+  proof does not update installed hosts; runtime rebuild/install/restart and
+  live-task validation remain separate. Revert these search changes to roll back.
+
 ## 2026-10-14 — Transaction staging and truncation continuation (PR #212)
 
 - Change: [PR #212](https://github.com/Raccoon-Office/Box-Agent/pull/212),

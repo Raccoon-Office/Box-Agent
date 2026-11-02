@@ -81,6 +81,12 @@ CUA operation.
 omitting strategy selects native only for declared image support; otherwise it
 uses the configured proxy route. Explicit proxy results remain text input to
 the main model; their optional archive is ineligible for automatic injection.
+Explicit `strategy="native"` also requires confirmed image support. A model
+switch to an unsupported or unknown binding retires retained images from live
+context while preserving their archived files and the text history. An unseen
+image produces a not-delivered notice. Unsupported inspection returns a tool
+error so the agent can explain the limitation and continue with available text
+and tools instead of sending image blocks that could fail the main request.
 Other tools' `transient_followup_content` retains its one-request semantics.
 With CUA `persist_images: false`, screenshots also use a one-request overlay
 when feeding is enabled and the model supports vision; they create no archived
@@ -112,8 +118,11 @@ CLI, ACP, image inspection and CUA share `image_input_support()` in
    containment: `sn-kimi-k3`, `openai/gpt-6.1-sol` and dated/provider-specific
    variants match their registered model name. Broad vendor names alone do not.
 4. Otherwise the result is unknown (`None`). Unknown models do not enable
-   automatic CUA screenshot injection or the default native inspection strategy.
-   Existing explicit-native and proxy behavior is unchanged.
+   automatic CUA screenshot injection, retained image input, or native inspection
+   (including explicit `strategy="native"`). A custom vision model must declare
+   image support through the configuration or catalog before using those paths.
+   Proxy inspection can still probe an unknown binding; explicit image-support
+   rejections are cached for that proxy binding and returned as tool failures.
 
 The host's `/api/web/llm/v2/model_catalog` response supplies the tags through
 `autoRouting.models`; this lookup does not fetch the catalog itself. A host

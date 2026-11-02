@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .env_context import EnvContext
     from .llm import SessionBoundLLM
     from .session_log import SessionLog
+    from .session_projection import SessionProjection
     from .tools.permissions import GrantStore, PermissionEngine
     from .tools.runtime import SkillRuntimeContext
     from .tools.skill_preload import SkillPreloadAttribution
@@ -115,6 +116,7 @@ class AgentSession:
         hooks: list[Any] | None = None,
         plugins: tuple[Any, ...] = (),
         session_log: SessionLog | None = None,
+        session_projection: SessionProjection | None = None,
         session_id: str | None = None,
         skill_runtime: Any = _UNSET,
         utility: bool = False,
@@ -134,6 +136,8 @@ class AgentSession:
             capabilities["skill_runtime"] = skill_runtime
         if session_id is not None:
             capabilities["session_id"] = session_id
+        if session_projection is not None:
+            capabilities["session_projection"] = session_projection
         agent = AgentService(agent_factory=agent_factory).create_agent(
             llm_client=llm_client,
             system_prompt=system_prompt,
@@ -186,6 +190,7 @@ class AgentSession:
         host: HostBindings | None = None,
         runtime: PluginRuntime | None = None,
         agent_factory: AgentFactory = Agent,
+        session_projection: SessionProjection | None = None,
         **state: Any,
     ) -> AgentSession:
         """Prepare configured plugins, then construct the Agent and this class.
@@ -196,6 +201,7 @@ class AgentSession:
         from .composition import _attach_cleanup_error
         from .plugins.runtime import PluginRuntime
         from .session_context import HostBindings, SessionContext, SessionOptions
+        from .session_log import SessionLog, run_session_io
 
         options = options or SessionOptions()
         if state:
@@ -213,8 +219,12 @@ class AgentSession:
             restore_validation = None
             session_log = context.host.session_log
             replay = getattr(session_log, "replay", None)
+            projection = resources.state.pop("session_projection", session_projection)
+            if projection is None and callable(replay):
+                projection = (await run_session_io(replay)
+                              if isinstance(session_log, SessionLog) else replay())
             if skill_runtime is not None and skill_runtime.loader is not None and callable(replay):
-                records = replay().skills
+                records = projection.skills
                 names = tuple(dict.fromkeys(row["name"] for row in records
                                             if isinstance(row, dict) and isinstance(row.get("name"), str)))
                 restore_validation = await skill_runtime.loader.avalidate_references(names, allow_stale=False)
@@ -231,6 +241,7 @@ class AgentSession:
                     token_limit=options.token_limit,
                     hooks=resources.hooks,
                     session_log=context.host.session_log,
+                    session_projection=projection,
                     utility=options.utility,
                     **resources.state,
                 )

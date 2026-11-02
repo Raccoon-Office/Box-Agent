@@ -13,13 +13,14 @@ import pytest
 from box_agent.agent import Agent
 from box_agent.config import Config, ImageContextConfig
 from box_agent.context_input import DefaultContextEngine
-from box_agent.events import ErrorEvent
+from box_agent.events import DoneEvent, ErrorEvent, StopReason, ToolCallResult
 from box_agent.image_context import ImageContext
 from box_agent.kernel.context_engine import _fallback_context_estimate, request_input_tokens
 from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall, TokenUsage
 from box_agent.session_log import SessionLog
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.engine.preparation import prepare_tools
+from box_agent.tools.image_inspection_tool import ImageInspectionTool
 
 
 def image_block(color="red"):
@@ -182,6 +183,79 @@ async def test_tool_images_share_retention_and_remain_only_in_event_metadata(tmp
     assert event["data"]["images"][0]["toolCallId"] == "call-1"
     assert all(not image_blocks([message]) for message in log.replay().messages)
     log.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retained_image", [False, True])
+async def test_glm_image_failures_after_model_switch_leave_task_running(tmp_path, retained_image):
+    (tmp_path / "slide.png").write_bytes(base64.b64decode(image_block()["data"]))
+    arguments = {"image_paths": ["slide.png"], "instruction": "Describe it."}
+    calls = [ToolCall(id=f"inspect-{strategy}", type="function", function=FunctionCall(
+        name="inspect_images", arguments={**arguments, "strategy": strategy},
+    )) for strategy in ("proxy", "native")]
+
+    class SwitchingLLM(RecordingLLM):
+        model = "sn-kimi-k3"
+        proxy_calls = 0
+
+        async def generate(self, **kwargs):
+            self.proxy_calls += 1
+            raise RuntimeError("messages.content.type 参数非法，取值范围 ['text']")
+
+        async def generate_stream(self, *, messages, **kwargs):
+            if self.model == "sn-glm-5-3" and image_blocks(messages):
+                raise RuntimeError("messages.content.type=image_url 当前纯文本模型不支持")
+            async for event in super().generate_stream(messages=messages, **kwargs):
+                yield event
+
+    final = "Image inspection is unavailable; I can continue from the written context."
+    log = SessionLog.create(tmp_path / "sessions", session_id="switch-model", cwd=tmp_path)
+    llm = SwitchingLLM(["Previous written findings.", *calls, final], log)
+    tool = ImageInspectionTool(llm=llm, workspace_dir=str(tmp_path),
+                               native_supported=True, native_capability_llm=llm)
+    agent = make_agent(tmp_path, llm, log, tools=[tool])
+    try:
+        agent.add_user_message("look", image_content=[image_block()] if retained_image else None)
+        await run(agent)
+        llm.model = "sn-glm-5-3"
+        llm.capabilities = {}  # The host did not declare this binding's image support.
+        agent.add_user_message("Review the image again and continue the task.")
+        events = await run(agent)
+
+        results = [event for event in events if isinstance(event, ToolCallResult)]
+        assert [result.raw_output["code"] for result in results] == [
+            "IMAGE_INPUT_UNSUPPORTED", "IMAGE_NATIVE_UNSUPPORTED",
+        ]
+        assert all(not result.success and result.image_content is None for result in results)
+        assert llm.proxy_calls == 1
+        assert len(llm.requests) == 4
+        assert all(not image_blocks(request) for request in llm.requests[1:])
+        assert any(message.content == "Previous written findings." for message in llm.requests[-1])
+        done = next(event for event in events if isinstance(event, DoneEvent))
+        assert done.stop_reason is StopReason.END_TURN
+        assert done.final_content == final
+        assert log.replay().messages[-1].content == final
+        if retained_image:
+            ref = log.replay().images[0]
+            assert not ref["active"]
+            assert ref["evictionReason"] == "model_image_support_unknown"
+            assert (log.path.parent / ref["contentRef"]).exists()
+    finally:
+        log.close()
+
+
+@pytest.mark.parametrize("capability", [False, None])
+def test_upload_without_confirmed_image_support_keeps_text_and_reports_unseen_image(capability):
+    context = ImageContext()
+    user = Message(role="user", content="Continue the task even if the image is unavailable.")
+    context.register(user, [image_block()], source="user_upload")
+
+    request = context.prepare([user], llm=SimpleNamespace(capabilities={"image_input": capability}))
+
+    assert not image_blocks(request.messages)
+    assert request.messages[0].content == user.content
+    assert request.notices
+    assert "Do not assume its contents were seen" in str(request.messages)
 
 
 @pytest.mark.asyncio

@@ -93,6 +93,9 @@ def test_short_acknowledgement_and_non_task_reply_detection():
 class MockLLM:
     """Deterministic LLM that yields pre-configured responses in order."""
 
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     def __init__(self, responses: list[LLMResponse]):
         self._responses = list(responses)
         self._idx = 0
@@ -5936,6 +5939,9 @@ async def test_provider_stale_retries_three_empty_responses_before_stopping(tmp_
     assert llm._idx == 4
     errors = [event for event in events if isinstance(event, ErrorEvent)]
     assert len(errors) == 1 and errors[0].is_fatal is True
+    assert errors[0].error_code == "LLM_PROVIDER_STALE_TIMEOUT"
+    assert errors[0].error_category == "timeout"
+    assert errors[0].error_details["recoveryAttempts"] == 3
     done = [event for event in events if isinstance(event, DoneEvent)]
     assert done and done[-1].stop_reason == StopReason.ERROR
 
@@ -6282,6 +6288,9 @@ def test_roadmap_artifact_layout_rejects_spoofed_or_invalid_html(tmp_path):
 
 class _FakeSummaryLLM:
     """Records calls and returns a canned summary."""
+
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
 
     def __init__(
         self,
@@ -6944,8 +6953,8 @@ def test_context_pressure_subtracts_consumed_request_only_image_estimate():
     assert estimated == 1_100
 
 
-def test_context_pressure_does_not_replace_api_usage_with_full_fallback():
-    from box_agent.core import _estimate_context_from_latest_response
+def test_context_pressure_counts_new_schemas_even_when_previous_usage_is_small():
+    from box_agent.core import _estimate_context_from_latest_response, _fallback_context_estimate
 
     class _LargeActivatedTool:
         def to_openai_schema(self):
@@ -6962,10 +6971,11 @@ def test_context_pressure_does_not_replace_api_usage_with_full_fallback():
         {"activated": _LargeActivatedTool()},
     )
 
-    assert source == "usage"
-    # API usage is authoritative when present; a large local tool-schema
-    # fallback must not cause early compaction.
-    assert estimated == 110
+    assert source == "fallback"
+    assert estimated == _fallback_context_estimate(
+        [Message(role="system", content="sys"), response], {"activated": _LargeActivatedTool()},
+    )
+    assert estimated > 110
 
 
 def test_context_pressure_without_usage_falls_back_to_characters_over_four():

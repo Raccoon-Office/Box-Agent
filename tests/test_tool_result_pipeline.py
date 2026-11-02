@@ -19,6 +19,67 @@ from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.engine import artifact_results
 
 
+@pytest.mark.parametrize("code", ["CHAT_REFERENCE_PROTECTED", "CHAT_REFERENCE_DELETE_DENIED", "BROAD_HOME_SEARCH_BLOCKED"])
+def test_repeated_policy_blocks_across_tools_keep_first_guidance_and_stop_retry_hint(tmp_path, code):
+    messages = []
+    counts = {}
+    error = f"{code}: Preserve file 0; continue the task."
+    for index, tool_name in enumerate(["bash", "execute_code"]):
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"call-{index}", tool_name=tool_name,
+            arguments={}, result=ToolResult(success=False, error=error),
+            visible_content="", visible_error=error,
+            result_storage=ToolResultStorage(tmp_path), framework_error_counts=counts,
+        ))
+        assert not outcome.events[0].success
+        assert outcome.visible_error == error
+        if index == 0:
+            assert "Preserve file 0" in outcome.model_content
+        else:
+            assert "REPEATED_FRAMEWORK_FAILURE" in outcome.model_content
+            assert "Do not retry" in outcome.model_content
+            assert code in outcome.model_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_command", ["rm other.txt", "python -I -c 'print(1)'"])
+async def test_policy_blocks_preserve_new_targets_and_repair_guidance(tmp_path, second_command):
+    from box_agent.tools.base import ToolInvocationContext
+    from box_agent.tools.bash_tool import BashTool
+    from box_agent.tools.chat_references import ChatReferences
+    from box_agent.tools.engine.execution import invoke_tool_once
+
+    references = ChatReferences(tmp_path)
+    for name in ("keep.txt", "other.txt"):
+        path = tmp_path / name
+        path.write_text("keep")
+        references.retain(path)
+    tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True)
+    messages = []
+    counts = {}
+    for index, command in enumerate(["rm keep.txt", second_command]):
+        arguments = {"command": command}
+        result = await invoke_tool_once(
+            tool, arguments, ToolInvocationContext(chat_references=references),
+        )
+        assert not result.success
+        assert result.error.startswith("CHAT_REFERENCE_PROTECTED:")
+        outcome = process_tool_result(ToolResultPipelineInput(
+            messages=messages, tool_call_id=f"call-{index}", tool_name="bash",
+            arguments=arguments, result=result, visible_content=result.content,
+            visible_error=result.error, result_storage=ToolResultStorage(tmp_path),
+            framework_error_counts=counts,
+        ))
+        assert result.error in outcome.model_content
+        assert "REPEATED_FRAMEWORK_FAILURE" not in outcome.model_content
+    if second_command.startswith("python"):
+        assert "use normal Python startup" in outcome.model_content
+    else:
+        assert str(tmp_path / "other.txt") in outcome.model_content
+    assert (tmp_path / "keep.txt").read_text() == "keep"
+    assert (tmp_path / "other.txt").read_text() == "keep"
+
+
 class _OneToolCallLLM:
     def __init__(self, tool_name: str, arguments: dict | None = None) -> None:
         self._tool_name = tool_name

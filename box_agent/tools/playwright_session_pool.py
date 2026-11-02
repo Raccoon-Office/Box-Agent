@@ -35,6 +35,9 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
+from mcp.shared.exceptions import McpError
+
 from .browser_runtime_scope import current_browser_session_key
 
 DEFAULT_SESSION_KEY = "__default__"
@@ -48,20 +51,29 @@ _TAB_CLEANUP_TIMEOUT = 15.0
 _WARM_UP_TIMEOUT = 60.0  # first call may launch Chromium
 
 
-async def close_all_tabs(session: Any, *, timeout: float = _TAB_CLEANUP_TIMEOUT) -> int:
+async def close_all_tabs(
+    session: Any,
+    *,
+    timeout: float = _TAB_CLEANUP_TIMEOUT,
+    metadata: dict[str, Any] | None = None,
+) -> int:
     """Close the calling client's tabs one by one via ``browser_tabs``.
 
     Upstream never calls ``BrowserContext.close()`` for a client while other
     clients share the browser, and ``Context.dispose`` does not close pages, so
     ``browser_close`` / disconnect would otherwise leave orphan windows. Stops
     at the first ``isError`` (no tab left). Returns the number of tabs closed.
+    Explicit user calls carry their host metadata; lifecycle cleanup omits it.
     """
     closed = 0
 
     async def _close_until_empty() -> None:
         nonlocal closed
         for _ in range(_MAX_TABS_TO_CLOSE):
-            result = await session.call_tool("browser_tabs", arguments={"action": "close"})
+            arguments: dict[str, Any] = {"action": "close"}
+            if metadata:
+                arguments["_meta"] = dict(metadata)
+            result = await session.call_tool("browser_tabs", arguments=arguments)
             if getattr(result, "isError", False):
                 break
             closed += 1
@@ -80,6 +92,32 @@ class BrowserSessionLimitError(RuntimeError):
             "managed browser at the same time. Wait for another session to finish "
             "or use a non-browser fallback."
         )
+
+
+class BrowserSessionExpiredError(RuntimeError):
+    """The failed session was retired, without replaying the browser action."""
+
+    def __init__(self):
+        super().__init__(
+            "BROWSER_SESSION_RESET: The browser connection ended and its cached "
+            "session was discarded. The next browser call will create a fresh "
+            "context. The failed action was not replayed and may have already "
+            "taken effect. Navigate and inspect the page before deciding whether "
+            "to retry; old tabs, cookies and element references are no longer valid."
+        )
+
+
+def _session_terminated(error: Exception) -> bool:
+    if isinstance(error, (BrokenResourceError, ClosedResourceError, EndOfStream)):
+        return True
+    return (
+        isinstance(error, McpError)
+        and (
+            (error.error.code == -32000 and error.error.message in {"Session terminated", "Connection closed"})
+            # The Python SDK maps a Streamable HTTP 404 to positive 32600.
+            or (error.error.code == 32600 and error.error.message == "Session terminated")
+        )
+    )
 
 
 @dataclass
@@ -295,7 +333,10 @@ class PlaywrightSessionPool:
 
     def _live(self, key: str) -> _PooledClient | None:
         client = self._clients.get(key)
-        if client is None or client.closing or client.generation != self._generation:
+        if (
+            client is None or client.closing or client.generation != self._generation
+            or (client.runner is not None and client.runner.done())
+        ):
             return None
         return client
 
@@ -402,7 +443,8 @@ class PlaywrightSessionPool:
             return
         client.closing = True
         try:
-            await self._close_tabs(client)
+            if reason != "session-terminated":
+                await self._close_tabs(client)
         finally:
             # Cancelling tab cleanup must still release the task that owns the
             # MCP transport. Keep it registered until teardown has settled.
@@ -427,6 +469,12 @@ class PlaywrightSessionPool:
                     f"[browser] closed managed browser context for session {client.key!r} "
                     f"({reason})\n"
                 )
+
+    async def _discard_terminated(self, client: _PooledClient) -> None:
+        # The caller holds this session's lease lock. Preserve its selected
+        # mode and every other session; do not retry tools on a dead transport.
+        async with self._sync():
+            await self._close_client(client, reason="session-terminated")
 
     def _ensure_reaper(self) -> None:
         if self._idle_timeout <= 0 or self._closed:
@@ -475,6 +523,9 @@ class PlaywrightSessionPool:
                 )
                 client.extra["browser_started"] = not getattr(result, "isError", False)
             except Exception as error:  # noqa: BLE001
+                if _session_terminated(error):
+                    await self._discard_terminated(client)
+                    raise BrowserSessionExpiredError() from error
                 sys.stderr.write(
                     f"[browser] warm-up for session {client.key!r} failed: {error}\n"
                 )
@@ -535,6 +586,11 @@ class PlaywrightSessionPool:
         client.last_used = self._time()
         try:
             yield client.session
+        except Exception as error:
+            if _session_terminated(error):
+                await self._discard_terminated(client)
+                raise BrowserSessionExpiredError() from error
+            raise
         finally:
             client.in_use -= 1
             client.last_used = self._time()

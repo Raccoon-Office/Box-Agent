@@ -3504,7 +3504,7 @@ def test_deck_contract_scaffolds_ordered_repeated_layouts_once(tmp_path: Path) -
     assert payload["authoring_rules"]["write_policy"]["initial_full_deck_writes"] == 0
     assert payload["authoring_rules"]["write_policy"]["initial_scaffold_writes"] == 1
     assert payload["authoring_rules"]["write_policy"]["batch_patch_command"].startswith(
-        "Write deck.patch.json once, then run ${BOX_AGENT_NODE:-node} "
+        'Write deck.patch.json once, then run "$BOX_AGENT_NODE" '
     )
 
     repeated = _run(
@@ -10310,7 +10310,7 @@ def test_pptx_theme_selection_has_no_hard_html_templates_dependency() -> None:
     assert "BOX_AGENT_OUTPUT_DIR" not in text
     assert "absolute `<PRESENTATION_DIR>`" in text
     assert "scripts/apply_deck_patch.js" in text
-    assert "verified_facts[].canonical" in text
+    assert "Keep actual source filenames/page references in evidence." in text
 
 
 def test_pptx_skill_exposes_platform_specific_standalone_image_sync() -> None:
@@ -10332,14 +10332,14 @@ def test_pptx_skill_exposes_platform_specific_standalone_image_sync() -> None:
     assert "the only command" in skill.content
 
 
-def test_pptx_solution_briefs_do_not_default_to_deep_research() -> None:
+def test_offline_pptx_solution_briefs_use_local_materials_without_research() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     outline = (SKILL_DIR / "references/outline.md").read_text(encoding="utf-8")
     assert "references/outline.md" in text
     assert "they do not require research by default" in text
-    assert "The request is a solution/design brief" in outline
-    assert "a concise proposal brief stays in branch 2" in outline
-    assert "use at most two targeted official-source lookups" in outline
+    assert "A sufficient solution/architecture brief can proceed as a proposal." in outline
+    assert "Do not perform external research" in outline
+    assert "Do not load research skills, call search/fetch tools, download images" in outline
 
 
 def test_pptx_missing_facts_use_placeholders_without_pausing() -> None:
@@ -10351,12 +10351,12 @@ def test_pptx_missing_facts_use_placeholders_without_pausing() -> None:
     assert "source findings are recorded as advisories" in text
 
 
-def test_pptx_framing_choices_use_recommended_decision_with_countdown() -> None:
+def test_offline_pptx_clarifies_structure_without_asking_for_each_missing_fact() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     outline = (SKILL_DIR / "references/outline.md").read_text(encoding="utf-8")
     assert "references/outline.md" in text
-    assert "never use `request_user_input` for\n   them" in outline
-    assert "default with a 30-second timeout" in outline
+    assert "Ask one focused structural question only when" in outline
+    assert "scope/audience ambiguity materially changes the result, never for each missing fact." in outline
 
 
 def test_outline_validator_writes_report_and_flags_reused_evidence(
@@ -11584,6 +11584,45 @@ def test_controlled_finalizer_runs_compact_complete_chain(tmp_path: Path) -> Non
     truth_report = json.loads((tmp_path / "qa" / "truth_check.json").read_text())
     assert truth_report["advisory"] is True
     assert truth_report["warnings"]
+
+
+def test_finalizer_includes_failed_image_layout_contract_in_delivery_status(tmp_path: Path) -> None:
+    deck = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    deck_path = tmp_path / "deck.json"
+    deck_path.write_text(json.dumps(deck, ensure_ascii=False), encoding="utf-8")
+    manifest = tmp_path / "assets/generated/manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"mode": "auto", "image_plan": [{
+        "slide": 1, "decision": "skip", "status": "skipped", "required": False,
+        "layout_contract": {"slide_size": {"width": 1920, "height": 1080},
+                            "text_regions": [{"name": "missing", "x": 0, "y": 0, "width": 100, "height": 100}]}
+    }]}), encoding="utf-8")
+    preload = tmp_path / "mock-image-layout.cjs"
+    preload.write_text(
+        """
+const fs = require('fs');
+const path = require('path');
+const child = require('child_process');
+const original = child.spawnSync;
+child.spawnSync = function(command, args, options) {
+  if (path.basename(args[0]) === 'validate_image_layout_contract.js') {
+    const report = args[args.indexOf('--report') + 1];
+    fs.writeFileSync(report, JSON.stringify({ok: false, issues: ['missing layout region'], warnings: []}));
+    return {status: 1, stdout: '', stderr: ''};
+  }
+  return original.apply(this, arguments);
+};
+""",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "NODE_OPTIONS": f"--require={preload}"}
+    result = _run("finalize_controlled_deck.js", str(deck_path), "--out", str(tmp_path / "index.html"), env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    report = json.loads((tmp_path / "qa/image_layout_contract.json").read_text())
+    assert "image_layout_contract" in payload["degraded_stages"]
+    assert payload["delivery_status"] == "degraded"
+    assert any("missing" in warning for warning in report["warnings"])
 
 
 def test_controlled_finalizer_delivers_degraded_html_for_image_manifest_failure(

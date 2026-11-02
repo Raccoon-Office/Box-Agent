@@ -6,10 +6,34 @@ import pytest
 
 from box_agent.tools.browser_runtime_scope import (
     BrowserRuntimeCoordinator,
+    current_browser_host_binding,
     current_browser_session_key,
+    reset_browser_host_binding,
     reset_browser_session_key,
     set_browser_session_key,
+    set_browser_host_binding,
 )
+
+
+@pytest.mark.asyncio
+async def test_host_binding_is_inherited_by_children_without_leaking_across_turns():
+    async def child():
+        session = set_browser_session_key("child-session")
+        try:
+            await asyncio.sleep(0)
+            return current_browser_host_binding()
+        finally:
+            reset_browser_session_key(session)
+
+    async def turn(binding):
+        token = set_browser_host_binding(binding)
+        try:
+            return await asyncio.create_task(child())
+        finally:
+            reset_browser_host_binding(token)
+
+    assert await asyncio.gather(turn("A"), turn("B")) == ["A", "B"]
+    assert current_browser_host_binding() is None
 
 
 @pytest.mark.asyncio

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,27 @@ from .session_projection import SessionProjection
 
 
 _log = logging.getLogger(__name__)
+
+
+async def run_session_io(operation: Callable[[], Any]) -> Any:
+    """Settle file work before cancellation can release its session ownership."""
+    worker = asyncio.create_task(asyncio.to_thread(operation))
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            result = await asyncio.shield(worker)
+            break
+        except asyncio.CancelledError as error:
+            if worker.cancelled():
+                raise
+            cancellation = error
+        except BaseException:
+            if cancellation is not None:
+                raise cancellation
+            raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 def _timed_fsync(fd: int) -> None:
@@ -229,6 +252,18 @@ class SessionLog:
 
         return tuple(deepcopy(self._events))
 
+    def current_revision(self) -> str:
+        """Read the revision without exposing or copying the event history."""
+        from .session_history import current_revision
+
+        return current_revision(self._events)
+
+    def has_turn_binding(self, turn_id: str) -> bool:
+        """Check request idempotency without copying unrelated history."""
+        return any(event["type"] == "turn/binding"
+                   and event["data"].get("turn_id") == turn_id
+                   for event in self._events)
+
     def next_turn_number(self) -> int:
         """Inspect recorded starts without copying history or reserving a turn."""
 
@@ -346,6 +381,37 @@ class SessionLog:
         recover: bool = False,
     ) -> "SessionLog":
         """Open a session, optionally preserving incompatible logs for host recovery."""
+        session, _ = cls._open(
+            root, session_id=session_id, cwd=cwd, recover=recover, project=recover,
+        )
+        return session
+
+    @classmethod
+    def open_with_projection(
+        cls,
+        root: str | Path,
+        *,
+        session_id: str,
+        cwd: str | Path,
+        recover: bool = False,
+    ) -> tuple["SessionLog", SessionProjection]:
+        """Return the validated recovery state without replaying it a second time."""
+        session, projection = cls._open(
+            root, session_id=session_id, cwd=cwd, recover=recover, project=True,
+        )
+        assert projection is not None
+        return session, projection
+
+    @classmethod
+    def _open(
+        cls,
+        root: str | Path,
+        *,
+        session_id: str,
+        cwd: str | Path,
+        recover: bool,
+        project: bool,
+    ) -> tuple["SessionLog", SessionProjection | None]:
         directory = _session_dir(Path(root), session_id)
         path = directory / "session.jsonl"
         lock_handle = _acquire_writer_lock(directory / ".writer.lock")
@@ -353,15 +419,13 @@ class SessionLog:
             handle = path.open("r+b")
             workspace_verified = False
             try:
-                raw = handle.read()
-                original_raw = raw
-                header_end = raw.find(b"\n")
-                if header_end < 0:
+                header_line = handle.readline()
+                if not header_line.endswith(b"\n"):
                     raise SessionLogCorrupted(
                         "session log has no complete header"
                     )
                 try:
-                    header = json.loads(raw[:header_end])
+                    header = json.loads(header_line)
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise SessionLogCorrupted(
                         "session log header is invalid JSON"
@@ -383,20 +447,20 @@ class SessionLog:
                 if header.get("version") != SESSION_LOG_VERSION:
                     raise SessionLogIncompatible("session log version is unsupported")
                 committed_end = None
-                if raw and not raw.endswith(b"\n"):
-                    committed_end = raw.rfind(b"\n") + 1
-                    raw = raw[:committed_end]
-                raw_lines = raw.splitlines()
-                records: list[Any] = [header]
-                for index, line in enumerate(raw_lines[1:], start=1):
+                events: list[dict[str, Any]] = []
+                offset = len(header_line)
+                for index, line in enumerate(handle, start=1):
+                    if not line.endswith(b"\n"):
+                        committed_end = offset
+                        break
+                    offset += len(line)
                     try:
-                        records.append(json.loads(line))
+                        event = json.loads(line)
                     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                         raise SessionLogCorrupted(
                             f"session log record {index} is invalid JSON"
                         ) from exc
-                events = records[1:]
-                for seq, event in enumerate(events):
+                    seq = index - 1
                     if not isinstance(event, dict):
                         raise SessionLogCorrupted(
                             f"session log record {seq + 1} is not an event object"
@@ -421,9 +485,9 @@ class SessionLog:
                         raise SessionLogCorrupted(
                             f"session log record {seq + 1} has invalid event data"
                         )
+                    events.append(event)
                 session = cls(path, header, events, handle, lock_handle)
-                if recover:
-                    session.replay()
+                projection = session.replay() if project else None
                 if committed_end is not None:
                     handle.truncate(committed_end)
                     handle.flush()
@@ -435,20 +499,22 @@ class SessionLog:
                         and not isinstance(
                             exc, (SessionLogRevisionCorrupted, SessionLogIncompatible)
                         )):
-                    return cls._recover_log(
-                        path, original_raw, session_id, cwd, lock_handle
-                    )
+                    session = cls._recover_log(path, session_id, cwd, lock_handle)
+                    try:
+                        return session, session.replay() if project else None
+                    except BaseException:
+                        session._handle.close()
+                        raise
                 raise
         except BaseException:
             _release_writer_lock(lock_handle)
             raise
-        return session
+        return session, projection
 
     @classmethod
     def _recover_log(
         cls,
         path: Path,
-        raw: bytes,
         session_id: str,
         cwd: str | Path,
         lock_handle: BinaryIO,
@@ -469,8 +535,8 @@ class SessionLog:
             "cwd": _normalize_cwd(cwd),
             "recoverySource": archive.name,
         }
-        with archive.open("xb") as backup:
-            backup.write(raw)
+        with path.open("rb") as source, archive.open("xb") as backup:
+            shutil.copyfileobj(source, backup, length=1024 * 1024)
             backup.flush()
             _timed_fsync(backup.fileno())
         try:
@@ -1182,6 +1248,14 @@ class SessionLog:
         appended.append(self.append("session/end-seed", {}))
         self.flush()
         return appended
+
+    def prepare_resume_projection(self, projection: SessionProjection) -> SessionProjection:
+        """Reuse validated state unless crash repair appended new session facts."""
+        appended = self.prepare_resume()
+        if any(event["type"] not in {"step/end", "turn/end", "session/end-seed"}
+               for event in appended):
+            return self.replay()
+        return projection
 
     def close(self) -> None:
         if self._closed:

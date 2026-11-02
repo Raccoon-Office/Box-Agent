@@ -243,6 +243,19 @@ sub_agent_batch_synthesis_timeout_seconds: 600
 限制传入 `files` 时推导出的无工具综合请求。将最后一项设为 `0` 只会关闭这层额外限制，
 不会关闭 provider timeout。批处理策略还包含文件数量与内容硬限制，详见
 [子 Agent 委派](SUB_AGENT_DELEGATION_CN.md)。
+`provider_stale_seconds` 同时限制非流式任务结束检查的总等待时间；
+`BOX_AGENT_PROVIDER_STALE_SECONDS` 可覆盖该值。检查超时返回
+`TURN_COMPLETION_CHECK_TIMEOUT`，任务标记未完成并保留已有输出，不把超时当成完成判定。
+模型无响应检查按剩余预算唤醒，不会被更长的活动心跳间隔拖后；恢复耗尽后返回
+`LLM_PROVIDER_STALE_TIMEOUT`。标准 ACP 评测默认按模型等待、恢复及结束检查预算计算总时限，
+显式更短时限会记录为预算受限；详见[评测时限说明](../test_workspace/README.md#基础任务验收口径)。
+例如显式 180 秒总时限仍可能早于默认的 300 秒模型等待触发，不能混为模型质量结论。
+
+`execute_code` 的子进程内核路径中，宿主准备检查（如有）、环境准备和内核启动各阶段最多等待 60 秒，
+失败返回阶段诊断。这些准备阶段与代码执行预算分开计算。
+代码执行参数 `timeout` 是持续输出也不能重置的墙钟预算，写保护设置及清理另留 15 秒；
+超时或取消会丢弃忙碌内核，后续调用创建新内核。准备超时应通过
+`local_environment` 检查或准备托管环境后重试，避免另建运行时。
 工具阈值默认值只保存在 `box_agent/config.py`，新生成的用户配置不会显式写入这些值，
 因此 runtime 升级可以更新默认值。只有确实需要长期固定的覆盖项才应写入
 `tool_limits:`；可通过 `box-agent config --json` 查看当前生效值。未知或非法字段会直接

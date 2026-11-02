@@ -36,8 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--case-id", action="append", default=[])
-    parser.add_argument("--timeout-seconds", type=_positive_float, default=2700.0)
+    parser.add_argument("--timeout-seconds", type=_positive_float,
+                        help="explicit attempt deadline; default covers runtime wait/recovery policy (at least 2700s)")
     parser.add_argument("--parallelism", type=_positive_int, default=1)
+    parser.add_argument("--rate-limit-retries", type=int, choices=range(6), default=2,
+                        help="retry a pre-tool provider 429 with new attempts (default: 2)")
+    parser.add_argument("--rate-limit-backoff-seconds", type=_positive_float, default=120.0,
+                        help="batch-wide exponential cooldown, capped at 600s (default: 120)")
     parser.add_argument(
         "--retry-terminal",
         action="store_true",
@@ -92,6 +97,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             model_max_tokens=args.model_max_tokens,
             model_binding=model_binding,
+            rate_limit_retries=args.rate_limit_retries,
+            rate_limit_backoff_seconds=args.rate_limit_backoff_seconds,
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"acp-eval: {error}", file=sys.stderr)

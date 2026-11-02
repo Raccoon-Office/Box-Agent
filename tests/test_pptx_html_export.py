@@ -71,6 +71,142 @@ def _last_json_object(output: str) -> dict:
     return json.loads(payload)
 
 
+def test_editable_table_preserves_distinct_browser_row_heights(tmp_path: Path) -> None:
+    html, pptx = tmp_path / "table.html", tmp_path / "table.pptx"
+    html.write_text('''<html><head><style>
+      html,body{margin:0}.slide{position:relative;width:1920px;height:1080px}
+      table{border-collapse:collapse;width:800px}td{border:1px solid black;padding:0.8px 12px}
+      tr:first-child{height:80px}tr:last-child{height:160px}
+    </style></head><body><section class="slide"><table>
+      <tr><td>First</td><td>One</td></tr><tr><td>Second</td><td>Two</td></tr>
+    </table></section></body></html>''', encoding="utf-8")
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx), "--out", str(tmp_path / "slides"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    rows = slide.findall(".//a:tbl/a:tr", ns)
+    heights = [int(row.get("h", "0")) for row in rows]
+    assert len(heights) == 2 and heights[0] > 0
+    assert 1.9 < heights[1] / heights[0] < 2.1
+    cell = rows[0].find("a:tc/a:tcPr", ns)
+    assert cell is not None
+    # Less than 1 pt of top padding must not be interpreted as inches.
+    assert int(cell.get("marT", "0")) < 20000
+    assert 40000 < int(cell.get("marL", "0")) < 100000
+
+
+def test_export_preserves_wrapped_cjk_table_cell_lines(tmp_path: Path) -> None:
+    html, pptx = tmp_path / "wrapped.html", tmp_path / "wrapped.pptx"
+    html.write_text('''<html><head><style>
+      html,body{margin:0}.slide{position:relative;width:1920px;height:1080px}
+      table{width:180px;table-layout:fixed}td{font:30px sans-serif;overflow-wrap:anywhere}
+    </style></head><body><section class="slide"><table><tr>
+      <td><span>居民签到领取阅读卡浏览主题书台</span></td>
+    </tr></table></section></body></html>''', encoding="utf-8")
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx), "--out", str(tmp_path / "slides"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    cell = slide.find(".//a:tbl/a:tr/a:tc", ns)
+    assert cell is not None and len(cell.findall("a:txBody/a:p", ns)) > 1
+    assert "居民签到领取阅读卡浏览主题书台" == "".join(
+        text.text or "" for text in cell.findall(".//a:t", ns)
+    )
+
+
+def test_dense_table_rows_grow_for_multiline_cell_content(tmp_path: Path) -> None:
+    html, pptx = tmp_path / "dense.html", tmp_path / "dense.pptx"
+    css = (SCRIPTS_DIR.parent / "runtime/deck.css").read_text(encoding="utf-8")
+    html.write_text(f'''<html><head><style>{css}
+      html,body{{margin:0}}.slide{{position:relative;width:1920px;height:1080px}}
+      .data-table{{width:900px}}.data-table-cell-text{{font:30px/1.4 sans-serif}}
+    </style></head><body><section class="slide"><table class="data-table"><tbody>
+      <tr><td><span class="data-table-cell-text">短文</span></td>
+          <td><span class="data-table-cell-text">第一行很长的中文阅读活动内容第二行的说明第三行补充内容第四行补充内容</span></td></tr>
+      <tr><td><span class="data-table-cell-text">下一行</span></td>
+          <td><span class="data-table-cell-text">短文</span></td></tr>
+    </tbody></table></section></body></html>''', encoding="utf-8")
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx), "--out", str(tmp_path / "slides"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    rows = slide.findall(".//a:tbl/a:tr", ns)
+    assert len(rows) == 2
+    assert int(rows[0].get("h", "0")) > int(rows[1].get("h", "0"))
+
+
+@pytest.mark.parametrize("cover_class", ["cover-copy", "editorial-cover-copy"])
+def test_controlled_cover_title_releases_export_padding(tmp_path: Path, cover_class: str) -> None:
+    html = tmp_path / "cover.html"
+    pptx = tmp_path / "cover.pptx"
+    html.write_text(f'''<html><head><style>
+      html,body{{margin:0}}.slide{{width:1920px;height:1080px}}
+      .{cover_class} h1{{width:900px;padding-right:24px;font:72px sans-serif}}
+    </style></head><body><section class="slide"><div class="{cover_class}">
+      <h1 data-prop-kind="text">社区图书馆阅读活动计划</h1>
+    </div></section></body></html>''', encoding="utf-8")
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx), "--out", str(tmp_path / "slides"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with zipfile.ZipFile(pptx) as archive:
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+    shapes = slide.findall(".//p:sp", ns)
+    title = next(shape for shape in shapes if "社区图书馆阅读活动计划" in "".join(shape.itertext()))
+    body = title.find("p:txBody/a:bodyPr", ns)
+    assert body is not None and body.get("rIns") == "0"
+    extent = title.find("p:spPr/a:xfrm/a:ext", ns)
+    assert extent is not None and int(extent.get("cx", "0")) > 0
+
+
+def test_controlled_short_labels_release_export_padding(tmp_path: Path) -> None:
+    html, pptx = tmp_path / "labels.html", tmp_path / "labels.pptx"
+    html.write_text('''<html><head><style>
+      html,body{margin:0}.slide{width:1920px;height:1080px}
+      .eyebrow{width:150px;padding-right:18px;font:32px sans-serif}
+      .card-kicker{width:150px;padding-right:14px;font:32px sans-serif}
+      .meta{width:150px;padding-right:20px;font:32px sans-serif}
+    </style></head><body><section class="slide">
+      <p class="eyebrow" data-prop-kind="text">为什么做</p>
+      <p class="card-kicker" data-prop-kind="text">活动安排</p>
+      <p class="meta" data-prop-kind="text">推广策略与预算</p>
+    </section></body></html>''', encoding="utf-8")
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx), "--out", str(tmp_path / "slides"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with zipfile.ZipFile(pptx) as archive:
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+    shapes = slide.findall(".//p:sp", ns)
+    for label in ("为什么做", "活动安排", "推广策略与预算"):
+        shape = next(shape for shape in shapes if label in "".join(shape.itertext()))
+        body = shape.find("p:txBody/a:bodyPr", ns)
+        assert body is not None and body.get("rIns") == "0"
+
+
+def test_right_anchored_card_number_has_font_metric_room(tmp_path: Path) -> None:
+    html, pptx = tmp_path / "number.html", tmp_path / "number.pptx"
+    html.write_text('''<html><head><style>
+      html,body{margin:0}.slide{position:relative;width:1920px;height:1080px}
+      .card-index{position:absolute;right:30px;top:28px;font:18px Arial}
+    </style></head><body><section class="slide"><span class="card-index">01</span>
+    </section></body></html>''', encoding="utf-8")
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx), "--out", str(tmp_path / "slides"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with zipfile.ZipFile(pptx) as archive:
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+    shape = next(s for s in slide.findall(".//p:sp", ns) if "01" in "".join(s.itertext()))
+    extent = shape.find("p:spPr/a:xfrm/a:ext", ns)
+    paragraph = shape.find("p:txBody/a:p/a:pPr", ns)
+    assert extent is not None and int(extent.get("cx", "0")) > 160000
+    assert paragraph is not None and paragraph.get("algn") == "r"
+
+
 @pytest.mark.parametrize("require_pptx", [False, True])
 def test_finalizer_delivers_the_requested_format(tmp_path: Path, require_pptx: bool) -> None:
     deck = json.loads((SCRIPTS_DIR.parent / "examples/controlled-deck/deck.json").read_text())
@@ -277,15 +413,15 @@ def _slide_picture_targets(
     return background_targets, vector_targets
 
 
-def _ordered_raster_picture_targets(archive: zipfile.ZipFile) -> list[str]:
+def _ordered_raster_picture_targets(archive: zipfile.ZipFile, slide_number: int = 1) -> list[str]:
     presentation_ns = "http://schemas.openxmlformats.org/presentationml/2006/main"
     drawing_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
     office_rel_ns = (
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
     )
     package_rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
-    slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
-    rels = ET.fromstring(archive.read("ppt/slides/_rels/slide1.xml.rels"))
+    slide = ET.fromstring(archive.read(f"ppt/slides/slide{slide_number}.xml"))
+    rels = ET.fromstring(archive.read(f"ppt/slides/_rels/slide{slide_number}.xml.rels"))
     rel_targets = {
         rel.attrib["Id"]: posixpath.normpath(
             posixpath.join("ppt/slides", rel.attrib["Target"])
@@ -303,6 +439,27 @@ def _ordered_raster_picture_targets(archive: zipfile.ZipFile) -> list[str]:
     return targets
 
 
+def test_export_background_does_not_capture_page_scrollbar(tmp_path: Path) -> None:
+    html_path = tmp_path / "deck.html"
+    html_path.write_text('''<!doctype html><html><head><style>
+      html,body { margin: 0; padding: 0; }
+      ::-webkit-scrollbar { width: 20px; background: #ff0000; }
+      ::-webkit-scrollbar-thumb { background: #000000; }
+      .slide { width: 1920px; height: 1080px; position: relative;
+               overflow: hidden; background: #ffffff; }
+      </style></head><body><section class="slide"></section>
+      <section class="slide"></section><section class="slide"></section></body></html>''')
+    pptx_path = tmp_path / "deck.pptx"
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html_path), str(pptx_path),
+                       "--out", str(tmp_path / "previews"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(pptx_path) as archive:
+        targets = _ordered_raster_picture_targets(archive, 2)
+        image = Image.open(io.BytesIO(archive.read(targets[0]))).convert("RGB")
+        assert all(min(image.getpixel((image.width - 5, y))) > 245
+                   for y in range(image.height // 4, 3 * image.height // 4, 20))
+
+
 def test_source_previews_are_captured_before_export_dom_is_flattened() -> None:
     source = EXPORT_SCRIPT_PATH.read_text(encoding="utf-8")
 
@@ -312,6 +469,27 @@ def test_source_previews_are_captured_before_export_dom_is_flattened() -> None:
     background_flatten = source.index("await applyDecorationFlatten({")
 
     assert preview_capture < background_flatten
+
+
+def test_export_preserves_wash_over_slide_background_image(tmp_path: Path) -> None:
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(tmp_path / "background.png")
+    html = tmp_path / "deck.html"
+    html.write_text('''<html><head><style>
+      html,body{margin:0}.slide{position:relative;width:1920px;height:1080px;overflow:hidden}
+      .slide-background{position:absolute;inset:0}
+      .slide-background img{width:100%;height:100%}
+      .slide-background::after{content:"";position:absolute;inset:0;background:#fff;opacity:.8}
+    </style></head><body><section class="slide background-wash-light">
+      <div class="slide-background"><img src="background.png"></div>
+    </section></body></html>''', encoding="utf-8")
+    pptx = tmp_path / "deck.pptx"
+    result = _run_node(EXPORT_SCRIPT_PATH, str(html), str(pptx), "--out", str(tmp_path / "previews"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(pptx) as archive:
+        targets = _ordered_raster_picture_targets(archive)
+        assert len(targets) == 1
+        image = Image.open(io.BytesIO(archive.read(targets[0]))).convert("RGB")
+        assert min(image.getpixel((image.width // 2, image.height // 2))) > 190
 
 
 def test_background_capture_exports_below_authored_full_slide_image(

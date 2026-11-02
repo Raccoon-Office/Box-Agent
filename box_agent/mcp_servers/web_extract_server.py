@@ -66,11 +66,7 @@ async def web_extract(
 _mcp_tool = MCPFunctionTool.from_function(
     web_extract,
     name="web_extract",
-    description=(
-        "Fetch and extract text from one public web page. Pages over 5,000 "
-        "characters are summarized with the configured Box-Agent model, or with "
-        "the optional model supplied by the caller. JavaScript is not executed."
-    ),
+    description=WebExtractTool(llm=None).description,
 )
 # Reuse the tool's explicit schema: FastMCP's inferred nullable unions can be
 # rejected by model APIs. Keep the function metadata accepting legacy nulls.

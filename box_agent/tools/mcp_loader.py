@@ -61,6 +61,7 @@ from box_agent.config import MCPConfig
 from .base import Tool, ToolInvocationContext, ToolResult
 from .browser_runtime_scope import (
     acquire_browser_runtime_for_current_turn,
+    current_browser_host_binding,
     release_browser_runtime_for_current_turn,
 )
 from .browser_tool_names import (
@@ -299,8 +300,9 @@ HOSTED_WEB_SEARCH_PARAMETERS: dict[str, Any] = {
                 "Omit this field for no time filter."
             ),
             "anyOf": [
-                {"enum": ["OneDay", "OneWeek", "OneMonth", "OneYear"]},
+                {"type": "string", "enum": ["OneDay", "OneWeek", "OneMonth", "OneYear"]},
                 {
+                    "type": "string",
                     "pattern": (
                         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\.\."
                         r"[0-9]{4}-[0-9]{2}-[0-9]{2}$"
@@ -1102,6 +1104,19 @@ class MCPTool(Tool):
                     concurrency_slot_acquired = True
                     waiting_for_concurrency_slot = False
                 call_arguments = {**kwargs, **self._fixed_arguments}
+                if self._server_name == PLAYWRIGHT_SERVER_NAME:
+                    # Only the host can supply this capability. Keep it off the
+                    # model-visible tool schema, arguments, and session log.
+                    raw_meta = call_arguments.get("_meta")
+                    meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+                    meta.pop("box_agent_browser_binding", None)
+                    binding = current_browser_host_binding()
+                    if binding is not None:
+                        meta["box_agent_browser_binding"] = binding
+                    if meta:
+                        call_arguments["_meta"] = meta
+                    else:
+                        call_arguments.pop("_meta", None)
                 if self._is_hosted_web_search:
                     call_arguments = {
                         _hosted_web_search_wire_name(local_name): call_arguments[local_name]
@@ -1129,7 +1144,9 @@ class MCPTool(Tool):
                             # its windows) alive while other clients share the
                             # browser; close our tabs first so "close" is real.
                             try:
-                                await close_all_tabs(leased_session)
+                                await close_all_tabs(
+                                    leased_session, metadata=call_arguments.get("_meta")
+                                )
                             except Exception as tab_error:  # noqa: BLE001
                                 _warn(f"[browser] tab cleanup before close skipped: {tab_error}")
                         result = await leased_session.call_tool(
@@ -2289,7 +2306,8 @@ _cua_service = None  # Owned with the existing process-wide MCP registry; closed
 def register_cua_service(service):
     global _cua_service
     if _cua_service is not None and _cua_service is not service:
-        if _cua_service.name == service.name and _cua_service.config == service.config:
+        if (_cua_service.name == service.name and _cua_service.config == service.config
+                and _cua_service.settings.tool_interface == service.settings.tool_interface):
             service.adapter.cleanup()
             return _cua_service
         raise RuntimeError("CUA runtime is already registered")
@@ -2339,11 +2357,9 @@ def _resolve_registered_sources(config_path: str) -> dict[str, ResolvedMcpServer
         existing = servers.get(name)
         if existing and existing.config.get("disabled"):
             return servers  # Explicit disable always wins, including host mode.
-        if existing and existing.config != config:
-            _warn(f"Managed CUA server '{name}' conflicts with existing MCP configuration; remove the old CUA entry before retrying")
-            from dataclasses import replace
-            servers[name] = replace(existing, config={**existing.config, "disabled": True})
-            return servers  # A CUA conflict must not block unrelated MCP servers.
+        # The managed runtime owns this server name. Replace legacy direct-Driver
+        # registrations with the selected interface, using the host's resolved
+        # endpoint. Publishing a second server would expose two tool contracts.
         servers[name] = ResolvedMcpServer(
             name=name, config=config, owner="system", config_id=name,
             connector_id=None, connector_name=None, source_path="<runtime:cua>",

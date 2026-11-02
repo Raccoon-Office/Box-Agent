@@ -234,6 +234,17 @@ preparation validate current Skill sources before repairing interrupted calls.
 `SessionOptions.resume_session_log` enables this ordering. CLI restores strictly;
 ACP retains its existing partial restoration policy for optional Skill state.
 
+Session logs are parsed one JSONL record at a time; damaged-log backups are
+copied in bounded blocks. Parsed events still remain in memory. ACP runs log
+opening, validation and interrupted-turn repair outside its event loop, and
+waits for outstanding file work before releasing ownership on cancellation.
+`SessionLog.open_with_projection()` returns both the log and its validated
+`SessionProjection`. Managed construction reuses that snapshot for Skill,
+Agent and image restoration; repair refreshes it only when new state was
+appended. Public event and projection snapshots retain their defensive-copy
+semantics. Revision metadata and turn-binding checks use scalar queries rather
+than copying the entire audit history.
+
 Named sessions use their log's goal even when it is empty; an unrelated workspace
 goal never overwrites it. For compatibility, fresh unnamed CLI sessions can seed
 and mirror the legacy workspace goal file. The goal command without a session ID

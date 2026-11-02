@@ -84,22 +84,16 @@ def test_browser_intent_preloads_full_builtin_instructions() -> None:
     assert "does not modify global configuration or restart other sessions" in rendered.system_prompt
     assert 'mcp_config(action="inspect_browser")' in rendered.system_prompt
     assert "fixed headless by default" not in rendered.system_prompt
-    assert "Treat headed/headless only as the managed browser's window visibility" in rendered.system_prompt
-    assert "Do not treat a visible managed window as proof" in rendered.system_prompt
+    assert "shared **Web Access Routing** policy" in rendered.system_prompt
+    assert "does not define a competing route order" in rendered.system_prompt
+    assert "do not reset a working browser merely to reveal its existing page" in rendered.system_prompt
     assert "There are exactly two browser modes" in rendered.system_prompt
     assert "Playwright MCP" in rendered.system_prompt
-    assert "start with managed browser automation when it can be completed independently" in rendered.system_prompt
-    assert "Use the user's real browser directly when the task depends on the current page" in rendered.system_prompt
-    assert "infer the mode from the most recent successful browser interaction" in rendered.system_prompt
-    assert "Explicit mode selection in the latest user message overrides earlier context" in rendered.system_prompt
-    assert "Background retrieval, scraping, screenshots and testing default to headless" in rendered.system_prompt
     assert "Recover from headless-only failures" in rendered.system_prompt
     assert "This rebuilds only the current session" in rendered.system_prompt
     assert "Login and form state from the previous instance are not restored" in rendered.system_prompt
     assert "Retry the blocked step once in headed mode" in rendered.system_prompt
     assert "Do not solve, outsource, or circumvent the verification" in rendered.system_prompt
-    assert "Switch between browser modes" in rendered.system_prompt
-    assert "does not require a separate authorization prompt" in rendered.system_prompt
     assert "Browser routing does not authorize external side effects" in rendered.system_prompt
     assert "Obtain consent before using the real browser" not in rendered.system_prompt
     assert "Ask for affirmative consent" not in rendered.system_prompt
@@ -110,11 +104,11 @@ def test_browser_intent_preloads_full_builtin_instructions() -> None:
     [
         (
             "用爬虫批量抓取这些公开网页",
-            "use managed browser automation unless the task also depends on user-owned browser state",
+            "shared **Web Access Routing** policy",
         ),
         (
             "填写这个表单，填好让我检查，最后我点击提交",
-            "user review, takeover, or personal submission",
+            "Stop before the final action whenever the user owns it, in either namespace",
         ),
     ],
 )

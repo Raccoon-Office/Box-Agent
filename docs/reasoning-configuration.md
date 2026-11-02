@@ -10,6 +10,37 @@ Utility calls, including image inspection, long-page summaries and the
 continuation judge, continue to request `thinking_enabled=False`. They use the
 same provider adapter, so endpoint compatibility applies to them too.
 
+## Enabled thinking effort
+
+For OpenAI-compatible requests, enabling thinking selects `reasoning_effort: "max"`
+only for these documented model families:
+
+| Models | Official reference |
+| --- | --- |
+| Kimi K3, Kimi K3.1 Pro (including Highspeed) | [K3](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart), [K3.1 Pro](https://platform.kimi.ai/docs/guide/kimi-k3-1-pro-quickstart) |
+| GPT-5.6 / GPT-5.6 Sol, Terra, Luna | [Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra), [Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna) |
+| GPT-6 Astra, Sol, Luna; GPT-6.1 Sol, Terra | [GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model) |
+| GLM-5.2, GLM-5.3 (including Flash) | [Z.ai deep thinking](https://docs.z.ai/guides/capabilities/thinking) |
+| DeepSeek V4 Pro, V4 Flash, V4.1 Flash, `deepseek-flash` | [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/) |
+| SenseNova 6.8 Flash Lite | [SenseNova API documentation](https://platform.sensenova.cn/docs) |
+
+DeepSeek retains its existing gateway `extra_body.thinking` control and adds the
+top-level effort only when thinking is enabled. Disabling thinking retains each
+model's existing behavior. In particular, Kimi K3 and GLM-5.3 still use `low`,
+and GPT-6 Sol/Luna requests with function tools still force `none` on both paths.
+
+Gemini, older models and unknown model names retain their existing mappings.
+Qwen and Doubao retain their existing thinking switches. Anthropic requests
+still use their native thinking budget; `output_config.effort` is a separate API
+contract and is not changed here.
+
+`max` is intended for demanding tasks and can increase latency and token usage.
+[OpenAI recommends evaluating the tradeoff](https://developers.openai.com/api/docs/guides/deployment-checklist)
+before adopting it for a workload. These model declarations do not prove that a
+third-party gateway accepts or forwards the value. This change does not add
+Responses API support: official GPT-6 Astra and GPT-6.1 Sol/Terra require
+Responses for tool calling; GPT-6 Sol/Luna require it for reasoning with tools.
+
 ## Endpoints that reject `none`
 
 Some OpenAI-compatible endpoints accept only `low`, `medium` and `high` for
@@ -33,7 +64,8 @@ runtime, edit the configuration under its own `BOX_AGENT_HOME`.
 Other values fail configuration validation. This option affects the existing
 SenseNova and eligible Gemini `none` mappings. It does not force a reasoning
 field onto other models or alter their native thinking controls. Requests with
-thinking enabled retain the existing mapping, including `high` for SenseNova.
+thinking enabled use the model-specific mapping above, including `max` for
+SenseNova 6.8 Flash Lite and `high` for other SenseNova model names.
 Anthropic requests are unchanged.
 
 `SenseNova-Flash-Lite-20260727-v39-fp8-step4k-dpov2-mtp` rejects `none`, so its

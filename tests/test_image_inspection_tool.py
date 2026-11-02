@@ -198,6 +198,24 @@ async def test_inspect_images_native_rejects_before_reading_when_main_model_is_t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capability", [False, None])
+async def test_explicit_native_requires_confirmed_current_model_support(tmp_path, capability):
+    main = SimpleNamespace(model="sn-glm-5-3", capabilities={"image_input": capability})
+    proxy = FakeVisionLLM()
+    tool = _tool(tmp_path, proxy, native_supported=True, native_capability_llm=main)
+
+    result = await tool.invoke({
+        "image_paths": ["missing.png"], "instruction": "Describe it.", "strategy": "native",
+    })
+
+    assert not result.success
+    assert result.raw_output["code"] == "IMAGE_NATIVE_UNSUPPORTED"
+    assert result.image_content is None
+    assert "missing.png" not in result.error
+    assert proxy.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_inspect_images_native_capability_tracks_rebound_main_model(tmp_path: Path):
     class RebindableMainLLM:
         model = "text-model"
@@ -527,8 +545,13 @@ async def test_inspect_images_rejects_empty_model_output(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_message", [
+    "This model does not support the image content block",
+    "messages.content.type 参数非法，取值范围 ['text']",
+    "messages[13].content[2].type=image_url 当前纯文本模型不支持",
+])
 async def test_inspect_images_caches_only_explicit_unsupported_image_input(
-    tmp_path: Path,
+    tmp_path: Path, provider_message: str,
 ):
     (tmp_path / "slide.png").write_bytes(_ONE_PIXEL_PNG)
 
@@ -538,7 +561,7 @@ async def test_inspect_images_caches_only_explicit_unsupported_image_input(
 
         async def generate(self, **_kwargs):
             self.calls += 1
-            raise RuntimeError("This model does not support the image content block")
+            raise RuntimeError(provider_message)
 
     llm = UnsupportedLLM()
     tool = _tool(tmp_path, llm)
@@ -855,7 +878,7 @@ def test_explicit_text_only_current_model_routes_to_other_vision_candidate(
 
 
 @pytest.mark.parametrize('status,category,retryable', [
-    (422, 'invalid_request', False), (401, 'auth', False),
+    (400, 'invalid_request', False), (422, 'invalid_request', False), (401, 'auth', False),
     (429, 'rate_limit', True), (503, 'server_error', True),
 ])
 async def test_proxy_provider_error_is_actionable_without_raw_payload(tmp_path, status, category, retryable):
@@ -869,11 +892,16 @@ async def test_proxy_provider_error_is_actionable_without_raw_payload(tmp_path, 
                               headers={'x-request-id': 'req-safe-123'})
 
     class FailingProvider:
+        calls = 0
+
         async def generate(self, **kwargs):
+            self.calls += 1
             raise openai.APIStatusError(f'Error {status}: {body}', response=response, body=body)
 
     (tmp_path / 'slide.png').write_bytes(_ONE_PIXEL_PNG)
-    result = await _tool(tmp_path, FailingProvider()).execute(image_paths=['slide.png'], instruction='Inspect', strategy='proxy')
+    provider = FailingProvider()
+    tool = _tool(tmp_path, provider)
+    result = await tool.execute(image_paths=['slide.png'], instruction='Inspect', strategy='proxy')
     assert not result.success
     assert result.raw_output['code'] == 'IMAGE_REQUEST_FAILED'
     details = result.raw_output['provider_error']
@@ -883,3 +911,6 @@ async def test_proxy_provider_error_is_actionable_without_raw_payload(tmp_path, 
     assert details['requestId'] == 'req-safe-123'
     assert secret not in str(result) and payload not in str(result)
     assert category in result.error and str(status) in result.error
+    again = await tool.execute(image_paths=['slide.png'], instruction='Inspect', strategy='proxy')
+    assert again.raw_output['code'] == 'IMAGE_REQUEST_FAILED'
+    assert provider.calls == 2

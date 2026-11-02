@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.runtime_components import runtime_component_required
 from .config import CuaConfig, CuaRuntimeConfig
 from .driver import DriverAdapter, installed_driver
 from .lifecycle import CuaRuntimeManager
+from .runtime.connection import DriverConnection, HOST_RUNTIME_ENV
 
 
 class CuaService:
@@ -25,11 +28,24 @@ class CuaService:
         return self.settings.server_name
 
     @property
+    def driver_server_config(self):
+        command = DriverConnection(self.config.driver_path or "cua-driver", self.adapter.endpoint,
+                                   self.config.mode == "external").command()
+        return {"command": command[0], "args": command[1:],
+                "disabled": not self.config.enabled}
+
+    @property
     def server_config(self):
-        args = ["mcp", "--socket", self.adapter.endpoint]
-        if self.config.mode == "external":
-            args.append("--embedded")
-        return {"command": self.config.driver_path or "cua-driver", "args": args,
+        if self.settings.tool_interface == "driver":
+            return self.driver_server_config
+        command = ([sys.executable, "--cua-mcp"] if getattr(sys, "frozen", False)
+                   else [sys.executable, "-m", "box_agent.mcp_servers.cua_server"])
+        runtime = self.config.model_copy(update={
+            "driver_path": self.config.driver_path or "cua-driver",
+            "endpoint": self.adapter.endpoint,
+        })
+        return {"command": command[0], "args": command[1:],
+                "env": {HOST_RUNTIME_ENV: runtime.model_dump_json()},
                 "disabled": not self.config.enabled}
 
     async def prepare(self):
@@ -60,13 +76,27 @@ class EnsureCuaReadyTool(Tool):
             return ToolResult(success=False, error="MCP discovery is still loading; retry after readiness")
         result = await reconnect_mcp_server(self.service.name)
         content = json.dumps(result)
+        if not result.get("success") and os.environ.get(HOST_RUNTIME_ENV, "").strip():
+            return runtime_component_required(
+                "computer-use", code="COMPUTER_USE_UNAVAILABLE",
+                message=result.get("error") or "Desktop control is not ready",
+                guidance=(
+                    "Ask the user to prepare Desktop control in the host's plugin settings: "
+                    "install its driver if missing, enable it, and complete the required OS permissions. "
+                    "The host must check readiness before retrying the original request. "
+                    "Do not install drivers, change settings, grant permissions, or start a daemon with other tools."
+                ),
+            )
         if result.get("success"):
-            content = (
+            instructions = (
+                "CUA ready. Use get_app to bind the application and get_state to observe it. "
+                "Element IDs come from the latest app observation; observe again after each action.\n"
+                if self.service.settings.tool_interface == "app" else
                 "CUA ready. Read the computer-use skill before acting. Use tool_search to discover actions. "
                 "Copy only exact window_id, snapshot_id and element_token values from CUA structured results; "
                 "never guess or synthesize identifiers. Pass session only if the specific tool schema declares it.\n"
-                + content
             )
+            content = instructions + content
         return ToolResult(success=result.get("success", False), content=content, error=result.get("error"))
 
 

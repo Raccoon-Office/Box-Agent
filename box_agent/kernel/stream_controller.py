@@ -90,7 +90,8 @@ async def stream_with_activity(
         while True:
             await asyncio.wait(
                 {next_chunk} if cancel_wait is None else {next_chunk, cancel_wait},
-                timeout=activity_interval_seconds,
+                timeout=min(activity_interval_seconds,
+                            max(0.0, stale_seconds - (perf_counter() - last_provider_chunk))),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if cancel_wait is not None and cancel_wait.done():

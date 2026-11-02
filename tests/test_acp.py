@@ -336,8 +336,8 @@ def test_acp_normalizes_connector_selection_and_renders_session_scoped_status(mo
     )
     assert _connector_status_context({"pkulaw"}, connector_statuses) == (
         "<connector-status>\n"
-        "qixin 启信慧眼: disconnected\n"
         "pkulaw 北大法宝: connected\n"
+        "qixin 启信慧眼: disconnected\n"
         "</connector-status>"
     )
     assert _connector_status_unavailable_from_meta(
@@ -631,6 +631,11 @@ async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tm
         async def ext_method(self, method, payload):
             assert method == "session/runtime_environment"
             assert payload["sessionId"] == capable.sessionId
+            if payload["capability"] == "chromium":
+                return {"status": "ready", "env": {
+                    "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": str(tmp_path / "chromium"),
+                    "BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": str(tmp_path / "chromium"),
+                }}
             if payload["capability"] == "git":
                 return {"status": "ready", "env": {"BOX_AGENT_BUNDLED_BASH": str(installed_bash)}}
             return {"status": "missing", "logTail": "not installed"}
@@ -661,6 +666,80 @@ async def test_acp_runtime_environment_is_opt_in_and_binds_python_preparation(tm
     assert shell_tool.shell_name == "bash"
     assert json.loads(installed.content)["shell"]["name"] == "bash"
     assert "syntax" in json.loads(installed.content)["shell"]["instruction"]
+    chromium = await tools["local_environment"].execute("chromium", "ensure")
+    assert chromium.success
+    for key in ("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "BOX_AGENT_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"):
+        assert shell_tool._subprocess_env[key] == str(tmp_path / "chromium")
+        assert tools["execute_code"].runtime_env[key] == str(tmp_path / "chromium")
+
+
+@pytest.mark.asyncio
+async def test_acp_chromium_install_continues_execution_in_the_same_prompt(tmp_path):
+    started, installed = asyncio.Event(), asyncio.Event()
+    executed = []
+    expected = str(tmp_path / "chromium")
+
+    class RuntimeConn(DummyConn):
+        async def ext_method(self, method, payload):
+            assert method == "session/runtime_environment"
+            assert payload["capability"] == "chromium"
+            if payload["action"] == "status":
+                return {"status": "missing"}
+            started.set()
+            await installed.wait()
+            return {"status": "ready", "env": {"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": expected}}
+
+    class RenderProbe(Tool):
+        name = "render_probe"
+        description = "Verify the next execution sees the prepared Chromium."
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self):
+            tools = host._sessions[session.sessionId].agent.tools
+            assert tools["bash"]._subprocess_env["PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"] == expected
+            executed.append(True)
+            return ToolResult(success=True, content="rendered")
+
+    class ContinueLLM(DummyLLM):
+        async def generate_stream(self, messages, tools, **_):
+            self.calls += 1
+            if self.calls <= 2:
+                name, args = (("local_environment", {"capability": "chromium", "action": "ensure"})
+                              if self.calls == 1 else ("render_probe", {}))
+                yield StreamEvent(type="finish", finish_reason="tool", tool_calls=[ToolCall(
+                    id=f"continuation-{self.calls}", type="function",
+                    function=FunctionCall(name=name, arguments=args),
+                )])
+            else:
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    llm = ContinueLLM()
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_sub_agent=False))
+    host = BoxACPAgent(RuntimeConn(), config, llm, [RenderProbe()], "system")
+    session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        "host_capabilities": {"runtime_environment": 1},
+    }))
+    prompt = asyncio.create_task(host.prompt(SimpleNamespace(
+        sessionId=session.sessionId, prompt=[{"text": "Prepare Chromium and render."}], field_meta={},
+    )))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        assert not prompt.done()
+        assert llm.calls == 1
+        assert not executed
+        installed.set()
+        response = await asyncio.wait_for(prompt, 10)
+        assert response.stopReason == "end_turn"
+        assert response.field_meta["ok"] is True
+        assert executed == [True]
+        assert llm.calls == 3
+    finally:
+        if not prompt.done():
+            prompt.cancel()
+            await asyncio.gather(prompt, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1479,7 +1558,8 @@ async def test_uploaded_image_payload_reaches_user_message_boundary(tmp_path, mo
             field_meta={"image_attachment_paths": [str(tmp_path / "reference.png")]},
         ))
         assert received == [{"image_content": blocks, "image_source": "user_upload",
-                             "image_context_eligible": eligible}]
+                             "image_context_eligible": eligible,
+                             "host_connector_status": _EMPTY_CONNECTOR_CONTEXT.strip()}]
         if eligible:
             assert "prepared for native inspection" in received_text[0]
             assert "may explicitly call inspect_images again" in received_text[0]
@@ -1790,75 +1870,99 @@ class DoneLLM:
 
 
 @pytest.mark.asyncio
-async def test_acp_appends_connector_status_to_every_user_turn(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "box_agent.acp.get_mcp_connector_server_names",
-        lambda: {"pkulaw": frozenset({"pkulaw-law-search-semantic"})},
-    )
-    monkeypatch.setattr(
-        "box_agent.acp.get_mcp_status",
-        lambda: [
-            {
-                "owner": "connector",
-                "connectorId": "pkulaw",
-                "connectorName": "北大法宝",
-                "name": "pkulaw-law-search-semantic",
-                "state": "connected",
-            }
-        ],
-    )
+async def test_acp_appends_only_changed_snapshots_and_preserves_sent_prefixes(tmp_path):
+    class SnapshotLLM(DoneLLM):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            self.requests.append([message.model_copy(deep=True) for message in messages])
+            async for event in super().generate_stream(messages, tools, **kwargs):
+                yield event
+
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False),
     )
-    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(
-            cwd=str(tmp_path),
-            field_meta={
-                "selected_connector_ids": ["pkulaw"],
-                "connector_statuses": [
-                    {"id": "qixin", "name": "启信慧眼", "status": "disconnected"},
-                    {"id": "pkulaw", "name": "北大法宝", "status": "connected"},
-                ],
-            },
-        )
-    )
+    llm = SnapshotLLM()
+    host = BoxACPAgent(DummyConn(), config, llm, [], "system")
+    connected = [
+        {"id": "qixin", "name": "启信慧眼", "status": "disconnected"},
+        {"id": "pkulaw", "name": "北大法宝", "status": "connected"},
+    ]
+    disconnected = [{**row, "status": "disconnected"} for row in connected]
+    session = await host.newSession(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"connector_statuses": connected}))
+    turns = [
+        ({}, True),
+        ({"connector_statuses": list(reversed(connected))}, False),
+        ({"connector_statuses": disconnected}, True),
+        ({}, False),
+        ({"connector_status_unavailable": True}, True),
+        ({"connector_status_unavailable": True}, False),
+        ({"connector_statuses": connected}, True),
+        ({"connector_statuses": []}, True),
+    ]
+    previous = []
+    try:
+        for index, (meta, emits) in enumerate(turns):
+            before = len(llm.requests)
+            await host.prompt(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta=meta))
+            assert len(llm.requests) == before + 1
+            current = llm.requests[-1]
+            assert current[:len(previous)] == previous
+            latest = host._sessions[session.sessionId].agent.messages[-2]
+            assert ("<connector-status>" in latest.content) is emits
+            if not emits:
+                assert latest.content == f"hello {index}"
+            if emits and index:
+                assert "supersedes all earlier" in latest.content
+            if index == 4:
+                assert "status: unavailable" in latest.content
+            if index == 7:
+                assert latest.content.endswith("<connector-status>\n</connector-status>")
+            previous = current
+    finally:
+        log = host._sessions[session.sessionId].agent.session_log
+        if log is not None:
+            log.close()
 
-    await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "first"}], field_meta={})
-    )
-    await agent.prompt(
-        SimpleNamespace(
-            sessionId=session.sessionId,
-            prompt=[{"text": "second"}],
-            field_meta={
-                "selected_connector_ids": [],
-                "connector_statuses": [
-                    {"id": "qixin", "name": "启信慧眼", "status": "disconnected"},
-                    {"id": "pkulaw", "name": "北大法宝", "status": "disconnected"},
-                ],
-            },
-        )
-    )
 
-    messages = agent._sessions[session.sessionId].agent.messages
-    assert messages[-4].content == (
-        "first\n\n<connector-status>\n"
-        "qixin 启信慧眼: disconnected\n"
-        "pkulaw 北大法宝: connected\n"
-        "</connector-status>"
-    )
-    assert messages[-2].content == (
-        "second\n\n<connector-status>\n"
-        "qixin 启信慧眼: disconnected\n"
-        "pkulaw 北大法宝: disconnected\n"
-        "</connector-status>"
-    )
-    session_log = agent._sessions[session.sessionId].agent.session_log
-    if session_log is not None:
-        session_log.close()
+@pytest.mark.asyncio
+async def test_connector_snapshot_read_failure_and_recovery_do_not_block_turns(tmp_path, monkeypatch):
+    config = Config(llm=LLMConfig(api_key="test-key"),
+                    agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+                    tools=ToolsConfig(enable_sub_agent=False))
+    host = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+    session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    render = acp_module._connector_status_context
+
+    def fail(*args):
+        raise OSError("state read failed")
+
+    monkeypatch.setattr(acp_module, "_connector_status_context", fail)
+    try:
+        for index in range(2):
+            await host.prompt(SimpleNamespace(
+                sessionId=session.sessionId, prompt=[{"text": f"hello {index}"}], field_meta={}))
+            message = host._sessions[session.sessionId].agent.messages[-2]
+            if index == 0:
+                assert "status: unavailable" in message.content
+            else:
+                assert message.content == "hello 1"
+        monkeypatch.setattr(acp_module, "_connector_status_context", render)
+        await host.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "recovered"}],
+            field_meta={"connector_statuses": [
+                {"id": "pkulaw", "name": "北大法宝", "status": "connected"}]}))
+        assert "pkulaw 北大法宝: connected" in host._sessions[session.sessionId].agent.messages[-2].content
+    finally:
+        log = host._sessions[session.sessionId].agent.session_log
+        if log is not None:
+            log.close()
 
 
 @pytest.mark.asyncio
@@ -1920,8 +2024,8 @@ async def test_acp_replaces_stale_connector_snapshot_when_host_status_is_unavail
 
     assert state.connector_statuses == (("pkulaw", "北大法宝", "disconnected"),)
     assert state.connector_status_unavailable is False
-    assert state.agent.messages[-2].content == (
-        "现在呢\n\n"
+    assert state.agent.messages[-2].content.startswith("现在呢\n\n[Host connector status update:")
+    assert state.agent.messages[-2].content.endswith(
         "<connector-status>\n"
         "pkulaw 北大法宝: disconnected\n"
         "</connector-status>"
@@ -1991,7 +2095,7 @@ async def test_acp_restarts_with_same_product_session_from_jsonl(
         "stale migration seed"
     ) == 0
     assert [(message.role, message.content) for message in state.agent.messages[-2:]] == [
-        ("user", "continue after restart" + _EMPTY_CONNECTOR_CONTEXT),
+        ("user", "continue after restart"),
         ("assistant", "done"),
     ]
     state.agent.session_log.close()
@@ -4690,6 +4794,25 @@ async def test_acp_prompt_exposes_structured_points_insufficient_error(tmp_path)
     assert response.field_meta["ok"] is False
     assert response.field_meta["errorCode"] == 1000007
     assert response.field_meta["errorCategory"] == "quota"
+
+
+@pytest.mark.asyncio
+async def test_acp_completion_check_timeout_is_not_reported_as_success(tmp_path):
+    class TimeoutJudgeLLM(DummyLLM):
+        async def generate(self, messages, tools=None, **kwargs):
+            raise TimeoutError("fixture completion check deadline")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, TimeoutJudgeLLM(), [EchoTool()], "system")
+    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "echo ping"}]))
+    assert response.field_meta["ok"] is False
+    assert response.field_meta["errorCode"] == "TURN_COMPLETION_CHECK_TIMEOUT"
+    assert response.field_meta["errorCategory"] == "timeout"
+    assert response.field_meta["errorDetails"]["source"] == "turn_continuation"
 
 
 @pytest.mark.asyncio
@@ -8773,20 +8896,24 @@ async def test_acp_streams_short_model_preface_before_tool(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_acp_prompt_binds_browser_session_key_to_session_id(tmp_path, monkeypatch):
+@pytest.mark.parametrize("binding", [None, "host-turn-capability"])
+async def test_acp_prompt_binds_browser_session_key_to_session_id(tmp_path, monkeypatch, binding):
     """Every Playwright call inside a turn resolves to the ACP session's own client."""
-    from box_agent.tools.browser_runtime_scope import current_browser_session_key
+    from box_agent.tools.browser_runtime_scope import (
+        current_browser_host_binding,
+        current_browser_session_key,
+    )
 
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
         tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False, enable_skills=False),
     )
-    observed: list[str | None] = []
+    observed = []
     real_loop = runtime_module._run_agent_loop
 
     def observing_loop(**kwargs):
-        observed.append(current_browser_session_key())
+        observed.append((current_browser_session_key(), current_browser_host_binding()))
         return real_loop(**kwargs)
 
     monkeypatch.setattr(runtime_module, "_run_agent_loop", observing_loop)
@@ -8797,11 +8924,15 @@ async def test_acp_prompt_binds_browser_session_key_to_session_id(tmp_path, monk
 
     assert current_browser_session_key() is None
     await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+        SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": "hello"}],
+            field_meta={"browser_host_binding": binding},
+        )
     )
 
-    assert observed == [session.sessionId]
+    assert observed == [(session.sessionId, binding)]
     assert current_browser_session_key() is None  # reset after the turn
+    assert current_browser_host_binding() is None
 
 
 @pytest.mark.asyncio

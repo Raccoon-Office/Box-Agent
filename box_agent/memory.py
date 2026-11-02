@@ -2149,6 +2149,7 @@ Rules:
 11. Apply a portability test before saving every candidate: would this still be useful if the project name, industry, product, audience, URL, filename, and other concrete nouns were replaced? If not, either generalize it to the reusable method/constraint or return nothing.
 12. Separate the reusable rule from the task payload. Remove one-off subject matter, campaign names, brands, links, filenames, example data, and deliverable-specific wording unless the user explicitly made them a durable project constraint. Prefer forms such as "对多格式内容交付，先统一事实与结构，再分别产出各格式并校验一致性" over "家园沟通类内容要先产出设计哲学文档和竖版 PNG".
 13. Preserve a concrete domain only when it is itself durable context (for example, an ongoing project boundary or a stable user preference). Do not turn the current task's requested output or attached document instructions into a user preference.
+14. Keep the result concise: at most 10 additions/replacements in total, with each new memory bullet at most 300 characters. Return only the JSON object, without explanations.
 
 Output ONLY valid JSON (no markdown fences):
 {{"core_additions": ["- core memory bullet"], "additions": [{{"text": "- context bullet point 1", "topic": "preferences"}}, {{"text": "- context bullet point 2", "topic": "project"}}], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
@@ -2721,6 +2722,7 @@ class MemoryExtractor:
         self._cooldown = cooldown
         self._step_interval = step_interval
         self._last_time: float = 0.0
+        self._retry_after: float = 0.0
         self._steps_since: int = 0
         self._extraction_lock = asyncio.Lock()
 
@@ -2755,6 +2757,8 @@ class MemoryExtractor:
         messages = list(messages)
         async with self._extraction_lock:
             now = monotonic()
+            if now < self._retry_after:
+                return False
             if trigger == "step_interval":
                 self._steps_since += 1
                 if self._steps_since < self._step_interval:
@@ -2771,9 +2775,12 @@ class MemoryExtractor:
             try:
                 await self._extract(messages, trigger, turn_id=extraction_turn_id)
                 self._last_time = monotonic()
+                self._retry_after = 0.0
                 self._steps_since = 0
                 return True
             except Exception:
+                # Failure backoff is separate from the successful-extraction cooldown.
+                self._retry_after = monotonic() + 30.0
                 logger.exception("Memory extraction failed (trigger=%s)", trigger)
                 return False
 
@@ -2813,43 +2820,79 @@ class MemoryExtractor:
             strategy="utility",
             task_tags=("summary", "analysis"),
             required_ability_level=1,
-            max_output_tokens_cap=SMALL_TASK_MAX_OUTPUT_TOKENS,
         )
-        response = await memory_llm.generate(
-            messages=[
-                Msg(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
-                Msg(role="user", content=prompt),
-            ],
-            session_id=self._session_id,
-            turn_id=turn_id,
-            call_kind="memory_extract",
-        )
+        request_messages = [
+            Msg(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
+            Msg(role="user", content=prompt),
+        ]
+        for attempt in range(1, 3):
+            try:
+                response = await memory_llm.generate(
+                    messages=request_messages,
+                    session_id=self._session_id,
+                    turn_id=turn_id,
+                    call_kind="memory_extract",
+                )
+                usage = getattr(response, "usage", None)
+                logger.info(
+                    "memory/extraction_response trigger=%s attempt=%s model=%s "
+                    "max_output_tokens=%s finish_reason=%s completion_tokens=%s "
+                    "reasoning_tokens=%s",
+                    trigger, attempt, getattr(memory_llm, "model", None),
+                    getattr(memory_llm, "max_output_tokens", None),
+                    response.finish_reason, getattr(usage, "completion_tokens", None),
+                    getattr(usage, "reasoning_tokens", None),
+                )
+                require_complete_response(response)
+                data = self._parse_updates(response.content)
+                break
+            except Exception as error:
+                if attempt == 2:
+                    raise
+                logger.warning(
+                    "Memory extraction retrying the same input (trigger=%s error_type=%s)",
+                    trigger, type(error).__name__,
+                )
 
-        require_complete_response(response)
+        # Only request/validation failures are retried; never replay a partial write.
         await asyncio.to_thread(
             self._apply_updates,
-            response.content,
+            data,
             trigger=trigger,
             turn_id=turn_id,
         )
 
-    def _apply_updates(self, llm_output: str, *, trigger: str, turn_id: str) -> None:
-        """Parse LLM JSON output and apply to CONTEXT.md.
+    @staticmethod
+    def _parse_updates(llm_output: str) -> dict[str, Any]:
+        """Validate the entire response before any persistent memory is changed."""
+        data = json.loads(_strip_json_fences(llm_output))
+        fields = ("core_additions", "additions", "merges")
+        if not isinstance(data, dict) or not any(field in data for field in fields):
+            raise ValueError("Memory extraction must return an object with memory operations")
+        for field in fields:
+            items = data.get(field, [])
+            if not isinstance(items, list):
+                raise ValueError(f"Memory extraction {field} must be an array")
+            for item in items:
+                if field == "merges":
+                    valid = isinstance(item, dict) and all(
+                        isinstance(item.get(key), str) for key in ("old", "new")
+                    )
+                else:
+                    valid = isinstance(item, str) or (
+                        isinstance(item, dict) and isinstance(item.get("text"), str)
+                    )
+                if not valid:
+                    raise ValueError(f"Memory extraction {field} contains an invalid operation")
+        return data
+
+    def _apply_updates(self, data: dict[str, Any], *, trigger: str, turn_id: str) -> None:
+        """Apply validated memory operations.
 
         Routed through ``apply_context_operations`` so entry metadata
         (hits, created, last_used) survives merges.
         """
-        text = _strip_json_fences(llm_output)
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning("Memory extraction returned invalid JSON: %s", text[:200])
-            return
-
         core_additions = data.get("core_additions", [])
-        if not isinstance(core_additions, list):
-            core_additions = []
         additions: list = data.get("additions", [])
         merges: list[dict] = data.get("merges", [])
 

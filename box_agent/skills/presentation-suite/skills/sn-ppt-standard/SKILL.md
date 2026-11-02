@@ -24,6 +24,13 @@ metadata:
 
 把本文件当作**路线图**，不要当作需要一次背完的规范全集。只读取已准备任务的 Entry/Story 交接、该路径要求的 reference 和职责卡。
 
+## Chromium 准备
+
+离线任务只使用随包或宿主已配置的本地 Chromium，沿用宿主 Playwright 渲染流程。
+缺失或不可用时报告“离线安装包不完整”，由打包方补齐；任务中不调用环境安装、
+不下载浏览器、不修改依赖。尊重用户只检查的要求。保留已有文件和原有验收标准，
+无法完成渲染时如实标记 partial，不把 Electron/MCP 就绪当作独立 Chromium 就绪。
+
 ## 整册 HTML 完成条件
 
 `<DECK_DIR>/present.html` 是静态整册的必交付入口，包括全生图、只要 PPTX、只要 HTML

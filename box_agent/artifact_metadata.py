@@ -39,20 +39,38 @@ def legacy_metadata_path(path: str | Path) -> Path:
     return path.with_name(f".{path.name}{SUFFIX}")
 
 
+def _profile_directory() -> Path:
+    profile = Path(os.environ.get("BOX_AGENT_HOME") or Path.home() / ".box-agent").expanduser()
+    return profile.parent.resolve() / profile.name
+
+
+def _storage_root(path: Path) -> Path:
+    # Only the user-selected global profile may relocate its entire data root.
+    # Resolve that root before appending children so their redirects stay visible.
+    if path == _profile_directory():
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return path
+        return path.resolve(strict=True)
+    return path
+
+
 def metadata_path(path: str | Path, workspace: str | Path | None = None) -> Path:
     target = canonical_path(path)
-    return resolve_workspace(target, workspace) / ".box-agent/artifact-metadata/files" / (hashlib.sha256(str(target).encode("utf-8")).hexdigest() + ".json")
+    root = _storage_root(resolve_workspace(target, workspace) / ".box-agent")
+    return root / "artifact-metadata/files" / (hashlib.sha256(str(target).encode("utf-8")).hexdigest() + ".json")
 
 
 def scope_path(directory: str | Path, workspace: str | Path | None = None) -> Path:
     target = canonical_path(directory)
-    return resolve_workspace(target / "_scope", workspace) / ".box-agent/artifact-metadata/scopes" / (hashlib.sha256(str(target).encode("utf-8")).hexdigest() + ".json")
+    root = _storage_root(resolve_workspace(target / "_scope", workspace) / ".box-agent")
+    return root / "artifact-metadata/scopes" / (hashlib.sha256(str(target).encode("utf-8")).hexdigest() + ".json")
 
 
 def retention_directory() -> Path:
     """Shared derived references, independent of a session's workspace/cwd."""
-    profile = Path(os.environ.get("BOX_AGENT_HOME") or Path.home() / ".box-agent").expanduser()
-    return profile.parent.resolve() / profile.name / "artifact-metadata/retained"
+    return _storage_root(_profile_directory()) / "artifact-metadata/retained"
 
 
 def iter_retention_records(target: str | Path | None = None) -> Iterator[Path]:
@@ -122,7 +140,8 @@ def _redirected(path: Path) -> bool:
 
 
 def _check_storage(directory: Path, *, create: bool = False) -> None:
-    # Do not resolve these components: resolving would silently accept redirects.
+    # The configured profile root is already resolved; never resolve its children
+    # or an ordinary workspace's .box-agent directory here.
     for path in (directory.parent.parent, directory.parent, directory):
         if create:
             path.mkdir(exist_ok=True)
@@ -151,8 +170,10 @@ def _read_json(path: Path, limit: int = MAX_RECORD_BYTES, *, strict: bool = Fals
 
 
 def is_metadata_record(path: Path) -> bool:
-    return (len(path.parts) >= 4 and path.parts[-4:-1] == (".box-agent", "artifact-metadata", "files")
-            and path.suffix == ".json")
+    return path.suffix == ".json" and (
+        len(path.parts) >= 4 and path.parts[-4:-1] == (".box-agent", "artifact-metadata", "files")
+        or path.absolute().parent == retention_directory().parent / "files"
+    )
 
 
 def read_record(marker: Path) -> tuple[Path, dict] | None:
@@ -266,6 +287,7 @@ def _exclude_internal_directory(root: Path) -> None:
 def _write(path: Path, value: dict, root: Path) -> None:
     if path.is_symlink():
         raise OSError(f"Artifact metadata record is redirected: {path}")
+    _check_storage(path.parent)
     data = json.dumps(value, ensure_ascii=False) + "\n"
     temporary = ".artifact-" + uuid.uuid4().hex + ".tmp"
     # Holding the directory descriptor prevents a swapped ancestor from
@@ -316,18 +338,23 @@ def write_metadata(path: str | Path, value: dict, workspace: str | Path | None =
     if read_metadata(target, workspace).get("retain_for_chat") is True:
         value = {**value, "retain_for_chat": True}
     root = resolve_workspace(target, workspace)
-    _write(metadata_path(target, root), {"path": str(target), "metadata": value}, root)
+    marker = metadata_path(target, root)
+    # Preserve the workspace descriptor anchor unless the global store moved.
+    anchor = root if marker.parents[2] == root / ".box-agent" else marker.parents[2]
+    _write(marker, {"path": str(target), "metadata": value}, anchor)
 
 
 def write_scope(directory: str | Path, value: dict, workspace: str | Path | None = None) -> None:
     target = canonical_path(directory)
     root = resolve_workspace(target / "_scope", workspace)
-    _write(scope_path(target, root), {"path": str(target), "metadata": value}, root)
+    marker = scope_path(target, root)
+    anchor = root if marker.parents[2] == root / ".box-agent" else marker.parents[2]
+    _write(marker, {"path": str(target), "metadata": value}, anchor)
 
 
 def iter_metadata_records(workspace: str | Path) -> Iterator[Path]:
     """Read only this workspace's central file store; callers bound traversal."""
-    directory = canonical_path(workspace) / ".box-agent/artifact-metadata/files"
+    directory = _storage_root(canonical_path(workspace) / ".box-agent") / "artifact-metadata/files"
     _check_storage(directory)
     try:
         with os.scandir(directory) as entries:

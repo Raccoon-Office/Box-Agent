@@ -112,17 +112,14 @@ simple factual lookup, one-source Q&A, or ordinary code changes.
   independent dimensions when possible and finish with an honest `partial` or
   `framework` handoff; do not silently spend the remaining search budget on
   near-equivalent retries or imply that retrieval is still running.
-- If an exact public URL is already known, read it with an actually available
-  exact-page tool. Prefer `web_extract`, or a user-selected MCP reader that
-  accepts the exact URL and returns that page's body. In officev3,
-  `managed_browser_*` is also valid for independent public-web reads. Activate
+- Select the page-reading channel with the runtime's shared **Web Access Routing**
+  policy; this Skill adds evidence requirements, not another channel priority.
+  When the selected channel is the managed browser, activate
   `managed_browser_navigate` and `managed_browser_snapshot` together, then
   verify one URL at a time with navigate followed by snapshot.
   Navigation metadata alone is not a failed body read; the snapshot body is the
-  evidence content bound to that URL.
-  Use `user_browser_*` when the read depends on the user's current page,
-  login state, cookies, extensions, or intranet access; this does not require a
-  separate authorization prompt. Do not route between browser modes through a
+  evidence content bound to that URL. A body-reading result is not proof that a
+  visible browser was opened. Do not route between browser modes through a
   `source_preference` argument.
 - Search-result summaries may support medium-confidence evidence when each row
   is bound to that result's exact URL, uses `evidence_basis=search_summary`, and
