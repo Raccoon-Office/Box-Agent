@@ -293,12 +293,20 @@ async def test_streamable_http_mcp1_passes_transport_configuration(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("private", [False, True])
-async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch, private):
+@pytest.mark.parametrize("private,host,attaches_session", [
+    (False, "example.com", False),
+    (False, "pre.xiaohuanxiong.com", True),
+    (True, "example.com", False),
+    (True, "pre.xiaohuanxiong.com", False),
+])
+async def test_streamable_http_mcp2_uses_preconfigured_http_client(
+    monkeypatch, private, host, attaches_session,
+):
+    url = f"https://{host}/mcp"
     monkeypatch.setenv("RACCOON_PRIVATE_DEPLOYMENT", str(private).lower())
-    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", "https://example.com")
+    monkeypatch.setenv("RACCOON_PRIVATE_OFFICE_URL", f"https://{host}")
     captured = {}
-    fake_http_client = SimpleNamespace(follow_redirects=True)
+    fake_http_client = SimpleNamespace(follow_redirects=True, event_hooks={})
 
     @asynccontextmanager
     async def managed_http_client():
@@ -327,7 +335,7 @@ async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch, 
     conn = MCPServerConnection(
         name="mcp2",
         connection_type="streamable_http",
-        url="https://example.com/mcp",
+        url=url,
         headers={"X-Test": "two"},
         connect_timeout=13,
         sse_read_timeout=17,
@@ -347,10 +355,11 @@ async def test_streamable_http_mcp2_uses_preconfigured_http_client(monkeypatch, 
         "write": 13,
         "pool": 13,
     }
-    assert captured["url"] == "https://example.com/mcp"
+    assert captured["url"] == url
     assert captured["http_client"] is fake_http_client
     assert captured["auth"] is not conn.auth
     assert fake_http_client.follow_redirects is not private
+    assert bool(fake_http_client.event_hooks.get("request")) is attaches_session
 
 
 @pytest.mark.asyncio
@@ -782,7 +791,8 @@ class TestMCPToolExecution:
         class FakeSession:
             arguments = None
 
-            async def call_tool(self, name, arguments):
+            async def call_tool(self, name, arguments, meta=None):
+                assert meta == {"box_agent_session_id": "parent-session"}
                 assert name == "web_extract"
                 self.arguments = arguments
                 return SimpleNamespace(content=[], isError=False)
@@ -798,6 +808,7 @@ class TestMCPToolExecution:
         token = set_model_tool_context(
             model=model,
             max_output_tokens=max_output_tokens,
+            session_id="parent-session",
         )
         try:
             result = await tool.execute(

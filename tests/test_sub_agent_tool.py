@@ -1666,14 +1666,15 @@ async def test_sub_agent_forwards_web_search_reference_event():
     assert result.content == f"child summary [{model_reference}]"
 
 
-async def test_sub_agent_web_extract_uses_child_model_context(monkeypatch):
+async def test_sub_agent_web_extract_uses_child_model_and_parent_session(monkeypatch):
     """Child web extraction must not inherit the surrounding parent model."""
     from box_agent.schema import FunctionCall, ToolCall
 
     class FakeSession:
         arguments = None
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, meta=None):
+            self.meta = meta
             assert name == "web_extract"
             self.arguments = arguments
             return SimpleNamespace(
@@ -1735,6 +1736,7 @@ async def test_sub_agent_web_extract_uses_child_model_context(monkeypatch):
     parent_token = set_model_tool_context(
         model="parent-model",
         max_output_tokens=111,
+        session_id="parent-session",
     )
     try:
         result = await tool.execute(
@@ -1745,10 +1747,12 @@ async def test_sub_agent_web_extract_uses_child_model_context(monkeypatch):
         assert restored_context is not None
         assert restored_context.model == "parent-model"
         assert restored_context.max_output_tokens == 111
+        assert restored_context.session_id == "parent-session"
     finally:
         reset_model_tool_context(parent_token)
 
     assert result.success is True
+    assert session.meta == {"box_agent_session_id": "parent-session"}
     assert session.arguments == {
         "url": "https://example.com",
         "model": "child-model",
