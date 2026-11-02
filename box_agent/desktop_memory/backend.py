@@ -14,6 +14,7 @@ from uuid import UUID
 from ..config import DesktopMemoryConfig, ExternalMemoryConfig
 from ..memory import MemsenseMemoryBackend, MemoryEditError
 from ..tools.base import check_tool_cancellation
+from .evidence import _redact
 from .transport import MemoryHostTransport, MemoryProxyError
 from .visibility import CoreRead, DesktopInputGuard
 
@@ -137,7 +138,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         self.corrections = None
         self.log_context: dict[str, str] = {}
         self.capabilities = frozenset({"recall", "read", "search", "save", "write", "edit"})
-        self.transport = MemoryHostTransport(Path(config.bootstrap_file), config.identity_epoch, on_revoked=self.end_turn)
+        self.transport = MemoryHostTransport(Path(config.bootstrap_file), config.identity_epoch, on_revoked=self._revoked)
         self.model_input_guard = DesktopInputGuard(self._visibility, self._preload)
         self.current_scope: TurnScope | None = None
         self._sections: dict[str, Any] = {}
@@ -150,6 +151,13 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
 
     def clone_for_session(self) -> DesktopMemoryBackend:
         return type(self)(self.desktop_config)
+
+    def _revoked(self, code: str, payload: dict[str, Any]) -> None:
+        if code == "TURN_REVOKED":
+            scope = self.current_scope
+            if scope is None or payload.get("binding") != dict(scope.binding):
+                return
+        self.end_turn()
 
     def create_runtime(self):
         from .runtime import DesktopMemoryRuntime
@@ -236,8 +244,8 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
 
         def finished(done):
             self._control_tasks.discard(done)
-            if not done.cancelled():
-                done.exception()  # Failure is still raised by guard.require.
+            if not done.cancelled() and done.exception() is not None:  # Also raised by guard.require.
+                self.log_failure("visibility_commit" if active else "visibility_revoke", "unconfirmed")
 
         task.add_done_callback(finished)
         return task
@@ -348,7 +356,7 @@ class DesktopMemoryBackend(MemsenseMemoryBackend):
         if not user.strip() or not assistant.strip() or len((user + assistant).encode()) > 256 * 1024:
             raise MemoryProxyError("BUDGET_EXCEEDED")
         payload = {"binding": dict(scope.binding), "event_id": scope.qa_event_id,
-                   "user": user, "assistant": assistant, "timestamp": timestamp}
+                   "user": _redact(user), "assistant": _redact(assistant), "timestamp": timestamp}
         if evidence is not None:
             payload["evidence"] = evidence
         data = await self.transport.request("qa/evidence" if evidence is not None else "qa", payload)

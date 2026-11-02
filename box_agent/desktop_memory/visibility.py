@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 import json
+import logging
 from typing import Callable
 from uuid import uuid4
 
@@ -12,6 +13,8 @@ from ..context_input import DefaultContextEngine, ModelInputGuard, PreparedConte
 from ..kernel.context_engine import request_input_tokens
 from ..schema import Message
 from .transport import MemoryProxyError
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +84,8 @@ class CoreVisibilityGuard(ModelInputGuard):
         estimated = self._input_tokens(messages, context.prepared_tools.definitions)
         if estimated + context._transient_reserve_tokens + 1024 > context._token_limit:
             self._notify(read, False, self._request)
+            _log.warning("memory operation=core_read reason=CORE_CONTEXT_TOO_LARGE estimated=%d limit=%d reserve=%d",
+                         estimated, context._token_limit, context._transient_reserve_tokens + 1024)
             raise MemoryProxyError("CORE_CONTEXT_TOO_LARGE")
         self._reads[read.path] = read
 
@@ -184,6 +189,8 @@ class DesktopInputGuard(CoreVisibilityGuard):
             return messages
         best = projected(0)
         if not fits(best):
+            _log.warning("memory operation=preload reason=history_over_budget budget=utf8_upper_bound estimated=%d limit=%d reserve=%d",
+                         self._input_tokens([*best, *tail], tools.definitions), token_limit, reserve_tokens + 1024)
             return best  # Other history still requires normal shared compaction.
         low, high = 0, 15400
         while low <= high:
@@ -193,4 +200,6 @@ class DesktopInputGuard(CoreVisibilityGuard):
                 best, low = candidate, middle + 1
             else:
                 high = middle - 1
+        _log.info("memory operation=preload reason=budget_reduced budget=utf8_upper_bound estimated=%d limit=%d reserve=%d",
+                  self._input_tokens([*best, *tail], tools.definitions), token_limit, reserve_tokens + 1024)
         return best

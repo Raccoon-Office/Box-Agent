@@ -37,6 +37,7 @@ def test_private_scope_omits_diagnostics_even_with_full_payload_environment(tmp_
             emit_session_trace("llm.request", data={"messages": [{"content": secret}]})
             logging.getLogger("openai._base_client").debug("SDK raw payload %s", secret)
             logging.getLogger("httpcore.http11").debug("HTTP raw payload %s", secret)
+            logging.getLogger("box_agent.core").warning("suspected_truncation tail=%s", secret)
         assert not private_payloads()
     finally:
         reset_llm_debug_sink(sink)
@@ -49,6 +50,8 @@ def test_private_scope_omits_diagnostics_even_with_full_payload_environment(tmp_
     assert secret in logger.log_file.read_text()
     logging.getLogger("openai._base_client").debug("ordinary-sdk-debug")
     assert "ordinary-sdk-debug" in caplog.text
+    logging.getLogger("box_agent.core").warning("ordinary-core-diagnostic")
+    assert "ordinary-core-diagnostic" in caplog.text
 
 
 async def test_private_scope_isolated_between_concurrent_tasks_and_resets_on_exception():

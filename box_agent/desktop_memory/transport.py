@@ -182,7 +182,7 @@ class MemoryHostTransport:
 
     bootstrap_file: Path = field(repr=False)
     identity_epoch: str
-    on_revoked: Callable[[], None] | None = field(default=None, repr=False)
+    on_revoked: Callable[[str, dict[str, Any]], None] | None = field(default=None, repr=False)
     _bootstrap: _Bootstrap | None = field(default=None, init=False, repr=False)
     _bootstrap_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -259,7 +259,7 @@ class MemoryHostTransport:
             return await asyncio.wait_for(send(), timeout=spec.timeout if timeout is None else timeout)
         except MemoryProxyError as error:
             if self.on_revoked is not None and error.code in {"AUTH_REQUIRED", "IDENTITY_CHANGED", "SESSION_REVOKED", "TURN_REVOKED", "MEMORY_DISABLED"}:
-                self.on_revoked()
+                self.on_revoked(error.code, payload)
             raise
         except asyncio.CancelledError:
             # Caller cancellation stays cancellation. No automatic replay is

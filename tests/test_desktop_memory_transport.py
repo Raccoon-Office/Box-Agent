@@ -104,6 +104,8 @@ async def test_untrusted_bootstrap_origin_is_rejected_before_http(bootstrap, mon
 @pytest.mark.parametrize("case", ["file_mode", "parent_mode", "symlink", "parent_symlink", "hardlink", "fifo",
                                   "duplicate", "large", "wrong_epoch", "protocol", "tokens", "profile", "extra"])
 async def test_unsafe_or_malformed_bootstrap_cannot_grant_access(bootstrap, monkeypatch, case):
+    if os.name == "nt" and case in {"file_mode", "parent_mode", "symlink", "parent_symlink", "fifo"}:
+        pytest.skip("POSIX permission/link checks; native Windows ACL coverage is separate")
     path, data, write = bootstrap
     if case == "file_mode":
         path.chmod(0o644)

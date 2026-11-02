@@ -27,6 +27,7 @@ class DesktopMemoryRuntime(MemoryRuntime):
         self._evidence_cursor: EvidenceCursor | None = None
         self._evidence_session = None
         self._experience = ExperienceRuntime(backend.transport)
+        self._close_tasks: set[asyncio.Task] = set()
 
     def user_turn_scope(self, turn: _MemoryTurn):
         from ..payload_privacy import private_payload_scope
@@ -112,10 +113,16 @@ class DesktopMemoryRuntime(MemoryRuntime):
         self._evidence_cursor = None
         self._evidence_session = None
         if scope is not None and self._scheduled is not scope and not self._closed:
-            if len(self.tasks) < self.backend.config.save_queue_limit:
+            # Cleanup has its own bounded allowance, so a full QA queue does
+            # not by itself leave this turn open at the Host.
+            if len(self._close_tasks) < self.backend.config.save_queue_limit:
                 task = asyncio.create_task(self.backend.close_turn(scope), name="desktop-memory-close")
+                self._close_tasks.add(task)
                 self.tasks.add(task)
+                task.add_done_callback(self._close_tasks.discard)
                 task.add_done_callback(self.tasks.discard)
+            else:
+                self.backend.log_failure("turn_close", "queue_full")
 
     async def _finish(self, turn: _MemoryTurn, scope: TurnScope,
                       cursor: EvidenceCursor | None = None, end: int = 0, llm: Any = None, token_limit: int = 0) -> None:

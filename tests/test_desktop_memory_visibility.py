@@ -205,6 +205,18 @@ async def test_capacity_failure_is_explicit_and_revokes_previous_path(bound):
     assert any(event[0] is huge and not event[1] for event in events)
 
 
+def test_conservative_history_budget_omission_is_diagnosable_without_payload(caplog):
+    from box_agent.memory import place_memory_block
+    guard = DesktopInputGuard(lambda *_: None, lambda size: "PRIVATE_PRELOAD" if size else "")
+    content = place_memory_block("BASE", "--- MEMORY START ---\nPRIVATE_PRELOAD\n--- MEMORY END ---", reserve=True)
+    history = [Message(role="system", content=content), Message(role="user", content="PRIVATE_HISTORY " * 8000)]
+    projected = guard.project_messages(history, tools=prepare_tools([]), token_limit=90000)
+    assert "PRIVATE_PRELOAD" not in projected[0].content
+    assert projected[1].content == history[1].content
+    assert "reason=history_over_budget" in caplog.text and "limit=90000" in caplog.text
+    assert "PRIVATE_PRELOAD" not in caplog.text and "PRIVATE_HISTORY" not in caplog.text
+
+
 async def test_blocked_model_input_never_grants_visibility(bound):
     guard, _, _, events = bound
     record = read_record()

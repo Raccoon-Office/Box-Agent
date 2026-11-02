@@ -7,6 +7,33 @@ from box_agent.acp.debug_logger import ACPDebugLogger
 from box_agent.payload_privacy import private_payload_scope, private_payloads
 
 
+@pytest.mark.parametrize("log_format", ["json", "text"])
+async def test_inject_preserves_instruction_but_logs_only_metadata(tmp_path, monkeypatch, capsys, log_format):
+    from types import SimpleNamespace
+
+    from box_agent.acp import BoxACPAgent
+    from box_agent.injections import InjectionManager
+
+    monkeypatch.setenv("BOX_AGENT_LOG_LEVEL", "debug")
+    monkeypatch.setenv("BOX_AGENT_LOG_FORMAT", log_format)
+    monkeypatch.setenv("BOX_AGENT_LOG_FILE", str(tmp_path / "inject.log"))
+    logger = ACPDebugLogger()
+    monkeypatch.setattr("box_agent.acp.log", logger)
+    state = SimpleNamespace(turn_active=True, inject_queue=InjectionManager())
+    canary = "SYNTHETIC_PRIVATE_INJECTION"
+    stub = SimpleNamespace(_sessions={"session": state})
+    try:
+        assert not private_payloads()
+        result = await BoxACPAgent.extMethod(stub, "inject", {
+            "sessionId": "session", "injectionId": "fixture-injection", "text": canary})
+        assert result["ok"]
+        assert state.inject_queue.get_nowait()["content"] == canary
+        output = capsys.readouterr().err + (tmp_path / "inject.log").read_text()
+        assert canary not in output and "characters" in output and "fixture-injection" in output
+    finally:
+        logger.close()
+
+
 @pytest.mark.parametrize('log_format', ['json', 'text'])
 @pytest.mark.parametrize('private_scope', [True, False])
 def test_memory_tool_payloads_and_raw_errors_never_reach_any_log_level(

@@ -9,6 +9,28 @@ from box_agent.desktop_memory.evidence import EvidenceCursor, EXCERPT_BYTES, MAX
 from box_agent.session_log import SessionLog
 
 
+CREDENTIAL_SAMPLES = [
+    "AWS_SECRET_ACCESS_KEY=SYNTHETIC_AWS_SECRET",
+    "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP",
+    "AWS_SESSION_TOKEN=SYNTHETIC_SESSION_SECRET",
+    "DB_PASSWORD=SYNTHETIC_DB_SECRET",
+    "MY_API_KEY=SYNTHETIC_API_SECRET",
+    "API key: SYNTHETIC_API_SECRET",
+    "GITHUB_TOKEN=SYNTHETIC_GITHUB_SECRET",
+    "token=SYNTHETIC_BARE_SECRET",
+    "ghp_SYNTHETIC_GITHUB_TOKEN_1234567890",
+    "github_pat_SYNTHETIC_GITHUB_TOKEN_1234567890",
+    "AKIAABCDEFGHIJKLMNOP",
+    "postgres://admin:SYNTHETIC_URL_SECRET@db",
+    "Cookie: session=SYNTHETIC_COOKIE_SECRET; other=SYNTHETIC_SECOND_SECRET",
+    "Set-Cookie: session=SYNTHETIC_COOKIE_SECRET",
+    'password="SYNTHETIC password with spaces"',
+    "env.DB_PASSWORD: 'SYNTHETIC secret with quotes'",
+    "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_KEY\n-----END PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETIC_UNTERMINATED_KEY",
+]
+
+
 @pytest.fixture
 def log(tmp_path):
     value = SessionLog.create(tmp_path, session_id="logical-session", cwd=tmp_path)
@@ -130,6 +152,54 @@ def test_event_pages_are_detached_and_bounded_without_copying_history(log):
 
 def test_no_log_is_not_an_empty_success_or_historical_fallback():
     assert EvidenceCursor.begin(None) is None
+
+
+@pytest.mark.parametrize("sample", CREDENTIAL_SAMPLES)
+def test_suspect_tool_strings_are_omitted_whole_before_view_hashing(log, sample):
+    cursor = EvidenceCursor.begin(log)
+    log.append("user/message", {"content": "question", "source": "user"})
+    log.append("tool/call", {"callId": "secret", "name": "fixture", "arguments": {"command": sample}})
+    log.append("tool/result", {"message": {"tool_call_id": "secret"}, "result": {
+        "success": True, "content": sample, "error": sample}})
+    log.append("assistant/message", {"message": {"content": "answer"}})
+    log.append("turn/end", {"reason": {"kind": "completed"}})
+    bundle = capture(cursor, log)
+    assert bundle["status"] == "captured"
+    for view in bundle["views"]:
+        assert "SYNTHETIC" not in view["text"] and "AKIAABCDEFGHIJKLMNOP" not in view["text"]
+        assert view["source_ref"]["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
+    assert any(event["data"].get("result", {}).get("content") == sample for event in log.events)
+
+
+def test_prefixed_nested_credential_fields_are_filtered_without_losing_safe_results():
+    from box_agent.desktop_memory.evidence import _redact
+    value = {"env": {"DB_PASSWORD": "SYNTHETIC_DB", "AWS_SECRET_ACCESS_KEY": "SYNTHETIC_AWS"},
+             "items": [{"MY_API_KEY": "SYNTHETIC_API", "GITHUB_TOKEN": "SYNTHETIC_TOKEN"}],
+             "success": True, "content": "7 validations passed"}
+    clean = _redact(value)
+    assert "SYNTHETIC" not in json.dumps(clean)
+    assert clean["success"] is True and clean["content"] == "7 validations passed"
+    assert value["env"]["DB_PASSWORD"] == "SYNTHETIC_DB"
+
+
+@pytest.mark.parametrize("text", [
+    "The key: persistence matters",
+    '{"key": "value", "count": 2}',
+    'Use key=value in this example',
+])
+def test_ordinary_key_text_survives_evidence_capture(log, text):
+    cursor = EvidenceCursor.begin(log)
+    completed(log, text, text)
+    bundle = capture(cursor, log, user=text, assistant=text)
+    assert bundle["status"] == "captured"
+    assert json.loads(bundle["views"][0]["text"])["content"] == text
+    assert json.loads(bundle["views"][1]["text"])["content"] == text
+
+
+def test_prefixed_key_is_still_treated_as_sensitive():
+    from box_agent.desktop_memory.evidence import _redact
+    assert _redact("DB_KEY=SYNTHETIC_SECRET") == "[REDACTED]"
+    assert _redact({"DB_KEY": "SYNTHETIC_SECRET"})["DB_KEY"] == "[REDACTED]"
 
 
 def test_pending_current_user_can_precede_refresh_but_completed_history_cannot(log):

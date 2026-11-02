@@ -29,6 +29,11 @@ def desktop_launch_agent(
     """No bootstrap I/O here. A missing/invalid grant disables memory, never chat."""
     env = _consume_native_environment() if environment is None else environment
     if "BOX_AGENT_MEMORY_MODE" not in env:
+        if agent.memory_backend_type == "desktop":
+            return agent.model_copy(update={
+                "enable_memory": False, "enable_memory_extraction": False,
+                "memory_desktop": DesktopMemoryConfig(),
+            })
         return agent
     file = env.get("BOX_AGENT_MEMORY_BOOTSTRAP_FILE", "")
     epoch = env.get("BOX_AGENT_MEMORY_IDENTITY_EPOCH", "")

@@ -69,6 +69,123 @@ async def finish(tasks):
     await asyncio.sleep(0)
 
 
+async def test_more_without_jobs_backs_off_and_close_cancels_continuation(monkeypatch):
+    transport, model, tasks, delays = Transport(), Model(), set(), []
+    real_sleep = asyncio.sleep
+
+    async def more(operation, payload):
+        transport.calls.append(payload)
+        return {"job": None, "more": True}
+
+    async def pause(delay):
+        delays.append(delay)
+
+    transport.request = more
+    runtime = ExperienceRuntime(transport)
+    monkeypatch.setattr("box_agent.desktop_memory.experience.asyncio.sleep", pause)
+    runtime.schedule("delivery", model, 100000, tasks)
+    first = runtime.task
+    await first
+    await real_sleep(0)
+    assert runtime.task is first and not runtime.again
+    assert len(transport.calls) == 3 and delays == [0.1, 0.2, 0.4]
+    timer = runtime._continuation
+    assert timer is not None
+    assert not model.calls
+    runtime.close()
+    assert timer.cancelled() and runtime._continuation is None
+
+
+async def test_continuation_claims_fourth_page_without_a_new_turn(monkeypatch):
+    transport, model, tasks = Transport(frozen=True), Model(), set()
+    original = transport.request
+    committed = asyncio.Event()
+    pages = 0
+
+    async def paginated(operation, payload):
+        nonlocal pages
+        if payload["action"] == "claim":
+            pages += 1
+            if pages <= 3:
+                transport.calls.append(payload)
+                return {"job": None, "more": True}
+        result = await original(operation, payload)
+        if payload["action"] == "advance":
+            committed.set()
+        return result
+
+    transport.request = paginated
+    monkeypatch.setattr("box_agent.desktop_memory.experience._PAGE_RETRY_DELAY", 0.001)
+    runtime = ExperienceRuntime(transport)
+    try:
+        runtime.schedule("delivery", model, 100000, tasks)
+        await asyncio.wait_for(committed.wait(), 2)
+        assert pages >= 4
+        assert not model.calls
+        await finish(tasks)
+        assert runtime._continuation is None
+    finally:
+        runtime.close()
+
+
+async def test_new_turn_replaces_pending_continuation_without_duplicate_scans(monkeypatch):
+    transport, model, tasks = Transport(), Model(), set()
+    pages = 0
+
+    async def claim(operation, payload):
+        nonlocal pages
+        pages += 1
+        return {"job": None, "more": pages <= 3}
+
+    transport.request = claim
+    monkeypatch.setattr("box_agent.desktop_memory.experience._PAGE_RETRY_DELAY", 0.05)
+    runtime = ExperienceRuntime(transport)
+    try:
+        runtime.schedule("first", model, 100000, tasks)
+        await runtime.task
+        await asyncio.sleep(0)
+        timer = runtime._continuation
+        assert timer is not None
+        runtime.schedule("second", model, 100000, tasks)
+        assert timer.cancelled()
+        await runtime.task
+        await asyncio.sleep(0.06)
+        assert pages == 4
+        assert runtime._continuation is None
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("state", ["UNRECOGNIZED_PRIVATE_STATE", "SAVING_FACTS"])
+async def test_unknown_stage_stops_and_known_stages_back_off(monkeypatch, caplog, state):
+    transport, model, tasks, delays = Transport(frozen=True), Model(), set(), []
+    original = transport.request
+    advances = 0
+
+    async def advance(operation, payload):
+        nonlocal advances
+        if payload["action"] == "advance":
+            transport.calls.append(payload)
+            advances += 1
+            return {"state": state if advances == 1 else "COMMITTED"}
+        return await original(operation, payload)
+
+    async def pause(delay):
+        delays.append(delay)
+
+    transport.request = advance
+    monkeypatch.setattr("box_agent.desktop_memory.experience.asyncio.sleep", pause)
+    runtime = ExperienceRuntime(transport)
+    runtime.schedule("delivery", model, 100000, tasks)
+    await runtime.task
+    assert advances == (1 if state.startswith("UNRECOGNIZED") else 2)
+    assert delays == ([] if advances == 1 else [0.1])
+    if advances == 1:
+        assert "reason=unexpected_state" in caplog.text and state not in caplog.text
+    assert not model.calls
+    runtime.close()
+
+
 @pytest.mark.asyncio
 async def test_producer_consumes_the_exact_native_prompt_without_tools_or_main_history():
     transport, model, tasks = Transport(), Model(), set()

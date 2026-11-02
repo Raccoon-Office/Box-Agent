@@ -60,6 +60,23 @@ def test_absent_launch_selector_preserves_standalone_and_offline_config(tmp_path
     assert desktop_launch_agent(settings, {"BOX_AGENT_MEMORY_BOOTSTRAP_FILE": "/ignored"}) is settings
 
 
+async def test_yaml_desktop_selector_without_native_grant_is_advertised_disabled(tmp_path, monkeypatch):
+    from box_agent.acp import BoxACPAgent
+    from box_agent.desktop_memory import launch
+
+    monkeypatch.setattr(launch, "_native_environment", None)
+    for key in launch._NATIVE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_text("api_key: synthetic\nmodel: synthetic\nenable_memory: true\nmemory_backend_type: desktop\n")
+    loaded = Config.from_yaml(path)
+    assert not loaded.agent.enable_memory and loaded.agent.memory_backend_type == "desktop"
+    agent = BoxACPAgent(SimpleNamespace(), loaded, SimpleNamespace(), [], "base")
+    agent._start_memory_bootstrap = lambda: None
+    response = await agent.initialize(SimpleNamespace(field_meta={}))
+    assert response.field_meta["desktop_memory"]["enabled"] is False
+
+
 def test_shared_config_loader_applies_the_same_overlay_for_cli_and_acp(tmp_path, monkeypatch):
     import box_agent.desktop_memory.launch as launch
     monkeypatch.setattr(launch, "_native_environment", None)

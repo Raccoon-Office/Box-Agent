@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import secrets
 from types import SimpleNamespace
+from typing import ClassVar
 import uuid
 
 import httpx
@@ -22,6 +23,7 @@ from box_agent.session_context import HostBindings, SessionOptions
 from box_agent.tools.engine.preparation import prepare_tools
 from box_agent.tools.memory_tool import create_memory_tools
 from tests.test_agent_session import session_config
+from tests.test_desktop_memory_evidence import CREDENTIAL_SAMPLES
 from tests.test_session_plugins import RecordingLLM
 
 
@@ -591,6 +593,149 @@ async def test_durable_unknown_qa_receipt_is_preserved_without_agent_retry(host)
         assert len([1 for operation, _ in host.calls if operation == "qa"]) == 1
     finally:
         await manager.aclose()
+
+
+@pytest.mark.parametrize("operation", ["qa", "qa/evidence", "turn/close", "visibility/revoke"])
+@pytest.mark.parametrize("code", ["TURN_REVOKED", "AUTH_REQUIRED"])
+async def test_old_background_rejection_only_revokes_the_matching_turn(host, operation, code):
+    manager = backend(host)
+    try:
+        await start_turn(manager, "old")
+        old = manager.current_scope
+        await start_turn(manager, "current")
+        current = manager.current_scope
+
+        async def reject(op, payload):
+            if op == operation:
+                return httpx.Response(403, json={"protocol": 2, "identity_epoch": host.bootstrap["identity_epoch"],
+                                                "ok": False, "error": {"code": code}})
+
+        host.before = reject
+        with pytest.raises(MemoryProxyError, match=code):
+            await manager.transport.request(operation, {"binding": dict(old.binding)})
+        assert (manager.current_scope is current) == (code == "TURN_REVOKED")
+        if code == "TURN_REVOKED":
+            with pytest.raises(MemoryProxyError, match=code):
+                await manager.transport.request(operation, {"binding": dict(current.binding)})
+            assert manager.current_scope is None
+    finally:
+        await manager.aclose()
+
+
+async def test_ordinary_key_text_reaches_host_qa_without_being_redacted(host):
+    manager = backend(host)
+    try:
+        await start_turn(manager)
+        user = 'The key: persistence matters'
+        assistant = 'Example: {"key": "value"}'
+        await manager.handoff(manager.current_scope, user, assistant, 123)
+        payload = next(payload for operation, payload in host.calls if operation == "qa")
+        assert payload["user"] == user
+        assert payload["assistant"] == assistant
+    finally:
+        await manager.aclose()
+
+
+async def test_failed_visibility_revoke_has_payload_free_diagnostics(host, caplog):
+    manager = backend(host)
+    try:
+        engine, history = await start_turn(manager)
+        await qualify(manager, engine, history)
+
+        async def reject(operation, payload):
+            if operation == "visibility/revoke":
+                raise httpx.ReadError("SYNTHETIC_PRIVATE_ERROR")
+
+        host.before = reject
+        manager.model_input_guard.forget("memory.md")
+        await asyncio.gather(*tuple(manager._control_tasks), return_exceptions=True)
+        await asyncio.sleep(0)
+        assert "operation=visibility_revoke" in caplog.text and "reason=unconfirmed" in caplog.text
+        assert "SYNTHETIC_PRIVATE_ERROR" not in caplog.text
+        with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
+            await manager.model_input_guard.require("memory.md")
+    finally:
+        await manager.aclose()
+
+
+async def test_full_handoff_queue_still_closes_skipped_turn_without_blocking(host, caplog):
+    manager = backend(host)
+    manager.config.save_queue_limit = 1
+    runtime = manager.create_runtime()
+    agent = SimpleNamespace(system_prompt="BASE", set_system_prompt=lambda value, **kwargs: None)
+    turn = _MemoryTurn("question", "session-1", "turn-1", 123)
+    stalled = asyncio.create_task(asyncio.Event().wait())
+    runtime.tasks.add(stalled)
+    try:
+        await runtime.refresh(SimpleNamespace(agent=agent), turn)
+        runtime.schedule(turn)
+        runtime.end_turn(turn)
+        await asyncio.gather(*tuple(runtime._close_tasks))
+        assert len([1 for operation, _ in host.calls if operation == "turn/close"]) == 1
+        assert not any(operation in {"qa", "qa/evidence"} for operation, _ in host.calls)
+        assert "operation=handoff" in caplog.text and "reason=queue_full" in caplog.text
+        assert not stalled.done()
+    finally:
+        stalled.cancel()
+        await asyncio.gather(stalled, return_exceptions=True)
+        runtime.tasks.discard(stalled)
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize("sample", CREDENTIAL_SAMPLES)
+@pytest.mark.parametrize("finish_sentence", [True, False])
+async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_path, host, sample, finish_sentence, caplog):
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+    from box_agent.session_log import SessionLog
+    from box_agent.tools.base import Tool, ToolResult
+
+    class FixtureTool(Tool):
+        name = "credential_fixture"
+        description = "Return synthetic fixture data."
+        parameters: ClassVar[dict] = {"type": "object", "properties": {"env": {"type": "object"}}}
+
+        async def execute(self, **kwargs):
+            return ToolResult(success=True, content=sample)
+
+    class FixtureLLM(RecordingLLM):
+        async def generate_stream(self, **kwargs):
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                    id="fixture", type="function", function=FunctionCall(name="credential_fixture", arguments={
+                        "env": {"DB_PASSWORD": "SYNTHETIC_NESTED_PASSWORD", "MY_API_KEY": "SYNTHETIC_NESTED_KEY"}}))])
+            else:
+                yield StreamEvent(type="text", delta=sample + ("\nFixture response complete." if finish_sentence else ""))
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    log = SessionLog.create(tmp_path / "private-canonical", session_id="fixture", cwd=tmp_path)
+    manager = backend(host)
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    config.agent.retry_on_suspected_truncation = False
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=FixtureLLM(), memory_manager=manager, tools=[FixtureTool()],
+        system_prompt="BASE", session_log=log), options=SessionOptions(profile="acp", workspace_dir=tmp_path))
+    try:
+        await session.agent.tools["tool_search"].execute(tool_names=["credential_fixture"])
+        handle = await AgentService().start(RunRequest(run_id="fixture-turn", session_id="session-1", user_message=sample), session=session)
+        assert (await handle.result()).status.value == "completed"
+        await asyncio.gather(*tuple(session.memory_runtime.tasks))
+        payload = next(payload for operation, payload in host.calls if operation == "qa/evidence")
+        assert payload["user"] == payload["assistant"] == "[REDACTED]"
+        assert "SYNTHETIC" not in json.dumps(payload) and "AKIAABCDEFGHIJKLMNOP" not in json.dumps(payload)
+        views = payload["evidence"]["views"]
+        assert payload["evidence"]["status"] == "captured"
+        assert {view["source_ref"]["event_type"] for view in views} >= {"tool/call", "tool/result"}
+        for view in views:
+            assert view["source_ref"]["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
+        assert any(event["type"] == "tool/result" and event["data"]["result"]["content"] == sample for event in log.events)
+        assert "SYNTHETIC" not in caplog.text and "AKIAABCDEFGHIJKLMNOP" not in caplog.text
+    finally:
+        await session.aclose()
+        await manager.aclose()
+        log.close()
 
 
 async def test_authentication_revocation_clears_preload_and_core_qualification(host):

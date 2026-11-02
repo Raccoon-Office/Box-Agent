@@ -19,12 +19,19 @@ MAX_BYTES = 64 * 1024
 MAX_EVENTS = 2048
 MAX_VIEWS = 12
 EXCERPT_BYTES = 4096
-_CREDENTIAL = re.compile(
-    r"(?i)(\b(?:authorization\s*[:=]\s*(?:bearer\s+)?|bearer\s+|"
-    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)[\"']?\s*[:=]\s*[\"']?))"
-    r"[^\s\"',;}&]+"
+_SENSITIVE_FIELD = re.compile(
+    r"(?i)(?:^|[_.-])(?:authorization|(?:set[_.-]?)?cookie|password|passwd|pwd|"
+    r"(?:api[_.-]?|access[_.-]?|[a-z0-9]+[_.-])key(?:[_.-]?id)?|(?:access[_.-]?|refresh[_.-]?)?token|"
+    r"(?:client[_.-]?)?secret|secret[_.-]?access[_.-]?key|private[_.-]?key)$"
 )
-_SECRET_TOKEN = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b")
+_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*)[\"']?\s*[:=]")
+_SECRET_TEXT = re.compile(
+    r"(?i)\bbearer\s+|\b(?:api|access|private|secret)\s+key\s*[:=]|"
+    r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----|"
+    r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b|"
+    r"://[^/\s@]+:[^/\s@]*@"
+)
 _ATTACHMENT = re.compile(r"(?i)data:(?:image|audio|video|application)/[^;,\s]+;base64,[A-Za-z0-9+/_=\r\n-]+")
 
 
@@ -39,13 +46,16 @@ def _hash(text: str) -> str:
 def _redact(value: Any) -> Any:
     value = sanitize_for_logging(value)
     if isinstance(value, dict):
-        return {key: "[REDACTED]" if str(key).lower().replace("_", "-") in
-                {"access-token", "refresh-token", "client-secret", "private-key"} else _redact(item)
+        return {key: "[REDACTED]" if _SENSITIVE_FIELD.search(str(key)) else _redact(item)
                 for key, item in value.items()}
     if isinstance(value, list):
         return [_redact(item) for item in value]
     if isinstance(value, str):
-        return _ATTACHMENT.sub("[OMITTED_ATTACHMENT]", _SECRET_TOKEN.sub("[REDACTED]", _CREDENTIAL.sub(r"\1[REDACTED]", value)))
+        # Do not guess where an untrusted quoted/multiline credential ends.
+        # Omit the whole suspect value rather than retaining a secret suffix.
+        if _SECRET_TEXT.search(value) or any(_SENSITIVE_FIELD.search(match[1]) for match in _ASSIGNMENT.finditer(value)):
+            return "[REDACTED]"
+        return _ATTACHMENT.sub("[OMITTED_ATTACHMENT]", value)
     return value
 
 
