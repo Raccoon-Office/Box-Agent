@@ -25,6 +25,11 @@ func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
     guard let value = attribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
     return unsafeBitCast(value, to: AXUIElement.self)
 }
+func isSystemFilePanel(_ element: AXUIElement) -> Bool {
+    guard let identifier = attribute(element, "AXIdentifier") as? String else { return false }
+    return ["open-panel", "save-panel"].contains(identifier)
+}
+
 // Public AXUIElementGetPid reports the host for AppKit's remote proxies.
 // Codex's receiver resolution uses actualPID, not that logical host PID.
 func actualPID(_ element: AXUIElement) -> pid_t? {
@@ -41,6 +46,59 @@ func windowID(_ element: AXUIElement) -> UInt32? {
     return getWindowID(element, &value) == .success && value != 0 ? value : nil
 }
 
+// Explicit foreground fallback for remote AppKit file panels. No input is posted.
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "focus-file-panel" {
+    guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
+          let expected = UInt32(CommandLine.arguments[3]), expected > 0,
+          AXIsProcessTrusted() else { refuse("file_panel_invalid_target") }
+    let app = AXUIElementCreateApplication(pid)
+    var matches:[AXUIElement] = []
+    func findPanel(_ element:AXUIElement, _ depth:Int) {
+        let identifier = attribute(element,"AXIdentifier") as? String
+        if windowID(element) == expected,
+           ["open-panel","save-panel","GoToWindow"].contains(identifier ?? "") {
+            if !matches.contains(where: { CFEqual($0,element) }) { matches.append(element) }
+        }
+        if depth < 2 {
+            for child in attribute(element,"AXChildren") as? [AXUIElement] ?? [] {
+                findPanel(child,depth+1)
+            }
+        }
+    }
+    for window in attribute(app,"AXWindows") as? [AXUIElement] ?? [] { findPanel(window,0) }
+    guard matches.count == 1, let panel = matches.first,
+          let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],
+                                                kCGNullWindowID) as? [[String:Any]],
+          rows.filter({ ($0["kCGWindowNumber"] as? UInt32) == expected }).count == 1,
+          let row = rows.first(where: { ($0["kCGWindowNumber"] as? UInt32) == expected }),
+          (row["kCGWindowOwnerPID"] as? Int32) == pid,
+          (row["kCGWindowIsOnscreen"] as? Bool) == true,
+          let frame = panelFrame(panel),
+          let b = row["kCGWindowBounds"] as? [String:Any],
+          let x = b["X"] as? Double, let y = b["Y"] as? Double,
+          let w = b["Width"] as? Double, let h = b["Height"] as? Double,
+          frame == CGRect(x:x,y:y,width:w,height:h),
+          ["AXWindow", "AXSheet"].contains(attribute(panel,"AXRole") as? String ?? ""),
+          let running = NSRunningApplication(processIdentifier:pid)
+    else { refuse("file_panel_identity_unverified") }
+    preparationStarted = true
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+        guard running.activate(options:[]) else { refuse("file_panel_activation_failed") }
+    }
+    let raised = AXUIElementPerformAction(panel,kAXRaiseAction as CFString)
+    // AXRaise alone restored the exact sheet focus in the live PS reproduction.
+    // Do not add a second focus mutation when the first is unverifiable.
+    guard raised == .success else { refuse("file_panel_raise_failed") }
+    usleep(300000)
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          let focused = elementAttribute(app,"AXFocusedWindow"),
+          windowID(focused) == expected, CFEqual(focused,panel)
+    else { refuse("file_panel_focus_unverified") }
+    finish(["effect":"confirmed", "code":"file_panel_focus_verified",
+            "pid":pid, "window_id":expected, "frontmost_pid":pid,
+            "focused_window_id":expected, "keyboard_posted":false])
+}
+
 // Read-only verification; never activate, raise, prepare focus, or post events.
 if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "verify-panel-front" {
     guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
@@ -52,7 +110,7 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "verify-panel
     let app = AXUIElementCreateApplication(pid)
     guard let focused = elementAttribute(app, "AXFocusedWindow"), windowID(focused) == expected,
           let identifier = attribute(focused, "AXIdentifier") as? String,
-          ["open-panel", "save-panel"].contains(identifier),
+          ["open-panel", "save-panel", "GoToWindow"].contains(identifier),
           let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                kCGNullWindowID) as? [[String: Any]]
     else { refuse("file_panel_identity_unverified") }
@@ -66,9 +124,17 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "verify-panel
     let targets = rows.enumerated().filter { ($0.element["kCGWindowNumber"] as? UInt32) == expected }
     guard targets.count == 1, let target = targets.first,
           (target.element["kCGWindowOwnerPID"] as? Int32) == pid,
-          (target.element["kCGWindowLayer"] as? Int) == 8,
           (target.element["kCGWindowIsOnscreen"] as? Bool) == true,
-          let frame = bounds(target.element) else { refuse("file_panel_window_unverified") }
+          let frame = bounds(target.element), panelFrame(focused) == frame
+    else { refuse("file_panel_window_unverified") }
+    if identifier == "GoToWindow" {
+        var parent = focused, seen = Set<AXUIElement>()
+        while !isSystemFilePanel(parent), let next = elementAttribute(parent,"AXParent") {
+            guard seen.count < 128, seen.insert(next).inserted else { refuse("file_panel_parent_unverified") }
+            parent = next
+        }
+        guard isSystemFilePanel(parent) else { refuse("file_panel_parent_unverified") }
+    }
     var count:UInt32 = 0
     guard CGGetActiveDisplayList(0,nil,&count) == .success, count > 0 else { refuse("display_unknown") }
     var displays = [CGDirectDisplayID](repeating:0,count:Int(count))
@@ -91,8 +157,79 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "verify-panel
           let latest = elementAttribute(app,"AXFocusedWindow"), CFEqual(latest,focused),
           windowID(latest) == expected else { refuse("file_panel_focus_changed") }
     finish(["effect":"confirmed", "code":"file_panel_front_verified", "pid":pid,
-            "window_id":expected, "layer":8, "panel_identifier":identifier,
+            "window_id":expected, "layer":target.element["kCGWindowLayer"] ?? 0,
+            "focused_window_id":expected, "frontmost_pid":pid,
+            "frame":[frame.minX,frame.minY,frame.width,frame.height], "panel_identifier":identifier,
             "display_id":targetDisplay, "read_only":true])
+}
+
+// Geometry shared by read-only panel verification.
+func panelFrame(_ element: AXUIElement) -> CGRect? {
+    guard let p = attribute(element, "AXPosition"), let s = attribute(element, "AXSize"),
+          CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+    var origin = CGPoint.zero, size = CGSize.zero
+    guard AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &origin),
+          AXValueGetValue(unsafeBitCast(s, to: AXValue.self), .cgSize, &size) else { return nil }
+    return CGRect(origin: origin, size: size)
+}
+
+// Read-only host/sheet geometry proof. Mouse delivery belongs to Driver's
+// explicit foreground desktop route; this helper never posts mouse events here.
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "panel-geometry" {
+    guard let pid = Int32(CommandLine.arguments[2]), pid > 0,
+          let expected = UInt32(CommandLine.arguments[3]), AXIsProcessTrusted()
+    else { refuse("panel_geometry_invalid_request") }
+    let app = AXUIElementCreateApplication(pid)
+    guard let sheet = elementAttribute(app, "AXFocusedWindow"), windowID(sheet) == expected,
+          attribute(sheet, "AXRole") as? String == "AXSheet",
+          attribute(sheet, "AXIdentifier") as? String == "GoToWindow",
+          let sf = panelFrame(sheet) else { refuse("panel_geometry_sheet_unresolved") }
+    var host = sheet, seen = Set<AXUIElement>()
+    var ancestry = [sheet]
+    while let parent = elementAttribute(host, "AXParent") {
+        if attribute(parent, "AXRole") as? String == "AXApplication" { break }
+        guard seen.count < 128, seen.insert(parent).inserted else { refuse("panel_geometry_parent_unresolved") }
+        host = parent
+        if ["AXWindow", "AXSheet"].contains(attribute(parent, "AXRole") as? String ?? ""),
+           let id = windowID(parent), id != windowID(ancestry.last!) {
+            ancestry.append(parent)
+        }
+    }
+    guard let panel = ancestry.dropFirst().first(where: isSystemFilePanel),
+          let parentID = windowID(panel), parentID != expected, let pf = panelFrame(panel),
+          // Compact save panels can be narrower/shorter than their GoTo sheet.
+          // AX ancestry and exact CG frames prove ownership, not containment.
+          // The capture still uses the parent's own bounds and may be clipped.
+          pf.intersects(sf),
+          let rows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String:Any]]
+    else { refuse("panel_geometry_parent_unresolved") }
+    func matches(_ id:UInt32, _ frame:CGRect) -> Bool {
+        let found = rows.filter { ($0["kCGWindowNumber"] as? UInt32) == id }
+        guard found.count == 1, let row = found.first,
+              row["kCGWindowOwnerPID"] as? Int32 == pid,
+              let b = row["kCGWindowBounds"] as? [String:Any],
+              let x=b["X"] as? Double, let y=b["Y"] as? Double,
+              let w=b["Width"] as? Double, let h=b["Height"] as? Double
+        else { return false }
+        return frame == CGRect(x:x,y:y,width:w,height:h)
+    }
+    var frames = [[String:Any]]()
+    for surface in ancestry {
+        guard let id = windowID(surface), let frame = panelFrame(surface), matches(id, frame)
+        else { refuse("panel_geometry_ancestor_changed") }
+        frames.append(["window_id":id, "frame":[frame.minX,frame.minY,frame.width,frame.height],
+                       "role":attribute(surface,"AXRole") as? String ?? ""])
+    }
+    guard matches(expected,sf), matches(parentID,pf),
+          let latest=elementAttribute(app,"AXFocusedWindow"),CFEqual(latest,sheet)
+    else { refuse("panel_geometry_changed") }
+    finish(["effect":"confirmed", "code":"panel_geometry_verified", "read_only":true,
+            "pid":pid, "window_id":expected, "parent_window_id":parentID,
+            "sheet_frame":[sf.minX,sf.minY,sf.width,sf.height],
+            "parent_frame":[pf.minX,pf.minY,pf.width,pf.height],
+            "sheet_contained_in_parent":pf.contains(sf),
+            "ancestry":frames,
+            "frontmost_pid":NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0])
 }
 
 // Resolve lease eligibility through the logical host. The remote panel service
@@ -102,15 +239,16 @@ func hasSystemPanelReceiver(_ pid: pid_t, host hostPID: pid_t, window expected: 
     guard var panel = elementAttribute(app, "AXFocusedWindow") else { return false }
     var ancestors = Set<AXUIElement>()
     var matchedWindow = windowID(panel) == expected
-    while let parent = elementAttribute(panel, "AXParent") {
+    while !isSystemFilePanel(panel), let parent = elementAttribute(panel, "AXParent") {
         if attribute(parent, "AXRole") as? String == "AXApplication" { break }
-        guard ancestors.insert(parent).inserted else { return false }
+        guard ancestors.count < 128, ancestors.insert(parent).inserted else { return false }
         panel = parent
         matchedWindow = matchedWindow || windowID(parent) == expected
     }
     guard matchedWindow,
-          attribute(panel, "AXIdentifier") as? String == "open-panel",
-          attribute(panel, "AXSubrole") as? String == "AXDialog" else { return false }
+          isSystemFilePanel(panel),
+          (attribute(panel, "AXSubrole") as? String == "AXDialog"
+           || attribute(panel, "AXRole") as? String == "AXSheet") else { return false }
     if pid == hostPID { return true }
     guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
         == "com.apple.appkit.xpc.openAndSavePanelService" else { return false }
@@ -303,15 +441,16 @@ else { refuse("focused_window_unavailable") }
 var host = focused
 var ancestors = Set<AXUIElement>()
 var windowIDs: Set<UInt32> = [focusedID]
-while let parent = elementAttribute(host, "AXParent") {
+while !isSystemFilePanel(host), let parent = elementAttribute(host, "AXParent") {
     if attribute(parent, "AXRole") as? String == "AXApplication" { break }
-    guard ancestors.insert(parent).inserted else { refuse("ax_parent_cycle") }
+    guard ancestors.count < 128, ancestors.insert(parent).inserted else { refuse("ax_parent_cycle") }
     host = parent
     if let id = windowID(parent) { windowIDs.insert(id) }
 }
 guard windowIDs.contains(expectedWindow) else { refuse("focused_window_mismatch") }
-guard attribute(host, "AXIdentifier") as? String == "open-panel",
-      attribute(host, "AXSubrole") as? String == "AXDialog"
+guard isSystemFilePanel(host),
+      (attribute(host, "AXSubrole") as? String == "AXDialog"
+       || attribute(host, "AXRole") as? String == "AXSheet")
 else { refuse("not_open_panel") }
 // File panels require window focus without marking the panel host active.
 // A host app-active notification raises its modal panels to layer 8 even when

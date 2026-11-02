@@ -19,6 +19,7 @@ PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAD0lEQVR4nGP4jwMwDC0JALoev
 @pytest.fixture(autouse=True)
 def no_native_input_in_fake_driver_tests(monkeypatch):
     monkeypatch.setattr(adapter, 'native_focused_window_id', lambda pid: None)
+    monkeypatch.setattr(adapter, 'focus_file_panel', lambda *a, **k: {'effect': 'not_sent'})
     monkeypatch.setattr(adapter, 'deliver_panel_key', lambda *args, **kwargs: None)
     monkeypatch.setattr(adapter, 'verify_file_panel_front', lambda *args, **kwargs: None)
 
@@ -266,7 +267,7 @@ def test_multiwindow_ax_checks_relationships_but_displays_current_window(monkeyp
     assert 'Window: "Save"' not in text and 'Window: "Go to Folder"' in text
     assert 'text field "50"' not in text and '0 text field "60"' in text
     observed_ids = [args['window_id'] for name, args in driver.calls if name == 'get_window_state']
-    assert observed_ids == [60, 50, 60]
+    assert observed_ids == [60]  # Ordinary observations need only the selected window.
     api.control('setValue', 'app', {'target': 0, 'value': '/tmp'})
     assert driver.calls[-1][0] == 'set_value'
     assert driver.calls[-1][1]['window_id'] == 60
