@@ -38,6 +38,38 @@ async def test_ordinary_tool_has_no_completion_requirement():
 
 
 @pytest.mark.asyncio
+async def test_uncommitted_write_requirement_survives_pause_and_does_not_leak_to_new_task(tmp_path):
+    from box_agent.tools.base import ToolInvocationContext
+    from box_agent.tools.file_tools import WriteTool
+
+    tool, scope = WriteTool(str(tmp_path)), []
+    context = CompletionContext((), lambda: False, resume_scope=scope)
+    original = await CompletionChecks.create({tool.name: tool}, context)
+    await tool.invoke(
+        {"path": "result.json", "content": '{"rows":[', "final": False},
+        context=ToolInvocationContext(completion_gate=original.gates[tool.name]),
+    )
+    original.suspend()
+    tool.cleanup_pending_writes()
+
+    unrelated = await CompletionChecks.create(
+        {tool.name: tool}, CompletionContext((), lambda: False, resume_scope=[]),
+    )
+    assert await unrelated.check() == []
+    resumed = await CompletionChecks.create({tool.name: tool}, context)
+    issue = (await resumed.check())[0]
+    assert issue.code == "WRITE_FILE_UNCOMMITTED"
+    assert "chunk_index=0" in issue.message
+    await tool.invoke(
+        {"path": "result.json", "content": '{"rows":[]}'},
+        context=ToolInvocationContext(completion_gate=resumed.gates[tool.name]),
+    )
+    assert await resumed.check() == []
+    resumed.close()
+    assert await (await CompletionChecks.create({tool.name: tool}, context)).check() == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["creation", "check"])
 async def test_failed_completion_check_is_fatal_not_silent_success(stage):
     class BrokenTool(GatedTool):

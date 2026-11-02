@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING, Any, Iterator
 from ..events import ProgressEvent
 from ..model_history import is_model_history_placeholder
 from .file_change_receipts import FileChangeReceiptMixin, before_write, file_change_result
-from .base import EventEmittingTool, Tool, ToolResult
+from .base import EventEmittingTool, Tool, ToolInvocationContext, ToolResult
+from .completion_checks import CompletionContext, CompletionIssue
 from .argument_limits import MAX_GENERATED_BODY_CHARS
 from .file.path_candidates import home_relative_path_candidates
 from .pptx_safety import detect_pptx_self_check_bypass
@@ -699,10 +700,65 @@ class _CommittedTextWrite:
     result: ToolResult
 
 
+class _WriteCompletionCheck:
+    """Require writes attempted in this run to reach an atomic commit."""
+
+    def __init__(self, tool: WriteTool):
+        self.tool = tool
+        self.uncommitted: set[str] = set()
+
+    def snapshot(self) -> dict:
+        return {"version": 1, "uncommitted": sorted(self.uncommitted)}
+
+    def observe(self, result: ToolResult) -> None:
+        output = result.raw_output or {}
+        path = output.get("path")
+        if not isinstance(path, str):
+            return
+        state = output.get("transaction_state")
+        if state == "committed" and result.success:
+            self.uncommitted.discard(path)
+        elif state in {"active", "discarded", "none"}:
+            self.uncommitted.add(path)
+
+    async def check(self) -> CompletionIssue | None:
+        if not self.uncommitted:
+            return None
+        instructions = []
+        for path in sorted(self.uncommitted):
+            state = self.tool._pending.get(Path(path))
+            index = state.next_index if state is not None else 0
+            instructions.append(f"{path}: continue with chunk_index={index}")
+        return CompletionIssue(
+            "WRITE_FILE_UNCOMMITTED",
+            "Uncommitted write_file output. Finish the remaining content and set "
+            "final=true on the last chunk; " + "; ".join(instructions),
+        )
+
+
 class WriteTool(FileChangeReceiptMixin, Tool):
     """Atomically write a UTF-8 file in one call or ordered chunks."""
 
     aliases = ("write",)
+    uses_invocation_context = True
+
+    async def create_completion_gate(self, context: CompletionContext) -> _WriteCompletionCheck:
+        return _WriteCompletionCheck(self)
+
+    async def restore_completion_gate(self, context: CompletionContext, state: dict) -> _WriteCompletionCheck:
+        if state.get("version") != 1 or not isinstance(state.get("uncommitted"), list):
+            raise ValueError("Invalid write_file completion checkpoint")
+        if not all(isinstance(path, str) for path in state["uncommitted"]):
+            raise ValueError("Invalid write_file completion paths")
+        gate = _WriteCompletionCheck(self)
+        gate.uncommitted.update(state["uncommitted"])
+        return gate
+
+    async def _invoke_validated(self, arguments: dict, *, context: ToolInvocationContext | None):
+        result = await super()._invoke_validated(arguments, context=context)
+        if context is not None and isinstance(context.completion_gate, _WriteCompletionCheck):
+            context.completion_gate.observe(result)
+        return result
 
     def __init__(
         self,
@@ -1204,7 +1260,7 @@ class WriteTool(FileChangeReceiptMixin, Tool):
         self,
         path: str,
         content: str,
-        chunk_index: int = 0,
+        chunk_index: int | None = None,
         final: bool = True,
         temporary: bool = False,
     ) -> ToolResult:
@@ -1215,6 +1271,21 @@ class WriteTool(FileChangeReceiptMixin, Tool):
             state = self._pending.get(target)
             if error := self._permission_error(target):
                 return self._active_result(state, error) if state is not None else error
+            if chunk_index is None:
+                if state is not None:
+                    return self._active_result(
+                        state,
+                        ToolResult(
+                            success=False,
+                            error=(
+                                "WRITE_FILE_CHUNK_INDEX_REQUIRED: an active transaction "
+                                f"requires chunk_index={state.next_index}. "
+                                "Accepted chunks were retained; retry with that index."
+                            ),
+                            raw_output={"action": "continue", "restart_required": False},
+                        ),
+                    )
+                chunk_index = 0
             data = content.encode("utf-8")
             if state is None:
                 replay = self._committed_replay(

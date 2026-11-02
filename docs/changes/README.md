@@ -6,6 +6,25 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-02 — Incomplete file delivery and bounded recovery
+
+- Omitting `chunk_index` during an active `write_file` transaction now reports
+  the required next index and retains accepted chunks. Single-call writes still
+  omit chunk parameters; explicit conflicting retries retain their restart contract.
+- A capability-owned completion check blocks successful completion while an
+  attempted file write remains uncommitted, including after a discarded transaction
+  or interactive pause. It allows bounded repair and otherwise reports failure.
+- After automatic continuation or step budget exhaustion, a final incomplete
+  verdict reports `TURN_COMPLETION_INCOMPLETE`; a completed answer still succeeds.
+- `publish_artifact` requires non-empty `path` for publish/begin and `write_id`
+  for commit/abort, with parameter errors before filesystem access. Action-specific
+  checks stay in the tool entry point: its provider-facing schema keeps a flat
+  object root because model gateways reject top-level schema combinators.
+  Existing valid publication and generation transactions keep their behavior.
+- Source regression coverage: `test_file_tool_size_guard.py`,
+  `test_publish_artifact_tool.py`, `test_turn_continuation.py`, and `test_completion.py`.
+  Packaged behavior requires a runtime rebuild, host restart, and fresh task probe.
+
 ## 2026-11-02 — Bounded parallel full-suite test runner
 
 - Preflight and GitHub CI share `general_review/ci/test.sh`: pytest-xdist selects
