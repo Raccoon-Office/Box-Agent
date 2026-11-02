@@ -1123,7 +1123,7 @@ async def _run_agent_loop_impl(
             allow_llm_summary=summary_failure_cooldown_steps == 0,
             before_summary=before_summary,
             force=force, estimate_tools=estimate_tools,
-            summary_input_token_limit=token_limit if force else None,
+            summary_input_token_limit=token_limit,
             summary_projector=getattr(context_engine, "prepare_summary", None),
         ))
         if result.mode == "fallback" and result.summary_calls > 0 and result.error:

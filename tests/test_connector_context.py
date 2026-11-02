@@ -7,8 +7,9 @@ import pytest
 from box_agent.agent import Agent
 from box_agent.connector_context import append_connector_status, restore_connector_status
 from box_agent.context_input import DefaultContextEngine
+from box_agent.events import SummarizationEvent
 from box_agent.llm.llm_wrapper import _trace_request_message
-from box_agent.schema import Message, StreamEvent
+from box_agent.schema import Message, StreamEvent, TokenUsage
 from box_agent.session_log import SessionLog
 from box_agent.tools.engine.preparation import prepare_tools
 
@@ -214,8 +215,14 @@ async def test_recovery_failure_still_reaches_model(monkeypatch, agent):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("token_limit", [2000, 20000])
-async def test_real_compaction_retains_current_state_without_summary_cooperation(agent, token_limit):
+@pytest.mark.parametrize("token_limit,history_chars,expected_mode", [
+    (2000, 20000, "fallback"),
+    (8000, 6000, "summary"),
+    (20000, 20000, None),
+])
+async def test_real_compaction_retains_current_state_without_summary_cooperation(
+    agent, token_limit, history_chars, expected_mode,
+):
     from box_agent.runtime import run_agent_loop
 
     requests = []
@@ -228,12 +235,19 @@ async def test_real_compaction_retains_current_state_without_summary_cooperation
             yield StreamEvent(type="finish", finish_reason="stop")
 
     agent.add_user_message("first", host_connector_status=snapshot("connected"))
-    agent.messages.append(Message(role="assistant", content="x" * 20000))
+    agent.messages.append(Message(
+        role="assistant", content="x" * history_chars,
+        usage=TokenUsage(prompt_tokens=token_limit, total_tokens=token_limit)
+        if expected_mode == "summary" else None,
+    ))
     agent.add_user_message("latest", host_connector_status=snapshot("connected"))
     assert agent.messages[-1].content == "latest"
-    _ = [event async for event in run_agent_loop(
+    events = [event async for event in run_agent_loop(
         llm=Provider(), messages=agent.messages, tools={}, token_limit=token_limit, max_steps=1)]
-    assert any(kind == "context_summary" for kind, _ in requests) == (token_limit == 2000)
+    assert any(kind == "context_summary" for kind, _ in requests) == (expected_mode == "summary")
+    assert [event.mode for event in events if isinstance(event, SummarizationEvent)] == (
+        [expected_mode] if expected_mode is not None else []
+    )
     main = next(messages for kind, messages in requests if kind != "context_summary")
     assert any(snapshot("connected") in message["content"] for message in main)
     agent.add_user_message("after", host_connector_status=snapshot("connected"))

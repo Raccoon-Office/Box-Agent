@@ -14,6 +14,8 @@ inferences, subject to encoded-byte and provider request-body limits. Pixels sta
 outside durable message content; SessionLog records references and lifecycle
 metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
+Before sending a summary request, Box-Agent estimates the complete history plus the appended summary instruction against the session's safe input budget. Both ordinary and forced compaction apply this check. An over-budget summary skips the provider call and uses the local bounded fallback; the rebuilt main request is then checked before sending.
+
 ## Request lifecycle
 
 ```text

@@ -11,6 +11,7 @@ from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEve
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from box_agent.context_input import DefaultContextEngine
 from box_agent.kernel.compact_engine import DefaultCompactEngine
+from box_agent.kernel.context_engine import _fallback_context_estimate, _SUMMARY_REQUEST
 
 
 class CompactionE2ELLM:
@@ -74,7 +75,10 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
         deferred_mcp_loading_enabled=False,
     )
     old_user = Message(role="user", content="old user request")
-    large_execution = Message(role="assistant", content="x" * 420_000)
+    large_execution = Message(
+        role="assistant", content="x" * 200_000,
+        usage=TokenUsage(prompt_tokens=104_400, completion_tokens=100, total_tokens=104_500),
+    )
     latest_user = Message(role="user", content="latest user request")
     agent.messages.extend([old_user, large_execution, latest_user])
     original_prefix = list(agent.messages)
@@ -114,6 +118,51 @@ async def test_agent_compacts_above_derived_limit_and_resumes_from_synthetic_use
     assert latest_user in llm.normal_messages
 
     assert agent.messages[-1].role == "assistant"
+    assert agent.messages[-1].content == "E2E resumed answer"
+    done = next(event for event in events if isinstance(event, DoneEvent))
+    assert done.stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_chars", [100_000, 45_000], ids=["history-overflow", "summary-instruction-overflow"])
+async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(tmp_path, history_chars):
+    llm = CompactionE2ELLM()
+    token_limit = 16_000
+    agent = Agent(
+        llm_client=llm, system_prompt="system", tools=[], max_steps=1,
+        workspace_dir=str(tmp_path), token_limit=token_limit,
+        deferred_mcp_loading_enabled=False,
+    )
+    latest_user = Message(role="user", content="latest user request")
+    agent.messages.extend([
+        Message(role="user", content="old user request"),
+        Message(
+            role="assistant", content="x" * history_chars,
+            usage=TokenUsage(prompt_tokens=token_limit, completion_tokens=100,
+                             total_tokens=token_limit + 100),
+        ),
+        latest_user,
+    ])
+    history_tokens = _fallback_context_estimate(agent.messages, {})
+    summary_tokens = _fallback_context_estimate([
+        *agent.messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
+    ], {})
+    if history_chars == 45_000:
+        assert history_tokens < token_limit
+    else:
+        assert history_tokens > token_limit
+    assert summary_tokens > token_limit
+
+    events = [event async for event in agent.run_events()]
+
+    compaction = next(event for event in events if isinstance(event, SummarizationEvent))
+    assert compaction.mode == "fallback"
+    assert compaction.summary_calls == 0
+    assert llm.summary_messages == []
+    assert "Deterministic history fallback" in str(llm.normal_messages)
+    assert latest_user in llm.normal_messages
+    assert _fallback_context_estimate(llm.normal_messages, {}) <= token_limit
+    assert not [event.message for event in events if isinstance(event, ErrorEvent)]
     assert agent.messages[-1].content == "E2E resumed answer"
     done = next(event for event in events if isinstance(event, DoneEvent))
     assert done.stop_reason == StopReason.END_TURN
