@@ -1,97 +1,182 @@
-# CuaDriver 0.38.0 alignment
+# CuaDriver 0.38 alignment and retained compatibility routes
 
-The installer pins 0.38.0 and validates release SHA-256 for all five platform archives. Installing a resource does not replace an already running daemon.
+The installer pins official CuaDriver 0.38.0 and validates release SHA-256 for
+all five platform archives. The upstream reference is
+`cua-driver-rs-v0.38.0` (`85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19`).
+Installing a resource does not replace a running daemon or a desktop client's
+bundled download manifest. This change does not patch the Driver binary.
 
-- All get_window_state calls request full_output=true to retain elements and window relationships.
-- Chords use hotkey; single keys use press_key; paste uses clipboard_write plus hotkey.
-- Click, scroll and keyboard operations retain PR225 background-first delivery. Drag retains its foreground default; an explicit background drag is supported by Driver 0.38. Foreground requests and eligible fallback first verify focus through the adaptor and Driver bring_to_front. Explicit input fields retain PID, source window and element_token; untargeted foreground keys use the verified desktop route.
-- Driver all-layer list_windows replaces the duplicate CGWindow inventory. AX focus reading, attachment validation, screenshot geometry and stale-target guards remain.
-- Elements without AXPress retain PR225's center-point click after a fresh screenshot, frame validation and attachment occlusion checks. A verified attached surface can use desktop-coordinate foreground clicks; coordinates are converted from its screenshot through window bounds and desktop scale.
-- PR225 fallback eligibility is retained for background_unavailable (no effect field, not_sent or refused) and same_pid_keyboard_ambiguity / off_space_or_ax_unresolved (refused only). Partial, unverifiable, confirmed and transport outcomes never trigger automatic replay. Preserve hint, path and delivered_chars for recovery.
-- Removed native editor input, search Escape, sheet action, field focus, activation and Cmd+O helpers. These operations continue to use Driver tools.
-- A bounded native file-panel key route supplements Driver 0.38 for Cmd+Shift+G, Return and Escape. It resolves the actual Open and Save Panel Service receiver and verifies the live window before posting. Cmd+Shift+G can prepare a cold receiver with window-directed events; Return/Escape require an established receiver focus. Cmd+O remains on the Driver menu-equivalent route. Swift source is bundled and compiled into a content-addressed cache; missing compiler/permissions return not_sent and use the fallback rules below. Unknown or partial helper outcomes never replay.
+## Ownership
 
-Upstream source: cua-driver-rs-v0.38.0 (85e2b13), tool schemas, macOS input routing and window enumeration.
+| Layer | Responsibility |
+| --- | --- |
+| `mcp_servers/cua_adapter.py` | Driver transport, fresh window/token ownership, delivery decisions and observation scope |
+| `mcp_servers/cua_server.py` | Serialized public tools, depth validation and observation presentation |
+| `mcp_servers/cua_panel_keyboard.py` and `native/panel_keyboard.swift` | Bounded file-panel receiver leases, keys, geometry and foreground verification |
+| `plugins/cua/structured_result.py` and `wiring.py` | CUA model projection and session-owned screenshot capability |
+| `tools/mcp_result_hooks.py`, `mcp_loader.py`, `image_inspection_tool.py` | Generic run-scoped hooks and image inspection; no Office-specific routing |
+| `skills/office-gui-basics/SKILL.md` | Observable Office editing and selection workflow |
+| `scripts/build_runtime.py` | Package the helper source with the standalone runtime |
 
-Attachment graph behavior remains covered for recursive sheets/popovers, stale and ambiguous targets, window movement and closure. The 0.38 suite covers full observations, targeted foreground input, hotkey routing, pixel selection, partial results and no unsafe replay. Restored PR225 tests cover failed activation, contradictory control focus and foreground ownership checks before desktop input.
+Driver owns ordinary editor input, search Escape, field value writes, semantic
+AX actions and Cmd+O. General editor/search/field-focus/activation helpers remain
+removed. Native activation is retained only for an exactly identified file panel;
+this is not an all-helper removal.
 
-## Attached field keyboard correction
+## Delivery and identity contract
 
-Driver 0.38 resolves a token to the source snapshot window in ResolvedElement::into_parts; changing window_id cannot retarget it. The adaptor therefore distinguishes AX source from the proven active surface. A background indexed Return on an attached AXTextField advertising AXConfirm retains a Driver semantic click(action=confirm) on the original token as its fallback. Before that action, the panel helper may confirm only a live GoToWindow PathTextField whose frame and current focus match the addressed field; it cannot retarget an arbitrary element. Other mismatched indexed keyboard requests stop before clipboard writes or input; tokens are never rewritten or silently dropped.
+- AX reads request `full_output=true`; actions retain the PID, source window and
+  original element token. Chords use `hotkey`, single keys use `press_key`, and
+  paste uses `clipboard_write` followed by `hotkey`.
+- Click, scroll and keyboard retain PR225 background-first delivery. Drag retains
+  its foreground default and supports explicit background delivery.
+  `deliveryMode=background` is not a universal no-activation guarantee: known,
+  eligible refusals may use the existing verified foreground fallback.
+- Automatic fallback accepts `background_unavailable` only with an absent effect,
+  `not_sent` or `refused`; `same_pid_keyboard_ambiguity` and
+  `off_space_or_ax_unresolved` require `refused`. Partial, unknown, unverifiable,
+  confirmed and transport outcomes never authorize replay. `target_focus_unconfirmed`
+  and Driver `window_not_key` do not authorize replay either.
+- Every activation or clipboard mutation invalidates the relevant inventory.
+  Subsequent checks revalidate PID, frames, attachment chain and input receiver.
+  Failed activation and explicit conflicting focus stop input.
+- AX source windows and active attached surfaces are distinct. Driver 0.38 resolves
+  tokens to their source snapshots, so changing `window_id` cannot retarget a token.
+  Mismatched indexed keyboard requests stop before clipboard writes or input.
+  Indexed Return on a proven GoTo `PathTextField` is the bounded exception below;
+  the existing semantic `AXConfirm` fallback retains the original token.
+- Driver's all-layer inventory supplies normal window discovery. Native AX focus
+  and independent CGWindow order/frame checks supplement specific proofs; they
+  do not supply a second general application inventory.
 
-target_focus_unconfirmed does not trigger automatic replay. window_not_key permits verified foreground fallback only for an untargeted file-panel key whose native receiver check returned panel_focus_unavailable/not_sent and whose Driver refusal explicitly recommends foreground. Generic or indexed window_not_key failures still stop. Known PR225 refusal codes retain verified foreground fallback on the same active/source window. Explicit foreground cannot bypass the attached-token guard. This prevents parent-scoped keyboard input from being silently redirected to a different surface.
+The restoration reference is PR225 merge commit
+`4b85b3062b1bb0fb60da5acf668391ededa6f648`. Driver text, action reports,
+`hint`, `path` and `delivered_chars` remain available for caller recovery.
+Recommendations are returned, not automatically executed.
 
+## Bounded file-panel helper
 
-## Delivery contract
+The helper recognizes exact native `open-panel`, `save-panel` and attached
+`GoToWindow` identities, not titles or window layers. Layer-0 Office sheets are
+valid. Nested Save/GoTo surfaces must match the complete live native ancestry,
+including an outer document or Print window used as the capture source.
 
-As in PR225, `deliveryMode=background` requests the background-first route and retains eligible automatic foreground fallback; it is not a strict no-activation mode. Fallback requires the same active/source window, a known refusal and successful foreground focus verification. Recommendations such as `px` or `page` are returned to the caller rather than replaced with foreground replay.
+Only Cmd+Shift+G, Return and Escape use the panel keyboard transport. The resolver
+proves the actual host/system-service receiver PID and window, retains scoped
+host/receiver leases, and checks identity again before delivery. Cmd+Shift+G may
+prepare a cold receiver with window-directed focus events; Return and Escape
+require established receiver focus. Indexed Return additionally checks the live
+GoTo path field's frame and focus. Driver still writes the path value.
 
-Action responses retain Driver text messages and structured escalation recommendations, including successful but unverifiable results. These recommendations describe possible next steps; the adapter does not automatically execute them.
+A definite pre-delivery `not_sent` for unavailable focus, lease, permission or
+helper launch/build may enter verified foreground fallback for an unaddressed
+key, after a fresh AX root proves the panel. Malformed output, timeout after
+launch, partial preparation and unknown/posted outcomes never cause key replay.
+Cold preparation is not proof that every panel stays in the background.
 
-## Deployment and verification scope
+Explicit foreground recovery may activate and AXRaise only the exact identified
+file panel. It then rechecks focus, frame, ancestry and ordering before input.
+The read-only `verify-panel-front` operation never activates or posts events:
+its independent CG order checks same-app windows on the target display, together
+with exact AX focus and the frontmost application. It is not a global guarantee
+against every foreign overlay. It can correct the two known Driver focus errors
+(`bring_to_front_exact_window_unverified`, `bring_to_front_window_not_ordinary`)
+only for the same verified file-panel PID/window. Corrected results retain the
+raw `driver_result` and an explicit `verification_source`.
 
-Desktop download manifests belong to the client repository and are not changed here. The CLI installer pin does not update a desktop client's bundled manifest or replace an already running daemon. A standalone wrapper configured with an application-bundle path uses that path; the installer pin does not redirect it.
+Swift source ships in the package and compiles into a content-addressed cache.
+Build timeout does not permanently poison that cache; missing compiler or
+permissions remain explicit failures. Receiver leases close on retarget/session
+end. The experimental native panel pointer transport is not retained.
 
-Regression tests cover routing and response preservation. Source inspection and fake-transport tests alone do not establish physical GUI behavior or Office task completion. Validation results and deployment boundaries are recorded in the PR description.
+## Capture, coordinates and unresolved surfaces
 
-## PR225 restoration baseline
+Driver 0.38 may return an AX-unresolved GoTo child image without usable snapshot
+context, or a scaled parent composite mislabeled as the child. Read-only native
+`panel-geometry` proves exact focus, parent ancestry and same-PID frames. The
+adaptor then returns the full parent capture, labels its scope (including possible
+clipped sheet edges), and keeps its own scale. Geometry is rechecked before input.
+Coordinate input uses verified foreground desktop coordinates; an explicit
+background request on this special route returns `background_unavailable` without
+activation. This compensates for the released Driver, not its snapshot store.
 
-The retained adaptor behavior is compared with PR225 merge commit `4b85b3062b1bb0fb60da5acf668391ededa6f648`. Editor, search, AX-action, field-focus, activation and Cmd+O helpers stay deleted; remote file-panel keys are the bounded exception described below. Driver 0.38 full-output reads, hotkey argument translation, all-layer window enumeration, structured result reporting and attached-token ownership checks remain. A sheet's owning document is activated with Driver bring_to_front and its foreground ownership, attachment chain and focused-control evidence are re-read before desktop input; the removed native activation helper is not restored.
+Separately captured floating palettes retain their own window ID, bounds and
+pixel dimensions. Their explicit foreground clicks verify current geometry,
+app ownership and app-window stacking, without raising the underlying document.
 
-Driver 0.38 also lists nonordinary windows such as Word's layer-8 Open panel, while bring_to_front rejects them as non-layer-0 targets. The adaptor retains PR225's verified supplemental-window foreground route using the already observed, PID/frame-matched AXWindow and confirmed active application. The source of the window inventory is Driver; no duplicate native window inventory is introduced.
+Word Find can expose a top-level `AXToolbar` through another window's snapshot.
+Those controls are observation-only: their tokens are not rebound, and the
+potentially misleading capture is withheld. Indexed and pixel actions are
+rejected. Unaddressed explicit foreground keys can recover (for example Escape)
+only after exact native focus, active PID and current frame agree. Empty AX dialogs
+use the same exact-window proof for eligible unaddressed foreground input;
+background input is not silently promoted. An ordinary-window keyboard refresh
+may retry one read-only inventory change before delivery, never replay an action.
 
+## Observation cost and result projection
 
-## Local file-panel validation (2026-10-30)
+One observation reuses its app inventory and adjacent window reads. Known child
+surfaces may start with a freshly read proven parent when frame and depth scope
+still agree. Cold discovery checks ambiguity; missing/changed parents reopen it.
+Old AX trees and action tokens never become fresh evidence. Checks after input,
+clipboard changes and activation remain live. Launch readiness still samples live
+PIDs under the original deadlines.
 
-The current native keyboard entry accepts an `open-panel` AXDialog and its
-attached GoToWindow. General Save-panel support is not established by this
-implementation. The shared resolver proves the actual system-service PID and
-receiver window, retains host/receiver focus leases, and rechecks the addressed
-PathTextField for indexed Return. Cmd+Shift+G may prepare a cold receiver with
-window-directed mouse events and synthetic focus events; this is not proof
-that every cold panel can remain in the background. Some preparation paths
-reassert the original application only if it is still frontmost. Return and
-Escape do not use cold-receiver preparation.
+`get_app` and AX-enabled `get_state` accept positive `max_depth`; default traversal
+is unchanged. Explicit shallow reads and automatic shallow timeout recovery report
+that deeper controls may be omitted. Screenshot-only reads reject the option.
+Root-only file-panel predicates request depth 1 when supported. A scoped attached
+keyboard refresh falls back to full traversal if it cannot prove the same chain
+and focus. Warm GoTo captures can read the parent directly after revalidation.
 
-Local Word tests with official Driver 0.38 confirmed: Driver menu-equivalent
-Cmd+O opens the panel; helper Cmd+Shift+G opens GoToWindow; Driver set_value fills
-the path; helper indexed Return confirms it; Driver AXPress on Open dismisses
-the panel and displays the fixture document. With the helper and its leases
-disabled for Return, Driver AXConfirm reported unverifiable and GoToWindow
-remained open. Return therefore remains in the helper. This is a source-adaptor
-probe, not a packaged client or Office-20 acceptance run. Foreground effects are
-observed by the user; tool receipts alone do not prove no transient activation.
+Row compaction and attachment ownership use indexed passes while preserving
+control order, tokens, state flags and ambiguity rejection. Successful intermediate
+queries may be summarized for the model, but errors, coded/unknown outcomes and
+current grounding remain. Complete MCP envelopes remain in `rawOutput`; direct
+Driver results are unchanged. The loader inspects already-decoded error objects
+without serializing the entire AX payload again.
 
-Unused editor, search Escape, field-focus, general Sheet-action and application
-activation helper entry points have been removed. Driver owns path value writes.
-The native source now contains only the bounded panel keyboard transport, its
-lease/receiver support, and read-only file-panel front verification. Panel Escape
-is retained pending a replacement test.
+Image persistence and model projection share canonical validation only within one
+MCP result; scope exit discards that memo. `inspect_images` can read immutable,
+content-addressed images from the active CUA session through a generic run-scoped
+capability. The sidecar validates path, symlink, content hash and media type on the
+actual returned bytes. This does not grant directory access or authorize images
+from another session. Ordinary file permissions apply outside that capability.
 
-### File-panel foreground result correction (2026-10-30)
+## Verification and deployment boundaries
 
-Driver 0.38 can activate a Word Open panel while the panel changes from CGWindow
-layer 0 to layer 8. Its layer-0-only postcondition then reports
-`bring_to_front_exact_window_unverified`; a subsequent request can instead report
-`bring_to_front_window_not_ordinary`. The adaptor preserves that raw result in
-its evidence log and runs a read-only native verifier for these exact errors and
-the same PID/window. Only an active app with the exact focused `open-panel` or
-`save-panel`, a visible layer-8 window owned by that PID, and no higher same-app
-window on its display can be corrected to success. All other failures remain
-failures. No activation or keyboard input is performed by this verifier; the
-Driver binary and subsequent keyboard route are unchanged. Corrected structured
-results retain `driver_result` and identify `verification_source` explicitly.
+Regression tests cover Driver translation, fallback/no replay, parent/source
+ownership, nested sheets, stale focus/frames, toolbar recovery, query cost,
+result projection, screenshot permission isolation and runtime packaging. See
+`tests/test_cua_038.py`, `test_cua_pr225_restoration.py`, `test_cua_office_regressions.py`,
+`test_cua_panel_pointer.py`, `test_cua_word_toolbar.py`, `test_cua_photoshop_focus.py`,
+`test_cua_query_cost.py`, `test_cua_wiring.py` and `test_image_inspection_tool.py`.
 
-Local Word open-panel verification passed against official Driver 0.38.0. This
-is source-level adaptor validation, not an installed-client runtime update.
+The historical probes below have different scopes and are not a combined latency
+benchmark. Their raw evidence remains in the local validation archives.
 
-### Panel keyboard routing and foreground fallback (2026-10-30)
+| Evidence | Observed result | Limit |
+| --- | --- | --- |
+| Recorded E07 observation replay | apps/windows/AX 4/4/17 → cold 1/2/11, warm 1/2/1 | Same 79 elements; not live latency |
+| Local TextEdit read | 11 queries/0.570 s → 4/0.198 s | Edit/save separately verified |
+| Word root predicate | 390 elements/0.9461 s → 27/0.0655 s | Root identity only |
+| Archived E07/P01 model text | 2,555,650 → 37,792 / 4,020,073 → 1,573 bytes | Raw envelopes retained |
+| Row/ownership processing | Equality on 17 archived and 1,000 generated trees | Python CPU measurements, not GUI task speed |
+| Same-result image processing | Synthetic median 57.0 → 37.6 ms | 20 samples; CPU/storage only |
+| Warm Word GoTo capture A/B/B/A | 3 reads → 2; .706/.491 s → .399/.408 s | Same rendered text/geometry; local probe |
 
-Unaddressed supported file-panel keys first use the native panel receiver helper.
-A definite `not_sent` caused by unavailable focus, lease, permission, or helper
-launch/build can enter the existing foreground path after a fresh exact AX root
-proves a file panel and window identity checks still pass. This bypasses Driver's
-known ineffective host-PID background keyboard route for that fallback. The
-foreground path remains `bring_to_front` then desktop-scope keys. Unknown/posted
-results, stale identities, and addressed fields are not replayed as desktop keys.
-Cmd+O remains Driver-owned menu routing.
+The 2026-11-02 formal 20-case batch used r2 for W01–W02, r4 for W03–E06 and r5
+for E07–P06. It is a mixed-version run, not acceptance of the final tree.
+The later isolated Box-Agent r6 repair run passed W04 and E05 at 100 each
+(459.28 s and 342.94 s), with saved artifact, business screenshot and unchanged
+input-hash checks. W04 still had 2 recoverable tool errors and E05 had 4;
+ACP completion alone was not treated as success. It explicitly loaded
+`office-gui-basics` in addition to `mac-cua`, so it is not a pure code ablation
+against the earlier run. It does not replace the original formal scores.
+
+That r6 candidate was built, installed with 3,024 file hashes verified, and tested
+through ACP. The normal installed application runtime link remained r5. Subsequent
+source cleanup/test results belong in the PR's current Proof, not retroactively
+in that runtime receipt. Neither two repaired cases nor offline tests establish
+all-Office/background-input correctness. Native Driver fixes, desktop client
+manifest migration and a final uniform-version full run remain separate work.
