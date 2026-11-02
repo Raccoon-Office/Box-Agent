@@ -53,7 +53,7 @@ except ImportError:
     # MCP <= 1.19 exports the same client without the separator.
     from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
 
-    create_mcp_http_client = None
+    from mcp.shared._httpx_utils import create_mcp_http_client
 
 from box_agent.auth import request_auth_headers, resolve_auth_token, should_attach_auth_header
 from box_agent.config import MCPConfig
@@ -78,6 +78,7 @@ from .mcp_sources import (
     configured_mcp_sources,
     resolve_mcp_sources,
 )
+from ..client_info import should_attach_client_headers
 from .model_tool_context import current_model_tool_context
 from .mcp_result_hooks import (
     adapt_mcp_image_context,
@@ -848,6 +849,7 @@ class MCPTool(Tool):
         connector_name: str | None = None,
         concurrency_limiter: asyncio.Semaphore | None = None,
         session_lease: SessionLease | None = None,
+        server_url: str = "",
     ):
         """
         ``session`` is the fixed ClientSession shared by every caller (classic
@@ -861,6 +863,8 @@ class MCPTool(Tool):
         self._name = name
         self._remote_name = remote_name or name
         self._server_name = server_name
+        self._server_url = server_url
+        self._session_header_enabled = should_attach_client_headers(server_url)
         self._fixed_arguments = dict(fixed_arguments or {})
         self._session_lease = session_lease
         self._description = description
@@ -1127,8 +1131,13 @@ class MCPTool(Tool):
                             and call_arguments[local_name] == ""
                         )
                     }
+                call_options = {}
+                model_context = current_model_tool_context()
+                if model_context and model_context.session_id and (
+                    (is_web_extract and not self._server_url) or self._session_header_enabled
+                ):
+                    call_options["meta"] = {"box_agent_session_id": model_context.session_id}
                 if is_web_extract:
-                    model_context = current_model_tool_context()
                     if model_context is not None:
                         call_arguments["model"] = model_context.model
                         call_arguments["max_output_tokens"] = (
@@ -1152,11 +1161,13 @@ class MCPTool(Tool):
                         result = await leased_session.call_tool(
                             self._remote_name,
                             arguments=call_arguments,
+                            **call_options,
                         )
                 else:
                     result = await self._session.call_tool(
                         self._remote_name,
                         arguments=call_arguments,
+                        **call_options,
                     )
 
             # MCP tool results are a list of content items
@@ -1312,6 +1323,33 @@ class MCPTool(Tool):
                 await release_browser_runtime_for_current_turn()
 
 
+async def _attach_mcp_session_header(request) -> None:
+    """Read correlation from the message, since MCP sends in a background task."""
+    header = "X-RACCOON-Session-ID"
+    request.headers.pop(header, None)
+    if not should_attach_client_headers(str(request.url)) or request.method != "POST":
+        return
+    try:
+        payload = json.loads(await request.aread())
+    except (ValueError, UnicodeDecodeError):
+        return
+    if not isinstance(payload, dict) or payload.get("method") != "tools/call":
+        return
+    params = payload.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    session_id = meta.get("box_agent_session_id") if isinstance(meta, dict) else None
+    if isinstance(session_id, str):
+        session_id = session_id.strip()
+        if session_id and session_id.isascii() and all(32 <= ord(c) < 127 for c in session_id):
+            request.headers[header] = session_id
+
+
+def _session_mcp_http_client(**kwargs):
+    client = create_mcp_http_client(**kwargs)
+    client.event_hooks.setdefault("request", []).append(_attach_mcp_session_header)
+    return client
+
+
 async def _open_streamable_http(
     exit_stack: AsyncExitStack,
     *,
@@ -1366,6 +1404,8 @@ async def _open_streamable_http(
             auth=transport_auth,
         )
         http_client = await exit_stack.enter_async_context(http_client_context)
+        if should_attach_client_headers(url or ""):
+            http_client.event_hooks.setdefault("request", []).append(_attach_mcp_session_header)
         streams = await exit_stack.enter_async_context(
             streamable_http_client(url=url, http_client=http_client)
         )
@@ -1379,6 +1419,8 @@ async def _open_streamable_http(
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=auth,
+                **({"httpx_client_factory": _session_mcp_http_client}
+                   if should_attach_client_headers(url or "") else {}),
             )
         )
     read_stream, write_stream = streams[:2]
@@ -1682,6 +1724,7 @@ class MCPServerConnection:
                     parameters=parameters,
                     session=session,
                     server_name=self.name,
+                    server_url=self.url or "",
                     fixed_arguments=fixed_arguments,
                     execute_timeout=execute_timeout,
                     always_load=_mcp_tool_always_load(self.name, tool, self.always_load),
@@ -1854,6 +1897,8 @@ class MCPServerConnection:
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
                 auth=self.auth,
+                **({"httpx_client_factory": _session_mcp_http_client}
+                   if should_attach_client_headers(self.url or "") else {}),
             )
         )
 

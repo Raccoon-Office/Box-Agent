@@ -12,6 +12,7 @@ from typing import TypeVar
 class ModelToolContext:
     model: str
     max_output_tokens: int
+    session_id: str = ""
 
 
 _CURRENT_MODEL_TOOL_CONTEXT: ContextVar[ModelToolContext | None] = ContextVar(
@@ -30,6 +31,7 @@ def set_model_tool_context(
     *,
     model: object,
     max_output_tokens: object,
+    session_id: str = "",
 ) -> Token[ModelToolContext | None]:
     normalized_model = model.strip() if isinstance(model, str) else ""
     normalized_max_tokens = (
@@ -43,6 +45,7 @@ def set_model_tool_context(
         ModelToolContext(
             model=normalized_model,
             max_output_tokens=normalized_max_tokens,
+            session_id=session_id.strip(),
         )
         if normalized_model and normalized_max_tokens
         else None
@@ -61,10 +64,12 @@ class _ScopedModelToolIterator(AsyncIterator[_EventT]):
         *,
         model: object,
         max_output_tokens: object,
+        session_id: str = "",
     ) -> None:
         self._events = events.__aiter__()
         self._model = model
         self._max_output_tokens = max_output_tokens
+        self._session_id = session_id
 
     def __aiter__(self) -> "_ScopedModelToolIterator[_EventT]":
         return self
@@ -73,6 +78,7 @@ class _ScopedModelToolIterator(AsyncIterator[_EventT]):
         token = set_model_tool_context(
             model=self._model,
             max_output_tokens=self._max_output_tokens,
+            session_id=self._session_id,
         )
         try:
             return await self._events.__anext__()
@@ -90,11 +96,13 @@ def scoped_model_tool_context(
     *,
     model: object,
     max_output_tokens: object,
+    session_id: str = "",
 ) -> AsyncIterator[_EventT]:
     return _ScopedModelToolIterator(
         events,
         model=model,
         max_output_tokens=max_output_tokens,
+        session_id=session_id,
     )
 
 
