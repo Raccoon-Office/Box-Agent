@@ -9,6 +9,44 @@ from box_agent.cli_renderer import CliRenderer
 from box_agent.acp import _artifact_envelope
 
 
+def test_publication_schema_keeps_provider_supported_object_root(tmp_path):
+    schema = PublishArtifactTool(tmp_path).to_openai_schema()["function"]["parameters"]
+    assert schema["type"] == "object"
+    assert not {"oneOf", "anyOf", "allOf", "enum", "const", "not"}.intersection(schema)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,field", [
+    ("publish", "path"), ("begin", "path"),
+    ("commit", "write_id"), ("abort", "write_id"),
+])
+@pytest.mark.parametrize("value", [None, "", "   "])
+async def test_publication_reports_missing_action_parameter_before_file_access(tmp_path, action, field, value):
+    tool = PublishArtifactTool(tmp_path)
+    arguments = {"action": action}
+    if value is not None:
+        arguments[field] = value
+    for result in [await tool.invoke(arguments), await tool.execute(**arguments)]:
+        assert not result.success
+        assert "INVALID_TOOL_ARGUMENTS" in result.error
+        assert f"/{field}" in result.error
+        assert "File is missing" not in result.error
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_default_publication_requires_path_but_valid_publication_and_transaction_still_work(tmp_path):
+    tool = PublishArtifactTool(tmp_path)
+    missing = await tool.invoke({"write_id": ""})
+    assert not missing.success
+    assert "/path" in missing.error
+    (tmp_path / "result.md").write_text("result")
+    assert (await tool.invoke({"path": "result.md"})).success
+    started = await tool.invoke({"action": "begin", "path": "generated.md"})
+    assert started.success
+    assert (await tool.invoke({"action": "abort", "write_id": started.raw_output["write_id"]})).success
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["commit", "abort"])
 async def test_transaction_inputs_never_become_artifacts_or_registry_entries(tmp_path, action):

@@ -185,6 +185,7 @@ from ..tool_result_storage import ToolResultStorage
 from ..turn_continuation import (
     ContinuationJudgeFacts,
     ContinuationJudgeTimeout,
+    ContinuationLimitReached,
     TurnContinuationController,
 )
 from ..turn_policy import (
@@ -2523,11 +2524,18 @@ async def _run_agent_loop_impl(
                         inject_queue is not None and not inject_queue.empty()
                     ),
                 )
-            except ContinuationJudgeTimeout as exc:
+            except (ContinuationJudgeTimeout, ContinuationLimitReached) as exc:
                 if cancelled() or (inject_queue is not None and not inject_queue.empty()):
                     continuation = None
                 else:
-                    msg = "任务结束检查超时，暂时无法确认任务完成。已有输出已保留，请重试。"
+                    if isinstance(exc, ContinuationJudgeTimeout):
+                        msg = "任务结束检查超时，暂时无法确认任务完成。已有输出已保留，请重试。"
+                        code, category = "TURN_COMPLETION_CHECK_TIMEOUT", "timeout"
+                        details = {"source": "turn_continuation", "timeoutSeconds": effective_provider_stale_seconds}
+                    else:
+                        msg = "自动续执行预算已用尽，任务仍未完成。已有输出已保留，请继续任务。"
+                        code, category = "TURN_COMPLETION_INCOMPLETE", "incomplete"
+                        details = {"source": "turn_continuation", "reason": "continuation_limit"}
                     elapsed = perf_counter() - step_start
                     total = perf_counter() - run_start
                     if hook_mgr.hooks:
@@ -2545,8 +2553,7 @@ async def _run_agent_loop_impl(
                     )
                     yield ErrorEvent(
                         message=msg, is_fatal=True, exception=exc,
-                        error_code="TURN_COMPLETION_CHECK_TIMEOUT", error_category="timeout",
-                        error_details={"source": "turn_continuation", "timeoutSeconds": effective_provider_stale_seconds},
+                        error_code=code, error_category=category, error_details=details,
                     )
                     yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
                     return

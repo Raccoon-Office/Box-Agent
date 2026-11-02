@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from box_agent.artifact_publication import STAGING_DIRECTORY, write_metadata
 from box_agent.artifact_metadata import read_metadata
 from box_agent.tools.base import Tool, ToolResult, ToolInvocationRejected, check_tool_cancellation
+from box_agent.tools.schema_validation import ToolArgumentIssue
 from box_agent.tools.file_change_receipts import (
     FileWriteInvocationContext, before_write, destination_lock, file_change_result,
 )
@@ -55,10 +56,12 @@ class PublishArtifactTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Final file path inside the session workspace."},
+                "path": {"type": "string",
+                         "description": "Required for publish/begin: final file path inside the session workspace."},
                 "action": {"type": "string", "enum": ["publish", "begin", "commit", "abort"],
                            "default": "publish"},
-                "write_id": {"type": "string", "description": "Exact transaction ID from begin."},
+                "write_id": {"type": "string",
+                             "description": "Required for commit/abort: exact transaction ID from begin."},
             },
             "additionalProperties": False,
         }
@@ -109,6 +112,15 @@ class PublishArtifactTool(Tool):
 
     async def _execute(self, path: str | None = None, action: str = "publish",
                        write_id: str | None = None, *, context=None) -> ToolResult:
+        required = "path" if action in {"publish", "begin"} else "write_id"
+        value = path if required == "path" else write_id
+        if action in {"publish", "begin", "commit", "abort"} and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            return self._invalid_arguments_result((ToolArgumentIssue(
+                path=f"/{required}", keyword="required",
+                message=f"action={action} requires a non-empty {required}",
+            ),))
         try:
             if action == "begin":
                 target = self._target(path)

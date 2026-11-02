@@ -15,6 +15,7 @@ from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.request_user_decision_tool import RequestUserDecisionTool
 from box_agent.turn_continuation import (
     ContinuationJudgeFacts,
+    ContinuationLimitReached,
     TurnContinuationController,
     model_says_continue,
 )
@@ -209,7 +210,6 @@ async def test_judge_rejects_non_text_responses_without_invoking_content_methods
 async def test_controller_requires_tools_budget_and_normal_finish() -> None:
     cases = (
         {"tools_available": False},
-        {"step": 1, "max_steps": 2},
         {"finish_reason": "length"},
         {"cancelled": True},
     )
@@ -250,9 +250,19 @@ async def test_controller_is_bounded_to_two_continuations() -> None:
 
     assert first is not None and first.attempt == 1
     assert second is not None and second.attempt == 2
-    assert await controller.evaluate(
-        llm=JudgeLLM(), **arguments
-    ) is None
+    with pytest.raises(ContinuationLimitReached):
+        await controller.evaluate(llm=JudgeLLM(), **arguments)
+    assert await controller.evaluate(llm=JudgeLLM('{"continue":false}'), **arguments) is None
+
+
+@pytest.mark.asyncio
+async def test_controller_reports_unfinished_action_when_step_budget_is_exhausted():
+    with pytest.raises(ContinuationLimitReached):
+        await TurnContinuationController().evaluate(
+            llm=JudgeLLM(), messages=_history("创建文件", "我会创建文件"),
+            finish_reason="stop", tools_available=True, step=1, max_steps=2,
+            cancelled=False,
+        )
 
 
 @pytest.mark.asyncio
@@ -677,14 +687,15 @@ async def test_successful_decision_stops_without_judging_or_duplicate_card() -> 
 
 
 @pytest.mark.asyncio
-async def test_loop_continuation_is_bounded() -> None:
+@pytest.mark.parametrize("completed", [False, True])
+async def test_loop_distinguishes_completion_after_bounded_continuations(completed) -> None:
     llm = MockLLM(
         [
             LLMResponse(content="我会创建文件并运行测试。", finish_reason="stop"),
             LLMResponse(content="我会创建文件并运行测试。", finish_reason="stop"),
-            LLMResponse(content="我会创建文件并运行测试。", finish_reason="stop"),
+            LLMResponse(content="文件已创建并验证。" if completed else "我会创建文件并运行测试。", finish_reason="stop"),
         ],
-        judge_decisions=[True, True],
+        judge_decisions=[True, True, not completed],
     )
     tool = SearchTool()
 
@@ -705,4 +716,65 @@ async def test_loop_continuation_is_bounded() -> None:
         [event for event in events if isinstance(event, InjectedMessageEvent)]
     ) == 2
     done = [event for event in events if isinstance(event, DoneEvent)][-1]
-    assert done.stop_reason is StopReason.END_TURN
+    assert done.stop_reason is (StopReason.END_TURN if completed else StopReason.ERROR)
+    if not completed:
+        assert [event for event in events if isinstance(event, ErrorEvent)][-1].error_code == "TURN_COMPLETION_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discarded", [False, True])
+async def test_loop_cannot_report_success_with_uncommitted_write_file(tmp_path, discarded):
+    from box_agent.tools.file_tools import WriteTool
+
+    def write(content):
+        return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id=f"write-{content}", type="function", function=FunctionCall(
+                name="write_file", arguments={
+                    "path": "manifest.json", "content": content,
+                    "chunk_index": 0, "final": False,
+                },
+            ),
+        )])
+
+    responses = [write("first")]
+    if discarded:
+        responses.append(write("conflicting"))
+    responses.extend([LLMResponse(content="文件已完成。", finish_reason="stop") for _ in range(3)])
+    llm = MockLLM(responses)
+    tool = WriteTool(str(tmp_path))
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="创建 manifest.json")],
+        tools={tool.name: tool}, max_steps=10,
+    ))
+    assert not (tmp_path / "manifest.json").exists()
+    assert [event for event in events if isinstance(event, DoneEvent)][-1].stop_reason is StopReason.ERROR
+    assert [event for event in events if isinstance(event, ErrorEvent)][-1].error_code == "COMPLETION_GATE_UNSATISFIED"
+
+
+@pytest.mark.asyncio
+async def test_loop_can_commit_pending_write_after_completion_repair(tmp_path):
+    from box_agent.tools.file_tools import WriteTool
+
+    def write(index, content, final):
+        return LLMResponse(content="", finish_reason="tool_calls", tool_calls=[ToolCall(
+            id=f"write-{index}", type="function", function=FunctionCall(
+                name="write_file", arguments={
+                    "path": "manifest.json", "content": content,
+                    "chunk_index": index, "final": final,
+                },
+            ),
+        )])
+
+    llm = MockLLM([
+        write(0, '{"rows":[', False),
+        LLMResponse(content="文件已完成。", finish_reason="stop"),
+        write(1, "]}", True),
+        LLMResponse(content="文件已写入并检查。", finish_reason="stop"),
+    ])
+    tool = WriteTool(str(tmp_path))
+    events = await _collect_events(run_agent_loop(
+        llm=llm, messages=[Message(role="user", content="创建 manifest.json")],
+        tools={tool.name: tool}, max_steps=8,
+    ))
+    assert json.loads((tmp_path / "manifest.json").read_text()) == {"rows": []}
+    assert [event for event in events if isinstance(event, DoneEvent)][-1].stop_reason is StopReason.END_TURN

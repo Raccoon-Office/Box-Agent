@@ -35,6 +35,10 @@ _JUDGE_POLL_SECONDS: Final[float] = 0.1
 class ContinuationJudgeTimeout(TimeoutError):
     """The completion check has no verdict; never interpret it as completed."""
 
+
+class ContinuationLimitReached(RuntimeError):
+    """The model still owes an action after the bounded recovery budget."""
+
 _NORMAL_FINISH_REASONS: Final[frozenset[str | None]] = frozenset(
     {None, "stop", "end_turn"}
 )
@@ -380,8 +384,6 @@ class TurnContinuationController:
             cancelled
             or not tools_available
             or finish_reason not in _NORMAL_FINISH_REASONS
-            or step + 1 >= max_steps
-            or self._continuations >= self._max_continuations
         ):
             return None
 
@@ -400,6 +402,9 @@ class TurnContinuationController:
             timeout_seconds=timeout_seconds,
         ):
             return None
+
+        if self._continuations >= self._max_continuations or step + 1 >= max_steps:
+            raise ContinuationLimitReached("Task remains incomplete after bounded continuation")
 
         self._continuations += 1
         request = TurnContinuationRequest(

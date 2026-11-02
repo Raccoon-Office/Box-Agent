@@ -104,10 +104,12 @@ _PUBLISH_ARTIFACT_SCHEMA = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Final file path inside the session workspace."},
+                "path": {"type": "string",
+                         "description": "Required for publish/begin: final file path inside the session workspace."},
                 "action": {"type": "string", "enum": ["publish", "begin", "commit", "abort"],
                            "default": "publish"},
-                "write_id": {"type": "string", "description": "Exact transaction ID from begin."},
+                "write_id": {"type": "string",
+                             "description": "Required for commit/abort: exact transaction ID from begin."},
             },
             "additionalProperties": False,
         },

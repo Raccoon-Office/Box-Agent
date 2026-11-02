@@ -67,6 +67,32 @@ async def test_write_file_chunks_leave_target_unchanged_until_final_commit(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("final", [False, True])
+async def test_write_file_preserves_accepted_chunks_when_continuation_omits_index(tmp_path, final):
+    tool = WriteTool(workspace_dir=str(tmp_path))
+    target = tmp_path / "a.txt"
+    target.write_text("original")
+    for index, content in enumerate(["one-", "two-", "three-"]):
+        assert (await tool.invoke({
+            "path": "a.txt", "content": content, "chunk_index": index, "final": False,
+        })).success
+
+    rejected = await tool.invoke({"path": "a.txt", "content": "last", "final": final})
+
+    assert not rejected.success
+    assert "WRITE_FILE_CHUNK_INDEX_REQUIRED" in rejected.error
+    assert rejected.raw_output["transaction_state"] == "active"
+    assert rejected.raw_output["next_chunk_index"] == 3
+    assert rejected.raw_output["restart_required"] is False
+    assert target.read_text() == "original"
+    committed = await tool.invoke({
+        "path": "a.txt", "content": "last", "chunk_index": 3, "final": True,
+    })
+    assert committed.success
+    assert target.read_text() == "one-two-three-last"
+
+
+@pytest.mark.asyncio
 async def test_write_file_chunks_enforce_order_and_idempotent_retries(tmp_path):
     tool = WriteTool(workspace_dir=str(tmp_path))
 
