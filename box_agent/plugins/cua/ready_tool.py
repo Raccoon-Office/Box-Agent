@@ -6,6 +6,7 @@ import os
 import sys
 
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.runtime_components import runtime_component_required
 from .config import CuaConfig, CuaRuntimeConfig
 from .driver import DriverAdapter, installed_driver
 from .lifecycle import CuaRuntimeManager
@@ -75,6 +76,17 @@ class EnsureCuaReadyTool(Tool):
             return ToolResult(success=False, error="MCP discovery is still loading; retry after readiness")
         result = await reconnect_mcp_server(self.service.name)
         content = json.dumps(result)
+        if not result.get("success") and os.environ.get(HOST_RUNTIME_ENV, "").strip():
+            return runtime_component_required(
+                "computer-use", code="COMPUTER_USE_UNAVAILABLE",
+                message=result.get("error") or "Desktop control is not ready",
+                guidance=(
+                    "Ask the user to prepare Desktop control in the host's plugin settings: "
+                    "install its driver if missing, enable it, and complete the required OS permissions. "
+                    "The host must check readiness before retrying the original request. "
+                    "Do not install drivers, change settings, grant permissions, or start a daemon with other tools."
+                ),
+            )
         if result.get("success"):
             instructions = (
                 "CUA ready. Use get_app to bind the application and get_state to observe it. "

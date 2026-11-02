@@ -171,6 +171,8 @@ Box-Agent 使用 Driver 实际声明的工具 schema，插件补充动作依据�
 
 检查 `tools.enable_mcp` 和 `plugins.cua.runtime.enabled` 是否开启、驱动是否已安装，再调用 `ensure_cua_ready`，之后用 `tool_search` 发现动作工具。桌面端还需开启插件并完成授权；external 模式必须有可用的宿主 daemon。若报告同名 MCP 配置冲突，移除旧手工 CUA entry；显式禁用的 entry 则需先解除禁用。
 
+宿主通过 `BOX_AGENT_CUA_RUNTIME_CONFIG` 提供运行配置时，`ensure_cua_ready` 的连接失败会返回 `runtime_component_required`（schema 1，`component_id: "computer-use"`，`code: "COMPUTER_USE_UNAVAILABLE"`），保留具体失败原因并引导用户完成插件设置。支持此协议的客户端可在用户点击后安装并开启组件，重新检测驱动、开关、权限及 daemon 后重试原请求；权限不足或服务未就绪时先引导用户到插件设置，不重试。此协议不让模型安装驱动、修改开关、申请权限或自行启动 daemon；没有宿主配置的 CLI 保持原有错误返回。MCP 尚在发现中的临时失败不请求组件安装。
+
 ### 工具成功但模型没有看到截图
 
 依次检查：

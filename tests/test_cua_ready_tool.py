@@ -139,6 +139,7 @@ async def test_managed_cua_replaces_legacy_registration_and_preserves_other_serv
 
 @pytest.mark.asyncio
 async def test_managed_cua_is_lazy_and_disabled_config_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":false,"mode":"standalone"}')
     file = tmp_path / "mcp.json"
     file.write_text(json.dumps({"mcpServers": {"computer-use": {"disabled": True}}}))
     service = CuaService(CuaConfig(runtime=CuaRuntimeConfig(enabled=True, driver_path="/trusted/driver")))
@@ -149,9 +150,73 @@ async def test_managed_cua_is_lazy_and_disabled_config_wins(tmp_path, monkeypatc
         assert tools == []
         result = await loader.reconnect_mcp_server(service.name)
         assert not result["success"] and result["error"] == "Server is disabled"
+        requirement = await EnsureCuaReadyTool(service).execute()
+        assert not requirement.success
+        assert requirement.error == "COMPUTER_USE_UNAVAILABLE: Server is disabled"
+        assert requirement.raw_output == {
+            "type": "runtime_component_required", "schema_version": 1,
+            "component_id": "computer-use", "code": "COMPUTER_USE_UNAVAILABLE",
+        }
+        assert "plugin settings" in requirement.model_context
+        assert "OS permissions" in requirement.model_context
         service.prepare.assert_not_awaited()
     finally:
         await loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    "Install and configure a trusted CuaDriver",
+    "Host CUA daemon is unavailable",
+    "CUA requires Accessibility and Screen Recording",
+])
+async def test_host_cua_failure_offers_component_setup_without_installing(monkeypatch, error):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":true}')
+    reconnect = AsyncMock(return_value={"success": False, "error": error})
+    monkeypatch.setattr(loader, "reconnect_mcp_server", reconnect)
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=True))
+    result = await EnsureCuaReadyTool(SimpleNamespace(name="computer-use")).execute()
+    assert result.raw_output["component_id"] == "computer-use"
+    assert error in result.error and error in result.model_context
+    assert "before retrying the original request" in result.model_context
+    assert "Do not install drivers" in result.model_context
+    reconnect.assert_awaited_once_with("computer-use")
+
+
+@pytest.mark.asyncio
+async def test_standalone_cua_failure_keeps_existing_error_contract(monkeypatch):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.delenv("BOX_AGENT_CUA_RUNTIME_CONFIG", raising=False)
+    monkeypatch.setattr(loader, "reconnect_mcp_server", AsyncMock(return_value={
+        "success": False, "error": "Install and configure a trusted CuaDriver",
+    }))
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=True))
+    result = await EnsureCuaReadyTool(SimpleNamespace(name="computer-use")).execute()
+    assert result.error == "Install and configure a trusted CuaDriver"
+    assert result.raw_output is None
+
+
+@pytest.mark.asyncio
+async def test_cua_discovery_loading_does_not_request_component_setup(monkeypatch):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":false}')
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=False))
+    result = await EnsureCuaReadyTool(None).execute()
+    assert not result.success and "still loading" in result.error
+    assert result.raw_output is None
+
+
+@pytest.mark.asyncio
+async def test_ready_host_cua_preserves_action_discovery_instructions(monkeypatch):
+    from box_agent.tools.mcp_tool_catalog import get_mcp_tool_catalog
+    monkeypatch.setenv("BOX_AGENT_CUA_RUNTIME_CONFIG", '{"enabled":true}')
+    monkeypatch.setattr(loader, "reconnect_mcp_server", AsyncMock(return_value={"success": True}))
+    monkeypatch.setattr(get_mcp_tool_catalog(), "wait_until_ready", AsyncMock(return_value=True))
+    service = SimpleNamespace(name="computer-use", settings=SimpleNamespace(tool_interface="app"))
+    result = await EnsureCuaReadyTool(service).execute()
+    assert result.success and result.raw_output is None
+    assert "CUA ready. Use get_app" in result.content
 
 
 @pytest.mark.asyncio
