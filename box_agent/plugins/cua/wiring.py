@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from box_agent.llm.capabilities import image_input_support
-from box_agent.tools.mcp_result_hooks import bind_mcp_result_adapter
+from box_agent.tools.mcp_result_hooks import bind_mcp_result_adapter, mcp_result_processing_cache
 
 from .config import CuaConfig
 from .image_encoding import encode_canonical_cua_image
@@ -31,6 +31,18 @@ _OBSERVATION_GUIDANCE = (
     "before another action. Successful dispatch or effect=unverifiable does not prove the "
     "requested outcome: inspect fresh state before retrying or reporting completion."
 )
+
+
+def _canonical_image(data: str, mime_type: str) -> dict[str, Any] | None:
+    cache = mcp_result_processing_cache(_canonical_image)
+    key = (data, mime_type)
+    if cache is None:
+        return encode_canonical_cua_image(data, mime_type, preserve_geometry=True)
+    if key not in cache:
+        cache[key] = encode_canonical_cua_image(data, mime_type, preserve_geometry=True)
+    block = cache[key]
+    # Canonical blocks contain scalars only; callers must not mutate the memo.
+    return dict(block) if block is not None else None
 
 
 def cua_vision_enabled(config: CuaConfig) -> bool:
@@ -82,10 +94,7 @@ class CuaBindings:
             return None
         blocks = []
         for entry in inline_images:
-            block = encode_canonical_cua_image(
-                entry.get("data", ""), entry.get("mime_type", ""),
-                preserve_geometry=True,
-            )
+            block = _canonical_image(entry.get("data", ""), entry.get("mime_type", ""))
             if block is None:
                 continue
             blocks.append(block)
@@ -144,11 +153,11 @@ class CuaBindings:
             return None
         if structured_content is None:
             return None
-        from .structured_result import cua_structured_payload
+        from .structured_result import cua_model_payload
 
         context = "CUA structured result: " + json.dumps({
             "server": server_name, "tool": remote_name,
-            "arguments": arguments, "structuredContent": cua_structured_payload(structured_content),
+            "arguments": arguments, "structuredContent": cua_model_payload(structured_content),
         }, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         if isinstance(structured_content.get("elements"), list):
             context += "\n" + _OBSERVATION_GUIDANCE
@@ -165,10 +174,7 @@ class CuaBindings:
             return None
         references = []
         for entry in inline_images:
-            block = encode_canonical_cua_image(
-                entry.get("data", ""), entry.get("mime_type", ""),
-                preserve_geometry=True,
-            )
+            block = _canonical_image(entry.get("data", ""), entry.get("mime_type", ""))
             if block is None:
                 continue
             reference = self.sidecar.persist_block(block)
@@ -184,6 +190,30 @@ class CuaBindings:
         if not self.mcp_active:
             return events
         return _ScopedCuaEvents(events, self)
+
+    def read_persisted_image(self, path: Path) -> bytes | None:
+        """Read only a content-addressed screenshot owned by this session.
+
+        This is an image capability, not a filesystem permission grant. Keep
+        the store's no-symlink, content-hash and image-type checks on the actual
+        bytes returned to the reader (never validate then reopen the path).
+        """
+        if not self.mcp_active or not self.config.persist_images or self.sidecar is None:
+            return None
+        import base64
+        import re
+
+        path = Path(path)
+        if path.parent != self.sidecar.directory.absolute():
+            return None
+        match = re.fullmatch(r"([0-9a-f]{64})\.(png|jpg)", path.name)
+        if match is None:
+            return None
+        block = self.sidecar.load_block({
+            "sha256": match[1], "contentRef": "images/" + path.name,
+            "media_type": "image/png" if match[2] == "png" else "image/jpeg",
+        })
+        return base64.b64decode(block["data"], validate=True)
 
     def install_agent(self, agent: Any) -> None:
         """Bind this adapter through the generic run activation capability."""

@@ -88,3 +88,85 @@ def test_structured_projection_removes_binary_but_keeps_capture_geometry():
     projected = json.loads(text.split("\n", 1)[1])
     assert projected["screenshot"] == {"width": 230, "height": 408}
     assert text.index("snapshot_id") < text.index('"screenshot"')
+
+
+def test_model_projection_keeps_final_state_actions_and_errors_without_query_duplicates():
+    import copy
+    from box_agent.plugins.cua.structured_result import cua_model_payload
+    events = [
+        {'phase': 'dispatch', 'tool': 'get_window_state', 'arguments': {'window_id': 1}},
+        {'phase': 'result', 'tool': 'get_window_state', 'result': {'structuredContent': {'elements': ['old-tree']}}},
+        {'phase': 'result', 'tool': 'click', 'result': {'structuredContent': {'effect': 'unverifiable'}}},
+        {'phase': 'result', 'tool': 'list_apps', 'result': {'isError': True, 'content': ['failed']}},
+        {'phase': 'error', 'tool': 'list_windows', 'error': 'transport failure'},
+    ]
+    source = {'schema_version': 1, 'output': {'state': 'current-tree'},
+              'adapter_context': {'elements': {'0': {'element_token': 'fresh'}}},
+              'backend_events': events}
+    original = copy.deepcopy(source)
+    projected = cua_model_payload(source)
+    assert source == original
+    assert projected['output'] == source['output']
+    assert projected['adapter_context'] == source['adapter_context']
+    assert projected['backend_query_counts'] == {'get_window_state': 1, 'list_apps': 1}
+    assert projected['backend_action_events'] == events[2:]
+    assert 'backend_events' not in projected
+    direct = {'elements': [{'element_token': 'direct'}], 'snapshot_id': 's1'}
+    assert cua_model_payload(direct) == direct
+
+
+def test_model_window_references_roundtrip_without_duplicate_window_rows():
+    from box_agent.plugins.cua.structured_result import cua_model_payload
+    source = {'schema_version': 1, 'output': {}, 'backend_events': [],
+              'adapter_context': {'element_windows': {
+                  0: {'window_id': 7, 'pid': 42, 'title': 'Document'},
+                  1: {'window_id': 7, 'pid': 42, 'title': 'Document'},
+                  2: {'window_id': 8, 'pid': 42, 'title': 'Sheet'},
+              }}}
+    context = cua_model_payload(source)['adapter_context']
+    restored = {i: context['windows_by_id'][str(wid)] for i, wid in context['element_window_ids'].items()}
+    assert restored == source['adapter_context']['element_windows']
+    assert len(context['windows_by_id']) == 2
+    source['adapter_context']['element_windows'][1]['title'] = 'Conflicting state'
+    assert cua_model_payload(source)['adapter_context'] == source['adapter_context']
+
+
+def test_model_action_context_omits_invalidated_ids_but_keeps_actual_delivery_report():
+    from box_agent.plugins.cua.structured_result import cua_model_payload
+    source = {'schema_version': 1, 'output': {'effect': 'unverifiable'},
+              'requires_requery': True, 'adapter_context': {
+                  'pid': 42, 'fresh': False, 'elements': {0: {'element_token': 'stale'}},
+                  'element_windows': {0: {'window_id': 7}}},
+              'backend_events': [{'phase': 'dispatch', 'tool': 'click',
+                                  'arguments': {'element_token': 'executed-token'}}]}
+    model = cua_model_payload(source)
+    assert model['adapter_context'] == {'pid': 42, 'fresh': False}
+    assert model['requires_requery'] is True
+    assert model['backend_action_events'][0]['arguments']['element_token'] == 'executed-token'
+    assert source['adapter_context']['elements'][0]['element_token'] == 'stale'
+
+
+@pytest.mark.parametrize('detail', [
+    {'is_error': True}, {'refusal': 'outside target'}, {'error': {'message': 'failed'}},
+    {'effect': 'failed'}, {'effect': 'partial'}, {'effect': 'unverifiable'},
+    {'status': 'refused'}, {'status': 'unknown_future_status'},
+    {'code': 'window_id_not_found'}, {'success': False},
+])
+@pytest.mark.parametrize('location', ['result', 'structuredContent'])
+def test_model_query_summary_preserves_error_and_uncertain_reports(detail, location):
+    from box_agent.plugins.cua.structured_result import cua_model_payload
+    result = {'structuredContent': {'elements': []}}
+    result.update(detail) if location == 'result' else result['structuredContent'].update(detail)
+    event = {'tool': 'get_window_state', 'phase': 'result', 'result': result}
+    raw = {'schema_version': 1, 'output': None, 'backend_events': [event]}
+    model = cua_model_payload(raw)
+    assert model['backend_action_events'] == [event]
+    assert model['backend_query_counts'] == {'get_window_state': 1}
+    assert raw['backend_events'] == [event]
+
+
+def test_model_query_summary_retains_missing_structured_evidence():
+    from box_agent.plugins.cua.structured_result import cua_model_payload
+    event = {'tool': 'list_windows', 'phase': 'result', 'result': {'content': []}}
+    model = cua_model_payload({'schema_version': 1, 'output': {}, 'backend_events': [event]})
+    assert model['backend_action_events'] == [event]

@@ -1793,3 +1793,38 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+@pytest.mark.parametrize('error,expected', [
+    (None, None), ('', None), (False, None), ('  failed  ', 'failed'),
+    ({'message': '  detail  ', 'code': 500}, 'detail'),
+    ({'code': 500}, 'Tool returned error'), ({'type': 'failed'}, 'Tool returned error'),
+    ({'message': ' ', 'code': None}, None), ([], None),
+])
+def test_mcp_error_envelope_matches_for_text_and_decoded_object(error, expected):
+    from box_agent.tools.mcp_loader import _structured_mcp_error_message
+    payload = {'error': error, 'elements': [{'element_token': 's1:1'}]}
+    assert _structured_mcp_error_message(payload) == expected
+    assert _structured_mcp_error_message(json.dumps(payload)) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error', [None, {'message': 'backend failure'}])
+async def test_mcp_decoded_result_error_check_does_not_serialize_whole_payload(monkeypatch, error):
+    from box_agent.tools import mcp_loader
+    payload = {'error': error, 'elements': [{'element_token': f's1:{i}'} for i in range(1000)]}
+    original = json.dumps
+    def dumps(value, *args, **kwargs):
+        assert value is not payload, 'already decoded result was unnecessarily serialized'
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(mcp_loader.json, 'dumps', dumps)
+    class Session:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(content=[SimpleNamespace(text='Result')],
+                                   structuredContent=payload, isError=False)
+    tool = MCPTool(name='query', description='query', parameters={'type': 'object'}, session=Session())
+    result = await tool.execute()
+    assert result.success is (error is None)
+    assert result.raw_output['mcp_structured_content'] is payload
+    if error is not None:
+        assert result.error == 'backend failure'

@@ -92,6 +92,7 @@ from .mcp_result_hooks import (
     adapt_mcp_result_context,
     allowed_mcp_result_adapters,
     persist_mcp_image_references,
+    mcp_result_processing_scope,
 )
 from .playwright_session_pool import (
     BrowserSessionLimitError,
@@ -157,10 +158,10 @@ def _replace_server_catalog(connection: "MCPServerConnection") -> None:
         )
 
 
-def _structured_mcp_error_message(content: str) -> str | None:
+def _structured_mcp_error_message(content: str | dict[str, Any]) -> str | None:
     """Recover error envelopes from servers that forget MCP ``isError=true``."""
     try:
-        payload = json.loads(content)
+        payload = content if isinstance(content, dict) else json.loads(content)
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(payload, dict) or "error" not in payload:
@@ -1187,8 +1188,10 @@ class MCPTool(Tool):
             if not isinstance(structured_content, dict):
                 structured_content = None
             if structured_content is not None:
+                # MCP already decoded this object. Inspect its error envelope
+                # directly instead of encoding/parsing the entire AX result.
                 structured_error = structured_error or _structured_mcp_error_message(
-                    json.dumps(structured_content, ensure_ascii=False),
+                    structured_content,
                 )
             context = adapt_mcp_result_context(
                 server_name=self._server_name, remote_name=self._remote_name,
@@ -1206,17 +1209,18 @@ class MCPTool(Tool):
                     server_name=self._server_name, remote_name=self._remote_name,
                 ) if inline_images else ()
             )
-            image_references = persist_mcp_image_references(
-                server_name=self._server_name, remote_name=self._remote_name,
-                inline_images=inline_images, adapters=result_adapters,
-            )
-            image_content, image_source = (
-                adapt_mcp_image_context(
+            with mcp_result_processing_scope():
+                image_references = persist_mcp_image_references(
                     server_name=self._server_name, remote_name=self._remote_name,
-                    inline_images=inline_images, arguments=call_arguments,
-                    structured_content=structured_content,
-                ) if not (is_error or structured_error) else (None, None)
-            )
+                    inline_images=inline_images, adapters=result_adapters,
+                )
+                image_content, image_source = (
+                    adapt_mcp_image_context(
+                        server_name=self._server_name, remote_name=self._remote_name,
+                        inline_images=inline_images, arguments=call_arguments,
+                        structured_content=structured_content,
+                    ) if not (is_error or structured_error) else (None, None)
+                )
             raw_output: dict[str, Any] = {}
             if structured_content is not None:
                 raw_output["mcp_structured_content"] = structured_content
