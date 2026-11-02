@@ -1959,6 +1959,9 @@ Output formats:
                 ),
             )
 
+        if python_path is not None and not python_path.strip():
+            python_path = None
+
         # A live session owns its interpreter. Never silently migrate variables
         # or switch a user-selected environment back to the host default.
         requested_session_id = session_id or self._session_id

@@ -71,6 +71,14 @@ longer recommended to the model. This is prompt guidance, not a new execution ga
   parameter or second installer is added. Rebuild/install Box-Agent and restart the host
   before evaluating packaged-client behavior.
 
+### Empty optional parameters (2026-11-02)
+
+`execute_code` and `local_environment` treat an empty or whitespace-only `python_path`
+as omitted. Execution keeps the current kernel's interpreter or checks the default managed
+environment; `load` discovers runtime candidates. `local_environment` also treats `modules=[]`
+as omitted, so empty optional fields do not block `status` or `ensure`. Nonempty paths retain
+their existing validation, and nonempty Python options still require Python `load`.
+
 ## Windows shell refresh
 
 Windows shell refresh: when the host returns a prepared Git runtime, existing Bash tools

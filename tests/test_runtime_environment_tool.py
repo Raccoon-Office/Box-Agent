@@ -142,6 +142,66 @@ async def test_ensure_checks_status_then_joins_host_installation():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capability", ["python", "node"])
+@pytest.mark.parametrize("action", ["status", "ensure"])
+@pytest.mark.parametrize("optional", [
+    {"python_path": ""},
+    {"modules": []},
+    {"python_path": " \t\n", "modules": []},
+])
+async def test_empty_optional_parameters_allow_runtime_status_and_ensure(
+    capability, action, optional,
+):
+    requester = AsyncMock(return_value={"status": "ready"})
+
+    result = await RuntimeEnvironmentTool(requester).execute(capability, action, **optional)
+
+    assert result.success, result.error
+    assert json.loads(result.content)["status"] == "ready"
+    requester.assert_awaited_once_with({"capability": capability, "action": "status"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("python_path", ["", " \t\n"])
+@pytest.mark.parametrize("modules", [None, [], ["pandas"]])
+async def test_load_with_blank_python_path_probes_discovered_runtime(
+    monkeypatch, python_path, modules,
+):
+    from box_agent.tools import runtime_environment_tool as environment_module
+
+    candidate = {"path": "/managed/python", "source": "host"}
+    monkeypatch.setattr(environment_module, "python_candidates", lambda *args: [candidate])
+    probe = AsyncMock(return_value={"status": "ready", "kernel_ready": True})
+    monkeypatch.setattr(environment_module, "probe_python", probe)
+    requester = AsyncMock(return_value={"status": "ready"})
+
+    result = await RuntimeEnvironmentTool(requester).execute(
+        "python", "load", python_path=python_path, modules=modules,
+    )
+
+    assert result.success, result.error
+    assert json.loads(result.content)["environments"][0]["path"] == candidate["path"]
+    probe.assert_awaited_once_with(candidate["path"], modules or None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability,action", [
+    ("python", "status"), ("python", "ensure"), ("node", "load"),
+])
+@pytest.mark.parametrize("optional", [
+    {"python_path": "/managed/python"}, {"modules": ["pandas"]},
+])
+async def test_nonempty_python_options_require_python_load(capability, action, optional):
+    requester = AsyncMock()
+
+    result = await RuntimeEnvironmentTool(requester).execute(capability, action, **optional)
+
+    assert not result.success
+    assert result.error == "python_path/modules require capability=python, action=load."
+    requester.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_failed_preparation_returns_reason_and_log_without_looping():
     requester = AsyncMock(side_effect=[{"status": "missing"}, {
         "status": "failed", "error": "archive verification failed", "logTail": "sha256 mismatch",

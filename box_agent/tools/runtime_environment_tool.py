@@ -193,6 +193,10 @@ class RuntimeEnvironmentTool(Tool):
                       python_path: str | None = None, modules: list[str] | None = None) -> ToolResult:
         if capability not in _CAPABILITIES or action not in {"status", "load", "ensure"}:
             return ToolResult(success=False, error="Invalid runtime capability or action.")
+        if python_path is not None and not python_path.strip():
+            python_path = None
+        if modules == []:
+            modules = None
         if (python_path is not None or modules is not None) and (capability != "python" or action != "load"):
             return ToolResult(success=False, error="python_path/modules require capability=python, action=load.")
         result = await (
