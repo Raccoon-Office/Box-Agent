@@ -393,25 +393,25 @@ class ImageInspectionTool(Tool):
         remaining_bytes: int,
         max_long_edge: int = _MAX_LONG_EDGE_PX,
     ) -> dict[str, Any]:
-        file_path = self._resolve_readable_path(path)
-        if not file_path.exists():
-            raise ValueError(f"image file not found: {path}")
-        if not file_path.is_file():
-            raise ValueError(f"image path is not a file: {path}")
+        from .mcp_result_hooks import read_persisted_mcp_image
 
-        try:
-            source_size = file_path.stat().st_size
-        except OSError as exc:
-            raise ValueError(f"failed to inspect image: {path}: {exc}") from None
-        if source_size > _MAX_IMAGE_BYTES:
-            raise ValueError(f"image is too large: {path}")
-        if source_size > remaining_bytes:
-            raise ValueError("combined image size exceeds the image inspection limit")
-
-        try:
-            raw = file_path.read_bytes()
-        except OSError as exc:
-            raise ValueError(f"failed to read image: {path}: {exc}") from None
+        file_path = self._resolve_from_active_root(path).absolute()
+        raw = read_persisted_mcp_image(file_path)
+        if raw is None:
+            file_path = self._resolve_readable_path(path)
+            if not file_path.exists():
+                raise ValueError(f"image file not found: {path}")
+            if not file_path.is_file():
+                raise ValueError(f"image path is not a file: {path}")
+            try:
+                source_size = file_path.stat().st_size
+                if source_size > _MAX_IMAGE_BYTES:
+                    raise ValueError(f"image is too large: {path}")
+                if source_size > remaining_bytes:
+                    raise ValueError("combined image size exceeds the image inspection limit")
+                raw = file_path.read_bytes()
+            except OSError as exc:
+                raise ValueError(f"failed to read image: {path}: {exc}") from None
         if len(raw) > _MAX_IMAGE_BYTES:
             raise ValueError(f"image is too large: {path}")
         if len(raw) > remaining_bytes:

@@ -914,3 +914,68 @@ async def test_proxy_provider_error_is_actionable_without_raw_payload(tmp_path, 
     again = await tool.execute(image_paths=['slide.png'], instruction='Inspect', strategy='proxy')
     assert again.raw_output['code'] == 'IMAGE_REQUEST_FAILED'
     assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_inspect_own_cua_screenshot_outside_workspace_without_granting_file_access(tmp_path):
+    from box_agent.plugins.cua.config import CuaConfig
+    from box_agent.plugins.cua.wiring import build_cua_bindings
+    from box_agent.tools.mcp_result_hooks import bind_mcp_result_adapter
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = build_cua_bindings(llm=object(), config=CuaConfig(),
+                                 sidecar_dir=tmp_path / "session" / "images")
+    reference = binding.sidecar.persist_block({
+        "media_type": "image/png", "data": base64.b64encode(_ONE_PIXEL_PNG).decode(),
+    })
+    tool = _tool(workspace, native_supported=True)
+    args = {"image_paths": [reference["path"]], "instruction": "Read screenshot.", "strategy": "native"}
+    assert not (await tool.invoke(args)).success
+    with bind_mcp_result_adapter(binding):
+        result = await tool.invoke(args)
+        assert result.success, result.error
+        assert base64.b64decode(next(b for b in result.image_content if b["type"] == "input_image")["data"]) == _ONE_PIXEL_PNG
+        other = tmp_path / "other-session" / "images" / Path(reference["path"]).name
+        other.parent.mkdir(parents=True)
+        other.write_bytes(_ONE_PIXEL_PNG)
+        denied = await tool.invoke({**args, "image_paths": [str(other)]})
+        assert not denied.success
+        arbitrary = binding.sidecar.directory / "private.png"
+        arbitrary.write_bytes(_ONE_PIXEL_PNG)
+        assert not (await tool.invoke({**args, "image_paths": [str(arbitrary)]})).success
+    assert not (await tool.invoke(args)).success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["tamper", "symlink", "directory_symlink"])
+async def test_cua_screenshot_read_rejects_changed_or_redirected_bytes(tmp_path, damage):
+    from box_agent.plugins.cua.config import CuaConfig
+    from box_agent.plugins.cua.wiring import build_cua_bindings
+    from box_agent.tools.mcp_result_hooks import bind_mcp_result_adapter
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = build_cua_bindings(llm=object(), config=CuaConfig(),
+                                 sidecar_dir=tmp_path / "session" / "images")
+    reference = binding.sidecar.persist_block({
+        "media_type": "image/png", "data": base64.b64encode(_ONE_PIXEL_PNG).decode(),
+    })
+    image = Path(reference["path"])
+    if damage == "tamper":
+        image.write_bytes(_ONE_PIXEL_PNG + b"changed")
+    elif damage == "symlink":
+        outside = tmp_path / "outside.png"
+        outside.write_bytes(_ONE_PIXEL_PNG)
+        image.unlink()
+        image.symlink_to(outside)
+    else:
+        moved = tmp_path / "moved"
+        binding.sidecar.directory.rename(moved)
+        binding.sidecar.directory.symlink_to(moved, target_is_directory=True)
+    with bind_mcp_result_adapter(binding):
+        result = await _tool(workspace, native_supported=True).invoke({
+            "image_paths": [str(image)], "instruction": "Read screenshot.", "strategy": "native",
+        })
+    assert not result.success
+    assert result.image_content is None
