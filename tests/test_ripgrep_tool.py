@@ -508,9 +508,13 @@ async def test_grep_path_include_keeps_individually_ignored_files_out(
 
 
 @pytest.mark.asyncio
-async def test_grep_exact_file_respects_nonmatching_include(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "content", ["needle\n", "needle " + "x" * (2 * 1024 * 1024) + "\n"],
+    ids=["short", "oversized"],
+)
+async def test_grep_exact_file_respects_nonmatching_include(tmp_path: Path, content: str) -> None:
     target = tmp_path / "app.py"
-    target.write_text("needle\n", encoding="utf-8")
+    target.write_text(content, encoding="utf-8")
 
     result = await GrepTool(
         workspace_dir=str(tmp_path), executable=require_rg()
@@ -518,6 +522,7 @@ async def test_grep_exact_file_respects_nonmatching_include(tmp_path: Path) -> N
 
     assert result.success is True
     assert result.raw_output["matches"] == []
+    assert result.raw_output["truncated"] is False
 
 
 @pytest.mark.asyncio
@@ -891,6 +896,302 @@ async def test_glob_and_grep_honor_escaped_braces(tmp_path: Path) -> None:
     assert literal.raw_output["files"] == ["foo{a,b}.py"]
     assert alternatives.raw_output["files"] == ["fooa.py"]
     assert [match["path"] for match in grep.raw_output["matches"]] == ["foo{a,b}.py"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_class", [GlobTool, GrepTool])
+@pytest.mark.parametrize("prefix", ["", "src/"])
+@pytest.mark.parametrize(
+    ("file_pattern", "expected"),
+    [
+        ("[^a].py", {"src/b.py", "src/!.py"}),
+        (r"[\!a].py", {"src/!.py", "src/a.py"}),
+        (r"[\!].py", {"src/!.py"}),
+    ],
+)
+async def test_search_character_classes_keep_ripgrep_semantics(
+    tmp_path: Path, tool_class, prefix: str, file_pattern: str, expected: set[str]
+) -> None:
+    (tmp_path / "src").mkdir()
+    for name in ("a.py", "b.py", "!.py"):
+        (tmp_path / "src" / name).write_text("needle\n", encoding="utf-8")
+    tool = tool_class(workspace_dir=str(tmp_path), executable=require_rg())
+
+    if tool_class is GlobTool:
+        result = await tool.execute(pattern=prefix + file_pattern)
+        paths = result.raw_output["files"]
+    else:
+        result = await tool.execute(pattern="needle", include=prefix + file_pattern)
+        paths = [match["path"] for match in result.raw_output["matches"]]
+
+    assert result.success is True
+    assert result.raw_output["truncated"] is False
+    assert set(paths) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include", ["src/**/*.py", "{src/**/*.py,other/**/*.py}"])
+async def test_grep_path_include_does_not_search_excluded_or_ignored_contents(
+    tmp_path: Path, include: str
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".gitignore").write_text("src/ignored.py\n", encoding="utf-8")
+    (tmp_path / "src" / "app.py").write_text("needle\n", encoding="utf-8")
+    oversized = "needle " + "x" * (2 * 1024 * 1024) + "\n"
+    (tmp_path / "unrelated.py").write_text(oversized, encoding="utf-8")
+    (tmp_path / "src" / "ignored.py").write_text(oversized, encoding="utf-8")
+
+    result = await GrepTool(
+        workspace_dir=str(tmp_path), executable=require_rg()
+    ).execute(pattern="needle", include=include)
+
+    assert result.success is True
+    assert [match["path"] for match in result.raw_output["matches"]] == ["src/app.py"]
+    assert result.raw_output["truncated"] is False
+    assert "oversized" not in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["x" * 3000, "中" * 3000], ids=["ascii", "unicode"])
+async def test_grep_long_line_preview_contains_the_match(tmp_path: Path, prefix: str) -> None:
+    (tmp_path / "app.js").write_text(
+        prefix + "UNIQUE_NEEDLE" + "y" * 3000 + "\n", encoding="utf-8"
+    )
+
+    result = await GrepTool(
+        workspace_dir=str(tmp_path), executable=require_rg()
+    ).execute(pattern="UNIQUE_NEEDLE", path="app.js")
+
+    assert result.success is True
+    match = result.raw_output["matches"][0]
+    assert match["column"] == 3001
+    assert "UNIQUE_NEEDLE" in match["text"]
+    assert "line truncated" in match["text"]
+    assert len(match["text"]) < 2100
+    assert "UNIQUE_NEEDLE" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [1, 3, 10])
+async def test_grep_path_include_keeps_one_result_limit_across_batches(
+    tmp_path: Path, monkeypatch, limit: int
+) -> None:
+    import box_agent.tools.ripgrep_tool as ripgrep_tool
+
+    monkeypatch.setattr(ripgrep_tool, "_MAX_SEARCH_TARGETS", 2)
+    (tmp_path / "src").mkdir()
+    for index in range(5):
+        (tmp_path / "src" / f"文件 {index}.py").write_text("needle\n", encoding="utf-8")
+
+    result = await GrepTool(
+        workspace_dir=str(tmp_path), executable=require_rg()
+    ).execute(pattern="needle", include="src/**/*.py", limit=limit)
+
+    assert result.success is True
+    paths = [match["path"] for match in result.raw_output["matches"]]
+    assert len(paths) == min(limit, 5)
+    assert len(set(paths)) == len(paths)
+    assert result.raw_output["truncated"] is (limit < 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pattern", ["needle", "["])
+async def test_grep_empty_path_include_never_falls_back_to_the_workspace(
+    tmp_path: Path, pattern: str
+) -> None:
+    (tmp_path / "outside.py").write_text("needle\n", encoding="utf-8")
+
+    result = await GrepTool(
+        workspace_dir=str(tmp_path), executable=require_rg()
+    ).execute(pattern=pattern, include="missing/**/*.py")
+
+    if pattern == "[":
+        assert result.success is False
+        assert "regex" in result.error.casefold()
+    else:
+        assert result.success is True
+        assert result.raw_output["matches"] == []
+        assert result.raw_output["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_cancelling_grep_path_include_terminates_discovery_and_search(tmp_path: Path) -> None:
+    tool = fake_rg_tool(
+        GrepTool, tmp_path,
+        "import sys, time\n"
+        "if '--files' in sys.argv:\n"
+        "    for i in range(129):\n"
+        "        sys.stdout.write(f'src/file{i}.py\\0')\n"
+        "    sys.stdout.flush()\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+    )
+    task = asyncio.create_task(tool.execute(pattern="needle", include="src/**/*.py"))
+    try:
+        for _ in range(500):
+            if len(tool.spawned) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(tool.spawned) == 2
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert all(process.returncode is not None for process in tool.spawned)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["file", "directory", "git_metadata"])
+async def test_grep_discovered_paths_do_not_follow_replaced_symlinks(
+    tmp_path: Path, replacement: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    (source / "module.py").write_text("ordinary source\n", encoding="utf-8")
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / "module.py").write_text("PRIVATE_NEEDLE\n", encoding="utf-8")
+    (workspace / ".git").mkdir()
+    (workspace / ".git" / "config").write_text("PRIVATE_NEEDLE\n", encoding="utf-8")
+
+    class SwappingGrep(GrepTool):
+        async def _spawn(self, *, cwd, args):
+            if "--json" in args:
+                if replacement == "directory":
+                    source.rename(workspace / "old-src")
+                    _symlink_or_skip(source, str(private), directory=True)
+                else:
+                    target = (private / "module.py" if replacement == "file"
+                              else workspace / ".git" / "config")
+                    (source / "module.py").unlink()
+                    _symlink_or_skip(source / "module.py", str(target), directory=False)
+            return await super()._spawn(cwd=cwd, args=args)
+
+    result = await SwappingGrep(
+        workspace_dir=str(workspace), executable=require_rg(), allow_full_access=False,
+    ).execute(pattern="PRIVATE_NEEDLE", include="src/**/*.py")
+
+    assert result.success is True
+    assert result.raw_output["matches"] == []
+    assert "PRIVATE_NEEDLE" not in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discovery", ["idle", "busy"])
+async def test_grep_searches_pending_candidates_before_discovery_times_out(
+    tmp_path: Path, discovery: str
+) -> None:
+    after_candidate = (
+        "    while True:\n"
+        "        sys.stdout.buffer.write(b'unrelated/file.txt\\0' * 1000); sys.stdout.flush()\n"
+        if discovery == "busy" else "    time.sleep(30)\n"
+    )
+    script = (
+        "import sys, time, json\n"
+        "if '--files' in sys.argv:\n"
+        "    sys.stdout.write('src/app.py\\0'); sys.stdout.flush()\n"
+        + after_candidate +
+        "else:\n"
+        "    print(json.dumps({'type':'match', 'data': {'path': {'text':'src/app.py'}, "
+        "'line_number':1, 'lines': {'text':'needle\\n'}, 'submatches':[{'start':0}]}}))\n"
+    )
+    tool = fake_rg_tool(GrepTool, tmp_path, script, timeout_seconds=1.0)
+
+    result = await tool.execute(pattern="needle", include="src/**/*.py")
+
+    assert result.success is True
+    assert result.raw_output["returned_matches"] == 1
+    assert result.raw_output["truncated"] is True
+    assert "timed out" in result.content
+    assert len(tool.spawned) == 2
+    assert all(process.returncode is not None for process in tool.spawned)
+
+
+@pytest.mark.asyncio
+async def test_grep_batches_fit_windows_command_limit_after_literal_escaping(tmp_path: Path, monkeypatch) -> None:
+    from subprocess import list2cmdline
+    import box_agent.tools.ripgrep_tool as ripgrep_tool
+
+    monkeypatch.setattr(ripgrep_tool, "_MAX_SEARCH_COMMAND_CHARS", 32767)
+    (tmp_path / "src").mkdir()
+    for index in range(100):
+        name = "[" * 100 + str(index) + ".py"
+        (tmp_path / "src" / name).write_text("needle\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    class RecordingGrep(GrepTool):
+        async def _spawn(self, *, cwd, args):
+            if "--json" in args:
+                commands.append([self.executable, *args])
+            return await super()._spawn(cwd=cwd, args=args)
+
+    result = await RecordingGrep(
+        workspace_dir=str(tmp_path), executable=require_rg(),
+    ).execute(pattern="x" * 12000 + "|needle", include="src/**/*.py")
+
+    assert result.success is True
+    assert result.raw_output["returned_matches"] == 100
+    assert result.raw_output["truncated"] is False
+    assert all(len(list2cmdline(args).encode("utf-16-le")) // 2 + 1 <= 32767 for args in commands)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "decoy"),
+    [
+        ("[ab].py", "a.py"), ("file{a,b}.py", "filea.py"),
+        ("file*.py", "file-extra.py"), ("file?.py", "file1.py"),
+        ("!file.py", "file.py"), ("中 文.py", "other.py"),
+        ("back\\slash.py", "slash.py"), ("line\nbreak.py", "break.py"),
+    ],
+)
+async def test_grep_batches_keep_literal_filenames_without_duplicate_matches(
+    tmp_path: Path, monkeypatch, filename: str, decoy: str
+) -> None:
+    import box_agent.tools.ripgrep_tool as ripgrep_tool
+
+    if sys.platform == "win32" and any(char in filename for char in "*?\\\n"):
+        pytest.skip("Windows forbids these literal filename characters")
+    monkeypatch.setattr(ripgrep_tool, "_MAX_SEARCH_TARGETS", 1)
+    (tmp_path / "src").mkdir()
+    for name in (filename, decoy):
+        (tmp_path / "src" / name).write_text("needle\n", encoding="utf-8")
+
+    result = await GrepTool(
+        workspace_dir=str(tmp_path), executable=require_rg()
+    ).execute(pattern="needle", include="src/**/*.py")
+
+    assert result.success is True
+    assert result.raw_output["truncated"] is False
+    paths = [match["path"] for match in result.raw_output["matches"]]
+    assert len(paths) == 2
+    assert set(paths) == {f"src/{filename}", f"src/{decoy}"}
+
+
+@pytest.mark.asyncio
+async def test_grep_result_limit_drains_blocked_discovery_output(tmp_path: Path) -> None:
+    script = (
+        "import sys, time, json\n"
+        "if '--files' in sys.argv:\n"
+        "    sys.stdout.buffer.write(b'src/app.py\\0' * 500000); sys.stdout.flush()\n"
+        "else:\n"
+        "    for i in range(2):\n"
+        "        print(json.dumps({'type':'match', 'data': {'path': {'text':'src/app.py'}, "
+        "'line_number':i+1, 'lines': {'text':'needle\\n'}, 'submatches':[{'start':0}]}}), flush=True)\n"
+        "while True: time.sleep(1)\n"
+    )
+    tool = fake_rg_tool(GrepTool, tmp_path, script)
+
+    result = await asyncio.wait_for(
+        tool.execute(pattern="needle", include="src/**/*.py", limit=1), timeout=5.0,
+    )
+
+    assert result.raw_output["returned_matches"] == 1
+    assert all(process.returncode is not None for process in tool.spawned)
+    assert all(process.stdout.at_eof() for process in tool.spawned)
 
 
 def _symlink_or_skip(link: Path, target: str, *, directory: bool) -> None:

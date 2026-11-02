@@ -6,6 +6,25 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-02 — Ripgrep selection and long-line previews
+
+- `glob` and `grep.include` preserve ripgrep character-class negation and
+  escaped literals during Python path filtering. Path includes select
+  non-ignored files before content search; unrelated oversized files no longer
+  make the selected results incomplete. Selected files become anchored literal
+  globs on a recursive search, preserving rg's no-follow behavior if files or
+  parent directories become symlinks after discovery. Selection uses the
+  ignore rules observed during discovery. File batches share one result limit
+  and timeout; pending candidates flush by batch age even during continuous
+  nonmatching discovery. Windows batches budget the fully escaped and quoted
+  command line, including the regex and UTF-16 size.
+  Early stops drain stdout, and cancellation closes both discovery and search.
+- Long-line grep previews retain the first match and its original character
+  column, with explicit truncation markers. Public arguments, configuration,
+  dependencies and stored-session formats are unchanged. Source regression
+  proof does not update installed hosts; runtime rebuild/install/restart and
+  live-task validation remain separate. Revert these search changes to roll back.
+
 ## 2026-10-14 — Transaction staging and truncation continuation (PR #212)
 
 - Change: [PR #212](https://github.com/Raccoon-Office/Box-Agent/pull/212),
