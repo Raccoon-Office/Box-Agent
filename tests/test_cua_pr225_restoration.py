@@ -185,8 +185,12 @@ def test_foreground_activation_invalidates_app_inventory(monkeypatch):
     with pytest.raises(ValueError, match='ApplicationChanged'):
         api.control('pressKey', 'app', {'key': 'cmd+a', 'deliveryMode': 'foreground'})
     calls = driver.calls[start:]
-    assert sum(name == 'list_apps' for name, _ in calls) == 2
-    assert not any(name == 'hotkey' for name, _ in calls)
+    # Activation may replace the process. A preflight inventory (however many
+    # reads it needs) must not satisfy the identity check after activation.
+    activation = next(i for i, (name, _) in enumerate(calls) if name == 'bring_to_front')
+    assert any(name == 'list_apps' for name, _ in calls[activation + 1:])
+    assert not any(name in {'hotkey', 'press_key', 'type_text', 'clipboard_write'}
+                   for name, _ in calls)
 
 
 @pytest.mark.parametrize('fresh,frontmost', [(False, True), (True, False)])

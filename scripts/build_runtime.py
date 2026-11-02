@@ -266,6 +266,9 @@ def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list
 def pyinstaller_collect_args(*, external_python_sandbox: bool = False) -> list[str]:
     """Return flattened PyInstaller collect args for the ACP runtime build."""
     collect_groups = [
+        # The bounded panel helper compiles this package's native Swift source
+        # at runtime; Python module discovery alone does not bundle that file.
+        ("--collect-data", "box_agent.mcp_servers"),
         ("--collect-all", "tiktoken"),
         ("--collect-all", "tiktoken_ext"),
         ("--collect-all", "jupyter_client"),

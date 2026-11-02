@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 _lock = threading.Lock()
 _binary = None
@@ -51,8 +52,10 @@ class PanelReceiverLease:
         if self.process is not None and (self.scope != (pid, host, window) or self.process.poll() is not None):
             self.close()
         if self.process is None:
-            binary = _helper()
-            if binary is None:
+            started = time.monotonic()
+            binary = _helper(timeout=timeout)
+            timeout -= time.monotonic() - started
+            if binary is None or timeout <= 0:
                 return None
             self.token = secrets.randbits(63) or 1
             self.pid = pid
@@ -98,9 +101,10 @@ class PanelFocusSession:
         identity = (host, target, window, host_window)
         if self.identity is not None and (host, host_window) != (self.identity[0], self.identity[3]):
             self.close()
-        if self.host.environment(host, timeout, host, host_window) is None:
+        host_environment = self.host.environment(host, timeout, host, host_window)
+        if host_environment is None:
             return None
-        environment = (self.host.environment(host, timeout, host, host_window) if target == host
+        environment = (host_environment if target == host
                        else self.receiver.environment(target, timeout, host, host_window))
         if environment is None:
             self.close()
@@ -109,9 +113,12 @@ class PanelFocusSession:
         return dict(environment, BOX_CUA_PANEL_PID=str(target), BOX_CUA_PANEL_WINDOW=str(window))
 
 
-def _helper():
+def _helper(*, timeout=30):
     global _binary, _unavailable
-    with _lock:
+    deadline = time.monotonic() + max(0, timeout)
+    if not _lock.acquire(timeout=max(0, timeout)):
+        return None
+    try:
         if _binary is not None or _unavailable is not None:
             return _binary
         source = Path(__file__).with_name('native') / 'panel_keyboard.swift'
@@ -126,15 +133,21 @@ def _helper():
                     built = subprocess.run(
                         ['/usr/bin/xcrun', 'swiftc', str(source), '-o', str(output)],
                         capture_output=True, text=True, check=False,
+                        timeout=max(0.001, deadline - time.monotonic()),
                     )
                     if built.returncode:
                         _unavailable = 'native_helper_build_failed'
                         return None
                     os.replace(output, binary)
             _binary = str(binary)
+        except subprocess.TimeoutExpired:
+            # No input has been sent. A later call may retry the cold build.
+            return None
         except OSError:
             _unavailable = 'native_helper_unavailable'
         return _binary
+    finally:
+        _lock.release()
 
 
 def deliver_panel_key(pid, window_id, key, modifiers, *, timeout, session=None, field_frame=None):
@@ -190,9 +203,11 @@ outcomes, never permission to send the same key again through the Driver.
 
 
 def _invoke(arguments, *, timeout, allowed_effects=frozenset({'not_sent', 'unverifiable'}), env=None):
-    binary = _helper()
-    if binary is None:
-        return {'effect': 'not_sent', 'code': _unavailable}
+    started = time.monotonic()
+    binary = _helper(timeout=timeout)
+    timeout -= time.monotonic() - started
+    if binary is None or timeout <= 0:
+        return {'effect': 'not_sent', 'code': _unavailable or 'native_helper_build_timeout'}
     try:
         completed = subprocess.run(
             [binary, *arguments],
@@ -219,3 +234,19 @@ def verify_file_panel_front(pid, window_id, *, timeout):
         return None
     return _invoke(['verify-panel-front', str(pid), str(window_id)], timeout=timeout,
                    allowed_effects={'not_sent', 'confirmed'})
+
+
+def resolve_panel_geometry(pid, window_id, *, timeout):
+    """Read-only proof of an exact GoTo sheet and its parent capture surface."""
+    if sys.platform != 'darwin':
+        return {'effect': 'not_sent', 'code': 'panel_geometry_platform_unavailable'}
+    return _invoke(['panel-geometry', str(pid), str(window_id)], timeout=timeout,
+                   allowed_effects={'not_sent', 'confirmed'})
+
+
+def focus_file_panel(pid, window_id, *, timeout):
+    """Explicit foreground AXRaise of an exact system file panel; no input."""
+    if sys.platform != 'darwin':
+        return {'effect': 'not_sent', 'code': 'panel_focus_platform_unavailable'}
+    return _invoke(['focus-file-panel', str(pid), str(window_id)], timeout=timeout,
+                   allowed_effects={'not_sent', 'unverifiable', 'confirmed'})

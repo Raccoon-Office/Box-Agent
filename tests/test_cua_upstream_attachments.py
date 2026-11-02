@@ -90,7 +90,7 @@ def test_relationship_observation_rejects_changed_parent(popover_app, monkeypatc
     def call(name, args):
         response = original(name, args)
         if name == 'get_window_state' and args['window_id'] == 73:
-            rows[0]['bounds'] = {**rows[0]['bounds'], 'x': 999}
+            rows[0]['bounds'] = {**rows[0]['bounds'], 'x': rows[0]['bounds']['x'] + 1}
         return response
     monkeypatch.setattr(driver, 'call', call)
     with pytest.raises(ValueError, match='WindowChanged'):

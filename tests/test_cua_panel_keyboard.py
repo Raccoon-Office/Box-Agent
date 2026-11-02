@@ -57,14 +57,14 @@ def test_helper_leaves_menu_and_editor_keys_to_driver(monkeypatch, key, modifier
 
 @pytest.mark.parametrize('output,status', [('garbled', 0), ('{}', 0), ('{"effect":"not_sent"}', 1), ('{"effect":"partial"}', 0)])
 def test_malformed_or_crashed_helper_is_unknown_not_safe_to_retry(monkeypatch, output, status):
-    monkeypatch.setattr(panel, '_helper', lambda: '/fake/helper')
+    monkeypatch.setattr(panel, '_helper', lambda **kwargs: '/fake/helper')
     monkeypatch.setattr(panel.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout=output, returncode=status))
     with pytest.raises(RuntimeError, match='unknown'):
         panel._invoke(['42', '7', '36'], timeout=1)
 
 
 def test_helper_timeout_is_unknown(monkeypatch):
-    monkeypatch.setattr(panel, '_helper', lambda: '/fake/helper')
+    monkeypatch.setattr(panel, '_helper', lambda **kwargs: '/fake/helper')
     def timeout(*a, **k):
         raise panel.subprocess.TimeoutExpired('helper', 1)
     monkeypatch.setattr(panel.subprocess, 'run', timeout)
@@ -159,3 +159,34 @@ def test_file_panel_proof_uses_exact_ax_root(monkeypatch, identifier, proven):
         'structuredContent': {'elements':[{'depth':0,'role':'AXWindow'}]},
         'content':[{'type':'text','text':f'- [0] AXWindow "Title" [id={identifier} actions=[raise]]'}]})
     assert api.current_file_panel(state, {'window_id':7}) == proven
+
+
+@pytest.mark.parametrize('receiver', [42, 99])
+def test_focus_session_checks_each_distinct_receiver_once(monkeypatch, receiver):
+    from box_agent.mcp_servers.cua_panel_keyboard import PanelFocusSession
+    session = PanelFocusSession()
+    calls = []
+    def host(*args):
+        calls.append(('host', args))
+        return {'TOKEN': 'host'}
+    def remote(*args):
+        calls.append(('receiver', args))
+        return {'TOKEN': 'receiver'}
+    monkeypatch.setattr(session.host, 'environment', host)
+    monkeypatch.setattr(session.receiver, 'environment', remote)
+    env = session.environment(42, receiver, 7, 3, 5)
+    assert [name for name, _ in calls] == (['host'] if receiver == 42 else ['host', 'receiver'])
+    assert env['TOKEN'] == ('host' if receiver == 42 else 'receiver')
+    assert env['BOX_CUA_PANEL_PID'] == str(receiver)
+    assert env['BOX_CUA_PANEL_WINDOW'] == '7'
+    calls.clear()
+    session.environment(42, receiver, 7, 3, 5)
+    assert calls  # A later delivery still checks the live lease.
+
+
+def test_focus_session_does_not_reuse_a_failed_host_lease(monkeypatch):
+    from box_agent.mcp_servers.cua_panel_keyboard import PanelFocusSession
+    session = PanelFocusSession()
+    monkeypatch.setattr(session.host, 'environment', lambda *args: None)
+    monkeypatch.setattr(session.receiver, 'environment', lambda *args: pytest.fail('receiver checked before host'))
+    assert session.environment(42, 99, 7, 3, 5) is None

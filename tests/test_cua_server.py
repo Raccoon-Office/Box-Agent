@@ -373,3 +373,55 @@ def test_explicit_foreground_key_verifies_window_before_desktop_delivery(service
     assert calls[0]['delivery_mode'] == 'foreground'
     assert calls[0]['keys'] == ['cmd', 'o']
     assert names.index('bring_to_front') < names.index('hotkey')
+
+
+def test_recorded_driver_event_isolated_without_second_tree_copy(service):
+    event = {'phase': 'result', 'tool': 'get_window_state',
+             'result': {'content': [{'type': 'image', 'data': PNG},
+                                    {'type': 'text', 'text': 'original'}],
+                        'structuredContent': {'elements': [{'element_token': 's1:1',
+                                                            'actions': ['AXPress']}]}}}
+    service._record_event(event)
+    event['result']['content'][1]['text'] = 'changed'
+    event['result']['structuredContent']['elements'][0]['actions'].append('AXCancel')
+    saved = service._events[0]['result']
+    assert saved['content'] == [{'type': 'text', 'text': 'original'}]
+    assert saved['structuredContent']['elements'][0]['actions'] == ['AXPress']
+
+
+def test_state_exposes_explicit_depth_and_preserves_default(service):
+    ok(service, 'get_app', app='TextEdit')
+    driver = service.drivers[0]
+    driver.tools['get_window_state']['inputSchema']['properties']['max_depth'] = {}
+    driver.calls.clear()
+    response = service.call_result('get_state', {'app': 'TextEdit', 'max_depth': 3})
+    assert not response.isError
+    assert 'max_depth=3' in response.structuredContent['output']['state']
+    assert all(a.get('max_depth') == 3 for n, a in driver.calls if n == 'get_window_state')
+    driver.calls.clear()
+    ok(service, 'get_state', app='TextEdit')
+    assert all('max_depth' not in a for n, a in driver.calls if n == 'get_window_state')
+    rejected = service.call_result('get_state', {'app': 'TextEdit', 'ax': False, 'screenshot': True, 'max_depth': 3})
+    assert rejected.isError
+
+
+def test_set_value_readback_does_not_claim_application_commit_or_send_confirm(service):
+    ok(service, 'get_app', app='TextEdit')
+    driver = service.drivers[0]
+    driver.responses['set_value'] = result(
+        effect='confirmed', evidence=[{'kind': 'value_readback'}])
+    before = len(driver.calls)
+    response = service.call_result('set_value', {'app': 'TextEdit', 'element': 0, 'value': '42'})
+    assert not response.isError
+    output = response.structuredContent['output']
+    assert output['effect'] == 'confirmed'
+    assert output['effect_scope'] == 'control_value'
+    assert output['application_commit'] == 'unverified'
+    assert 'Application commit is unverified' in response.content[0].text
+    sent = [name for name, _ in driver.calls[before:]]
+    assert sent.count('set_value') == 1
+    assert not set(sent) & {'click', 'press_key', 'hotkey', 'type_text'}
+    # A successful AX readback does not make the old element token reusable.
+    content, failed = service.call('set_value', {'app': 'TextEdit', 'element': 0, 'value': '42'})
+    assert failed and 'StaleElement' in texts(content)
+    assert [name for name, _ in driver.calls[before:]].count('set_value') == 1

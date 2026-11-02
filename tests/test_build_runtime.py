@@ -13,6 +13,16 @@ from scripts import build_runtime
 from scripts.build_runtime import _relativize_node_manifest
 
 
+@pytest.mark.parametrize('external', [False, True])
+def test_runtime_collects_native_panel_source(external):
+    args = build_runtime.pyinstaller_collect_args(external_python_sandbox=external)
+    assert ('--collect-data', 'box_agent.mcp_servers') in set(zip(args[::2], args[1::2]))
+    files = pytest.importorskip('PyInstaller.utils.hooks').collect_data_files('box_agent.mcp_servers')
+    assert any(Path(source).name == 'panel_keyboard.swift'
+               and destination == 'box_agent/mcp_servers/native'
+               for source, destination in files)
+
+
 def test_linux_runtime_pins_openai_to_utf8_header_compatible_version() -> None:
     project = (build_runtime.PROJECT_ROOT / "pyproject.toml").read_text()
     dockerfile = (
