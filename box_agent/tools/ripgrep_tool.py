@@ -186,6 +186,64 @@ def _file_filter_args(
     ]
 
 
+def _recursive_file_filter_args(pattern: str) -> list[str]:
+    """Compile literal-prefix/**/simple-name globs without whitelisting paths."""
+    if "\\" in pattern or len(pattern) > _MAX_SEARCH_TARGET_BYTES:
+        return []
+    prefix: tuple[str, ...] | None = None
+    names: list[str] = []
+    for alternative in _expand_braces(_normalize_glob_pattern(pattern)):
+        parts = tuple(part for part in alternative.split("/") if part)
+        if len(parts) < 2 or parts[-2] != "**":
+            return []
+        directories, name = parts[:-2], parts[-1]
+        if any(
+            part in {".", ".."}
+            or any(not ch.isascii() or not (ch.isalnum() or ch in "._-") for ch in part)
+            for part in directories
+        ):
+            return []
+        if "**" in name or any(
+            not ch.isascii() or not (ch.isalnum() or ch in "._-*") for ch in name
+        ):
+            return []
+        if prefix is not None and directories != prefix:
+            return []
+        prefix = directories
+        names.append(name)
+    assert prefix is not None
+    # Prefix components must be directories. Otherwise the type filter could
+    # admit a same-named file when a directory disappears during the search.
+    if any(fnmatchcase(directory, name) for directory in prefix for name in names):
+        return []
+
+    filters = [f"--type-add={_FILTER_TYPE}:{name}" for name in dict.fromkeys(names)]
+    filters.append(f"--type={_FILTER_TYPE}")
+    filter_bytes = sum(len(arg) + 1 for arg in filters)
+
+    def append(arg: str) -> bool:
+        nonlocal filter_bytes
+        filter_bytes += len(arg) + 1
+        if filter_bytes > _MAX_SEARCH_TARGET_BYTES:
+            return False
+        filters.append(arg)
+        return True
+
+    parent = "/"
+    for directory in prefix:
+        # Exclude shorter names, different characters and longer names at
+        # this depth. Negative globs prune siblings without overriding ignores.
+        for index, char in enumerate(directory):
+            if index and not append(f"--glob=!{parent}{directory[:index]}"):
+                return []
+            if not append(f"--glob=!{parent}{directory[:index]}[!{char}]*"):
+                return []
+        if not append(f"--glob=!{parent}{directory}?*"):
+            return []
+        parent += directory + "/"
+    return filters if filter_bytes <= _MAX_SEARCH_TARGET_BYTES else []
+
+
 def _matches_file_pattern(
     raw_path: str, compiled_patterns: tuple[tuple[str, ...], ...]
 ) -> bool:
@@ -736,6 +794,23 @@ class GrepTool(_RipgrepTool):
             "additionalProperties": False,
         }
 
+    def _direct_search_filters(
+        self, pattern: str, include: str | None,
+        compiled_include: tuple[tuple[str, ...], ...] | None,
+    ) -> list[str]:
+        if include is None or compiled_include is None:
+            return []
+        filters = _file_filter_args(include, compiled_include)
+        if filters:
+            return filters
+        filters = _recursive_file_filter_args(include)
+        if (filters and _MAX_SEARCH_COMMAND_CHARS is not None
+                and _windows_command_chars([
+                    self.executable, *_content_search_args(pattern, filters, ["."]),
+                ]) > _MAX_SEARCH_COMMAND_CHARS):
+            return []
+        return filters
+
     async def _search_batches(
         self,
         search_path: Path,
@@ -756,8 +831,8 @@ class GrepTool(_RipgrepTool):
                 if _matches_file_pattern(search_path.name, compiled_include) else ["-"]
             )
             return
-        if _file_filter_args(include, compiled_include):
-            # Native basename filters already preserve ignore rules without a file-list pass.
+        if self._direct_search_filters(pattern, include, compiled_include):
+            # Equivalent native filters avoid discovery and repeated walks.
             yield ["."]
             return
 
@@ -879,10 +954,7 @@ class GrepTool(_RipgrepTool):
                 if time.monotonic() >= deadline:
                     status.timed_out = True
                     return
-                filter_args = (
-                    _file_filter_args(include, compiled_include)
-                    if include is not None and compiled_include is not None else []
-                )
+                filter_args = self._direct_search_filters(pattern, include, compiled_include)
                 if (
                     search_path.is_dir() and compiled_include is not None
                     and not filter_args and targets != ["-"]

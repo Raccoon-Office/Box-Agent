@@ -6,6 +6,27 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-02 — Single-walk recursive grep includes
+
+- `grep` routes `**/*.py` and shared literal-prefix forms such as
+  `src/app/**/*.{ts,tsx}` to native file types and negative sibling globs.
+  The search keeps its original cwd and recursive no-follow walker; no
+  positive whitelist overrides ignore files. These patterns need one content
+  search instead of file discovery plus repeated root walks.
+- The optimization accepts ASCII literal directory components and simple
+  basename globs using ASCII letters, digits, `._-` and `*`. Ambiguous prefix
+  files, complex patterns, oversized filters and tight Windows command lines
+  retain the bounded discovery/batch implementation described below.
+- Native fixed prefixes use actual platform directory boundaries: on POSIX,
+  a sibling named `src\file.py` is excluded from `src/**/*.py` rather than
+  treated as a virtual subpath. The fallback's legacy backslash normalization
+  is outside this optimization.
+- Tests cover single-process execution, ignore precedence, prefix siblings,
+  prefix-file collisions, symlink replacement and both execution paths. No
+  public arguments, dependencies, config or persistence changes. Source-only
+  checks do not update installed runtimes; revert this optimization to restore
+  discovery and batching for every recursive path include.
+
 ## 2026-11-02 — Ripgrep selection and long-line previews
 
 - `glob` and `grep.include` preserve ripgrep character-class negation and
