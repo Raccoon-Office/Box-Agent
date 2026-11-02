@@ -496,7 +496,7 @@ async def test_unchanged_source_retries_failed_servers_without_restarting_health
 
     second = await reconcile()
     assert attempts == {"retry-server": 2, "healthy-server": 1}
-    assert second["success"] is retry_succeeds
+    assert second["success"] is retry_succeeds, second
     assert mcp_loader._mcp_status["retry-server"].state == (
         "connected" if retry_succeeds else "failed"
     )
