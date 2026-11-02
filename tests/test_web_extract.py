@@ -124,6 +124,157 @@ async def test_tool_returns_short_extracted_page_without_summarization(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code,headers,html", [
+    (200, {}, "<title>环境异常</title><p>当前环境异常，完成验证后即可继续访问。</p><a>去验证</a>"),
+    (403, {}, "<h1>环境异常</h1><p>当前环境异常，完成验证后即可继续访问。</p><a>去验证</a>"),
+    (200, {}, "<title>Security check</title><p>Please verify you are human to continue.</p>"),
+    (200, {}, "<title> Security CHECK </title><p>Please verify\n you are human to continue.</p>"),
+    (200, {}, "<title>安全验证</title><p>请完成人机验证后继续访问。</p>"),
+    (503, {"cf-mitigated": "challenge"}, "<p>Verifying your browser</p>" + "x" * 6_000),
+], ids=["wechat-200", "wechat-403", "english", "whitespace", "chinese", "cloudflare-503"])
+async def test_verification_pages_return_browser_handoff_instead_of_article(
+    monkeypatch, status_code, headers, html,
+) -> None:
+    tool = web_extract.WebExtractTool(llm=None)
+    url = "https://example.com/article"
+
+    async def fake_send(target, timeout):
+        return httpx.Response(status_code, headers=headers, text=html, request=httpx.Request("GET", target))
+
+    async def unexpected_summary(*args, **kwargs):
+        raise AssertionError("verification pages must not be summarized")
+
+    monkeypatch.setattr(web_extract, "_send_public_request", fake_send)
+    monkeypatch.setattr(tool, "_summarize", unexpected_summary)
+    result = await tool.execute(url)
+
+    assert result.success is False
+    assert result.content == ""
+    assert result.error.startswith("WEB_VERIFICATION_REQUIRED:")
+    assert url in result.error
+    assert "available browser" in result.error
+    assert "take over" in result.error
+    assert "confirmation" in result.error
+    assert "same browser" in result.error
+    assert result.raw_output["status"] == "verification_required"
+    assert result.raw_output["url"] == url
+    assert result.raw_output["final_url"] == url
+
+
+@pytest.mark.asyncio
+async def test_verification_page_is_not_cached_and_article_can_be_refetched(monkeypatch) -> None:
+    tool = web_extract.WebExtractTool(llm=None)
+    requested = []
+
+    async def fake_send(url, timeout):
+        requested.append(url)
+        html = (
+            "<title>环境异常</title><p>当前环境异常，完成验证后即可继续访问。</p><a>去验证</a>"
+            if len(requested) == 1 else "<article>Actual article body</article>"
+        )
+        return httpx.Response(200, text=html, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(web_extract, "_send_public_request", fake_send)
+    blocked = await tool.execute("https://example.com/article")
+    recovered = await tool.execute("https://example.com/article")
+    cached = await tool.execute("https://example.com/article")
+
+    assert blocked.success is False
+    assert recovered.success is True
+    assert recovered.content.endswith("Actual article body")
+    assert recovered.raw_output["from_cache"] is False
+    assert cached.success is True
+    assert cached.raw_output["from_cache"] is True
+    assert len(requested) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redirect_status", [200, 302])
+async def test_redirected_verification_preserves_original_browser_target(monkeypatch, redirect_status) -> None:
+    original = "https://example.com/article"
+    challenge = "https://example.com/verify"
+
+    async def fake_send(url, timeout):
+        if url == original:
+            return httpx.Response(
+                redirect_status, request=httpx.Request("GET", url),
+                headers={"location": challenge},
+                text='<meta http-equiv="refresh" content="0;url=/verify">',
+            )
+        assert url == challenge
+        return httpx.Response(
+            200, request=httpx.Request("GET", url),
+            text="<title>环境异常</title><p>当前环境异常，完成验证后即可继续访问。</p><a>去验证</a>",
+        )
+
+    monkeypatch.setattr(web_extract, "_send_public_request", fake_send)
+    result = await web_extract.WebExtractTool(llm=None).execute(original)
+
+    assert result.success is False
+    assert original in result.error
+    assert result.raw_output["url"] == original
+    assert result.raw_output["final_url"] == challenge
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("html", [
+    "<title>验证机制介绍</title><article>人机验证会要求你 verify you are human。</article>",
+    "<title>如何解决环境异常</title><article>示例提示：当前环境异常，完成验证后即可继续访问。去验证。</article>",
+    "<title>Security check</title><article>This guide explains the banner: Please verify you are human to continue.</article>",
+    "<title>环境异常</title><article>本文解释提示：当前环境异常，完成验证后即可继续访问。去验证。</article>",
+    "<title>Example article</title><p>Documentation intro.</p><h1>Security check</h1><p>Please verify you are human to continue is example wording.</p>",
+    '<title>Normal article</title><article>Article body</article><script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>',
+], ids=["overview", "wechat-guide", "english-guide", "wechat-title", "article-section", "widget-script"])
+async def test_articles_mentioning_verification_remain_readable(monkeypatch, html) -> None:
+    async def fake_send(url, timeout):
+        return httpx.Response(200, text=html, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(web_extract, "_send_public_request", fake_send)
+    result = await web_extract.WebExtractTool(llm=None).execute("https://example.com/article")
+
+    assert result.success is True
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden", [
+    '<script>const template = "<h1>Security check</h1>";</script>',
+    '<style>h1::before {content: "<h1>Security check</h1>"}</style>',
+    "<!-- <h1>Security check</h1> -->",
+    "<template><h1>Security check</h1></template>",
+], ids=["script", "style", "comment", "template"])
+async def test_nonvisible_headings_do_not_turn_articles_into_verification_pages(monkeypatch, hidden) -> None:
+    async def fake_send(url, timeout):
+        return httpx.Response(
+            200, request=httpx.Request("GET", url),
+            text="<title>Example article</title><p>Please verify you are human to continue.</p>" + hidden,
+        )
+
+    monkeypatch.setattr(web_extract, "_send_public_request", fake_send)
+    result = await web_extract.WebExtractTool(llm=None).execute("https://example.com/article")
+
+    assert result.success is True
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 429])
+async def test_access_denial_without_verification_keeps_transport_error(monkeypatch, status_code) -> None:
+    async def fake_send(url, timeout):
+        return httpx.Response(
+            status_code, headers={"server": "cloudflare"}, text="<h1>Access denied</h1>",
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(web_extract, "_send_public_request", fake_send)
+    result = await web_extract.WebExtractTool(llm=None).execute("https://example.com/article")
+
+    assert result.success is False
+    assert result.error.startswith("Failed to fetch URL:")
+    assert "WEB_VERIFICATION_REQUIRED" not in result.error
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("max_output_tokens", [2_048, 8_192, 63_999, 100_000])
 async def test_summary_caps_injected_session_output_tokens(max_output_tokens: int) -> None:
     llm = _SummaryLLM()

@@ -3,12 +3,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from jsonschema import Draft202012Validator
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from box_agent.llm import AnthropicClient, OpenAIClient
-from box_agent.mcp_servers import web_extract_server
+from box_agent.mcp_servers import web_extract, web_extract_server
 from box_agent.tools.base import ToolResult
 from box_agent.tools.mcp_loader import MCPTool
 
@@ -142,3 +144,32 @@ async def test_mcp_execution_reports_extraction_failure(monkeypatch):
         await web_extract_server.mcp.call_tool(
             "web_extract", {"url": "https://example.com"},
         )
+
+
+@pytest.mark.asyncio
+async def test_verification_handoff_survives_mcp_and_agent_wrapper(monkeypatch):
+    async def fake_send(url, timeout):
+        return httpx.Response(
+            200, request=httpx.Request("GET", url),
+            text="<title>环境异常</title><p>当前环境异常，完成验证后即可继续访问。</p><a>去验证</a>",
+        )
+
+    extractor = web_extract.WebExtractTool(llm=None)
+    monkeypatch.setattr(web_extract, "_send_public_request", fake_send)
+    monkeypatch.setattr(web_extract_server, "_extractor", lambda: extractor)
+    async with create_connected_server_and_client_session(web_extract_server.mcp) as session:
+        arguments = {"url": "https://example.com/article"}
+        result = await session.call_tool("web_extract", arguments=arguments)
+        assert result.isError
+        assert "WEB_VERIFICATION_REQUIRED:" in result.content[0].text
+
+        listed = await session.list_tools()
+        tool = listed.tools[0]
+        wrapper = MCPTool(
+            name=tool.name, description=tool.description or "", parameters=tool.inputSchema,
+            session=session, server_name="box-agent-web-extract",
+        )
+        wrapped = await wrapper.invoke(arguments)
+        assert wrapped.success is False
+        assert "WEB_VERIFICATION_REQUIRED:" in wrapped.error
+        assert "take over" in wrapped.error

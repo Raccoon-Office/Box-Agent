@@ -6,6 +6,38 @@ must compare with the current target branch: compatibility, migration,
 security, release, rollback, and follow-up constraints. It is not a changelog
 of every commit.
 
+## 2026-11-02 — Verification pages block extraction and request browser recovery
+
+- `web_extract` reports `WEB_VERIFICATION_REQUIRED` for the observed WeChat
+  verification screen, verification headings paired with challenge instructions,
+  and Cloudflare's documented [`cf-mitigated: challenge` header](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/).
+  Detection precedes HTTP status handling, summarization and caching, so challenge
+  text is neither returned as article content nor cached as a successful read.
+  Text recognition ignores script/style/comment/template headings and requires
+  leading challenge instructions, preserving articles that quote verification
+  messages. Unclassified HTTP denials retain their existing behavior.
+- Shared routing and the MCP error direct the model to discover an available
+  browser and revisit the original URL, preserving explicit channel choices.
+  Human verification requires a visible page, user takeover and confirmation,
+  then a fresh read in the same browser. Unavailable browsers remain an explicit
+  blocker; permissions and access restrictions cannot be bypassed.
+- The standalone extractor does not own browser sessions: browser recovery is
+  model-directed through existing tools. Parser/MCP/prompt tests do not prove
+  live model compliance or site access. Consuming hosts need a runtime rebuild,
+  install, restart and fresh-task verification. No config, dependency or stored
+  data migration; reverting this change restores the previous extraction policy.
+
+## 2026-11-02 — DOCX reading selects Python before text tools
+
+- Shared file guidance routes `.docx` directly to `execute_code` with
+  `python-docx`, or an available managed Python through `bash` when the sandbox
+  tool is absent. Sessions without execution report the missing capability.
+  The `read_file` description also directs DOCX away from text reads before
+  the first call. Guidance covers paragraphs, tables and nullable styles.
+- This changes model-facing guidance, not parsers, tool results or permissions.
+  Prompt/schema tests do not prove live model compliance. Installed hosts need
+  a runtime rebuild, install and restart; revert the guidance to roll back.
+
 ## 2026-11-02 — Single-walk recursive grep includes
 
 - `grep` routes `**/*.py` and shared literal-prefix forms such as

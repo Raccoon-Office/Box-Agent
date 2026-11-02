@@ -33,6 +33,39 @@ def test_email_guidance_is_only_present_when_the_decoder_is_available():
     assert 'attachment_index' in with_extraction
 
 
+@pytest.mark.parametrize("tools,executor", [
+    (None, "execute_code"),
+    ({"read_file", "search_files", "query_jsonl", "execute_code", "bash"}, "execute_code"),
+    ({"execute_code"}, "execute_code"),
+    ({"read_file", "bash"}, "bash"),
+])
+def test_docx_guidance_routes_directly_to_available_python_execution(tools, executor):
+    prompt = resolve_capability_placeholders("{FILE_OPERATIONS}", tools)
+    rule = next(line for line in prompt.splitlines() if line.startswith("- DOCX"))
+
+    assert f"直接用 `{executor}`" in rule
+    assert "python-docx" in rule
+    assert "from docx import Document" in rule
+    assert "段落和表格" in rule
+    assert "不要先用文本读取工具试读" in rule
+    assert "style" in rule and "为空" in rule
+    if executor == "bash":
+        assert "`execute_code`" not in rule
+        assert "应用托管 Python" in rule
+
+
+@pytest.mark.parametrize("tools", [set(), {"read_file"}])
+def test_docx_without_execution_reports_missing_parsing_capability(tools):
+    prompt = resolve_capability_placeholders("{FILE_OPERATIONS}", tools)
+    rule = next(line for line in prompt.splitlines() if line.startswith("- DOCX"))
+
+    assert "缺少文档解析执行能力" in rule
+    assert "提供文本" in rule
+    assert "不要先用文本读取工具试读" in rule
+    assert "`execute_code`" not in rule
+    assert "`bash`" not in rule
+
+
 def test_table_gate_guidance_requires_registered_validator():
     without = resolve_capability_placeholders('{FILE_OPERATIONS}', {'read_file', 'bash'})
     enabled = resolve_capability_placeholders('{FILE_OPERATIONS}', {'read_file', 'bash', 'validate_table'})

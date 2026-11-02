@@ -249,7 +249,10 @@ class ReadTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Read a text file with line numbers and bounded pagination. Use this instead of "
+            "Read a text file with line numbers and bounded pagination. "
+            "For Word .docx files, use an available Python execution tool (prefer execute_code) "
+            "with python-docx (from docx import Document) to read paragraphs and tables directly; "
+            "do not try read_file first. Use this instead of "
             "cat/head/tail or shell commands that print file contents. Output uses "
             "'LINE_NUMBER|LINE_CONTENT' (1-indexed). The default page is 500 lines and the "
             "maximum is 2000; use offset and limit to continue through large files. "

@@ -106,6 +106,12 @@ def render_web_access_policy(tools: Collection[str] | None) -> str:
         "正文缺失且确认需要 JS 时可改用内置浏览器；某通道不可用不代表其他通道不可用。"
         "只有未指定通道、不依赖该通道状态且替代方式能完成同一目标时才允许切换；Fetch 不能替代交互或展示。"
         "权限拒绝和访问限制不能靠切换绕过；动作结果不确定先核验，不重放点击或提交。",
+        "正文读取返回 WEB_VERIFICATION_REQUIRED 或明确验证页时，该次没有取得正文，不得当作读取成功或用于文章摘要，"
+        "不要反复 HTTP 重试。用户未限定读取通道时，按上述规则用可用浏览器打开原 URL 继续访问；"
+        "浏览器工具未展示时按当前发现机制查找，不要直接断言不可用。",
+        "浏览器仍需人工验证时，先展示或保留可见验证页面，提示用户接管并等待用户确认；"
+        "不替用户完成或绕过验证，不反复触发挑战。确认后在同一浏览器读取新快照，核实验证已通过并取得正文后再继续。"
+        "没有可用浏览器、无法展示验证页面或验证仍未通过时，说明具体阻塞和目标链接，不得声称已读正文。",
         "切换通道重新开始页面操作，不复用跨通道的标签页、元素引用、快照或 Cookie。"
         "保持浏览器选择、页面操作结果和是否展示三个事实分开，不能把读取正文说成已打开给用户看。",
         "工具名称和可用范围以当前任务实际提供的工具清单及发现机制为准；未展示不等于不可用。"
@@ -196,6 +202,22 @@ def _render_tabular_processing(tools: Collection[str] | None) -> str:
     )
 
 
+def _render_docx_reading(tools: Collection[str] | None) -> str:
+    prefix = "\n- DOCX（.docx）读取："
+    no_text_probe = "不要先用文本读取工具试读。"
+    if _has(tools, "execute_code"):
+        execution = "直接用 `execute_code`"
+    elif _has(tools, "bash"):
+        execution = "直接用 `bash` 调用已有的应用托管 Python"
+    else:
+        return prefix + "缺少文档解析执行能力时说明限制，请用户提供文本；" + no_text_probe
+    return (
+        prefix + execution + " 配合 `python-docx`（`from docx import Document`），"
+        "按用户提供的路径打开文档，读取所需段落和表格。" + no_text_probe
+        + "只需正文时不依赖样式；需要样式时先判断 style 是否为空。"
+    )
+
+
 def _render_file_operations(tools: Collection[str] | None) -> str:
     email_rule = (
         "\n- EML 邮件用 `read_email` 只读解码邮件头、正文并列出附件；长正文按 next_offset 继续读取，"
@@ -208,7 +230,7 @@ def _render_file_operations(tools: Collection[str] | None) -> str:
             "提取，再用相应文件工具处理。此操作需要写权限，不能覆盖现有文件。"
         )
     if _has(tools, "read_file", "search_files", "query_jsonl"):
-        return _FILE_OPERATIONS_FULL + _render_tabular_processing(tools) + email_rule
+        return _FILE_OPERATIONS_FULL + _render_docx_reading(tools) + _render_tabular_processing(tools) + email_rule
     directory = _FILE_OPERATIONS_FULL.splitlines()[0]
     if not _has(tools, "search_files"):
         directory = directory.replace("先用 `search_files` 查看 cwd", "先依据已提供的工作区信息确认位置")
@@ -221,7 +243,7 @@ def _render_file_operations(tools: Collection[str] | None) -> str:
         parts.append("- JSONL/NDJSON 使用 `query_jsonl` 做字段投影和游标分页。")
     parts.append("- 缺少必要的文件能力时请求用户提供正文或明确位置；不要猜测文件内容或声称已读取。")
     parts.append("- 不要用 bash 拼接常规搜索，也不要因 JSONL 超长记录改用 `execute_code` 整体读取。")
-    return "\n".join(parts) + _render_tabular_processing(tools) + email_rule
+    return "\n".join(parts) + _render_docx_reading(tools) + _render_tabular_processing(tools) + email_rule
 
 
 def _render_analysis_execution(tools: Collection[str] | None) -> str:

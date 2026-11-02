@@ -114,6 +114,13 @@ def test_routing_contract_prioritizes_explicit_targets_and_preserves_recovery_bo
         "权限拒绝和访问限制不能靠切换绕过",
         "“让我看/检查”本身不要求系统浏览器",
         "不执行无条件 Fetch→内置→系统降级",
+        "WEB_VERIFICATION_REQUIRED",
+        "可用浏览器",
+        "原 URL",
+        "等待用户确认",
+        "同一浏览器",
+        "不要反复 HTTP 重试",
+        "不替用户完成或绕过验证",
     ):
         assert boundary in policy
 
@@ -153,6 +160,8 @@ async def test_routing_contract_reaches_model_requests_on_initial_and_follow_up_
             assert prompt.count("## Web Access Routing") == 1
             assert "5. 已知公开 URL" in prompt
             assert "当前任务实际提供的工具清单" in prompt
+            assert "WEB_VERIFICATION_REQUIRED" in prompt
+            assert "等待用户确认" in prompt
     finally:
         await session.aclose()
 

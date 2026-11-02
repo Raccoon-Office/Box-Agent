@@ -453,6 +453,14 @@ def _assert_schema_contract(tools, profile):
                 "Do not reserialize query data as the original text. "
             ))
         if tool.name == "read_file":
+            anchor = "Read a text file with line numbers and bounded pagination. "
+            assert entry["schema"]["description"].count(anchor) == 1
+            entry["schema"]["description"] = entry["schema"]["description"].replace(
+                anchor,
+                anchor + "For Word .docx files, use an available Python execution tool (prefer execute_code) "
+                "with python-docx (from docx import Document) to read paragraphs and tables directly; "
+                "do not try read_file first. ",
+            )
             anchor = "For JSONL logs, especially those with large records, use query_jsonl to filter "
             assert entry["schema"]["description"].count(anchor) == 1
             entry["schema"]["description"] = entry["schema"]["description"].replace(
