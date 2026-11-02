@@ -131,6 +131,9 @@ def test_consecutive_skill_pages_charge_schemas_images_overlays_and_pending_enve
 class Provider:
     max_output_tokens = 64000
 
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     def __init__(self, *, summary_available=True):
         self.requests = []
         self.summary_calls = 0

@@ -107,6 +107,9 @@ async def test_history_budget_error_reports_actual_limit():
 
 
 class ScriptedProvider:
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     capabilities = {'image_input': True}
 
     def __init__(self, scripts):

@@ -172,6 +172,7 @@ class LLMClient:
         reasoning_effort_when_disabled: str | None = None,
         max_request_body_bytes: int | None = None,
         image_input: bool | None = None,
+        context_window: int | None = None,
     ):
         """Initialize LLM client with specified provider.
 
@@ -192,6 +193,11 @@ class LLMClient:
         self.model = model
         self.retry_config = retry_config or RetryConfig()
         self.max_output_tokens = max_output_tokens
+        if context_window is not None and (
+            type(context_window) is not int or context_window <= max_output_tokens
+        ):
+            raise ValueError("context_window must be an integer greater than max_output_tokens")
+        self.context_window = context_window
         self.auth_token = auth_token
         self.auth_file = auth_file
         self.timeout = timeout
@@ -251,6 +257,14 @@ class LLMClient:
         if closer is not None:
             await closer()
 
+    def estimate_text_tokens(self, text: str) -> int:
+        """Use a UTF-8 byte bound when the endpoint's tokenizer is unknown.
+
+        OpenAI-compatible endpoints can serve different tokenizers behind the
+        same model name. Do not assume a local OpenAI encoding matches them.
+        """
+        return len(text.encode("utf-8"))
+
     def for_model(self, model: str, *, max_output_tokens: int | None = None) -> "LLMClient":
         """Return a client with the same endpoint/auth settings for ``model``.
 
@@ -267,6 +281,8 @@ class LLMClient:
         # without creating an unbounded set of HTTP connection pools.
         client = copy(self)
         client._client = copy(self._client)
+        if normalized_model != self.model:
+            client.context_window = None
         client.model = normalized_model
         client._client.model = normalized_model
         if max_output_tokens is not None:
@@ -568,6 +584,12 @@ class SessionBoundLLM:
         child = SessionBoundLLM(
             clone_for_model(model, max_output_tokens=max_output_tokens)
         )
+        if model.strip() == self.model:
+            child.context_window = getattr(self, "context_window", None)
+            if max_output_tokens is None:
+                limit = getattr(self, "max_output_tokens", None)
+                if type(limit) is int:
+                    child.max_output_tokens = limit
         child.set_request_context(
             session_id=self._session_id,
             turn_id=self._turn_id,

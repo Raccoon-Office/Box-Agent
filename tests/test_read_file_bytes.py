@@ -272,7 +272,7 @@ async def test_agent_reads_every_fragment_without_suppressing_or_externalizing_i
     llm = ReaderLLM()
     events = [event async for event in run_agent_loop(
         llm=llm, messages=[Message(role="user", content="Read this file completely")],
-        tools={tool.name: tool}, max_steps=30, workspace_dir=str(tmp_path),
+        tools={tool.name: tool}, max_steps=30, workspace_dir=str(tmp_path), token_limit=200_000,
         tool_result_storage=ToolResultStorage(tmp_path / "outputs"), context_resource_ledger=ledger,
     )]
     assert "".join(llm.parts) == text

@@ -13,6 +13,7 @@ from .kernel.context_engine import (
     request_input_tokens, skill_reference_budget_chars,
 )
 from .schema import Message
+from .llm.capabilities import bound_context_token_limit
 from .connector_context import restore_connector_status
 from .skill_context import (
     SkillReferenceContext, effective_system_prompt, project_legacy_system, verified_system_suffixes,
@@ -218,6 +219,7 @@ class DefaultContextEngine:
         transient_message: Message | None = None, transient_tokens: int = 0,
     ) -> PreparedContext:
         """Project ordinary reference material using the offered tools unchanged."""
+        token_limit = bound_context_token_limit(self.llm, token_limit)
         restore = getattr(self.references.runtime, "restore_deferred_records", None) if self.references else None
         if callable(restore):
             restore()
@@ -253,7 +255,7 @@ class DefaultContextEngine:
         on_response = None
         full_request = ([*context_messages, transient_message]
                         if transient_message is not None else context_messages)
-        base_input_tokens = (request_input_tokens(full_request, prepared_tools.definitions)
+        base_input_tokens = (request_input_tokens(full_request, prepared_tools.definitions, llm=self.llm)
                              + self._transient_reserve_tokens)
         if self.references is not None:
             projection = self.references.prepare_request(
@@ -308,7 +310,7 @@ class DefaultContextEngine:
             if image_projection.blocked_reason:
                 blocked_reason = image_projection.blocked_reason
                 budget_blocked = False
-            elif (not blocked_reason and request_input_tokens(provider_messages, prepared_tools.definitions)
+            elif (not blocked_reason and request_input_tokens(provider_messages, prepared_tools.definitions, llm=self.llm)
                   + self._transient_reserve_tokens > token_limit):
                 blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
                 budget_blocked = True

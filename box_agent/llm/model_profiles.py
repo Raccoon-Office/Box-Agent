@@ -193,6 +193,7 @@ def client_for_model_profile(
         model=model,
         retry_config=getattr(fallback_client, "retry_config", None),
         max_output_tokens=max_output_tokens,
+        context_window=min(profile["contextWindow"], binding.get("contextWindow", profile["contextWindow"])),
         max_request_body_bytes=profile["maxRequestBodyBytes"],
         auth_file=profile["authFile"],
         timeout=profile["timeout"],

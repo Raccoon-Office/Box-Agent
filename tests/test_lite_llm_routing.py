@@ -30,6 +30,7 @@ class _DummyLLM:
         self.last_messages = None
         self.last_kwargs = None
         self.max_output_tokens = 80000
+        self.context_window = 180000
 
     async def generate(self, messages, tools=None, **kwargs):
         self.last_messages = messages
@@ -50,6 +51,7 @@ class _DummyLLM:
     def for_model(self, model: str, *, max_output_tokens: int | None = None):
         client = _DummyLLM(f"bound-{model}")
         client.model = model
+        client.context_window = self.context_window
         if max_output_tokens is not None:
             client.max_output_tokens = max_output_tokens
         return client
@@ -543,6 +545,7 @@ def test_capacity_checked_routing_does_not_fall_back_to_the_original_client_on_b
 @pytest.mark.asyncio
 async def test_acp_session_with_large_context_can_prepare_its_bounded_compaction_model(tmp_path, monkeypatch):
     agent, main, _ = _make_agent(tmp_path, lite=True)
+    main.context_window = 1_000_000
     monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
     binding = {
@@ -637,7 +640,7 @@ async def test_conversation_sessions_bind_models_without_mutating_each_other(tmp
         "maxTokens": 16000,
     }
     assert second_state.agent.llm.max_output_tokens == 16000
-    assert first_state.agent.token_limit == 104400
+    assert first_state.agent.token_limit == 90000
     assert second_state.agent.token_limit == 100800
 
 

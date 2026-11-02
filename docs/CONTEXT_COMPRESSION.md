@@ -377,7 +377,11 @@ input_tokens
 + output_tokens
 ```
 
-It then estimates messages appended after that response conservatively. If no message has real API usage, the entire pending request—including tool schemas—is estimated with the larger of `characters / 4` and UTF-8 bytes `/ 3`. This avoids severe under-counting for CJK and other multibyte text.
+It then estimates messages appended after that response and independently measures the complete current request, including its actual offered tool schemas. The larger estimate is used, so old usage cannot hide newly activated tools or changed request material. The two complete estimates are not added together.
+
+Runtime requests use a conservative UTF-8 byte bound for text when the endpoint tokenizer is unknown; image payload bytes are excluded and the existing image-token estimate is added separately. A custom client may provide `estimate_text_tokens(text)` when it has a trustworthy model-specific counter. Legacy low-level estimates without a client retain their character/byte heuristic. Unknown-tokenizer requests may compact earlier than an exact tokenizer would require. After one bounded compaction, the final request is measured again and rejected locally if it still exceeds the safe input budget.
+
+The run budget is capped by the active client's known context window and matching catalog entry, after reserving its actual output cap. ACP takes the smallest known window from the binding, resolved profile/client, and matching catalog entry. A binding for a different model without any known window is rejected locally instead of inheriting another model's global window. Profile output limits are retained when host metadata omits them. These checks depend on accurate capability declarations; a service that silently lowers its own limit cannot be detected from local configuration alone.
 
 ### Compacted message layout
 

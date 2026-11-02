@@ -261,7 +261,7 @@ async def test_acp_creates_configured_session_and_runs_through_it(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_model_switch_keeps_session_config_context_budget(tmp_path):
+async def test_model_switch_keeps_explicit_session_budget_after_default_changes(tmp_path):
     from box_agent.acp import BoxACPAgent
     from tests.test_lite_llm_routing import _DummyConn, _DummyLLM
 
@@ -276,7 +276,8 @@ async def test_model_switch_keeps_session_config_context_budget(tmp_path):
 
     result = await adapter.prompt(SimpleNamespace(
         sessionId=response.sessionId, prompt=[{"text": "hello"}],
-        field_meta={"llm_binding": {"source": "builtin", "model": "another-model"}},
+        field_meta={"llm_binding": {"source": "builtin", "model": "another-model",
+                                    "contextWindow": 100_000, "maxTokens": 20_000}},
     ))
 
     assert result.stopReason == "end_turn"

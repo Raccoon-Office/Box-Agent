@@ -17,6 +17,9 @@ from box_agent.kernel.context_engine import _fallback_context_estimate, _SUMMARY
 class CompactionE2ELLM:
     """Exercise one non-streaming summary call followed by a normal stream."""
 
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     def __init__(self) -> None:
         self.summary_messages: list[Message] = []
         self.normal_messages: list[Message] = []
@@ -175,6 +178,9 @@ async def test_loop_prepares_before_compacting_and_reprepares_before_provider(mo
     order: list[str] = []
 
     class Provider:
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
         async def generate_stream(self, messages, tools=None, **kwargs):
             if kwargs.get("call_kind") == "context_summary":
                 yield StreamEvent(type="text", delta="<summary>kept</summary>")

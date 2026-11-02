@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from ..cache_fingerprint import build_cache_fingerprint
 from ..tools.completion_checks import CompletionChecks, CompletionContext
 from ..config import AgentConfig, ToolLimitsConfig
+from ..llm.capabilities import bound_context_token_limit
 from ..context_resources import (
     ContextResourceLedger,
 )
@@ -726,6 +727,7 @@ async def _run_agent_loop_impl(
             optimization without changing visible tool execution.
     """
     llm = _services.llm
+    token_limit = bound_context_token_limit(llm, token_limit)
     summary_llm = _services.summary_llm
     permission_negotiator = _services.permission_gateway
     memory_lookup = _services.memory_lookup
@@ -1450,6 +1452,7 @@ async def _run_agent_loop_impl(
                 budget_tools_by_name,
                 api_total_tokens=api_total_tokens,
                 api_prompt_tokens=api_prompt_tokens,
+                llm=llm,
             )
             # Invoke the replaceable compaction policy only after the complete
             # request has been prepared. It performs the cheap no-op decision

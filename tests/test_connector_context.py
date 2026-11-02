@@ -228,6 +228,9 @@ async def test_real_compaction_retains_current_state_without_summary_cooperation
     requests = []
 
     class Provider:
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
         async def generate_stream(self, messages, tools=None, **kwargs):
             requests.append((kwargs.get("call_kind"), [_trace_request_message(m) for m in messages]))
             delta = "<summary>Earlier work completed.</summary>" if kwargs.get("call_kind") == "context_summary" else "done"

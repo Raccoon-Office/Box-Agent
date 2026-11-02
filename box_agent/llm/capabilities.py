@@ -5,6 +5,25 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ..config import derive_context_token_limit
+
+
+def bound_context_token_limit(llm: Any, token_limit: int) -> int:
+    """Clamp a caller budget to the active model's known context capacity."""
+    window = getattr(llm, "context_window", None)
+    windows = [window] if type(window) is int and window > 0 else []
+    model = getattr(llm, "model", None)
+    for candidate in getattr(llm, "auto_model_candidates", ()) or ():
+        if isinstance(candidate, Mapping) and candidate.get("model") == model:
+            window = candidate.get("contextWindow")
+            if type(window) is int and window > 0:
+                windows.append(window)
+    if not windows:
+        return token_limit
+    return min(token_limit, derive_context_token_limit(
+        min(windows), getattr(llm, "max_output_tokens", 0),
+    ))
+
 
 # Known vision model names matched as substrings (gateway prefixes and snapshots
 # are common). Catalog tags and explicit declarations always win.
@@ -120,4 +139,4 @@ def image_input_support(llm: Any) -> bool | None:
     return None
 
 
-__all__ = ["image_input_support", "model_candidate_has_tag"]
+__all__ = ["bound_context_token_limit", "image_input_support", "model_candidate_has_tag"]

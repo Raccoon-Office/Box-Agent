@@ -341,6 +341,9 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
         model = "test-model"
         max_output_tokens = 1024
 
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
         async def generate_stream(self, *, messages, **kwargs):
             if any(marker in str(message.content) for message in messages):
                 interrupt(messages, "provider")
@@ -358,6 +361,9 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
             ])
 
     class Summary:
+        def estimate_text_tokens(self, text):
+            return len(text.encode("utf-8")) // 3
+
         async def generate(self, *, messages, **kwargs):
             interrupt(messages, "summary")
 
@@ -393,6 +399,9 @@ async def test_runtime_wrapup_survives_interruption_before_model_response(
 
 
 class _SummaryCheckpointLLM:
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.saw_start = False
@@ -417,6 +426,9 @@ class _SummaryCheckpointLLM:
 
 
 class _PostCompactionLLM:
+    def estimate_text_tokens(self, text):
+        return len(text.encode("utf-8")) // 3
+
     model = "test-model"
     max_output_tokens = 1024
 

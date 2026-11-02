@@ -1403,18 +1403,35 @@ class BoxACPAgent:
         binding: dict[str, Any] | None,
         *,
         config: Config | None = None,
+        llm: Any | None = None,
     ) -> tuple[int, int]:
         """Resolve active-model capabilities with config fallback."""
 
         config = config if config is not None else self._config
-        context_window = (binding or {}).get(
-            "contextWindow",
-            config.llm.context_window,
-        )
-        max_output_tokens = (binding or {}).get(
-            "maxTokens",
-            config.llm.max_output_tokens,
-        )
+        windows = []
+        if binding is None or (
+            binding.get("source") == "builtin"
+            and binding.get("model") in {config.llm.model, getattr(self._llm, "model", None)}
+        ):
+            windows.append(config.llm.context_window)
+        for window in ((binding or {}).get("contextWindow"), getattr(llm, "context_window", None)):
+            if type(window) is int and window > 0:
+                windows.append(window)
+        for candidate in (binding or {}).get("autoRouting", {}).get("models", ()):
+            if candidate.get("model") == (binding or {}).get("model"):
+                window = candidate.get("contextWindow")
+                if type(window) is int and window > 0:
+                    windows.append(window)
+        if not windows:
+            model = (binding or {}).get("model")
+            if model is not None and model not in {config.llm.model, getattr(self._llm, "model", None)}:
+                raise ValueError("llm_binding.contextWindow is required for the selected model")
+            windows.append(config.llm.context_window)
+        context_window = min(windows)
+        output_limits = [value for value in (
+            (binding or {}).get("maxTokens"), getattr(llm, "max_output_tokens", None),
+        ) if type(value) is int and value > 0]
+        max_output_tokens = max(output_limits) if output_limits else config.llm.max_output_tokens
         return context_window, max_output_tokens
 
     def _summary_llm_for_session(
@@ -1895,8 +1912,10 @@ class BoxACPAgent:
         llm_binding = _normalize_llm_binding(meta) or self._default_llm_binding
         session_llm = SessionBoundLLM(self._llm_for_binding(llm_binding))
         session_context_window, session_max_output_tokens = (
-            self._context_capabilities_for_binding(llm_binding)
+            self._context_capabilities_for_binding(llm_binding, llm=session_llm)
         )
+        session_llm.context_window = session_context_window
+        session_llm.max_output_tokens = session_max_output_tokens
         session_token_limit = derive_context_token_limit(
             session_context_window,
             session_max_output_tokens,
@@ -2835,7 +2854,7 @@ class BoxACPAgent:
             requested_llm = self._llm_for_binding(requested_llm_binding)
             requested_context_window, requested_max_output_tokens = (
                 self._context_capabilities_for_binding(
-                    requested_llm_binding, config=state.config,
+                    requested_llm_binding, config=state.config, llm=requested_llm,
                 )
             )
             requested_token_limit = derive_context_token_limit(
@@ -2843,6 +2862,8 @@ class BoxACPAgent:
                 requested_max_output_tokens,
             )
             state.session_llm.bind(requested_llm)
+            state.session_llm.context_window = requested_context_window
+            state.session_llm.max_output_tokens = requested_max_output_tokens
             state.session_llm.set_auto_model_candidates(
                 requested_llm_binding.get("autoRouting", {}).get("models", [])
             )
@@ -6088,6 +6109,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 exponential_base=rcfg.exponential_base,
             ),
             max_output_tokens=config.llm.max_output_tokens,
+            context_window=config.llm.context_window,
             max_request_body_bytes=config.llm.max_request_body_bytes,
             auth_file=config.llm.auth_file,
             timeout=config.llm.timeout,

@@ -2038,6 +2038,7 @@ async def run_agent(
     memory_log_scope = ExitStack()
 
     def _new_client(**kwargs):
+        kwargs.setdefault("context_window", config.llm.context_window)
         client = build_llm_client(**kwargs)
         owned_clients.append(client)
         return client
