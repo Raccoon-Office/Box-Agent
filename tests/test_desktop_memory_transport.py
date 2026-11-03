@@ -150,7 +150,7 @@ async def test_unsafe_or_malformed_bootstrap_cannot_grant_access(bootstrap, monk
     assert calls == []
 
 
-@pytest.mark.parametrize("operation", ["https://remote.test", "../qa", "qa?x=1", "experience/records/delete"])
+@pytest.mark.parametrize("operation", ["https://remote.test", "../qa", "qa?x=1", "experience/records/delete", "experience/entities/get", "experience/entities/save"])
 async def test_unknown_operations_never_open_bootstrap_or_network(operation, monkeypatch):
     monkeypatch.setattr(module, "_read_bootstrap", lambda *_: pytest.fail("bootstrap must not be opened"))
     with pytest.raises(MemoryProxyError, match="INVALID_OPERATION"):

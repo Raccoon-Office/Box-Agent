@@ -13,6 +13,40 @@ from box_agent.payload_privacy import private_payloads
 from box_agent.schema import LLMResponse
 
 
+@pytest.mark.parametrize("pipeline", [None, "desktop-experience-v1"])
+async def test_unsupported_host_pipeline_never_runs_a_model_or_replays_writes(pipeline, caplog):
+    transport, model, tasks = Transport(), Model(), set()
+    original = transport.request
+
+    async def request(operation, payload):
+        result = await original(operation, payload)
+        if payload["action"] == "claim" and result.get("job"):
+            result["job"]["pipeline_version"] = pipeline
+        return result
+
+    transport.request = request
+    runtime = ExperienceRuntime(transport)
+    runtime.schedule("delivery", model, 100000, tasks)
+    await finish(tasks)
+    assert not model.calls
+    assert [c["action"] for c in transport.calls] == ["claim"]
+    assert "reason=unsupported_pipeline" in caplog.text
+    runtime.close()
+
+
+async def test_typed_experience_prompt_preserves_private_evidence_and_name_array_contract():
+    transport, model, tasks = Transport(), Model(), set()
+    runtime = ExperienceRuntime(transport)
+    runtime.schedule("delivery", model, 100000, tasks)
+    await finish(tasks)
+    prompt = model.calls[0]["messages"][0].content
+    assert all(value in prompt for value in ("user_preference", "round_experience", "operation_experience", '"scenario"', '"rationale"', '"entities":[]'))
+    assert '"entity_ids":' not in prompt
+    assert "not evidence of use" in prompt
+    assert "preserve its memory_type, scenario, content and rationale exactly" in prompt
+    runtime.close()
+
+
 class Transport:
     def __init__(self, *, frozen=False):
         self.calls = []
@@ -30,10 +64,10 @@ class Transport:
             if self.claimed:
                 return {'job': None}
             self.claimed = True
-            return {'job': {'event_id': 'event', 'lease_token': 'lease', 'frozen': self.frozen}}
+            return {'job': {'event_id': 'event', 'lease_token': 'lease', 'pipeline_version': 'desktop-experience-v2', 'frozen': self.frozen}}
         assert payload['event_id'] == 'event' and payload['lease_token'] == 'lease'
         if action == 'model':
-            return {'job': {'event_id': 'event', 'lease_token': 'lease', 'model_prompt': self.prompt,
+            return {'job': {'event_id': 'event', 'lease_token': 'lease', 'pipeline_version': 'desktop-experience-v2', 'model_prompt': self.prompt,
                             'model_input_sha256': hashlib.sha256(self.prompt.encode()).hexdigest()}}
         if action == 'propose':
             self.proposal = payload['proposal']

@@ -53,8 +53,6 @@ _OPERATIONS = {
     "qa/evidence": _Operation(timeout=15, mutation=True, control=True),
     "experience/job": _Operation(timeout=15, mutation=True, control=True),
     "experience/search": _Operation(),
-    "experience/entities/get": _Operation(),
-    "experience/entities/save": _Operation(timeout=15, mutation=True),
     "experience/facts/get": _Operation(),
     "experience/facts/save": _Operation(timeout=15, mutation=True),
     "experience/observations/get": _Operation(),
