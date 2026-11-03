@@ -21,7 +21,7 @@ POSIX 校验文件归属、权限与链接；Windows 使用句柄及私有 ACL �
 宿主仍须实现代理和 commit/revoke 回调及最终写入门禁；合成 Host 测试不能代替真实宿主验收。
 最终 QA 捕获原轮次来源与事件键，只交接合格在线云端轮次；HTTP 超时不自动重发，
 durable_unknown 不计为云端已保存。确认 QA 后，后台 `ExperienceRuntime` 可向宿主领取任务，
-使用固定证据和独立、无工具的模型请求生成提案，再通过宿主推进 Entity、Fact、Observation 保存。
+使用固定证据和独立、无工具的模型请求生成提案，再通过宿主推进 Fact 和 Observation 保存。
 宿主负责持久任务、租约、证据和版本校验、幂等及未知结果恢复；Box-Agent 不直接写远端存储。
 没有可复用候选时可正常结束；不将助手声明本身当作执行成功证据。
 桌面轮次的诊断正文被省略，包含 full-payload 调试开关；真实模型输入和正式 SessionLog 保留原语义。
