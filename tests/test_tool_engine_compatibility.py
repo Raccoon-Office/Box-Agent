@@ -84,6 +84,9 @@ _FLAGS_OFF = {
     "enable_skills": False,
     "enable_mcp": False,
 }
+_IMAGE_LABEL_SCHEMA_CHANGES = json.loads(
+    (Path(__file__).parent / "fixtures/tool_engine/image_label_schema_changes.json").read_text(encoding="utf-8")
+)
 _SCHEMA_FIXTURE = Path(__file__).parent / "fixtures/tool_engine/c1_schemas.json"
 _PUBLISH_ARTIFACT_SCHEMA = {
     "aliases": [],
@@ -428,6 +431,7 @@ def _assert_schema_contract(tools, profile):
             *_PPTX_ENTRY_SCHEMA_CHANGES.get(tool.name, ()),
             *_TOOL_HANDOFF_SCHEMA_CHANGES.get(tool.name, ()),
             *_IMAGE_CONTEXT_SCHEMA_CHANGES.get(tool.name, ()),
+            *_IMAGE_LABEL_SCHEMA_CHANGES.get(tool.name, ()),
             *_BACKGROUND_OUTPUT_SCHEMA_CHANGES.get(tool.name, ()),
             *_JSONL_DESCRIPTION_CHANGES.get(tool.name, ()),
         ):
