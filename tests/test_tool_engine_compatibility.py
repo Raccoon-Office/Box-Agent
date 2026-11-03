@@ -218,7 +218,7 @@ _MANAGED_RUNTIME_DESCRIPTION_CHANGES = {
     ),
 }
 _C5_DISCOVERABLE = {
-    "append_file", "query_jsonl", "bash_output", "bash_kill", "sandbox_status",
+    "append_file", "query_jsonl", "sandbox_status",
     "mcp_config", "report_execution_result",
     "plan_read", "plan_write", "todo_read", "todo_write", "goal_read", "goal_write",
     "memory_read", "memory_search", "memory_write", "memory_list_corrections", "memory_write_correction", "memory_supersede_correction", "memory_delete_correction", "obsidian_create_note",

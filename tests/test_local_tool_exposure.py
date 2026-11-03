@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from box_agent.agent import Agent
-from box_agent.tools.bash_tool import BackgroundShell, BackgroundShellManager, BashOutputTool, BashKillTool
+from box_agent.tools.bash_tool import BackgroundShell, BackgroundShellManager, BashTool, BashOutputTool, BashKillTool
 from box_agent.tools.plan_tool import PlanStore, PlanReadTool, PlanWriteTool
 from box_agent.tools.todo_tool import TodoStore, TodoReadTool, TodoWriteTool
 from tests.test_local_tool_search import LocalTool
@@ -82,20 +82,23 @@ def test_original_skill_tool_hints_follow_method_requirements_not_skill_name(tmp
     assert visible(agent) == frozenset({"tool_search", *expected})
 
 
-def test_owned_completed_unread_shell_exposes_output_and_kill_without_other_owner_leak(tmp_path, monkeypatch):
+def test_background_shell_tools_are_offered_from_first_request_in_stable_order(tmp_path, monkeypatch):
     monkeypatch.setattr(BackgroundShellManager, "_shells", {})
-    shell = BackgroundShell("shell-1", "command", SimpleNamespace(), 0.0, owner_id="other")
+    tools = [
+        BashTool(workspace_dir=str(tmp_path), process_owner_id="mine"),
+        BashOutputTool(process_owner_id="mine"), BashKillTool(process_owner_id="mine"),
+    ]
+    agent = Agent(llm_client=object(), system_prompt="test", tools=tools, workspace_dir=str(tmp_path))
+    first = agent.mcp_tool_exposure.prepare_tools(list(agent.tools.values()))
+    assert {"bash", "bash_output", "bash_kill"} <= first.offered_names
+
+    shell = BackgroundShell("shell-1", "command", SimpleNamespace(), 0.0, owner_id="mine")
     shell.status = "completed"
     shell.add_output("unread result")
     BackgroundShellManager.add(shell)
-    agent = Agent(llm_client=object(), system_prompt="test", tools=[
-        BashOutputTool(process_owner_id="mine"), BashKillTool(process_owner_id="mine"),
-    ], workspace_dir=str(tmp_path))
-    assert "bash_output" not in visible(agent)
-    shell.owner_id = "mine"
-    assert {"bash_output", "bash_kill"} <= visible(agent)
+    assert agent.mcp_tool_exposure.prepare_tools(list(agent.tools.values())).tools == first.tools
     BackgroundShellManager._remove(shell.bash_id)
-    assert {"bash_output", "bash_kill"} <= visible(agent)
+    assert agent.mcp_tool_exposure.prepare_tools(list(agent.tools.values())).tools == first.tools
 
 
 @pytest.mark.parametrize("heading", ["## Deferred MCP tools", "## Discoverable tools"])

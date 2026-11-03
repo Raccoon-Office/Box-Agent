@@ -105,7 +105,7 @@ flowchart TD
 | bash | 本 PR 保留名称与 exec/terminal 兼容名 | 它在 Windows 也可执行 PowerShell；若以后改为 execute_command，应同时明确跨平台契约，不能只换名字 |
 | append_file | 保留独立语义，普通会话可发现，文件生成场景可直接提供 | 非幂等追加与完整替换不同；已有 Skill 真实依赖 |
 | query_jsonl | 保留，文件/数据场景直接提供，其余可发现 | 有流式扫描、投影、过滤、游标和输出边界；read_file 的引导必须能抵达它 |
-| bash_output、bash_kill | 存在当前会话可访问句柄后提供，也可通过发现入口找到 | 已结束但输出未读的任务仍需要 output；执行时必须检查 owner，不靠隐藏保证隔离 |
+| bash_output、bash_kill | 已注册时从首个模型请求起提供，也可通过发现入口找到 | 提前提供可避免启动后台命令时改变工具 schema 列表。调用时按会话 owner 校验句柄 |
 | execute_code、inspect_images、generate_image | 按运行模式、模型能力、配置及任务场景提供 | 专门执行环境和多模态能力不能用“都能 shell”假设代替 |
 | sandbox_status | 从普通常驻面撤下，保留诊断发现和 CLI 入口 | 状态诊断有用，但不是每轮任务的必需说明 |
 | mcp_config | 从普通任务常驻面撤下，管理场景/相关 Skill 直接提供，其余可发现 | 现有 mcp-config、browser-use Skill 需要它；写配置不等于连接成功 |

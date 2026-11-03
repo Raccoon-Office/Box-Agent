@@ -6,7 +6,6 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from .base import Tool, build_tool_name_index
-from .bash_tool import BackgroundShellManager
 
 
 DISCOVERABLE_LOCAL_NAMES = frozenset({
@@ -67,6 +66,8 @@ class LocalToolExposurePolicy:
             name for name, tool in tools.items()
             if getattr(tool, "_model_exposure_direct", False)
         }
+        # Keep the request schemas stable when a background shell starts.
+        direct.update(("bash_output", "bash_kill"))
         # JSONL is part of the file/data surface whenever ordinary file access
         # was already enabled by setup; a standalone diagnostic remains findable.
         if "read_file" in tools:
@@ -82,14 +83,6 @@ class LocalToolExposurePolicy:
                     break
         if self._goal_provider() is not None:
             direct.update(("goal_read", "goal_write"))
-        for name in ("bash_output", "bash_kill"):
-            tool = tools.get(name)
-            if tool is not None and BackgroundShellManager.get_available_ids(
-                getattr(tool, "process_owner_id", None),
-            ):
-                # Completed handles can still contain unread output. Once the
-                # session needs these schemas, retain them for stable follow-up.
-                direct.update(("bash_output", "bash_kill"))
         for skill_name in self._active_skills_provider():
             direct.update(SKILL_TOOL_HINTS.get(skill_name, ()))
         self._required_names.update(direct & tools.keys())
