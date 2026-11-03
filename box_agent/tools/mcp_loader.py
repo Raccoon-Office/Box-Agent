@@ -76,6 +76,7 @@ from .mcp_sources import (
     McpConfigSource,
     ResolvedMcpServer,
     configured_mcp_sources,
+    mcp_credential_key,
     resolve_mcp_sources,
 )
 from .model_tool_context import current_model_tool_context
@@ -1978,7 +1979,24 @@ class MCPServerConnection:
 # Global connections registry
 _mcp_connections: list[MCPServerConnection] = []
 _mcp_reconnect_locks: dict[str, asyncio.Lock] = {}
+_mcp_connection_epochs: dict[str, object] = {}
 _mcp_source_reconcile_lock = asyncio.Lock()
+
+
+def _begin_mcp_connection(name: str) -> object:
+    epoch = object()
+    _mcp_connection_epochs[name] = epoch
+    return epoch
+
+
+async def _close_obsolete_connection(conn: "MCPServerConnection") -> None:
+    try:
+        await conn.disconnect()
+    except Exception:
+        # A retired transport must never republish tools or overwrite current status.
+        _warn(f"[mcp] obsolete connection cleanup failed: {conn.name!r}")
+    finally:
+        conn.tools = []
 
 
 @dataclass
@@ -2003,9 +2021,9 @@ _mcp_config_path: str | None = None
 _mcp_sources: tuple[McpConfigSource, ...] = ()
 _mcp_server_definitions: dict[str, ResolvedMcpServer] = {}
 _mcp_source_overrides: dict[str, dict[str, dict]] = {}
-_mcp_runtime_credentials: dict[str, dict[str, str]] = {}
+_mcp_runtime_credentials: dict[str | tuple[str, str], dict[str, str]] = {}
 _mcp_credential_targets: dict[str, dict] = {}
-_mcp_runtime_credential_versions: dict[str, int] = {}
+_mcp_runtime_credential_versions: dict[str | tuple[str, str], int] = {}
 # Auth inputs from the last load_mcp_tools_async() call — reused by
 # reconnect_mcp_server() so a single-server hot reconnect gets the same
 # DynamicBearer / Authorization headers the cold-start path would build.
@@ -2048,21 +2066,24 @@ def get_all_mcp_tools() -> list:
 async def disconnect_mcp_server(name: str) -> dict:
     """Disconnect a named MCP server and return its removed tool names."""
     global _mcp_connections
-    conn = next((c for c in _mcp_connections if c.name == name), None)
-    removed_tools: list[str] = []
-    if conn:
-        removed_tools = [t.name for t in conn.tools]
+    epoch = _begin_mcp_connection(name)
+    connections = [c for c in _mcp_connections if c.name == name]
+    _mcp_connections = [c for c in _mcp_connections if c.name != name]
+    get_mcp_tool_catalog().remove_server(name)
+    removed_tools = [t.name for conn in connections for t in conn.tools]
+    error = None
+    for conn in connections:
         try:
             await conn.disconnect()
-        except Exception as error:
+        except Exception as failure:
+            error = str(failure)
+            if _mcp_connection_epochs.get(name) is epoch:
+                _mcp_connections.append(conn)
+        finally:
             conn.tools = []
-            get_mcp_tool_catalog().remove_server(name)
-            _record_status(name, "failed", error=str(error))
-            return {"success": False, "error": str(error), "removedTools": removed_tools}
-        _mcp_connections = [c for c in _mcp_connections if c.name != name]
-    get_mcp_tool_catalog().remove_server(name)
-    _record_status(name, "disabled")
-    return {"success": True, "removedTools": removed_tools}
+    if _mcp_connection_epochs.get(name) is epoch:
+        _record_status(name, "failed" if error else "disabled", error=error)
+    return {"success": error is None, "removedTools": removed_tools, **({"error": error} if error else {})}
 
 
 def _record_status(
@@ -2191,6 +2212,7 @@ def set_mcp_runtime_credential(
 ) -> list[str]:
     """Store host credentials in memory, scoped to a connector ref or exact user config."""
     normalized_ref = credential_ref.strip()
+    credential_key = mcp_credential_key("user" if target is not None else "connector", normalized_ref)
     if not normalized_ref:
         raise ValueError("credentialRef is required")
     if target is not None and not all(
@@ -2223,16 +2245,16 @@ def set_mcp_runtime_credential(
         }
         affected = [name]
     else:
-        if normalized_ref.startswith("user-mcp:"):
-            raise ValueError("User credentials require an explicit target")
         affected = [
             name for name, definition in _mcp_server_definitions.items()
             if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
         ]
-    _mcp_runtime_credentials[normalized_ref] = normalized_headers
-    _mcp_runtime_credential_versions[normalized_ref] = (
-        _mcp_runtime_credential_versions.get(normalized_ref, 0) + 1
+    _mcp_runtime_credentials[credential_key] = normalized_headers
+    _mcp_runtime_credential_versions[credential_key] = (
+        _mcp_runtime_credential_versions.get(credential_key, 0) + 1
     )
+    for name in affected:
+        _begin_mcp_connection(name)
     return affected
 
 
@@ -2249,20 +2271,31 @@ def get_mcp_connector_server_names() -> dict[str, frozenset[str]]:
     }
 
 
-def clear_mcp_runtime_credential(credential_ref: str) -> list[str]:
+def clear_mcp_runtime_credential(credential_ref: str, *, target: dict | None = None) -> list[str]:
     normalized_ref = credential_ref.strip()
-    target = _mcp_credential_targets.pop(normalized_ref, None)
-    _mcp_runtime_credentials.pop(normalized_ref, None)
-    _mcp_runtime_credential_versions[normalized_ref] = (
-        _mcp_runtime_credential_versions.get(normalized_ref, 0) + 1
-    )
+    key = mcp_credential_key("user" if target is not None else "connector", normalized_ref)
     if target is not None:
-        return [target["name"]]
-    return [
-        name
-        for name, definition in _mcp_server_definitions.items()
-        if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
-    ]
+        if (not isinstance(target, dict) or target.get("owner") != "user"
+                or not isinstance(target.get("name"), str) or not target["name"].strip()
+                or normalized_ref != f"user-mcp:{target['name']}"):
+            raise ValueError("credentialRef must match a user target")
+        _mcp_credential_targets.pop(normalized_ref, None)
+        affected = [target["name"]]
+    else:
+        affected = [
+            name for name, definition in _mcp_server_definitions.items()
+            if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
+        ]
+    _mcp_runtime_credentials.pop(key, None)
+    _mcp_runtime_credential_versions[key] = _mcp_runtime_credential_versions.get(key, 0) + 1
+    for name in affected:
+        _begin_mcp_connection(name)
+    return affected
+
+
+def _merge_runtime_headers(configured: dict, runtime: dict) -> dict:
+    overridden = {key.lower() for key in runtime}
+    return {**{key: value for key, value in configured.items() if key.lower() not in overridden}, **runtime}
 
 
 def _materialize_server_config(definition: ResolvedMcpServer) -> dict:
@@ -2277,19 +2310,16 @@ def _materialize_server_config(definition: ResolvedMcpServer) -> dict:
         target = _mcp_credential_targets.get(reference)
         config = {key: value for key, value in definition.config.items() if key != "disabled"}
         if target is not None and target["config"] == config:
-            server_config["headers"] = {
-                **dict(server_config.get("headers") or {}),
-                **_mcp_runtime_credentials.get(reference, {}),
-            }
+            server_config["headers"] = _merge_runtime_headers(
+                dict(server_config.get("headers") or {}),
+                _mcp_runtime_credentials.get(mcp_credential_key("user", reference), {}),
+            )
     if isinstance(credential_ref, str):
-        if credential_ref.startswith("user-mcp:"):
-            raise ValueError("Connector cannot reference user credentials")
         credential_headers = _mcp_runtime_credentials.get(credential_ref)
         if credential_headers:
-            server_config["headers"] = {
-                **dict(server_config.get("headers") or {}),
-                **credential_headers,
-            }
+            server_config["headers"] = _merge_runtime_headers(
+                dict(server_config.get("headers") or {}), credential_headers,
+            )
     return server_config
 
 
@@ -2321,7 +2351,7 @@ def _defer_user_mcp_startup(definition: ResolvedMcpServer) -> bool:
         return False
     reference = f"user-mcp:{definition.name}"
     bound = _mcp_credential_targets.get(reference)
-    return not (bound and bound["config"] == current and _mcp_runtime_credentials.get(reference))
+    return not (bound and bound["config"] == current and _mcp_runtime_credentials.get(mcp_credential_key("user", reference)))
 
 
 def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
@@ -2534,41 +2564,48 @@ async def load_mcp_tools_async(
         connections: list[MCPServerConnection] = []
 
         # Build connection objects for each enabled server
+        epochs: list[object] = []
         for server_name, definition in _mcp_server_definitions.items():
-            server_config = _materialize_server_config(definition)
-            if server_config.get("disabled", False):
-                _warn(f"Skipping disabled server: {server_name}")
-                _record_status(server_name, "disabled", definition=definition)
-                continue
+            try:
+                server_config = _materialize_server_config(definition)
+                if server_config.get("disabled", False):
+                    _warn(f"Skipping disabled server: {server_name}")
+                    _record_status(server_name, "disabled", definition=definition)
+                    continue
 
-            if _waiting_for_credential(definition):
-                _record_status(
-                    server_name, "connecting",
-                    error="Waiting for host credential", definition=definition,
-                )
-                continue
+                if _waiting_for_credential(definition):
+                    _record_status(
+                        server_name, "connecting",
+                        error="Waiting for host credential", definition=definition,
+                    )
+                    continue
 
-            if _defer_user_mcp_startup(definition):
-                _record_status(server_name, "connecting", definition=definition)
-                continue
+                if _defer_user_mcp_startup(definition):
+                    _record_status(server_name, "connecting", definition=definition)
+                    continue
 
-            if _cua_service is not None and server_name == _cua_service.name:
-                _record_status(server_name, "connecting", error="Call ensure_cua_ready to prepare CUA", definition=definition)
-                continue
+                if _cua_service is not None and server_name == _cua_service.name:
+                    _record_status(server_name, "connecting", error="Call ensure_cua_ready to prepare CUA", definition=definition)
+                    continue
 
-            conn_type = _effective_connection_type(server_name, server_config)
-            url = server_config.get("url")
-            command = server_config.get("command")
+                conn_type = _effective_connection_type(server_name, server_config)
+                url = server_config.get("url")
+                command = server_config.get("command")
 
-            # Validate config
-            if conn_type in ("stdio", "stdio_http") and not command:
-                _warn(f"No command specified for STDIO server: {server_name}")
-                continue
-            if conn_type in ("sse", "http", "streamable_http") and not url:
-                _warn(f"No url specified for {conn_type.upper()} server: {server_name}")
-                continue
+                # Validate config
+                if conn_type in ("stdio", "stdio_http") and not command:
+                    _warn(f"No command specified for STDIO server: {server_name}")
+                    continue
+                if conn_type in ("sse", "http", "streamable_http") and not url:
+                    _warn(f"No url specified for {conn_type.upper()} server: {server_name}")
+                    continue
 
-            connections.append(_build_connection(definition))
+                conn = _build_connection(definition)
+                connections.append(conn)
+                epochs.append(_begin_mcp_connection(server_name))
+
+            except Exception as error:
+                _record_status(server_name, "failed", error=str(error), definition=definition)
 
         # Connect to all servers in parallel — one slow/broken server no
         # longer blocks the others. Each connection has its own timeout.
@@ -2582,8 +2619,10 @@ async def load_mcp_tools_async(
             return_exceptions=True,
         )
 
-        all_tools = []
-        for conn, success in zip(connections, results):
+        for conn, success, epoch in zip(connections, results, epochs):
+            if _mcp_connection_epochs.get(conn.name) is not epoch:
+                await _close_obsolete_connection(conn)
+                continue
             if isinstance(success, BaseException):
                 _warn(f"✗ MCP server '{conn.name}' raised during connect: {success}")
                 _record_status(
@@ -2596,7 +2635,6 @@ async def load_mcp_tools_async(
             if success and conn.last_error is None:
                 _mcp_connections.append(conn)
                 _replace_server_catalog(conn)
-                all_tools.extend(conn.tools)
                 _record_status(
                     conn.name, "connected",
                     transport=conn.transport_label,
@@ -2611,6 +2649,7 @@ async def load_mcp_tools_async(
                     auth_status=conn.last_auth_status,
                 )
 
+        all_tools = get_all_mcp_tools()
         _warn(f"Total MCP tools loaded: {len(all_tools)}")
 
         return all_tools
@@ -2630,6 +2669,7 @@ async def load_mcp_tools_async(
 async def cleanup_mcp_connections():
     """Clean up all MCP connections."""
     global _mcp_connections, _mcp_server_definitions, _mcp_sources, _cua_service
+    _mcp_connection_epochs.clear()
     failed = []
     closed = []
     try:
@@ -2889,10 +2929,19 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
     """Reconnect one server from the resolved multi-source registry."""
     global _mcp_connections
 
+    epoch = _begin_mcp_connection(name)
+    def obsolete() -> bool:
+        return _mcp_connection_epochs.get(name) is not epoch
+
+    superseded = {"success": False, "superseded": True}
     definition = _mcp_server_definitions.get(name)
     if definition is None:
         return {"success": False, "error": f"Server '{name}' not found in MCP sources"}
-    server_config = _materialize_server_config(definition)
+    try:
+        server_config = _materialize_server_config(definition)
+    except Exception as error:
+        _record_status(name, "failed", error=str(error), definition=definition)
+        return {"success": False, "error": str(error)}
 
     if server_config.get("disabled"):
         _record_status(name, "disabled", definition=definition)
@@ -2902,9 +2951,13 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
         try:
             await _cua_service.prepare()
         except (OSError, RuntimeError) as error:
+            if obsolete():
+                return superseded
             _record_status(name, "failed", error=str(error), definition=definition)
             return {"success": False, "error": str(error)}
 
+    if obsolete():
+        return superseded
     catalog = get_mcp_tool_catalog()
     catalog.mark_server_loading(name)
     try:
@@ -2912,15 +2965,20 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
         # per-server refresh marker until the replacement snapshot is stable.
         old_conn = next((c for c in _mcp_connections if c.name == name), None)
         if old_conn:
+            _mcp_connections = [c for c in _mcp_connections if c.name != name]
+            catalog.remove_server(name)
             try:
                 await old_conn.disconnect()
             except Exception as error:
+                if obsolete():
+                    return superseded
                 old_conn.tools = []
+                _mcp_connections.append(old_conn)
                 catalog.remove_server(name)
                 _record_status(name, "failed", error=str(error), definition=definition)
                 return {"success": False, "error": str(error), "configPath": definition.source_path}
-            _mcp_connections = [c for c in _mcp_connections if c.name != name]
-            catalog.remove_server(name)
+            if obsolete():
+                return superseded
 
         url = server_config.get("url")
         command = server_config.get("command")
@@ -2934,12 +2992,16 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
                 "success": False, "waitingForCredential": True,
                 "error": "Waiting for host credential", "configPath": definition.source_path,
             }
-        conn = _build_connection(definition)
-
+        conn = None
         _record_status(name, "connecting", transport=transport_label)
         try:
+            conn = _build_connection(definition)
             success = await conn.connect()
         except Exception as e:
+            if obsolete():
+                if conn is not None:
+                    await _close_obsolete_connection(conn)
+                return superseded
             _record_status(
                 name,
                 "failed",
@@ -2949,6 +3011,9 @@ async def _reconnect_mcp_server_locked(name: str) -> dict:
             )
             return {"success": False, "error": str(e), "configPath": definition.source_path}
 
+        if obsolete():
+            await _close_obsolete_connection(conn)
+            return superseded
         if success and conn.last_error is None:
             _mcp_connections.append(conn)
             _replace_server_catalog(conn)

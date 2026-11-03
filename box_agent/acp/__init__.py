@@ -3882,7 +3882,12 @@ class BoxACPAgent:
             if not isinstance(credential_ref, str) or not credential_ref.strip():
                 return {"success": False, "error": "credentialRef is required"}
             from box_agent.tools.mcp_loader import clear_mcp_runtime_credential
-            affected = clear_mcp_runtime_credential(credential_ref)
+            try:
+                target = params.get("target")
+                affected = (clear_mcp_runtime_credential(credential_ref, target=target)
+                            if target is not None else clear_mcp_runtime_credential(credential_ref))
+            except ValueError as error:
+                return {"success": False, "error": str(error)}
             log.info("mcp/credential/clear", affected_servers=len(affected))
             return {"success": True, "affectedServers": affected}
         if method in {"mcp/reconcile", "mcp/source/replace"}:

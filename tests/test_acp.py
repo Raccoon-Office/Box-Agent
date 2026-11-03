@@ -9054,15 +9054,29 @@ async def test_user_mcp_host_credential_binding_keeps_secret_out_of_result(tmp_p
         "headers": {"Authorization": "Bearer test-secret"},
     })
     assert result == {"success": True, "affectedServers": ["sample"], "target": {"owner": "user", "name": "sample"}}
-    assert mcp_loader._mcp_runtime_credentials["user-mcp:sample"]["Authorization"] == "Bearer test-secret"
+    assert mcp_loader._mcp_runtime_credentials[("user", "user-mcp:sample")]["Authorization"] == "Bearer test-secret"
     assert "test-secret" not in str(result)
     invalid = await agent.extMethod("mcp/credential/set", {
         "credentialRef": "user-mcp:sample", "target": target, "headers": {"Authorization": 1},
     })
     assert invalid["success"] is False
     assert "test-secret" not in str(invalid)
-    cleared = await agent.extMethod("mcp/credential/clear", {"credentialRef": "user-mcp:sample"})
+    legacy = await agent.extMethod("mcp/credential/set", {
+        "credentialRef": "user-mcp:sample", "headers": {"Authorization": "Bearer connector-secret"},
+    })
+    assert legacy["success"] is True
+    assert "connector-secret" not in str(legacy)
+    rejected = await agent.extMethod("mcp/credential/clear", {
+        "credentialRef": "user-mcp:sample", "target": {"owner": "user", "name": "other"},
+    })
+    assert rejected["success"] is False
+    assert mcp_loader._mcp_runtime_credentials[("user", "user-mcp:sample")]["Authorization"] == "Bearer test-secret"
+    cleared = await agent.extMethod("mcp/credential/clear", {
+        "credentialRef": "user-mcp:sample", "target": {"owner": "user", "name": "sample"},
+    })
     assert cleared == {"success": True, "affectedServers": ["sample"]}
+    assert mcp_loader._mcp_runtime_credentials["user-mcp:sample"]["Authorization"] == "Bearer connector-secret"
+    await agent.extMethod("mcp/credential/clear", {"credentialRef": "user-mcp:sample"})
     assert not mcp_loader._mcp_runtime_credentials
     assert not mcp_loader._mcp_credential_targets
 

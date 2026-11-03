@@ -31,8 +31,14 @@ configuration changes invalidate the match. Protected system/connector entries
 cannot consume user bindings. `credentialRef` remains forbidden in user files;
 the existing connector credential contract is unchanged.
 
-`_mcp/credential/clear` accepts `{ "credentialRef": "user-mcp:user-server" }` and removes the
-in-memory binding. It does not erase the user's configuration or persist a token.
+`_mcp/credential/clear` accepts
+`{ "credentialRef": "user-mcp:user-server", "target": { "owner": "user", "name": "user-server" } }`
+and removes the user-owned in-memory binding. It does not erase the user's
+configuration or persist a token. Both set and clear default to connector-owned
+credentials when `target` is omitted. Hosts must include a user target on clear,
+as on set; otherwise a historical connector reference with the same text would
+be ambiguous. Connector and user credentials and version counters are isolated
+by owner, even when their references are identical.
 
 ## Lifecycle
 
@@ -47,7 +53,13 @@ in-memory binding. It does not erase the user's configuration or persist a token
   system/connector sources, stdio and explicit Authorization headers retain their
   existing startup behavior. Invalid declarations are ignored. Agent/conversation
   readiness never waits for these credentials. This requires an updated runtime.
-- Set/clear only change memory and the target server's credential version.
+- Set/clear only change memory and the target owner's credential version, and
+  retire pending connection publications for affected servers. Cold-start and
+  hot-reconnect handshakes publish only if their per-server generation is still
+  current; obsolete transports are closed. Disconnect also retires pending
+  handshakes so delayed success or failure cannot restore tools or overwrite status.
+- A server configuration construction failure is recorded for that server and
+  does not prevent other valid servers from connecting during cold startup.
 - The host reconnects the target with `_mcp/reconnect` after setting headers.
 - Clear does not close an existing transport. On expired/revoked authorization,
   the host also disconnects the target to remove its tools.
@@ -63,9 +75,11 @@ fingerprints, secret-free ACP responses and prompt readiness during pending MCP
 discovery. A packaged Agent must be rebuilt/installed before a desktop host can
 use user targets with that packaged runtime.
 
-Manual `headers.Authorization` in a user MCP JSON remains supported. OAuth headers
+Manual `headers.Authorization` in a user MCP JSON remains supported. Runtime
+header names override configured header names case-insensitively. OAuth headers
 are overlaid only in memory while their exact configuration binding matches;
 clearing OAuth credentials restores the configured manual headers. Both user and
 connector OAuth use one runtime credential store and the same set/clear methods.
-The `user-mcp:` reference namespace is reserved for explicit host-owned user targets;
-connector configurations cannot use those references.
+The `user-mcp:` prefix is a host convention for user targets, not a reserved
+connector namespace. Existing connector references with that prefix remain valid
+and cannot read or invalidate user-owned credentials with the same reference.
