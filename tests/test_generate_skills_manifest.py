@@ -19,10 +19,6 @@ EXPECTED_BUILTIN_SKILLS = {
     "mcp-config": "mcp-config/SKILL.md",
     "memory-guide": "memory-guide/SKILL.md",
     "pdf": "document-skills/pdf/SKILL.md",
-    "pptx": "pptx/SKILL.md",
-    "ppt-fast": "document-skills/pptx/SKILL.md",
-    **{f"sn-ppt-{module}": f"presentation-suite/skills/sn-ppt-{module}/SKILL.md"
-       for module in ("entry", "tools", "story", "standard", "dazzle", "doctor")},
     "research-synthesis": "research-synthesis/SKILL.md",
     "roadmap": "roadmap/SKILL.md",
     "scheduled-task": "scheduled-task/SKILL.md",
@@ -84,3 +80,17 @@ def test_roadmap_is_a_top_level_builtin_skill():
     entries = dict(_collect_skills())
 
     assert entries["roadmap"] == "roadmap/SKILL.md"
+
+
+@pytest.mark.parametrize(("name", "relative_path"), [
+    ("pptx", "pptx/SKILL.md"),
+    ("ppt-fast", "document-skills/pptx/SKILL.md"),
+    *[(f"sn-ppt-{name}", f"presentation-suite/skills/sn-ppt-{name}/SKILL.md")
+      for name in ("entry", "tools", "story", "standard", "dazzle", "doctor")],
+])
+def test_legacy_ppt_resources_are_not_active_builtin_skills(name, relative_path):
+    assert (SKILLS_DIR / relative_path).is_file()
+    assert name not in dict(_collect_skills())
+    loader = SkillLoader(SKILLS_DIR)
+    loader.discover_skills()
+    assert loader.get_skill(name) is None

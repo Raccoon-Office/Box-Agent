@@ -2191,6 +2191,11 @@ async def run_agent(
             memory_mgr = resources.memory_manager
             memory_extractor = agent_session.memory_extractor
             skill_loader = agent_session.skill_loader
+            await asyncio.to_thread(
+                AgentService.confirm_plugin_startup, config, skill_loader,
+                runtime_env=getattr(agent_session.agent.tools.get("bash"), "runtime_env", None),
+                available_tools=agent_session.agent.tools,
+            )
             mcp_task = resources.mcp_task
             grant_store = agent_session.grant_store
             if not allow_full_access:
@@ -2837,6 +2842,9 @@ async def run_agent(
 
 def main() -> int:
     """Main entry point for CLI"""
+    if sys.argv[1:] in (["--plugin-management"], ["plugins"]):
+        from .plugin_management import main as manage_plugins
+        return manage_plugins()
     # Parse command line arguments
     args = parse_args()
 

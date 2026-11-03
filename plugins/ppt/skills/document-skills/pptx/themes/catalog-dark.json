@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "themes": [
+    {
+      "id": "8-bit-orbit",
+      "name": "8-Bit Orbit",
+      "description": "Pixel-art neon arcade energy on a deep navy void.",
+      "source_reference": "beautiful-html-templates/8-bit-orbit",
+      "selection": {
+        "visual_dna_ids": ["8-bit-orbit"],
+        "mood_keywords": ["retro-tech", "playful", "cyberpunk", "energetic", "pixel", "neon", "复古科技", "像素", "霓虹"],
+        "industry_fit": ["gaming", "developer tools", "hackathon", "web3", "indie product", "tech talk"],
+        "density": "medium",
+        "scheme": "dark",
+        "formality": "low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#0A0E27",
+        "surface": "#0F1B3D",
+        "surface_strong": "#18265A",
+        "primary": "#5EDCF4",
+        "primary_soft": "#183754",
+        "text": "#E2D5F2",
+        "muted": "#AAA1C3",
+        "border": "#2A3E70",
+        "inverse": "#0A0E27",
+        "chart": ["#5EDCF4", "#F0A6CA", "#F4D03F", "#E2D5F2"]
+      },
+      "typography": {
+        "display": "Tektur, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Chakra Petch, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+        "label": "Space Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 4,
+        "radius_large": 8,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "pixel",
+        "surface": "outline",
+        "shadow": "glow",
+        "heading": "pixel",
+        "label": "boxed",
+        "accent": "bracket",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "broadside",
+      "name": "Broadside",
+      "description": "Near-black newspaper canvas with warm paper type and fire-orange emphasis.",
+      "source_reference": "beautiful-html-templates/broadside",
+      "selection": {
+        "visual_dna_ids": ["broadside"],
+        "mood_keywords": ["editorial", "dramatic", "loud", "newspaper", "graphic", "报纸", "戏剧性", "大胆"],
+        "industry_fit": ["brand manifesto", "creative talk", "editorial", "design presentation", "bilingual deck"],
+        "density": "medium",
+        "scheme": "dark",
+        "formality": "medium",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#111111",
+        "surface": "#1A1A18",
+        "surface_strong": "#282826",
+        "primary": "#E85D26",
+        "primary_soft": "#3B241B",
+        "text": "#F0ECE5",
+        "muted": "#888880",
+        "border": "#3A3A36",
+        "inverse": "#111111",
+        "alt_background": "#E85D26",
+        "alt_surface": "#F17443",
+        "alt_text": "#111111",
+        "alt_muted": "#432318",
+        "alt_border": "#111111",
+        "alt_primary": "#111111",
+        "chart": ["#E85D26", "#F0ECE5", "#888880", "#B94318"]
+      },
+      "typography": {
+        "display": "Barlow, Arial Black, Noto Sans SC, PingFang SC, sans-serif",
+        "body": "Barlow, Arial, Noto Sans SC, PingFang SC, sans-serif",
+        "label": "IBM Plex Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "condensed",
+        "label": "mono",
+        "accent": "underline",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "pink-script",
+      "name": "Pink Script",
+      "description": "Nocturnal black canvas with a single hot-pink luxury editorial accent.",
+      "source_reference": "beautiful-html-templates/pink-script",
+      "selection": {
+        "visual_dna_ids": ["pink-script"],
+        "mood_keywords": ["nocturnal", "moody", "luxe", "expressive", "editorial", "夜色", "奢华", "热粉"],
+        "industry_fit": ["fashion", "luxury", "beauty", "editorial", "creative brand", "portfolio"],
+        "density": "low",
+        "scheme": "dark",
+        "formality": "medium-high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#060507",
+        "surface": "#171017",
+        "surface_strong": "#3A2634",
+        "primary": "#ED3D8C",
+        "primary_soft": "#3B1028",
+        "text": "#F5EDF1",
+        "muted": "#C69CB2",
+        "border": "#51243A",
+        "inverse": "#060507",
+        "alt_background": "#F5EDF1",
+        "alt_surface": "#EADCE3",
+        "alt_text": "#060507",
+        "alt_muted": "#6D4A5A",
+        "alt_border": "#C9A9B8",
+        "alt_primary": "#B81D67",
+        "chart": ["#ED3D8C", "#FF66A8", "#F5EDF1", "#6F5AE8"]
+      },
+      "typography": {
+        "display": "Instrument Serif, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Inter, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "gradient",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "mono",
+        "accent": "dot",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "studio",
+      "name": "Studio",
+      "description": "Warm-black canvas with electric-yellow type and high-voltage graphic restraint.",
+      "source_reference": "beautiful-html-templates/studio",
+      "selection": {
+        "visual_dna_ids": ["studio"],
+        "mood_keywords": ["electric", "bold", "graphic", "design-led", "high contrast", "黑黄", "强对比", "工作室"],
+        "industry_fit": ["design studio", "creative agency", "brand", "fashion", "editorial technology"],
+        "density": "medium",
+        "scheme": "dark",
+        "formality": "medium",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#1C1C1C",
+        "surface": "#242422",
+        "surface_strong": "#4B4212",
+        "primary": "#F5D200",
+        "primary_soft": "#3D3811",
+        "text": "#F4EEDC",
+        "muted": "#B8AA72",
+        "border": "#4B4619",
+        "inverse": "#1C1C1C",
+        "alt_background": "#F5D200",
+        "alt_surface": "#F0CC00",
+        "alt_text": "#1C1C1C",
+        "alt_muted": "#514800",
+        "alt_border": "#1C1C1C",
+        "alt_primary": "#1C1C1C",
+        "chart": ["#F5D200", "#F4EEDC", "#8F9AA5", "#E66A3D"]
+      },
+      "typography": {
+        "display": "Barlow, Arial Black, Noto Sans SC, PingFang SC, sans-serif",
+        "body": "Barlow, Arial, Noto Sans SC, PingFang SC, sans-serif",
+        "label": "IBM Plex Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "poster",
+        "label": "mono",
+        "accent": "block",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "vellum",
+      "name": "Vellum",
+      "description": "Deep periwinkle navy with warm-yellow italic serif and scholarly restraint.",
+      "source_reference": "beautiful-html-templates/vellum",
+      "selection": {
+        "visual_dna_ids": ["vellum"],
+        "mood_keywords": ["scholarly", "literary", "patient", "intellectual", "quiet", "学术", "文学", "沉静"],
+        "industry_fit": ["research", "white paper", "academic", "advisory", "founder reflection"],
+        "density": "low",
+        "scheme": "dark",
+        "formality": "high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#2A3870",
+        "surface": "#343F80",
+        "surface_strong": "#414D8C",
+        "primary": "#3A7878",
+        "primary_text": "#E8D85C",
+        "primary_soft": "#334D75",
+        "text": "#E8D85C",
+        "muted": "#B6AD6A",
+        "border": "#59628A",
+        "inverse": "#FFFFFF",
+        "chart": ["#E8D85C", "#3A7878", "#B6AD6A", "#7985B8"]
+      },
+      "typography": {
+        "display": "Cormorant Garamond, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "DM Sans, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Courier Prime, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "italic",
+        "label": "mono",
+        "accent": "underline",
+        "alternation": "none"
+      }
+    }
+  ]
+}

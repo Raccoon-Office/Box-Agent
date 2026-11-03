@@ -28,8 +28,26 @@ def test_hint_only_for_non_chinese_and_appended_after_the_request():
     english = "Write a short product blurb based on product.md and save it as blurb.md."
     message = with_deliverable_language_hint(english)
     assert message.startswith(english)
-    assert message.endswith("unless the user asks for a specific language.]")
+    assert "[Deliverable language fallback: English." in message
+    assert "If none applies, use English." in message
     assert with_deliverable_language_hint("帮我写一段产品介绍") == "帮我写一段产品介绍"
+
+
+def test_english_hint_preserves_explicit_user_choices_and_scoped_skill_defaults():
+    text = "Please write a short report for the board in Japanese and save it as report.md."
+    message = with_deliverable_language_hint(text)
+    assert message.startswith(text)
+    hint = deliverable_language_hint(text)
+    assert "this alone is not an explicit deliverable-language choice" in hint
+    assert (
+        "Priority: the user's explicit instruction this turn, then a language the user explicitly "
+        "confirmed earlier for this task, then an applicable non-auto output-language default"
+    ) in hint
+    assert "currently loaded Skill from active Schema-validated configuration" in hint
+    assert "only to that Skill's deliverables" in hint
+    assert "existing files, and an earlier model response do not establish a confirmed language choice" in hint
+    assert "does not change reply/progress language or grant tools or execution permission" in hint
+    assert "write any files you create" not in hint
 
 
 @pytest.mark.asyncio
@@ -57,9 +75,12 @@ async def test_acp_prompt_places_hint_beside_the_user_request(tmp_path, text, hi
     [user_message] = [content for role, content in llm.calls[0] if role == "user"]
     assert user_message.startswith("[Host UI language: Chinese.")
     assert user_message.endswith(_EMPTY_CONNECTOR_CONTEXT)
-    assert ("[Deliverable language: English." in user_message) is hinted
+    assert ("[Deliverable language fallback: English." in user_message) is hinted
     if hinted:
         assert user_message.index(text) < user_message.index("[Deliverable language")
+        assert "If none applies, use English." in user_message
+        assert "Skill from active Schema-validated configuration" in user_message
+        assert "write any files you create" not in user_message
 
 
 @pytest.mark.parametrize('text', [

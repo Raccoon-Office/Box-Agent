@@ -1,0 +1,275 @@
+{
+  "version": 1,
+  "required_fields": [
+    "role",
+    "scene",
+    "audience",
+    "page_count"
+  ],
+  "high_impact_fields": [
+    "scene",
+    "audience"
+  ],
+  "defaults": {
+    "role": "role_marketing",
+    "scene": "scene_work_report",
+    "audience": "audience_internal",
+    "page_count": "page_count_auto",
+    "mode": "normal"
+  },
+  "fields": [
+    {
+      "id": "role",
+      "label": "身份角色",
+      "label_key": "pptConfig.categories.role",
+      "allow_custom": true,
+      "options": [
+        {
+          "id": "role_manager",
+          "label": "企业管理者",
+          "label_key": "pptConfig.homeRoles.manager",
+          "aliases": ["企业管理者", "高管", "领导", "经理", "总监", "CEO", "manager", "executive"]
+        },
+        {
+          "id": "role_student",
+          "label": "学生",
+          "label_key": "pptConfig.roles.student",
+          "aliases": ["学生", "同学", "student"]
+        },
+        {
+          "id": "role_researcher",
+          "label": "研究人员",
+          "label_key": "pptConfig.roles.researcher",
+          "aliases": ["研究人员", "研究员", "科研人员", "researcher"]
+        },
+        {
+          "id": "role_sales",
+          "label": "销售",
+          "label_key": "pptConfig.roles.sales",
+          "aliases": ["销售", "销售人员", "sales"]
+        },
+        {
+          "id": "role_marketing",
+          "label": "市场",
+          "label_key": "pptConfig.roles.marketing",
+          "aliases": ["市场人员", "市场部", "marketing"]
+        },
+        {
+          "id": "role_marketing_promotion",
+          "label": "营销",
+          "label_key": "pptConfig.roles.marketingPromotion",
+          "aliases": ["营销", "推广", "品牌营销", "promotion"]
+        },
+        {
+          "id": "role_product_manager",
+          "label": "产品经理",
+          "label_key": "pptConfig.roles.productManager",
+          "aliases": ["产品经理", "产品负责人", "product manager", "PM"]
+        },
+        {
+          "id": "role_project_manager",
+          "label": "项目经理",
+          "label_key": "pptConfig.roles.projectManager",
+          "aliases": ["项目经理", "项目负责人", "project manager"]
+        },
+        {
+          "id": "role_teacher",
+          "label": "教师",
+          "label_key": "pptConfig.roles.teacher",
+          "aliases": ["教师", "老师", "讲师", "teacher"]
+        },
+        {
+          "id": "role_trainer",
+          "label": "培训师",
+          "label_key": "pptConfig.roles.trainer",
+          "aliases": ["培训师", "培训讲师", "trainer"]
+        },
+        {
+          "id": "role_finance",
+          "label": "财务",
+          "label_key": "pptConfig.roles.finance",
+          "aliases": ["财务", "财务人员", "finance"]
+        },
+        {
+          "id": "role_accounting",
+          "label": "会计",
+          "label_key": "pptConfig.roles.accounting",
+          "aliases": ["会计", "accounting", "accountant"]
+        },
+        {
+          "id": "role_administration",
+          "label": "行政",
+          "label_key": "pptConfig.roles.administration",
+          "aliases": ["行政", "行政人员", "administration"]
+        },
+        {
+          "id": "role_hr",
+          "label": "人力资源",
+          "label_key": "pptConfig.roles.hr",
+          "aliases": ["人力资源", "人事", "HR", "human resources"]
+        }
+      ]
+    },
+    {
+      "id": "scene",
+      "label": "使用场景",
+      "label_key": "pptConfig.categories.scene",
+      "allow_custom": true,
+      "options": [
+        {
+          "id": "scene_work_report",
+          "label": "工作汇报",
+          "label_key": "pptConfig.scenes.workReport",
+          "aliases": ["工作汇报", "述职", "复盘", "总结汇报", "进度汇报", "work report"]
+        },
+        {
+          "id": "scene_market_research",
+          "label": "市场调研",
+          "label_key": "pptConfig.scenes.marketResearch",
+          "aliases": ["市场调研", "市场研究", "行业分析", "竞品分析", "market research"]
+        },
+        {
+          "id": "scene_training",
+          "label": "培训教学",
+          "label_key": "pptConfig.scenes.training",
+          "aliases": ["培训教学", "培训课件", "课程", "教学", "training"]
+        },
+        {
+          "id": "scene_knowledge_sharing",
+          "label": "知识分享",
+          "aliases": ["读书分享", "读书会", "知识分享", "内部分享", "分享会", "knowledge sharing", "book sharing"]
+        },
+        {
+          "id": "scene_academic_speech",
+          "label": "学术演讲",
+          "label_key": "pptConfig.scenes.academicSpeech",
+          "aliases": ["学术演讲", "学术报告", "论文答辩", "课题汇报", "academic"]
+        },
+        {
+          "id": "scene_business_proposal",
+          "label": "商业提案",
+          "label_key": "pptConfig.scenes.businessProposal",
+          "aliases": ["商业提案", "商业计划书", "融资路演", "项目提案", "方案汇报", "proposal", "pitch deck"]
+        },
+        {
+          "id": "scene_event_planning",
+          "label": "活动策划",
+          "label_key": "pptConfig.scenes.eventPlanning",
+          "aliases": ["活动策划", "活动方案", "campaign", "event planning"]
+        }
+      ]
+    },
+    {
+      "id": "audience",
+      "label": "目标受众",
+      "label_key": "pptConfig.categories.audience",
+      "allow_custom": true,
+      "options": [
+        {
+          "id": "audience_internal",
+          "label": "公司内部",
+          "label_key": "pptConfig.audiences.internal",
+          "aliases": ["公司内部", "内部", "同事", "团队", "管理层", "internal"]
+        },
+        {
+          "id": "audience_external_clients",
+          "label": "外部客户",
+          "label_key": "pptConfig.audiences.externalClients",
+          "aliases": ["外部客户", "客户", "甲方", "合作伙伴", "client", "customer"]
+        },
+        {
+          "id": "audience_investors",
+          "label": "投资人",
+          "label_key": "pptConfig.audiences.investors",
+          "aliases": ["投资人", "投资机构", "股东", "investor"]
+        },
+        {
+          "id": "audience_students",
+          "label": "学生",
+          "label_key": "pptConfig.audiences.students",
+          "aliases": ["学生", "学员", "同学", "students"]
+        },
+        {
+          "id": "audience_public",
+          "label": "大众群体",
+          "label_key": "pptConfig.audiences.publicAudience",
+          "aliases": ["大众群体", "公众", "普通用户", "public audience"]
+        },
+        {
+          "id": "audience_professionals",
+          "label": "专业人士",
+          "label_key": "pptConfig.audiences.professionals",
+          "aliases": ["专业人士", "专家", "业内人士", "professionals"]
+        }
+      ]
+    },
+    {
+      "id": "page_count",
+      "label": "页数",
+      "label_key": "homePPTConfig.labels.pageCount",
+      "allow_custom": false,
+      "boundary_policy": "prefer_range_ending_at_count",
+      "options": [
+        {
+          "id": "page_count_auto",
+          "label": "根据内容",
+          "aliases": ["根据内容", "智能推荐", "自动", "auto", "content-driven"]
+        },
+        {
+          "id": "page_count_1_4",
+          "label": "1-4页",
+          "label_key": "pptConfig.pageCounts.1-4",
+          "min": 1,
+          "max": 4
+        },
+        {
+          "id": "page_count_5_10",
+          "label": "5-10页",
+          "label_key": "pptConfig.pageCounts.5-10",
+          "min": 5,
+          "max": 10
+        },
+        {
+          "id": "page_count_10_15",
+          "label": "10-15页",
+          "label_key": "pptConfig.pageCounts.10-15",
+          "min": 10,
+          "max": 15
+        },
+        {
+          "id": "page_count_15_20",
+          "label": "15-20页",
+          "label_key": "pptConfig.pageCounts.15-20",
+          "min": 15,
+          "max": 20
+        },
+        {
+          "id": "page_count_20_plus",
+          "label": "20页以上",
+          "label_key": "pptConfig.pageCounts.20+",
+          "min": 20
+        }
+      ]
+    },
+    {
+      "id": "mode",
+      "label": "视觉模式",
+      "label_key": "pptPreflight.mode",
+      "allow_custom": false,
+      "options": [
+        {
+          "id": "normal",
+          "label": "标准",
+          "label_key": "pptConfig.modes.normal",
+          "aliases": ["标准", "商务", "简洁", "专业", "normal", "standard"]
+        },
+        {
+          "id": "creative",
+          "label": "创意",
+          "label_key": "pptConfig.modes.creative",
+          "aliases": ["创意", "视觉化", "海报感", "插画", "creative", "image-rich"]
+        }
+      ]
+    }
+  ]
+}

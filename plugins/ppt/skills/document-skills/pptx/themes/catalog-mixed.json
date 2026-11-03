@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "themes": [
+    {
+      "id": "coral",
+      "name": "Coral",
+      "description": "Near-black and warm-cream editorial surfaces with one saturated coral signature.",
+      "source_reference": "beautiful-html-templates/coral",
+      "selection": {
+        "visual_dna_ids": ["coral"],
+        "mood_keywords": ["bold", "warm", "graphic", "punchy", "magazine", "珊瑚红", "杂志", "醒目"],
+        "industry_fit": ["brand", "marketing", "consumer product", "creative agency", "editorial", "launch"],
+        "density": "medium",
+        "scheme": "mixed",
+        "formality": "medium",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#1A1A1A",
+        "surface": "#26201F",
+        "surface_strong": "#352826",
+        "primary": "#E85D5D",
+        "primary_soft": "#462727",
+        "text": "#F5F0E8",
+        "muted": "#B9ADA0",
+        "border": "#514943",
+        "inverse": "#1A1A1A",
+        "alt_background": "#F5F0E8",
+        "alt_surface": "#E8E0D4",
+        "alt_text": "#1A1A1A",
+        "alt_muted": "#6B6B6B",
+        "alt_border": "#BEB4A8",
+        "alt_primary": "#D44A4A",
+        "chart": ["#E85D5D", "#F5F0E8", "#A56E68", "#4F7C78"]
+      },
+      "typography": {
+        "display": "Bebas Neue, Arial Narrow, Noto Sans SC, PingFang SC, sans-serif",
+        "body": "Inter, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Inter, Noto Sans SC, PingFang SC, Arial, sans-serif"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 6,
+        "radius_large": 10,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "condensed",
+        "label": "boxed",
+        "accent": "block",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "editorial-tri-tone",
+      "name": "Editorial Tri-Tone",
+      "description": "Dusty pink, mustard cream, and burgundy arranged as decisive magazine color fields.",
+      "source_reference": "beautiful-html-templates/editorial-tri-tone",
+      "selection": {
+        "visual_dna_ids": ["editorial-tri-tone"],
+        "mood_keywords": ["editorial", "warm", "intentional", "moody", "magazine", "三色", "编辑", "杂志"],
+        "industry_fit": ["fashion", "culture", "editorial", "creative brand", "design review", "portfolio"],
+        "density": "medium",
+        "scheme": "mixed",
+        "formality": "medium-high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F2B6C6",
+        "surface": "#F2D86A",
+        "surface_strong": "#E8A2B5",
+        "primary": "#7A1F35",
+        "primary_soft": "#E8A2B5",
+        "text": "#7A1F35",
+        "muted": "#9C5164",
+        "border": "#7A1F35",
+        "inverse": "#F2D86A",
+        "alt_background": "#7A1F35",
+        "alt_surface": "#8D2A43",
+        "alt_text": "#F2D86A",
+        "alt_muted": "#E5B9A8",
+        "alt_border": "#F2B6C6",
+        "alt_primary": "#F2B6C6",
+        "chart": ["#7A1F35", "#F2D86A", "#F2B6C6", "#B85B73"]
+      },
+      "typography": {
+        "display": "Bricolage Grotesque, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Instrument Serif, Noto Serif SC, Songti SC, Georgia, serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "mono",
+        "accent": "block",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "grove",
+      "name": "Grove",
+      "description": "Deep forest green, warm bone, and restrained rust-red with literary calm.",
+      "source_reference": "beautiful-html-templates/grove",
+      "selection": {
+        "visual_dna_ids": ["grove"],
+        "mood_keywords": ["organic", "considered", "warm", "patient", "literary", "森林绿", "有机", "沉静"],
+        "industry_fit": ["sustainability", "research", "culture", "hospitality", "advisory", "brand story"],
+        "density": "medium",
+        "scheme": "mixed",
+        "formality": "high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#192B1B",
+        "surface": "#1E3221",
+        "surface_strong": "#29412C",
+        "primary": "#B74640",
+        "primary_text": "#E07068",
+        "primary_soft": "#44312A",
+        "text": "#D4CFBF",
+        "muted": "#9F9A8D",
+        "border": "#435845",
+        "inverse": "#FFFFFF",
+        "alt_background": "#E8E4D6",
+        "alt_surface": "#DCD7C6",
+        "alt_text": "#192B1B",
+        "alt_muted": "#59645A",
+        "alt_border": "#B7B1A1",
+        "alt_primary": "#A93F39",
+        "chart": ["#C8524A", "#D4CFBF", "#718A73", "#A98058"]
+      },
+      "typography": {
+        "display": "Playfair Display, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Jost, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 4,
+        "radius_large": 8,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "paper",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "mono",
+        "accent": "line",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "mat",
+      "name": "Mat",
+      "description": "Tactile sage green and bone paper with a focused burnt-orange accent.",
+      "source_reference": "beautiful-html-templates/mat",
+      "selection": {
+        "visual_dna_ids": ["mat"],
+        "mood_keywords": ["warm-modern", "considered", "tactile", "mid-century", "sage", "鼠尾草绿", "触感", "现代"],
+        "industry_fit": ["interior", "architecture", "product design", "hospitality", "brand", "strategy"],
+        "density": "medium",
+        "scheme": "mixed",
+        "formality": "medium-high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#232E26",
+        "surface": "#2E3D30",
+        "surface_strong": "#3B4A3D",
+        "primary": "#9A4E1D",
+        "primary_text": "#E29A58",
+        "primary_soft": "#493421",
+        "text": "#F0E8D2",
+        "muted": "#B6AD96",
+        "border": "#4A5B4C",
+        "inverse": "#FFFFFF",
+        "alt_background": "#EDE6D0",
+        "alt_surface": "#DED4B9",
+        "alt_text": "#232E26",
+        "alt_muted": "#6F6654",
+        "alt_border": "#B7AA8D",
+        "alt_primary": "#A25522",
+        "chart": ["#C07030", "#7A4E24", "#8FA08C", "#F0E8D2"]
+      },
+      "typography": {
+        "display": "Bricolage Grotesque, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "DM Sans, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "DM Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 10,
+        "radius_medium": 18,
+        "radius_large": 28,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "gradient",
+        "surface": "soft",
+        "shadow": "soft",
+        "heading": "editorial",
+        "label": "mono",
+        "accent": "dot",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "signal",
+      "name": "Signal",
+      "description": "Deep navy, warm bone, and muted gold for institutional and investor-facing authority.",
+      "source_reference": "beautiful-html-templates/signal",
+      "selection": {
+        "visual_dna_ids": ["signal"],
+        "mood_keywords": ["institutional", "trustworthy", "considered", "weighty", "authoritative", "机构", "可信", "稳重"],
+        "industry_fit": ["investor deck", "consulting", "board presentation", "legal", "policy", "academic", "advisory", "B2B"],
+        "density": "high",
+        "scheme": "mixed",
+        "formality": "high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#1C2644",
+        "surface": "#232F55",
+        "surface_strong": "#2E3D5C",
+        "primary": "#C8A870",
+        "primary_soft": "#3D3D4B",
+        "text": "#E2DCD0",
+        "muted": "#8A96A8",
+        "border": "#2E3D5C",
+        "inverse": "#1A2030",
+        "alt_background": "#F0ECE3",
+        "alt_surface": "#E6E0D4",
+        "alt_text": "#1A2030",
+        "alt_muted": "#5A6270",
+        "alt_border": "#CAC4B4",
+        "alt_primary": "#8C6D33",
+        "chart": ["#C8A870", "#8A96A8", "#D9C8A3", "#6C7D9A"]
+      },
+      "typography": {
+        "display": "Source Serif 4, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "DM Sans, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "IBM Plex Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 2,
+        "radius_large": 2,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "grid",
+        "surface": "outline",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "mono",
+        "accent": "line",
+        "alternation": "section"
+      }
+    }
+  ]
+}

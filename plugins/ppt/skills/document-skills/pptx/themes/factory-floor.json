@@ -1,0 +1,45 @@
+{
+  "id": "factory-floor",
+  "name": "Factory Floor",
+  "description": "A production-floor control system with safety yellow, machine blue, station rails, inspection marks, tolerance labels, and operational discipline.",
+  "source_reference": "beautiful-html-templates/technical-blueprint",
+  "selection": {
+    "visual_dna_ids": ["factory-floor"],
+    "mood_keywords": ["industrial", "precise", "operational", "safety", "engineering", "制造", "工业", "精益", "质量", "车间"],
+    "industry_fit": ["manufacturing", "factory operations", "industrial engineering", "quality management", "lean production", "制造业", "工厂运营", "生产管理", "质量管理", "精益生产"],
+    "density": "high",
+    "scheme": "industrial-light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#EEF1F2",
+    "surface": "#FAFBF8",
+    "surface_strong": "#DCE3E6",
+    "primary": "#173F5F",
+    "primary_soft": "#D7E2E9",
+    "text": "#101820",
+    "muted": "#53636D",
+    "border": "#81939D",
+    "inverse": "#FFFFFF",
+    "alt_background": "#173F5F",
+    "alt_surface": "#214E70",
+    "alt_text": "#F7FAFC",
+    "alt_muted": "#CFDAE0",
+    "alt_border": "#6F8798",
+    "alt_primary": "#F2C94C",
+    "alt_primary_text": "#F2C94C",
+    "chart": ["#173F5F", "#F2C94C", "#27896F", "#D55E3B"]
+  },
+  "typography": {
+    "display": "Barlow Condensed, Arial Narrow, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 0, "radius_medium": 2, "radius_large": 4, "border_width": 2},
+  "style": {"canvas": "grid", "surface": "outline", "shadow": "none", "heading": "condensed", "label": "mono", "accent": "bracket", "alternation": "section"},
+  "composition": {
+    "default_family": "technical-schematic",
+    "allowed_families": ["technical-schematic", "analytical-exhibit", "institutional-grid", "brutalist-frame"]
+  }
+}

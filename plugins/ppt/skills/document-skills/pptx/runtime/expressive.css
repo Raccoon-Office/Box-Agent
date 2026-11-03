@@ -1,0 +1,288 @@
+/* Page-owned canvas variants. Keep theme typography and palette, without the
+   family shell shrinking the same focal composition into another card. */
+body[data-deck-theme] .slide.expressive-slide {
+  display: block;
+  padding: 72px 88px;
+  border: 0;
+  border-radius: 0;
+  background: var(--deck-base-bg);
+  color: var(--deck-base-text);
+  --deck-text: var(--deck-base-text);
+  --deck-muted: var(--deck-base-muted);
+  --deck-bg: var(--deck-base-bg);
+}
+
+body[data-deck-theme] .slide.expressive-slide::before,
+body[data-deck-theme] .slide.expressive-slide::after { display: none; }
+
+body[data-deck-theme] .expressive-slide .expressive-content {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  gap: 28px;
+}
+
+body[data-deck-theme] .expressive-slide:not(.open-structured) [data-prop-kind="text"] {
+  position: relative;
+  min-width: 0;
+  margin: 0;
+  padding: 0 24px 16px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  text-shadow: none;
+  text-transform: none;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+  transform: none;
+}
+
+body[data-deck-theme] .expressive-slide:not(.open-structured) [data-prop-kind="text"]::before,
+body[data-deck-theme] .expressive-slide:not(.open-structured) [data-prop-kind="text"]::after { display: none; }
+
+body[data-deck-theme] .expressive-slide .expressive-label {
+  font-family: var(--deck-label);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+body[data-deck-theme] .expressive-slide .expressive-summary {
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+body[data-deck-theme] .expressive-slide .expressive-caption,
+body[data-deck-theme] .expressive-slide .expressive-footer {
+  font-size: 22px;
+  line-height: 1.4;
+}
+
+body[data-deck-theme] .expressive-slide > .deck-page {
+  right: 60px;
+  bottom: 20px;
+  color: inherit;
+}
+
+body[data-deck-theme] .slide.expressive-cover {
+  background: var(--deck-poster-bg);
+  color: var(--deck-poster-text);
+}
+
+body[data-deck-voice="sketch"] .slide.expressive-cover {
+  background: var(--deck-base-bg);
+  color: var(--deck-base-text);
+}
+
+body[data-deck-theme] .expressive-cover .expressive-content {
+  grid-template-rows: 56px minmax(0, 1fr) 208px 44px;
+}
+body[data-deck-theme] .expressive-cover-dense .expressive-content {
+  grid-template-rows: 56px minmax(0, 1fr) 288px 44px;
+}
+
+body[data-deck-theme] .expressive-masthead {
+  display: flex;
+  justify-content: space-between;
+  gap: 56px;
+  border-bottom: 2px solid currentColor;
+}
+body[data-deck-theme] .expressive-masthead > * { flex: 1; }
+body[data-deck-theme] .expressive-masthead > :last-child { text-align: right; }
+
+body[data-deck-theme] .expressive-title-stage {
+  display: flex;
+  align-items: center;
+  min-height: 0;
+}
+
+body[data-deck-theme] .expressive-cover .expressive-title {
+  width: 100%;
+  font-family: var(--deck-display);
+  font-size: var(--expressive-title-size);
+  font-weight: 800;
+  line-height: 1.3;
+  padding-bottom: 36px;
+}
+
+body[data-deck-theme] .expressive-align-center .expressive-title { text-align: center; }
+
+body[data-deck-theme] .expressive-cover-bottom {
+  display: grid;
+  grid-template-columns: 1.8fr 1fr;
+  gap: 96px;
+  align-items: start;
+}
+
+body[data-deck-theme] .expressive-tags {
+  display: flex;
+  align-content: start;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+}
+
+body[data-deck-theme] .expressive-slide .expressive-tag {
+  max-width: 100%;
+  font-size: 22px;
+  line-height: 1.35;
+  border-bottom: 1px solid currentColor;
+}
+body[data-deck-theme] .expressive-cover-dense .expressive-tags {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+body[data-deck-theme] .expressive-cover-dense .expressive-tag { font-size: 20px; }
+
+body[data-deck-theme] .expressive-image .expressive-content {
+  grid-template: auto minmax(0, 1fr) / minmax(0, 1fr) 464px;
+  column-gap: 64px;
+}
+
+body[data-deck-theme] .expressive-image-heading { grid-column: 1 / -1; }
+
+body[data-deck-theme] .expressive-slide .expressive-image-title {
+  font-size: var(--expressive-title-size, 64px);
+  line-height: 1.12;
+  font-weight: 700;
+}
+
+body[data-deck-theme] .expressive-media {
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+body[data-deck-theme] .expressive-media .expressive-photo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  transform: none;
+}
+
+body[data-deck-theme] .expressive-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  min-width: 0;
+  border-top: 3px solid var(--deck-primary);
+  padding-top: 28px;
+}
+
+body[data-deck-theme] .expressive-notes .expressive-summary { font-size: 24px; }
+body[data-deck-theme] .expressive-notes .expressive-caption { margin-top: auto; }
+
+body[data-deck-theme] .expressive-project .expressive-summary { font-size: 22px; }
+body[data-deck-theme] .expressive-image-dense .expressive-notes { gap: 20px; padding-top: 20px; }
+body[data-deck-theme] .expressive-image-dense .expressive-summary { font-size: 22px; }
+body[data-deck-theme] .expressive-image-dense.expressive-project .expressive-summary { font-size: 20px; }
+body[data-deck-theme] .expressive-image-dense .expressive-caption { font-size: 20px; }
+body[data-deck-theme] .expressive-project .expressive-content { grid-template-rows: auto minmax(0, 1fr) auto; }
+body[data-deck-theme] .expressive-proofs {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 32px;
+  border-top: 2px solid var(--deck-border);
+  padding-top: 24px;
+}
+body[data-deck-theme] .expressive-proof { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+body[data-deck-theme] .expressive-proof-value { font-size: 30px; line-height: 1.25; }
+body[data-deck-theme] .expressive-proof-label { font-size: 22px; line-height: 1.35; }
+
+body[data-deck-theme] .expressive-media-right .expressive-content {
+  grid-template-columns: 464px minmax(0, 1fr);
+}
+body[data-deck-theme] .expressive-media-right .expressive-media { grid-column: 2; grid-row: 2; }
+body[data-deck-theme] .expressive-media-right .expressive-notes { grid-column: 1; grid-row: 2; }
+
+body[data-deck-theme] .expressive-metrics .expressive-content { grid-template-rows: auto minmax(0, 1fr); }
+body[data-deck-theme] .expressive-metric-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-auto-flow: row;
+  gap: 28px 72px;
+  min-height: 0;
+}
+body[data-deck-theme] .expressive-metric {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  border-top: 2px solid var(--deck-border);
+  padding-top: 20px;
+}
+body[data-deck-theme] .expressive-metric:first-child {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  border-top: 0;
+  padding-top: 0;
+  padding-right: 48px;
+  border-right: 2px solid var(--deck-border);
+}
+body[data-deck-theme] .expressive-metric:not(:first-child) { grid-column: 2; }
+body[data-deck-theme] .expressive-metric-label { font-size: 28px; line-height: 1.25; }
+body[data-deck-theme] .expressive-metric-value {
+  font-family: var(--deck-display);
+  font-size: var(--expressive-value-size);
+  font-weight: 750;
+  line-height: 1.3;
+  padding-bottom: 36px;
+  color: var(--deck-focus-text);
+}
+body[data-deck-theme] .expressive-metric-detail { font-size: 24px; line-height: 1.4; }
+body[data-deck-theme] .expressive-metric-delta { font-size: 22px; line-height: 1.3; }
+
+body[data-deck-theme] :is(.expressive-count-4, .expressive-count-5, .expressive-count-6) .expressive-metric-grid {
+  grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(0, 1fr));
+  column-gap: 40px;
+}
+body[data-deck-theme] :is(.expressive-count-4, .expressive-count-5, .expressive-count-6) .expressive-metric:not(:first-child) { grid-column: auto; }
+body[data-deck-theme] .expressive-count-6 .expressive-metric:first-child { grid-row: 1 / span 3; }
+body[data-deck-theme] .expressive-count-6 .expressive-metric:not(:first-child) { padding-top: 12px; }
+body[data-deck-theme] .expressive-count-6 .expressive-metric:not(:first-child) .expressive-metric-value { font-size: min(var(--expressive-value-size), 56px); }
+body[data-deck-theme] :is(.expressive-count-4, .expressive-count-5, .expressive-count-6) .expressive-metric:first-child .expressive-metric-value { font-size: min(var(--expressive-value-size), 210px); }
+
+/* Dense support copy needs two rows of open metrics, not a tall hero spanning
+   three rows. The first value stays emphasized without dropping any fields. */
+body[data-deck-theme] .expressive-metrics-dense .expressive-metric-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 24px 40px;
+}
+body[data-deck-theme] .expressive-metrics-dense .expressive-metric,
+body[data-deck-theme] .expressive-metrics-dense .expressive-metric:first-child {
+  grid-row: auto;
+  grid-column: auto;
+  justify-content: start;
+  padding: 12px 0 0;
+  border-right: 0;
+  border-top: 2px solid var(--deck-border);
+}
+body[data-deck-theme] .expressive-metrics-dense .expressive-metric [data-prop-kind="text"] { padding-bottom: 8px; }
+body[data-deck-theme] .expressive-metrics-dense .expressive-metric .expressive-metric-label { font-size: 22px; }
+body[data-deck-theme] .expressive-metrics.expressive-metrics-dense .expressive-metric .expressive-metric-value { font-size: min(var(--expressive-value-size), 40px); }
+body[data-deck-theme] .expressive-metrics-dense .expressive-metric .expressive-metric-detail { font-size: 20px; line-height: 1.3; }
+body[data-deck-theme] .expressive-metrics-dense .expressive-metric .expressive-metric-delta { font-size: 18px; }
+
+/* Applied only to explicitly marked display text. The runtime changes size,
+   never the text or its editable prop binding. */
+body[data-deck-theme] .slide [data-deck-text-fit="heading"] {
+  text-wrap: balance;
+  overflow-wrap: normal;
+}
+body[data-deck-theme] .slide [data-deck-text-fit="metric"] {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.slide [data-deck-fit-applied] {
+  font-size: var(--deck-fit-font-size) !important;
+}

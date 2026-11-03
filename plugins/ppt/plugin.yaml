@@ -1,0 +1,49 @@
+schema_version: 1
+id: com.box.ppt
+version: 1.0.3
+display_name: PPT
+description: 使用现有 Box-Agent 工具制作演示文稿
+requires:
+  box_agent: ">=1.0.0 <2.0.0"
+  plugin_api: 1
+  runtime_profile: ppt-host-v1
+runtime:
+  kind: resources
+config_schema: config.schema.json
+ui:
+  config:
+    entry: ui/config.html
+    bridge_version: 1
+contributes:
+  skills:
+    - id: pptx
+      path: skills/pptx
+      config_keys: [language, preferred_mode]
+    - id: ppt_fast
+      enabled_by: [pptx]
+      path: skills/document-skills/pptx
+      config_keys: [language]
+      requires_host_tools: [bash, append_file, query_jsonl, report_execution_result]
+    - id: sn_ppt_entry
+      enabled_by: [pptx]
+      path: skills/presentation-suite/skills/sn-ppt-entry
+      config_keys: [language]
+    - id: sn_ppt_story
+      enabled_by: [pptx]
+      path: skills/presentation-suite/skills/sn-ppt-story
+      config_keys: [language]
+    - id: sn_ppt_standard
+      enabled_by: [pptx]
+      path: skills/presentation-suite/skills/sn-ppt-standard
+      config_keys: [language]
+      requires_host_tools: [bash, sub_agent, inspect_images]
+    - id: sn_ppt_dazzle
+      enabled_by: [pptx]
+      path: skills/presentation-suite/skills/sn-ppt-dazzle
+      config_keys: [language]
+    - id: sn_ppt_tools
+      enabled_by: [pptx]
+      path: skills/presentation-suite/skills/sn-ppt-tools
+    - id: sn_ppt_doctor
+      enabled_by: [pptx]
+      path: skills/presentation-suite/skills/sn-ppt-doctor

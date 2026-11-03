@@ -154,6 +154,8 @@ def create_skill_tools(
     skills_dir: Optional[str] = None,
     sources: Optional[List[Tuple[str | Path, SkillSource]]] = None,
     defer_discovery: bool = False,
+    plugin_skills=(),
+    replaced_skill_names=(),
 ) -> tuple[List[Tool], Optional[SkillLoader]]:
     """Create skill tool for Progressive Disclosure.
 
@@ -172,9 +174,11 @@ def create_skill_tools(
         Tuple of (list of tools, skill loader).
     """
     if sources is not None:
-        loader = SkillLoader(sources=sources)
+        loader = SkillLoader(sources=sources, plugin_skills=plugin_skills,
+                             replaced_skill_names=replaced_skill_names)
     else:
-        loader = SkillLoader(skills_dir=skills_dir or "./skills")
+        loader = SkillLoader(skills_dir=skills_dir or "./skills", plugin_skills=plugin_skills,
+                             replaced_skill_names=replaced_skill_names)
 
     if not defer_discovery:
         skills = loader.discover_skills()

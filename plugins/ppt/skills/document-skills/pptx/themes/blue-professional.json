@@ -1,0 +1,56 @@
+{
+  "id": "blue-professional",
+  "name": "Blue Professional",
+  "description": "Warm paper, electric cobalt, restrained editorial geometry for business and research decks.",
+  "source_reference": "beautiful-html-templates/blue-professional",
+  "composition": {
+    "default_family": "institutional-grid",
+    "allowed_families": [
+      "institutional-grid",
+      "analytical-exhibit",
+      "product-showcase",
+      "technical-schematic",
+      "literary-minimal"
+    ]
+  },
+  "selection": {
+    "visual_dna_ids": ["blue-professional"],
+    "mood_keywords": ["professional", "editorial", "restrained", "business", "research", "克制", "专业", "商务", "研究"],
+    "industry_fit": ["business", "technology", "research", "consulting", "enterprise"],
+    "density": "medium-high",
+    "scheme": "warm-light",
+    "fallback": true
+  },
+  "palette": {
+    "background": "#FDFAE7",
+    "surface": "#F5F1D9",
+    "surface_strong": "#E9E5CB",
+    "primary": "#1E2BFA",
+    "primary_soft": "#E3E6FF",
+    "text": "#111111",
+    "muted": "#686861",
+    "border": "#C9C7B8",
+    "inverse": "#FFFFFF",
+    "chart": ["#1E2BFA", "#7B84FF", "#111111", "#8B8B83"]
+  },
+  "typography": {
+    "display": "Space Grotesk, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "Space Grotesk, Arial, PingFang SC, Microsoft YaHei, sans-serif"
+  },
+  "shape": {
+    "radius_small": 12,
+    "radius_medium": 22,
+    "radius_large": 36,
+    "border_width": 2
+  },
+  "style": {
+    "canvas": "solid",
+    "surface": "soft",
+    "shadow": "none",
+    "heading": "standard",
+    "label": "pill",
+    "accent": "line",
+    "alternation": "none"
+  }
+}

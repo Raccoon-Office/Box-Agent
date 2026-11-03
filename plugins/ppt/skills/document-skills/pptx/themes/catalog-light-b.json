@@ -1,0 +1,442 @@
+{
+  "schema_version": 1,
+  "themes": [
+    {
+      "id": "peoples-platform",
+      "name": "People's Platform",
+      "description": "Cobalt, signal orange, warning red, and slab typography in a civic-poster system.",
+      "source_reference": "beautiful-html-templates/peoples-platform",
+      "selection": {
+        "visual_dna_ids": ["peoples-platform"],
+        "mood_keywords": ["civic", "political poster", "bold", "collective", "campaign", "公共", "运动", "海报"],
+        "industry_fit": ["community", "public campaign", "nonprofit", "education", "social impact", "event"],
+        "density": "medium-high",
+        "scheme": "light",
+        "formality": "medium",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F4E9D6",
+        "surface": "#FFFFFF",
+        "surface_strong": "#F2A03A",
+        "primary": "#2C2CDC",
+        "primary_soft": "#D9D9FF",
+        "text": "#0E0E14",
+        "muted": "#5A564E",
+        "border": "#0E0E14",
+        "inverse": "#FFFFFF",
+        "alt_background": "#2C2CDC",
+        "alt_surface": "#3A3AE8",
+        "alt_text": "#F4E9D6",
+        "alt_muted": "#D9D4CA",
+        "alt_border": "#F4E9D6",
+        "alt_primary": "#F2A03A",
+        "chart": ["#2C2CDC", "#F2A03A", "#E83A2A", "#0E0E14"]
+      },
+      "typography": {
+        "display": "Alfa Slab One, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Archivo Narrow, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "DM Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 3
+      },
+      "style": {
+        "canvas": "paper",
+        "surface": "hard",
+        "shadow": "hard",
+        "heading": "poster",
+        "label": "boxed",
+        "accent": "block",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "pin-and-paper",
+      "name": "Pin and Paper",
+      "description": "Saturated yellow paper, deep ink-blue type, handwritten warmth, and visible annotation texture.",
+      "source_reference": "beautiful-html-templates/pin-and-paper",
+      "selection": {
+        "visual_dna_ids": ["pin-and-paper"],
+        "mood_keywords": ["paper", "handwritten", "annotation", "warm", "classroom", "便签", "手写", "纸张"],
+        "industry_fit": ["education", "workshop", "research notes", "community", "training", "creative process"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "medium-low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#EFE56A",
+        "surface": "#F8F1D6",
+        "surface_strong": "#E3D65A",
+        "primary": "#1F3A8A",
+        "primary_soft": "#DCD487",
+        "text": "#1F3A8A",
+        "muted": "#685F3F",
+        "border": "#1F3A8A",
+        "inverse": "#F8F1D6",
+        "chart": ["#1F3A8A", "#C2342B", "#767A3E", "#9B6B3D"]
+      },
+      "typography": {
+        "display": "Caveat, Kaiti SC, STKaiti, cursive",
+        "body": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "DM Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 2,
+        "radius_medium": 4,
+        "radius_large": 6,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "paper",
+        "surface": "paper",
+        "shadow": "soft",
+        "heading": "handwritten",
+        "label": "tape",
+        "accent": "underline",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "raw-grid",
+      "name": "Raw Grid",
+      "description": "White paper, system-black structure, and flat pink and sage blocks with offset shadows.",
+      "source_reference": "beautiful-html-templates/raw-grid",
+      "selection": {
+        "visual_dna_ids": ["raw-grid"],
+        "mood_keywords": ["raw", "grid", "functional", "brutalist", "system", "原始", "网格", "硬朗"],
+        "industry_fit": ["product", "design system", "technology", "portfolio", "operations", "startup"],
+        "density": "high",
+        "scheme": "light",
+        "formality": "medium",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#FFFFFF",
+        "surface": "#F5F5F5",
+        "surface_strong": "#F2D4CF",
+        "primary": "#0A0A0A",
+        "primary_soft": "#E5EDD6",
+        "text": "#0A0A0A",
+        "muted": "#656565",
+        "border": "#0A0A0A",
+        "inverse": "#FFFFFF",
+        "chart": ["#0A0A0A", "#F2D4CF", "#E5EDD6", "#9C9C9C"]
+      },
+      "typography": {
+        "display": "Segoe UI, PingFang SC, Microsoft YaHei, system-ui, sans-serif",
+        "body": "Segoe UI, PingFang SC, Microsoft YaHei, system-ui, sans-serif",
+        "label": "Segoe UI, PingFang SC, Microsoft YaHei, system-ui, sans-serif"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 3
+      },
+      "style": {
+        "canvas": "grid",
+        "surface": "hard",
+        "shadow": "hard",
+        "heading": "poster",
+        "label": "boxed",
+        "accent": "bracket",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "retro-windows",
+      "name": "Retro Windows",
+      "description": "Windows 95 grey, navy title bars, pixel type, and inset-outset system chrome.",
+      "source_reference": "beautiful-html-templates/retro-windows",
+      "selection": {
+        "visual_dna_ids": ["retro-windows"],
+        "mood_keywords": ["retro", "windows 95", "pixel", "system", "nostalgic", "复古系统", "像素", "Windows"],
+        "industry_fit": ["developer tools", "gaming", "technology history", "indie product", "creative demo", "portfolio"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#C0C0C0",
+        "surface": "#D4D0C8",
+        "surface_strong": "#1084D0",
+        "primary": "#000080",
+        "primary_soft": "#9CC9E8",
+        "text": "#000000",
+        "muted": "#444444",
+        "border": "#000000",
+        "inverse": "#FFFFFF",
+        "alt_background": "#000080",
+        "alt_surface": "#1084D0",
+        "alt_text": "#FFFFFF",
+        "alt_muted": "#D4D0C8",
+        "alt_border": "#FFFFFF",
+        "alt_primary": "#FFFFFF",
+        "chart": ["#000080", "#1084D0", "#000000", "#7F7F7F"]
+      },
+      "typography": {
+        "display": "Press Start 2P, Monaco, PingFang SC, Microsoft YaHei, monospace",
+        "body": "MS Sans Serif, Tahoma, PingFang SC, Microsoft YaHei, sans-serif",
+        "label": "VT323, Monaco, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "window",
+        "surface": "window",
+        "shadow": "none",
+        "heading": "pixel",
+        "label": "boxed",
+        "accent": "block",
+        "alternation": "section"
+      }
+    },
+    {
+      "id": "retro-zine",
+      "name": "Retro Zine",
+      "description": "Khaki paper, forest-green riso ink, and layered condensed and handwritten type.",
+      "source_reference": "beautiful-html-templates/retro-zine",
+      "selection": {
+        "visual_dna_ids": ["retro-zine"],
+        "mood_keywords": ["retro", "zine", "riso", "green", "printed", "复古杂志", "孔版", "纸张"],
+        "industry_fit": ["music", "culture", "creative portfolio", "community", "editorial", "independent brand"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "medium-low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#C8B99A",
+        "surface": "#F4EFE6",
+        "surface_strong": "#B8A98A",
+        "primary": "#006C3B",
+        "primary_text": "#006638",
+        "primary_soft": "#A9C8A8",
+        "text": "#1A1A1A",
+        "muted": "#645B49",
+        "border": "#1A1A1A",
+        "inverse": "#FFFFFF",
+        "chart": ["#008F4D", "#1A1A1A", "#7A6D55", "#00A85D"]
+      },
+      "typography": {
+        "display": "Bebas Neue, Arial Narrow, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Space Grotesk, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Caveat, Kaiti SC, STKaiti, cursive"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "paper",
+        "surface": "outline",
+        "shadow": "hard",
+        "heading": "condensed",
+        "label": "tape",
+        "accent": "underline",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "sakura-chroma",
+      "name": "Sakura Chroma",
+      "description": "Warm cream and brown ink with six saturated chromatic ribbons and condensed display type.",
+      "source_reference": "beautiful-html-templates/sakura-chroma",
+      "selection": {
+        "visual_dna_ids": ["sakura-chroma"],
+        "mood_keywords": ["chromatic", "Japanese", "bold", "product strip", "warm", "樱花", "多彩", "日式"],
+        "industry_fit": ["consumer product", "retail", "culture", "food", "campaign", "brand launch"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "medium",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F1E6CB",
+        "surface": "#FFF4DD",
+        "surface_strong": "#F7C7B5",
+        "primary": "#C92D20",
+        "primary_text": "#B8261A",
+        "primary_soft": "#F7C7B5",
+        "text": "#3A2516",
+        "muted": "#80604A",
+        "border": "#3A2516",
+        "inverse": "#FFFFFF",
+        "chart": ["#E5392A", "#E54489", "#F09131", "#3F8BC4"]
+      },
+      "typography": {
+        "display": "Big Shoulders Display, Arial Narrow, Noto Sans JP, PingFang SC, sans-serif",
+        "body": "Albert Sans, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "JetBrains Mono, Menlo, Consolas, monospace"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 4,
+        "radius_large": 8,
+        "border_width": 2
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "note",
+        "shadow": "hard",
+        "heading": "condensed",
+        "label": "boxed",
+        "accent": "block",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "scatterbrain",
+      "name": "Scatterbrain",
+      "description": "Off-white paper covered with pastel sticky notes, warm slab text, and soft shadows.",
+      "source_reference": "beautiful-html-templates/scatterbrain",
+      "selection": {
+        "visual_dna_ids": ["scatterbrain"],
+        "mood_keywords": ["sticky notes", "brainstorm", "playful", "workshop", "handmade", "便利贴", "头脑风暴", "手作"],
+        "industry_fit": ["workshop", "education", "design thinking", "planning", "community", "creative process"],
+        "density": "high",
+        "scheme": "light",
+        "formality": "low",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F7F5F0",
+        "surface": "#FFE066",
+        "surface_strong": "#A5D8FF",
+        "primary": "#2D2A26",
+        "primary_soft": "#FFE066",
+        "text": "#2D2A26",
+        "muted": "#665F56",
+        "border": "#7A7369",
+        "inverse": "#FFFFFF",
+        "chart": ["#FFE066", "#A5D8FF", "#FFC9C9", "#B2F2BB"]
+      },
+      "typography": {
+        "display": "Shrikhand, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Zilla Slab, Noto Serif SC, Songti SC, Georgia, serif",
+        "label": "Caveat, Kaiti SC, STKaiti, cursive"
+      },
+      "shape": {
+        "radius_small": 2,
+        "radius_medium": 4,
+        "radius_large": 6,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "paper",
+        "surface": "note",
+        "shadow": "soft",
+        "heading": "handwritten",
+        "label": "tape",
+        "accent": "dot",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "soft-editorial",
+      "name": "Soft Editorial",
+      "description": "Warm paper, deep ink, soft pink, lemon, blush, and sage in a quiet Sunday-editorial system.",
+      "source_reference": "beautiful-html-templates/soft-editorial",
+      "selection": {
+        "visual_dna_ids": ["soft-editorial"],
+        "mood_keywords": ["soft", "editorial", "quiet", "pastel", "literary", "柔和", "编辑", "留白"],
+        "industry_fit": ["editorial", "wellness", "culture", "lifestyle", "research story", "brand"],
+        "density": "low",
+        "scheme": "light",
+        "formality": "medium-high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#F2EEDF",
+        "surface": "#E8C9B6",
+        "surface_strong": "#B7C7A8",
+        "primary": "#A35F82",
+        "primary_soft": "#D6DD63",
+        "text": "#2A241B",
+        "muted": "#756C5F",
+        "border": "#C9BEAA",
+        "inverse": "#FFFFFF",
+        "chart": ["#A35F82", "#AAB448", "#829877", "#C5967A"]
+      },
+      "typography": {
+        "display": "Cormorant Garamond, Noto Serif SC, Songti SC, Georgia, serif",
+        "body": "Work Sans, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Work Sans, Noto Sans SC, PingFang SC, Arial, sans-serif"
+      },
+      "shape": {
+        "radius_small": 10,
+        "radius_medium": 18,
+        "radius_large": 26,
+        "border_width": 1
+      },
+      "style": {
+        "canvas": "solid",
+        "surface": "soft",
+        "shadow": "none",
+        "heading": "editorial",
+        "label": "plain",
+        "accent": "underline",
+        "alternation": "none"
+      }
+    },
+    {
+      "id": "stencil-tablet",
+      "name": "Stencil Tablet",
+      "description": "Bone paper, black structure, earthy saturated blocks, and field-manual stencil typography.",
+      "source_reference": "beautiful-html-templates/stencil-tablet",
+      "selection": {
+        "visual_dna_ids": ["stencil-tablet"],
+        "mood_keywords": ["stencil", "field manual", "earthy", "archaeological", "graphic", "模板字", "田野", "手册"],
+        "industry_fit": ["architecture", "field research", "outdoor", "history", "education", "design portfolio"],
+        "density": "medium",
+        "scheme": "light",
+        "formality": "medium-high",
+        "fallback": false
+      },
+      "palette": {
+        "background": "#E2DCC9",
+        "surface": "#F4EFE0",
+        "surface_strong": "#A06A3C",
+        "primary": "#9B2F65",
+        "primary_soft": "#D8B8C8",
+        "text": "#0A0A0A",
+        "muted": "#6B5A49",
+        "border": "#0A0A0A",
+        "inverse": "#FFFFFF",
+        "chart": ["#9B2F65", "#C95E20", "#2D7E73", "#3F73B7"]
+      },
+      "typography": {
+        "display": "Bowlby One, Arial Black, PingFang SC, Microsoft YaHei, sans-serif",
+        "body": "Inter, Noto Sans SC, PingFang SC, Arial, sans-serif",
+        "label": "Barlow Condensed, Arial Narrow, PingFang SC, sans-serif"
+      },
+      "shape": {
+        "radius_small": 0,
+        "radius_medium": 0,
+        "radius_large": 0,
+        "border_width": 3
+      },
+      "style": {
+        "canvas": "paper",
+        "surface": "hard",
+        "shadow": "hard",
+        "heading": "stencil",
+        "label": "boxed",
+        "accent": "bracket",
+        "alternation": "none"
+      }
+    }
+  ]
+}

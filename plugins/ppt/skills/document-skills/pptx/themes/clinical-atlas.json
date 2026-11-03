@@ -1,0 +1,44 @@
+{
+  "id": "clinical-atlas",
+  "name": "Clinical Atlas",
+  "description": "A clinical evidence atlas combining graph paper, specimen labels, medical signal motifs, and precise teal-cobalt hierarchy.",
+  "source_reference": "beautiful-html-templates/cobalt-grid",
+  "selection": {
+    "visual_dna_ids": ["clinical-atlas"],
+    "mood_keywords": ["clinical", "precise", "evidence-based", "sterile", "technical", "临床", "医学", "循证", "严谨"],
+    "industry_fit": ["healthcare", "clinical trials", "medical education", "pharma", "patient care", "hospital", "医疗", "临床试验", "诊疗", "患者路径", "医药"],
+    "density": "high",
+    "scheme": "light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F5F7F2",
+    "surface": "#FFFFFF",
+    "surface_strong": "#DCEDEA",
+    "primary": "#087F78",
+    "primary_soft": "#D5EEEA",
+    "text": "#162827",
+    "muted": "#58706E",
+    "border": "#A9C4C0",
+    "inverse": "#FFFFFF",
+    "alt_background": "#102E33",
+    "alt_surface": "#173D43",
+    "alt_text": "#F3FAF8",
+    "alt_muted": "#B7D4D0",
+    "alt_border": "#477078",
+    "alt_primary": "#68D3C8",
+    "chart": ["#087F78", "#253FD0", "#D34B46", "#7F9C56"]
+  },
+  "typography": {
+    "display": "Newsreader, Georgia, Songti SC, serif",
+    "body": "Hanken Grotesk, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "DM Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 2, "radius_medium": 6, "radius_large": 10, "border_width": 1},
+  "style": {"canvas": "grid", "surface": "outline", "shadow": "none", "heading": "editorial", "label": "mono", "accent": "line", "alternation": "section"},
+  "composition": {
+    "default_family": "technical-schematic",
+    "allowed_families": ["technical-schematic", "analytical-exhibit", "institutional-grid", "editorial-spread"]
+  }
+}

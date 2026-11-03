@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Plugin configuration</title>
+<style>
+:root { color-scheme: light; --bg:#fff; --fg:#242333; --muted:#625f70; --line:#dddbe5; --field:#faf9fc; --accent:#6245bb; --error:#b32939; }
+:root[data-theme="dark"] { color-scheme: dark; --bg:#211f27; --fg:#f3f0fa; --muted:#bbb5c9; --line:#4c4659; --field:#2c2835; --accent:#c3afff; --error:#ff9eaa; }
+* { box-sizing:border-box; } body { margin:0; padding:20px; font:14px/1.6 system-ui,sans-serif; color:var(--fg); background:var(--bg); }
+main { max-width:840px; margin:auto; } h1 { font-size:20px; margin:0 0 6px; } p { margin:8px 0; } .muted { color:var(--muted); }
+label { display:block; font-weight:600; margin:12px 0 6px; } textarea, pre { font:13px/1.5 ui-monospace,monospace; overflow-wrap:anywhere; }
+textarea { width:100%; min-height:210px; resize:vertical; padding:12px; color:var(--fg); background:var(--field); border:1px solid var(--line); border-radius:8px; }
+pre { white-space:pre-wrap; padding:12px; background:var(--field); border-radius:8px; } button { font:inherit; cursor:pointer; color:var(--fg); background:var(--field); border:1px solid var(--line); border-radius:6px; padding:7px 12px; }
+button:disabled { cursor:default; opacity:.5; } :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; } .info { border:1px solid var(--line); border-radius:8px; padding:16px; margin:12px 0; }
+#status { min-height:1.6em; white-space:pre-wrap; } #status.error { color:var(--error); } [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1 data-text="title"></h1>
+  <p id="description" class="muted" data-text="intro"></p>
+  <p id="versions" class="muted"></p>
+  <section id="no-parameters" class="info" hidden>
+    <strong data-text="noParameters"></strong>
+    <p data-text="noParametersHelp"></p>
+  </section>
+  <form id="config-form" hidden>
+    <label for="config-json" data-text="editor"></label>
+    <textarea id="config-json" spellcheck="false" aria-describedby="editor-help" disabled></textarea>
+    <p id="editor-help" class="muted" data-text="editorHelp"></p>
+    <div class="actions">
+      <button id="validate" type="button" data-text="validate" disabled></button>
+      <button id="save" type="button" data-text="save" disabled></button>
+    </div>
+    <details>
+      <summary data-text="schema"></summary>
+      <pre id="schema-json"></pre>
+    </details>
+  </form>
+  <div class="actions"><button id="reload" type="button" data-text="reload" disabled></button></div>
+  <p id="status" role="status" aria-live="polite"></p>
+  <p class="muted" data-text="notice"></p>
+</main>
+<script>
+(() => {
+  'use strict';
+  const texts = {
+    zh: {
+      title:'插件配置', intro:'读取并修改当前插件实例的配置。', editor:'配置 JSON 对象', editorHelp:'只输入 JSON 对象；字段是否合法由宿主按插件 Schema 校验。最多 64 KiB。',
+      validate:'校验配置', save:'保存配置', reload:'重新读取已保存配置（放弃草稿）', schema:'查看配置 Schema',
+      noParameters:'此插件没有可配置参数', noParametersHelp:'无需填写或保存配置。可在宿主的插件管理页启用、停用或应用此插件。',
+      connecting:'正在读取配置…', ready:'配置已读取。', dirty:'当前草稿尚未保存。', validating:'正在校验…', valid:'校验通过，尚未保存。', saving:'正在校验并保存…',
+      saved:'已保存。请在宿主插件管理页应用并重启后生效。', invalid:'配置校验失败。', invalidJson:'请输入合法的 JSON 对象，大小不超过 64 KiB。',
+      conflict:'配置版本已变化。草稿已保留；请显式重新读取最新配置后再编辑保存。', stale:'插件包已变化。草稿已保留；请关闭并重新打开配置页。',
+      disconnected:'无法确认操作结果。草稿已保留，可重试相同提交或重新打开配置页核对。', failed:'操作失败，草稿已保留。',
+      versions:'已保存修订：{saved} · 生效修订：{active}', inactive:'尚未生效', notice:'本页仅修改当前插件配置。保存不会更改正在运行的任务；启停、应用和回退由宿主管理。'
+    },
+    en: {
+      title:'Plugin configuration', intro:'Read and edit configuration for this plugin instance.', editor:'Configuration JSON object', editorHelp:'Enter a JSON object. The host validates its fields against the plugin schema. Maximum 64 KiB.',
+      validate:'Validate configuration', save:'Save configuration', reload:'Reload saved configuration (discard draft)', schema:'View configuration schema',
+      noParameters:'This plugin has no configurable parameters', noParametersHelp:'No configuration needs to be entered or saved. Enable, disable, or apply this plugin from the host plugin manager.',
+      connecting:'Loading configuration…', ready:'Configuration loaded.', dirty:'Your draft has not been saved.', validating:'Validating…', valid:'Validation passed. Not saved yet.', saving:'Validating and saving…',
+      saved:'Saved. Apply and restart from the host plugin manager to activate it.', invalid:'Configuration validation failed.', invalidJson:'Enter a valid JSON object no larger than 64 KiB.',
+      conflict:'The configuration revision changed. Your draft is preserved. Explicitly reload the latest configuration before editing and saving again.', stale:'The plugin package changed. Your draft is preserved. Close and reopen this page.',
+      disconnected:'The result is not confirmed. Your draft is preserved. Retry the same submission or reopen the page to check.', failed:'The operation failed. Your draft is preserved.',
+      versions:'Saved revision: {saved} · Active revision: {active}', inactive:'Not active yet', notice:'This page edits only this plugin configuration. Saving does not change a running task. The host manages enabling, applying, and rollback.'
+    },
+    ja: {
+      title:'プラグイン設定', intro:'現在のプラグインインスタンスの設定を読み取り、編集します。', editor:'設定の JSON オブジェクト', editorHelp:'JSON オブジェクトを入力してください。ホストがプラグインの Schema に従って検証します。上限は 64 KiB です。',
+      validate:'設定を検証', save:'設定を保存', reload:'保存済み設定を再読み込み（下書きを破棄）', schema:'設定 Schema を表示',
+      noParameters:'このプラグインには設定項目がありません', noParametersHelp:'設定の入力や保存は不要です。有効化・無効化・適用はホストのプラグイン管理画面で行います。',
+      connecting:'設定を読み込んでいます…', ready:'設定を読み込みました。', dirty:'下書きは未保存です。', validating:'検証しています…', valid:'検証に成功しました。まだ保存されていません。', saving:'検証して保存しています…',
+      saved:'保存しました。ホストのプラグイン管理画面から適用して再起動すると有効になります。', invalid:'設定の検証に失敗しました。', invalidJson:'64 KiB 以下の有効な JSON オブジェクトを入力してください。',
+      conflict:'設定のリビジョンが変更されました。下書きは保持されています。最新の設定を再読み込みしてから編集・保存してください。', stale:'プラグインが更新されました。下書きは保持されています。この画面を閉じて開き直してください。',
+      disconnected:'操作の結果を確認できません。下書きは保持されています。同じ送信を再試行するか、画面を開き直して確認してください。', failed:'操作に失敗しました。下書きは保持されています。',
+      versions:'保存済みリビジョン：{saved} · 有効なリビジョン：{active}', inactive:'まだ有効ではありません', notice:'この画面は現在のプラグイン設定のみを編集します。保存しても実行中のタスクは変更されません。有効化・適用・ロールバックはホストが管理します。'
+    }
+  };
+  const element = id => document.getElementById(id);
+  const editor = element('config-json');
+  const pending = new Map();
+  let port = null, initialized = false, snapshot = null, busy = false, counter = 0, saveIdentity = null;
+  let locale = 'zh', statusState = ['connecting', false, ''];
+  const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const noParameters = schema => isObject(schema) && schema.type === 'object' && schema.additionalProperties === false &&
+    Object.keys(schema.properties || {}).length === 0 && !schema.$ref && !schema.allOf && !schema.anyOf && !schema.oneOf && !schema.patternProperties;
+  function show(key, error = false, detail = '') {
+    statusState = [key, error, detail];
+    element('status').textContent = texts[locale][key] + (detail ? '\n' + detail : '');
+    element('status').classList.toggle('error', error);
+  }
+  function translate() {
+    document.documentElement.lang = {zh:'zh-CN', en:'en', ja:'ja'}[locale];
+    document.title = texts[locale].title;
+    for (const node of document.querySelectorAll('[data-text]')) node.textContent = texts[locale][node.dataset.text];
+    if (snapshot) {
+      if (typeof snapshot.schema.description === 'string') element('description').textContent = snapshot.schema.description;
+      element('versions').textContent = texts[locale].versions.replace('{saved}', String(snapshot.saved_revision))
+        .replace('{active}', snapshot.active_revision == null ? texts[locale].inactive : String(snapshot.active_revision));
+    }
+    show(...statusState);
+  }
+  function controls() {
+    editor.disabled = !port || !snapshot || busy;
+    element('validate').disabled = editor.disabled;
+    element('save').disabled = editor.disabled;
+    element('reload').disabled = !port || busy;
+  }
+  function request(method, params = {}) {
+    if (!port) return Promise.reject({code:'disconnected'});
+    const id = 'config-' + (++counter);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { pending.delete(id); reject({code:'timeout'}); }, 35000);
+      pending.set(id, {resolve, reject, timer});
+      port.postMessage({type:'request', id, method, params});
+    });
+  }
+  function report(error) {
+    const code = String(error && error.code || '').toLowerCase();
+    show(/conflict|revision/.test(code) ? 'conflict' : /stale|package|schema_changed/.test(code) ? 'stale' :
+      /timeout|disconnected/.test(code) ? 'disconnected' : code === 'invalid_json' ? 'invalidJson' : 'failed', true);
+  }
+  function accept(result) {
+    if (!isObject(result) || !isObject(result.config) || !isObject(result.schema) || !Number.isSafeInteger(result.saved_revision))
+      throw {code:'invalid_response'};
+    snapshot = result;
+    editor.value = JSON.stringify(result.config, null, 2);
+    element('schema-json').textContent = JSON.stringify(result.schema, null, 2);
+    const empty = noParameters(result.schema);
+    element('no-parameters').hidden = !empty;
+    element('config-form').hidden = empty;
+    saveIdentity = null;
+    translate();
+  }
+  async function load() {
+    if (busy || !port) return;
+    busy = true; controls(); show('connecting');
+    try { accept(await request('config.get')); show('ready'); }
+    catch (error) { report(error); }
+    finally { busy = false; controls(); }
+  }
+  function readDraft() {
+    try {
+      if (new TextEncoder().encode(editor.value).byteLength > 64 * 1024) throw Error();
+      const value = JSON.parse(editor.value);
+      if (!isObject(value)) throw Error();
+      return value;
+    } catch { throw {code:'invalid_json'}; }
+  }
+  async function submit(save) {
+    if (busy || !port || !snapshot || noParameters(snapshot.schema)) return;
+    busy = true; controls(); show(save ? 'saving' : 'validating');
+    try {
+      const config = readDraft();
+      const checked = await request('config.validate', {config});
+      if (!checked || checked.valid !== true) {
+        const details = Array.isArray(checked && checked.errors) ? checked.errors.map(x => String(x.path || '/') + ': ' + String(x.message || '')).join('\n') : '';
+        show('invalid', true, details); return;
+      }
+      if (!save) { show('valid'); return; }
+      const normalized = isObject(checked.config) ? checked.config : config;
+      const key = JSON.stringify([snapshot.saved_revision, normalized]);
+      if (!saveIdentity || saveIdentity.key !== key) {
+        const bytes = new Uint32Array(4); crypto.getRandomValues(bytes);
+        saveIdentity = {key, id:Array.from(bytes, x => x.toString(16).padStart(8,'0')).join('')};
+      }
+      accept(await request('config.save', {config:normalized, expected_revision:snapshot.saved_revision, request_id:saveIdentity.id}));
+      show('saved');
+    } catch (error) { report(error); }
+    finally { busy = false; controls(); }
+  }
+  editor.addEventListener('input', () => { saveIdentity = null; show('dirty'); });
+  element('validate').addEventListener('click', () => void submit(false));
+  // Saving is a bridge request, never a native form submission.
+  element('save').addEventListener('click', () => void submit(true));
+  element('config-form').addEventListener('submit', event => event.preventDefault());
+  element('reload').addEventListener('click', () => void load());
+  const handshakeTimer = setTimeout(() => { if (!initialized) show('disconnected', true); }, 10000);
+  window.addEventListener('message', event => {
+    const init = event.data;
+    if (initialized || event.source !== parent || parent === window || !init || init.type !== 'box-plugin-config:init' ||
+      init.bridge_version !== 1 || typeof init.nonce !== 'string' || init.nonce.length < 16 || init.nonce.length > 128 || event.ports.length !== 1) return;
+    initialized = true; clearTimeout(handshakeTimer); port = event.ports[0];
+    locale = ['zh','en','ja'].includes(init.locale) ? init.locale : 'zh';
+    document.documentElement.dataset.theme = init.theme === 'dark' ? 'dark' : 'light';
+    translate(); controls();
+    port.onmessage = message => {
+      const reply = message.data;
+      if (reply && reply.type === 'context.changed') {
+        if (['zh','en','ja'].includes(reply.locale)) locale = reply.locale;
+        if (reply.theme === 'dark' || reply.theme === 'light') document.documentElement.dataset.theme = reply.theme;
+        translate(); return;
+      }
+      if (!reply || reply.type !== 'response' || typeof reply.id !== 'string') return;
+      const waiting = pending.get(reply.id);
+      if (!waiting) return;
+      pending.delete(reply.id); clearTimeout(waiting.timer);
+      if (reply.ok === true) waiting.resolve(reply.result);
+      else waiting.reject(reply.error || {code:'invalid_response'});
+    };
+    port.onmessageerror = () => {
+      for (const item of pending.values()) { clearTimeout(item.timer); item.reject({code:'disconnected'}); }
+      pending.clear(); port.close(); port = null; controls(); show('disconnected', true);
+    };
+    port.start();
+    port.postMessage({type:'box-plugin-config:ready', bridge_version:1, nonce:init.nonce});
+    void load();
+  });
+  window.addEventListener('beforeunload', () => {
+    clearTimeout(handshakeTimer);
+    for (const item of pending.values()) clearTimeout(item.timer);
+    port && port.close();
+  });
+  translate(); controls();
+})();
+</script>
+</body>
+</html>

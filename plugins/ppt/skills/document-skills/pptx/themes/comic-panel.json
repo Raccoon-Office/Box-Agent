@@ -1,0 +1,79 @@
+{
+  "id": "comic-panel",
+  "name": "Comic Panel",
+  "description": "Editorial comic-book panels with ink-black frames, halftone paper, caption boxes, speech-bubble surfaces, action labels, and a high-contrast pop palette. Technical diagrams stay clean and schematic inside a framed panel.",
+  "source_reference": "beautiful-html-templates/block-frame",
+  "composition": {
+    "default_family": "brutalist-frame",
+    "allowed_families": [
+      "brutalist-frame",
+      "poster-asymmetric",
+      "product-showcase",
+      "technical-schematic",
+      "playful-collage"
+    ]
+  },
+  "selection": {
+    "visual_dna_ids": ["comic-panel"],
+    "mood_keywords": [
+      "comic book",
+      "comic panel",
+      "graphic novel",
+      "storyboard",
+      "speech bubble",
+      "halftone",
+      "pop art",
+      "manga",
+      "漫画",
+      "分镜",
+      "对话气泡",
+      "拟声词",
+      "网点纸",
+      "波普漫画"
+    ],
+    "industry_fit": [
+      "storytelling",
+      "education",
+      "creative presentation",
+      "product scenario",
+      "technology explainer"
+    ],
+    "density": "medium-high",
+    "scheme": "comic-light",
+    "formality": "medium-low",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#FFF8E8",
+    "surface": "#FFFFFF",
+    "surface_strong": "#76E5F3",
+    "primary": "#FF4D3D",
+    "primary_text": "#111111",
+    "primary_soft": "#FFD84D",
+    "text": "#111111",
+    "muted": "#343434",
+    "border": "#111111",
+    "inverse": "#111111",
+    "chart": ["#FF4D3D", "#FFD84D", "#76E5F3", "#7BD56F"]
+  },
+  "typography": {
+    "display": "Arial Black, Impact, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, Arial, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "Arial Black, Impact, PingFang SC, Microsoft YaHei, sans-serif"
+  },
+  "shape": {
+    "radius_small": 0,
+    "radius_medium": 0,
+    "radius_large": 0,
+    "border_width": 5
+  },
+  "style": {
+    "canvas": "dots",
+    "surface": "hard",
+    "shadow": "hard",
+    "heading": "poster",
+    "label": "boxed",
+    "accent": "block",
+    "alternation": "none"
+  }
+}

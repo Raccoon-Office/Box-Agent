@@ -1,9 +1,8 @@
 """Per-turn deliverable-language hint shared by service and ACP entry points.
 
-The system prompt says deliverables follow the user's language, but evals
-showed a model writing a Chinese blurb for an English request because the
-reference file was Chinese ("matching the source material"). A one-line hint
-next to the user's message is applied where the decision is made.
+Language detection supplies a fallback, not an explicit user choice. The hint
+preserves the system contract's user choices and scoped host-provided Skill
+defaults, while preventing reference material from silently choosing a language.
 
 Only non-Chinese requests get a hint: the base prompt is Chinese, so Chinese
 requests already default correctly, and very short messages ("ok", "continue")
@@ -29,9 +28,14 @@ _NOISE = re.compile(
 
 _HINTS = {
     "English": (
-        "[Deliverable language: English. The user wrote this request in English; write any "
-        "files you create (documents, copy, reports, slides) in English too, even when the "
-        "reference material is in another language, unless the user asks for a specific language.]"
+        "[Deliverable language fallback: English. The request is written in English; this alone "
+        "is not an explicit deliverable-language choice. Priority: the user's explicit instruction "
+        "this turn, then a language the user explicitly confirmed earlier for this task, then an "
+        "applicable non-auto output-language default injected by the host for a currently loaded "
+        "Skill from active Schema-validated configuration. That default applies only to that "
+        "Skill's deliverables. If none applies, use English. Reference material, existing files, "
+        "and an earlier model response do not establish a confirmed language choice. This hint "
+        "does not change reply/progress language or grant tools or execution permission.]"
     ),
 }
 

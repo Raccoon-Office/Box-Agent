@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "title": "受控布局：从规范到系统",
+  "theme_id": "blue-professional",
+  "slides": [
+    {
+      "id": "cover",
+      "layout_id": "cover-hero-v1",
+      "props": {
+        "eyebrow": "BOX AGENT DECK RUNTIME",
+        "title": "让创意发生在边界之内",
+        "subtitle": "用可执行的布局合同稳定结构，用参数化变体保留每一页的视觉表达。",
+        "meta": "Controlled layout MVP · 2026",
+        "media_side": "right"
+      }
+    },
+    {
+      "id": "section-principle",
+      "layout_id": "section-marker-v1",
+      "props": {
+        "number": "01",
+        "eyebrow": "CORE PRINCIPLE",
+        "title": "固定规则，不固定结果",
+        "subtitle": "模型选择布局家族并填写内容，编译器负责确定性几何与导出安全。"
+      }
+    },
+    {
+      "id": "statement",
+      "layout_id": "statement-focus-v1",
+      "props": {
+        "eyebrow": "THE SHIFT",
+        "statement": "从“模型写页面”切换为“模型填写设计系统”。",
+        "support": "自由度从任意 DOM/CSS 转移到布局选择、内容策略、主题、媒体和受控变体。",
+        "proofs": [
+          { "value": "8", "label": "首批布局家族" },
+          { "value": "1", "label": "统一文档模型" },
+          { "value": "0", "label": "任意脚本依赖" }
+        ],
+        "emphasis": "balanced"
+      }
+    },
+    {
+      "id": "capabilities",
+      "layout_id": "cards-grid-v1",
+      "props": {
+        "eyebrow": "CONTROLLED CREATIVE",
+        "title": "创意被拆成可验证的变体轴",
+        "subtitle": "每一种变化都能被编辑器理解，也能被导出链稳定复现。",
+        "variant": "numbered",
+        "items": [
+          { "kicker": "Structure", "title": "布局家族", "body": "根据页面角色、密度和内容形态选择骨架。" },
+          { "kicker": "Expression", "title": "主题语言", "body": "字体、颜色、间距与装饰保持统一的视觉语法。" },
+          { "kicker": "Variation", "title": "参数化变体", "body": "媒体方向、对齐、密度和强调方式可以安全变化。" },
+          { "kicker": "Safety", "title": "内容预算", "body": "字段长度、数组容量和媒体比例在渲染前完成校验。" }
+        ]
+      }
+    },
+    {
+      "id": "comparison",
+      "layout_id": "comparison-two-column-v1",
+      "props": {
+        "eyebrow": "BEFORE / AFTER",
+        "title": "生成自由度没有消失，只是换了位置",
+        "left": {
+          "label": "Current",
+          "title": "自由 HTML",
+          "items": [
+            "模型同时决定内容、结构与像素细节",
+            "结果依赖单次生成状态",
+            "编辑后容易破坏布局与导出"
+          ],
+          "footer": "创意上限高，但稳定性波动明显。"
+        },
+        "right": {
+          "label": "Target",
+          "title": "受控生成",
+          "items": [
+            "模型负责故事、布局选择和内容填充",
+            "组件负责几何、容量与视觉节奏",
+            "编辑器直接修改结构化 props"
+          ],
+          "footer": "保持设计表达，同时获得可重复交付。"
+        }
+      }
+    },
+    {
+      "id": "metrics",
+      "layout_id": "kpi-grid-v1",
+      "props": {
+        "eyebrow": "MVP SCOPE",
+        "title": "第一阶段只验证最关键的系统假设",
+        "subtitle": "布局数量不是首要指标，契约能否贯穿生成、编辑和导出才是。",
+        "variant": "ledger",
+        "items": [
+          { "label": "布局家族", "value": "8", "detail": "覆盖封面、章节、卡片、对比、KPI、流程和图片页。", "delta": "可继续扩展" },
+          { "label": "数据真源", "value": "1", "detail": "deck.json 是生成与编辑共同消费的唯一结构化状态。", "delta": "无 DOM 双轨" },
+          { "label": "默认交付", "value": "HTML", "detail": "离线可看、可编辑，并保留显式 PPTX 导出能力。", "delta": "渐进迁移" }
+        ]
+      }
+    },
+    {
+      "id": "roadmap",
+      "layout_id": "timeline-horizontal-v1",
+      "props": {
+        "eyebrow": "DELIVERY PATH",
+        "title": "先打通纵向切片，再扩充设计资产",
+        "subtitle": "每一步都有独立验证标准，不让布局数量掩盖系统问题。",
+        "steps": [
+          { "phase": "Phase 1", "title": "布局合同", "body": "建立 schema、query、inspect 和 props 校验。" },
+          { "phase": "Phase 2", "title": "HTML 编译", "body": "用确定性 renderer 输出离线、可编辑页面。" },
+          { "phase": "Phase 3", "title": "宿主保存", "body": "接入 officev3 的安全写盘、素材与历史。" },
+          { "phase": "Phase 4", "title": "视觉扩展", "body": "通过对比测试逐步扩到更多主题和布局家族。" }
+        ]
+      }
+    }
+  ]
+}

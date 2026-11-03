@@ -1,0 +1,38 @@
+{
+  "id": "commerce-pulse",
+  "name": "Commerce Pulse",
+  "description": "A retail operating system built from barcode rails, price tickets, SKU labels, receipt perforations, promotion blocks, and conversion rhythm.",
+  "source_reference": "beautiful-html-templates/sakura-chroma",
+  "selection": {
+    "visual_dna_ids": ["commerce-pulse"],
+    "mood_keywords": ["retail", "commercial", "energetic", "modular", "conversion", "零售", "电商", "商品", "促销", "转化"],
+    "industry_fit": ["retail", "ecommerce", "DTC", "merchandising", "omnichannel", "零售运营", "电子商务", "商品运营", "全渠道", "品牌电商"],
+    "density": "high",
+    "scheme": "bright-light",
+    "formality": "medium-high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F7F3E8",
+    "surface": "#FFFDF8",
+    "surface_strong": "#ECE7DA",
+    "primary": "#2147C7",
+    "primary_soft": "#DDE5FF",
+    "text": "#151515",
+    "muted": "#5E5A54",
+    "border": "#1E1E1E",
+    "inverse": "#FFFFFF",
+    "chart": ["#2147C7", "#E6462E", "#F3C936", "#168A73"]
+  },
+  "typography": {
+    "display": "Barlow Condensed, Arial Narrow, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 2, "radius_medium": 6, "radius_large": 10, "border_width": 2},
+  "style": {"canvas": "solid", "surface": "soft", "shadow": "hard", "heading": "condensed", "label": "pill", "accent": "line", "alternation": "section"},
+  "composition": {
+    "default_family": "product-showcase",
+    "allowed_families": ["product-showcase", "analytical-exhibit", "brutalist-frame", "playful-collage"]
+  }
+}

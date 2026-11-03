@@ -277,7 +277,10 @@ async def test_sdk_adds_language_hint_without_changing_request_or_routing(utilit
     request = RunRequest('hint-run', 'hint-session', text)
     await AgentClient(session).run(request)
     assert request.user_message == session.routing_text == text
-    assert ('[Deliverable language: English.' in session.agent.messages[0]) is (not utility)
+    assert ('[Deliverable language fallback: English.' in session.agent.messages[0]) is (not utility)
+    if not utility:
+        assert 'Skill from active Schema-validated configuration' in session.agent.messages[0]
+        assert 'If none applies, use English.' in session.agent.messages[0]
 
 
 @pytest.mark.asyncio

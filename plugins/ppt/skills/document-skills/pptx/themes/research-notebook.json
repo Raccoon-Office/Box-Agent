@@ -1,0 +1,44 @@
+{
+  "id": "research-notebook",
+  "name": "Research Notebook",
+  "description": "A monograph-like academic notebook with abstract labels, footnote rhythm, section marks, and restrained black-ivory evidence framing.",
+  "source_reference": "beautiful-html-templates/monochrome",
+  "selection": {
+    "visual_dna_ids": ["research-notebook"],
+    "mood_keywords": ["academic", "scholarly", "monograph", "methodical", "quiet", "学术", "论文", "研究", "文献", "严谨"],
+    "industry_fit": ["academic research", "thesis defense", "literature review", "research methodology", "conference", "学术研究", "论文答辩", "开题报告", "文献综述", "研究方法"],
+    "density": "medium-high",
+    "scheme": "light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#FAF9EC",
+    "surface": "#FFFDF4",
+    "surface_strong": "#ECE9D8",
+    "primary": "#741F2A",
+    "primary_soft": "#EBDADD",
+    "text": "#171715",
+    "muted": "#66635B",
+    "border": "#BEB9AA",
+    "inverse": "#FFFDF4",
+    "alt_background": "#191917",
+    "alt_surface": "#262622",
+    "alt_text": "#FAF9EC",
+    "alt_muted": "#C4C0B3",
+    "alt_border": "#55534C",
+    "alt_primary": "#E0AAB2",
+    "chart": ["#171715", "#741F2A", "#777269", "#B6AE92"]
+  },
+  "typography": {
+    "display": "Lora, Noto Serif SC, Songti SC, serif",
+    "body": "Jost, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 0, "radius_medium": 0, "radius_large": 0, "border_width": 1},
+  "style": {"canvas": "paper", "surface": "paper", "shadow": "none", "heading": "editorial", "label": "mono", "accent": "underline", "alternation": "section"},
+  "composition": {
+    "default_family": "literary-minimal",
+    "allowed_families": ["literary-minimal", "editorial-spread", "analytical-exhibit", "institutional-grid"]
+  }
+}

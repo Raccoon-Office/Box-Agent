@@ -977,7 +977,7 @@ class BashTool(Tool):
             _DEFAULT_TOOLS_CONFIG.bash_default_timeout_seconds
         ),
         max_timeout_seconds: int = _DEFAULT_TOOLS_CONFIG.bash_max_timeout_seconds,
-        pptx_sync_script_provider: Callable[[], Path | None] | None = None,
+        pptx_sync_script_provider: Callable[[], Path | tuple[Path, ...] | None] | None = None,
     ):
         """Initialize BashTool with OS-specific shell detection.
 
@@ -1685,16 +1685,18 @@ Examples:
                     exit_code=1,
                 )
             # 仅目标同步命令查询当前会话的技能资源，不缓存可能已失效的路径。
-            expert_sync_script = (
+            bound_sync_scripts = (
                 self._pptx_sync_script_provider()
                 if self._pptx_sync_script_provider is not None
                 and "sync_image_manifest_status.js" in command else None
             )
+            if isinstance(bound_sync_scripts, Path):
+                bound_sync_scripts = (bound_sync_scripts,)
             image_status_error = detect_pptx_image_status_command_bypass(
                 command,
                 workspace_dir=self.workspace_dir,
                 runtime_env=self._subprocess_env,
-                expert_sync_script=expert_sync_script,
+                bound_sync_scripts=bound_sync_scripts or (),
                 shell_style=(
                     "powershell"
                     if self.is_windows and self._bundled_win_bash is None

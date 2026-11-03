@@ -27,6 +27,10 @@ class _McpStdoutProxy:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--plugin-management"]:
+        from box_agent.plugin_management import main as manage_plugins
+        raise SystemExit(manage_plugins())
+
     if sys.argv[1:] == [BOOTSTRAP_MCP_CONFIG_ARG]:
         from box_agent.tools.mcp_bootstrap import (
             MANAGED_MCP_CONFIG_VERSION,

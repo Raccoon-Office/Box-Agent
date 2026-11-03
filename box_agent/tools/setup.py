@@ -363,6 +363,9 @@ async def initialize_base_tools(
     """
     _out = output or print
 
+    from box_agent.plugins.skill_sources import load_plugin_skill_plan
+    plugin_plan = load_plugin_skill_plan(config)
+
     tools = []
     skill_loader = None
     skill_task: Optional[asyncio.Task] = None
@@ -460,7 +463,7 @@ async def initialize_base_tools(
             # skill catalog.
             if defer_skills:
                 skill_tools, skill_loader = create_skill_tools(
-                    sources=sources, defer_discovery=True
+                    sources=sources, defer_discovery=True, **plugin_plan.loader_arguments()
                 )
                 if skill_tools:
                     tools.extend(skill_tools)
@@ -486,7 +489,7 @@ async def initialize_base_tools(
 
                 skill_task = asyncio.create_task(_discover(), name="skills-background-load")
             else:
-                skill_tools, skill_loader = create_skill_tools(sources=sources)
+                skill_tools, skill_loader = create_skill_tools(sources=sources, **plugin_plan.loader_arguments())
                 if skill_tools:
                     tools.extend(skill_tools)
                     _out(
@@ -756,8 +759,9 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             permission_engine=permission_engine,
             runtime_env=runtime_env,
             pptx_sync_script_provider=(
-                lambda: skill_loader.get_bound_expert_resource(
-                    "pptx", "scripts/sync_image_manifest_status.js"
+                lambda: skill_loader.get_bound_skill_resources(
+                    "scripts/sync_image_manifest_status.js", expert_name="pptx",
+                    plugin_anchor_id="pptx", plugin_resource_id="ppt_fast",
                 )
             ) if skill_loader is not None else None,
             process_owner_id=process_owner_id,

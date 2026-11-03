@@ -1,0 +1,85 @@
+{
+  "id": "tasting-menu",
+  "name": "Tasting Menu · 餐饮品牌",
+  "description": "A tasting-menu folio with berry ink, cream stock, paired menu rules and ingredient labels for food concepts and restaurant stories.",
+  "source_reference": "builtin",
+  "selection": {
+    "visual_dna_ids": [
+      "tasting-menu"
+    ],
+    "mood_keywords": [
+      "sensory",
+      "crafted",
+      "menu",
+      "风味",
+      "食材",
+      "餐饮"
+    ],
+    "industry_fit": [
+      "restaurant concept",
+      "food brand",
+      "seasonal menu",
+      "hospitality pitch",
+      "餐饮品牌提案",
+      "餐厅介绍",
+      "季节菜单",
+      "食材故事"
+    ],
+    "density": "medium",
+    "scheme": "light",
+    "formality": "medium-high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#FFF8EF",
+    "surface": "#FFFDFA",
+    "surface_strong": "#F4E8DE",
+    "primary": "#96394D",
+    "primary_soft": "#F5DEE3",
+    "text": "#512A36",
+    "muted": "#7A5D61",
+    "border": "#D8B9B8",
+    "inverse": "#FFFDFA",
+    "alt_background": "#512A36",
+    "alt_surface": "#683D48",
+    "alt_text": "#FFF8EF",
+    "alt_muted": "#E7CFD1",
+    "alt_border": "#9B7782",
+    "alt_primary": "#F3BECC",
+    "chart": [
+      "#96394D",
+      "#567C56",
+      "#A56828",
+      "#7166A0"
+    ]
+  },
+  "typography": {
+    "display": "Cormorant Garamond, Georgia, Noto Serif SC, Songti SC, SimSun, serif",
+    "body": "DM Sans, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "DM Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {
+    "radius_small": 0,
+    "radius_medium": 0,
+    "radius_large": 0,
+    "border_width": 1
+  },
+  "style": {
+    "canvas": "paper",
+    "surface": "paper",
+    "shadow": "none",
+    "heading": "editorial",
+    "label": "plain",
+    "accent": "underline",
+    "alternation": "none"
+  },
+  "composition": {
+    "default_family": "literary-minimal",
+    "allowed_families": [
+      "literary-minimal",
+      "editorial-spread",
+      "institutional-grid",
+      "product-showcase"
+    ]
+  }
+}

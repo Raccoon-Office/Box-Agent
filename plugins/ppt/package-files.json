@@ -1,0 +1,1363 @@
+{
+  "format_version": 1,
+  "plugin_id": "com.box.ppt",
+  "plugin_version": "1.0.3",
+  "files": {
+    "README.md": {
+      "sha256": "fa6a513f072fc47d72a3be3ff1cbe4eb4a01b8446ef0b8cca33b6114162b3201",
+      "bytes": 8714
+    },
+    "config.schema.json": {
+      "sha256": "2d62666a5e849b76f110c578d46c011cd6b1fa265858997fd144b725b661534f",
+      "bytes": 562
+    },
+    "plugin.yaml": {
+      "sha256": "b728c9c32da2587c7e17b495dde8a52124e61552ddd4b532040d9f9ec01d803d",
+      "bytes": 1472
+    },
+    "skills/document-skills/pptx/SKILL.md": {
+      "sha256": "5952903328a371fcc602dfab7c5bbf606c6f11baa4dee38a0e857cf285b19381",
+      "bytes": 45459
+    },
+    "skills/document-skills/pptx/agents/openai.yaml": {
+      "sha256": "f2927382b42a30129823d03bf9cc5f51db4848773672a817451162b3454d0a87",
+      "bytes": 7009
+    },
+    "skills/document-skills/pptx/examples/controlled-deck/deck.json": {
+      "sha256": "ee24fd88b75bfa7d2f1c763b5c63316ba35a80e664e831da88eed238ae021bf3",
+      "bytes": 4972
+    },
+    "skills/document-skills/pptx/examples/html-first-demo/deck.html": {
+      "sha256": "518151599c36dc626c58253b620cd095ab9087bcf7f340c6d6cb832a76bbc2e9",
+      "bytes": 10657
+    },
+    "skills/document-skills/pptx/examples/presentation-preview.svg": {
+      "sha256": "2254d9ea861982a10a929c063422dd157795de956bad69fecb8a66d9cdf8cae5",
+      "bytes": 790
+    },
+    "skills/document-skills/pptx/layouts/manifest.json": {
+      "sha256": "f5a4253c67d79387507697045c5b95a877498a6d81930eb54184e5a46e58dfde",
+      "bytes": 475092
+    },
+    "skills/document-skills/pptx/layouts/registry.js": {
+      "sha256": "26693cef9f41a18e0ed25bae93cbecd5f9fc47f5cb2c1e91747351a0012bd645",
+      "bytes": 211833
+    },
+    "skills/document-skills/pptx/references/api-integration.md": {
+      "sha256": "39ed5162e8c600a6511fdec1e5ff150ad812fe3194da3ebfe7e11ae279847bae",
+      "bytes": 608
+    },
+    "skills/document-skills/pptx/references/archify-diagrams.md": {
+      "sha256": "ae812f8cac9bdfe368267a513ce1137b2bd881cde35a201d3ed9c7da3dbe1f1f",
+      "bytes": 4556
+    },
+    "skills/document-skills/pptx/references/controlled-layouts.md": {
+      "sha256": "10e0796ef2127cabde603988e2792e39fdacd8de7f7f28503cb37024921bad98",
+      "bytes": 37438
+    },
+    "skills/document-skills/pptx/references/deck-spec.schema.json": {
+      "sha256": "97d203d1568615119a1e5b061616f0dc6de265a2e54389351d78ede41d4d012f",
+      "bytes": 8593
+    },
+    "skills/document-skills/pptx/references/dependency-policy.md": {
+      "sha256": "2c974a5f8db255d490369e74f6f09495cc02ed90ce16a252d0719354a7f80be1",
+      "bytes": 1573
+    },
+    "skills/document-skills/pptx/references/design-role.md": {
+      "sha256": "b94c41924e3f050d44d920dbeccc6ab45f9df0fb76b0f97025aed366cc0083d8",
+      "bytes": 14646
+    },
+    "skills/document-skills/pptx/references/html-editable.md": {
+      "sha256": "f47851fcaffea7cb63bc52657f87ebfd99a986cee6fd96a47d6ba653670aeee9",
+      "bytes": 8990
+    },
+    "skills/document-skills/pptx/references/html-first.md": {
+      "sha256": "e21eef132333eb774dc8644b88889b40fa0195a691785a19ba96b750f3ef0c73",
+      "bytes": 36429
+    },
+    "skills/document-skills/pptx/references/image-assets.md": {
+      "sha256": "945ff189d36f3b85c5f2bdfc7aca67708b2e3d5f174ef8f97216b99bda3947b2",
+      "bytes": 17081
+    },
+    "skills/document-skills/pptx/references/ooxml-editing.md": {
+      "sha256": "19d9b4b2a8895cadd0fe5097460886a069150cd6be037978eaab9f8bb2500f96",
+      "bytes": 2749
+    },
+    "skills/document-skills/pptx/references/outline-recipes.json": {
+      "sha256": "f4d687b5f092e711e897a058fbddd5c41c9e9d50100ad094c27ec9687c726771",
+      "bytes": 4598
+    },
+    "skills/document-skills/pptx/references/outline.md": {
+      "sha256": "7a621463d3cb419b9082426b1d4874bf7961ebf03412f7991034e254d394e17c",
+      "bytes": 20658
+    },
+    "skills/document-skills/pptx/references/pptxgenjs.md": {
+      "sha256": "d01396756152bfc0204853fe2ff1f0b2592e992cb7224bbf19808966096272f9",
+      "bytes": 7890
+    },
+    "skills/document-skills/pptx/references/presentation-preflight.json": {
+      "sha256": "cfef7c5cadad6ecd38bdf8d704c5161c024347da1a6369bf2a6835912dbe2cb4",
+      "bytes": 8839
+    },
+    "skills/document-skills/pptx/references/presentation-system.md": {
+      "sha256": "b0c66087b567317223928d92703b2adb173412f811a504b75626fecf218c4f1f",
+      "bytes": 6549
+    },
+    "skills/document-skills/pptx/references/qa.md": {
+      "sha256": "563892707149041ffe14a6c9e31ddf2ee99ed1831ffcd481aa55021468f20f03",
+      "bytes": 10977
+    },
+    "skills/document-skills/pptx/references/runtime-office-raccoon.md": {
+      "sha256": "b20b8e0d32c180496e15701c22fc70506ce627a4dbaae3317a1ca202a9f0b681",
+      "bytes": 2687
+    },
+    "skills/document-skills/pptx/references/shell-safety.md": {
+      "sha256": "50d8af90d29783923f62e767a81ce0b3ffafa35576ba7fbcd685aa275318bea0",
+      "bytes": 1165
+    },
+    "skills/document-skills/pptx/references/starter/common.css": {
+      "sha256": "29605ccb46f43493777052b3bb858d6f8826266bb22fae45a69caa2a512399d3",
+      "bytes": 1872
+    },
+    "skills/document-skills/pptx/runtime/chart-runtime.js": {
+      "sha256": "c3a58a22c945f0dfdc6c63bcc4affc04f8d29f9409f9bca00718986994c38f90",
+      "bytes": 18510
+    },
+    "skills/document-skills/pptx/runtime/composition.css": {
+      "sha256": "235a09a078060d89264df34c1e75a95147d791f458b981932ff1e2e91db3f020",
+      "bytes": 182819
+    },
+    "skills/document-skills/pptx/runtime/deck-editor.js": {
+      "sha256": "fecf59984cd20f90665999328a2e081698ac7cb8f29159fe862a2f6703ca30ce",
+      "bytes": 88095
+    },
+    "skills/document-skills/pptx/runtime/deck.css": {
+      "sha256": "c09d619f75fa60e5018007370fa1d48d543f2530320b8ee5be396e82bf3abc28",
+      "bytes": 252798
+    },
+    "skills/document-skills/pptx/runtime/diagram-runtime.js": {
+      "sha256": "0a9f411c1cba417ccfa271bcd6111bcd61ad3429a07bac87729649521908677c",
+      "bytes": 39653
+    },
+    "skills/document-skills/pptx/runtime/expressive.css": {
+      "sha256": "f9aae4ab4a2bf5fafffc58e570d16d4426323d4d2eb9857b2bda3286bf0f914e",
+      "bytes": 10050
+    },
+    "skills/document-skills/pptx/runtime/open-layouts.css": {
+      "sha256": "6120a3d2643fbc2182d10c92e6e7bd30509cbcf7ed852978192c0cdccce2bb04",
+      "bytes": 17427
+    },
+    "skills/document-skills/pptx/runtime/presentation-system.css": {
+      "sha256": "fc3771281b2a673cb2ee15c365e90ad8c3201ed6cea73bd27c3dd1be00d76778",
+      "bytes": 20516
+    },
+    "skills/document-skills/pptx/runtime/presentation-system.js": {
+      "sha256": "0a8fbe0c9ed2d962d33a0bc241ff65af614c03810ddd0210df7c50b4d485a1e8",
+      "bytes": 5578
+    },
+    "skills/document-skills/pptx/runtime/sketch-runtime.js": {
+      "sha256": "464867610b07d96e3c5b79bec2739d7f5c5f66f1e349af1c30b5f2caa68f0998",
+      "bytes": 7537
+    },
+    "skills/document-skills/pptx/runtime/text-fit.js": {
+      "sha256": "1df4d4e8061b1e3945bc88cba5716aee547f0c4043e8a273b4c9c289d3f801bb",
+      "bytes": 5811
+    },
+    "skills/document-skills/pptx/runtime/vendor/echarts/LICENSE": {
+      "sha256": "634293835b43a6dd2094fa39182a3d9a6b9ca43b7fdb9ac354e8037af2a3093a",
+      "bytes": 11990
+    },
+    "skills/document-skills/pptx/runtime/vendor/echarts/NOTICE": {
+      "sha256": "dc0d9176413c3d96d0ac40b39b1dbb11e3043b7b010be560f5dfe66bd3774ae1",
+      "bytes": 168
+    },
+    "skills/document-skills/pptx/runtime/vendor/echarts/echarts.min.js": {
+      "sha256": "baa8dfe7e1d9336b98e8986ba7e20ea15e7cdbea1ef42a59d59478632fa45a1d",
+      "bytes": 1117939
+    },
+    "skills/document-skills/pptx/runtime/vendor/elkjs/LICENSE.md": {
+      "sha256": "637e81f4a1b6b4079535c499fca05e238cf7605c1ff5b76d60d7da7ce96700c9",
+      "bytes": 14443
+    },
+    "skills/document-skills/pptx/runtime/vendor/elkjs/elk.bundled.js": {
+      "sha256": "1222e44f953ce7746af23801e723708f8e6f436b8b377a6a5fc7552f34a307b3",
+      "bytes": 1609707
+    },
+    "skills/document-skills/pptx/scripts/apply_deck_patch.js": {
+      "sha256": "3614b4ba0b2040e540662b665d9902dc893f9d6a30109b2a7401700d2fd64aa3",
+      "bytes": 33552
+    },
+    "skills/document-skills/pptx/scripts/apply_deck_redesign.js": {
+      "sha256": "66cef7eefb9bd7dac1529590185fef0d5cb94aba1fe3103ac96138d63babe48f",
+      "bytes": 13901
+    },
+    "skills/document-skills/pptx/scripts/artifact_delivery.js": {
+      "sha256": "3c9f127b372f3a30093f3db87844ff99f002d0a5f8d9ebb17f9b0ceea8dd617b",
+      "bytes": 7784
+    },
+    "skills/document-skills/pptx/scripts/artifact_metadata.py": {
+      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "bytes": 14322
+    },
+    "skills/document-skills/pptx/scripts/bg_capture.js": {
+      "sha256": "ada2a185895810ed0932f5dd6d67cfbe2217cc5670f4442f38cb89db0b340a27",
+      "bytes": 8018
+    },
+    "skills/document-skills/pptx/scripts/build_layout_manifest.js": {
+      "sha256": "12b3808b80a53ea5eda9e7e63d0566e2f3082cbd96917db1f3d68ed821780372",
+      "bytes": 1478
+    },
+    "skills/document-skills/pptx/scripts/check_html_export_env.js": {
+      "sha256": "f5d96a3ab41f0f3349adbc1d6ffc30e9de8fab98e4a8a044ab070a417927016c",
+      "bytes": 4066
+    },
+    "skills/document-skills/pptx/scripts/color_harmony_rules.json": {
+      "sha256": "ab25056e3a374cc3be00179261f4bd6016e042125f859f62510f2c82ecee55f9",
+      "bytes": 966
+    },
+    "skills/document-skills/pptx/scripts/compare_slide_images.js": {
+      "sha256": "94bae44635c7cf6a33062267dc6f4da5aeac952d040183f46845535bd9c5fd2c",
+      "bytes": 7354
+    },
+    "skills/document-skills/pptx/scripts/composition_core.js": {
+      "sha256": "fc741c33cdd127d4c554a3d738c77f764572324cecf259ce2055ab7ae78129be",
+      "bytes": 27658
+    },
+    "skills/document-skills/pptx/scripts/deck_spec_core.js": {
+      "sha256": "73feb50254758f5cf09876b22acf7316fbe9fa988d6a2467696844db34e609da",
+      "bytes": 40267
+    },
+    "skills/document-skills/pptx/scripts/design_contract_core.js": {
+      "sha256": "12a2c74372400b62e203ad835a5af84fee0b95a843647f5fe0ba4088e7cefc1b",
+      "bytes": 38015
+    },
+    "skills/document-skills/pptx/scripts/design_plan.js": {
+      "sha256": "4680aef6f0567a5bdfcda8b2ddb47d90837080bac54b2bd8b488a93004810aaa",
+      "bytes": 24419
+    },
+    "skills/document-skills/pptx/scripts/design_plan_core.js": {
+      "sha256": "f5e7defa4ea4c142bd20b281c1a1804a5cb976159c046fb11ee3c401bd6003fc",
+      "bytes": 24950
+    },
+    "skills/document-skills/pptx/scripts/design_recovery.js": {
+      "sha256": "eea225a6eede662c0e1593ee10a19068694b08ee507d8b5fbce23abba0346db1",
+      "bytes": 12328
+    },
+    "skills/document-skills/pptx/scripts/design_response_source.js": {
+      "sha256": "496b2e77e684b1a8675a11c44a18b30e18262ddf6425bcf0e897b1a68d8fe42a",
+      "bytes": 8232
+    },
+    "skills/document-skills/pptx/scripts/design_review_receipt.js": {
+      "sha256": "e17da1126a295fbc01d775aca5765c6113c78cc5a0344a818d38c7ec68168479",
+      "bytes": 5217
+    },
+    "skills/document-skills/pptx/scripts/dom-to-pptx.bundle.js": {
+      "sha256": "037a971a761c1b437a2c8f53b20be8cb96e1258e246ca92f87579a3542d39b64",
+      "bytes": 2859904
+    },
+    "skills/document-skills/pptx/scripts/export_font_resolution.js": {
+      "sha256": "dcee539b8358ced351da97e226be1438641d4140f38fc4a4fdaf7ebdd2746060",
+      "bytes": 2401
+    },
+    "skills/document-skills/pptx/scripts/extract_text.py": {
+      "sha256": "37eb30ce5e8f681d9088b9536d1b6498f2b97c8b21ccb8c67ed7baa101f24ee9",
+      "bytes": 2626
+    },
+    "skills/document-skills/pptx/scripts/finalize_controlled_deck.js": {
+      "sha256": "878235a346f287a44ce1038cf0f6fe4b462f64104af5f277c57184eddc3429a2",
+      "bytes": 21643
+    },
+    "skills/document-skills/pptx/scripts/html-to-pptx.js": {
+      "sha256": "e63ea65cf48ac5696690c931c45e7e9db0fb92b7329480ad3866056989e4e9ce",
+      "bytes": 59
+    },
+    "skills/document-skills/pptx/scripts/html_self_check.js": {
+      "sha256": "1cd0ad48cb11dbc48b5ccb19219a4bb0a15e1a2bb7afc375a555fe860a1be7fd",
+      "bytes": 44676
+    },
+    "skills/document-skills/pptx/scripts/html_to_editable_pptx.js": {
+      "sha256": "6a28982a4bc8752d13797f178dd756f0c1c02c2c2572b2fba0513ae849537af7",
+      "bytes": 18433
+    },
+    "skills/document-skills/pptx/scripts/inspect_deck_contract.js": {
+      "sha256": "8d7752f916d61ae8b0bef0a5fe172f8b859319155ee11b138614760a01ff19a2",
+      "bytes": 99312
+    },
+    "skills/document-skills/pptx/scripts/inspect_layout.js": {
+      "sha256": "caf96ce9cabc619dcd826357e18606eca76b774c065e254df5d4f0665146fa14",
+      "bytes": 617
+    },
+    "skills/document-skills/pptx/scripts/localize_web_image.py": {
+      "sha256": "e8b93cef75c43af4f7e3ba3f6aa623b100f223500483f19b278398a844597d4e",
+      "bytes": 13680
+    },
+    "skills/document-skills/pptx/scripts/make_contact_sheet.js": {
+      "sha256": "7c5b5b1359b47e6793649255fca7b343f412867fe1ca3023398e816453ea0087",
+      "bytes": 6643
+    },
+    "skills/document-skills/pptx/scripts/make_vision_inputs.js": {
+      "sha256": "0cd0d7708e6dcfe8dd2647da13a9f278e57433934ef7070bad038b13872af6da",
+      "bytes": 5155
+    },
+    "skills/document-skills/pptx/scripts/merge_html_fragments.js": {
+      "sha256": "e988c696f2bb2a6f92e9fa8be8434d6ae3db04a4b7acb3f684ee6adaa5804ec2",
+      "bytes": 5334
+    },
+    "skills/document-skills/pptx/scripts/outline_layout_contract.js": {
+      "sha256": "38e93dd1c5a977ce0763e4b4d7a62003028fd519168a8e24083a52dc49c5849c",
+      "bytes": 23807
+    },
+    "skills/document-skills/pptx/scripts/palette_css.js": {
+      "sha256": "93324abc0fccd3026b2fdfc4e5d83474bdbb7863732762835e6d8184a34d1f9b",
+      "bytes": 4416
+    },
+    "skills/document-skills/pptx/scripts/palette_harmony.js": {
+      "sha256": "71a8f0a27f294cf4e14518e4e83410002756b463660731f3b86430554cff8361",
+      "bytes": 3978
+    },
+    "skills/document-skills/pptx/scripts/pdfjs_render.js": {
+      "sha256": "17121289dc33d9d50a71e1ab19fb2788ebaef3c666d054c378a065bd72e5a67f",
+      "bytes": 2607
+    },
+    "skills/document-skills/pptx/scripts/playwright_host.js": {
+      "sha256": "94c02a1eb00f6a0f45802573980e745444dfdfa18092ea4bd4a1af16a32606a0",
+      "bytes": 6141
+    },
+    "skills/document-skills/pptx/scripts/premium_palettes.json": {
+      "sha256": "656e995505c9475452707188e2aef55f5f7d587d376069b2c24274302b1954c5",
+      "bytes": 1673
+    },
+    "skills/document-skills/pptx/scripts/probe_deck_runtime.js": {
+      "sha256": "02f1e14b41faba1da50bdf21d136fb83c75a8d872fe4012945f7c97aad611c86",
+      "bytes": 33503
+    },
+    "skills/document-skills/pptx/scripts/query_layouts.js": {
+      "sha256": "1b61bbf470771130e7c63175ecb0948acd65ac51d0f48e20c92200a6eff922ab",
+      "bytes": 4190
+    },
+    "skills/document-skills/pptx/scripts/query_outline_recipes.js": {
+      "sha256": "c6039532127b9099f980d70169f2672a1ff085c4d4996c2483de61c9c1c32268",
+      "bytes": 3349
+    },
+    "skills/document-skills/pptx/scripts/rebase_image_policy.js": {
+      "sha256": "ed9eb1ecbceda587c7e08d8bde460a705e9bfa376b76140f6182822df706e930",
+      "bytes": 8394
+    },
+    "skills/document-skills/pptx/scripts/render_composition_gallery.js": {
+      "sha256": "6b4e1ffed0d035114339163ca9d10d473de716ed5eabbed16f22336d932d8dcc",
+      "bytes": 20082
+    },
+    "skills/document-skills/pptx/scripts/render_deck_html.js": {
+      "sha256": "74b7f022baf244467009786f675cb4a869fcadf06a4b37eb96da8f10b7f462c1",
+      "bytes": 23696
+    },
+    "skills/document-skills/pptx/scripts/render_pptx.py": {
+      "sha256": "b6e0c3de895706be677167769c8327c386a5e4446d645861113427f91119fdab",
+      "bytes": 11286
+    },
+    "skills/document-skills/pptx/scripts/render_quality.js": {
+      "sha256": "8a72f2a75a797462a299a87caec73f4129e6a2cc60397c0c51d4448be74def19",
+      "bytes": 1404
+    },
+    "skills/document-skills/pptx/scripts/render_theme_gallery.js": {
+      "sha256": "b1e50f10c30f8e1b2fb45bf0188d09631dc2350721195530d27539e36c00b06f",
+      "bytes": 19700
+    },
+    "skills/document-skills/pptx/scripts/render_theme_matrix.js": {
+      "sha256": "4a94357ab039ac3b3330134a429954a9e2f18e8f26d8eaa00ac9f9f1ec9e2e93",
+      "bytes": 14637
+    },
+    "skills/document-skills/pptx/scripts/setup_check.py": {
+      "sha256": "68e8214c7355d032251ad93bdddf93d264c790855eda7d6fb043485f29585382",
+      "bytes": 12098
+    },
+    "skills/document-skills/pptx/scripts/source_copy_core.js": {
+      "sha256": "a1399d5d24e70507317b53b94dbe988deb1781d76ec6f54cc9e5173bf49b83ba",
+      "bytes": 2196
+    },
+    "skills/document-skills/pptx/scripts/subject_visual_core.js": {
+      "sha256": "02912be9104e26280d05dd4bbdaddc1127e48fd4b34228264cc788b8d882e4b8",
+      "bytes": 2371
+    },
+    "skills/document-skills/pptx/scripts/sync_image_manifest_status.js": {
+      "sha256": "7816523f706418ab675bc32dcdbb17df3aa3195626a9b59fc87e947266074d1b",
+      "bytes": 3621
+    },
+    "skills/document-skills/pptx/scripts/theme_match.js": {
+      "sha256": "090a61c4d675019cfae5949e1db0d1832ca4534ba20f34d2875f7058c21e9f67",
+      "bytes": 3121
+    },
+    "skills/document-skills/pptx/scripts/theme_selection_core.js": {
+      "sha256": "419d7558ad54132a127d3c1ab3f3b85405f8382da618bc4ea2d9c82829d3a58b",
+      "bytes": 41609
+    },
+    "skills/document-skills/pptx/scripts/validate_deck_spec.js": {
+      "sha256": "42756148c873fcaf22d8ed9ca220fac9ec3b3380c69d07921105aea6a70384b3",
+      "bytes": 16465
+    },
+    "skills/document-skills/pptx/scripts/validate_deck_truth.js": {
+      "sha256": "f9769bfa0261d70d028753b1207fe6fe99ec08fbeb2e26956855551c073cebe9",
+      "bytes": 63782
+    },
+    "skills/document-skills/pptx/scripts/validate_image_layout_contract.js": {
+      "sha256": "4622d254213c08016c594bf21ef55aa6f7edde295abfbdce0c36217ced43487f",
+      "bytes": 7947
+    },
+    "skills/document-skills/pptx/scripts/validate_image_manifest.js": {
+      "sha256": "9db53701ebccceb4e5b3da04ca211d34cdf37d64993134ea5d1654a990425377",
+      "bytes": 14725
+    },
+    "skills/document-skills/pptx/scripts/validate_outline.js": {
+      "sha256": "a4ed1abfb52e9d6ac555f9fa7c34d0bfc0961dd4fa4ba7b4a0dbda560bf662b2",
+      "bytes": 45357
+    },
+    "skills/document-skills/pptx/scripts/validate_pptx_package.py": {
+      "sha256": "cec79f1c559dbd9c057ef961bd3eb90397e00cc6cdf7c92c1435cf57691227e9",
+      "bytes": 4106
+    },
+    "skills/document-skills/pptx/themes/block-frame-mono-blue.json": {
+      "sha256": "71b814ab608826efacf3f074abc4c9198602e44baf67779335aa389d617b5800",
+      "bytes": 1814
+    },
+    "skills/document-skills/pptx/themes/block-frame.json": {
+      "sha256": "db53c666a76966186c7cf19f836aa3454199717ea7fdfc5f7156dbd9347d5cd4",
+      "bytes": 1770
+    },
+    "skills/document-skills/pptx/themes/blue-professional.json": {
+      "sha256": "18b426eee271562cddf045b219228f0110920e15444a4ba7017672f0865e7268",
+      "bytes": 1711
+    },
+    "skills/document-skills/pptx/themes/capital-ledger.json": {
+      "sha256": "cf399787aaaf5b281147a8296c9833a62bf59d406e1f50419c46a0e25feb58bd",
+      "bytes": 1890
+    },
+    "skills/document-skills/pptx/themes/catalog-dark.json": {
+      "sha256": "0e3b2e678935b7df6f71670075eea607fd5f031a88b9bfa4850ab557079b9555",
+      "bytes": 8706
+    },
+    "skills/document-skills/pptx/themes/catalog-light-a.json": {
+      "sha256": "82d395660c4a12a787b230435b90c2aabbc34711954461d12b216f46bb225884",
+      "bytes": 16849
+    },
+    "skills/document-skills/pptx/themes/catalog-light-b.json": {
+      "sha256": "5b1a1d892267bb92636a85a0d225a8558fbacfb4ba760cb5b918e9e66bf29b62",
+      "bytes": 15341
+    },
+    "skills/document-skills/pptx/themes/catalog-mixed.json": {
+      "sha256": "51bedea5e70f125a69be610ccc0f1da42ad64dd59a4b0d6002ffa0c342ec4494",
+      "bytes": 9243
+    },
+    "skills/document-skills/pptx/themes/civic-brief.json": {
+      "sha256": "86241615bc5595dc9eb5697b9f0b26d5de63fa7a5c170d7d56f444c6bdb15112",
+      "bytes": 1868
+    },
+    "skills/document-skills/pptx/themes/clinical-atlas.json": {
+      "sha256": "4e644b9976da27f21c35a3f1dd4ecdc85609818069fb5708f5c13e8a07a7f973",
+      "bytes": 1875
+    },
+    "skills/document-skills/pptx/themes/comic-panel.json": {
+      "sha256": "fe6e16422ecdf8d1ad55ad157239f20a93a61527bdd1f59fb84a2fdd00f82e2f",
+      "bytes": 2104
+    },
+    "skills/document-skills/pptx/themes/commerce-pulse.json": {
+      "sha256": "720d4bb60a65448253e6d069938deac17a66eb78be65cd09828ab45d98f6322a",
+      "bytes": 1737
+    },
+    "skills/document-skills/pptx/themes/consulting-navy.json": {
+      "sha256": "6cb9292b67495e1ce4343d9b585b87c37767a78089dffe9ccb91b3c1e783f75d",
+      "bytes": 2050
+    },
+    "skills/document-skills/pptx/themes/data-intelligence.json": {
+      "sha256": "15474237ce088b904a51f44b5574f41f0c5b95d339f52fb9b079730d9e5d0b87",
+      "bytes": 2298
+    },
+    "skills/document-skills/pptx/themes/destination-atlas.json": {
+      "sha256": "e9a6a9c89c516990923d85d9dd090a65de4f1307273f13aafb078034cc7f5c06",
+      "bytes": 2043
+    },
+    "skills/document-skills/pptx/themes/factory-floor.json": {
+      "sha256": "9fdb96a87cea9db61f633fdd064019e6729a3ce4cf49dc27f1db2ba54f11025d",
+      "bytes": 2014
+    },
+    "skills/document-skills/pptx/themes/impact-field.json": {
+      "sha256": "73fe4179505762963ea8d5ac6485311ca9c18597943c68aba2f58e21eecccff8",
+      "bytes": 2061
+    },
+    "skills/document-skills/pptx/themes/legal-docket.json": {
+      "sha256": "450add8dc0c8693be08220c126d6c9e54df32c9ff67fad513beef150d4c24658",
+      "bytes": 1717
+    },
+    "skills/document-skills/pptx/themes/logistics-control-tower.json": {
+      "sha256": "7849b1942ba896471f2ef83c515d43ad88fc60a528716e6b0487cb42fb10f4b3",
+      "bytes": 1780
+    },
+    "skills/document-skills/pptx/themes/people-handbook.json": {
+      "sha256": "f71fd59344891c4a83af0030a161eeed8dc5b573eae71e4f49d9ee0ee9b305a7",
+      "bytes": 1917
+    },
+    "skills/document-skills/pptx/themes/plain-neutral.json": {
+      "sha256": "a9e4f7f7dcdd7302a9067ff00af340f93f91cf43adca6b223b60f6a6d158a804",
+      "bytes": 1524
+    },
+    "skills/document-skills/pptx/themes/product-console.json": {
+      "sha256": "3237760ad7668f2c28e2a476c5739eb8fb8a025407f09528b3d24d303d6929a9",
+      "bytes": 2060
+    },
+    "skills/document-skills/pptx/themes/property-atlas.json": {
+      "sha256": "ba9798c3a150e8d3fa4f8d4a78de4c1743463c672ae1fa6b460dc8b04cd51a42",
+      "bytes": 1758
+    },
+    "skills/document-skills/pptx/themes/research-notebook.json": {
+      "sha256": "3fd35218c766d8817fc1a1fe95ca72bb35cca4e7562afdbc2c8961f439337f7d",
+      "bytes": 1917
+    },
+    "skills/document-skills/pptx/themes/sketch-whiteboard.json": {
+      "sha256": "d694b9056c2bd4e7aa8ea1411f0f18079921ac37f851d2296960c24b2bf273ed",
+      "bytes": 2146
+    },
+    "skills/document-skills/pptx/themes/stadium-score.json": {
+      "sha256": "6f89b08c0e1c6902bec4e1fc7bb8ee387b06900b4c061d8d10f88010f794322a",
+      "bytes": 2065
+    },
+    "skills/document-skills/pptx/themes/tasting-menu.json": {
+      "sha256": "5422166123b242c0f7b725c5a6cd8fef23033d24251b7da8e17128c48fe51f91",
+      "bytes": 2055
+    },
+    "skills/document-skills/pptx/themes/technical-blueprint.json": {
+      "sha256": "0f35aab0ce9a2f1522606c7f09c90266a459c047aa36c0914149d089b4403433",
+      "bytes": 2104
+    },
+    "skills/document-skills/pptx/vendor/archify/LICENSE": {
+      "sha256": "b799ab081703e7821ae5096d2c1abdf14bbdc75e8ea1c4045998c36ed6db9706",
+      "bytes": 1102
+    },
+    "skills/document-skills/pptx/vendor/archify/THIRD_PARTY_NOTICES.md": {
+      "sha256": "f8dec2a3a8c977069f07a370b5580757191202a805c19d3cad2c5bcaf9e3a8b3",
+      "bytes": 4543
+    },
+    "skills/document-skills/pptx/vendor/archify/UPSTREAM_SKILL.md": {
+      "sha256": "10094272d6d1b4ad0f2c2e0880cb646fe4991454a2dc3d854aecb27e7407ee1f",
+      "bytes": 16396
+    },
+    "skills/document-skills/pptx/vendor/archify/VENDORED.json": {
+      "sha256": "9778d7e17aa56b504d4a7a9f45a5b243fc3af7cb9be88183e8aeffbb6d25267d",
+      "bytes": 8798
+    },
+    "skills/document-skills/pptx/vendor/archify/assets/template.html": {
+      "sha256": "35b2210b120c56a6c58d953ffe0cf815c2e67d0a5ff3e8b9518c45b737dd3fc3",
+      "bytes": 678398
+    },
+    "skills/document-skills/pptx/vendor/archify/bin/archify.mjs": {
+      "sha256": "304fc9aa27d069b724dfd57f8df50e3aac574760199b20652dad987b3ca20594",
+      "bytes": 72093
+    },
+    "skills/document-skills/pptx/vendor/archify/bin/open-artifact.mjs": {
+      "sha256": "add1722186683c12770c575585bbb8774919c15b87361e10d2fe834623223159",
+      "bytes": 2225
+    },
+    "skills/document-skills/pptx/vendor/archify/bin/preview.mjs": {
+      "sha256": "6d41e491d42070c05b5e278548714da1fcef6e6adfd84a0391ab2bf12f47373c",
+      "bytes": 23722
+    },
+    "skills/document-skills/pptx/vendor/archify/bin/visual-check.mjs": {
+      "sha256": "8fa8c6f233f3598f4f22e58c48a4de6f45b3b072ad8e7aee4731c49b4bfbdc52",
+      "bytes": 33390
+    },
+    "skills/document-skills/pptx/vendor/archify/brand-marks/README.md": {
+      "sha256": "8b771a16322ce9ea47fdc00b9935e33adf0f3af608f2d735235443e15ef622e2",
+      "bytes": 1449
+    },
+    "skills/document-skills/pptx/vendor/archify/brand-marks/catalog.json": {
+      "sha256": "e1a6c555cbf8ea36fb8100a4a25824e7ab87bebe9871e450ba05b6dea3b036d6",
+      "bytes": 14162
+    },
+    "skills/document-skills/pptx/vendor/archify/delta/architecture-delta.mjs": {
+      "sha256": "f75aa96a22cdd640762f6f2cebdd1b89188d7d2f2cf354a764de1063c95b78ae",
+      "bytes": 72328
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/agent-run.lifecycle.json": {
+      "sha256": "af939579dcafc8b4c49f09594591577994398aee57a57369d4c791dfc0d85a42",
+      "bytes": 4417
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/agent-tool-call.workflow.json": {
+      "sha256": "4d3f6c23de2ca7d306e05d0041a9506833bb5a164a2bddc2d1984cf4da3ee90c",
+      "bytes": 5687
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/async-job-roundtrip.sequence.json": {
+      "sha256": "545f20920c89b69c2bb1f15508d5543fddbeb15cffba61e102206e04bd5a5cd9",
+      "bytes": 4370
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/brand-aware-delivery.architecture.json": {
+      "sha256": "d4f0df8114b3524756ffa49529c015e00757b0594a357183490c1edeb341e3c6",
+      "bytes": 3271
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/cache-miss-request.sequence.json": {
+      "sha256": "4bbaa6ca3cd4036002fd5d0f3a332eb922cec69d09bac3d7925f95beb4308389",
+      "bytes": 4345
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/checkout-platform.base.architecture.json": {
+      "sha256": "c112195e7285e3e4aedaeab3e1f85f5891d30fccc2c260aebe4e1da12c80cf84",
+      "bytes": 2234
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/checkout-platform.head.architecture.json": {
+      "sha256": "e3aaf47f77afeadafc81c6ce853dc1df68cc1e6932dec972cf478f4008fdda99",
+      "bytes": 2368
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/dataflow-product-analytics.html": {
+      "sha256": "d66d70595448044a92d032738e2437980d2160462f974a1de8cfa82c5e148d54",
+      "bytes": 720496
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/deployment-release.lifecycle.json": {
+      "sha256": "735c2c5819266e6ea2a71775b6eefce98b53030ce90cb721dc8e1d022ce5be71",
+      "bytes": 4274
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/event-stream.dataflow.json": {
+      "sha256": "a92d6597ddbe164f395da32a7d4b33cfae08edd7d9600a6fb45a2058e5bbb43e",
+      "bytes": 5433
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/incident-response.workflow.json": {
+      "sha256": "5c760c82eee545dfb7da38a4e628059d7891af4cfbfc13c8a7009ea64f69aa1b",
+      "bytes": 5375
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/lifecycle-agent-run.html": {
+      "sha256": "d15306112803fe6ac1050c6fd5d943545a5bc6a72a0407cd0751d0d8794f6429",
+      "bytes": 714131
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/product-analytics.dataflow.json": {
+      "sha256": "6fa38a7ccedf96da592d60b392783b846188eaa3ec9136c6dc06ca020e43a110",
+      "bytes": 5627
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/production-deployment.architecture.json": {
+      "sha256": "ec484aa8576664fdb207b543fa49486b23273faccb7a5071e1a0becfb48c22eb",
+      "bytes": 5476
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/release-delivery.workflow.json": {
+      "sha256": "e5c880417eac1623923c3dd5461e0c78acd762e1621a28bd53fc14a84cad6a91",
+      "bytes": 5164
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/sequence-cache-miss-request.html": {
+      "sha256": "6bf688c8577049973ace979ac73292eda0cc8f349934c6ba4452720853ced84c",
+      "bytes": 716842
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/web-app-rendered.html": {
+      "sha256": "26784b847623e79727e44eb5fabfbedc2c47289bf877703eee78787a3eb5bee5",
+      "bytes": 715216
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/web-app.architecture.json": {
+      "sha256": "483350f5297df682aba4e4a0fa491307ce3d3abd725ae4df07fab177490752cf",
+      "bytes": 3793
+    },
+    "skills/document-skills/pptx/vendor/archify/examples/workflow-agent-tool-call-rendered.html": {
+      "sha256": "e083cfe2d35701472374910e922ebdf8b30fdd3d5547d0e2cabd05094d033c66",
+      "bytes": 723038
+    },
+    "skills/document-skills/pptx/vendor/archify/migrations/workflow-v2.mjs": {
+      "sha256": "77aadc38460e5e778344901f492cc00f16f74e8fe1def14b01e6d6d346b9f4c7",
+      "bytes": 9168
+    },
+    "skills/document-skills/pptx/vendor/archify/package.json": {
+      "sha256": "7fe2a96f0d6730b2d35811d7d4f5e7e969c166a47a0c87543cdf667a221815be",
+      "bytes": 1478
+    },
+    "skills/document-skills/pptx/vendor/archify/recipes/scenarios.mjs": {
+      "sha256": "e77d31d5b65b921799f4f560287fbac24feb3cd683bee8cabe49ed1ddde1a8ac",
+      "bytes": 32073
+    },
+    "skills/document-skills/pptx/vendor/archify/references/authoring-contract.md": {
+      "sha256": "8f2b583d0d84fb315e4c4dfa685bbcb93343bf7673b92ea0e70d361f8ffca4d7",
+      "bytes": 11309
+    },
+    "skills/document-skills/pptx/vendor/archify/references/brand-marks.md": {
+      "sha256": "8010869da70677e686ecb312d9c3eec2d20723a44f817ab2bbf5525361c8a136",
+      "bytes": 2179
+    },
+    "skills/document-skills/pptx/vendor/archify/references/delivery-contract.md": {
+      "sha256": "c0af94e227c5617c7c290065a0404d0fc769b7e4ef26f187f51a19e3640fa176",
+      "bytes": 8070
+    },
+    "skills/document-skills/pptx/vendor/archify/references/viewer-runtime.md": {
+      "sha256": "dc0d9ffe6b9987d73d2d48710fce5ab4c120bbf1940ff1eb9355259c5d4f32b6",
+      "bytes": 4243
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/architecture/grid.mjs": {
+      "sha256": "f6de99c32436feed3378b0ddef516bb4732ff27a89c543b50635d4d14a15a55a",
+      "bytes": 2071
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/architecture/render-architecture.mjs": {
+      "sha256": "f57077cb9fa64a8412ab0af705cb31e2e7a920114b31852882c04a76840365dc",
+      "bytes": 45546
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/dataflow/README.md": {
+      "sha256": "18c4f86ba62fcee371d9fe38094625b3a68cc76231c36ab8c8124acb4c1ffa42",
+      "bytes": 4202
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/dataflow/render-dataflow.mjs": {
+      "sha256": "5a5da505e5c68041990de92847f53a38215efb9212bc36fc911774e8829335c9",
+      "bytes": 21194
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/lifecycle/README.md": {
+      "sha256": "f8ef88dc859189bb18bad7bb2e27d997cbc9d30936cf20f8bf401bae7f57deec",
+      "bytes": 5197
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/lifecycle/render-lifecycle.mjs": {
+      "sha256": "23720729a14495b4085839653ec0622f2465be3b1e8c9eb556b602ab3f4a8cda",
+      "bytes": 24285
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/sequence/README.md": {
+      "sha256": "a442335dcf44b1587d3ad88809e31b001a4fafdf7a134040e8b1927455af4206",
+      "bytes": 4828
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/sequence/render-sequence.mjs": {
+      "sha256": "230c0fb79775badb4beb6fd74f45ed1ffbb70e932c3641a24bedcc61f912bddf",
+      "bytes": 21734
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/brand-marks.mjs": {
+      "sha256": "4557b7f3eec25a3dba66a0f5da1c5dca6ec607e2a68e9be51cd697cefe9e6425",
+      "bytes": 22582
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/cli.mjs": {
+      "sha256": "2a6b8fa11234451627a70bca71985d80362a4c52401a90a21840d6e2ae3012d9",
+      "bytes": 10188
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/desktop-readability.mjs": {
+      "sha256": "b36203a11df348706e541f309266a0f9b914dac6a7eb8ba804e3abe8f8d6c710",
+      "bytes": 1089
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/diagnostics.mjs": {
+      "sha256": "855fea15daf2beb5be7fad0d54b72a63a4af8595f227facf845ba1852b3b365a",
+      "bytes": 4561
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/engineering-profiles.mjs": {
+      "sha256": "7e99f9d5423f66cc9ab6224da56dc2d5aa6c6faec29178034794e9db6b5b2889",
+      "bytes": 6936
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/generated-brand-marks.mjs": {
+      "sha256": "0f157d229c12df6f53763a3b88684baa5803a52484c49c4d34ec40b8743beea2",
+      "bytes": 163612
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/generated-validators.mjs": {
+      "sha256": "b32d852053a2159477393c38df55f4759633bd3d36d829bd307b9389611e06b8",
+      "bytes": 430844
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/geometry.mjs": {
+      "sha256": "161785af32241fc96df051c9be4f2bb9c3b897418d708f4a051b63f1c44952cf",
+      "bytes": 57175
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/i18n.mjs": {
+      "sha256": "da0320ac6c002f421c516cb4921e9b806a4ba5b3e9a4f6cbcdef0b16e2917d47",
+      "bytes": 48260
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/layout-report.mjs": {
+      "sha256": "44c2f74a20e483dd37dae6791ede39284ce3bac1a2a13872d2912999e8504df5",
+      "bytes": 1015
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/legend.mjs": {
+      "sha256": "4c8b37f10fb5c783a28bff6aa35bc3966155213ee32f64a8252eab5b9e64a747",
+      "bytes": 8652
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/output-path.mjs": {
+      "sha256": "9c61692cf9debc99f5cb86e0df8c474d0665921345fecdfc13ded3828c94f0a8",
+      "bytes": 10618
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/repository-evidence.mjs": {
+      "sha256": "e36c109c84b338ea77d2ae74e9fa9ffe4317e7780a2be8d4d78e588ddb387677",
+      "bytes": 11445
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/text-fit.mjs": {
+      "sha256": "35b6ef2c64d88c1ea4e5aab2af7c4e8a2c2e1be62db71263787d39a9797e7dea",
+      "bytes": 2191
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/utils.mjs": {
+      "sha256": "20124265300eb286db184a053561005cc32b6128dc1bc1b3f9520ffa8d43a241",
+      "bytes": 11603
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/shared/validator.mjs": {
+      "sha256": "7460d7fcbcdf710649256c5e96142ae26d807a655d3296ee8caf7f5e158622cc",
+      "bytes": 3508
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/workflow/README.md": {
+      "sha256": "7e1bd65cc5cc38206304ae2f61f4f0f493da98d71a111a61d0754c9da362c5c9",
+      "bytes": 10386
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/workflow/render-workflow.mjs": {
+      "sha256": "83be05d1efd1816c527fccdf3ebbd4a0f1454c6cb0c9f7554c6702eb40d9c540",
+      "bytes": 1153
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/workflow/workflow-compiler.mjs": {
+      "sha256": "06dc97f67041037d71fd8731934d4833ece95ac1a4278e3ef875b0e51e516104",
+      "bytes": 171396
+    },
+    "skills/document-skills/pptx/vendor/archify/renderers/workflow/workflow-migration-geometry.mjs": {
+      "sha256": "ebfc5085dd008ae63802f500402fb7bf8ca0ae28460997d867f45e5493b8fbe6",
+      "bytes": 5299
+    },
+    "skills/document-skills/pptx/vendor/archify/schemas/README.md": {
+      "sha256": "f4ca94ec18cf60ad02211f2c5bb64e9c26a87467a22215e06db34dbfc5d6145f",
+      "bytes": 11462
+    },
+    "skills/document-skills/pptx/vendor/archify/schemas/architecture.schema.json": {
+      "sha256": "8c96140b6af8d93fb825a3c63e46b74176c9485185c978074ffe89e0f614576c",
+      "bytes": 6702
+    },
+    "skills/document-skills/pptx/vendor/archify/schemas/common.schema.json": {
+      "sha256": "2630c958314eeebb92e0f6f6330475f1a2bc48f8c1b53201ba3b58889b319c80",
+      "bytes": 3096
+    },
+    "skills/document-skills/pptx/vendor/archify/schemas/dataflow.schema.json": {
+      "sha256": "09d238a6a18f2e074ec69c8f905f58a44d3a0b68fc6a925b8346c484a912af90",
+      "bytes": 5907
+    },
+    "skills/document-skills/pptx/vendor/archify/schemas/lifecycle.schema.json": {
+      "sha256": "05b46c0db95ee7ed44305b61496a96bb4f69342b20f9903d6534d952ebc65083",
+      "bytes": 6597
+    },
+    "skills/document-skills/pptx/vendor/archify/schemas/sequence.schema.json": {
+      "sha256": "c9fec3fad087f14d55c0bb2d34446246e3405f0238c292c1cb6bef28d1120fcb",
+      "bytes": 5642
+    },
+    "skills/document-skills/pptx/vendor/archify/schemas/workflow.schema.json": {
+      "sha256": "2128e82afd2b971fcb7d80ada86fa836bb4a5035b504053b87d3aeefec380e3c",
+      "bytes": 9752
+    },
+    "skills/document-skills/pptx/vendor/archify/scripts/check-render-output.mjs": {
+      "sha256": "5b86f60bd6607c580e1d2daaf181a129d81c3293310b3c7f38eda6435b8520b5",
+      "bytes": 32413
+    },
+    "skills/document-skills/pptx/vendor/archify/scripts/check-update.mjs": {
+      "sha256": "7c7f47b35a55754fd85468c5e1cfc467bb2e1b9dd5c683dd60172844882b1970",
+      "bytes": 56369
+    },
+    "skills/document-skills/pptx/vendor/archify/scripts/generate-brand-marks.mjs": {
+      "sha256": "0434c31903b831382a91e85a329bcbcb39b32f29c656273a273f896b3b0a42e7",
+      "bytes": 5136
+    },
+    "skills/document-skills/pptx/vendor/archify/scripts/generate-validators.mjs": {
+      "sha256": "a5f5f67d3cd4675b16fa620043a5463f3c15aad89afb1b0c7cf42cf35e883f9a",
+      "bytes": 2400
+    },
+    "skills/document-skills/pptx/vendor/archify/scripts/render-examples.mjs": {
+      "sha256": "a173a053fb26c0ac3cd72eb9b4e50411e67ca8c50bec57f05d4ca8ba79db2c0b",
+      "bytes": 1178
+    },
+    "skills/document-skills/pptx/vendor/archify/scripts/update-contract.mjs": {
+      "sha256": "7c5d34c5fa2e08fcd0b42e33a0f3b4685fcecf3ac88f1ed820528df8fdc46cbc",
+      "bytes": 6750
+    },
+    "skills/document-skills/pptx/vendor/archify/skill-release.json": {
+      "sha256": "269772492c38663b5d19730a54e5d7ad973ef04e47eb4f75b6dfa2e249614097",
+      "bytes": 272
+    },
+    "skills/pptx/SKILL.md": {
+      "sha256": "14bc8e5b8666530f10c1d116bc236ba35d02c0c74c1cd7f6d35ba589cbb7545f",
+      "bytes": 13927
+    },
+    "skills/presentation-suite/THIRD_PARTY_NOTICES.md": {
+      "sha256": "d85e13753947f8c9feeab80d9832ca35c8a56d84df09d529cf751890b5f0894a",
+      "bytes": 1830
+    },
+    "skills/presentation-suite/fonts/ArchitectsDaughter-Regular.ttf": {
+      "sha256": "6159718a08898e34bc1cb7354086141a5f9a70b73e54dbec27ead0d59a697359",
+      "bytes": 43352
+    },
+    "skills/presentation-suite/fonts/Archivo.ttf": {
+      "sha256": "0e094a7d3c7c4c25cf1310c4b30014f1dae9332220b1c2c88f4fa996f0b05053",
+      "bytes": 658596
+    },
+    "skills/presentation-suite/fonts/BarlowCondensed-Bold.ttf": {
+      "sha256": "e476562ec9c1e16cf16475895b511f08c804f438cc9a9f80a44ea50a0eeb5b65",
+      "bytes": 109912
+    },
+    "skills/presentation-suite/fonts/BarlowCondensed-Regular.ttf": {
+      "sha256": "583cec5da3b84bc4dc7c9c72e2a565c94d34e431518b19d7e250b7830ad5f996",
+      "bytes": 102480
+    },
+    "skills/presentation-suite/fonts/BarlowCondensed-SemiBold.ttf": {
+      "sha256": "7b619d14bc2327509a9ef32b0890f709626f7ecc9ff61191c2a4314c5499d2d9",
+      "bytes": 109428
+    },
+    "skills/presentation-suite/fonts/BebasNeue-Regular.ttf": {
+      "sha256": "08e4623805102d819f58601e46e345648846075e363b2ceb23313c2d1c83ec73",
+      "bytes": 61400
+    },
+    "skills/presentation-suite/fonts/Bungee-Regular.ttf": {
+      "sha256": "c4f5361ce120af3e6b9156d0bf379fa19cda2ea0cd18ac01fd99596c6bf66e3f",
+      "bytes": 118996
+    },
+    "skills/presentation-suite/fonts/Caveat.ttf": {
+      "sha256": "0bdb6b660482d31531b3945849fba5916b3ef8695da7024a9e6b9ee3c4157988",
+      "bytes": 403648
+    },
+    "skills/presentation-suite/fonts/CormorantGaramond.ttf": {
+      "sha256": "b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0",
+      "bytes": 1195560
+    },
+    "skills/presentation-suite/fonts/DMSans.ttf": {
+      "sha256": "8cd08d97e89c24d0aa92edd2f0f4c8ee6195eee9b7c9f154865a58b02f0c1c0d",
+      "bytes": 240164
+    },
+    "skills/presentation-suite/fonts/DancingScript.ttf": {
+      "sha256": "21808625578fe8d8cd10cb684be546dca077b27cd03a53a2f1ec11dc743c924c",
+      "bytes": 133636
+    },
+    "skills/presentation-suite/fonts/Fraunces.ttf": {
+      "sha256": "177ff6c0f14e5550a3c624247cd1189611d4eb65d000b14944c63d967958abbb",
+      "bytes": 360440
+    },
+    "skills/presentation-suite/fonts/IBMPlexMono-Regular.ttf": {
+      "sha256": "df73e3be25c174d25da4077468c9f70f65ac5b3f171642ccae11040a38d9230b",
+      "bytes": 112376
+    },
+    "skills/presentation-suite/fonts/IBMPlexMono-SemiBold.ttf": {
+      "sha256": "b77df64bf155780988af10211d38bc74a688df7a779fe4f1442c3d464eb3cf76",
+      "bytes": 117148
+    },
+    "skills/presentation-suite/fonts/IBMPlexSans_1.ttf": {
+      "sha256": "6f7a8c4219e021ff7c9131bc5f1f7af97bcd1436a59578d444a8cb92e9791742",
+      "bytes": 205292
+    },
+    "skills/presentation-suite/fonts/IBMPlexSans_2.ttf": {
+      "sha256": "6dbe082463cf749cfa057d45c3048c90f4df031496498e5b5bdfd0b6babb9d16",
+      "bytes": 205252
+    },
+    "skills/presentation-suite/fonts/IndieFlower-Regular.ttf": {
+      "sha256": "ccc94b22b156e9c5dfe50fd051f01b097600b252c24473e624bb43a143140a94",
+      "bytes": 108196
+    },
+    "skills/presentation-suite/fonts/Kalam-Bold.ttf": {
+      "sha256": "2f6576601db015d4f6c08678120277fc8510b98c06e932ce7a6a9cbff4cbdded",
+      "bytes": 460896
+    },
+    "skills/presentation-suite/fonts/Kalam-Regular.ttf": {
+      "sha256": "57cecb63d4608019371954274ae1d8c397764debd5b19d4a33c1efa4dc923c0b",
+      "bytes": 427360
+    },
+    "skills/presentation-suite/fonts/LXGWWenKai-Regular.ttf": {
+      "sha256": "ea47ec17d0f3d0ed1e6d9c51d6146402d4d1e2f0ff397a90765aaaa0ddd382fb",
+      "bytes": 19310488
+    },
+    "skills/presentation-suite/fonts/LeagueGothic.ttf": {
+      "sha256": "3b0e998c9a0034222394ffecdd383e6948259ad037b95555b139a217629ce1d0",
+      "bytes": 65972
+    },
+    "skills/presentation-suite/fonts/LiuJianMaoCao-Regular.ttf": {
+      "sha256": "cab396b91a5b7c0b4005a35891180d06e6751f5ac261fe680aec65c1ae209033",
+      "bytes": 4951804
+    },
+    "skills/presentation-suite/fonts/LongCang-Regular.ttf": {
+      "sha256": "e5bf2c3f24ef2327c6f136d8f73e2f9dfdf44896fdbeb35a9515f44777bb91bc",
+      "bytes": 5162508
+    },
+    "skills/presentation-suite/fonts/MaShanZheng-Regular.ttf": {
+      "sha256": "b844c59bf20bf530e41c20d6ff12b383b23a2e553b9b68cc89f070869213155d",
+      "bytes": 5858048
+    },
+    "skills/presentation-suite/fonts/Manrope.ttf": {
+      "sha256": "d0639be45d0af36e798172419d7bd173c4bd4f29e2b76cbb69db1d11bf8b0a40",
+      "bytes": 165420
+    },
+    "skills/presentation-suite/fonts/Montserrat.ttf": {
+      "sha256": "0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7",
+      "bytes": 744936
+    },
+    "skills/presentation-suite/fonts/NotoSansSC.ttf": {
+      "sha256": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da",
+      "bytes": 17772300
+    },
+    "skills/presentation-suite/fonts/NotoSerifSC.ttf": {
+      "sha256": "050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9",
+      "bytes": 25125512
+    },
+    "skills/presentation-suite/fonts/OFL-1.1.txt": {
+      "sha256": "66124daea07cb08ada8f37fccbb7745536389efc9ae3197503ab03a702c353e5",
+      "bytes": 4008
+    },
+    "skills/presentation-suite/fonts/Oswald.ttf": {
+      "sha256": "5b38c246e255a12f5712d640d56bcced0472466fc68983d2d0410ec0457c2817",
+      "bytes": 172088
+    },
+    "skills/presentation-suite/fonts/PatrickHand-Regular.ttf": {
+      "sha256": "0f173b3e6cb6d1af25babf7f0057c5ac4ee11f9992b0469bb817e967ef4ad0fc",
+      "bytes": 214772
+    },
+    "skills/presentation-suite/fonts/PlayfairDisplay.ttf": {
+      "sha256": "c40f2293766a503bc70cce9e512ef844a4ccb7cbcde792fe2ea31d191917d8d6",
+      "bytes": 300724
+    },
+    "skills/presentation-suite/fonts/Sacramento-Regular.ttf": {
+      "sha256": "9341fda10adbfeb7efc94302b34507a3e227d7e7f5c432df3f5ac8753ff73d24",
+      "bytes": 79696
+    },
+    "skills/presentation-suite/fonts/ShadowsIntoLight.ttf": {
+      "sha256": "1347863151acdc00fa281daaba1a3543dbce5870b55f9cf7479a15bb84007681",
+      "bytes": 54304
+    },
+    "skills/presentation-suite/fonts/SmileySans-Oblique.ttf": {
+      "sha256": "b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4",
+      "bytes": 2629764
+    },
+    "skills/presentation-suite/fonts/Sora.ttf": {
+      "sha256": "84ff7096ae3ec6c8be47d906d1a0ba4de7f2ce78c615275c77301964a316e16c",
+      "bytes": 111400
+    },
+    "skills/presentation-suite/fonts/SpaceGrotesk.ttf": {
+      "sha256": "acad6de1fc93436f5c0f1f4137751ef04f1aea3063e7036535970ffcfbd79f72",
+      "bytes": 136676
+    },
+    "skills/presentation-suite/fonts/Spectral-Bold.ttf": {
+      "sha256": "70ddb1ec6ae3b0b8d0c79231f670de786978f19baeba2130757526e407aebf9b",
+      "bytes": 273220
+    },
+    "skills/presentation-suite/fonts/Spectral-Regular.ttf": {
+      "sha256": "c89021dc20720c8d0dcf40b0b2f6e00c13665fa8041717f581396f51b8c78f5d",
+      "bytes": 261088
+    },
+    "skills/presentation-suite/fonts/Syne.ttf": {
+      "sha256": "ce5ac77142a65cab2248a1a2ebb740b1d4d9c20b52488877d3ff664d1356104a",
+      "bytes": 146980
+    },
+    "skills/presentation-suite/fonts/Unbounded.ttf": {
+      "sha256": "323b511be380c8d474ef030686b71aedde501f8d9cd46da558b7c40454372c3f",
+      "bytes": 778272
+    },
+    "skills/presentation-suite/fonts/Xiaolai-Regular.ttf": {
+      "sha256": "e2f68daf0e72777a8cf58bc83de1b98634b251e537ddbfca24b0ae50d1802da2",
+      "bytes": 22220806
+    },
+    "skills/presentation-suite/fonts/ZCOOLKuaiLe-Regular.ttf": {
+      "sha256": "b3ed6f358cb69f9232eb7e794267767e51d8aeeeeeb612a81a24efb52f0b6bae",
+      "bytes": 1513964
+    },
+    "skills/presentation-suite/fonts/ZCOOLQingKeHuangYou-Regular.ttf": {
+      "sha256": "54f0c0df4308cd74cd0f2fd3494ae054dbc4a1fd6fa7d71f4807eb4cdd8b4136",
+      "bytes": 8328684
+    },
+    "skills/presentation-suite/fonts/ZCOOLXiaoWei-Regular.ttf": {
+      "sha256": "a42b620140f493db42f741351dfbf343c0936d58588ee8004b8b2a218d997ff1",
+      "bytes": 6313808
+    },
+    "skills/presentation-suite/fonts/ZhiMangXing-Regular.ttf": {
+      "sha256": "644e0cae9b40f0b10ab729a01bd32032e3973bac22be3dccae01bf6ae7fde969",
+      "bytes": 4063532
+    },
+    "skills/presentation-suite/skills/sn-ppt-dazzle/SKILL.md": {
+      "sha256": "77d4f935e17abac876dc15c085e4619a0717796c37195a11279082b490f4811f",
+      "bytes": 42978
+    },
+    "skills/presentation-suite/skills/sn-ppt-dazzle/references/fancy-cookbook.md": {
+      "sha256": "f0e4d893898a9134db8cd817060176c1cb78cf7afd3d3dc3f0a36e01491700bc",
+      "bytes": 39260
+    },
+    "skills/presentation-suite/skills/sn-ppt-dazzle/references/style-families.md": {
+      "sha256": "61723cf249ce70e93df2ea23da926194af9df86b9b622ca6604337f494a747fb",
+      "bytes": 10015
+    },
+    "skills/presentation-suite/skills/sn-ppt-dazzle/scripts/artifact_metadata.py": {
+      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "bytes": 14322
+    },
+    "skills/presentation-suite/skills/sn-ppt-dazzle/scripts/render_deck.py": {
+      "sha256": "a49fe283b43839979eca02d672de815c6efb62bed69da006125dca1c0c91c767",
+      "bytes": 28991
+    },
+    "skills/presentation-suite/skills/sn-ppt-dazzle/scripts/sitecustomize.py": {
+      "sha256": "fa1306bcf83baf9f6f8c06e20c8019896c60925b44e7f4e12ec8fb4b2df3165b",
+      "bytes": 787
+    },
+    "skills/presentation-suite/skills/sn-ppt-doctor/SKILL.md": {
+      "sha256": "29d7861ce4d870ce571e99c424fd35c6fca29f0ef19485f21bec16a5fc1fa057",
+      "bytes": 5757
+    },
+    "skills/presentation-suite/skills/sn-ppt-doctor/ppt_doctor/check_environment.py": {
+      "sha256": "27f702e5b8b12805681f606b8959465397de01d4ca82147ef013f63e05ab8e2b",
+      "bytes": 22590
+    },
+    "skills/presentation-suite/skills/sn-ppt-doctor/requirements.txt": {
+      "sha256": "81c8cbb6cb3914342f0e09a47001a1522492c3b94cbd82774b2c803d762c8a1c",
+      "bytes": 41
+    },
+    "skills/presentation-suite/skills/sn-ppt-entry/SKILL.md": {
+      "sha256": "1bafd3fe27ebc71af424113bf9bc5257dde405a89ad51410cb88b6e6cab767c9",
+      "bytes": 24598
+    },
+    "skills/presentation-suite/skills/sn-ppt-entry/requirements.txt": {
+      "sha256": "70a97342cad68847e78481291445595cf4008dfd10b42fd508e0d7b4d431f2bc",
+      "bytes": 41
+    },
+    "skills/presentation-suite/skills/sn-ppt-entry/scripts/artifact_metadata.py": {
+      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "bytes": 14322
+    },
+    "skills/presentation-suite/skills/sn-ppt-entry/scripts/parse_user_docs.py": {
+      "sha256": "4be3eb83b91731206665bbb7ff9cb69834e01cbc905a4a70ef36642b9fdb7672",
+      "bytes": 12863
+    },
+    "skills/presentation-suite/skills/sn-ppt-entry/scripts/timing_helper.py": {
+      "sha256": "a29eba114f6916a15edd8c855ccc8c19150d117505ab37a442d33216ed1c9dc3",
+      "bytes": 2753
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/SKILL.md": {
+      "sha256": "a3f40f92c1235784d1f492a858b1af39368cd79dabb62126e12f882758c19e55",
+      "bytes": 57130
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/agents/openai.yaml": {
+      "sha256": "fca822e9a5e99f3ba5422a29e074c8cb553e7d864042f5eca2dbf57f98449489",
+      "bytes": 350
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/assets/licenses/OFL-1.1.txt": {
+      "sha256": "66124daea07cb08ada8f37fccbb7745536389efc9ae3197503ab03a702c353e5",
+      "bytes": 4008
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/assets/licenses/echarts-5.5.0/LICENSE": {
+      "sha256": "634293835b43a6dd2094fa39182a3d9a6b9ca43b7fdb9ac354e8037af2a3093a",
+      "bytes": 11990
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/assets/licenses/echarts-5.5.0/NOTICE": {
+      "sha256": "fa99ac3af859d0e13166906dc53a73ad34a08898da7e8ae83407275496e9e30c",
+      "bytes": 168
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/assets/licenses/echarts-5.5.0/licenses/LICENSE-d3": {
+      "sha256": "e1211892da0b0e0585b7aebe8f98c1274fba15bafe47fa1f4ee8a7a502c06304",
+      "bytes": 1475
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/assets/vendor/echarts.min.js": {
+      "sha256": "42f8329d989b6f6539dd2b15bbdf0d82025762ac112fbb60dc57b27d7bcf3946",
+      "bytes": 1029203
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/base-template.css": {
+      "sha256": "568e6c5249c360de868395eaf64bd7b19e2d91cd0722092abb0c59813224314c",
+      "bytes": 35366
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/box-agent-tool-contract.md": {
+      "sha256": "fdd7a2d49b9465ac71147303a4cb0d1e6f8c9eea32a42ce6ff08a22c35d28a9b",
+      "bytes": 21918
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/design-rules.md": {
+      "sha256": "7b2c0a14e41292c4752f77a74b3e65e1a18aa9bc10dec0fbb029a782fc7bb4da",
+      "bytes": 64355
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/design-styles.md": {
+      "sha256": "8a8639f7b97b153ee023b14a0f291137f0efd135b4b7e4b4ebfd583b5d307931",
+      "bytes": 26842
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/editing-contract.md": {
+      "sha256": "cf0c91af7cf341cdffb0e8436988962b1d39e06d51b9377411df9203ea3bc739",
+      "bytes": 5074
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/fonts.md": {
+      "sha256": "0d29e6e58159c8f85b6137b6f2a4b6ce31d7f1a539ac3be24684b749a8f204e6",
+      "bytes": 10965
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/layout-patterns.md": {
+      "sha256": "7934524a778353a8f333c0c29b91466680b57a6f4abf6fd075781856ec585ec6",
+      "bytes": 18688
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/planning-contract.md": {
+      "sha256": "786faeab351000bcfca717dbd23bb94e43de2fd73aa2585fe08255b468597f2c",
+      "bytes": 30147
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/references/quality-checklist.md": {
+      "sha256": "682227cb733fc10afe070b8041d1211eb57be0c4b387f17860c091a578a801f6",
+      "bytes": 32548
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/requirements.txt": {
+      "sha256": "e99da4477edfa9ac32905f515ebd468c3308d07ebe31eb2c74d7d54120c6a7b7",
+      "bytes": 65
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/artifact_delivery.js": {
+      "sha256": "3c9f127b372f3a30093f3db87844ff99f002d0a5f8d9ebb17f9b0ceea8dd617b",
+      "bytes": 7784
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/artifact_metadata.py": {
+      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
+      "bytes": 14322
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/deck.py": {
+      "sha256": "f32494b4c5638419975e1269cc3de4ea164eeeecf4d747f8999d4aab5e7cf100",
+      "bytes": 71272
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/html_to_pptx.mjs": {
+      "sha256": "aa8ea3ca3899915cc2688744f4b7dfe80b9b767022f4c010618a2358dca00476",
+      "bytes": 6464
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/browser_picker.mjs": {
+      "sha256": "e986e7a717a6df820be43b8e75ca93684926379b17fe093bda5db923a98689f9",
+      "bytes": 6052
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/cli_guards.mjs": {
+      "sha256": "520147c4f4476b117f69c4e0348cdf85c3b7d1292c620d19c7d50408108b3188",
+      "bytes": 16217
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/dom_extractor.mjs": {
+      "sha256": "2a2def419d0663eb1cd73472edf9019a5e2f335bc1a5d6a191fbfee1962dbd5f",
+      "bytes": 37849
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/echarts_discovery.mjs": {
+      "sha256": "f87640b1acd6325140d4b903e97bc918a7c7cc8cbfad012d5d53d7dbb10c4261",
+      "bytes": 1262
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/echarts_to_pptx.mjs": {
+      "sha256": "01276717c4513d994bff6cc554d34246a68ba3d7858c764bc238da65cfb7bed4",
+      "bytes": 30704
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/image_downloader.mjs": {
+      "sha256": "1f1be06dcc2d8d49e96fcc8f17d4eef931c5efbccb45f4dc3c853c52e1ddaa62",
+      "bytes": 4416
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/postprocess_pptx.mjs": {
+      "sha256": "47559e618c969befce7e9227642f09a2d64be9ea5d13de31d015c43e22282a65",
+      "bytes": 7153
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/pptx_builder.mjs": {
+      "sha256": "991865e65ccea3c24dc81fa2073d007b4ce426b7f07c01447aaca8804b384850",
+      "bytes": 90838
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/lib/style_parser.mjs": {
+      "sha256": "62f06b58ece189ea4c523e24e5e1f648a09aac622d2d9aada717af78fb532cae",
+      "bytes": 19733
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/package-lock.json": {
+      "sha256": "97d489f594900a91b5028237229ee10a475b3b26255a9398c707b471641f4d5b",
+      "bytes": 9293
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/package.json": {
+      "sha256": "bdf96ced74a9660ebc6e11de71865dcb20a80dc962049e889b29dc4ddeb793f1",
+      "bytes": 268
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/screenshot.mjs": {
+      "sha256": "700dcf3dde86d4a4995585bc6d6740cdba632a8c550d3c2a9754f33e0a9d057a",
+      "bytes": 2761
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/fixtures/dom-layout-regression.html": {
+      "sha256": "14a4531c5f1869d57626cb7a93aff7f42ca3403beb3c179637152f30058aacee",
+      "bytes": 758
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/fixtures/echarts-fallback.html": {
+      "sha256": "0703867337d3cab00fb40bf9e928ebbbf6009318f308f90e7bb97294acff347b",
+      "bytes": 1214
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_color_srgb_regression.mjs": {
+      "sha256": "5285ff003746fefc925791d79438efdecfffa149a99cf70a3ada9a06a6abe846",
+      "bytes": 881
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_dom_layout_regression.mjs": {
+      "sha256": "dc0835d5115039f254f1a1468890b338c8e3a5b8b95242400c8c5474e4c3c112",
+      "bytes": 1559
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_discovery.mjs": {
+      "sha256": "6c9c935bcc94d9ef1c9829f9803c7b8a04a3dd062756164fa15e4e5c66950c3d",
+      "bytes": 1484
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_fallback.mjs": {
+      "sha256": "b92017905f53a4ccb7729c3f6ad8ae670408e18f6d7cc06126bc8cf03d461981",
+      "bytes": 2086
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_echarts_to_pptx_regression.mjs": {
+      "sha256": "81fea96386c9bb1307e4c26ed2a878d65637016e1ac20f5f132efe12ce0e7218",
+      "bytes": 2343
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_export_contract_regression.mjs": {
+      "sha256": "81bd2b1b9a4e037bd19b193a9315f2f873010b325ac831173a7decf5b50985a2",
+      "bytes": 9850
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_radial_overlay_regression.mjs": {
+      "sha256": "ac479471e2189901e07123ad0157d6269ea9d631f70f4017d3d0c95fb6393563",
+      "bytes": 1055
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/export_pptx/test/test_text_box_padding_regression.mjs": {
+      "sha256": "72864f88a9776b7eb732228e810e8626ee98da00306ea2506efdb6feb61b3b48",
+      "bytes": 675
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/file_lock.py": {
+      "sha256": "894542a3843a80cf8cba1901a272600d30d3dcc12f3b467cba4783a49df204a1",
+      "bytes": 1553
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/font_bundle.py": {
+      "sha256": "7869aa40580504b7afde5c24aa337309beda04be380a8ab56c5499dd2fb70488",
+      "bytes": 41804
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/group_input.py": {
+      "sha256": "5ead74d0963c22b1ec206bdcfe6070c924ff7ae2602c94a6165607cc81ba3824",
+      "bytes": 16476
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/image_cutout.py": {
+      "sha256": "0b5191060c5138760b1026f6ce650faa4b67a2adb076a9867ffc8ce186ad9512",
+      "bytes": 14571
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/install.sh": {
+      "sha256": "87306345ee66f061c7f4cec612cd971b2af404067c586e580fd4a813efe1a064",
+      "bytes": 13533
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/render.py": {
+      "sha256": "c0c5949d9c866051b23ee9e724819d2a8bfdcb1fbb1dcdba7bd4bba2d7c5c1bd",
+      "bytes": 92011
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/render_runtime.py": {
+      "sha256": "d388e0dae35eb638ac6ab43acf1153afaa8d2cc35704493524abe5625fb4e377",
+      "bytes": 31020
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/render_runtime_windows.py": {
+      "sha256": "144bbf33fd55ffe0356fd6223e4b913206c86719db669bcb5f2fcb36e1cc9ae7",
+      "bytes": 14434
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/serper_images.py": {
+      "sha256": "c9c6e1b0864b628cc09fd5a36d7b28e4765b9ee2a1fe2501c2a927e9bc114a55",
+      "bytes": 4262
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/scripts/stage_materials.py": {
+      "sha256": "0bca48250667635af7526cf25dbb27e8ed6cecbf69e4ee71dcbd2aef42d76106",
+      "bytes": 38514
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/subagents/image.md": {
+      "sha256": "b45463800a47c1d72cf00b4c2521f68cfb7d467b5ba8b350a85f32fef1427025",
+      "bytes": 16169
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/subagents/review.md": {
+      "sha256": "f91366b7ea57794a2b9071f42841811560a69b155a2ccc39f7e8e252f132f373",
+      "bytes": 33243
+    },
+    "skills/presentation-suite/skills/sn-ppt-standard/subagents/slide.md": {
+      "sha256": "b6c47079bb3b6afed182a1e06a5702ab7afdc05ee541ff715649eb69eb15fc10",
+      "bytes": 32520
+    },
+    "skills/presentation-suite/skills/sn-ppt-story/SKILL.md": {
+      "sha256": "cc6cbc236195c1d08046371bf269312d3b13fcac87bb7c7b5ae682b97cb4e39f",
+      "bytes": 9974
+    },
+    "skills/presentation-suite/skills/sn-ppt-tools/SKILL.md": {
+      "sha256": "ce454ad27cfaf6c0960bc4746bfb4b08333fac27b3ff955565bf1b9c01927019",
+      "bytes": 3221
+    },
+    "skills/presentation-suite/skills/sn-ppt-tools/references/capability-policy.md": {
+      "sha256": "12ced1792ef0e17032b63c5a6000876264f92bddba468c56a773bce1bab842b4",
+      "bytes": 3074
+    },
+    "skills/presentation-suite/skills/sn-ppt-tools/scripts/env_config.py": {
+      "sha256": "48d0b12c70642dd949727fe8d5e8da3f5b834b3a991fee802a33eeea942c792a",
+      "bytes": 2668
+    },
+    "skills/presentation-suite/skills/sn-ppt-tools/scripts/fetch_image.py": {
+      "sha256": "015361dbc3352b2ed914953442db87d7a2d90677d8a2234e9eb4a195ae071708",
+      "bytes": 4572
+    },
+    "skills/presentation-suite/skills/sn-ppt-tools/scripts/image_generate.py": {
+      "sha256": "77d70f12758fda4ab8fe9bc27c190afc3727ff79e92b3233651c7924aece3c80",
+      "bytes": 8747
+    },
+    "skills/presentation-suite/skills/sn-ppt-tools/scripts/image_search.py": {
+      "sha256": "8f053c23822bca58a3b54423d11b4933e50627ee03c2b84aa4725f48f3b2d8c8",
+      "bytes": 4535
+    },
+    "skills/presentation-suite/skills/sn-ppt-tools/scripts/web_search.py": {
+      "sha256": "ff9019bf2c1ff4fae345506babba6d4d39e274bf0fcadecf238904f4c431e264",
+      "bytes": 5422
+    },
+    "skills/presentation-suite/source.json": {
+      "sha256": "3bbaf4a34bac95b4879cb8068b63ffbb8825d6ff2077efdbca50b8e79167a500",
+      "bytes": 40371
+    },
+    "ui/config.html": {
+      "sha256": "9fd33a18834a130b0b6553516ec7dc03fabb424246b5f636502a3b0bb6ae7270",
+      "bytes": 16286
+    }
+  }
+}

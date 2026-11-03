@@ -1,0 +1,44 @@
+{
+  "id": "capital-ledger",
+  "name": "Capital Ledger",
+  "description": "A disciplined investment ledger with warm paper, concentric valuation geometry, hairline rules, and tabular evidence for capital decisions.",
+  "source_reference": "beautiful-html-templates/cartesian",
+  "selection": {
+    "visual_dna_ids": ["capital-ledger"],
+    "mood_keywords": ["disciplined", "financial", "quiet confidence", "evidence-led", "ledger", "克制", "资本", "投资", "账簿感"],
+    "industry_fit": ["investment", "capital markets", "investor relations", "valuation", "earnings", "corporate finance", "投资分析", "财报", "资本配置", "估值", "投资者关系"],
+    "density": "high",
+    "scheme": "light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#F1EEE5",
+    "surface": "#FBF9F2",
+    "surface_strong": "#E4DED0",
+    "primary": "#173B2C",
+    "primary_soft": "#D9E4DB",
+    "text": "#171916",
+    "muted": "#66665F",
+    "border": "#B9B3A7",
+    "inverse": "#FBF9F2",
+    "alt_background": "#172019",
+    "alt_surface": "#223027",
+    "alt_text": "#F5F1E8",
+    "alt_muted": "#BFC7BD",
+    "alt_border": "#536157",
+    "alt_primary": "#BBD2BF",
+    "chart": ["#173B2C", "#6E8064", "#B08A4B", "#7A3F35"]
+  },
+  "typography": {
+    "display": "Playfair Display, Georgia, Songti SC, serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 0, "radius_medium": 0, "radius_large": 0, "border_width": 1},
+  "style": {"canvas": "grid", "surface": "outline", "shadow": "none", "heading": "editorial", "label": "mono", "accent": "line", "alternation": "section"},
+  "composition": {
+    "default_family": "analytical-exhibit",
+    "allowed_families": ["analytical-exhibit", "institutional-grid", "literary-minimal"]
+  }
+}

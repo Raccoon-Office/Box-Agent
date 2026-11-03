@@ -1,0 +1,95 @@
+{
+  "id": "data-intelligence",
+  "name": "Data Intelligence",
+  "description": "A high-density intelligence console for KPI reviews, analytics narratives, evidence rails, operating dashboards, and decision-ready data.",
+  "source_reference": "beautiful-html-templates/signal",
+  "selection": {
+    "visual_dna_ids": [
+      "data-intelligence"
+    ],
+    "mood_keywords": [
+      "analytical",
+      "intelligent",
+      "evidence-led",
+      "precise",
+      "authoritative",
+      "high density",
+      "分析",
+      "智能",
+      "证据驱动",
+      "数据驱动",
+      "理性",
+      "严谨",
+      "高密度"
+    ],
+    "industry_fit": [
+      "business intelligence",
+      "data analytics",
+      "KPI review",
+      "finance",
+      "operations",
+      "growth analytics",
+      "商业智能",
+      "数据分析",
+      "经营分析",
+      "财务分析",
+      "指标复盘"
+    ],
+    "density": "high",
+    "scheme": "dark",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#10182A",
+    "surface": "#17243B",
+    "surface_strong": "#203252",
+    "primary": "#42D3B2",
+    "primary_soft": "#173D3B",
+    "text": "#F4F7FB",
+    "muted": "#A7B3C7",
+    "border": "#39506F",
+    "inverse": "#10182A",
+    "alt_background": "#EDF2F7",
+    "alt_surface": "#FFFFFF",
+    "alt_text": "#16233A",
+    "alt_muted": "#53657D",
+    "alt_border": "#B5C1D1",
+    "alt_primary": "#087E6A",
+    "chart": [
+      "#42D3B2",
+      "#67A8FF",
+      "#DAB76C",
+      "#E47C68"
+    ]
+  },
+  "typography": {
+    "display": "IBM Plex Sans, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, IBM Plex Sans, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {
+    "radius_small": 4,
+    "radius_medium": 8,
+    "radius_large": 12,
+    "border_width": 1
+  },
+  "style": {
+    "canvas": "grid",
+    "surface": "outline",
+    "shadow": "none",
+    "heading": "condensed",
+    "label": "mono",
+    "accent": "line",
+    "alternation": "section"
+  },
+  "composition": {
+    "default_family": "analytical-exhibit",
+    "allowed_families": [
+      "analytical-exhibit",
+      "institutional-grid",
+      "technical-schematic",
+      "product-showcase"
+    ]
+  }
+}

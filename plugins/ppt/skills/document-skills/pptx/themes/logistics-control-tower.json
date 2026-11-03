@@ -1,0 +1,38 @@
+{
+  "id": "logistics-control-tower",
+  "name": "Logistics Control Tower",
+  "description": "A supply-network control tower with container IDs, route coordinates, transit rails, shipment states, ETA markers, and port-orange alerts.",
+  "source_reference": "beautiful-html-templates/product-console",
+  "selection": {
+    "visual_dna_ids": ["logistics-control-tower"],
+    "mood_keywords": ["logistics", "connected", "operational", "traceable", "global", "物流", "供应链", "履约", "追踪", "网络"],
+    "industry_fit": ["supply chain", "logistics", "procurement operations", "warehousing", "transportation", "供应链管理", "物流运营", "采购运营", "仓储", "运输"],
+    "density": "high",
+    "scheme": "control-light",
+    "formality": "high",
+    "fallback": false
+  },
+  "palette": {
+    "background": "#EDF2F3",
+    "surface": "#FFFFFF",
+    "surface_strong": "#DCE8E8",
+    "primary": "#143C52",
+    "primary_soft": "#D8E4EA",
+    "text": "#11252C",
+    "muted": "#53666C",
+    "border": "#89A1A6",
+    "inverse": "#FFFFFF",
+    "chart": ["#143C52", "#E66A2C", "#168A83", "#D4A72C"]
+  },
+  "typography": {
+    "display": "Space Grotesk, Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "body": "Inter, PingFang SC, Microsoft YaHei, sans-serif",
+    "label": "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "shape": {"radius_small": 4, "radius_medium": 8, "radius_large": 12, "border_width": 1},
+  "style": {"canvas": "grid", "surface": "outline", "shadow": "soft", "heading": "standard", "label": "mono", "accent": "line", "alternation": "section"},
+  "composition": {
+    "default_family": "product-showcase",
+    "allowed_families": ["product-showcase", "technical-schematic", "analytical-exhibit", "institutional-grid"]
+  }
+}

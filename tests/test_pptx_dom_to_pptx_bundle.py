@@ -1,9 +1,8 @@
-from pathlib import Path
+from tests.pptx_test_support import PPT_PLUGIN_ROOT
 
 
 BUNDLE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "box_agent"
+    PPT_PLUGIN_ROOT
     / "skills"
     / "document-skills"
     / "pptx"

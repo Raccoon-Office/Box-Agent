@@ -35,6 +35,9 @@ MANIFEST_PATH = SKILLS_DIR / "_manifest.json"
 # invisible to ordinary sessions. Marketplace installation copies those skills
 # into ~/.box-agent/skills/, where the user source is discovered independently
 # of this builtin whitelist.
+# PPT is delivered through plugins/ppt and activated by an external instance.
+# Its eight legacy resource directories remain on disk for migration only;
+# none of their names belongs in this active builtin allowlist.
 BUILTIN_SKILL_NAMES: frozenset[str] = frozenset(
     {
         "browser-use",
@@ -47,14 +50,6 @@ BUILTIN_SKILL_NAMES: frozenset[str] = frozenset(
         "mcp-config",
         "memory-guide",
         "pdf",
-        "pptx",
-        "ppt-fast",
-        "sn-ppt-entry",
-        "sn-ppt-tools",
-        "sn-ppt-story",
-        "sn-ppt-standard",
-        "sn-ppt-dazzle",
-        "sn-ppt-doctor",
         "research-synthesis",
         "roadmap",
         "scheduled-task",

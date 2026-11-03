@@ -1,11 +1,9 @@
-from pathlib import Path
-
 import pytest
+from tests.pptx_test_support import PPT_PLUGIN_ROOT
 
 
 PPTX_SKILL_ROOT = (
-    Path(__file__).resolve().parents[1]
-    / "box_agent"
+    PPT_PLUGIN_ROOT
     / "skills"
     / "document-skills"
     / "pptx"
