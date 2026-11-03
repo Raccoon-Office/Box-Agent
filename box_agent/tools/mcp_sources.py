@@ -140,9 +140,14 @@ def _fingerprint(
     return hashlib.sha256(f"{serialized}\0{credential_version}".encode("utf-8")).hexdigest()
 
 
+def mcp_credential_key(owner: str, reference: str) -> str | tuple[str, str]:
+    # Preserve all existing connector references, including the user-mcp: prefix.
+    return (owner, reference) if owner == "user" else reference
+
+
 def resolve_mcp_sources(
     sources: tuple[McpConfigSource, ...],
-    credential_versions: dict[str, int] | None = None,
+    credential_versions: dict[str | tuple[str, str], int] | None = None,
     reserved_names: set[str] | None = None,
     source_server_overrides: dict[McpOwner, dict[str, dict]] | None = None,
 ) -> ResolvedMcpSources:
@@ -178,6 +183,8 @@ def resolve_mcp_sources(
                 if isinstance(credential_ref, str)
                 else 0
             )
+            if source.owner == "user":
+                credential_version = credential_versions.get(mcp_credential_key("user", f"user-mcp:{name}"), 0)
             resolved[name] = ResolvedMcpServer(
                 name=name,
                 config=config,

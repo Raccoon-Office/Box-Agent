@@ -3865,17 +3865,29 @@ class BoxACPAgent:
                 return {"success": False, "error": "credentialRef and headers are required"}
             from box_agent.tools.mcp_loader import set_mcp_runtime_credential
             try:
-                affected = set_mcp_runtime_credential(credential_ref, headers)
+                target = params.get("target")
+                affected = (
+                    set_mcp_runtime_credential(credential_ref, headers, target=target)
+                    if target is not None else set_mcp_runtime_credential(credential_ref, headers)
+                )
             except ValueError as error:
                 return {"success": False, "error": str(error)}
             log.info("mcp/credential/set", affected_servers=len(affected))
-            return {"success": True, "affectedServers": affected}
+            response = {"success": True, "affectedServers": affected}
+            if target is not None:
+                response["target"] = {"owner": "user", "name": target["name"]}
+            return response
         if method == "mcp/credential/clear":
             credential_ref = params.get("credentialRef", "")
             if not isinstance(credential_ref, str) or not credential_ref.strip():
                 return {"success": False, "error": "credentialRef is required"}
             from box_agent.tools.mcp_loader import clear_mcp_runtime_credential
-            affected = clear_mcp_runtime_credential(credential_ref)
+            try:
+                target = params.get("target")
+                affected = (clear_mcp_runtime_credential(credential_ref, target=target)
+                            if target is not None else clear_mcp_runtime_credential(credential_ref))
+            except ValueError as error:
+                return {"success": False, "error": str(error)}
             log.info("mcp/credential/clear", affected_servers=len(affected))
             return {"success": True, "affectedServers": affected}
         if method in {"mcp/reconcile", "mcp/source/replace"}:

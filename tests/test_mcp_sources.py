@@ -195,8 +195,8 @@ def isolated_connector_runtime(monkeypatch, tmp_path):
     monkeypatch.delenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", raising=False)
     monkeypatch.delenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", raising=False)
     monkeypatch.setattr(mcp_loader, "_mcp_config_path", str(user))
-    for name in ("_mcp_server_definitions", "_mcp_source_overrides", "_mcp_runtime_credentials",
-                 "_mcp_runtime_credential_versions", "_mcp_status", "_mcp_reconnect_locks"):
+    for name in ("_mcp_server_definitions", "_mcp_source_overrides", "_mcp_runtime_credentials", "_mcp_credential_targets",
+                 "_mcp_runtime_credential_versions", "_mcp_status", "_mcp_reconnect_locks", "_mcp_connection_epochs"):
         monkeypatch.setattr(mcp_loader, name, {})
     monkeypatch.setattr(mcp_loader, "_mcp_connections", [])
     monkeypatch.setattr(mcp_loader, "_mcp_loading", False)
@@ -364,6 +364,86 @@ async def test_cold_load_waits_for_required_credentials_before_creating_transpor
     assert await mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path) == []
     assert not build.called
     assert mcp_loader.get_mcp_status()[0]["error"] == "Waiting for host credential"
+
+
+@pytest.mark.asyncio
+async def test_host_managed_user_server_makes_no_connection_until_credentials_are_restored(
+    monkeypatch, isolated_connector_runtime,
+):
+    from unittest.mock import Mock
+
+    config = {"url": "https://remote.test/mcp", "type": "streamable_http", "alwaysLoad": True}
+    _write(Path(mcp_loader._mcp_config_path), {"remote": config})
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS", json.dumps({
+        "remote": {key: value for key, value in config.items() if key != "alwaysLoad"},
+    }))
+    build = Mock(wraps=mcp_loader._build_connection)
+    monkeypatch.setattr(mcp_loader, "_build_connection", build)
+    attempts = []
+
+    async def connect(connection):
+        attempts.append(dict(connection.headers))
+        assert connection.headers == {"Authorization": "Bearer restored-token"}
+        return True
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    assert await mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path) == []
+    build.assert_not_called()
+    assert attempts == []
+    assert mcp_loader.get_mcp_status()[0]["state"] == "connecting"
+    assert mcp_loader.get_mcp_status()[0]["error"] is None
+    assert not mcp_loader.is_mcp_loading()
+
+    mcp_loader.set_mcp_runtime_credential(
+        "user-mcp:remote", {"Authorization": "Bearer restored-token"},
+        target={"owner": "user", "name": "remote", "config": config},
+    )
+    result = await mcp_loader.reconnect_mcp_server("remote")
+    assert result["success"] is True
+    assert len(attempts) == 1
+    build.assert_called_once()
+    assert mcp_loader.get_mcp_status()[0]["state"] == "connected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("targets,owner,config", [
+    (None, "user", {"url": "https://remote.test/mcp"}),
+    ("{}", "user", {"url": "https://remote.test/mcp"}),
+    ("invalid-json", "user", {"url": "https://remote.test/mcp"}),
+    ("[]", "user", {"url": "https://remote.test/mcp"}),
+    ('{"remote":{"url":"https://before.test/mcp"}}', "user", {"url": "https://changed.test/mcp"}),
+    ('{"other":{"url":"https://remote.test/mcp"}}', "user", {"url": "https://remote.test/mcp"}),
+    ("match", "user", {"url": "https://remote.test/mcp", "headers": {"AUTHORIZATION": "Bearer manual"}}),
+    ("match", "user", {"command": "fixture-server"}),
+    ("match", "system", {"url": "https://system.test/mcp"}),
+    ("match", "connector", {"url": "https://connector.test/mcp", "_connectorId": "fixture"}),
+])
+async def test_host_user_deferral_preserves_other_startup_paths(
+    monkeypatch, tmp_path, isolated_connector_runtime, targets, owner, config,
+):
+    if targets is None:
+        monkeypatch.delenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS", raising=False)
+    else:
+        monkeypatch.setenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS",
+                           json.dumps({"remote": config}) if targets == "match" else targets)
+    if owner == "user":
+        _write(Path(mcp_loader._mcp_config_path), {"remote": config})
+    elif owner == "system":
+        system = tmp_path / "system.json"
+        _write(system, {"remote": config})
+        monkeypatch.setenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", str(system))
+    else:
+        monkeypatch.setattr(mcp_loader, "_mcp_source_overrides", {owner: {"remote": config}})
+    attempts = []
+
+    async def connect(connection):
+        attempts.append(connection.name)
+        return True
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    await mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path)
+    assert attempts == ["remote"]
+    assert mcp_loader.get_mcp_status()[0]["state"] == "connected"
 
 
 @pytest.mark.asyncio
@@ -709,3 +789,282 @@ async def test_source_update_checks_startup_after_acquiring_the_source_lock(
     wait.assert_awaited_once()
     assert mcp_loader._mcp_source_overrides == {}
     assert mcp_loader._mcp_server_definitions == {}
+
+
+def test_host_user_credentials_bind_to_exact_config_without_file_refs(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    path = tmp_path / "mcp.json"
+    original = {"url": "https://user.test/mcp", "headers": {"X-Key": "keep"}}
+    _write(path, {"custom": original, "other": {"url": "https://other.test/mcp"}})
+    monkeypatch.setattr(mcp_loader, "_mcp_credential_targets", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credential_versions", {})
+    definitions = resolve_mcp_sources((McpConfigSource("user", path),)).servers
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", definitions)
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credentials", {})
+    def bind(name, config, headers):
+        return mcp_loader.set_mcp_runtime_credential(
+            f"user-mcp:{name}", headers,
+            target={"owner": "user", "name": name, "config": config},
+        )
+    before = definitions["custom"].fingerprint
+    assert bind("custom", original, {"Authorization": "Bearer test-only"}) == ["custom"]
+    updated = resolve_mcp_sources((McpConfigSource("user", path),), mcp_loader._mcp_runtime_credential_versions).servers
+    assert updated["custom"].fingerprint != before
+    assert updated["other"].fingerprint == definitions["other"].fingerprint
+    assert mcp_loader._materialize_server_config(updated["custom"])["headers"] == {
+        "X-Key": "keep", "Authorization": "Bearer test-only",
+    }
+    assert "Authorization" not in path.read_text()
+    changed = replace(updated["custom"], config={**original, "url": "https://attacker.test/mcp"})
+    assert mcp_loader._materialize_server_config(changed)["headers"] == {"X-Key": "keep"}
+    changed_header = replace(updated["custom"], config={**original, "headers": {"X-Key": "changed"}})
+    assert "Authorization" not in mcp_loader._materialize_server_config(changed_header)["headers"]
+    protected = replace(updated["custom"], owner="system")
+    assert "Authorization" not in mcp_loader._materialize_server_config(protected)["headers"]
+    mcp_loader.clear_mcp_runtime_credential("user-mcp:custom", target={"owner": "user", "name": "custom"})
+    assert "Authorization" not in mcp_loader._materialize_server_config(updated["custom"])["headers"]
+    with pytest.raises(ValueError, match="without credentialRef"):
+        bind("custom", {**original, "credentialRef": "connector:secret"}, {"Authorization": "test"})
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", {"protected": protected})
+    with pytest.raises(ValueError, match="protected server"):
+        bind("protected", original, {"Authorization": "test"})
+
+
+def test_unified_credentials_preserve_manual_headers_and_isolate_owners(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    path = tmp_path / "mcp.json"
+    manual = {"url": "https://user.test/mcp", "headers": {"Authorization": "Bearer manual"}}
+    _write(path, {"custom": manual})
+    definitions = resolve_mcp_sources((McpConfigSource("user", path),)).servers
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", definitions)
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credentials", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_credential_targets", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credential_versions", {})
+    definition = definitions["custom"]
+    assert mcp_loader._materialize_server_config(definition)["headers"] == manual["headers"]
+    target = {"owner": "user", "name": "custom", "config": manual}
+    mcp_loader.set_mcp_runtime_credential("user-mcp:custom", {"Authorization": "Bearer oauth"}, target=target)
+    assert mcp_loader._materialize_server_config(definition)["headers"]["Authorization"] == "Bearer oauth"
+    stolen = replace(definition, owner="connector", config={**manual, "credentialRef": "user-mcp:custom"})
+    assert mcp_loader._materialize_server_config(stolen)["headers"] == manual["headers"]
+    assert mcp_loader.clear_mcp_runtime_credential("user-mcp:custom", target={"owner": "user", "name": "custom"}) == ["custom"]
+    assert mcp_loader._materialize_server_config(definition)["headers"] == manual["headers"]
+    assert path.read_text().count("oauth") == 0
+    mcp_loader.set_mcp_runtime_credential("user-mcp:custom", {"Authorization": "test"})
+    assert mcp_loader._materialize_server_config(definition)["headers"] == manual["headers"]
+    mcp_loader.clear_mcp_runtime_credential("user-mcp:custom")
+    with pytest.raises(ValueError, match="must match"):
+        mcp_loader.set_mcp_runtime_credential("connector:other", {"Authorization": "test"}, target=target)
+    assert mcp_loader._mcp_runtime_credentials == {}
+
+
+@pytest.mark.asyncio
+async def test_legacy_connector_ref_does_not_block_public_cold_start(monkeypatch, tmp_path, isolated_connector_runtime):
+    from unittest.mock import AsyncMock
+    from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
+
+    connector = tmp_path / "connectors.json"
+    _write(connector, {"legacy": {"url": "https://legacy.test/mcp", "_connectorId": "example", "credentialRef": "user-mcp:legacy"}})
+    _write(Path(mcp_loader._mcp_config_path), {"public": {"url": "https://public.test/mcp"}})
+    monkeypatch.setenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", str(connector))
+    monkeypatch.delenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS", raising=False)
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    mcp_loader.set_mcp_runtime_credential("user-mcp:legacy", {"Authorization": "Bearer legacy-test"})
+    attempted = []
+    async def connect(conn):
+        attempted.append(conn.name)
+        if conn.name == "legacy":
+            assert conn.headers["Authorization"] == "Bearer legacy-test"
+        return True
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "disconnect", AsyncMock())
+    await mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path)
+    assert attempted == ["legacy", "public"]
+    assert {name: status.state for name, status in mcp_loader._mcp_status.items()} == {"legacy": "connected", "public": "connected"}
+    await mcp_loader.cleanup_mcp_connections()
+
+
+def test_equal_credential_refs_keep_owner_headers_and_versions_isolated(monkeypatch, tmp_path, isolated_connector_runtime):
+    user = Path(mcp_loader._mcp_config_path)
+    connector = tmp_path / "connectors.json"
+    config = {"url": "https://user.test/mcp"}
+    reference = "user-mcp:remote"
+    _write(user, {"remote": config})
+    _write(connector, {"legacy": {"url": "https://legacy.test/mcp", "_connectorId": "example", "credentialRef": reference}})
+    sources = (McpConfigSource("connector", connector), McpConfigSource("user", user))
+    def resolve():
+        return resolve_mcp_sources(sources, mcp_loader._mcp_runtime_credential_versions).servers
+    original = resolve()
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", original)
+    mcp_loader.set_mcp_runtime_credential(reference, {"Authorization": "Bearer connector-test"})
+    connector_updated = resolve()
+    assert connector_updated["remote"].fingerprint == original["remote"].fingerprint
+    assert connector_updated["legacy"].fingerprint != original["legacy"].fingerprint
+    target = {"owner": "user", "name": "remote", "config": config}
+    mcp_loader.set_mcp_runtime_credential(reference, {"Authorization": "Bearer user-test"}, target=target)
+    user_updated = resolve()
+    assert user_updated["legacy"].fingerprint == connector_updated["legacy"].fingerprint
+    assert user_updated["remote"].fingerprint != connector_updated["remote"].fingerprint
+    def headers(name):
+        return mcp_loader._materialize_server_config(user_updated[name]).get("headers", {})
+    assert headers("legacy")["Authorization"] == "Bearer connector-test"
+    assert headers("remote")["Authorization"] == "Bearer user-test"
+    mcp_loader.clear_mcp_runtime_credential(reference)
+    assert headers("remote")["Authorization"] == "Bearer user-test"
+    assert headers("legacy") == {}
+    assert resolve()["remote"].fingerprint == user_updated["remote"].fingerprint
+    mcp_loader.set_mcp_runtime_credential(reference, {"Authorization": "Bearer connector-test"})
+    before_user_clear = resolve()
+    mcp_loader.clear_mcp_runtime_credential(reference, target={"owner": "user", "name": "remote"})
+    assert headers("legacy")["Authorization"] == "Bearer connector-test"
+    assert headers("remote") == {}
+    assert resolve()["legacy"].fingerprint == before_user_clear["legacy"].fingerprint
+
+
+@pytest.mark.asyncio
+async def test_cold_start_build_failure_is_limited_to_that_server(monkeypatch, isolated_connector_runtime):
+    from unittest.mock import AsyncMock
+    from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
+
+    _write(Path(mcp_loader._mcp_config_path), {"broken": {"url": "https://broken.test/mcp"}, "public": {"url": "https://public.test/mcp"}})
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    build = mcp_loader._build_connection
+    def build_one(definition):
+        if definition.name == "broken":
+            raise ValueError("invalid server configuration")
+        return build(definition)
+    monkeypatch.setattr(mcp_loader, "_build_connection", build_one)
+    connect = AsyncMock(return_value=True)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "disconnect", AsyncMock())
+    await mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path)
+    connect.assert_awaited_once()
+    assert mcp_loader._mcp_status["broken"].state == "failed"
+    assert mcp_loader._mcp_status["public"].state == "connected"
+    await mcp_loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "failure", "exception"])
+@pytest.mark.parametrize("operation", ["reconnect", "disconnect"])
+async def test_late_cold_handshake_cannot_publish_after_oauth_update(monkeypatch, isolated_connector_runtime, outcome, operation):
+    import asyncio
+    from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    config = {"url": "https://remote.test/mcp", "headers": {"Authorization": "Bearer old-mock"}}
+    _write(Path(mcp_loader._mcp_config_path), {"remote": config})
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS", json.dumps({"remote": config}))
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    started, release = asyncio.Event(), asyncio.Event()
+    old_connections, closed = [], []
+    async def connect(conn):
+        old = conn.headers["Authorization"] == "Bearer old-mock"
+        if old:
+            old_connections.append(conn)
+            started.set()
+            await release.wait()
+            if outcome == "exception":
+                raise RuntimeError("late old handshake failed")
+            if outcome == "failure":
+                conn.last_error = "late old handshake failed"
+                return False
+        conn.tools = [FakeMCPTool("tool_manual" if old else "tool_oauth", "remote")]
+        return True
+    async def disconnect(conn):
+        closed.append(conn)
+        conn.tools = []
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "disconnect", disconnect)
+    cold = asyncio.create_task(mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        mcp_loader.set_mcp_runtime_credential("user-mcp:remote", {"Authorization": "Bearer new-mock"}, target={"owner": "user", "name": "remote", "config": config})
+        result = await mcp_loader.reconnect_mcp_server("remote")
+        assert result["success"]
+        assert [entry.model_name for entry in catalog.snapshot()] == ["tool_oauth"]
+        if operation == "disconnect":
+            mcp_loader.clear_mcp_runtime_credential("user-mcp:remote", target={"owner": "user", "name": "remote"})
+            await mcp_loader.disconnect_mcp_server("remote")
+        release.set()
+        loaded = await asyncio.wait_for(cold, 2)
+        expected = ["tool_oauth"] if operation == "reconnect" else []
+        assert [entry.model_name for entry in catalog.snapshot()] == expected
+        assert [tool.name for tool in loaded] == expected
+        assert mcp_loader._mcp_status["remote"].state == ("connected" if operation == "reconnect" else "disabled")
+        assert len(mcp_loader._mcp_connections) == len(expected)
+        assert closed.count(old_connections[0]) == 1
+        assert old_connections[0].tools == []
+    finally:
+        release.set()
+        await asyncio.gather(cold, return_exceptions=True)
+        await mcp_loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "failure", "exception"])
+async def test_disconnect_retires_a_pending_hot_handshake(monkeypatch, isolated_connector_runtime, outcome):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    config = {"url": "https://remote.test/mcp"}
+    _write(Path(mcp_loader._mcp_config_path), {"remote": config})
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    started, release = asyncio.Event(), asyncio.Event()
+    async def connect(conn):
+        started.set()
+        await release.wait()
+        if outcome == "exception":
+            raise RuntimeError("late handshake failed")
+        if outcome == "failure":
+            conn.last_error = "late handshake failed"
+            return False
+        conn.tools = [FakeMCPTool("obsolete", "remote")]
+        return True
+    disconnect = AsyncMock()
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "disconnect", disconnect)
+    hot = asyncio.create_task(mcp_loader.reconnect_mcp_server("remote"))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        await mcp_loader.disconnect_mcp_server("remote")
+        release.set()
+        result = await asyncio.wait_for(hot, 2)
+        assert result["superseded"]
+        assert mcp_loader._mcp_connections == []
+        assert catalog.snapshot() == ()
+        assert mcp_loader._mcp_status["remote"].state == "disabled"
+        disconnect.assert_awaited_once()
+    finally:
+        release.set()
+        await asyncio.gather(hot, return_exceptions=True)
+
+
+@pytest.mark.parametrize("owner", ["user", "connector"])
+@pytest.mark.parametrize("configured_key,runtime_key", [("authorization", "Authorization"), ("Authorization", "authorization"), ("aUtHoRiZaTiOn", "AUTHORIZATION")])
+def test_runtime_headers_override_case_insensitively_in_http_requests(monkeypatch, tmp_path, isolated_connector_runtime, owner, configured_key, runtime_key):
+    import httpx
+
+    config = {"url": "https://remote.test/mcp", "headers": {configured_key: "Bearer old-mock", "X-Project": "keep", "x-project": "also-keep"}}
+    reference = "user-mcp:remote"
+    user_config = dict(config)
+    if owner == "connector":
+        config = {**config, "_connectorId": "example", "credentialRef": reference}
+    path = tmp_path / "source.json"
+    _write(path, {"remote": config})
+    definition = resolve_mcp_sources((McpConfigSource(owner, path),)).servers["remote"]
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", {"remote": definition})
+    target = {"owner": "user", "name": "remote", "config": user_config} if owner == "user" else None
+    mcp_loader.set_mcp_runtime_credential(reference, {runtime_key: "Bearer new-mock"}, target=target)
+    headers = mcp_loader._materialize_server_config(definition)["headers"]
+    request = httpx.Request("POST", config["url"], headers=headers)
+    assert request.headers.get_list("authorization") == ["Bearer new-mock"]
+    assert request.headers.get_list("x-project") == ["keep", "also-keep"]
