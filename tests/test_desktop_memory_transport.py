@@ -64,6 +64,17 @@ async def test_no_bootstrap_io_or_network_at_construction_and_missing_file_is_re
     assert len(calls) == 1
 
 
+async def test_context_accepts_a_response_after_the_former_800ms_limit(bootstrap, monkeypatch):
+    path, data, _ = bootstrap
+
+    async def slow_response(_):
+        await asyncio.sleep(1.05)
+        return httpx.Response(200, json=envelope(data))
+
+    install_http(monkeypatch, slow_response)
+    assert await MemoryHostTransport(path, data["identity_epoch"]).request("context", {}) == {"items": []}
+
+
 async def test_fixed_protocol_private_tokens_and_first_identity_pinned(bootstrap, monkeypatch):
     path, data, write = bootstrap
     original = dict(data)
@@ -261,7 +272,7 @@ async def test_oversized_or_invalid_requests_are_not_sent(bootstrap, monkeypatch
         with pytest.raises(MemoryProxyError, match=code):
             await transport.request("search", payload)
     with pytest.raises(MemoryProxyError, match="INVALID_ARGUMENT"):
-        await transport.request("context", {}, timeout=5)
+        await transport.request("context", {}, timeout=5.1)
     assert calls == []
 
 

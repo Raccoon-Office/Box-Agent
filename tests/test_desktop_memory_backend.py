@@ -511,9 +511,9 @@ async def test_hung_preload_is_bounded_and_cancellation_does_not_cancel_main_tas
         await started.wait()
         if cancel:
             runtime.request_cancel()
-        await asyncio.wait_for(refresh, timeout=1.1)
+        await asyncio.wait_for(refresh, timeout=5.5)
         elapsed = asyncio.get_running_loop().time() - begin
-        assert elapsed < (0.2 if cancel else 1.05)
+        assert elapsed < (0.2 if cancel else 5.3)
         assert runtime._turn_scope is None
         assert not session.cancelled
         assert not any(operation in {"qa", "qa/evidence"} for operation, _ in host.calls)
