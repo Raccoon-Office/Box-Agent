@@ -77,6 +77,11 @@ If the body is still too large after all images are removed, preparation fails
 explicitly. A persistence or transmission failure never reexecutes a completed
 CUA operation.
 
+`inspect_images` reads local PNG, JPEG, and WebP files. It decodes WebP as PNG
+in memory for both native and proxy inspection, preserving transparency and
+leaving the source file intact. Animated WebP is inspected using its first
+frame.
+
 `inspect_images` checks the current main-model capability on every invocation:
 omitting strategy selects native only for declared image support; otherwise it
 uses the configured proxy route. Explicit proxy results remain text input to

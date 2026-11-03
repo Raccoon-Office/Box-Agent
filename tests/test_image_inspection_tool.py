@@ -181,6 +181,50 @@ async def test_inspect_images_native_returns_private_persistable_canonical_block
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["native", "proxy"])
+@pytest.mark.parametrize("animated", [False, True], ids=["still", "animated"])
+async def test_inspect_images_sends_webp_as_png(
+    tmp_path: Path, strategy: str, animated: bool
+):
+    from PIL import Image
+
+    source = tmp_path / "reference.webp"
+    first_frame = Image.new("RGBA", (16, 12), (50, 100, 150, 128))
+    options = {}
+    if animated:
+        next_frame = Image.new("RGBA", first_frame.size, (150, 100, 50, 255))
+        options = {"save_all": True, "append_images": [next_frame], "duration": 100}
+    first_frame.save(source, lossless=True, **options)
+    original = source.read_bytes()
+
+    llm = FakeVisionLLM()
+    result = await _tool(tmp_path, llm, native_supported=True).invoke({
+        "image_paths": [source.name],
+        "instruction": "Describe it.",
+        "strategy": strategy,
+    })
+
+    assert result.success, result.error
+    if strategy == "native":
+        assert llm.calls == 0
+        assert result.image_context_eligible
+        blocks = result.image_content
+    else:
+        assert llm.calls == 1
+        assert result.content == llm.content
+        blocks = llm.messages[1].content
+    block = next(block for block in blocks if block["type"] == "input_image")
+    assert block["media_type"] == "image/png"
+    assert result.raw_output["images"][0]["path"] == source.name
+    with Image.open(io.BytesIO(base64.b64decode(block["data"]))) as sent:
+        assert sent.format == "PNG"
+        assert sent.size == first_frame.size
+        assert sent.getpixel((0, 0)) == first_frame.getpixel((0, 0))
+    assert source.read_bytes() == original
+    assert set(tmp_path.iterdir()) == {source}
+
+
+@pytest.mark.asyncio
 async def test_inspect_images_native_rejects_before_reading_when_main_model_is_text_only(
     tmp_path: Path,
 ):
@@ -425,13 +469,15 @@ async def test_inspect_images_schema_rejects_invalid_arguments(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["fake.jpg", "fake.webp"])
 async def test_inspect_images_rejects_file_with_image_extension_but_invalid_bytes(
     tmp_path: Path,
+    filename: str,
 ):
-    (tmp_path / "fake.jpg").write_bytes(b"not a jpeg")
+    (tmp_path / filename).write_bytes(b"not an image")
 
     result = await _tool(tmp_path).invoke(
-        {"image_paths": ["fake.jpg"], "instruction": "Describe it."}
+        {"image_paths": [filename], "instruction": "Describe it."}
     )
 
     assert not result.success

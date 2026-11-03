@@ -54,7 +54,7 @@ class _PermissionRequired(ValueError):
 
 
 class ImageInspectionTool(Tool):
-    """Inspect local PNG/JPEG images with an injected multimodal LLM."""
+    """Inspect local PNG, JPEG, and WebP images with an injected multimodal LLM."""
 
     def __init__(
         self,
@@ -92,7 +92,8 @@ class ImageInspectionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's "
+            "Inspect 1-6 local PNG, JPEG, or WebP images (first frame for animated WebP). "
+            "proxy returns a vision model's "
             "written analysis; native shows image pixels to you under the session's "
             "image-context retention policy. Omit strategy to use native when the "
             "active main model declares image support, otherwise proxy. "
@@ -116,7 +117,7 @@ class ImageInspectionTool(Tool):
                         "maxLength": 4096,
                     },
                     "description": (
-                        "Local PNG/JPEG paths. Relative paths resolve from the active "
+                        "Local PNG, JPEG, or WebP paths. Relative paths resolve from the active "
                         "session cwd."
                     ),
                 },
@@ -425,9 +426,9 @@ class ImageInspectionTool(Tool):
         try:
             with Image.open(io.BytesIO(raw)) as opened:
                 image_format = (opened.format or "").upper()
-                if image_format not in {"PNG", "JPEG"}:
+                if image_format not in {"PNG", "JPEG", "WEBP"}:
                     raise ValueError(
-                        f"unsupported image type for {path}; only PNG and JPEG are supported"
+                        f"unsupported image type for {path}; supported formats are PNG, JPEG, and WebP"
                     )
                 source_pixels = opened.width * opened.height
                 if source_pixels > _MAX_IMAGE_PIXELS:
@@ -435,8 +436,13 @@ class ImageInspectionTool(Tool):
                 orientation = opened.getexif().get(274, 1)
                 opened.load()
                 normalized = ImageOps.exif_transpose(opened)
-                mime_type = "image/png" if image_format == "PNG" else "image/jpeg"
-                if max(normalized.size) <= max_long_edge and orientation == 1:
+                # Convert WebP to PNG for both provider input and session storage.
+                mime_type = "image/jpeg" if image_format == "JPEG" else "image/png"
+                if (
+                    image_format != "WEBP"
+                    and max(normalized.size) <= max_long_edge
+                    and orientation == 1
+                ):
                     encoded = raw
                     encoded_width, encoded_height = normalized.size
                 else:
