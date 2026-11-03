@@ -3,13 +3,16 @@
 from dataclasses import replace
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from box_agent.context_input import DefaultContextEngine
 from box_agent.events import DoneEvent, ErrorEvent, StepStart, StopReason, SummarizationEvent
 from box_agent.hooks import BaseHook
-from box_agent.kernel.context_engine import _fallback_context_estimate, skill_reference_budget_chars
+from box_agent.kernel.context_engine import (
+    _fallback_context_estimate, request_input_tokens, skill_reference_budget_chars,
+)
 from box_agent.runtime import run_agent_loop
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall, TokenUsage
 from box_agent.session_log import SessionLog
@@ -77,6 +80,24 @@ def test_host_and_paged_tool_share_the_safe_input_budget(runtime):
     page = engine.tool_reader("demo", limit=20)
     assert page.success and "EXACT_METHOD_BODY" in page.model_context
     assert page.raw_output["skill_reference"]["has_more"]
+
+
+def test_near_limit_selected_skill_pages_without_blocking_final_request(runtime):
+    llm = SimpleNamespace(estimate_text_tokens=lambda text: len(text.encode("utf-8")))
+    engine = DefaultContextEngine(llm=llm)
+    engine.configure_run(skill_engine=runtime)
+    tool = GetSkillTool(runtime.loader)
+    prepared_tools = prepare_tools([tool])
+    history = [Message(role="user", content="请继续处理任务。 " * 1000)]
+    limit = request_input_tokens(history, prepared_tools.definitions, llm=llm) + 1500
+    runtime.select(["demo"])
+
+    request = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=limit)
+
+    assert request.blocked_reason is None
+    assert "Selected Skills need paged reading" in str(request.messages)
+    assert "EXACT_METHOD_BODY" not in str(request.messages)
+    assert request_input_tokens(request.messages, prepared_tools.definitions, llm=llm) <= limit
 
 
 def test_declared_transient_cost_is_reserved_for_projection_and_batch_reads(runtime):

@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any, Callable
 
 from .kernel.context_engine import (
-    _fallback_context_estimate,
+    _fallback_context_estimate, context_text_counter,
     request_input_tokens, skill_reference_budget_chars,
 )
 from .schema import Message
@@ -168,7 +168,7 @@ class DefaultContextEngine:
                    if self._pending_followup_blocks else [])
         available = skill_reference_budget_chars(
             self.project_history([*self._history, *envelopes, *self._extra_messages, *pending]), definitions,
-            self._token_limit - self._transient_reserve_tokens, self._output_tokens,
+            self._token_limit - self._transient_reserve_tokens, self._output_tokens, llm=self.llm,
         )
         return self.references.read(name, **arguments, budget_chars=max(
             0, available - self._request_reference_tokens * 4,
@@ -229,7 +229,7 @@ class DefaultContextEngine:
         from .correction import prepare_correction_context
         available = skill_reference_budget_chars(
             self.project_history([*messages, *extra_messages, *((transient_message,) if transient_message else ())]),
-            prepared_tools.definitions, max(0, token_limit - max(0, transient_tokens)), output_tokens,
+            prepared_tools.definitions, max(0, token_limit - max(0, transient_tokens)), output_tokens, llm=self.llm,
         )
         correction_context = prepare_correction_context(
             self._memory_lookup, prepared_tools.targets,
@@ -262,9 +262,10 @@ class DefaultContextEngine:
                 context_messages,
                 can_page=self._can_page,
                 defer_delivery=True,
+                count_text_tokens=context_text_counter(self.llm),
                 budget_chars=skill_reference_budget_chars(
                     full_request, prepared_tools.definitions,
-                    token_limit - self._transient_reserve_tokens, output_tokens,
+                    token_limit - self._transient_reserve_tokens, output_tokens, llm=self.llm,
                 ),
             )
             context_messages, references = projection.messages, projection.references

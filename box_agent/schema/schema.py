@@ -1,7 +1,8 @@
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class LLMProvider(str, Enum):
@@ -65,6 +66,15 @@ class ToolCall(BaseModel):
     function: FunctionCall
 
 
+@dataclass(frozen=True, slots=True)
+class RequestUsageSnapshot:
+    """Runtime-only fingerprints for the request measured by provider usage."""
+
+    route: str
+    history: tuple[str, ...]
+    tools: dict[str, str]
+
+
 class TokenUsage(BaseModel):
     """Token usage statistics from one real provider response."""
 
@@ -80,6 +90,7 @@ class TokenUsage(BaseModel):
     cache_creation_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens: int = Field(default=0, exclude=True)
     cache_read_input_tokens_reported: bool = Field(default=False, exclude=True)
+    _request_snapshot: RequestUsageSnapshot | None = PrivateAttr(default=None)
 
     def reported_usage(self) -> dict[str, int]:
         """Return provider totals with cache reads when the provider reported them."""

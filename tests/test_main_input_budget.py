@@ -16,8 +16,8 @@ from box_agent.kernel.context_engine import _SUMMARY_REQUEST
 from box_agent.llm import LLMClient, SessionBoundLLM
 from box_agent.retry import RetryConfig
 from box_agent.runtime import run_agent_loop
-from box_agent.schema import LLMProvider, Message, TokenUsage
-from box_agent.tools.base import Tool
+from box_agent.schema import FunctionCall, LLMProvider, Message, StreamEvent, TokenUsage, ToolCall
+from box_agent.tools.base import Tool, ToolResult
 
 
 @asynccontextmanager
@@ -54,6 +54,75 @@ async def wire_llm(context_window=20_000):
         yield llm, requests
     finally:
         await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_long_text_that_fits_the_estimated_window_reaches_provider_without_compaction():
+    user_text = "请整理工作计划和待办。\n" * 800
+    messages = [Message(role="system", content="system"), Message(role="user", content=user_text)]
+    async with wire_llm() as (llm, requests):
+        events = [event async for event in run_agent_loop(
+            llm=llm, messages=messages, tools={},
+            token_limit=derive_context_token_limit(20_000, 1_000), max_steps=1,
+        )]
+    assert len(requests) == 1
+    assert requests[0]["messages"][-1]["content"] == user_text
+    assert not any(isinstance(event, (SummarizationEvent, ErrorEvent)) for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change_schema", [False, True])
+async def test_provider_usage_guides_next_request_and_charges_changed_tools(change_schema):
+    class ReadTool(Tool):
+        name = "read_data"
+        description = "Read data."
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self):
+            if change_schema:
+                self.description = "Extra usage guidance. " * 2_000
+            return ToolResult(success=True, content="工具返回的结果。\n" * 650)
+
+    class Provider:
+        estimate_text_tokens = LLMClient.estimate_text_tokens
+
+        def __init__(self):
+            self.main_requests = []
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                yield StreamEvent(type="text", delta="<summary>Continue.</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            self.main_requests.append(list(messages))
+            if len(self.main_requests) == 1:
+                yield StreamEvent(
+                    type="finish", finish_reason="tool_calls",
+                    tool_calls=[ToolCall(id="read-1", type="function", function=FunctionCall(
+                        name="read_data", arguments={},
+                    ))],
+                    usage=TokenUsage(prompt_tokens=4_500, completion_tokens=30, total_tokens=4_530),
+                )
+            else:
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    provider = Provider()
+    events = [event async for event in run_agent_loop(
+        llm=provider,
+        messages=[Message(role="system", content="system"),
+                  Message(role="user", content="请整理工作计划和待办。\n" * 800)],
+        tools={"read_data": ReadTool()}, token_limit=17_100, max_steps=2,
+    )]
+
+    if change_schema:
+        assert len(provider.main_requests) == 1
+        assert any(isinstance(event, ErrorEvent) for event in events)
+    else:
+        assert len(provider.main_requests) == 2
+        assert any(message.role == "tool" and "工具返回的结果" in message.content
+                   for message in provider.main_requests[-1])
+        assert not any(isinstance(event, (SummarizationEvent, ErrorEvent)) for event in events)
 
 
 @pytest.mark.asyncio

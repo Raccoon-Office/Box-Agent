@@ -61,6 +61,7 @@ from .context_engine import (
     _estimate_context_from_latest_response,
     _is_compaction_metadata,
     _validate_transient_followup_result,
+    capture_request_usage,
 )
 from .ports import KernelServices
 from .tool_messages import ToolMessageCommitter, session_log_messages
@@ -1001,6 +1002,11 @@ async def _run_agent_loop_impl(
         commit_response = getattr(context_engine, "commit_response", None)
         if callable(commit_response):
             commit_response(message)
+        if message.usage is not None and message.usage._request_snapshot is not None:
+            for previous in reversed(messages):
+                if previous.usage is not None and previous.usage._request_snapshot is not None:
+                    previous.usage._request_snapshot = None
+                    break
         messages.append(message)
         if session_log is not None and session_turn is not None:
             session_log.append_unlogged_messages(session_log_messages(messages),
@@ -1665,6 +1671,9 @@ async def _run_agent_loop_impl(
             if call_kind:
                 stream_kwargs["call_kind"] = call_kind
             request_only_input_tokens = request_overlay_tokens
+            request_usage_snapshot = capture_request_usage(
+                provider_request_messages, len(messages), tool_list, llm,
+            )
             llm_stream = llm.generate_stream(**stream_kwargs)
             async with aclosing(_stream_with_activity(
                 llm_stream,
@@ -2015,11 +2024,16 @@ async def _run_agent_loop_impl(
                 and ((response.content or "").strip() or response.tool_calls)):
             on_response_received()
 
+        assistant_usage = response.usage
+        if (assistant_usage is not None and request_usage_snapshot is not None
+                and assistant_usage.prompt_tokens > 0):
+            assistant_usage = assistant_usage.model_copy()
+            assistant_usage._request_snapshot = request_usage_snapshot
         assistant_msg = Message(
             role="assistant",
             content=response.content,
             thinking=response.thinking,
-            usage=response.usage,
+            usage=assistant_usage,
             request_only_input_tokens=request_only_input_tokens,
             tool_calls=(
                 [tool_call.model_copy(deep=True) for tool_call in response.tool_calls]

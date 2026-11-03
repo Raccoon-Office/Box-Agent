@@ -258,12 +258,12 @@ class LLMClient:
             await closer()
 
     def estimate_text_tokens(self, text: str) -> int:
-        """Use a UTF-8 byte bound when the endpoint's tokenizer is unknown.
+        """Estimate text without assuming the endpoint uses a particular tokenizer.
 
-        OpenAI-compatible endpoints can serve different tokenizers behind the
-        same model name. Do not assume a local OpenAI encoding matches them.
+        Use two UTF-8 bytes per token as a local heuristic. This leaves more
+        margin than the legacy byte/3 rule without charging every byte as a token.
         """
-        return len(text.encode("utf-8"))
+        return (len(text.encode("utf-8")) + 1) // 2
 
     def for_model(self, model: str, *, max_output_tokens: int | None = None) -> "LLMClient":
         """Return a client with the same endpoint/auth settings for ``model``.

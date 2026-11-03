@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-import json
+import hashlib
 import inspect
+import json
 import logging
 import math
 import re
 from typing import Any, Callable, Final
 
+from ..cache_fingerprint import sha256_fingerprint
 from ..llm.capabilities import image_input_support
 from ..llm.base import closing_llm_stream
 from ..llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS, cap_auxiliary_client
 from ..schema import Message
+from ..schema.schema import RequestUsageSnapshot
 from ..session_log import SessionLog
 from ..tools.base import Tool, ToolResult
 from .context_types import CompactionOutcome
@@ -478,6 +481,16 @@ def _bound_retained_messages(messages: list[Message]) -> list[Message]:
     return bounded
 
 
+def context_text_counter(llm: Any | None) -> Callable[[str], int] | None:
+    """Resolve the synchronous counter shared by history and request overlays."""
+    if llm is None:
+        return None
+    counter = getattr(llm, "estimate_text_tokens", None)
+    if callable(counter) and not inspect.iscoroutinefunction(counter):
+        return counter
+    return lambda text: len(text.encode("utf-8"))
+
+
 def _fallback_context_estimate(
     messages: list[Message],
     tools: dict[str, Tool] | None,
@@ -499,14 +512,34 @@ def _fallback_context_estimate(
         chars += len(serialized_parts[-1])
     utf8_bytes = sum(len(part.encode("utf-8")) for part in serialized_parts)
     estimated = max(1, chars // 4, utf8_bytes // 3)
-    estimate_text = getattr(llm, "estimate_text_tokens", None)
-    if llm is not None:
-        text_tokens = (sum(estimate_text(part) for part in serialized_parts)
-                       if callable(estimate_text) and not inspect.iscoroutinefunction(estimate_text)
-                       else utf8_bytes)
+    estimate_text = context_text_counter(llm)
+    if estimate_text is not None:
+        text_tokens = sum(estimate_text(part) for part in serialized_parts)
         estimated = max(estimated, text_tokens
                         + sum(_budget_image_tokens(message.content) for message in messages))
     return estimated
+
+
+def _usage_route(llm: Any) -> str:
+    route = (getattr(llm, "provider", None), getattr(llm, "model", None), getattr(llm, "api_base", None))
+    return sha256_fingerprint((type(llm).__qualname__, *(value if isinstance(value, str) else None
+                                                       for value in route)))
+
+
+def _message_fingerprint(message: Message) -> str:
+    return hashlib.sha256(_summary_message_text(message).encode("utf-8")).hexdigest()
+
+
+def capture_request_usage(
+    messages: list[Message], history_length: int, tools: list[Tool], llm: Any,
+) -> RequestUsageSnapshot | None:
+    if len(messages) < history_length:
+        return None
+    return RequestUsageSnapshot(
+        route=_usage_route(llm),
+        history=tuple(_message_fingerprint(message) for message in messages[:history_length]),
+        tools={tool.name: sha256_fingerprint(tool.to_openai_schema()) for tool in tools},
+    )
 
 
 def _estimate_context_from_latest_response(
@@ -517,13 +550,36 @@ def _estimate_context_from_latest_response(
     api_prompt_tokens: int | None = None,
     llm: Any | None = None,
 ) -> tuple[int, str]:
-    """Keep the larger of previous usage plus delta and the current full input."""
+    """Prefer matched provider usage and estimate only new request material."""
 
-    fallback = _fallback_context_estimate(messages, tools, llm=llm)
     for index in range(len(messages) - 1, -1, -1):
         usage = messages[index].usage
         if messages[index].role != "assistant" or usage is None:
             continue
+        snapshot = usage._request_snapshot
+        if (snapshot is not None and llm is not None and len(snapshot.history) <= index
+                and snapshot.route == _usage_route(llm)):
+            # Retain the measured cost of earlier input. Charge changed
+            # messages and tools in full without guessing how much to subtract.
+            changed_messages = [
+                message for message, fingerprint in zip(messages, snapshot.history)
+                if _message_fingerprint(message) != fingerprint
+            ]
+            changed_messages.extend(messages[len(snapshot.history) : index])
+            changed_messages.extend(messages[index + 1 :])
+            if not (usage.output_tokens or usage.completion_tokens):
+                changed_messages.insert(0, messages[index])
+            changed_tools = {
+                name: tool for name, tool in (tools or {}).items()
+                if snapshot.tools.get(name) != sha256_fingerprint(tool.to_openai_schema())
+            }
+            delta = (_fallback_context_estimate(changed_messages, changed_tools, llm=llm)
+                     if changed_messages or changed_tools else 0)
+            return usage.context_tokens + delta, "usage"
+        fallback = _fallback_context_estimate(messages, tools, llm=llm)
+        if snapshot is not None:
+            # The previous measurement belongs to a different model or surface.
+            return fallback, "fallback"
         added_messages = messages[index + 1 :]
         added_tokens = (
             _fallback_context_estimate(added_messages, None, llm=llm)
@@ -535,14 +591,14 @@ def _estimate_context_from_latest_response(
             usage.context_tokens - messages[index].request_only_input_tokens,
         )
         usage_estimate = durable_usage_tokens + added_tokens
-        # Usage describes the previous request. The current projection or tool
-        # schemas may have changed since then. Take a maximum, rather than
-        # adding a complete estimate and counting the old request twice.
+        # Older logs and low-level callers have no request snapshot. Their
+        # usage alone cannot account for changed tools or request projections.
         return (usage_estimate, "usage") if usage_estimate >= fallback else (fallback, "fallback")
 
     # Backward-compatible low-level callers may still provide a usage total
     # without response metadata attached to a Message. It remains a lower
     # bound; the current messages and schemas still require a complete check.
+    fallback = _fallback_context_estimate(messages, tools, llm=llm)
     provided_usage = (
         api_prompt_tokens
         if api_prompt_tokens is not None and api_prompt_tokens > 0
@@ -811,8 +867,11 @@ async def _maybe_summarize(
     # pre-compaction usage metadata cleared above this deliberately falls back
     # to measuring the rebuilt messages and offered tool schemas.
     estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
-    for summary_limit in (8_000, 4_000, 2_000):
-        if estimated_after <= token_limit or len(bounded_summary) <= summary_limit:
+    # Leave room for request-only content when shortening the existing
+    # summary can do so. The history limit remains the hard ceiling.
+    summary_target = max(1, token_limit - REQUEST_INPUT_HEADROOM_TOKENS)
+    for summary_limit in (4_000, 2_000):
+        if estimated_after <= summary_target or len(bounded_summary) <= summary_limit:
             continue
         bounded_summary = _bound_text_middle(
             summary,
@@ -880,12 +939,12 @@ def request_input_tokens(messages: list[Message], tools: Any, *, llm: Any | None
 
 
 def skill_reference_budget_chars(messages: list[Message], tools: Any, token_limit: int,
-                                 output_tokens: int = 0) -> int:
+                                 output_tokens: int = 0, *, llm: Any | None = None) -> int:
     """Allocate from the safe *input* limit; model output was already reserved.
 
     ``output_tokens`` remains accepted for caller compatibility. The fixed
     headroom covers request assembly, not another output-token reservation.
     """
-    estimated = request_input_tokens(messages, tools)
+    estimated = request_input_tokens(messages, tools, llm=llm)
     spare_tokens = max(0, token_limit - estimated - REQUEST_INPUT_HEADROOM_TOKENS)
     return min(SKILL_REFERENCE_BUDGET_CHARS, spare_tokens * 4)

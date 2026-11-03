@@ -254,6 +254,29 @@ async def test_compacted_request_recounts_retained_tool_history_before_provider(
 
 
 @pytest.mark.asyncio
+async def test_compaction_shortens_summary_to_leave_room_for_request_overlays(monkeypatch):
+    from box_agent.kernel import context_engine
+
+    async def summarize(*args, **kwargs):
+        return "Task progress. " * 400
+
+    monkeypatch.setattr(context_engine, "_create_summary", summarize)
+    messages = [
+        Message(role="system", content="system"),
+        Message(role="user", content="original request"),
+        Message(role="assistant", content="old execution " * 1_000),
+        *(Message(role="assistant", content=f"recent result {i}") for i in range(5)),
+        Message(role="user", content="continue"),
+    ]
+    limit = 2_900
+    outcome = await context_engine._maybe_summarize(
+        None, messages, token_limit=limit, api_total_tokens=0, skip_check=False,
+    )
+    assert outcome.mode == "summary" and outcome.summary_calls == 1
+    assert outcome.estimated_after <= limit - context_engine.REQUEST_INPUT_HEADROOM_TOKENS
+
+
+@pytest.mark.asyncio
 async def test_compaction_rebases_usage_before_rebuilding_request():
     from box_agent.kernel.context_engine import _fallback_context_estimate, _maybe_summarize, request_input_tokens
 

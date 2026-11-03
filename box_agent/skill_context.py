@@ -48,9 +48,10 @@ def verified_system_suffixes(runtime: Any) -> tuple[str, ...]:
     return getattr(runtime, "legacy_system_suffixes", (runtime.legacy_system_suffix,))
 
 
-def reference_cost(text: str) -> int:
+def reference_cost(text: str, *, count_text_tokens: Callable[[str], int] | None = None) -> int:
     """Character-equivalent cost using the same UTF-8 guard as context estimates."""
-    return max(len(text), (len(text.encode("utf-8")) * 4 + 2) // 3)
+    legacy_cost = max(len(text), (len(text.encode("utf-8")) * 4 + 2) // 3)
+    return max(legacy_cost, 4 * count_text_tokens(text)) if count_text_tokens else legacy_cost
 
 
 def render_reference(metadata: dict[str, Any], body: str) -> str:
@@ -114,13 +115,16 @@ def append_reference(message: Message, text: str) -> Message:
     return message.model_copy(update={"content": blocks})
 
 
-def projection_cost(message: Message, text: str) -> int:
+def projection_cost(
+    message: Message, text: str, *, count_text_tokens: Callable[[str], int] | None = None,
+) -> int:
     """Charge the actual appended block, including quoting existing string input."""
     projected = append_reference(message, text)
     chars = _message_chars(projected) - _message_chars(message)
-    utf8_bytes = (len(_summary_message_text(projected).encode("utf-8"))
-                  - len(_summary_message_text(message).encode("utf-8")))
-    return max(0, chars, (utf8_bytes * 4 + 2) // 3)
+    before, after = _summary_message_text(message), _summary_message_text(projected)
+    utf8_bytes = len(after.encode("utf-8")) - len(before.encode("utf-8"))
+    token_cost = 4 * (count_text_tokens(after) - count_text_tokens(before)) if count_text_tokens else 0
+    return max(0, chars, (utf8_bytes * 4 + 2) // 3, token_cost)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +155,7 @@ class SkillReferenceContext:
         self._remaining = SKILL_REFERENCE_BUDGET_CHARS
         self._host_visible: dict[str, str] = {}
         self.reference_overhead_chars = 0
+        self._count_text_tokens: Callable[[str], int] | None = None
 
     def _store_reference(self, text: str) -> dict[str, Any]:
         if self.session_store is None:
@@ -212,6 +217,12 @@ class SkillReferenceContext:
         self._messages = messages
         self.observe_history(messages)
 
+    def _projection_cost(self, message: Message, text: str) -> int:
+        return projection_cost(message, text, count_text_tokens=self._count_text_tokens)
+
+    def _reference_cost(self, text: str) -> int:
+        return reference_cost(text, count_text_tokens=self._count_text_tokens)
+
     def _selection_fits(self, names: tuple[str, ...], prefix: str, target: Message) -> bool:
         """Plan host references without recording a read or consuming its budget.
 
@@ -233,7 +244,7 @@ class SkillReferenceContext:
                 continue
             metadata.update(end_offset=len(lines), complete=True, has_more=False, next_offset=None)
             text = prefix + render_reference(metadata, prompt)
-            cost += projection_cost(target, text)
+            cost += self._projection_cost(target, text)
             target = append_reference(target, text)
             if cost > self._remaining:
                 return False
@@ -243,9 +254,10 @@ class SkillReferenceContext:
     def read(self, name: str, *, offset: int = 0, limit: int | None = None,
              revision: str | None = None, reason: str = "tool", allow_partial: bool = True,
              budget_chars: int | None = None,
-             _cost: Callable[[str], int] = reference_cost,
+             _cost: Callable[[str], int] | None = None,
              _delivery: Callable[..., None] | None = None) -> ToolResult:
         delivery = _delivery or self.runtime.record_delivery
+        _cost = _cost or self._reference_cost
         if budget_chars is not None:
             self._remaining = min(self._remaining, max(0, budget_chars))
         name = name.strip()
@@ -286,7 +298,7 @@ class SkillReferenceContext:
             excess = _cost(content) - self._remaining
             while end > offset and excess > 0:
                 end -= 1
-                excess -= reference_cost(lines[end])
+                excess -= self._reference_cost(lines[end])
         if end <= offset:
             return ToolResult(success=False, error="Skill reference budget cannot fit the next complete line. Compact context or allocate a larger budget; do not retry the same page unchanged.",
                               raw_output={"code": "SKILL_CONTEXT_BUDGET", "name": name, "revision": current_revision})
@@ -364,10 +376,12 @@ class SkillReferenceContext:
 
     def prepare_request(self, messages: list[Message], *, budget_chars: int,
                         can_page: Callable[[tuple[str, ...]], bool] | None = None,
-                        defer_delivery: bool = False) -> ReferenceProjection:
+                        defer_delivery: bool = False,
+                        count_text_tokens: Callable[[str], int] | None = None) -> ReferenceProjection:
         self._messages = messages
         self.observe_history(messages)
         self._remaining = max(0, budget_chars)
+        self._count_text_tokens = count_text_tokens
         self._host_visible = {}
         self.reference_overhead_chars = 0
         # Only a byte-exact legacy suffix backed by verified restored records
@@ -441,7 +455,7 @@ class SkillReferenceContext:
             for name in selected:
                 reason = "explicit" if name in self.runtime.selected_names else "restored"
                 target = projected[user_index]
-                cost = lambda content: projection_cost(target, prefix + content)
+                cost = lambda content: self._projection_cost(target, prefix + content)
                 # Explicit Skills materialized at the user-message boundary
                 # are already durable request text. Keep them as-is instead
                 # of appending a synthetic reuse receipt on every request.
@@ -489,7 +503,7 @@ class SkillReferenceContext:
                     diagnostics.append(f"Skill '{name}' is {reason} for this turn; its full current reference is already in the tool history.")
                     continue
                 text = prefix + result.model_context
-                self.reference_overhead_chars += projection_cost(target, text)
+                self.reference_overhead_chars += self._projection_cost(target, text)
                 projected[user_index] = append_reference(projected[user_index], text)
                 ref = {"name": name, "revision": info["revision"], "message_index": user_index,
                        "offset": info["offset"], "end_offset": info["end_offset"]}
@@ -501,16 +515,25 @@ class SkillReferenceContext:
             if diagnostics:
                 # Status is metadata. Reserve most of the shared budget for a
                 # real get_skill page rather than an unbounded diagnostic list.
-                notice_budget = min(2048, self._remaining // 4)
-                notice = ("Skill reference status:\n" + "\n".join(diagnostics))[:notice_budget]
-                while notice and projection_cost(projected[user_index], notice) > notice_budget:
-                    notice = notice[:max(0, len(notice) - max(1, (projection_cost(projected[user_index], notice) - notice_budget) // 2))]
+                target = projected[user_index]
+                status_prefix = "Skill reference status:\n"
+                required_status = status_prefix + required_notice if required_notice else ""
+                required_cost = self._projection_cost(target, required_status) if required_status else 0
+                notice_budget = min(self._remaining, max(self._remaining // 4, required_cost))
+                notice = (status_prefix + "\n".join(diagnostics))[:min(2048, notice_budget)]
+                while notice:
+                    notice_cost = self._projection_cost(target, notice)
+                    if notice_cost <= notice_budget:
+                        break
+                    notice = notice[:max(0, len(notice) - max(1, (notice_cost - notice_budget) // 2))]
+                if required_notice and required_notice not in notice and required_cost <= notice_budget:
+                    notice = required_status
+                    notice_cost = required_cost
                 if required_notice and required_notice not in notice:
                     blocked_reason = "Selected Skill material and its reading instructions cannot fit the context budget. Compact context or reduce the selection before retrying."
                     notice = ""
                 if notice:
-                    notice_cost = projection_cost(projected[user_index], notice)
-                    projected[user_index] = append_reference(projected[user_index], notice)
+                    projected[user_index] = append_reference(target, notice)
                     self._remaining -= notice_cost
                     self.reference_overhead_chars += notice_cost
                     if self.session_store is not None:
