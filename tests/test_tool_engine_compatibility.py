@@ -136,7 +136,12 @@ _IMAGE_CONTEXT_SCHEMA_CHANGES = {
         {
             "path": ["description"],
             "before": "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's written analysis; native shows image pixels to you in your next request, so you must record your findings before reading another batch. Never modifies files.",
-            "after": "Inspect 1-6 local PNG/JPEG images. proxy returns a vision model's written analysis; native shows image pixels to you under the session's image-context retention policy. Omit strategy to use native when the active main model declares image support, otherwise proxy. Never modifies files.",
+            "after": "Inspect 1-6 local PNG, JPEG, or WebP images (first frame for animated WebP). proxy returns a vision model's written analysis; native shows image pixels to you under the session's image-context retention policy. Omit strategy to use native when the active main model declares image support, otherwise proxy. Never modifies files.",
+        },
+        {
+            "path": ["input_schema", "properties", "image_paths", "description"],
+            "before": "Local PNG/JPEG paths. Relative paths resolve from the active session cwd.",
+            "after": "Local PNG, JPEG, or WebP paths. Relative paths resolve from the active session cwd.",
         },
         {
             "path": ["input_schema", "properties", "strategy", "default"],
