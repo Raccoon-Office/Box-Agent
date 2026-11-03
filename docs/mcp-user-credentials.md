@@ -36,6 +36,17 @@ in-memory binding. It does not erase the user's configuration or persist a token
 
 ## Lifecycle
 
+- Before launching the Agent, a host may set `BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS`
+  to a JSON object mapping names to their saved URL configurations (excluding
+  `disabled` and `alwaysLoad`), for example `{"remote":{"url":"https://example.test/mcp"}}`.
+  Declare only services already confirmed to require host-managed OAuth, using
+  the host's discovery cache. Never put runtime headers or tokens in this declaration.
+  Cold loading leaves only exact matching user configurations as connecting,
+  without creating a transport. After restoring credentials through the existing
+  API the host calls `_mcp/reconnect`. Unlisted services, changed configurations,
+  system/connector sources, stdio and explicit Authorization headers retain their
+  existing startup behavior. Invalid declarations are ignored. Agent/conversation
+  readiness never waits for these credentials. This requires an updated runtime.
 - Set/clear only change memory and the target server's credential version.
 - The host reconnects the target with `_mcp/reconnect` after setting headers.
 - Clear does not close an existing transport. On expired/revoked authorization,

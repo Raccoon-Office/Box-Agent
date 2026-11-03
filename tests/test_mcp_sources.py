@@ -367,6 +367,86 @@ async def test_cold_load_waits_for_required_credentials_before_creating_transpor
 
 
 @pytest.mark.asyncio
+async def test_host_managed_user_server_makes_no_connection_until_credentials_are_restored(
+    monkeypatch, isolated_connector_runtime,
+):
+    from unittest.mock import Mock
+
+    config = {"url": "https://remote.test/mcp", "type": "streamable_http", "alwaysLoad": True}
+    _write(Path(mcp_loader._mcp_config_path), {"remote": config})
+    monkeypatch.setenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS", json.dumps({
+        "remote": {key: value for key, value in config.items() if key != "alwaysLoad"},
+    }))
+    build = Mock(wraps=mcp_loader._build_connection)
+    monkeypatch.setattr(mcp_loader, "_build_connection", build)
+    attempts = []
+
+    async def connect(connection):
+        attempts.append(dict(connection.headers))
+        assert connection.headers == {"Authorization": "Bearer restored-token"}
+        return True
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    assert await mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path) == []
+    build.assert_not_called()
+    assert attempts == []
+    assert mcp_loader.get_mcp_status()[0]["state"] == "connecting"
+    assert mcp_loader.get_mcp_status()[0]["error"] is None
+    assert not mcp_loader.is_mcp_loading()
+
+    mcp_loader.set_mcp_runtime_credential(
+        "user-mcp:remote", {"Authorization": "Bearer restored-token"},
+        target={"owner": "user", "name": "remote", "config": config},
+    )
+    result = await mcp_loader.reconnect_mcp_server("remote")
+    assert result["success"] is True
+    assert len(attempts) == 1
+    build.assert_called_once()
+    assert mcp_loader.get_mcp_status()[0]["state"] == "connected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("targets,owner,config", [
+    (None, "user", {"url": "https://remote.test/mcp"}),
+    ("{}", "user", {"url": "https://remote.test/mcp"}),
+    ("invalid-json", "user", {"url": "https://remote.test/mcp"}),
+    ("[]", "user", {"url": "https://remote.test/mcp"}),
+    ('{"remote":{"url":"https://before.test/mcp"}}', "user", {"url": "https://changed.test/mcp"}),
+    ('{"other":{"url":"https://remote.test/mcp"}}', "user", {"url": "https://remote.test/mcp"}),
+    ("match", "user", {"url": "https://remote.test/mcp", "headers": {"AUTHORIZATION": "Bearer manual"}}),
+    ("match", "user", {"command": "fixture-server"}),
+    ("match", "system", {"url": "https://system.test/mcp"}),
+    ("match", "connector", {"url": "https://connector.test/mcp", "_connectorId": "fixture"}),
+])
+async def test_host_user_deferral_preserves_other_startup_paths(
+    monkeypatch, tmp_path, isolated_connector_runtime, targets, owner, config,
+):
+    if targets is None:
+        monkeypatch.delenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS", raising=False)
+    else:
+        monkeypatch.setenv("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS",
+                           json.dumps({"remote": config}) if targets == "match" else targets)
+    if owner == "user":
+        _write(Path(mcp_loader._mcp_config_path), {"remote": config})
+    elif owner == "system":
+        system = tmp_path / "system.json"
+        _write(system, {"remote": config})
+        monkeypatch.setenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", str(system))
+    else:
+        monkeypatch.setattr(mcp_loader, "_mcp_source_overrides", {owner: {"remote": config}})
+    attempts = []
+
+    async def connect(connection):
+        attempts.append(connection.name)
+        return True
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    await mcp_loader.load_mcp_tools_async(mcp_loader._mcp_config_path)
+    assert attempts == ["remote"]
+    assert mcp_loader.get_mcp_status()[0]["state"] == "connected"
+
+
+@pytest.mark.asyncio
 async def test_scoped_replacement_uses_normalized_connector_identity(
     monkeypatch, isolated_connector_runtime,
 ):

@@ -2298,6 +2298,32 @@ def _waiting_for_credential(definition: ResolvedMcpServer) -> bool:
     return isinstance(credential_ref, str) and not _mcp_runtime_credentials.get(credential_ref)
 
 
+def _defer_user_mcp_startup(definition: ResolvedMcpServer) -> bool:
+    """Wait only for exact user configurations explicitly declared by the host."""
+    config = definition.config
+    headers = config.get("headers") or {}
+    if (definition.owner != "user" or config.get("command")
+            or not isinstance(config.get("url"), str)
+            or any(str(key).lower() == "authorization" for key in headers)):
+        return False
+    try:
+        targets = json.loads(os.environ.get("BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS", "{}"))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(targets, dict):
+        return False
+    expected = targets.get(definition.name)
+    current = {key: value for key, value in config.items() if key != "disabled"}
+    policy_fields = {"disabled", "alwaysLoad"}
+    if (not isinstance(expected, dict)
+            or {key: value for key, value in expected.items() if key not in policy_fields}
+            != {key: value for key, value in current.items() if key not in policy_fields}):
+        return False
+    reference = f"user-mcp:{definition.name}"
+    bound = _mcp_credential_targets.get(reference)
+    return not (bound and bound["config"] == current and _mcp_runtime_credentials.get(reference))
+
+
 def _build_connection(definition: ResolvedMcpServer) -> "MCPServerConnection":
     server_config = _materialize_server_config(definition)
     conn_type = _effective_connection_type(definition.name, server_config)
@@ -2520,6 +2546,10 @@ async def load_mcp_tools_async(
                     server_name, "connecting",
                     error="Waiting for host credential", definition=definition,
                 )
+                continue
+
+            if _defer_user_mcp_startup(definition):
+                _record_status(server_name, "connecting", definition=definition)
                 continue
 
             if _cua_service is not None and server_name == _cua_service.name:
