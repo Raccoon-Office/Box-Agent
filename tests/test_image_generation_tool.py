@@ -1473,7 +1473,7 @@ async def test_generate_image_watermarks_by_default(
 
 
 @pytest.mark.asyncio
-async def test_generate_image_watermark_disabled_keeps_original_bytes(
+async def test_published_image_cannot_disable_ai_label(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1494,9 +1494,9 @@ async def test_generate_image_watermark_disabled_keeps_original_bytes(
 
     assert result.success, result.error
     saved = (tmp_path / "assets/generated/plain.png").read_bytes()
-    assert saved == source  # untouched
-    assert result.raw_output["watermark"]["applied"] is False
-    assert result.raw_output["watermark"]["reason"] == "disabled by caller"
+    assert saved != source
+    assert result.raw_output["watermark"]["applied"] is True
+    assert result.raw_output["aigc_metadata_applied"] is True
 
 
 @pytest.mark.asyncio
@@ -1773,3 +1773,56 @@ async def test_image_requests_handle_hosted_auth(
     if scenario == "environment":
         assert authorizations == ["Bearer environment-token"]
     assert (tmp_path / "result.png").exists() == success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intermediate", [True, False])
+async def test_saved_image_labels_dimensions_and_digest(tmp_path, monkeypatch, intermediate):
+    import io
+    from PIL import Image
+    source = _real_png()
+    patch_async_client(monkeypatch, _b64_handler(source))
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint="https://image.example.test/v1/images/generations")
+    result = await tool.execute(prompt="hero", output_path="result.png", watermark=False,
+                                publish_artifact=not intermediate)
+    assert result.success, result.error
+    saved = (tmp_path / "result.png").read_bytes()
+    image = Image.open(io.BytesIO(saved))
+    original = Image.open(io.BytesIO(source))
+    assert json.loads(image.info["AIGC"])["Label"] == "1"
+    assert result.raw_output["aigc_metadata_applied"]
+    assert result.raw_output["width"] == image.width
+    assert result.raw_output["height"] == image.height
+    assert result.raw_output["size_bytes"] == len(saved)
+    if intermediate:
+        assert image.size == original.size
+        assert image.convert("RGB").tobytes() == original.tobytes()
+    else:
+        assert image.height > original.height
+    from box_agent.artifact_metadata import read_metadata
+    metadata = read_metadata(tmp_path / "result.png", tmp_path)
+    assert metadata["sha256"] == hashlib.sha256(saved).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_labeling_failure_does_not_publish_or_overwrite(tmp_path, monkeypatch):
+    import io
+    from PIL import Image, PngImagePlugin
+    info = PngImagePlugin.PngInfo()
+    info.add_itxt("XML:com.adobe.xmp", "<broken")
+    data = io.BytesIO()
+    Image.new("RGB", (100, 100)).save(data, "PNG", pnginfo=info)
+    patch_async_client(monkeypatch, _b64_handler(data.getvalue()))
+    tool = GenerateImageTool(workspace_dir=str(tmp_path), endpoint="https://image.example.test/v1/images/generations")
+    for name in ("existing.png", "new.png"):
+        target = tmp_path / name
+        if name == "existing.png":
+            target.write_bytes(_real_png())
+        before = target.read_bytes() if target.exists() else None
+        result = await tool.execute(prompt="hero", output_path=name)
+        assert not result.success
+        assert "required image labels" in result.error
+        if before is None:
+            assert not target.exists()
+        else:
+            assert target.read_bytes() == before

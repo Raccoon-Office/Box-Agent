@@ -525,8 +525,8 @@ class GenerateImageTool(Tool):
                     "description": (
                         "Internal flag for the 'AI 生成' watermark, ON by default. "
                         "DO NOT set this. Omit it for every normal image so the watermark stays on. "
-                        "Only pass false when the PPTX skill instructs it, or the user EXPLICITLY says "
-                        "to remove/disable the watermark. A plain, solid-color, test, or 'no text' image "
+                        "Only pass false for intermediate assets when the PPTX skill instructs it. "
+                        "Published images always retain the AI label. A plain, solid-color, test, or 'no text' image "
                         "is NOT a reason to disable it."
                     ),
                 },
@@ -542,7 +542,7 @@ class GenerateImageTool(Tool):
                 "watermark_text": {
                     "type": "string",
                     "description": (
-                        "Custom watermark text overriding the default 'AI 生成'. "
+                        "Additional watermark text alongside the required 'AI 生成' label. "
                         "Only set when the user explicitly asks for specific watermark wording (e.g. a brand name)."
                     ),
                 },
@@ -647,16 +647,17 @@ class GenerateImageTool(Tool):
             if permission_error:
                 return permission_error
 
-            if watermark:
-                image_bytes, watermark_status = apply_text_watermark(
-                    image_bytes, mime_type, watermark_text
+            image_bytes, watermark_status = apply_text_watermark(
+                image_bytes, mime_type, watermark_text,
+                visible=bool(watermark or publish_artifact),
+            )
+            if watermark_status.get("labeling_failed"):
+                return ToolResult(
+                    success=False,
+                    error=f"Could not apply required image labels: {watermark_status['reason']}",
                 )
-            else:
-                watermark_status = {
-                    "applied": False,
-                    "reason": "disabled by caller",
-                    "font": "",
-                }
+            if watermark_status.get("metadata_applied"):
+                width, height = watermark_status["width"], watermark_status["height"]
 
             async with destination_lock(target):
                 # Re-resolve and re-authorize after waiting; aliases can change.
@@ -702,6 +703,7 @@ class GenerateImageTool(Tool):
                 "alt_text": alt_text or "",
                 "metadata": metadata or {},
                 "watermark": watermark_status,
+                "aigc_metadata_applied": watermark_status.get("metadata_applied", False),
             }
             result = ToolResult(
                 success=True,
@@ -719,6 +721,7 @@ class GenerateImageTool(Tool):
                         if not watermark_status.get("applied") and watermark_status.get("reason")
                         else ""
                     )
+                    + f"\naigc_metadata: {'applied' if watermark_status.get('metadata_applied') else 'not applied'}"
                 ),
                 raw_output=info,
                 model_context=json.dumps(info, ensure_ascii=False),

@@ -1,6 +1,6 @@
 """Text watermark rendering for generated bitmap images.
 
-This module overlays a small text watermark (default ``AI 生成``) onto a
+This module adds a white footer (default ``AI 生成``) and AIGC metadata to a
 generated image before it is written to disk. It is shared by both the
 text-to-image and image-to-image paths of :class:`GenerateImageTool`, so a
 single call site covers CLI and ACP runtimes alike.
@@ -17,20 +17,22 @@ Design constraints:
 from __future__ import annotations
 
 import io
+import json
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from PIL import ImageFont
 
 
 _DEFAULT_TEXT = "AI 生成"
-_OPACITY = 0.45  # watermark fill alpha, 0.0–1.0
-_COLOR = "#FFFFFF"  # watermark text color (hex)
+_OPACITY = 1.0  # watermark fill alpha, 0.0–1.0
+_COLOR = "#666666"  # watermark text color (hex)
 _FONT_SIZE_RATIO = 0.022  # font size = short_edge * ratio
 _MIN_FONT_SIZE = 12
 _MARGIN_RATIO = 0.02  # margin from the corner = short_edge * ratio
-_STROKE = True  # draw a contrasting outline so the text stays readable
 
 # Only true bitmaps are rasterizable by Pillow. SVG is vector, GIF is animated.
 _RASTERIZABLE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
@@ -62,69 +64,99 @@ def apply_text_watermark(
     image_bytes: bytes,
     mime_type: str,
     text: str | None = None,
+    *,
+    visible: bool = True,
 ) -> tuple[bytes, dict[str, Any]]:
-    """Overlay a text watermark on the bottom-right of a bitmap image.
+    """Add a footer outside the original pixels and embed AIGC metadata.
 
     Args:
         image_bytes: Raw encoded image bytes.
         mime_type: MIME type of ``image_bytes`` (e.g. ``image/png``).
-        text: Watermark text; ``None``/empty falls back to ``AI 生成``.
+        text: Optional additional text; the ``AI 生成`` label is always retained.
+        visible: False for intermediate assets that only need embedded metadata.
 
     Returns:
         ``(out_bytes, status)`` where ``status`` is
-        ``{"applied": bool, "reason": str | None, "font": str}``. On any
+        visible/metadata application flags, actual output dimensions on success,
+        a reason and font information. On any
         problem (unsupported MIME, Pillow missing, decode/encode error) the
         original ``image_bytes`` are returned with ``applied=False`` — this
         function never raises.
     """
-    watermark_text = (text or "").strip() or _DEFAULT_TEXT
+    custom_text = (text or "").strip()
+    watermark_text = _DEFAULT_TEXT
+    if custom_text and custom_text != _DEFAULT_TEXT:
+        watermark_text += " · " + custom_text
 
     if mime_type not in _RASTERIZABLE_MIME:
         return image_bytes, {
             "applied": False,
+            "metadata_applied": False,
             "reason": f"unsupported mime type for watermark: {mime_type}",
             "font": "",
         }
 
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageOps
     except ImportError:
         return image_bytes, {
             "applied": False,
+            "metadata_applied": False,
             "reason": "Pillow is not installed; watermark skipped",
             "font": "",
         }
 
+    decoded = False
     try:
-        base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        source = Image.open(io.BytesIO(image_bytes))
+        if getattr(source, "is_animated", False):
+            return image_bytes, {
+                "applied": False, "metadata_applied": False,
+                "reason": "animated images are not supported", "font": "",
+            }
+        source.load()
+        decoded = True
+        source = ImageOps.exif_transpose(source)
+        base = source.convert("RGBA")
         short_edge = min(base.size)
         font_size = max(_MIN_FONT_SIZE, int(short_edge * _FONT_SIZE_RATIO))
         font, font_name = _resolve_font(font_size)
         margin = max(1, int(short_edge * _MARGIN_RATIO))
+        composited = base
+        if visible:
+            draw = ImageDraw.Draw(base)
+            bbox = draw.textbbox((0, 0), watermark_text, font=font)
+            if custom_text and bbox[2] - bbox[0] + 2 * margin > base.width:
+                # A long optional brand must not make the mandatory AI label tiny.
+                watermark_text = _DEFAULT_TEXT
+                bbox = draw.textbbox((0, 0), watermark_text, font=font)
+            # Render to a separate strip so even narrow images cannot clip into
+            # the source. Fit the strip for unusually narrow provider responses.
+            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            strip = Image.new("RGBA", (text_w + 2 * margin, text_h + 2 * margin), "white")
+            ImageDraw.Draw(strip).text(
+                (margin - bbox[0], margin - bbox[1]), watermark_text,
+                font=font, fill=_hex_to_rgba(_COLOR, _OPACITY),
+            )
+            if strip.width > base.width:
+                strip = strip.resize((base.width, max(1, round(strip.height * base.width / strip.width))))
+            composited = Image.new("RGBA", (base.width, base.height + strip.height), "white")
+            composited.paste(base, (0, 0))  # preserve alpha, including transparent pixels
+            composited.paste(strip, (base.width - strip.width, base.height))
 
-        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        fill = _hex_to_rgba(_COLOR, _OPACITY)
-
-        text_w, text_h = _text_size(draw, watermark_text, font)
-        xy = _anchor_xy(base.size, (text_w, text_h), margin)
-
-        stroke_kwargs: dict[str, Any] = {}
-        if _STROKE:
-            stroke_kwargs = {
-                "stroke_width": max(1, font_size // 12),
-                "stroke_fill": _contrast_stroke(fill),
-            }
-
-        draw.text(xy, watermark_text, font=font, fill=fill, **stroke_kwargs)
-        composited = Image.alpha_composite(base, overlay)
-
-        out_bytes = _encode_target(composited, mime_type, Image)
-        return out_bytes, {"applied": True, "reason": None, "font": font_name}
+        xmp, aigc = _aigc_metadata(source.info)
+        out_bytes = _encode_target(composited, mime_type, Image, source.info, xmp, aigc)
+        return out_bytes, {
+            "applied": visible, "metadata_applied": True,
+            "reason": None if visible else "disabled for intermediate asset",
+            "font": font_name, "width": composited.width, "height": composited.height,
+        }
     except Exception as exc:  # pragma: no cover - defensive: never fail a render
         return image_bytes, {
             "applied": False,
+            "metadata_applied": False,
             "reason": f"watermark error: {exc}",
+            "labeling_failed": decoded,
             "font": "",
         }
 
@@ -204,22 +236,90 @@ def _contrast_stroke(fill: tuple[int, int, int, int]) -> tuple[int, int, int, in
     return (*stroke_rgb, a)
 
 
-def _encode_target(image: Any, mime_type: str, image_module: Any) -> bytes:
-    """Re-encode the composited RGBA image to the original ``mime_type``.
+# Same service code as raccoon-lab's existing export metadata implementation.
+_SERVICE_CODE = "00191310104MAC2G6EG4100000003"
+_TC260 = "http://www.tc260.org.cn/ns/AIGC/1.0/"
+_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+_XMP_KEY = "XML:com.adobe.xmp"
 
-    JPEG has no alpha channel, so the image is flattened onto a white
-    background first. PNG/WebP keep transparency.
-    """
+
+def _aigc_metadata(info: dict[str, Any]) -> tuple[bytes, str]:
+    """Update only AIGC in XMP; keep upstream provenance and other properties."""
+    raw = info.get("xmp") or info.get(_XMP_KEY)
+    root = ET.fromstring(raw) if raw else ET.Element("{adobe:ns:meta/}xmpmeta")
+    rdf = root.find(f".//{{{_RDF}}}RDF")
+    if rdf is None:
+        rdf = ET.SubElement(root, f"{{{_RDF}}}RDF")
+    description = rdf.find(f"{{{_RDF}}}Description")
+    if description is None:
+        description = ET.SubElement(rdf, f"{{{_RDF}}}Description", {f"{{{_RDF}}}about": ""})
+    # Both namespace spellings occur in the TC260 guide and existing producers.
+    tags = {f"{{{ns}}}AIGC" for ns in (_TC260, _TC260.rstrip("/"))}
+    previous = info.get("AIGC")
+    for element in root.iter():
+        for key in list(element.attrib):
+            if key in tags:
+                previous = element.attrib.pop(key)
+        for child in list(element):
+            if child.tag in tags:
+                previous = child.text
+                element.remove(child)
+    existing: dict[str, Any] = {}
+    if previous:
+        try:
+            parsed = json.loads(previous)
+            if isinstance(parsed, dict):
+                existing = parsed.get("AIGC", parsed)
+                if not isinstance(existing, dict):
+                    existing = {}
+        except (ValueError, TypeError):
+            pass
+    content_id = uuid4().hex
+    metadata = {
+        "Label": "1", "ContentProducer": _SERVICE_CODE,
+        "ProduceID": content_id, "ReservedCode1": "",
+        "ContentPropagator": _SERVICE_CODE, "PropagateID": content_id,
+        "ReservedCode2": "",
+    }
+    if all(isinstance(existing.get(key), str) and existing[key]
+           for key in ("ContentProducer", "ProduceID")):
+        for key in ("ContentProducer", "ProduceID", "ReservedCode1"):
+            if isinstance(existing.get(key), str):
+                metadata[key] = existing[key]
+    aigc = json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
+    ET.SubElement(description, f"{{{_TC260}}}AIGC").text = aigc
+    return ET.tostring(root, encoding="utf-8"), aigc
+
+
+def _encode_target(
+    image: Any, mime_type: str, image_module: Any,
+    original_info: dict[str, Any], xmp: bytes, aigc: str,
+) -> bytes:
+    """Write labels during the final encode, preserving EXIF/ICC and PNG text."""
     buffer = io.BytesIO()
     normalized = mime_type.lower()
-
+    options = {key: original_info[key] for key in ("exif", "icc_profile") if original_info.get(key)}
     if normalized in ("image/jpeg", "image/jpg"):
         background = image_module.new("RGB", image.size, (255, 255, 255))
-        background.paste(image, mask=image.split()[-1])  # use alpha as mask
-        background.save(buffer, format="JPEG", quality=95, subsampling=0)
-    elif normalized == "image/webp":
-        image.save(buffer, format="WEBP", quality=95)
-    else:  # image/png
-        image.save(buffer, format="PNG")
+        background.paste(image, mask=image.split()[-1])
+        background.save(buffer, format="JPEG", quality=95, subsampling=0, **options)
+        # Insert APP1 directly for compatibility with Pillow 10 (no JPEG xmp save).
+        packet = b"http://ns.adobe.com/xap/1.0/\0" + xmp
+        if len(packet) + 2 > 65535:
+            raise ValueError("XMP exceeds JPEG APP1 capacity")
+        data = buffer.getvalue()
+        return data[:2] + b"\xff\xe1" + (len(packet) + 2).to_bytes(2, "big") + packet + data[2:]
+    if normalized == "image/webp":
+        image.save(buffer, format="WEBP", lossless=True, xmp=xmp, **options)
+    else:
+        from PIL.PngImagePlugin import PngInfo
 
+        pnginfo = PngInfo()
+        for key, value in original_info.items():
+            if isinstance(value, str) and key not in ("AIGC", _XMP_KEY):
+                pnginfo.add_itxt(key, value)
+        pnginfo.add_itxt(_XMP_KEY, xmp.decode("utf-8"))
+        # Retain the legacy PNG reader contract in addition to standard XMP.
+        pnginfo.add_text("AIGC", aigc)
+        image.save(buffer, format="PNG", pnginfo=pnginfo, **options)
     return buffer.getvalue()

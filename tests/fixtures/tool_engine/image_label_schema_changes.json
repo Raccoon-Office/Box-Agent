@@ -1,0 +1,24 @@
+{
+  "generate_image": [
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "watermark",
+        "description"
+      ],
+      "before": "Internal flag for the 'AI 生成' watermark, ON by default. DO NOT set this. Omit it for every normal image so the watermark stays on. Only pass false when the PPTX skill instructs it, or the user EXPLICITLY says to remove/disable the watermark. A plain, solid-color, test, or 'no text' image is NOT a reason to disable it.",
+      "after": "Internal flag for the 'AI 生成' watermark, ON by default. DO NOT set this. Omit it for every normal image so the watermark stays on. Only pass false for intermediate assets when the PPTX skill instructs it. Published images always retain the AI label. A plain, solid-color, test, or 'no text' image is NOT a reason to disable it."
+    },
+    {
+      "path": [
+        "input_schema",
+        "properties",
+        "watermark_text",
+        "description"
+      ],
+      "before": "Custom watermark text overriding the default 'AI 生成'. Only set when the user explicitly asks for specific watermark wording (e.g. a brand name).",
+      "after": "Additional watermark text alongside the required 'AI 生成' label. Only set when the user explicitly asks for specific watermark wording (e.g. a brand name)."
+    }
+  ]
+}
