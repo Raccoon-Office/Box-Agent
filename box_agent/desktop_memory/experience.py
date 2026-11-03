@@ -189,7 +189,8 @@ class ExperienceRuntime:
             _log.warning("memory operation=experience error=%s", type(error).__name__)
 
     def _rpc(self, session_id: str, action: str, event_id: str | None = None, token: str | None = None, **extra):
-        payload = {"binding": {"sessionId": session_id}, "action": action, **extra}
+        payload = {"binding": {"sessionId": session_id}, "action": action,
+                   "pipeline_version": _PIPELINE_VERSION, **extra}
         if event_id is not None:
             payload.update(event_id=event_id, lease_token=token)
         return self.transport.request("experience/job", payload)

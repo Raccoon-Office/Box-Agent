@@ -44,6 +44,7 @@ async def test_typed_experience_prompt_preserves_private_evidence_and_name_array
     assert '"entity_ids":' not in prompt
     assert "not evidence of use" in prompt
     assert "preserve its memory_type, scenario, content and rationale exactly" in prompt
+    assert all(call["pipeline_version"] == "desktop-experience-v2" for call in transport.calls)
     runtime.close()
 
 
