@@ -178,6 +178,8 @@ def resolve_mcp_sources(
                 if isinstance(credential_ref, str)
                 else 0
             )
+            if source.owner == "user":
+                credential_version = credential_versions.get(f"user-mcp:{name}", 0)
             resolved[name] = ResolvedMcpServer(
                 name=name,
                 config=config,

@@ -195,7 +195,7 @@ def isolated_connector_runtime(monkeypatch, tmp_path):
     monkeypatch.delenv("BOX_AGENT_SYSTEM_MCP_CONFIG_PATH", raising=False)
     monkeypatch.delenv("BOX_AGENT_CONNECTOR_MCP_CONFIG_PATH", raising=False)
     monkeypatch.setattr(mcp_loader, "_mcp_config_path", str(user))
-    for name in ("_mcp_server_definitions", "_mcp_source_overrides", "_mcp_runtime_credentials",
+    for name in ("_mcp_server_definitions", "_mcp_source_overrides", "_mcp_runtime_credentials", "_mcp_credential_targets",
                  "_mcp_runtime_credential_versions", "_mcp_status", "_mcp_reconnect_locks"):
         monkeypatch.setattr(mcp_loader, name, {})
     monkeypatch.setattr(mcp_loader, "_mcp_connections", [])
@@ -709,3 +709,72 @@ async def test_source_update_checks_startup_after_acquiring_the_source_lock(
     wait.assert_awaited_once()
     assert mcp_loader._mcp_source_overrides == {}
     assert mcp_loader._mcp_server_definitions == {}
+
+
+def test_host_user_credentials_bind_to_exact_config_without_file_refs(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    path = tmp_path / "mcp.json"
+    original = {"url": "https://user.test/mcp", "headers": {"X-Key": "keep"}}
+    _write(path, {"custom": original, "other": {"url": "https://other.test/mcp"}})
+    monkeypatch.setattr(mcp_loader, "_mcp_credential_targets", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credential_versions", {})
+    definitions = resolve_mcp_sources((McpConfigSource("user", path),)).servers
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", definitions)
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credentials", {})
+    def bind(name, config, headers):
+        return mcp_loader.set_mcp_runtime_credential(
+            f"user-mcp:{name}", headers,
+            target={"owner": "user", "name": name, "config": config},
+        )
+    before = definitions["custom"].fingerprint
+    assert bind("custom", original, {"Authorization": "Bearer test-only"}) == ["custom"]
+    updated = resolve_mcp_sources((McpConfigSource("user", path),), mcp_loader._mcp_runtime_credential_versions).servers
+    assert updated["custom"].fingerprint != before
+    assert updated["other"].fingerprint == definitions["other"].fingerprint
+    assert mcp_loader._materialize_server_config(updated["custom"])["headers"] == {
+        "X-Key": "keep", "Authorization": "Bearer test-only",
+    }
+    assert "Authorization" not in path.read_text()
+    changed = replace(updated["custom"], config={**original, "url": "https://attacker.test/mcp"})
+    assert mcp_loader._materialize_server_config(changed)["headers"] == {"X-Key": "keep"}
+    changed_header = replace(updated["custom"], config={**original, "headers": {"X-Key": "changed"}})
+    assert "Authorization" not in mcp_loader._materialize_server_config(changed_header)["headers"]
+    protected = replace(updated["custom"], owner="system")
+    assert "Authorization" not in mcp_loader._materialize_server_config(protected)["headers"]
+    mcp_loader.clear_mcp_runtime_credential("user-mcp:custom")
+    assert "Authorization" not in mcp_loader._materialize_server_config(updated["custom"])["headers"]
+    with pytest.raises(ValueError, match="without credentialRef"):
+        bind("custom", {**original, "credentialRef": "connector:secret"}, {"Authorization": "test"})
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", {"protected": protected})
+    with pytest.raises(ValueError, match="protected server"):
+        bind("protected", original, {"Authorization": "test"})
+
+
+def test_unified_credentials_preserve_manual_headers_and_isolate_owners(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    path = tmp_path / "mcp.json"
+    manual = {"url": "https://user.test/mcp", "headers": {"Authorization": "Bearer manual"}}
+    _write(path, {"custom": manual})
+    definitions = resolve_mcp_sources((McpConfigSource("user", path),)).servers
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", definitions)
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credentials", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_credential_targets", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credential_versions", {})
+    definition = definitions["custom"]
+    assert mcp_loader._materialize_server_config(definition)["headers"] == manual["headers"]
+    target = {"owner": "user", "name": "custom", "config": manual}
+    mcp_loader.set_mcp_runtime_credential("user-mcp:custom", {"Authorization": "Bearer oauth"}, target=target)
+    assert mcp_loader._materialize_server_config(definition)["headers"]["Authorization"] == "Bearer oauth"
+    stolen = replace(definition, owner="connector", config={**manual, "credentialRef": "user-mcp:custom"})
+    with pytest.raises(ValueError, match="cannot reference user"):
+        mcp_loader._materialize_server_config(stolen)
+    assert mcp_loader.clear_mcp_runtime_credential("user-mcp:custom") == ["custom"]
+    assert mcp_loader._materialize_server_config(definition)["headers"] == manual["headers"]
+    assert path.read_text().count("oauth") == 0
+    with pytest.raises(ValueError, match="explicit target"):
+        mcp_loader.set_mcp_runtime_credential("user-mcp:custom", {"Authorization": "test"})
+    with pytest.raises(ValueError, match="must match"):
+        mcp_loader.set_mcp_runtime_credential("connector:other", {"Authorization": "test"}, target=target)
+    assert mcp_loader._mcp_runtime_credentials == {}

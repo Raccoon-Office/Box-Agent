@@ -2004,6 +2004,7 @@ _mcp_sources: tuple[McpConfigSource, ...] = ()
 _mcp_server_definitions: dict[str, ResolvedMcpServer] = {}
 _mcp_source_overrides: dict[str, dict[str, dict]] = {}
 _mcp_runtime_credentials: dict[str, dict[str, str]] = {}
+_mcp_credential_targets: dict[str, dict] = {}
 _mcp_runtime_credential_versions: dict[str, int] = {}
 # Auth inputs from the last load_mcp_tools_async() call — reused by
 # reconnect_mcp_server() so a single-server hot reconnect gets the same
@@ -2185,32 +2186,54 @@ def _effective_connection_type(server_name: str, server_config: dict) -> Connect
     return conn_type
 
 
-def set_mcp_runtime_credential(credential_ref: str, headers: dict[str, str]) -> list[str]:
-    """Store connector credentials in memory and return affected server names.
-
-    Credential material is deliberately excluded from MCP config files and status
-    payloads. The desktop host must restore it after every Box-Agent restart.
-    """
-
+def set_mcp_runtime_credential(
+    credential_ref: str, headers: dict[str, str], *, target: dict | None = None,
+) -> list[str]:
+    """Store host credentials in memory, scoped to a connector ref or exact user config."""
     normalized_ref = credential_ref.strip()
     if not normalized_ref:
         raise ValueError("credentialRef is required")
+    if target is not None and not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in headers.items()
+    ):
+        raise ValueError("credential headers must be strings")
     normalized_headers = {
-        str(name): str(value)
-        for name, value in headers.items()
-        if str(name).strip() and str(value).strip()
+        str(key): str(value) for key, value in headers.items()
+        if str(key).strip() and str(value).strip()
     }
     if not normalized_headers:
         raise ValueError("credential headers are required")
+    if target is not None:
+        if not isinstance(target, dict) or target.get("owner") != "user":
+            raise ValueError("credential target must be user-owned")
+        name, config = target.get("name"), target.get("config")
+        if (not isinstance(name, str) or not name.strip() or not isinstance(config, dict)
+                or not isinstance(config.get("url"), str) or not config["url"].strip()):
+            raise ValueError("name and URL config are required")
+        if normalized_ref != f"user-mcp:{name}":
+            raise ValueError("credentialRef must match the user target")
+        if "credentialRef" in config or config.get("command"):
+            raise ValueError("User credential binding requires a URL server without credentialRef")
+        definition = _mcp_server_definitions.get(name)
+        if definition is not None and definition.owner != "user":
+            raise ValueError("User credential binding cannot target a protected server")
+        _mcp_credential_targets[normalized_ref] = {
+            "owner": "user", "name": name,
+            "config": {key: value for key, value in config.items() if key != "disabled"},
+        }
+        affected = [name]
+    else:
+        if normalized_ref.startswith("user-mcp:"):
+            raise ValueError("User credentials require an explicit target")
+        affected = [
+            name for name, definition in _mcp_server_definitions.items()
+            if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
+        ]
     _mcp_runtime_credentials[normalized_ref] = normalized_headers
     _mcp_runtime_credential_versions[normalized_ref] = (
         _mcp_runtime_credential_versions.get(normalized_ref, 0) + 1
     )
-    return [
-        name
-        for name, definition in _mcp_server_definitions.items()
-        if definition.owner == "connector" and definition.config.get("credentialRef") == normalized_ref
-    ]
+    return affected
 
 
 def get_mcp_connector_server_names() -> dict[str, frozenset[str]]:
@@ -2228,10 +2251,13 @@ def get_mcp_connector_server_names() -> dict[str, frozenset[str]]:
 
 def clear_mcp_runtime_credential(credential_ref: str) -> list[str]:
     normalized_ref = credential_ref.strip()
+    target = _mcp_credential_targets.pop(normalized_ref, None)
     _mcp_runtime_credentials.pop(normalized_ref, None)
     _mcp_runtime_credential_versions[normalized_ref] = (
         _mcp_runtime_credential_versions.get(normalized_ref, 0) + 1
     )
+    if target is not None:
+        return [target["name"]]
     return [
         name
         for name, definition in _mcp_server_definitions.items()
@@ -2246,7 +2272,18 @@ def _materialize_server_config(definition: ResolvedMcpServer) -> dict:
         raise ValueError("credentialRef requires a connector-owned source")
     server_config.pop("_connectorId", None)
     server_config.pop("_connectorName", None)
+    if definition.owner == "user":
+        reference = f"user-mcp:{definition.name}"
+        target = _mcp_credential_targets.get(reference)
+        config = {key: value for key, value in definition.config.items() if key != "disabled"}
+        if target is not None and target["config"] == config:
+            server_config["headers"] = {
+                **dict(server_config.get("headers") or {}),
+                **_mcp_runtime_credentials.get(reference, {}),
+            }
     if isinstance(credential_ref, str):
+        if credential_ref.startswith("user-mcp:"):
+            raise ValueError("Connector cannot reference user credentials")
         credential_headers = _mcp_runtime_credentials.get(credential_ref)
         if credential_headers:
             server_config["headers"] = {
@@ -2590,6 +2627,7 @@ async def cleanup_mcp_connections():
     _mcp_server_definitions = {}
     _mcp_sources = ()
     _mcp_source_overrides.clear()
+    _mcp_credential_targets.clear()
     _mcp_status.clear()
     get_mcp_tool_catalog().clear()
 

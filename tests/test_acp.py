@@ -9036,3 +9036,55 @@ def test_display_output_identity_changes_for_continuation_snapshot(streamed):
     assert first["outputId"] != second_snapshot["outputId"]
     if streamed:
         assert second == second_snapshot
+
+
+@pytest.mark.asyncio
+async def test_user_mcp_host_credential_binding_keeps_secret_out_of_result(tmp_path, monkeypatch):
+    from box_agent.tools import mcp_loader
+
+    config = Config(llm=LLMConfig(api_key="test-key"), agent=AgentConfig(workspace_dir=str(tmp_path)), tools=ToolsConfig(enable_sub_agent=False))
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credentials", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_credential_targets", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_runtime_credential_versions", {})
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", {})
+    target = {"owner": "user", "name": "sample", "config": {"url": "https://example.test/mcp"}}
+    result = await agent.extMethod("mcp/credential/set", {
+        "credentialRef": "user-mcp:sample", "target": target,
+        "headers": {"Authorization": "Bearer test-secret"},
+    })
+    assert result == {"success": True, "affectedServers": ["sample"], "target": {"owner": "user", "name": "sample"}}
+    assert mcp_loader._mcp_runtime_credentials["user-mcp:sample"]["Authorization"] == "Bearer test-secret"
+    assert "test-secret" not in str(result)
+    invalid = await agent.extMethod("mcp/credential/set", {
+        "credentialRef": "user-mcp:sample", "target": target, "headers": {"Authorization": 1},
+    })
+    assert invalid["success"] is False
+    assert "test-secret" not in str(invalid)
+    cleared = await agent.extMethod("mcp/credential/clear", {"credentialRef": "user-mcp:sample"})
+    assert cleared == {"success": True, "affectedServers": ["sample"]}
+    assert not mcp_loader._mcp_runtime_credentials
+    assert not mcp_loader._mcp_credential_targets
+
+
+@pytest.mark.asyncio
+async def test_user_oauth_does_not_change_prompt_readiness_with_pending_mcp(tmp_path):
+    import asyncio
+    config = Config(llm=LLMConfig(api_key="test-key"), agent=AgentConfig(workspace_dir=str(tmp_path)), tools=ToolsConfig(enable_sub_agent=False))
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [], "system")
+    pending = asyncio.get_running_loop().create_future()
+    agent._mcp_task = pending
+    agent._mcp_loaded = False
+    try:
+        await asyncio.wait_for(agent._ensure_mcp_loaded(), timeout=0.1)
+        assert not pending.done()
+        assert agent._mcp_finalize_scheduled
+        # Repeated prompts share the same background finalizer.
+        finalizer = agent._mcp_finalize_task
+        await asyncio.wait_for(agent._ensure_mcp_loaded(), timeout=0.1)
+        assert agent._mcp_finalize_task is finalizer
+    finally:
+        pending.cancel()
+        if agent._mcp_finalize_task:
+            agent._mcp_finalize_task.cancel()
+            await asyncio.gather(agent._mcp_finalize_task, return_exceptions=True)
