@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from box_agent.events import DoneEvent, ErrorEvent, StopReason
 from box_agent.runtime import invoke_tool_with_permissions
-from box_agent.schema import FunctionCall, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, Message, StreamEvent, ToolCall
 from box_agent.tools import jupyter_tool
 from box_agent.tools.base import ToolResult
 from box_agent.tools.bash_tool import BashTool
@@ -21,6 +22,68 @@ from box_agent.tools.jupyter_tool import (
 )
 from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
 from box_agent.tools.sub_agent_tool import SubAgentTool
+
+
+async def _run_child_loop_events(monkeypatch, events):
+    from box_agent import runtime
+
+    async def run(**kwargs):
+        for event in events:
+            if isinstance(event, BaseException):
+                raise event
+            yield event
+
+    monkeypatch.setattr(runtime, "run_agent_loop", run)
+    child = SubAgentTool(llm=None, parent_tools={})
+    return await child._run_general_loop(
+        llm=None, messages=[Message(role="user", content="task")], child_tools={},
+        max_steps=1, max_tool_calls=None, diagnostic={"strategy": "general_loop"},
+        queue=None, parent_tool_call_id="test-child", task_preview="task",
+        sub_agent_id="child", title="child",
+    )
+
+
+@pytest.mark.parametrize("stop_reason", [StopReason.ERROR, StopReason.CANCELLED, StopReason.INTERRUPTED])
+async def test_child_error_or_interruption_keeps_partial_output_without_reporting_success(monkeypatch, stop_reason):
+    result = await _run_child_loop_events(monkeypatch, [
+        DoneEvent(stop_reason=stop_reason, final_content="partial work"),
+    ])
+    assert not result.success
+    assert result.content == "partial work"
+    assert stop_reason.value in result.error
+    assert result.raw_output["stop_reason"] == stop_reason.value
+
+
+@pytest.mark.parametrize("stop_reason", [StopReason.END_TURN, StopReason.MAX_TOKENS, None])
+async def test_child_fatal_error_is_not_success_even_with_final_output(monkeypatch, stop_reason):
+    events = [ErrorEvent(message="Input budget exceeded", is_fatal=True,
+                         error_code="CONTEXT_INPUT_BUDGET_EXCEEDED")]
+    if stop_reason is not None:
+        events.append(DoneEvent(stop_reason=stop_reason, final_content="partial work"))
+    result = await _run_child_loop_events(monkeypatch, events)
+    assert not result.success
+    assert result.error == "Input budget exceeded"
+    assert result.content == ("partial work" if stop_reason is not None else "")
+    assert result.raw_output["error_code"] == "CONTEXT_INPUT_BUDGET_EXCEEDED"
+
+
+@pytest.mark.parametrize("stop_reason", [
+    StopReason.END_TURN, StopReason.MAX_STEPS, StopReason.MAX_TOKENS, StopReason.WAITING_FOR_USER,
+])
+async def test_child_nonfatal_outcomes_keep_output_and_expose_the_stop_reason(monkeypatch, stop_reason):
+    result = await _run_child_loop_events(monkeypatch, [
+        ErrorEvent(message="Optional image unavailable", is_fatal=False),
+        DoneEvent(stop_reason=stop_reason, final_content="useful output"),
+    ])
+    assert result.success
+    assert result.content == "useful output"
+    assert result.error is None
+    assert result.raw_output["stop_reason"] == stop_reason.value
+
+
+async def test_child_loop_task_cancellation_still_propagates(monkeypatch):
+    with pytest.raises(asyncio.CancelledError):
+        await _run_child_loop_events(monkeypatch, [asyncio.CancelledError()])
 
 
 class SuccessfulProcess:

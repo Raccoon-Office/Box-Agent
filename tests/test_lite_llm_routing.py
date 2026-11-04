@@ -576,6 +576,8 @@ async def test_routed_child_checks_full_input_against_its_selected_model_window(
             events.append(queue.get_nowait().event)
         if reference_repetitions == 5_000:
             assert requests == []
+            assert not result.success
+            assert result.raw_output["stop_reason"] == "error"
             assert any(isinstance(event, ErrorEvent)
                        and event.error_code == "CONTEXT_INPUT_BUDGET_EXCEEDED" for event in events)
             assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR

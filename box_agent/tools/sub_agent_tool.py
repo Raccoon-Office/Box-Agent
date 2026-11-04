@@ -27,6 +27,7 @@ from ..events import (
     ProgressEvent,
     StepEnd,
     StepStart,
+    StopReason,
     SubAgentEvent,
     ToolCallResult,
     ToolCallStart,
@@ -837,6 +838,8 @@ class SubAgentTool(EventEmittingTool):
         from ..runtime import run_agent_loop
 
         final_content = ""
+        stop_reason: StopReason | None = None
+        fatal_error: ErrorEvent | None = None
         pending_child_tc: dict[str, str] = {}
         model_calls = 0
         tool_calls = 0
@@ -954,9 +957,12 @@ class SubAgentTool(EventEmittingTool):
                 elif isinstance(event, LLMOutputEvent):
                     model_calls += 1
                     self._accumulate_usage(usage, self._usage_payload(event.usage))
+                elif isinstance(event, ErrorEvent) and event.is_fatal:
+                    fatal_error = event
 
                 if isinstance(event, DoneEvent):
                     final_content = event.final_content
+                    stop_reason = event.stop_reason
                 elif isinstance(event, self._FORWARD_TYPES):
                     self._put_sub_event(
                         queue,
@@ -1008,7 +1014,24 @@ class SubAgentTool(EventEmittingTool):
             "model_calls": model_calls,
             "tool_calls": tool_calls,
             "usage": usage,
+            **({"stop_reason": stop_reason.value} if stop_reason is not None else {}),
         }
+        if fatal_error is not None:
+            raw_output.update({
+                "error_code": fatal_error.error_code,
+                "error_category": fatal_error.error_category,
+                "error_details": fatal_error.error_details,
+            })
+        if fatal_error is not None or stop_reason in {
+            StopReason.ERROR, StopReason.CANCELLED, StopReason.INTERRUPTED,
+        }:
+            return ToolResult(
+                success=False,
+                content=final_content,
+                error=(fatal_error.message if fatal_error is not None
+                       else f"Sub-agent stopped with {stop_reason.value}; output is incomplete."),
+                raw_output=raw_output,
+            )
         if not final_content:
             return ToolResult(
                 success=False,

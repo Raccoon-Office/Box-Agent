@@ -172,6 +172,8 @@ tool_limits:
 - 归一化 `files` 与有效预算
 - 模型/工具调用次数、usage 和模型路由诊断
 
+普通子循环会在可用时返回 `stop_reason`。子任务发生致命错误，或以 `error`、`cancelled`、`interrupted` 停止时，即使已有部分输出也返回 `success: false`，并保留输出、错误原因及可用的错误码、类别和详情。非致命的步数／输出上限和等待用户输入仍沿用原有结果语义。
+
 执行前失败使用 `type: sub_agent_delegation_error`，并返回稳定 `code`、
 `retryable`、`invalid_fields` 及适用的修正信息。子级进度使用
 `rawOutput.type: sub_agent_progress`。

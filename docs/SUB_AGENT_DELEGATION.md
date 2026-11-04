@@ -206,6 +206,8 @@ Successful `ToolResult.raw_output` includes:
 - normalized `files` and effective budget
 - model/tool-call counts, usage, and model-routing diagnostics
 
+General-loop results also report `stop_reason` when available. A fatal child error or an `error`, `cancelled`, or `interrupted` stop returns `success: false`, even if partial output exists; the output is preserved along with the error and available error code/category/details. Nonfatal step/output limits and waiting for user input retain their existing result semantics.
+
 Pre-execution failures use `type: sub_agent_delegation_error` with a stable
 `code`, `retryable`, `invalid_fields`, and correction metadata where relevant.
 Child progress uses `rawOutput.type: sub_agent_progress`.
