@@ -14,7 +14,7 @@ inferences, subject to encoded-byte and provider request-body limits. Pixels sta
 outside durable message content; SessionLog records references and lifecycle
 metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
-Before sending a summary request, Box-Agent estimates the complete history plus the appended summary instruction against the session's safe input budget. Both ordinary and forced compaction apply this check. An over-budget summary skips the provider call and uses the local bounded fallback; the rebuilt main request is then checked before sending.
+Before sending a summary request, Box-Agent estimates the complete projected request, including the appended summary instruction and images, against the summary client's safe input budget: `90% × (context window − actual output reservation)`, with the output reservation capped at 8,192 tokens. If the client does not declare its window or output reservation, the session's input budget remains the fallback. Both ordinary and forced compaction apply this check. An over-budget summary skips the provider call and uses the local bounded fallback; the rebuilt main request is then checked against the main model's budget before sending.
 
 ## Request lifecycle
 
@@ -379,7 +379,7 @@ input_tokens
 + output_tokens
 ```
 
-When usage has a request snapshot for the same route, the runtime starts with measured usage and adds estimates for new or changed messages and new or changed offered tool schemas. Appended request-only messages are fingerprinted too: each unchanged occurrence already covered by usage is counted once; additional copies or changed content are charged. Removed material is left in the baseline until the next provider response updates it. Snapshots are kept in memory. Without a usable snapshot the runtime estimates the complete request, retaining unpaired usage from older sessions and low-level callers as a protective floor.
+When usage has a request snapshot for the same route, the runtime starts with measured usage and adds estimates for new or changed messages and new or changed offered tool schemas. Appended request-only messages are fingerprinted too: each unchanged occurrence already covered by usage is counted once; additional copies or changed content are charged. Removed material is left in the baseline until the next provider response updates it. New assistant records also persist the snapshot's hashes and aggregate counts as private `contextUsage` metadata in the Session Log, without storing request-only content or changing the public usage payload. Replay validates the metadata version, field types, and checksum bound to the response; only the latest active snapshot is retained. History revisions restore the matching checkpoint, while compaction clears the old usage baseline. Older logs have no snapshot to restore; missing or invalid metadata falls back safely. Without a usable snapshot the runtime estimates the complete request, retaining unpaired usage from older sessions and low-level callers as a protective floor.
 
 When the fully assembled request fits the input budget, the default compactor skips its history-only threshold check. This prevents reserving appended content a second time against a usage baseline that already includes it. A blocked or oversized request still goes through bounded compaction and full-request rechecking.
 

@@ -20,6 +20,7 @@ from typing import Any, BinaryIO
 from uuid import uuid4
 
 from .schema import Message
+from .schema.schema import RequestUsageSnapshot
 from .session_projection import SessionProjection
 
 
@@ -133,6 +134,71 @@ def _encode_record(record: dict[str, Any]) -> bytes:
         ).encode("utf-8")
         + b"\n"
     )
+
+
+def _context_usage_hash(message: Message, metadata: dict[str, Any]) -> str:
+    payload = {
+        "message": message.model_dump(mode="json", exclude_none=True),
+        "contextUsage": {key: value for key, value in metadata.items() if key != "sha256"},
+    }
+    return hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _context_usage_metadata(message: Message) -> dict[str, Any] | None:
+    usage = message.usage
+    snapshot = usage._request_snapshot if usage is not None else None
+    if message.role != "assistant" or snapshot is None or usage.context_tokens <= 0:
+        return None
+    metadata = {
+        "version": 1,
+        "route": snapshot.route,
+        "history": list(snapshot.history),
+        "tools": dict(snapshot.tools),
+        "requestOnly": list(snapshot.request_only),
+        "contextTokens": usage.context_tokens,
+        "outputTokens": usage.output_tokens or usage.completion_tokens,
+    }
+    metadata["sha256"] = _context_usage_hash(message, metadata)
+    return metadata
+
+
+def _restore_context_usage(message: Message, metadata: Any) -> None:
+    """Restore optional measured context without changing public usage fields."""
+    if message.role != "assistant" or message.usage is None or not isinstance(metadata, dict):
+        return
+    if type(metadata.get("version")) is not int or metadata["version"] != 1:
+        return
+
+    def is_hash(value: Any, prefix: str = "") -> bool:
+        return isinstance(value, str) and re.fullmatch(prefix + r"[0-9a-f]{64}", value) is not None
+
+    history, tools = metadata.get("history"), metadata.get("tools")
+    request_only = metadata.get("requestOnly")
+    context_tokens, output_tokens = metadata.get("contextTokens"), metadata.get("outputTokens")
+    if (not is_hash(metadata.get("route"), "sha256:")
+            or not isinstance(history, list) or not all(is_hash(value) for value in history)
+            or not isinstance(tools, dict)
+            or not all(isinstance(name, str) and is_hash(value, "sha256:") for name, value in tools.items())
+            or not isinstance(request_only, list) or not all(is_hash(value, "sha256:") for value in request_only)
+            or type(context_tokens) is not int or type(output_tokens) is not int
+            or not 0 <= output_tokens <= context_tokens or context_tokens <= 0):
+        return
+    try:
+        if metadata.get("sha256") != _context_usage_hash(message, metadata):
+            return
+    except (TypeError, ValueError, UnicodeError):
+        return
+    usage = message.usage
+    usage._request_snapshot = RequestUsageSnapshot(
+        route=metadata["route"], history=tuple(history), tools=dict(tools), request_only=tuple(request_only),
+    )
+    # Provider-specific input/cache fields are excluded from public serialization.
+    # Restore their aggregate so context_tokens remains identical after replay.
+    usage.input_tokens = context_tokens - output_tokens
+    usage.output_tokens = output_tokens
+    usage.cache_creation_input_tokens = usage.cache_read_input_tokens = 0
 
 
 def _session_dir(root: Path, session_id: str) -> Path:
@@ -643,6 +709,9 @@ class SessionLog:
         pending = self._pending_message_metadata.get(id(message))
         if pending is not None:
             data.update(deepcopy(pending[1]))
+        context_usage = _context_usage_metadata(message)
+        if context_usage is not None:
+            data["contextUsage"] = context_usage
         event = self.append(
             event_type, data, surface_op=surface_op, source_event_seqs=source_event_seqs,
         )
@@ -1111,6 +1180,7 @@ class SessionLog:
                 raise SessionLogCorrupted(
                     f"session event {event['seq']} has an invalid message"
                 ) from exc
+            _restore_context_usage(message, data.get("contextUsage"))
             operation = event.get("surfaceOp")
             node = (event["seq"], message)
             if operation == "append":
@@ -1134,12 +1204,15 @@ class SessionLog:
                     f"surface replacement {event['seq']} has a reversed range"
                 )
             surface[start_index : end_index + 1] = [node]
+        messages = [message for _, message in surface if not _is_legacy_workflow_context(message)]
+        latest_snapshot_seen = False
+        for message in reversed(messages):
+            if message.usage is not None and message.usage._request_snapshot is not None:
+                if latest_snapshot_seen:
+                    message.usage._request_snapshot = None
+                latest_snapshot_seen = True
         return SessionProjection(
-            messages=[
-                message
-                for _, message in surface
-                if not _is_legacy_workflow_context(message)
-            ],
+            messages=messages,
             goal=goal,
             plan=plan,
             todos=todos,

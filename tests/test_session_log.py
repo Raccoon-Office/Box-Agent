@@ -13,13 +13,162 @@ from types import SimpleNamespace
 import pytest
 
 import box_agent.session_log as session_log_module
-from box_agent.schema import FunctionCall, Message, ToolCall
+from box_agent.schema import FunctionCall, Message, TokenUsage, ToolCall
 from box_agent.session_log import (
     SessionLog,
     SessionLogCorrupted,
     SessionLogInUseError,
     SessionLogWorkspaceMismatch,
 )
+
+
+@pytest.mark.parametrize("replace_surface", [False, True])
+@pytest.mark.parametrize("cache_usage", [False, True])
+def test_reopen_preserves_measured_context_and_request_only_fingerprints(tmp_path, replace_surface, cache_usage):
+    from box_agent.kernel.context_engine import capture_request_usage, request_input_tokens
+
+    llm = SimpleNamespace(model="model", provider="openai", api_base="https://budget.invalid/v1",
+                          estimate_text_tokens=lambda text: (len(text.encode("utf-8")) + 1) // 2)
+    history = [Message(role="system", content="system"), Message(role="user", content="龘 " * 5_000)]
+    overlay = Message(role="user", source="runtime", content="private-request-only-marker " * 20)
+    usage = TokenUsage(prompt_tokens=1_000, completion_tokens=10, total_tokens=1_010)
+    if cache_usage:
+        usage.input_tokens = 800
+        usage.cache_creation_input_tokens = 100
+        usage.cache_read_input_tokens = 200
+        usage.output_tokens = 10
+    usage._request_snapshot = capture_request_usage([*history, overlay], len(history), [], llm)
+    response = Message(role="assistant", content="answer", usage=usage)
+    before = request_input_tokens([*history, response, overlay], {}, llm=llm)
+    public_response = response.model_dump(mode="json", exclude_none=True)
+    log = SessionLog.create(tmp_path, session_id="measured", cwd=tmp_path)
+    if replace_surface:
+        log.append_unlogged_messages([Message(role="user", content="old")], turn=1, step=1)
+        log.replace_surface([history[1], response], turn=1, step=2)
+    else:
+        log.append_unlogged_messages([history[1], response], turn=1, step=1)
+    path = log.path
+    log.close()
+    assert "private-request-only-marker" not in path.read_text()
+
+    reopened = SessionLog.open(tmp_path, session_id="measured", cwd=tmp_path)
+    try:
+        restored = reopened.replay().messages
+        assert request_input_tokens([history[0], *restored, overlay], {}, llm=llm) == before
+        assert before == (1_110 if cache_usage else 1_010)
+        assert restored[-1].model_dump(mode="json", exclude_none=True) == public_response
+        assert restored[-1].usage._request_snapshot == usage._request_snapshot
+        assert reopened.append_unlogged_messages(restored, turn=2, step=1) == []
+        changed_system = history[0].model_copy(update={"content": "new policy " * 1_000})
+        assert request_input_tokens([changed_system, *restored, overlay], {}, llm=llm) > before + 4_000
+        added_tool = SimpleNamespace(to_openai_schema=lambda: {"description": "tool schema " * 1_000})
+        assert request_input_tokens([history[0], *restored, overlay], {"new": added_tool}, llm=llm) > before + 4_000
+        llm.model = "different-model"
+        assert request_input_tokens([history[0], *restored, overlay], {}, llm=llm) > 10_000
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("corruption", [
+    "missing", "future_version", "boolean_count", "negative_output", "bad_fingerprint",
+    "changed_count", "changed_route", "changed_response", "changed_usage", "invalid_unicode",
+])
+def test_reopen_ignores_unusable_context_measurements_without_losing_history(tmp_path, corruption):
+    from box_agent.kernel.context_engine import capture_request_usage, request_input_tokens
+
+    llm = SimpleNamespace(model="model", estimate_text_tokens=lambda text: len(text))
+    user = Message(role="user", content="long history " * 1_000)
+    usage = TokenUsage(prompt_tokens=100, completion_tokens=10, total_tokens=110)
+    usage._request_snapshot = capture_request_usage([user], 1, [], llm)
+    log = SessionLog.create(tmp_path, session_id="invalid-measurement", cwd=tmp_path)
+    log.append_unlogged_messages([user, Message(role="assistant", content="answer", usage=usage)], turn=1, step=1)
+    path = log.path
+    log.close()
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    data = next(record["data"] for record in records if record.get("type") == "assistant/message")
+    metadata = data["contextUsage"]
+    if corruption == "missing":
+        del data["contextUsage"]
+    elif corruption == "future_version":
+        metadata["version"] = 2
+    elif corruption == "boolean_count":
+        metadata["contextTokens"] = True
+    elif corruption == "negative_output":
+        metadata["outputTokens"] = -1
+    elif corruption == "bad_fingerprint":
+        metadata["history"] = ["invalid"]
+    elif corruption == "changed_count":
+        metadata["contextTokens"] += 1
+    elif corruption == "changed_route":
+        metadata["route"] = "sha256:" + "0" * 64
+    elif corruption == "changed_response":
+        data["message"]["content"] = "changed answer"
+    elif corruption == "invalid_unicode":
+        metadata["extra"] = "\ud800"
+    else:
+        data["message"]["usage"]["prompt_tokens"] += 1
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    reopened = SessionLog.open(tmp_path, session_id="invalid-measurement", cwd=tmp_path, recover=True)
+    try:
+        restored = reopened.replay().messages
+        assert len(restored) == 2
+        assert restored[0] == user
+        assert restored[-1].usage._request_snapshot is None
+        assert request_input_tokens(restored, {}, llm=llm) > 10_000
+    finally:
+        reopened.close()
+
+
+def test_replay_uses_latest_active_measurement_and_compaction_clears_it(tmp_path):
+    from box_agent.kernel.context_engine import capture_request_usage, request_input_tokens
+
+    llm = SimpleNamespace(model="model", estimate_text_tokens=lambda text: len(text))
+    messages = [Message(role="user", content="history " * 1_000)]
+    log = SessionLog.create(tmp_path, session_id="measurement-timeline", cwd=tmp_path)
+    checkpoints = []
+    for turn in range(1, 4):
+        usage = TokenUsage(prompt_tokens=100 * turn, completion_tokens=10, total_tokens=100 * turn + 10)
+        usage._request_snapshot = capture_request_usage(messages, len(messages), [], llm)
+        # The live loop retains only its latest snapshot; this must not rewrite
+        # older persisted messages merely because their private state changed.
+        for message in messages:
+            if message.usage is not None:
+                message.usage._request_snapshot = None
+        messages.append(Message(role="assistant", content=f"answer {turn}", usage=usage))
+        appended = log.append_unlogged_messages(messages, turn=turn, step=1)
+        assert all(event["surfaceOp"] == "append" for event in appended)
+        checkpoints.append(appended[-1]["seq"])
+    log.close()
+
+    reopened = SessionLog.open(tmp_path, session_id="measurement-timeline", cwd=tmp_path)
+    try:
+        restored = reopened.replay().messages
+        assert [message.usage._request_snapshot is not None for message in restored[1:]] == [False, False, True]
+        assert request_input_tokens(restored, {}, llm=llm) == 310
+        reopened.append("history/revise", {
+            "revision_id": "r2", "previous_revision_id": "initial", "turn_id": "t4",
+            "restore_through_seq": checkpoints[0],
+        })
+        revised = reopened.replay().messages
+        assert len(revised) == 2
+        assert request_input_tokens(revised, {}, llm=llm) == 110
+        compacted = [
+            Message(role="user", source="runtime", content="summary " * 50),
+            revised[-1].model_copy(update={"usage": None, "request_only_input_tokens": 0}),
+        ]
+        reopened.replace_surface(compacted, turn=4, step=1)
+    finally:
+        reopened.close()
+
+    compacted_log = SessionLog.open(tmp_path, session_id="measurement-timeline", cwd=tmp_path)
+    try:
+        restored = compacted_log.replay().messages
+        assert restored == compacted
+        assert request_input_tokens(restored, {}, llm=llm) > 310
+    finally:
+        compacted_log.close()
 
 
 def test_history_revision_restores_tool_pairs_and_all_prefix_state_after_reopen(tmp_path):

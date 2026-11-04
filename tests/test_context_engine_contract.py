@@ -122,3 +122,49 @@ async def test_context_summary_collects_text_from_streaming_llm():
     summary = await _create_summary(provider, [Message(role="user", content="request")], 1)
     assert summary == "kept"
     assert provider.calls[0]["call_kind"] == "context_summary"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_chars", [20_000, 60_000])
+async def test_summary_checks_complete_projected_input_against_its_own_capacity(extra_chars):
+    from types import SimpleNamespace
+
+    from box_agent.context_input import DefaultContextEngine
+    from box_agent.kernel.context_engine import _maybe_summarize
+    from box_agent.llm import LLMClient
+    from tests.test_task_output_budgets import BudgetLLM
+
+    llm = BudgetLLM("<summary>Continue the task.</summary>", max_output_tokens=50_000)
+    llm.context_window = 100_000
+    llm.estimate_text_tokens = LLMClient.estimate_text_tokens.__get__(llm)
+    extra = Message(role="user", source="runtime", content="z" * extra_chars)
+
+    def project(messages, **kwargs):
+        assert kwargs["purpose"] == "summary"
+        assert kwargs["llm"].max_output_tokens == 8_192
+        return SimpleNamespace(messages=[*messages, extra], manifest={}, input_tokens=extra_chars // 2,
+                               blocked_reason=None)
+
+    context = DefaultContextEngine(image_context=SimpleNamespace(
+        images=["projected-input"], session_log=None, prepare=project,
+    ))
+    context._token_limit = 45_000
+    history = [
+        Message(role="system", content="system"),
+        Message(role="user", content="old request"),
+        Message(role="assistant", content="x" * 120_000),
+        *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
+        Message(role="user", content="continue"),
+    ]
+    result = await _maybe_summarize(
+        llm, history, token_limit=45_000, api_total_tokens=0, skip_check=False,
+        summary_input_token_limit=45_000, summary_projector=context.prepare_summary,
+    )
+    if extra_chars == 20_000:
+        assert result.mode == "summary" and result.summary_calls == 1
+        assert len(llm.calls) == 1
+    else:
+        assert result.mode == "fallback" and result.summary_calls == 0
+        assert llm.calls == []
+    assert result.estimated_after <= 45_000
+    assert llm.max_output_tokens == 50_000

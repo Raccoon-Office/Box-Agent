@@ -172,6 +172,56 @@ async def test_agent_skips_over_budget_summary_and_resumes_with_local_fallback(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("summary_window", [100_000, 60_000])
+@pytest.mark.parametrize("history_chars", [120_000, 164_000, 180_000])
+async def test_summary_uses_its_own_window_and_output_reservation(summary_window, history_chars):
+    from box_agent.config import derive_context_token_limit
+    from box_agent.runtime import run_agent_loop
+    from tests.test_main_input_budget import wire_llm
+
+    history = [
+        Message(role="system", content="system"),
+        Message(role="user", content="old request"),
+        Message(role="assistant", content="x" * history_chars),
+        *(Message(role="assistant", content=f"recent result {index}") for index in range(6)),
+        Message(role="user", content="continue"),
+    ]
+    async with wire_llm(context_window=100_000) as (llm, requests):
+        llm.max_output_tokens = 50_000
+        summary_llm = llm.for_model("summary-model")
+        summary_llm.context_window = summary_window
+        main_limit = derive_context_token_limit(100_000, 50_000)
+        summary_limit = derive_context_token_limit(summary_window, 8_192)
+        summary_tokens = _fallback_context_estimate([
+            *history, Message(role="user", source="runtime", content=_SUMMARY_REQUEST),
+        ], {}, llm=summary_llm)
+        assert _fallback_context_estimate(history, {}, llm=llm) > main_limit
+        if summary_window == 100_000 and history_chars == 164_000:
+            assert _fallback_context_estimate(history, {}, llm=summary_llm) <= summary_limit < summary_tokens
+
+        events = [event async for event in run_agent_loop(
+            llm=llm, summary_llm=summary_llm, messages=history, tools={},
+            token_limit=main_limit, max_steps=1,
+        )]
+
+        compaction = next(event for event in events if isinstance(event, SummarizationEvent))
+        summary_requests = [request for request in requests if request["model"] == "summary-model"]
+        if summary_tokens <= summary_limit:
+            assert compaction.mode == "summary" and compaction.summary_calls == 1
+            assert len(summary_requests) == 1
+            assert summary_requests[0]["messages"][-1]["content"] == _SUMMARY_REQUEST
+            assert summary_requests[0].get("max_tokens", summary_requests[0].get("max_completion_tokens")) == 8_192
+        else:
+            assert compaction.mode == "fallback" and compaction.summary_calls == 0
+            assert summary_requests == []
+        main_requests = [request for request in requests if request["model"] == llm.model]
+        assert len(main_requests) == 1
+        assert compaction.estimated_after <= main_limit
+        assert llm.max_output_tokens == 50_000
+        assert not any(isinstance(event, ErrorEvent) for event in events)
+
+
+@pytest.mark.asyncio
 async def test_loop_prepares_before_compacting_and_reprepares_before_provider(monkeypatch):
     """The first projection is the budget decision for the exact request."""
 

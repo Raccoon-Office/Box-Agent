@@ -68,7 +68,7 @@ class ToolCall(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class RequestUsageSnapshot:
-    """Runtime-only fingerprints for the request measured by provider usage."""
+    """Measured-request fingerprints, private to runtime and Session Log replay."""
 
     route: str
     history: tuple[str, ...]

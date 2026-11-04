@@ -12,7 +12,7 @@ from collections import Counter
 from typing import Any, Callable, Final
 
 from ..cache_fingerprint import sha256_fingerprint
-from ..llm.capabilities import image_input_support
+from ..llm.capabilities import bound_context_token_limit, image_input_support
 from ..llm.base import closing_llm_stream
 from ..llm.task_budgets import SMALL_TASK_MAX_OUTPUT_TOKENS, cap_auxiliary_client
 from ..schema import Message
@@ -150,6 +150,10 @@ def _summary_message_text(msg: Message) -> str:
     return "\n".join(sections)
 
 
+class _SummaryInputBudgetExceeded(RuntimeError):
+    """The fully projected summary request cannot be sent within its budget."""
+
+
 async def _create_summary(
     llm,
     messages: list[Message],
@@ -158,6 +162,7 @@ async def _create_summary(
     turn_id: str = "",
     title: str = "",
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None,
+    input_token_limit: int | None = None,
 ) -> str:
     """Append one instruction to the exact history so provider KV cache survives."""
 
@@ -172,6 +177,13 @@ async def _create_summary(
     summary_messages = [*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)]
     if summary_projector is not None:
         summary_messages = summary_projector(summary_messages, summary_llm)
+    window = getattr(summary_llm, "context_window", None)
+    output = getattr(summary_llm, "max_output_tokens", None)
+    if type(window) is int and window > 0 and type(output) is int and output > 0:
+        input_token_limit = bound_context_token_limit(summary_llm, window)
+    if (input_token_limit is not None
+            and _fallback_context_estimate(summary_messages, None, llm=summary_llm) > input_token_limit):
+        raise _SummaryInputBudgetExceeded("Summary request exceeds the safe input budget")
     async with closing_llm_stream(summary_llm.generate_stream(
         messages=summary_messages,
         tools=None,
@@ -831,12 +843,6 @@ async def _maybe_summarize(
     try:
         if not allow_llm_summary:
             raise RuntimeError("LLM summary disabled")
-        if (summary_input_token_limit is not None
-                and _fallback_context_estimate(
-                    [*messages, Message(role="user", source="runtime", content=_SUMMARY_REQUEST)], None,
-                    llm=summary_llm or llm,
-                ) > summary_input_token_limit):
-            raise RuntimeError("Summary request exceeds the safe input budget")
         summary_calls = 1
         summary = await _create_summary(
             summary_llm or llm,
@@ -846,10 +852,13 @@ async def _maybe_summarize(
             turn_id=turn_id,
             title=title,
             **({"summary_projector": summary_projector} if summary_projector is not None else {}),
+            **({"input_token_limit": summary_input_token_limit} if summary_input_token_limit is not None else {}),
         )
         if not summary.strip():
             raise RuntimeError("summary provider returned empty content")
     except Exception as exc:
+        if isinstance(exc, _SummaryInputBudgetExceeded):
+            summary_calls = 0
         error = str(exc)
         error_type = type(exc).__name__
         mode = "fallback"

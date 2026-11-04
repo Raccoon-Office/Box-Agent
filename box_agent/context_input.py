@@ -97,8 +97,6 @@ class DefaultContextEngine:
             self.image_context.session_log.flush()
         if projection.blocked_reason:
             raise ValueError(projection.blocked_reason)
-        if projection.input_tokens and _fallback_context_estimate(projection.messages, {}) > self._token_limit:
-            raise ValueError("Summary request exceeds the safe input budget")
         return projection.messages
 
     def bind_memory(self, memory_lookup: Any) -> None:
