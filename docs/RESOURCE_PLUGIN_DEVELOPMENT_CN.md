@@ -205,11 +205,16 @@ Schema 可以使用包内相对 `$ref`，不能请求远程 Schema，也不能�
 | 包 ID | `com.example.team-brief` | 插件作者 |
 | 实例 ID | `sales_brief` / `research_brief` | 部署者；两个实例可以使用不同参数 |
 | 贡献 ID | `brief` | 插件作者；实例内唯一 |
+| 贡献展示名 | `SKILL.md` frontmatter 的 `displayName: 团队简报` | 插件作者；不参与调用或权限判断 |
 | 模型调用名 | 宿主生成的 `p__...` 名称 | 宿主；不要自行拼接 |
 | 可选公开别名 | `sales_summary` → `brief` | 部署者通过 `aliases` 绑定 |
 | 用户使用偏好身份 | 包 ID + 实例 ID + 贡献 ID | 宿主；显示名或别名变更不应改变偏好身份 |
 
 部署默认暴露全部声明的 Skill。`expose` 决定贡献是否进入运行时，不等于是否在用户技能页展示。两个实例不能占用相同别名，一个贡献也只能对应一个别名；系统保留名称不能覆盖。首次开发不设置别名即可。
+
+`plugin.yaml` 的 `display_name` 是**包的管理标题**；每个公开 Skill 的用户展示名写在其 `SKILL.md` 顶层 `displayName`，二者独立。`displayName` 是去掉首尾空格后不超过256个字符的非空单行字符串；缺失或非法时回退到该文件原始 `name`，不会回退到插件命名空间调用名。ACP目录以 `displayName` 传递这个字段，`name` 仍是实际调用名，`plugin` 中的包/实例/贡献身份保持不变。客户端展示作者名，并用实例 ID 区分多个安装；选择、使用开关和权限校验仍使用宿主身份，不可用展示名发起调用。
+
+作者展示名与描述按原文显示，不要求宿主自动翻译。宿主已提供的PPT标题/简介翻译仅匹配明确支持的 `com.box.ppt` 包及其 `pptx` 贡献；任意第三方贡献使用相同ID，不因此获得内置身份或翻译。不要通过配置额外alias来修饰普通用户看到的名称。
 
 ### 4.3 一个公开入口与多个内部方法
 
@@ -250,6 +255,84 @@ Skill 使用宿主已有工具时，在 `requires_host_tools` 声明必需工具
 Skill 上下文包含包与实例身份、配置修订、generation、选中的 `values` 和 `skill_names`。配置是默认数据，用户明确要求和本任务已确认选择优先；不得把配置拼接成 shell/Python 代码或额外授权指令。普通资源文件不会自动进入上下文，按需使用文件工具读取。
 
 宿主管理审计记录操作、身份、修订和摘要，不记录配置值；本地保留最近 256 条，它不是插件业务日志服务。业务脚本日志放在任务输出中，附退出码、产物路径和必要错误信息，不输出凭据。平台 SessionLog 保留会话及工具记录；当前没有供资源插件注册独立日志后端或后台上下文服务的接口。
+
+### 4.5 将已有脚本 Skill 改造成插件
+
+只增加 Manifest 不足以完成迁移。先复制业务源码和资源到新插件目录，保留原 Skill 不变；核对下表后，再从**安装后的只读包**运行脚本。
+
+| 原 Skill 常见行为 | 插件迁移要求 |
+| --- | --- |
+| 在 Skill 内运行 `npm install`、创建 `.venv` | 由平台管理员在包外准备依赖；删除模型任务中的自动安装步骤，缺依赖时报告准确错误。安装器排除这些目录，不会把已安装依赖带入包。 |
+| 使用 `__file__` / `import.meta.url` 附近目录写缓存 | 这些位置只能读资源。字体下载、临时文件、日志、浏览器缓存和恢复状态使用任务输出目录或管理员明确提供的可写目录；不得假设进程 cwd 可写。 |
+| Python 导入在包内生成 `__pycache__` | 平台启动或脚本子进程设置 `PYTHONDONTWRITEBYTECODE=1`，或使用 Python 的 `-B`。 |
+| ESM 脚本直接 `import ... from '依赖名'` | 核对实际解析路径；ESM bare import 不使用 `NODE_PATH`。支持 CommonJS 的依赖可使用下文 `createRequire` 示例；不要在包中创建 `node_modules` 符号链接。 |
+| 从当前目录或其他应用自动寻找 `.env`、账号配置 | 使用平台明确提供的当前宿主凭据通道；测试限定隔离 profile。缺少授权或配置时停止，不搜索其他客户端的登录数据，不把凭据放进 HTML 配置或产物。 |
+| 支持断点恢复或保存运行参数 | 新配置默认只影响新任务。恢复以原任务保存的参数、输入和源码版本为准；源码有指纹清单时同步更新，并记录升级兼容性，避免重做已成功的付费调用。 |
+
+目录名 `runtime` 本身不是应排除项；已有 Skill 可能把完整业务源码放在其中。根据文件用途迁移，保留源文件、模板和相对路径，排除依赖、缓存、个人配置及输出。不要把示例的 MIT 许可扩展到没有该许可的业务源码、字体或模板；分别记录原作者、来源、摘要、修改和许可范围。
+
+**参数不会自动传给程序。** `values` 和 `skill_names` 是宿主提供给模型的上下文数据，不是自动创建的文件、环境变量或脚本参数。Skill 正文应明确哪些字段对应哪些命令行选项，模型读取生效配置并结合用户要求后调用脚本；脚本仍需校验类型和范围。需要跨进程传递时，可把非秘密设置写入任务目录的 JSON 文件，由插件自己的启动脚本读取。这个文件是插件约定，不是新增宿主接口。
+
+例如图片任务将 `max_corrections` 映射为 `--max-corrections`。下面仅演示预算参数的构造；具体插件还需补齐模型等业务必需参数，不能把片段当作完整图片任务入口。`values` 是已读取的非秘密配置，`explicit` 是用户本任务明确选择，`entry`、`input`、`output` 由调用方提供：
+
+```javascript
+import {spawnSync} from 'node:child_process';
+
+export function runTask({values, explicit = {}, entry, input, output}) {
+  const corrections = explicit.max_corrections ?? values.max_corrections;
+  if (!Number.isInteger(corrections) || corrections < 0 || corrections > 10) {
+    throw new Error('max_corrections must be an integer from 0 to 10');
+  }
+  return spawnSync(process.execPath, [entry, '--input', input, '--output', output,
+    '--max-corrections', String(corrections)], {stdio: 'inherit', shell: false});
+}
+```
+
+路径作为独立 argv 传入；调用方需检查子进程退出码。不要将 JSON 值拼入 shell 命令，不允许设置字段替换可执行文件、脚本路径或额外权限。恢复入口应单独使用已保存参数，不能直接套用这个新任务示例。
+
+**可安装默认值与业务运行前置条件可以分开。** 例如外部图片分层测试插件的 `recognition_model`、`image_model` 是非秘密模型 ID，Schema 默认均为 `""`，允许 `{}` 安装；新任务和 `--check-auth` 必须显式取得两个非空 ID，均最长 200 字符、不以 `-` 开头且无空白/控制字符。`--settings` 可用于这两种入口，`--model` / `--image-model` 优先于 settings；纯离线 `--check` 不需要模型。配置页应以文本字段和能力提示说明识别模型需图像输入、结构化 JSON 与坐标，生图模型需图像编辑、参考图、mask/遮罩和透明 PNG 等能力；字段合法不证明远端模型可用。endpoint 和鉴权继续来自当前宿主，不加入 URL 或密钥配置。恢复沿用原任务模型和指纹，拒绝新 settings 或模型覆盖；这些是业务脚本的明确契约，不由宿主自动完成。该业务仅用于独立迁移测试，不随宿主正式插件源码或客户端分发。
+
+### 4.6 为脚本插件准备宿主依赖
+
+Manifest 仅引用 profile 名称；profile 的内容属于管理员维护的**宿主配置**，不放在插件业务配置里。以下是没有浏览器需求的图片脚本示例，需按真实依赖修改；完整宿主配置示例见 [config-example.yaml](../box_agent/config/config-example.yaml)。
+
+桌面验收先通过正常客户端流程初始化模型配置并完成一次最小普通任务，再向现有配置合并 runtime profile。不要先创建只有 `plugin_platform` 的 `config.yaml`：文件已经存在可能使客户端跳过模型默认配置初始化，导致应用候选因缺少模型凭据而启动失败。下列片段不是可直接覆盖宿主配置的完整文件。
+
+```yaml
+# plugin.yaml 的 requires 中增加：
+# runtime_profile: image-layer-host-v1
+
+# 以下写入隔离宿主的配置，由管理员与已有 runtime_profiles 合并：
+plugin_platform:
+  runtime_profiles:
+    image-layer-host-v1:
+      python_modules: [PIL, fontTools, numpy, requests]
+      node_modules: [sharp, yaml]
+      playwright_chromium: false
+      timeout_seconds: 20
+```
+
+`python_modules` 填导入名（例如 Pillow 对应 `PIL`）；`node_modules` 填模块名。`timeout_seconds` 为每个探测进程的超时，范围 1～60 秒。当前 Python 探测使用 `find_spec` 检查模块可发现，Node 探测使用 CommonJS 解析模块路径；不验证这些模块的版本、原生二进制实际加载或全部业务行为。设置 `playwright_chromium: true` 才会额外启动 Chromium 并检查页面截图。通过 profile 不能代替脚本自己的依赖加载和最小功能测试。
+
+平台在启动宿主及其工具环境中提供 `BOX_AGENT_NODE` 和 `BOX_AGENT_PYTHON`（或 `BOX_AGENT_PYTHON3`）绝对路径。非冻结源码宿主未指定 Python 时使用自身解释器；冻结运行时不能依赖该回退。Node profile 必须有 `BOX_AGENT_NODE`。外部 Node 依赖目录可通过 `NODE_PATH` 提供；脚本若使用 `TEXT_PYTHON`、`python3` 或其他解释器，管理员必须核对它与 profile 探测的环境一致，宿主不会自动解释插件自定义的环境变量。
+
+**PPT 隔离环境还需明确 Node 前缀。** 当前 PPT 包的一些环境检查/导出脚本先向模块搜索路径加入 `BOX_AGENT_NODE_PREFIX/node_modules`，次选 `BOX_AGENT_RUNTIME_PREFIX/node_modules`；两者都没有时会使用正式 `office-raccoon` 用户目录。它们不会根据 `BOX_AGENT_HOME` 改这个默认前缀。因此做 PPT 回归时，应把 `BOX_AGENT_NODE_PREFIX` 设为本轮管理员准备的独立 Node 依赖根目录（其下含 `node_modules`），同时核对 `NODE_PATH` 和探测输出中的 managed node_modules 路径。仅设置 `BOX_AGENT_HOME` 或 `NODE_PATH` 不能证明 PPT 脚本的依赖查找已经隔离。这是当前 PPT 资源的兼容行为，不是新插件应仿照的默认路径。
+
+对同时支持 CommonJS 的依赖，ESM 源文件可以这样使用管理员准备的 `NODE_PATH`：
+
+```javascript
+import {createRequire} from 'node:module';
+const requireHost = createRequire(import.meta.url);
+const sharp = requireHost('sharp');
+```
+
+多个脚本共用一个依赖适配模块，子进程继承同一环境。仅能以 ESM 形式加载的依赖需由平台另行明确入口解析方式；不要假定这个示例覆盖所有包。管理员在独立依赖目录按插件锁文件准备环境，记录版本与安装来源；包内只交付依赖声明、锁文件及管理员说明，不携带依赖树。
+
+**实际工具环境必须单独核对。** 桌面启动进程继承的 `NODE_PATH` 不一定原样进入 Bash；宿主可以按当前会话重新组装工具环境。管理阶段只校验包完整性、Skill 和 runtime profile 声明，不使用父进程环境判定依赖是否可用。CLI 与 ACP 在真实启动确认时共用同一规则：从实际工具集合中的原生 Bash 取得只读环境快照，再执行依赖探针；显式快照不补回工具已移除的父进程变量。有 runtime profile 但没有真实 Bash 环境时，候选失败并保留旧 active；普通启动发生同类失败时只降级外部 Skill、标记运行状态异常。没有 runtime profile 的纯文本插件不要求 Bash。后续 session env_context 或 shell 仍可能改变执行环境，因此应用通过不能代替业务脚本依赖检查。先在实际会话使用宿主已有的 `runtime_environment` 检查 `NODE_PATH`、`NPM_CONFIG_PREFIX`、Python 路径及可写工具目录，再由管理员向该环境可见的包外位置准备依赖，或使用宿主支持的正式配置。不要为通过预检改变业务脚本去搜索正式客户端目录，也不要把本机绝对路径写入插件。
+
+上线前至少验证：依赖缺失时不自动安装；安装后脚本可读完整资源；执行后包摘要不变；字体等缓存和业务输出均在包外；两个实例参数独立且不会共享可变业务状态。认证检查与纯离线依赖检查应分开，避免 `--help`、本地导出等离线操作要求模型登录。
+
+业务测试插件应放在宿主仓库之外的独立工程，随测试交付物附上源码、构建脚本、迁移实录和验收证据；不要因接入验证而纳入宿主正式 `plugins/` 目录。图片分层采用这一边界，宿主正式插件目录只保留 PPT。通用作者流程仍从[最小资源插件示例](../examples/resource-skill-plugin/README.md)开始；独立业务项目的源码、自检、离线输出与真实客户端效果分别记录，不能互相替代。
 
 ## 5. HTML 配置页与 CLI 对接
 
@@ -307,7 +390,7 @@ JSON
 
 这只是保存期望状态。由隔离开发 App 执行“应用”，等待空闲、重启并确认；`plugins.list` 可核对 `desired_enabled`、`active_enabled`、`saved_revision`、`active_revision` 和 `restart_required`。
 
-纯 CLI 宿主的受控启动应由平台适配器完成：读取最新 profile 修订 → `profile.prepare_apply` → 将返回的 `result.activation_id` 赋给真实宿主进程的 `BOX_AGENT_PLUGIN_ACTIVATION_ID` 环境变量，在同一 profile 下启动 → `activation.status` 读取结果。核对 `activation.status` 为 `active`、`runtime.healthy` 为 `true`，并确认 runtime 与 activation 的 generation 一致。`profile.prepare_apply` 会做 Skill 与运行环境预检，但成功仍只是准备好候选。公共 CLI 不允许调用 `profile.confirm_apply`；不得通过内部 Python 方法伪造真实启动成功。
+纯 CLI 宿主的受控启动应由平台适配器完成：读取最新 profile 修订 → `profile.prepare_apply` → 将返回的 `result.activation_id` 赋给真实宿主进程的 `BOX_AGENT_PLUGIN_ACTIVATION_ID` 环境变量，在同一 profile 下启动 → `activation.status` 读取结果。核对 `activation.status` 为 `active`、`runtime.healthy` 为 `true`，并确认 runtime 与 activation 的 generation 一致。`profile.prepare_apply` 会做 Skill 与运行环境声明的静态校验，成功仅表示准备好候选；依赖可用性由真实启动的工具环境探针确认。公共 CLI 不允许调用 `profile.confirm_apply`；不得通过内部 Python 方法伪造真实启动成功。
 
 ## 6. 作者自检命令的能力与边界
 
@@ -365,6 +448,12 @@ uv run python scripts/check_resource_plugin.py /absolute/plugin \
 
 记录 Skill 读取/选择证据、实例 ID、配置修订、工具调用和最终输出。无模型凭据时停在集成前或调用前，将业务效果标为未验证；不得生成一个模拟回答来冒充模型验收。PPT、表格等插件需要实际打开或渲染产物，检查可编辑对象与内容，文件存在不足以验收。
 
+脚本自行调用模型时，还要区分 HTTP 成功与业务产物通过。请求模型 ID 与服务响应标签应分别记录；标签差异本身不证明业务响应不可用，也不证明两个 ID 是等价别名。外部图片分层测试案例将标签不同记为 warning，继续校验结构化响应和图像结果，不仅因标签差异失败、重发或自动换模型。标签相同也不证明底层身份，服务未报告时保留 `unreported`。
+
+以下是该业务脚本的诊断格式示例，不是宿主自动提供的插件接口：单次响应的 `modelDiagnostics` 包含 `model`、`returnedModel`、`modelIdentity` 和可选 `modelWarning`；根 `result.json.modelDiagnostics` 汇总平铺的 `requestCount`、`matched`、`mismatch`、`unreported` 以及 `warnings`、`requests`，没有 `counts` 子字段，不保存认证 headers。作者应在交付说明中提供与实际脚本一致的字段和脱敏示例。
+
+仍须保留 HTTP 状态、结构化响应校验、图层数量、视觉复核与导出检查，不能因文件存在就判成功。一个图片样本即便完成文字和几何重建，如果图像生成 API 调用为 0，仍不能据此声称线上生图能力通过。每个业务分支、配置变化和失败场景都应记录实际覆盖范围。修正预算需说明按图、按轮还是按任务计量；手动恢复可再次尝试失败项时，应与自动恢复预算和已完成请求的复用规则分别说明，不能把某个配置值当作整个任务生命周期的请求总上限。新版本的源码、运行包、客户端和真实模型验证需单独记录，不能继承旧版本通过或失败的结论。
+
 ## 8. 升级、失败与恢复
 
 ### 8.1 升级约定
@@ -400,6 +489,19 @@ uv run python scripts/check_resource_plugin.py /absolute/plugin \
 交付：固定插件目录或压缩包（安装前解压）、README、参数说明、依赖与兼容信息、变更和迁移说明、许可证/资源来源，以及填写完成的[验收记录](RESOURCE_PLUGIN_ACCEPTANCE_TEMPLATE.md)。README 必须说明用途、触发方式、输入输出、普通用户开关和开发配置的区别。
 
 不提交真实配置、凭据、用户会话、缓存、日志和模型产物到插件包。交付包的摘要必须与验收包一致；改动后重新检查，不复用旧摘要的通过记录。
+
+### 9.1 压缩包摘要与安装包摘要
+
+交付记录分别保存两个值，不能互相替代：
+
+- **归档 SHA-256**：整个 ZIP 文件字节的摘要，用于确认下载/传输的文件；压缩方式或归档元数据变化就可能改变它。
+- **`package_digest`**：宿主对解压后可安装文件的相对路径、是否可执行、长度及内容摘要计算的值，不是 ZIP SHA-256，也不是单个文件的 SHA-256。以作者自检或真实安装返回的值为准。
+
+打包及解压必须保留文件的可执行标志。只检查文件字节相同仍不够：例如把可执行脚本从 `0755` 解压成 `0644` 会改变 `package_digest`。PPT 构建器在 ZIP 的 Unix 属性中记录权限，但不同解压程序未必恢复；Python `zipfile.extractall()` 不会自动恢复这些权限。使用能保留归档权限的工具或经过验证的提取流程，不要通过修改只读包存储来修补。
+
+分发验收步骤：构建归档并记录 SHA-256 → 解压到包存储之外的全新目录 → 对**解压目录**重新运行 `scripts/check_resource_plugin.py ... --json` → 将返回的 `package_digest` 与原始待交付目录自检报告比较 → 从该解压目录安装并核对安装摘要。差异需在打包/提取环节修复，重新验收后再分发。解压也要拒绝路径逃逸、符号链接等非法条目；不要仅为保留权限而信任任意归档路径。源目录自检通过不等于已验证发给同事的压缩包。
+
+### 9.2 开发 Agent 与维护约定
 
 给开发 Agent 的任务可以使用下面的完整约束：
 
