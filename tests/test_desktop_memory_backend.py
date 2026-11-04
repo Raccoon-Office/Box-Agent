@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 import secrets
 from types import SimpleNamespace
@@ -762,6 +763,80 @@ async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_
         from box_agent.turn_hints import with_turn_hints
         assert any(event["type"] == "user/message" and event["data"]["content"] == with_turn_hints(user) for event in log.events)
         assert "SYNTHETIC" not in caplog.text and "AKIAABCDEFGHIJKLMNOP" not in caplog.text
+    finally:
+        await session.aclose()
+        await manager.aclose()
+        log.close()
+
+
+async def test_desktop_hook_errors_never_log_model_or_tool_payloads(tmp_path, host, caplog, monkeypatch):
+    from box_agent.agent_service import AgentService
+    from box_agent.api import RunRequest
+    from box_agent.hooks import HookManager
+    from box_agent.session_log import SessionLog
+    from box_agent.tools.base import Tool, ToolResult
+
+    class FixtureTool(Tool):
+        name = "privacy_fixture"
+        description = "Return synthetic fixture data."
+        parameters: ClassVar[dict] = {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs):
+            return ToolResult(success=True, content="PRIVATE_TOOL_RESULT")
+
+    class FixtureLLM(RecordingLLM):
+        async def generate_stream(self, **kwargs):
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                yield StreamEvent(type="text", delta="PRIVATE_MODEL_RESPONSE")
+                yield StreamEvent(type="finish", finish_reason="tool_use", tool_calls=[ToolCall(
+                    id="fixture", type="function", function=FunctionCall(name="privacy_fixture", arguments={}))])
+            else:
+                yield StreamEvent(type="text", delta="PRIVATE_FINAL_ANSWER")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    seen = []
+
+    class FailingHook:
+        async def on_llm_response(self, *, response):
+            seen.append(("model", response.content))
+            raise ValueError(response.content)
+
+        async def on_tool_result(self, *, tool_call_id, tool_name, success, content, error):
+            seen.append(("tool", content))
+            raise ValueError(content)
+
+        async def on_done(self, *, stop_reason, final_content):
+            seen.append(("done", final_content))
+            raise ValueError(final_content)
+
+    caplog.set_level(logging.WARNING, logger="box_agent.hooks")
+    log = SessionLog.create(tmp_path / "canonical", session_id="fixture", cwd=tmp_path)
+    manager = backend(host)
+    config = session_config(tmp_path)
+    config.agent.memory_backend_type = "desktop"
+    config.agent.retry_on_suspected_truncation = False
+    session = await AgentSession.open(config=config, host=HostBindings(
+        llm_client=FixtureLLM(), memory_manager=manager, tools=[FixtureTool()], hooks=[FailingHook()],
+        system_prompt="BASE", session_log=log), options=SessionOptions(profile="acp", workspace_dir=tmp_path))
+    monkeypatch.setattr(session.memory_runtime._experience, "schedule", lambda *args: None)
+    try:
+        await session.agent.tools["tool_search"].execute(tool_names=["privacy_fixture"])
+        handle = await AgentService().start(RunRequest(
+            run_id="privacy-turn", session_id="session-1", user_message="Run the fixture"), session=session)
+        result = await handle.result()
+        assert result.status.value == "completed"
+        assert result.final_content == "PRIVATE_FINAL_ANSWER"
+        await asyncio.gather(*tuple(session.memory_runtime.tasks))
+        assert ("model", "PRIVATE_MODEL_RESPONSE") in seen
+        assert ("tool", "PRIVATE_TOOL_RESULT") in seen
+        assert ("done", "PRIVATE_FINAL_ANSWER") in seen
+        assert all(value not in caplog.text for value in (
+            "PRIVATE_MODEL_RESPONSE", "PRIVATE_TOOL_RESULT", "PRIVATE_FINAL_ANSWER"))
+
+        # The same hook still reports its error outside the private desktop scope.
+        await HookManager([FailingHook()]).fire_done(stop_reason="completed", final_content="ORDINARY_HOOK_ERROR")
+        assert "ORDINARY_HOOK_ERROR" in caplog.text
     finally:
         await session.aclose()
         await manager.aclose()

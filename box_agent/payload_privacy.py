@@ -23,9 +23,9 @@ _FILTER = _SDKFilter()
 @contextmanager
 def private_payload_scope():
     """Suppress unsafe SDK diagnostics only inside a capability's async scope."""
-    # Core diagnostics and Bash logs can contain raw model/tool payloads.
+    # Core, Hook and Bash diagnostics can contain raw model/tool payloads.
     names = {
-        "box_agent.core", "box_agent.tools.bash_tool", "httpx", "httpcore.connection",
+        "box_agent.core", "box_agent.hooks", "box_agent.tools.bash_tool", "httpx", "httpcore.connection",
         "httpcore.http11", "httpcore.http2", "httpcore.proxy",
         "openai._base_client", "anthropic._base_client",
     }
