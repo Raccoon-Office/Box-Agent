@@ -40,6 +40,10 @@ as on set; otherwise a historical connector reference with the same text would
 be ambiguous. Connector and user credentials and version counters are isolated
 by owner, even when their references are identical.
 
+For a user target, `affectedServers` lists the server only when the current
+resolved configuration identifies it as user-owned. A protected or unresolved
+same-name server yields an empty list even when the user credential was removed.
+
 ## Lifecycle
 
 - Before launching the Agent, a host may set `BOX_AGENT_USER_MCP_CREDENTIAL_TARGETS`
