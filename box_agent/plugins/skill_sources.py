@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -209,7 +210,7 @@ def _fail_candidate(service: Any, activation_id: str, error: Exception) -> None:
 
 
 def confirm_plugin_startup(config: Any, loader: SkillLoader | None, *,
-                           runtime_env: dict[str, str] | None = None,
+                           runtime_env: Mapping[str, str] | None = None,
                            available_tools: Any = None) -> PluginSkillPlan:
     """Called only after the real host catalog has passed its startup smoke."""
     plan = load_plugin_skill_plan(config)
@@ -220,12 +221,22 @@ def confirm_plugin_startup(config: Any, loader: SkillLoader | None, *,
         return plan
     service = plugin_settings_service(config)
     try:
+        if available_tools is not None:
+            from ..tools.bash_tool import BashTool
+            host_tools = list(available_tools.values() if hasattr(available_tools, "values") else available_tools)
+            # Match Agent's last-registration-wins catalog. A supplied catalog
+            # is authoritative; an unrelated environment cannot replace Bash.
+            bash = {tool.name: tool for tool in host_tools}.get("bash")
+            runtime_env = bash.runtime_env if isinstance(bash, BashTool) else None
+        if plan.runtime_profiles and runtime_env is None:
+            from .manifest import PluginError
+            raise PluginError("runtime_unavailable", "The native Bash tool environment is unavailable")
         from .runtime_profiles import verify_runtime_profiles
         verify_runtime_profiles(config, plan.runtime_profiles, runtime_env=runtime_env)
         if available_tools is not None:
             from ..skill_runtime import SkillRuntime
             runtime = SkillRuntime(loader)
-            runtime.available_tools_provider = lambda: available_tools
+            runtime.available_tools_provider = lambda: host_tools
             runtime.check_host_tools(plan.skills)
         class InstalledCatalog:
             def get_skill(self, name, *, include_disabled=False):
@@ -261,8 +272,8 @@ def confirm_plugin_startup(config: Any, loader: SkillLoader | None, *,
 
 
 def preflight_plugin_candidate(config: Any, activation_id: str) -> PluginSkillPlan:
-    """Management verifies a candidate before the host stops accepting work."""
-    from .runtime_profiles import verify_runtime_profiles
+    """Check static integrity; only real host startup can verify dependencies."""
+    from .runtime_profiles import validate_runtime_profiles
 
     service = plugin_settings_service(config)
     try:
@@ -271,7 +282,7 @@ def preflight_plugin_candidate(config: Any, activation_id: str) -> PluginSkillPl
             if item.get("enabled"):
                 service.packages.load(item["package_digest"], verify=True)
         plan = build_skill_plan(snapshot)
-        verify_runtime_profiles(config, plan.runtime_profiles)
+        validate_runtime_profiles(config, plan.runtime_profiles)
         return plan
     except Exception as error:
         _fail_candidate(service, activation_id, error)
@@ -284,13 +295,12 @@ def confirm_acp_plugin_startup(config: Any, loader: SkillLoader | None,
     import tempfile
     from ..tools.setup import add_workspace_tools
 
-    if not load_plugin_skill_plan(config).skills:
+    plan = load_plugin_skill_plan(config)
+    if not plan.skills and not plan.runtime_profiles:
         return confirm_plugin_startup(config, loader, available_tools=base_tools)
     with tempfile.TemporaryDirectory(prefix="box-plugin-preflight-") as directory:
         tools = list(base_tools)
         add_workspace_tools(tools, config, Path(directory), sandbox_mode=True, allow_full_access=False,
                             non_interactive=True, output=lambda *_: None,
                             llm=llm, skill_loader=loader)
-        bash = next((tool for tool in tools if tool.name == "bash"), None)
-        return confirm_plugin_startup(config, loader, available_tools=tools,
-                                      runtime_env=getattr(bash, "runtime_env", None))
+        return confirm_plugin_startup(config, loader, available_tools=tools)

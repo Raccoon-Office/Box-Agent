@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 from .manifest import PluginError
@@ -66,9 +67,8 @@ def _probe(command: list[str], *, timeout: float, profile: str, env: dict[str, s
                           {"diagnostic": diagnostic[-4096:]})
 
 
-def verify_runtime_profiles(config: Any, required: tuple[str, ...], *,
-                            runtime_env: dict[str, str] | None = None) -> None:
-    env = {**os.environ, **(runtime_env or {})}
+def validate_runtime_profiles(config: Any, required: tuple[str, ...]) -> None:
+    """Validate host-owned declarations without assuming a tool environment."""
     profiles = getattr(getattr(config, "plugin_platform", None), "runtime_profiles", {})
     for name in required:
         profile = profiles.get(name)
@@ -81,6 +81,19 @@ def verify_runtime_profiles(config: Any, required: tuple[str, ...], *,
         if any(not re.fullmatch(r"@?[A-Za-z0-9_][A-Za-z0-9_./@-]{0,255}", module)
                or ".." in module.split("/") for module in node_modules):
             raise PluginError("runtime_profile_invalid", "Invalid Node module declaration")
+
+
+def verify_runtime_profiles(config: Any, required: tuple[str, ...], *,
+                            runtime_env: Mapping[str, str] | None = None) -> None:
+    validate_runtime_profiles(config, required)
+    # An explicit environment is the tool's complete snapshot, not an overlay.
+    # Merging the parent back in would resurrect paths the tool removed.
+    env = dict(os.environ if runtime_env is None else runtime_env)
+    profiles = getattr(getattr(config, "plugin_platform", None), "runtime_profiles", {})
+    for name in required:
+        profile = profiles[name]
+        python_modules = profile.python_modules
+        node_modules = profile.node_modules
         if python_modules:
             executable = env.get("BOX_AGENT_PYTHON") or env.get("BOX_AGENT_PYTHON3")
             if not executable and not getattr(sys, "frozen", False):

@@ -2193,7 +2193,6 @@ async def run_agent(
             skill_loader = agent_session.skill_loader
             await asyncio.to_thread(
                 AgentService.confirm_plugin_startup, config, skill_loader,
-                runtime_env=getattr(agent_session.agent.tools.get("bash"), "runtime_env", None),
                 available_tools=agent_session.agent.tools,
             )
             mcp_task = resources.mcp_task

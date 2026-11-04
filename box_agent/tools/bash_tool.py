@@ -20,8 +20,9 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, model_validator
@@ -1060,6 +1061,16 @@ class BashTool(Tool):
             self._subprocess_env = os.environ.copy()
         if self._subprocess_env is not None:
             self._subprocess_env.pop("BOX_AGENT_OUTPUT_DIR", None)
+
+    @property
+    def runtime_env(self) -> Mapping[str, str]:
+        """Read-only snapshot of the environment inherited by future commands.
+
+        This includes managed-runtime overrides and removals. Command-specific
+        guards and shell startup scripts may add their own environment later.
+        """
+        values = os.environ if self._subprocess_env is None else self._subprocess_env
+        return MappingProxyType(dict(values))
 
     def _refresh_windows_shell(self, runtime_env: dict[str, str] | None = None) -> None:
         """Resolve the shell again after the host finishes preparing a runtime."""

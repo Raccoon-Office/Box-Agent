@@ -292,6 +292,287 @@ def test_runtime_environment_probe_uses_host_python_and_rejects_missing_modules(
         verify_runtime_profiles(config, ("minimal",), runtime_env={"BOX_AGENT_PYTHON": sys.executable})
 
 
+def _candidate_with_runtime_profile(installed, monkeypatch, profile):
+    start_candidate(installed, monkeypatch)
+    previous = installed.get_snapshot()
+    source = Path(os.environ["BOX_AGENT_HOME"]).parent / "package"
+    manifest = yaml.safe_load((source / "plugin.yaml").read_text())
+    manifest["version"] = "1.0.1"
+    manifest["requires"]["runtime_profile"] = "fixture"
+    (source / "plugin.yaml").write_text(yaml.safe_dump(manifest))
+    current = installed.get_config("office")
+    installed.install("office", str(source), enabled=True, aliases={"test-guide": "guide"},
+                      expected_revision=current["saved_revision"], request_id="runtime-profile")
+    candidate = installed.prepare_apply(installed.activation_status()["profile_revision"], "runtime-start")
+    monkeypatch.setenv(ACTIVATION_ENV, candidate["activation_id"])
+    config = configuration(runtime_profiles={"fixture": profile})
+    plan = load_plugin_skill_plan(config)
+    loader = SkillLoader(sources=[], **plan.loader_arguments())
+    loader.discover_skills()
+    return config, loader, previous
+
+
+@pytest.mark.parametrize("tool_has_dependency", [False, True])
+def test_management_defers_dependency_probe_to_actual_tool_environment(
+    installed, monkeypatch, tool_has_dependency,
+):
+    from box_agent.agent_service import AgentService
+    from box_agent.config import PluginRuntimeProfile
+    from box_agent.plugin_management import handle_request
+    from box_agent.plugins import runtime_profiles
+    from box_agent.plugins.manifest import PluginError
+    from box_agent.tools.bash_tool import BashTool
+    from box_agent.tools.runtime import SkillRuntime as ExecutionRuntime, SkillRuntimeContext
+    from box_agent.tools.skill_execution_env import build_skill_execution_env
+
+    monkeypatch.setenv("BOX_AGENT_PYTHON", sys.executable)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    dependency = "box_plugin_managed_fixture_dependency"
+    profile = PluginRuntimeProfile(python_modules=[dependency])
+    config, loader, previous = _candidate_with_runtime_profile(installed, monkeypatch, profile)
+    context = SkillRuntimeContext(runtimes={
+        "python": ExecutionRuntime(kind="python", status="available", provider="host",
+                                   executable_path=sys.executable,
+                                   env_vars={"BOX_AGENT_PYTHON": sys.executable}),
+        "node": ExecutionRuntime(kind="node", status="missing", provider="missing"),
+    })
+    execution_env = build_skill_execution_env(context)
+    module_dir = Path(execution_env["PYTHONPATH"].split(os.pathsep)[0])
+    if tool_has_dependency:
+        (module_dir / (dependency + ".py")).write_text("# Offline preinstalled dependency.\n")
+    bash = BashTool(workspace_dir=str(Path(os.environ["BOX_AGENT_HOME"]) / "work"),
+                    runtime_env=execution_env)
+    with pytest.raises(PluginError, match="failed its host probe"):
+        runtime_profiles.verify_runtime_profiles(config, ("fixture",))
+
+    host_config = Path(os.environ["BOX_AGENT_HOME"]) / "config/config.yaml"
+    host_config.parent.mkdir(parents=True)
+    host_config.write_text(yaml.safe_dump({"plugin_platform": {
+        "runtime_profiles": {"fixture": profile.model_dump()},
+    }}))
+    with monkeypatch.context() as static_only:
+        static_only.setattr(runtime_profiles, "_probe", lambda *_args, **_kwargs:
+                            pytest.fail("Management must not probe a parent process environment"))
+        prepared = handle_request({"method": "profile.prepare_apply", "params": {
+            "expected_profile_revision": installed.activation_status()["profile_revision"],
+            "request_id": "runtime-start",
+        }})
+    assert prepared["activation_id"] == os.environ[ACTIVATION_ENV]
+    assert installed.activation_status()["activation"]["status"] == "prepared"
+    assert installed.get_snapshot() == previous
+
+    if tool_has_dependency:
+        confirmed = AgentService.confirm_plugin_startup(config, loader, available_tools={"bash": bash})
+        assert installed.get_snapshot()["generation"] == confirmed.generation
+        assert installed.activation_status()["activation"]["status"] == "active"
+        assert installed.activation_status()["runtime"]["healthy"] is True
+    else:
+        with pytest.raises(PluginError, match="failed its host probe"):
+            AgentService.confirm_plugin_startup(config, loader, available_tools={"bash": bash})
+        assert installed.activation_status()["activation"]["status"] == "failed"
+        assert installed.get_snapshot() == previous
+
+
+@pytest.mark.parametrize("failure", ["missing_profile", "invalid_python", "invalid_node", "changed_package"])
+def test_management_static_preflight_still_rejects_invalid_candidates(installed, monkeypatch, failure):
+    from box_agent.config import PluginRuntimeProfile
+    from box_agent.plugins.manifest import PluginError
+    from box_agent.plugins.skill_sources import preflight_plugin_candidate
+
+    config, loader, previous = _candidate_with_runtime_profile(
+        installed, monkeypatch, PluginRuntimeProfile(python_modules=["json"]))
+    if failure == "missing_profile":
+        config.plugin_platform.runtime_profiles.clear()
+    elif failure == "invalid_python":
+        config.plugin_platform.runtime_profiles["fixture"] = PluginRuntimeProfile(python_modules=["bad/name"])
+    elif failure == "invalid_node":
+        config.plugin_platform.runtime_profiles["fixture"] = PluginRuntimeProfile(node_modules=["../bad"])
+    else:
+        path = loader.get_skill("test-guide").skill_path
+        path.chmod(0o644)
+        path.write_text("Changed installed resource")
+    with pytest.raises(PluginError):
+        preflight_plugin_candidate(config, os.environ[ACTIVATION_ENV])
+    assert installed.activation_status()["activation"]["status"] == "failed"
+    assert installed.get_snapshot() == previous
+
+
+@pytest.mark.parametrize("catalog_kind", ["missing", "fake", "native"])
+def test_cli_startup_requires_real_bash_for_runtime_profiles(installed, monkeypatch, tmp_path, catalog_kind):
+    from box_agent.agent_service import AgentService
+    from box_agent.config import PluginRuntimeProfile
+    from box_agent.plugins.manifest import PluginError
+    from box_agent.tools.bash_tool import BashTool
+
+    config, loader, previous = _candidate_with_runtime_profile(
+        installed, monkeypatch, PluginRuntimeProfile(python_modules=["json"]))
+    catalog = {}
+    environment = {"BOX_AGENT_PYTHON": sys.executable}
+    if catalog_kind == "fake":
+        catalog["bash"] = SimpleNamespace(name="bash", runtime_env=environment)
+    elif catalog_kind == "native":
+        catalog["bash"] = BashTool(workspace_dir=str(tmp_path), runtime_env=environment)
+    if catalog_kind == "native":
+        confirmed = AgentService.confirm_plugin_startup(config, loader, available_tools=catalog)
+        assert installed.get_snapshot()["generation"] == confirmed.generation
+        assert installed.activation_status()["runtime"]["healthy"] is True
+    else:
+        # Even a supplied fallback environment cannot replace the actual catalog.
+        with pytest.raises(PluginError, match="native Bash tool environment is unavailable"):
+            AgentService.confirm_plugin_startup(config, loader, available_tools=catalog,
+                                                runtime_env=environment)
+        assert installed.activation_status()["activation"]["status"] == "failed"
+        assert installed.get_snapshot() == previous
+
+
+def test_cli_startup_confirms_text_only_plugin_without_bash(installed, monkeypatch):
+    from box_agent.agent_service import AgentService
+
+    candidate = installed.prepare_apply(installed.activation_status()["profile_revision"], "text-only-cli")
+    monkeypatch.setenv(ACTIVATION_ENV, candidate["activation_id"])
+    config = configuration()
+    plan = load_plugin_skill_plan(config)
+    loader = SkillLoader(sources=[], **plan.loader_arguments())
+    loader.discover_skills()
+    assert not plan.runtime_profiles
+    confirmed = AgentService.confirm_plugin_startup(config, loader, available_tools={})
+    assert confirmed.skills
+    assert installed.activation_status()["activation"]["status"] == "active"
+    assert installed.activation_status()["runtime"]["healthy"] is True
+
+
+@pytest.mark.parametrize("failure", ["missing_bash", "missing_dependency"])
+def test_cli_active_runtime_failure_degrades_external_skills_without_stopping_host(
+    installed, monkeypatch, tmp_path, failure,
+):
+    from box_agent.agent_service import AgentService
+    from box_agent.config import PluginRuntimeProfile
+    from box_agent.tools.bash_tool import BashTool
+
+    profile = PluginRuntimeProfile(python_modules=["json"])
+    config, loader, _ = _candidate_with_runtime_profile(installed, monkeypatch, profile)
+    bash = BashTool(workspace_dir=str(tmp_path), runtime_env={"BOX_AGENT_PYTHON": sys.executable})
+    AgentService.confirm_plugin_startup(config, loader, available_tools={"bash": bash})
+    previous = installed.get_snapshot()
+    monkeypatch.delenv(ACTIVATION_ENV)
+    if failure == "missing_dependency":
+        profile = PluginRuntimeProfile(python_modules=["box_plugin_missing_module"])
+    config = configuration(runtime_profiles={"fixture": profile})
+    plan = load_plugin_skill_plan(config)
+    loader = SkillLoader(sources=[], **plan.loader_arguments())
+    loader.discover_skills()
+    catalog = {} if failure == "missing_bash" else {"bash": bash}
+
+    degraded = AgentService.confirm_plugin_startup(config, loader, available_tools=catalog)
+
+    assert not degraded.skills and degraded.errors
+    assert loader.get_skill("test-guide") is None
+    assert installed.activation_status()["runtime"]["healthy"] is False
+    assert installed.get_snapshot() == previous
+
+
+@pytest.mark.parametrize("parent_has_module,tool_path", [(True, "empty"), (False, "modules"), (True, None)])
+def test_acp_startup_probes_actual_bash_environment_not_parent(
+    installed, monkeypatch, tmp_path, parent_has_module, tool_path,
+):
+    from box_agent.config import PluginRuntimeProfile
+    from box_agent.plugins.manifest import PluginError
+    from box_agent.plugins.runtime_profiles import verify_runtime_profiles
+    from box_agent.plugins.skill_sources import confirm_acp_plugin_startup
+    from box_agent.tools.bash_tool import BashTool
+    from box_agent.tools import setup
+
+    modules, empty = tmp_path / "modules", tmp_path / "empty"
+    modules.mkdir()
+    empty.mkdir()
+    (modules / "box_plugin_fixture_dependency.py").write_text("# Fixture module; probe resolves without importing.\n")
+    monkeypatch.setenv("BOX_AGENT_PYTHON", sys.executable)
+    monkeypatch.setenv("PYTHONPATH", str(modules if parent_has_module else empty))
+    config, loader, previous = _candidate_with_runtime_profile(
+        installed, monkeypatch, PluginRuntimeProfile(python_modules=["box_plugin_fixture_dependency"]))
+    # Prove the parent environment gives the opposite result to the tool.
+    if parent_has_module:
+        verify_runtime_profiles(config, ("fixture",))
+    else:
+        with pytest.raises(PluginError, match="failed its host probe"):
+            verify_runtime_profiles(config, ("fixture",))
+
+    def add_tools(tools, _config, workspace, **_kwargs):
+        bash = BashTool(workspace_dir=str(workspace), runtime_env={"BOX_AGENT_PYTHON": sys.executable})
+        bash.update_runtime_env({"PYTHONPATH": str(tmp_path / tool_path) if tool_path else None})
+        tools.append(bash)
+
+    monkeypatch.setattr(setup, "add_workspace_tools", add_tools)
+    if tool_path == "modules":
+        plan = confirm_acp_plugin_startup(config, loader, [], object())
+        assert installed.get_snapshot()["generation"] == plan.generation
+        assert installed.activation_status()["activation"]["status"] == "active"
+        assert installed.activation_status()["runtime"]["healthy"] is True
+    else:
+        with pytest.raises(PluginError, match="failed its host probe"):
+            confirm_acp_plugin_startup(config, loader, [], object())
+        assert installed.activation_status()["activation"]["status"] == "failed"
+        assert installed.get_snapshot() == previous
+
+
+@pytest.mark.parametrize("catalog", [[], [SimpleNamespace(name="bash")]])
+def test_acp_startup_cannot_confirm_without_real_bash_environment(installed, monkeypatch, catalog):
+    from box_agent.config import PluginRuntimeProfile
+    from box_agent.plugins.manifest import PluginError
+    from box_agent.plugins.skill_sources import confirm_acp_plugin_startup
+    from box_agent.tools import setup
+
+    config, loader, previous = _candidate_with_runtime_profile(
+        installed, monkeypatch, PluginRuntimeProfile(python_modules=["json"]))
+    monkeypatch.setattr(setup, "add_workspace_tools", lambda tools, *_args, **_kwargs: tools.extend(catalog))
+    with pytest.raises(PluginError, match="native Bash tool environment is unavailable"):
+        confirm_acp_plugin_startup(config, loader, [], object())
+    assert installed.activation_status()["activation"]["status"] == "failed"
+    assert installed.get_snapshot() == previous
+
+
+def test_acp_startup_confirms_text_only_plugin_when_bash_is_disabled(installed, monkeypatch):
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from box_agent.plugins.skill_sources import confirm_acp_plugin_startup
+
+    candidate = installed.prepare_apply(installed.activation_status()["profile_revision"], "text-only")
+    monkeypatch.setenv(ACTIVATION_ENV, candidate["activation_id"])
+    config = Config(llm=LLMConfig(api_key="fixture"), tools=ToolsConfig(enable_bash=False), agent=AgentConfig())
+    plan = load_plugin_skill_plan(config)
+    loader = SkillLoader(sources=[], **plan.loader_arguments())
+    loader.discover_skills()
+    assert not plan.runtime_profiles
+    confirmed = confirm_acp_plugin_startup(config, loader, [], object())
+    assert confirmed.skills
+    assert installed.activation_status()["activation"]["status"] == "active"
+    assert installed.activation_status()["runtime"]["healthy"] is True
+
+
+def test_active_plugin_missing_tool_environment_degrades_without_stopping_host(installed, monkeypatch):
+    from box_agent.config import PluginRuntimeProfile
+    from box_agent.plugins.skill_sources import confirm_acp_plugin_startup
+    from box_agent.tools import setup
+
+    config, loader, _ = _candidate_with_runtime_profile(
+        installed, monkeypatch, PluginRuntimeProfile(python_modules=["json"]))
+    confirm_plugin_startup(config, loader, runtime_env={"BOX_AGENT_PYTHON": sys.executable})
+    previous = installed.get_snapshot()
+    monkeypatch.delenv(ACTIVATION_ENV)
+    config = configuration(runtime_profiles={"fixture": PluginRuntimeProfile(python_modules=["json"])})
+    plan = load_plugin_skill_plan(config)
+    loader = SkillLoader(sources=[], **plan.loader_arguments())
+    loader.discover_skills()
+    monkeypatch.setattr(setup, "add_workspace_tools", lambda *_args, **_kwargs: None)
+
+    degraded = confirm_acp_plugin_startup(config, loader, [], object())
+
+    assert not degraded.skills and degraded.errors
+    assert "native Bash tool environment is unavailable" in degraded.errors[0]["message"]
+    assert loader.get_skill("test-guide") is None
+    assert installed.activation_status()["runtime"]["healthy"] is False
+    assert installed.get_snapshot() == previous
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("required", ["certainly_missing_tool", "execute_code"])
 async def test_acp_initialize_checks_real_native_tools_before_confirming(installed, monkeypatch, required):
