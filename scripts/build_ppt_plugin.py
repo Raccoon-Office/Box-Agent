@@ -381,7 +381,10 @@ def main() -> None:
         inventory = write_inventory(args.package_root)
         print(json.dumps({"files": len(inventory["files"]), "plugin_id": inventory["plugin_id"]}))
         return
-    output = args.output or REPO / "workspace/plugin-dist/ppt-plugin-1.0.0.zip"
+    output = args.output
+    if output is None:
+        manifest = yaml.safe_load((args.package_root / "plugin.yaml").read_text(encoding="utf-8"))
+        output = REPO / "workspace/plugin-dist" / f"ppt-plugin-{manifest['version']}.zip"
     print(json.dumps(build_archive(args.package_root, output), ensure_ascii=False))
 
 

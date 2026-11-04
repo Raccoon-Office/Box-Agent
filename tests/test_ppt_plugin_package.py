@@ -281,6 +281,34 @@ def test_archive_is_deterministic_and_does_not_need_builtin_sources(tmp_path):
         BUILDER["build_archive"](package, tmp_path / "blocked.zip")
 
 
+@pytest.mark.parametrize("version,output_name", [
+    ("1.0.3", None),
+    ("2.4.0-preview.1", None),
+    ("2.4.0-preview.1", "custom-ppt.zip"),
+])
+def test_cli_archive_name_tracks_manifest_version_and_respects_explicit_output(
+    tmp_path, monkeypatch, capsys, version, output_name,
+):
+    package = tmp_path / "standalone"
+    package.mkdir()
+    (package / "plugin.yaml").write_text(f"id: test.ppt\nversion: {version}\n")
+    (package / "resource.txt").write_text("standalone resource\n")
+    args = ["build_ppt_plugin.py", "--package-root", str(package)]
+    expected = tmp_path / "workspace/plugin-dist" / f"ppt-plugin-{version}.zip"
+    if output_name:
+        expected = tmp_path / output_name
+        args.extend(["--output", str(expected)])
+    monkeypatch.setattr(sys, "argv", args)
+    monkeypatch.setitem(BUILDER["main"].__globals__, "REPO", tmp_path)
+
+    BUILDER["main"]()
+
+    assert Path(json.loads(capsys.readouterr().out)["path"]) == expected
+    assert list(tmp_path.rglob("*.zip")) == [expected]
+    with zipfile.ZipFile(expected) as archive:
+        assert archive.read("plugin.yaml") == (package / "plugin.yaml").read_bytes()
+
+
 @pytest.mark.skipif(NODE is None, reason="Node is needed to execute the resource CLI")
 def test_exporter_fails_without_host_dependencies_and_never_installs(tmp_path, installed):
     root, receipt = installed
