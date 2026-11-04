@@ -95,18 +95,19 @@ class EvidenceCursor:
     user_variants: tuple[str, ...] = ()
 
     @classmethod
-    def begin(cls, log: Any, user: str = "", *, wrapped_user: str | None = None) -> EvidenceCursor | None:
+    def begin(cls, log: Any, user: str = "", *, wrapped_user: str | None = None,
+              user_seq: int | None = None) -> EvidenceCursor | None:
         if not isinstance(log, SessionLog) or log.failed:
             return None
         start = log.event_count
         variants = tuple(dict.fromkeys([user, with_turn_hints(user), *([wrapped_user] if wrapped_user is not None else [])]))
-        if user:
-            for event in reversed(log.event_page(max(0, start - 64))):
-                if event["type"] == "turn/end":
-                    break
-                if _is_turn_user(event, variants):
-                    start = event["seq"]
-                    break
+        if user_seq is not None:
+            if type(user_seq) is not int or not 0 <= user_seq < start:
+                raise ValueError("invalid current user sequence")
+            event = log.event_page(user_seq, limit=1)[0]
+            if not _is_turn_user(event, variants):
+                raise ValueError("current user event does not match")
+            start = user_seq
         return cls(log, start, "session-log:" + _hash(str(log.header["id"])), variants)
 
     def capture(self, *, session_id: str, turn_id: str, event_id: str,
@@ -152,6 +153,10 @@ class EvidenceCursor:
             call_id = data.get("message", {}).get("tool_call_id")
             call = calls.get(call_id)
             result = data.get("result")
+            name = call["data"].get("name") if call else None
+            if isinstance(name, str) and name.startswith("memory_"):
+                omitted += 1
+                continue
             if (not call or call_id in duplicated or not isinstance(result, dict) or type(result.get("success")) is not bool
                     or not explicit[0]["seq"] < call["seq"] < event["seq"] < completed[-1]["seq"]):
                 omitted += 1

@@ -3593,6 +3593,7 @@ class _MemoryTurn:
     timestamp: int
     handle: Any = None
     logged_user_text: str | None = None
+    user_message: Any = None
 
 
 class MemoryRuntime:
@@ -3702,7 +3703,8 @@ class MemoryRuntime:
 
 @asynccontextmanager
 async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
-                           turn_id: str, logged_user_text: str | None = None) -> AsyncIterator[_MemoryTurn | None]:
+                           turn_id: str, logged_user_text: str | None = None,
+                           user_message: Any = None) -> AsyncIterator[_MemoryTurn | None]:
     """宿主声明真实用户轮次，内部续跑复用同一边界。"""
     runtime = getattr(session, "memory_runtime", None)
     if runtime is None:
@@ -3712,7 +3714,7 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
         yield runtime.active
         return
     turn = _MemoryTurn(user_text, session_id, turn_id, int(datetime.now(timezone.utc).timestamp() * 1000),
-                       logged_user_text=logged_user_text)
+                       logged_user_text=logged_user_text, user_message=user_message)
     runtime.active = turn
     with runtime.user_turn_scope(turn):
         try:
@@ -3730,8 +3732,13 @@ async def memory_user_turn(session: Any, *, user_text: str, session_id: str,
 async def memory_run_events(session: Any, request: Any, options: Any) -> AsyncIterator[AgentEvent]:
     """共享服务运行包装器，普通运行和 CLI/ACP 外层轮次使用同一策略。"""
     user_text = request.user_text if request.user_text is not None else (getattr(options, "current_turn_text", None) or "")
+    user_message = None
+    if request.user_input is not None:
+        user_message = next((message for message in reversed(session.agent.messages)
+                             if message.role == "user" and message.source == "user"), None)
     async with memory_user_turn(session, user_text=user_text, session_id=request.session_id,
-                                turn_id=getattr(options, "turn_id", "") or request.run_id) as turn:
+                                turn_id=getattr(options, "turn_id", "") or request.run_id,
+                                user_message=user_message) as turn:
         if turn is not None:
             turn.handle = session._run_handle
         async with aclosing(session.run_events(options=options)) as events:

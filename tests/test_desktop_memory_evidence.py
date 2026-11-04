@@ -266,7 +266,7 @@ def test_pending_current_user_can_precede_refresh_but_completed_history_cannot(l
     assert EvidenceCursor.begin(log, "question").start == old_end
     event = log.append("user/message", {"content": "question", "source": "user"})
     log.append("user/message", {"content": "question", "source": "runtime"})
-    cursor = EvidenceCursor.begin(log, "question")
+    cursor = EvidenceCursor.begin(log, "question", user_seq=event["seq"])
     assert cursor.start == event["seq"]
     log.append("assistant/message", {"message": {"content": "answer"}})
     log.append("turn/end", {"reason": {"kind": "completed"}})
@@ -288,8 +288,8 @@ def test_framework_hints_are_verified_but_only_user_words_enter_the_view(log):
     user = "Please explain how this system works and how I can use it."
     wrapped = with_turn_hints(user)
     assert wrapped != user
-    log.append("user/message", {"content": wrapped, "source": "user"})
-    cursor = EvidenceCursor.begin(log, user)
+    event = log.append("user/message", {"content": wrapped, "source": "user"})
+    cursor = EvidenceCursor.begin(log, user, user_seq=event["seq"])
     log.append("assistant/message", {"message": {"content": "answer"}})
     log.append("turn/end", {"reason": {"kind": "completed"}})
     bundle = capture(cursor, log, user=user)
@@ -330,7 +330,7 @@ def test_connector_text_requires_matching_trusted_metadata(log, prelogged, metad
 
 
 @pytest.mark.parametrize("prelogged", [False, True])
-@pytest.mark.parametrize("user", ["好", "好  \n\t"])
+@pytest.mark.parametrize("user", ["好", "好  \n\t", "好的，把 a.txt 删掉"])
 def test_short_user_reply_does_not_collect_unfinished_previous_turn(log, prelogged, user):
     from box_agent.agent import Agent
     from box_agent.schema import Message
@@ -348,9 +348,11 @@ def test_short_user_reply_does_not_collect_unfinished_previous_turn(log, prelogg
     # There is deliberately no turn/end for the old user message.
     start = log.event_count
     agent.add_user_message(user, host_connector_status="<connector-status>disconnected</connector-status>")
+    current = agent.messages[-1]
     if prelogged:
         agent._persist_unlogged_messages(turn=2, step=None)
-    cursor = EvidenceCursor.begin(log, user)
+    user_seq = log.surface_message_sequence(agent.messages[1:], current)
+    cursor = EvidenceCursor.begin(log, user, user_seq=user_seq)
     assert cursor.start == start
     agent._persist_unlogged_messages(turn=2, step=None)
     log.append("assistant/message", {"message": {"content": "answer"}})
@@ -361,3 +363,19 @@ def test_short_user_reply_does_not_collect_unfinished_previous_turn(log, prelogg
     assert all(v["source_ref"]["event_seqs"][0] >= start for v in bundle["views"])
     assert "OLD_TURN_RESULT" not in json.dumps(bundle)
     assert len(bundle["views"]) == 3
+
+
+@pytest.mark.parametrize("name", ["memory_search", "memory_experience_search", "memory_read", "memory_managed_read"])
+def test_memory_recall_results_cannot_become_execution_evidence(log, name):
+    cursor = EvidenceCursor.begin(log)
+    log.append("user/message", {"content": "question", "source": "user"})
+    for call_id, tool in [("recalled", name), ("actual", "run_check")]:
+        log.append("tool/call", {"callId": call_id, "name": tool, "arguments": {}})
+        log.append("tool/result", {"message": {"tool_call_id": call_id},
+                                   "result": {"success": True, "content": call_id}})
+    log.append("assistant/message", {"message": {"content": "answer"}})
+    log.append("turn/end", {"reason": {"kind": "completed"}})
+    bundle = capture(cursor, log)
+    assert bundle["status"] == "captured" and bundle["omitted"] == 1
+    assert {v["source_ref"]["call_id"] for v in bundle["views"] if v["source_ref"]["call_id"]} == {"actual"}
+    assert "recalled" not in json.dumps(bundle)

@@ -3339,6 +3339,8 @@ class BoxACPAgent:
             async with memory_user_turn(
                 state, user_text=plan_detection_text,
                 logged_user_text=user_text,
+                user_message=next((message for message in reversed(state.agent.messages)
+                                   if message.role == "user" and message.source == "user"), None),
                 session_id=state.upstream_session_id or session_id, turn_id=turn_id,
             ):
                 stop_reason = await self._run_turn(

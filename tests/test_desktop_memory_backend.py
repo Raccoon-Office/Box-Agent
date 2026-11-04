@@ -864,7 +864,9 @@ async def test_acp_wrapped_user_event_is_exactly_verified_but_only_original_word
             session.agent._persist_unlogged_messages(turn=1, step=None)
             log.flush()
         async with memory_user_turn(session, user_text=user, session_id="session-1", turn_id="acp-turn",
-                                    logged_user_text="wrong host wrapper" if wrong_host_text else logged):
+                                    logged_user_text="wrong host wrapper" if wrong_host_text else logged,
+                                    user_message=next(m for m in reversed(session.agent.messages)
+                                                      if m.role == "user" and m.source == "user")):
             handle = await AgentService().start(RunRequest(run_id="acp-turn", session_id="session-1"), session=session)
             assert (await handle.result()).status.value == "completed"
         await asyncio.gather(*tuple(session.memory_runtime.tasks))

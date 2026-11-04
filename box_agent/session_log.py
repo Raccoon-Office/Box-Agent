@@ -993,6 +993,22 @@ class SessionLog:
                 history.append((event["seq"], Message.model_validate(payload), data))
         return history
 
+    def surface_message_sequence(self, messages: list[Message], target: Message) -> int | None:
+        """Resolve a live message by position, never by matching its text alone."""
+        positions = [index for index, message in enumerate(messages) if message is target]
+        if len(positions) != 1:
+            raise ValueError("message is not uniquely present in the live surface")
+        nodes = self._surface_nodes()
+        common = min(len(nodes), len(messages))
+        if len(nodes) > len(messages) or any(
+            nodes[index][1].model_dump(mode="json", exclude_none=True)
+            != messages[index].model_dump(mode="json", exclude_none=True)
+            for index in range(common)
+        ):
+            raise ValueError("session surface diverged")
+        index = positions[0]
+        return nodes[index][0] if index < len(nodes) else None
+
     def _append_surface_message(
         self,
         message: Message,

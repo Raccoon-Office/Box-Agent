@@ -49,7 +49,10 @@ class DesktopMemoryRuntime(MemoryRuntime):
             wrapped = logged if logged is not None else with_turn_hints(turn.user)
             if getattr(goal, "status", None) == "active" and callable(wrapper):
                 wrapped = wrapper(wrapped)
-            self._evidence_cursor = EvidenceCursor.begin(log, turn.user, wrapped_user=wrapped)
+            current_message = turn.user_message
+            user_seq = (log.surface_message_sequence(session.agent.messages[1:], current_message)
+                        if log is not None and current_message is not None else None)
+            self._evidence_cursor = EvidenceCursor.begin(log, turn.user, wrapped_user=wrapped, user_seq=user_seq)
         except Exception:
             self._evidence_cursor = None
             self.backend.log_failure("evidence", "log_unavailable")
