@@ -356,6 +356,16 @@ class SessionLog:
             raise SessionLogDurabilityError("session log unavailable")
         return tuple(deepcopy(self._events[start:start + limit]))
 
+    def events_of_type(self, event_type: str):
+        """Iterate detached events of one type without copying unrelated payloads."""
+        if self._closed or self._failed:
+            raise SessionLogDurabilityError("session log unavailable")
+        end = len(self._events)
+        for index in range(end):
+            event = self._events[index]
+            if event["type"] == event_type:
+                yield deepcopy(event)
+
     def next_turn_number(self) -> int:
         """Inspect recorded starts without copying history or reserving a turn."""
 

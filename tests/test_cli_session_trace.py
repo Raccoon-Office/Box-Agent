@@ -119,6 +119,47 @@ async def run_task(workspace, **kwargs):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interactive", [False, True])
+async def test_desktop_cli_omits_turn_input_and_output_from_trace(cli_trace_setup, monkeypatch, interactive):
+    workspace, trace_dir = cli_trace_setup
+    config = cli.Config.from_yaml(None)
+    config.agent.memory_backend_type = "desktop"
+    inputs = iter(["synthetic private question", "/exit"])
+
+    class Prompts:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def prompt_async(self, *args, **kwargs):
+            return next(inputs)
+
+    monkeypatch.setattr(cli, "PromptSession", Prompts)
+    assert await cli.run_agent(
+        workspace, task=None if interactive else "synthetic private question",
+        sandbox_mode=False, verify_api=False, goal_autopilot_enabled=False,
+    ) == 0
+    records = read_records(next(trace_dir.glob("*.jsonl")))
+    turns = [record for record in records if record["event"] in {"turn.input", "turn.output", "turn.end"}]
+    assert len(turns) == 3
+    assert all(record["data"] == {"payload_redacted": True} for record in turns)
+    assert "synthetic private question" not in json.dumps(records)
+    assert "native trace answer" not in json.dumps(records)
+
+
+def test_desktop_cli_trace_omits_exception_and_restores_scope(tmp_path):
+    from box_agent.payload_privacy import private_payloads
+
+    writer = SessionTraceWriter(session_id="private", acp_session_id="", trace_dir=tmp_path, enabled=True)
+    with pytest.raises(ValueError):
+        with cli._cli_traced_turn(writer, content="private question", desktop=True):
+            raise ValueError("private exception")
+    assert not private_payloads()
+    records = read_records(writer.file_path)
+    assert [record["event"] for record in records] == ["turn.input", "turn.error", "turn.output", "turn.end"]
+    assert all(record["data"] == {"payload_redacted": True} for record in records)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_phase", ["typing", "shutdown"])
 async def test_cli_background_memory_failure_is_file_only(
     cli_trace_setup, monkeypatch, capsys, failure_phase,

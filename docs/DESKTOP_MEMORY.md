@@ -14,6 +14,8 @@ ACP initialize advertises `_meta.desktop_memory` with `protocol_version: 2`, `ba
 
 Before context loading, the desktop runtime appends and flushes an ignorable `memory/desktop-attempt` extension in the existing canonical Session Log. It stores only a hashed turn key and original timestamp. Recovered attempts send `require_existing: true`: the host restores an existing binding, or records unavailable if the first attempt never reached it. This prevents bootstrap delays or migration completion from retroactively making an old turn learnable. Failure to persist the attempt skips memory for that turn; it never sends an unprotected context. Temporary programmatic sessions without a Session Log keep only an in-process attempt set and have no cross-process recovery guarantee.
 
+The persisted attempt lookup caches at most 5,000 keys and scans matching events in the canonical log for an older evicted key, without copying unrelated event payloads; the cache limit does not disable new turns. The original timestamp and `require_existing` survive cache eviction and process restart. Temporary sessions without a log retain their attempts in memory for their lifetime, since there is no durable source to consult after eviction.
+
 ## Evidence and background Experience production
 
 The runtime can hand off bounded, redacted views of the current turn's canonical Session Log with its QA through the native control capability. Missing evidence permits ordinary QA but cannot produce an evidence-backed Experience. A `durable_unknown` receipt is not confirmation that QA was saved; the host retains the original input for reconciliation.
@@ -28,11 +30,15 @@ User evidence must exactly match the original text or a verified framework wrapp
 
 For eligible online cloud sessions, `ExperienceRuntime` uses the control-only `experience/job` operation to claim work, obtain a host-frozen model input, submit a proposal and advance persistence. Model generation runs in the background without tools or changes to the main conversation history. It has a 30-second timeout and a capped output budget. The host validates evidence and proposals, owns durable leases and idempotency, and saves Fact and Observation records. Box-Agent never writes those records directly to an external database. An uncertain persistence result stops advancement for that activation; later activations resume the host-owned state rather than inventing a replacement plan. An empty supported proposal may finish with no candidate.
 
+Transient proxy failures schedule a bounded-backoff scan. If a claim response is unknown, the scan waits for the Host lease to expire; a new foreground turn can scan earlier without cancelling that recovery. An unknown proposal or persistence result is not reported as a model failure and does not trigger an automatic replay of the write.
+
 Hosts must implement the named proxy operations and enforce identity, session, read-visibility and write-protection boundaries. Backend deployment, authorization policy and product rollout remain the host's responsibility. The default local backend does not require this service.
 
 ## Diagnostic privacy and revocation
 
 Private desktop payloads are omitted at the shared trace writer, including ACP input and error events that write directly. Model input and the canonical Session Log retain their normal semantics. After authentication, identity or memory-disable rejection, final input projection removes the owned preload block before checking whether the request fits its budget. It does not rewrite durable history. Utility sessions keep memory tools, extraction and persistence disabled; existing local host metadata used for UI guidance remains compatible, while desktop utility sessions retain no usable backend.
+
+CLI desktop turns enter the private scope before their trace input and leave it after output/error finalization, including when the memory backend is disabled or a turn raises. Ordinary CLI trace behavior is unchanged.
 
 Injection diagnostics contain IDs and character counts, never text. Unknown model aliases retain the conservative UTF-8 byte bound; preload reduction and full-read rejection emit payload-free budget diagnostics. A late `TURN_REVOKED` affects only the matching binding, while identity/session revocation remains global. Failed visibility control requests are logged without raw errors. Full handoff queues skip QA explicitly and use a separate bounded close allowance; if that allowance is also full, a diagnostic records the unconfirmed close and host idle expiry remains the fallback. Background scans back off between pages/stages, continue remaining pages in bounded delayed batches, and stop on unknown states. YAML alone cannot enable desktop memory without native launch metadata.
 

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from typing import Any
 
 from ..memory import MemoryRuntime, _MemoryTurn
@@ -15,15 +16,19 @@ from .experience import ExperienceRuntime
 
 
 _log = logging.getLogger(__name__)
+_ATTEMPT_CACHE_LIMIT = 5000
 
 
 class DesktopMemoryRuntime(MemoryRuntime):
+    requires_user_message = True
+
     def __init__(self, backend) -> None:
         super().__init__(backend)
         self._turn_scope: TurnScope | None = None
         self._scheduled: TurnScope | None = None
-        self._attempts: dict[str, int] = {}
+        self._attempts: OrderedDict[str, int] = OrderedDict()
         self._attempt_log = None
+        self._attempts_complete = True
         self._evidence_cursor: EvidenceCursor | None = None
         self._evidence_session = None
         self._experience = ExperienceRuntime(backend.transport)
@@ -33,6 +38,25 @@ class DesktopMemoryRuntime(MemoryRuntime):
         from ..payload_privacy import private_payload_scope
 
         return private_payload_scope()
+
+    @staticmethod
+    def _attempt_events(log):
+        for event in log.events_of_type("memory/desktop-attempt"):
+            data = event.get("data", {})
+            key, timestamp = data.get("turn_key"), data.get("timestamp")
+            if (not isinstance(key, str) or len(key) != 64
+                    or type(timestamp) is not int or timestamp < 0):
+                raise ValueError("invalid_memory_attempt")
+            yield key, timestamp
+
+    def _remember_attempt(self, key: str, timestamp: int, *, bounded: bool) -> None:
+        if key in self._attempts:
+            self._attempts.move_to_end(key)
+            return
+        if bounded and len(self._attempts) >= _ATTEMPT_CACHE_LIMIT:
+            self._attempts.popitem(last=False)
+            self._attempts_complete = False
+        self._attempts[key] = timestamp
 
     async def refresh(self, session: Any, turn: _MemoryTurn) -> None:
         self._turn_scope = None
@@ -59,27 +83,28 @@ class DesktopMemoryRuntime(MemoryRuntime):
         self.backend.context_attempt_durable = True
         try:
             if log is not None and log is not self._attempt_log:
-                self._attempts = {}
-                for event in log.events:
-                    if event.get("type") != "memory/desktop-attempt":
-                        continue
-                    data = event.get("data", {})
-                    timestamp = data.get("timestamp")
-                    if (not isinstance(data.get("turn_key"), str) or len(data["turn_key"]) != 64
-                            or type(timestamp) is not int or timestamp < 0):
-                        raise ValueError("invalid_memory_attempt")
-                    self._attempts.setdefault(data["turn_key"], timestamp)
+                self._attempts.clear()
+                self._attempts_complete = True
+                for attempt_key, timestamp in self._attempt_events(log):
+                    # Retain the first occurrence even if a corrupt log contains duplicates.
+                    if attempt_key not in self._attempts and len(self._attempts) < _ATTEMPT_CACHE_LIMIT:
+                        self._attempts[attempt_key] = timestamp
+                    elif attempt_key not in self._attempts:
+                        self._attempts_complete = False
                 self._attempt_log = log
-            self.backend.context_requires_existing = key in self._attempts
-            if key in self._attempts:
-                turn.timestamp = self._attempts[key]
+            timestamp = self._attempts.get(key)
+            if timestamp is None and log is not None and not self._attempts_complete:
+                timestamp = next((value for attempt_key, value in self._attempt_events(log)
+                                  if attempt_key == key), None)
+            self.backend.context_requires_existing = timestamp is not None
+            if timestamp is not None:
+                turn.timestamp = timestamp
+                self._remember_attempt(key, timestamp, bounded=log is not None)
             else:
-                if len(self._attempts) >= 5000:
-                    raise ValueError("memory_attempt_budget")
                 if log is not None:
                     log.append("memory/desktop-attempt", {"turn_key": key, "timestamp": turn.timestamp}, ignorable=True)
                     log.flush()
-                self._attempts[key] = turn.timestamp
+                self._remember_attempt(key, turn.timestamp, bounded=log is not None)
         except Exception as exc:
             self.backend.context_attempt_durable = False
             self.backend.log_failure("attempt", type(exc).__name__)

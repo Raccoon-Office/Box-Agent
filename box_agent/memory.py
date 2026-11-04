@@ -3733,9 +3733,11 @@ async def memory_run_events(session: Any, request: Any, options: Any) -> AsyncIt
     """共享服务运行包装器，普通运行和 CLI/ACP 外层轮次使用同一策略。"""
     user_text = request.user_text if request.user_text is not None else (getattr(options, "current_turn_text", None) or "")
     user_message = None
-    if request.user_input is not None:
+    runtime = getattr(session, "memory_runtime", None)
+    if request.user_text is not None and getattr(runtime, "requires_user_message", False):
         user_message = next((message for message in reversed(session.agent.messages)
-                             if message.role == "user" and message.source == "user"), None)
+                             if getattr(message, "role", None) == "user"
+                             and getattr(message, "source", None) == "user"), None)
     async with memory_user_turn(session, user_text=user_text, session_id=request.session_id,
                                 turn_id=getattr(options, "turn_id", "") or request.run_id,
                                 user_message=user_message) as turn:

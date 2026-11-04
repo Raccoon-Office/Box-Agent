@@ -221,6 +221,84 @@ async def test_new_turn_replaces_pending_continuation_without_duplicate_scans(mo
         runtime.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code,outcome,status", [
+    ("MEMORY_PROXY_UNAVAILABLE", "not_sent", None),
+    ("MEMORY_PROXY_UNAVAILABLE", "unknown", None),
+    ("MEMORY_PROXY_INVALID_RESPONSE", "unknown", 503),
+    ("RESULT_UNKNOWN", "unknown", 409),
+])
+async def test_transient_claim_failure_resumes_without_a_new_turn(monkeypatch, code, outcome, status):
+    calls, tasks = [], set()
+    committed = asyncio.Event()
+
+    class RecoveringTransport:
+        async def request(self, operation, payload):
+            action = payload["action"]
+            calls.append(action)
+            if action == "claim":
+                if calls.count("claim") == 1:
+                    raise MemoryProxyError(code, outcome=outcome, status=status)
+                if committed.is_set():
+                    return {"job": None}
+                return {"job": {"event_id": "event", "lease_token": "lease",
+                                "pipeline_version": "desktop-experience-v2", "frozen": True}}
+            if action == "advance":
+                committed.set()
+                return {"state": "COMMITTED"}
+            return {}
+
+    monkeypatch.setattr("box_agent.desktop_memory.experience._PAGE_RETRY_DELAY", 0.001)
+    monkeypatch.setattr("box_agent.desktop_memory.experience._LEASE_RECOVERY_DELAY", 0.02)
+    runtime = ExperienceRuntime(RecoveringTransport())
+    model = Model()
+    try:
+        runtime.schedule("delivery", model, 100000, tasks)
+        await asyncio.wait_for(committed.wait(), 1)
+        await finish(tasks)
+        assert calls[:4] == ["claim", "claim", "renew", "advance"]
+        assert not model.calls
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_new_turn_does_not_cancel_unknown_claim_lease_recovery(monkeypatch):
+    calls, tasks = [], set()
+    committed = asyncio.Event()
+
+    class TransportWithLease:
+        async def request(self, operation, payload):
+            action = payload["action"]
+            calls.append(action)
+            if action == "claim":
+                if calls.count("claim") == 1:
+                    raise MemoryProxyError("MEMORY_PROXY_UNAVAILABLE", outcome="unknown")
+                if calls.count("claim") == 2 or committed.is_set():
+                    return {"job": None}
+                return {"job": {"event_id": "event", "lease_token": "lease",
+                                "pipeline_version": "desktop-experience-v2", "frozen": True}}
+            if action == "advance":
+                committed.set()
+                return {"state": "COMMITTED"}
+            return {}
+
+    monkeypatch.setattr("box_agent.desktop_memory.experience._PAGE_RETRY_DELAY", 0.001)
+    monkeypatch.setattr("box_agent.desktop_memory.experience._LEASE_RECOVERY_DELAY", 0.05)
+    runtime = ExperienceRuntime(TransportWithLease())
+    model = Model()
+    try:
+        runtime.schedule("first", model, 100000, tasks)
+        await runtime.task
+        await asyncio.sleep(0)
+        runtime.schedule("second", model, 100000, tasks)
+        await asyncio.wait_for(committed.wait(), 1)
+        assert calls.count("claim") >= 3
+        assert not model.calls
+    finally:
+        runtime.close()
+
+
 @pytest.mark.parametrize("state", ["UNRECOGNIZED_PRIVATE_STATE", "SAVING_FACTS"])
 async def test_unknown_stage_stops_and_known_stages_back_off(monkeypatch, caplog, state):
     transport, model, tasks, delays = Transport(frozen=True), Model(), set(), []
@@ -349,5 +427,6 @@ async def test_uncertain_proposal_receipt_does_not_rerun_the_model_or_replace_th
     runtime.schedule('delivery', model, 100000, tasks)
     await finish(tasks)
     assert len(model.calls) == 1
+    assert not any(call['action'] == 'fail' for call in transport.calls)
     assert not any(call['action'] == 'advance' for call in transport.calls)
     runtime.close()
