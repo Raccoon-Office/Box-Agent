@@ -1,18 +1,18 @@
 {
   "format_version": 1,
   "plugin_id": "com.box.ppt",
-  "plugin_version": "1.0.3",
+  "plugin_version": "1.0.4",
   "files": {
     "README.md": {
-      "sha256": "fa6a513f072fc47d72a3be3ff1cbe4eb4a01b8446ef0b8cca33b6114162b3201",
-      "bytes": 8714
+      "sha256": "aacf995d9b0ab89c42d675980c92b9084c33dcb1de6f3fb0a08f26a069ac970b",
+      "bytes": 9714
     },
     "config.schema.json": {
       "sha256": "2d62666a5e849b76f110c578d46c011cd6b1fa265858997fd144b725b661534f",
       "bytes": 562
     },
     "plugin.yaml": {
-      "sha256": "b728c9c32da2587c7e17b495dde8a52124e61552ddd4b532040d9f9ec01d803d",
+      "sha256": "eab975b846a63407c8bddbf9a76a2f5f824a21415627aa06d64b8219f3ee7bc2",
       "bytes": 1472
     },
     "skills/document-skills/pptx/SKILL.md": {

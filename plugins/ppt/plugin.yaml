@@ -1,6 +1,6 @@
 schema_version: 1
 id: com.box.ppt
-version: 1.0.3
+version: 1.0.4
 display_name: PPT
 description: 使用现有 Box-Agent 工具制作演示文稿
 requires:

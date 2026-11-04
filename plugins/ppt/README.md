@@ -10,11 +10,11 @@ location at runtime and does not execute plugin Python when installed.
 From the Box-Agent repository root:
 
 ```sh
-uv run python scripts/build_ppt_plugin.py --output workspace/plugin-dist/ppt-plugin-1.0.3.zip
+uv run python scripts/build_ppt_plugin.py --output workspace/plugin-dist/ppt-plugin-1.0.4.zip
 ```
 
 The deterministic archive is written to
-`workspace/plugin-dist/ppt-plugin-1.0.3.zip`. `package-files.json` contains the
+`workspace/plugin-dist/ppt-plugin-1.0.4.zip`. `package-files.json` contains the
 SHA-256 and size of every other file. The build prints the archive SHA-256.
 The package manager installs a directory: extract the archive into a fresh
 directory, then pass that directory as `package_path` to `plugins.install`.
@@ -81,8 +81,14 @@ Prepare dependencies in the host runtime **before** enabling the plugin:
   honor. `PLAYWRIGHT_BROWSERS_PATH` must stay inside the selected `BOX_AGENT_HOME`
   when an isolated profile is used; the explicit managed executable may be
   shared. Runtime scripts do not download browsers or install Node dependencies
-  into this package. A task encountering a missing dependency must stop and
-  report it; it must not run pip/npm/apt or browser installers.
+  into this package. They report missing dependencies instead of running
+  pip/npm/apt or browser installers. Before rendering, an Agent may use the
+  supported host capability `local_environment(capability="chromium", action="ensure")`
+  to prepare Chromium outside the package, as described by the rendering Skills.
+  Respect check-only requests and cancellation; avoid concurrent installation.
+  When that host capability is unavailable or fails, retain the original render
+  path and report its actual result. This does not bypass activation readiness
+  checks or permit scripts to install other dependencies.
 - Existing PDF/Office conversion tools remain conditional on the operation;
   the included setup/doctor commands report their availability.
 - Optional operations retain their own dependencies: image cutout needs
@@ -157,4 +163,12 @@ Version 1.0.3 declares `enabled_by: [pptx]` for the seven internal methods. The
 ordinary user can disable the PPT capability without changing the installed
 plugin configuration or activation generation. Internal methods then become
 unavailable too; enabling the public entry restores them. Exporters and Skill
-instructions are unchanged from 1.0.2.
+instructions were unchanged from 1.0.2 in that release.
+
+Version 1.0.4 incorporates the current host main-branch PPT fixes: editable table
+row sizing and text layout, bounded design recovery and delivery checks,
+relocated global-profile metadata, and host-mediated Chromium preparation.
+It preserves the plugin's explicit content-language settings, bound Skill
+references, host-only credential lookup and immutable resource policy. Rebuild
+and verify this package independently; earlier 1.0.3 runtime or visual acceptance
+does not validate these updated resources.
