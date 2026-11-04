@@ -1169,7 +1169,6 @@ async def test_session_creation_uses_cached_memory_while_busy_then_refreshes(tmp
         memory = MemoryManager(memory_dir=str(tmp_path / "memory"))
     elif cache_state == "refreshed":
         memory.recall()
-    memory.write_core("- user prefers English")
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory_extraction=False),
@@ -1201,6 +1200,7 @@ async def test_session_creation_uses_cached_memory_while_busy_then_refreshes(tmp
         release.set()
         await asyncio.wait_for(maintenance, 2)
 
+    memory.write_core("- user prefers English")
     session = await asyncio.wait_for(agent.newSession(
         SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}),
     ), timeout=2)

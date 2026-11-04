@@ -300,7 +300,7 @@ Models should call `memory_search` with short durable keys instead of whole acti
 
 No additional integration code is needed. When `enable_memory: true`:
 
-- **Startup**: `MEMORY.md` is recalled and injected into the system prompt if non-empty. `memory_summary.md` is also injected when searchable v2 or legacy context exists, so the model can decide whether to call `memory_search` without an extra routing model call.
+- **Startup.** Recall adds core memory from `MEMORY.md` and a routing summary when available. If a context transaction is busy, recall uses the cached routing summary and includes cached core memory only while the file revision still matches. Core and routing can degrade independently if either read fails. The same behavior applies when creating an ACP session.
 - **During a session**: the agent can call `memory_write`, `memory_read`, and `memory_search`.
 - **Lifecycle extraction**: when `enable_memory_extraction: true`, the agent loop asks the LLM to extract cross-session-useful memory at protected lifecycle points. Explicit user profile/preferences/local defaults can go to core; project and task history go to topic-sharded v2 experience memory.
 

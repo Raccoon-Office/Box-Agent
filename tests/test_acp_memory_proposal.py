@@ -126,13 +126,16 @@ async def test_memory_proposal_list_waits_off_event_loop(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cached", [True, False])
-async def test_session_recall_completes_before_memory_transaction_releases(tmp_path: Path, cached):
+@pytest.mark.parametrize("core_change", ["unchanged", "rewritten", "deleted"])
+async def test_session_recall_only_reuses_unchanged_core_while_memory_is_busy(tmp_path: Path, core_change):
     agent, mgr = _make_agent(tmp_path)
     mgr.write_context("- project memory", topic="project")
     mgr.write_core("- cached preference")
-    expected = mgr.recall() if cached else ""
-    mgr.write_core("- updated preference")
+    assert "cached preference" in mgr.recall()
+    if core_change == "rewritten":
+        mgr.write_core("- updated preference")
+    elif core_change == "deleted":
+        mgr.memory_file.unlink()
     transaction_acquired = threading.Event()
     release_transaction = threading.Event()
 
@@ -154,10 +157,8 @@ async def test_session_recall_completes_before_memory_transaction_releases(tmp_p
         assert not holder.done()
         prompt = agent._sessions[session.sessionId].agent.system_prompt
         assert "updated preference" not in prompt
-        if cached:
-            assert expected in prompt
-        else:
-            assert "--- MEMORY START ---" not in prompt
+        assert ("cached preference" in prompt) == (core_change == "unchanged")
+        assert "`project`" in prompt
     finally:
         release_transaction.set()
         await asyncio.wait_for(holder, timeout=2.0)

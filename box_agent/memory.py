@@ -3,7 +3,7 @@
 Directory layout::
 
     ~/.box-agent/memory/
-    ├── MEMORY.md          # Core memory (always injected into system prompt)
+    ├── MEMORY.md          # Core memory for system-prompt injection
     ├── memory_summary.md  # Lightweight routing summary for deciding memory_search
     └── v2/experiences/    # Topic-sharded searchable context (retrieved on demand)
 """
@@ -572,7 +572,7 @@ class MemoryManager:
     """Two-tier memory: MEMORY.md (core) + topic-sharded searchable context.
 
     - **MEMORY.md** — user identity, preferences, writing style.
-      Always injected into the system prompt via ``recall()``.
+      Injected into the system prompt via ``recall()`` when available.
       Written by LLM via ``memory_write(category="core")``.
 
     - **memory_summary.md** — compact routing guide injected with core memory so
@@ -598,7 +598,7 @@ class MemoryManager:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.dedup_jaccard_threshold = dedup_jaccard_threshold
         self._context_transaction_lock = threading.RLock()
-        self._recall_cache = ""
+        self._recall_cache: tuple[tuple[int, int, int, int, int] | None, str, str] = (None, "", "")
 
         # v2 is an overlay, not a migration.  New context/experience writes go
         # here; old context files remain untouched and are searched only as a
@@ -640,7 +640,7 @@ class MemoryManager:
 
     @property
     def memory_file(self) -> Path:
-        """MEMORY.md — core memory, always injected."""
+        """MEMORY.md — core memory for system-prompt injection."""
         return self.memory_dir / "MEMORY.md"
 
     @property
@@ -1503,26 +1503,45 @@ class MemoryManager:
 
     # ── Recall (system prompt injection) ────────────────────────
 
+    def _core_memory_revision(self) -> tuple[int, int, int, int, int] | None:
+        try:
+            stat = self.memory_file.stat()
+        except OSError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
     def recall(self, **_kwargs) -> str:
         """Build a memory block for system-prompt injection.
 
         Injects MEMORY.md (core) plus the lightweight ``memory_summary.md``
         routing guide. Full context entries remain on demand via
-        ``memory_search``. Reuse the last complete block (or empty memory) while
-        context memory is busy or unreadable so session creation does not wait
-        for maintenance or fail on a recall error.
+        ``memory_search``. While context memory is busy, use cached routing
+        and reuse cached core only if its file revision still matches.
         """
-        if not self._context_transaction_lock.acquire(blocking=False):
-            return self._recall_cache
+        acquired = self._context_transaction_lock.acquire(blocking=False)
         try:
-            core = self.read_core()
-            summary = self.read_memory_summary()
-            self._recall_cache = self.build_memory_block(core, memory_summary=summary)
-        except Exception:
-            logger.exception("Memory recall failed; using last complete recall or empty memory")
+            revision, core, summary = self._recall_cache
+            if acquired:
+                revision = self._core_memory_revision()
+                try:
+                    core = self.read_core()
+                except Exception:
+                    logger.exception("Failed to read core memory during recall")
+                    core = ""
+                try:
+                    summary = self.read_memory_summary()
+                except Exception:
+                    logger.exception("Failed to refresh memory routing during recall")
+
+            # Hosts can rewrite or delete MEMORY.md outside the context lock.
+            if core and (revision is None or self._core_memory_revision() != revision):
+                core = ""
+            if acquired:
+                self._recall_cache = (revision, core, summary)
+            return self.build_memory_block(core, memory_summary=summary)
         finally:
-            self._context_transaction_lock.release()
-        return self._recall_cache
+            if acquired:
+                self._context_transaction_lock.release()
 
     # ── OpenClaw import ─────────────────────────────────────────
 

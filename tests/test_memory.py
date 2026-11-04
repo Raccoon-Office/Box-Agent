@@ -340,29 +340,32 @@ def test_recall_includes_routing_summary_without_context_content(mgr: MemoryMana
     assert "secret context" not in block
 
 
-@pytest.mark.parametrize("cached", [True, False])
-@pytest.mark.parametrize("failed_read", ["read_core", "read_memory_summary"])
-def test_recall_read_failure_preserves_complete_cache(mgr, monkeypatch, cached, failed_read):
-    mgr.write_core("- previous preference")
-    expected = mgr.recall() if cached else ""
-    mgr.write_core("- new preference")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(mgr, failed_read, MagicMock(side_effect=OSError("read failed")))
-        assert mgr.recall() == expected
-
-    assert "new preference" in mgr.recall()
-    assert "previous preference" not in mgr.recall()
-
-
-def test_recall_clears_cache_when_memory_is_removed(mgr, monkeypatch):
+def test_recall_keeps_routing_when_core_is_unreadable(mgr):
+    mgr.write_context("- project context", topic="project")
     mgr.write_core("- previous preference")
     assert "previous preference" in mgr.recall()
-    mgr.memory_file.unlink()
-    assert mgr.recall() == ""
+    mgr.memory_file.write_bytes(b"\xff")
 
-    monkeypatch.setattr(mgr, "read_core", MagicMock(side_effect=OSError("read failed")))
-    assert mgr.recall() == ""
+    block = mgr.recall()
+    assert "[Core Memory]" not in block
+    assert "`project`" in block
+
+
+@pytest.mark.parametrize("core_change", ["rewritten", "deleted"])
+def test_recall_keeps_current_core_state_when_routing_is_unreadable(mgr, core_change):
+    mgr.write_context("- project context", topic="project")
+    mgr.write_core("- previous preference")
+    assert "previous preference" in mgr.recall()
+    if core_change == "rewritten":
+        mgr.write_core("- new preference")
+    else:
+        mgr.memory_file.unlink()
+    mgr.memory_summary_file.write_bytes(b"\xff")
+
+    block = mgr.recall()
+    assert "previous preference" not in block
+    assert ("new preference" in block) == (core_change == "rewritten")
+    assert "`project`" in block
 
 
 def test_recall_startup_read_failure_falls_back_to_empty(memory_dir):
