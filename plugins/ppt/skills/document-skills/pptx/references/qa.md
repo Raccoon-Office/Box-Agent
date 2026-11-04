@@ -46,7 +46,7 @@ Editable export can reflow text, shift layers, or lose CSS effects, so source
 previews alone are not enough.
 
 0. HTML self-check for HTML-first decks:
-   - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js index.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` for controlled decks before export (use `deck.html` only on the legacy/custom route). The editable exporter does not run this check or write this report internally.
+   - Run `"$BOX_AGENT_NODE" scripts/html_self_check.js index.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` for controlled decks before export (use `deck.html` only on the legacy/custom route). The editable exporter does not run this check or write this report internally.
    - Always use the stricter `--dom-to-pptx` compatibility profile for new HTML-first decks.
    - Confirm every `.slide` reports exactly `1920x1080` unless the user explicitly requested a nonstandard output size.
    - Confirm `qa/html_self_check.json` exists, is non-empty, and has `"ok": true`. If it is missing, report HTML self-check as `BLOCKED`.
@@ -61,7 +61,7 @@ previews alone are not enough.
    - This is QA evidence, not an editable-export gate. Passing it does not mean the slide looks good.
 
 1. Package validation:
-   - Run `${BOX_AGENT_PYTHON:-python3} scripts/validate_pptx_package.py output.pptx`.
+   - Run `"$BOX_AGENT_PYTHON" scripts/validate_pptx_package.py output.pptx`.
    - Fix zip, relationship, missing part, or invalid XML errors before delivery.
    - For a technical-diagram export, inspect the slide relationship/drawing:
      the primary picture must use an SVG image relationship (PowerPoint may
@@ -69,7 +69,7 @@ previews alone are not enough.
      present in the `pptx-bg` background bitmap.
 
 2. Text extraction:
-   - Run `${BOX_AGENT_PYTHON:-python3} scripts/extract_text.py output.pptx`.
+   - Run `"$BOX_AGENT_PYTHON" scripts/extract_text.py output.pptx`.
    - Verify slide count, slide order, expected titles, and requested content.
    - Verify visible page numbers against actual slide order. Use a consistent
      `NN / TOTAL` style such as `03 / 08`; non-cover slides should not silently
@@ -85,7 +85,7 @@ previews alone are not enough.
      advisory is a limitation, not an HTML blocker.
 
 4. Render:
-   - Run `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py output.pptx --out rendered`.
+   - Run `"$BOX_AGENT_PYTHON" scripts/render_pptx.py output.pptx --out rendered`.
    - Do not pre-check `soffice` and skip this command. The render script owns renderer discovery, Quick Look fallback, and missing-LibreOffice messaging.
    - If this command fails due to dependency/runtime missing, treat render as blocked and continue: `Rendering: BLOCKED`.
    - If rendering is blocked by permissions or missing runtime after the deck changed, previous render images are stale. Do not use old renders as final proof for the new deck.

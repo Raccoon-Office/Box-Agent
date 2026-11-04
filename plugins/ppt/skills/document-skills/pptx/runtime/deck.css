@@ -3832,12 +3832,12 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
 }
 
 .table-gantt .data-table-cell-text {
-  height: 50px;
+  min-height: 50px;
   padding: 0 14px;
 }
 
 .table-gantt .data-table th .data-table-cell-text {
-  height: 54px;
+  min-height: 54px;
 }
 
 .table-gantt .gantt-cell .data-table-cell-text {
@@ -3860,7 +3860,7 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
 
 .data-table-cell-text {
   width: 100%;
-  height: 76px;
+  min-height: 76px;
   margin: 0;
   padding: 0 24px;
   display: flex;
@@ -3869,7 +3869,7 @@ body[data-deck-composition] .layout-timeline.timeline-bodyless .timeline-step {
 }
 
 .data-table th .data-table-cell-text {
-  height: 68px;
+  min-height: 68px;
 }
 
 .table-footer {

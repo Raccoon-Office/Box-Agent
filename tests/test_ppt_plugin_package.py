@@ -85,6 +85,64 @@ def test_all_eight_skills_load_from_immutable_installed_snapshot(installed):
     assert bound["sn_ppt_story"].name in entry.content
 
 
+@pytest.mark.skipif(NODE is None, reason="Node is needed to execute the resource CLI")
+def test_installed_ppt_accepts_verbatim_requirement_lists_and_rejects_invented_requirements(installed):
+    root, receipt = installed
+    script = root / "skills/document-skills/pptx/scripts/design_plan_core.js"
+    result = subprocess.run([NODE, "-e", """
+const {makeInput} = require(process.argv[1]);
+const requirements = ['使用白色背景', '保留可编辑文字'];
+const outline = {slides: [{title: '测试', message: '测试', hard_requirements: requirements}]};
+const input = makeInput(outline, '测试', '使用白色背景，保留可编辑文字。');
+let rejected = false;
+try { makeInput(outline, '测试', '使用白色背景。'); } catch (error) {
+  rejected = error.message.includes('must quote the actual user request verbatim');
+}
+console.log(JSON.stringify({requirements: input.outline.slides[0].hard_requirements, rejected}));
+""", str(script)], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {
+        "requirements": ["使用白色背景", "保留可编辑文字"], "rejected": True,
+    }
+    assert package_digest(root) == receipt["package_digest"]
+
+
+@pytest.mark.parametrize("relative", [
+    "document-skills/pptx/scripts/artifact_metadata.py",
+    "presentation-suite/skills/sn-ppt-entry/scripts/artifact_metadata.py",
+    "presentation-suite/skills/sn-ppt-standard/scripts/artifact_metadata.py",
+    "presentation-suite/skills/sn-ppt-dazzle/scripts/artifact_metadata.py",
+])
+def test_installed_ppt_metadata_supports_relocated_profiles_and_rejects_redirected_children(
+    installed, tmp_path, monkeypatch, relative,
+):
+    from tests.test_artifact_metadata_relocation import redirect_directory
+
+    root, receipt = installed
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    profile = workspace / ".box-agent"
+    target = tmp_path / "data-disk"
+    target.mkdir()
+    redirect_directory(profile, target)
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    metadata = runpy.run_path(str(root / "skills" / relative))
+    report = workspace / "report.txt"
+    report.write_text("report")
+    metadata["write_metadata"](report, {"type": "artifact"}, workspace)
+    assert metadata["read_metadata"](report, workspace)["type"] == "artifact"
+    assert metadata["metadata_path"](report, workspace).is_relative_to(target)
+    metadata["write_retention"](report, workspace)
+    assert len(list(metadata["iter_retention_records"](report))) == 1
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    redirect_directory(target / "artifact-metadata/scopes", outside)
+    with pytest.raises(OSError, match="redirected"):
+        metadata["write_scope"](workspace, {"default": "intermediate"}, workspace)
+    assert list(outside.iterdir()) == []
+    assert package_digest(root) == receipt["package_digest"]
+
+
 def test_disabling_installed_ppt_never_reveals_legacy_builtin_files(installed, tmp_path):
     root, receipt = installed
     builtin = REPO / "box_agent/skills"

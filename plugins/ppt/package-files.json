@@ -16,8 +16,8 @@
       "bytes": 1472
     },
     "skills/document-skills/pptx/SKILL.md": {
-      "sha256": "5952903328a371fcc602dfab7c5bbf606c6f11baa4dee38a0e857cf285b19381",
-      "bytes": 45459
+      "sha256": "ab879c3481aedbe0ebbb82c6e2fbfc8d5b65b9d8cbdd7f28f5ff97a16bf75355",
+      "bytes": 47235
     },
     "skills/document-skills/pptx/agents/openai.yaml": {
       "sha256": "f2927382b42a30129823d03bf9cc5f51db4848773672a817451162b3454d0a87",
@@ -64,8 +64,8 @@
       "bytes": 1573
     },
     "skills/document-skills/pptx/references/design-role.md": {
-      "sha256": "b94c41924e3f050d44d920dbeccc6ab45f9df0fb76b0f97025aed366cc0083d8",
-      "bytes": 14646
+      "sha256": "9d408bf59e74082950d0e92f6e6375a0ae5555d9bc0f0cef87352e2b1b1f6150",
+      "bytes": 14717
     },
     "skills/document-skills/pptx/references/html-editable.md": {
       "sha256": "f47851fcaffea7cb63bc52657f87ebfd99a986cee6fd96a47d6ba653670aeee9",
@@ -104,8 +104,8 @@
       "bytes": 6549
     },
     "skills/document-skills/pptx/references/qa.md": {
-      "sha256": "563892707149041ffe14a6c9e31ddf2ee99ed1831ffcd481aa55021468f20f03",
-      "bytes": 10977
+      "sha256": "a8b1542d4d351dd61a96a20338a3b4c60f1e2b09b1a8553804df4a2c76955e1a",
+      "bytes": 10944
     },
     "skills/document-skills/pptx/references/runtime-office-raccoon.md": {
       "sha256": "b20b8e0d32c180496e15701c22fc70506ce627a4dbaae3317a1ca202a9f0b681",
@@ -132,8 +132,8 @@
       "bytes": 88095
     },
     "skills/document-skills/pptx/runtime/deck.css": {
-      "sha256": "c09d619f75fa60e5018007370fa1d48d543f2530320b8ee5be396e82bf3abc28",
-      "bytes": 252798
+      "sha256": "5703c7b359acd9a9c814f30bbd99abf04c7e4347870b7d911698c6a9e8332e06",
+      "bytes": 252814
     },
     "skills/document-skills/pptx/runtime/diagram-runtime.js": {
       "sha256": "0a9f411c1cba417ccfa271bcd6111bcd61ad3429a07bac87729649521908677c",
@@ -196,12 +196,12 @@
       "bytes": 7784
     },
     "skills/document-skills/pptx/scripts/artifact_metadata.py": {
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
-      "bytes": 14322
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
+      "bytes": 15349
     },
     "skills/document-skills/pptx/scripts/bg_capture.js": {
-      "sha256": "ada2a185895810ed0932f5dd6d67cfbe2217cc5670f4442f38cb89db0b340a27",
-      "bytes": 8018
+      "sha256": "19b845820e0fa016cd4cf16e17b3ef0d93967f64db2305f23d7133c4cbb1fd2b",
+      "bytes": 8547
     },
     "skills/document-skills/pptx/scripts/build_layout_manifest.js": {
       "sha256": "12b3808b80a53ea5eda9e7e63d0566e2f3082cbd96917db1f3d68ed821780372",
@@ -232,16 +232,16 @@
       "bytes": 38015
     },
     "skills/document-skills/pptx/scripts/design_plan.js": {
-      "sha256": "4680aef6f0567a5bdfcda8b2ddb47d90837080bac54b2bd8b488a93004810aaa",
-      "bytes": 24419
+      "sha256": "149a236b0357aec7eae755b57cf8547297f18eee837ae9fab9f48bec4810da12",
+      "bytes": 24634
     },
     "skills/document-skills/pptx/scripts/design_plan_core.js": {
-      "sha256": "f5e7defa4ea4c142bd20b281c1a1804a5cb976159c046fb11ee3c401bd6003fc",
-      "bytes": 24950
+      "sha256": "0982c6d40a9c456e41070acf066110fcc6d0baee0c35c5e126153a61f90a95e7",
+      "bytes": 25146
     },
     "skills/document-skills/pptx/scripts/design_recovery.js": {
-      "sha256": "eea225a6eede662c0e1593ee10a19068694b08ee507d8b5fbce23abba0346db1",
-      "bytes": 12328
+      "sha256": "e28cb3f0e639b458747fe29212e50e99fcfba3225b8ea801fdff5e8846536c21",
+      "bytes": 11781
     },
     "skills/document-skills/pptx/scripts/design_response_source.js": {
       "sha256": "496b2e77e684b1a8675a11c44a18b30e18262ddf6425bcf0e897b1a68d8fe42a",
@@ -264,8 +264,8 @@
       "bytes": 2626
     },
     "skills/document-skills/pptx/scripts/finalize_controlled_deck.js": {
-      "sha256": "878235a346f287a44ce1038cf0f6fe4b462f64104af5f277c57184eddc3429a2",
-      "bytes": 21643
+      "sha256": "87495bb5c8eab2397f1cc87d1a0a63d30523a1cb77a55513065d8da8a45e96be",
+      "bytes": 23024
     },
     "skills/document-skills/pptx/scripts/html-to-pptx.js": {
       "sha256": "e63ea65cf48ac5696690c931c45e7e9db0fb92b7329480ad3866056989e4e9ce",
@@ -276,12 +276,12 @@
       "bytes": 44676
     },
     "skills/document-skills/pptx/scripts/html_to_editable_pptx.js": {
-      "sha256": "6a28982a4bc8752d13797f178dd756f0c1c02c2c2572b2fba0513ae849537af7",
-      "bytes": 18433
+      "sha256": "b1aa30385956126ce5209d420a99e2b43de423b3cf117e9bee26ba00c7f61080",
+      "bytes": 22897
     },
     "skills/document-skills/pptx/scripts/inspect_deck_contract.js": {
-      "sha256": "8d7752f916d61ae8b0bef0a5fe172f8b859319155ee11b138614760a01ff19a2",
-      "bytes": 99312
+      "sha256": "dd389720494ebb2e2defea220d17732b64c2436206b81dba865a75a615d14be2",
+      "bytes": 99308
     },
     "skills/document-skills/pptx/scripts/inspect_layout.js": {
       "sha256": "caf96ce9cabc619dcd826357e18606eca76b774c065e254df5d4f0665146fa14",
@@ -356,8 +356,8 @@
       "bytes": 11286
     },
     "skills/document-skills/pptx/scripts/render_quality.js": {
-      "sha256": "8a72f2a75a797462a299a87caec73f4129e6a2cc60397c0c51d4448be74def19",
-      "bytes": 1404
+      "sha256": "f4ea84cfdcf5e975d5865c4a11604f1942e5df73ebbd3db329223f13d86aa002",
+      "bytes": 1628
     },
     "skills/document-skills/pptx/scripts/render_theme_gallery.js": {
       "sha256": "b1e50f10c30f8e1b2fb45bf0188d09631dc2350721195530d27539e36c00b06f",
@@ -1040,8 +1040,8 @@
       "bytes": 4063532
     },
     "skills/presentation-suite/skills/sn-ppt-dazzle/SKILL.md": {
-      "sha256": "77d4f935e17abac876dc15c085e4619a0717796c37195a11279082b490f4811f",
-      "bytes": 42978
+      "sha256": "113ef4a0bdb6f6dfdd4cda6bcca1a265e0cd605efa955885c237f33fc83bc008",
+      "bytes": 43715
     },
     "skills/presentation-suite/skills/sn-ppt-dazzle/references/fancy-cookbook.md": {
       "sha256": "f0e4d893898a9134db8cd817060176c1cb78cf7afd3d3dc3f0a36e01491700bc",
@@ -1052,8 +1052,8 @@
       "bytes": 10015
     },
     "skills/presentation-suite/skills/sn-ppt-dazzle/scripts/artifact_metadata.py": {
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
-      "bytes": 14322
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
+      "bytes": 15349
     },
     "skills/presentation-suite/skills/sn-ppt-dazzle/scripts/render_deck.py": {
       "sha256": "a49fe283b43839979eca02d672de815c6efb62bed69da006125dca1c0c91c767",
@@ -1064,8 +1064,8 @@
       "bytes": 787
     },
     "skills/presentation-suite/skills/sn-ppt-doctor/SKILL.md": {
-      "sha256": "29d7861ce4d870ce571e99c424fd35c6fca29f0ef19485f21bec16a5fc1fa057",
-      "bytes": 5757
+      "sha256": "43a0af71a751fc086da892768302adbb79258473dc7721875f09f9c4def4c41b",
+      "bytes": 6500
     },
     "skills/presentation-suite/skills/sn-ppt-doctor/ppt_doctor/check_environment.py": {
       "sha256": "27f702e5b8b12805681f606b8959465397de01d4ca82147ef013f63e05ab8e2b",
@@ -1084,8 +1084,8 @@
       "bytes": 41
     },
     "skills/presentation-suite/skills/sn-ppt-entry/scripts/artifact_metadata.py": {
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
-      "bytes": 14322
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
+      "bytes": 15349
     },
     "skills/presentation-suite/skills/sn-ppt-entry/scripts/parse_user_docs.py": {
       "sha256": "4be3eb83b91731206665bbb7ff9cb69834e01cbc905a4a70ef36642b9fdb7672",
@@ -1096,8 +1096,8 @@
       "bytes": 2753
     },
     "skills/presentation-suite/skills/sn-ppt-standard/SKILL.md": {
-      "sha256": "a3f40f92c1235784d1f492a858b1af39368cd79dabb62126e12f882758c19e55",
-      "bytes": 57130
+      "sha256": "61054f7b9ca4a8548524650287b9c6d5518cb074d5ee6930ac8a94aef20019a4",
+      "bytes": 57867
     },
     "skills/presentation-suite/skills/sn-ppt-standard/agents/openai.yaml": {
       "sha256": "fca822e9a5e99f3ba5422a29e074c8cb553e7d864042f5eca2dbf57f98449489",
@@ -1168,8 +1168,8 @@
       "bytes": 7784
     },
     "skills/presentation-suite/skills/sn-ppt-standard/scripts/artifact_metadata.py": {
-      "sha256": "fd89204a5f005cc29c78261cf9178521d173834ff33ebd327499cc43a51e82d1",
-      "bytes": 14322
+      "sha256": "02fbb9f565fac8044ab51f058df3ec44485e3c88ccd9c7cb399aee9c28ae40c4",
+      "bytes": 15349
     },
     "skills/presentation-suite/skills/sn-ppt-standard/scripts/deck.py": {
       "sha256": "f32494b4c5638419975e1269cc3de4ea164eeeecf4d747f8999d4aab5e7cf100",
@@ -1352,8 +1352,8 @@
       "bytes": 5422
     },
     "skills/presentation-suite/source.json": {
-      "sha256": "3bbaf4a34bac95b4879cb8068b63ffbb8825d6ff2077efdbca50b8e79167a500",
-      "bytes": 40371
+      "sha256": "1b8df9aef49469c3c9e6188d2b73dacf36e149e40a792d741fb047b6e42ffbe1",
+      "bytes": 40404
     },
     "ui/config.html": {
       "sha256": "9fd33a18834a130b0b6553516ec7dc03fabb424246b5f636502a3b0bb6ae7270",

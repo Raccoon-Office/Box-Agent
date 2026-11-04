@@ -21,6 +21,12 @@ triggers:
 
 Doctor 不检查或恢复 `sn_agent_runner.py`，不写 `.env`，也不把可选媒体能力变成硬门槛。
 
+## Chromium 准备
+
+执行依赖 Chromium 的渲染前，若宿主支持，优先调用 `local_environment(capability="chromium", action="ensure")`；就绪后用新的子进程继续原任务。宿主不支持或未提供该工具时沿用原渲染流程。准备失败或超时时，由 Agent 根据错误和任务需要自主判断继续、修复或采用其他可用方式，不因准备接口失败直接停止整个任务。
+
+安装可能仍在后台进行，先确认状态、避免并发安装或修改正在安装的环境；尊重用户取消。如实报告渲染结果并保留原有验收要求，不混淆独立 Chromium 与 Electron/MCP 的就绪状态。用户明确要求只检查、不安装时，不调用 `ensure`。
+
 ## 持久配置
 
 优先使用宿主原生媒体工具及其已有配置。PPT 附带脚本与 Doctor 仅使用宿主进程环境；部署者显式设置 `SN_PPT_ENV_FILE=/absolute/path/to/file` 时，才读取指定配置文件。不扫描其他应用目录，插件 HTML 配置页也不收集密钥。
@@ -107,7 +113,7 @@ python3 "$SKILL_DIR/ppt_doctor/check_environment.py" \
   --probe-output-dir "/absolute/existing/directory"
 ```
 
-Doctor 只报告，不安装依赖、不写 secret、不修改任务目录。`standard_html.status` 只有在
+Doctor 脚本只报告，不安装依赖、不写 secret、不修改任务目录。`standard_html.status` 只有在
 渲染脚本、Python Playwright 和 Chromium 实际启动都通过时才是 `available`；否则
 `playwright_chromium.install_hint` 给出准备命令。报告中的 `python_source` 为
 `current_interpreter` 或 `uv_tool`。前者始终先检查，缺包时的主安装提示保留

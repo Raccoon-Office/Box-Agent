@@ -94,6 +94,15 @@ async function markDecorationNodes(page) {
       all.forEach(el => {
         if (el === slide) return;
         if (el.classList.contains("pptx-bg")) return;
+        // A washed slide background must be captured together with its image:
+        // its pseudo-element is the contrast treatment, and exporting the raw
+        // image separately would place it above the captured wash.
+        if (slide.matches(".background-wash-light, .background-wash-dark")
+            && (el.matches(".slide-background") || el.closest(".slide-background"))) {
+          el.setAttribute("data-pptx-decoration", "");
+          el.removeAttribute("data-pptx-non-decoration");
+          return;
+        }
         // Technical diagrams are authored as recoverable DiagramSpec + inline
         // SVG. Keep the root and every descendant out of the background PNG
         // so dom-to-pptx can export the SVG as a separate vector picture.

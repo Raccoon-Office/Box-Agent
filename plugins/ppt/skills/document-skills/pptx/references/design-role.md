@@ -170,7 +170,8 @@ and never invent an official brand standard.
 
 For a concrete cultural, place or product subject, include `subject_expression`
 on each slide: a short description of how that page makes the subject visible
-through a supported image, diagram or spatial layout. Palette/font changes or
+through a supported image, diagram or spatial layout. Each expression must be
+12–240 characters, including in corrections. Palette/font changes or
 repeating the subject name alone are insufficient. Use the page's visual hint
 as semantic input, not a mandatory layout. For example, a palace axis calls for
 an ordered route or spatial hierarchy, not an abstract software architecture;
