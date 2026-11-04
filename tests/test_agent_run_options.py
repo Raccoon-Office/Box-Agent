@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import box_agent.agent as agent_module
-from box_agent.agent import Agent, AgentRunOptions
+from box_agent.agent import Agent, AgentRunOptions, InitialContextTransition
 from box_agent.config import ToolLimitsConfig
 from box_agent.context_resources import ResourceClass, ResourceDescriptor
 from box_agent.events import ContentEvent, DoneEvent, StopReason, SummarizationEvent
@@ -117,6 +117,13 @@ async def test_agent_run_events_forwards_host_run_options(
     def fingerprint_sink(_payload: dict) -> None:
         pass
 
+    def commit_transition() -> None:
+        pytest.fail("A host transition must commit at the request boundary")
+
+    transition = InitialContextTransition(
+        token_limit=24_000, previous_token_limit=agent.token_limit,
+        summary_llm=summary_llm, commit=commit_transition,
+    )
     options = replace(
         agent.default_run_options(),
         llm=host_llm,
@@ -146,6 +153,7 @@ async def test_agent_run_events_forwards_host_run_options(
         cache_fingerprint_context=fingerprint_context,
         cache_fingerprint_sink=fingerprint_sink,
         current_turn_text="host current turn",
+        initial_context_transition=transition,
     )
 
     events = [event async for event in agent.run_events(options=options)]
@@ -171,6 +179,10 @@ async def test_agent_run_events_forwards_host_run_options(
             continue
         if option_field.name == "kernel_services" and options.kernel_services is None:
             assert "kernel_services" not in captured
+            continue
+        if option_field.name == "initial_context_transition":
+            assert captured["context_engine"].initial_context_transition is transition
+            assert captured["token_limit"] == transition.token_limit
             continue
         actual = captured[option_field.name]
         expected = getattr(options, option_field.name)

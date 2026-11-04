@@ -20,4 +20,5 @@ class DefaultCompactEngine:
             force=inputs.force, estimate_tools=inputs.estimate_tools,
             summary_input_token_limit=inputs.summary_input_token_limit,
             summary_projector=inputs.summary_projector,
+            request_headroom_tokens=inputs.request_headroom_tokens,
         )

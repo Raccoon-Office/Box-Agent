@@ -89,9 +89,12 @@ def test_near_limit_selected_skill_pages_without_blocking_final_request(runtime)
     tool = GetSkillTool(runtime.loader)
     prepared_tools = prepare_tools([tool])
     history = [Message(role="user", content="请继续处理任务。 " * 1000)]
-    limit = request_input_tokens(history, prepared_tools.definitions, llm=llm) + 1500
+    base_input = request_input_tokens(history, prepared_tools.definitions, llm=llm)
     runtime.select(["demo"])
 
+    blocked = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=base_input + 1024)
+    assert blocked.budget_blocked and blocked.required_reference_tokens > 0
+    limit = base_input + 1024 + blocked.required_reference_tokens
     request = engine.prepare_request(history, prepared_tools=prepared_tools, token_limit=limit)
 
     assert request.blocked_reason is None

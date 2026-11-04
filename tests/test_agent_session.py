@@ -286,6 +286,112 @@ async def test_model_switch_keeps_explicit_session_budget_after_default_changes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["fits", "compacts", "recheck_rejects"])
+async def test_acp_narrower_model_commits_only_after_the_complete_request_fits(tmp_path, case):
+    from box_agent.acp import BoxACPAgent
+    from box_agent.schema import Message
+    from tests.test_image_context import image_block
+    from tests.test_lite_llm_routing import _DummyConn, _DummyLLM
+
+    calls = []
+    prepared = []
+
+    class RecordingLLM(_DummyLLM):
+        def for_model(self, model, *, max_output_tokens=None):
+            client = RecordingLLM(model)
+            client.model = model
+            client.context_window = self.context_window
+            client.capabilities = {"image_input": model == "model-main"}
+            if max_output_tokens is not None:
+                client.max_output_tokens = max_output_tokens
+            return client
+
+        def preflight_image_request(self, messages, tools, **kwargs):
+            if self.model == "small":
+                prepared.append((session.agent.llm.model, [msg.content for msg in messages]))
+                if case == "recheck_rejects":
+                    return {"fits": not any("Continue with the saved decision." in str(msg.content)
+                                            for msg in messages)}
+            return {"fits": True}
+
+        async def generate_stream(self, messages, tools=None, **kwargs):
+            kind = kwargs.get("call_kind", "")
+            calls.append((self.model, kind, session.agent.llm.model, [msg.content for msg in messages]))
+            text = "<summary>Continue with the saved decision.</summary>" if kind == "context_summary" else "Done."
+            yield StreamEvent(type="text", delta=text)
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    config = session_config(tmp_path)
+    config.llm.context_window = 300_000
+    config.llm.max_output_tokens = 4_000
+    main = RecordingLLM("main")
+    main.context_window = config.llm.context_window
+    main.max_output_tokens = 4_000
+    main.capabilities = {"image_input": True}
+    adapter = BoxACPAgent(_DummyConn(), config, main, [], "system")
+    response = await adapter.newSession(SimpleNamespace(
+        cwd=str(tmp_path), field_meta={"session_id": "context-transition-test"},
+    ))
+    session = adapter._sessions[response.sessionId]
+    original_limit = session.agent.token_limit
+    old_output = "Old detail. " * 9_000
+    if case != "fits":
+        session.agent.add_user_message("Decide what to do next.")
+        session.agent.messages.append(Message(role="assistant", content=old_output))
+
+    prompt = [{"type": "text", "text": "Keep this pending message."}]
+    if case == "recheck_rejects":
+        prompt.append({"type": "image", "mimeType": "image/png", "data": image_block()["data"]})
+    result = await adapter.prompt(SimpleNamespace(
+        sessionId=response.sessionId, prompt=prompt,
+        field_meta={"llm_binding": {"source": "builtin", "model": "small",
+                                    "contextWindow": 48_000, "maxTokens": 1_000}},
+    ))
+
+    assert prepared and all(model == "model-main" for model, _ in prepared)
+    assert any("Keep this pending message." in str(content) for _, contents in prepared for content in contents)
+    summaries = [call for call in calls if call[1] == "context_summary"]
+    main_calls = [call for call in calls if not call[1]]
+    if case == "fits":
+        assert not summaries
+    else:
+        assert len(summaries) == 1
+        assert summaries[0][:3] == ("model-main", "context_summary", "model-main")
+        assert old_output in summaries[0][3]
+        assert any("Continue with the saved decision." in str(content)
+                   for _, contents in prepared for content in contents)
+
+    if case == "recheck_rejects":
+        assert result.field_meta["ok"] is False
+        assert result.field_meta["errorCode"] == "MODEL_SWITCH_CONTEXT_PREPARATION_FAILED"
+        assert not main_calls
+        assert session.llm_binding is None
+        assert session.agent.llm.model == "model-main"
+        assert session.agent.token_limit == original_limit
+        restored = session.agent.session_log.replay()
+        assert any(msg.content == old_output for msg in restored.messages)
+        assert any(str(msg.content).startswith("Keep this pending message.") for msg in restored.messages)
+        assert len(restored.images) == 1 and restored.images[0]["active"]
+        assert session.agent.image_context.images[0]["active"]
+        retry = await adapter.prompt(SimpleNamespace(
+            sessionId=response.sessionId, prompt=[{"text": "Continue the saved request."}],
+        ))
+        assert retry.field_meta["ok"] is True
+        _, _, model, contents = next(call for call in calls if not call[1])
+        assert model == "model-main"
+        assert any(str(content).startswith("Keep this pending message.") for content in contents)
+        assert any(isinstance(content, list) and any(block.get("type") == "input_image" for block in content)
+                   for content in contents)
+    else:
+        assert result.field_meta["ok"] is True
+        assert len(main_calls) == 1 and main_calls[0][:3] == ("small", "", "small")
+        assert old_output not in main_calls[0][3]
+        assert session.llm_binding["model"] == "small"
+        assert session.agent.llm.model == "small"
+        assert session.agent.token_limit == 42_300
+
+
+@pytest.mark.asyncio
 async def test_closing_session_stream_persists_interrupted_turn(tmp_path):
     from box_agent.agent_session import AgentSession
     from box_agent.session_log import SessionLog

@@ -83,11 +83,15 @@ def _default_capabilities(run_arguments: Mapping[str, Any]) -> dict[str, Any]:
 def _kernel_run_arguments(run_arguments: Mapping[str, Any]) -> dict[str, Any]:
     """Keep capability objects behind the resolved ``KernelServices`` bundle."""
 
-    return {
+    arguments = {
         name: value
         for name, value in run_arguments.items()
         if name not in _SERVICE_OWNED_RUN_ARGUMENTS
     }
+    transition = getattr(run_arguments.get("context_engine"), "initial_context_transition", None)
+    if transition is not None:
+        arguments["initial_context_transition"] = transition
+    return arguments
 
 
 def _register_legacy_hooks(bus: HookBus, hooks: Sequence[object]) -> list[HookRegistration]:

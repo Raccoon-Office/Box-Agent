@@ -756,6 +756,7 @@ async def _maybe_summarize(
     summary_input_token_limit: int | None = None,
     before_summary: Callable[[int], None] | None = None,
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None,
+    request_headroom_tokens: int | None = None,
 ) -> CompactionOutcome:
     """Compact once when the complete next request exceeds its safe limit."""
     if skip_check:
@@ -896,7 +897,8 @@ async def _maybe_summarize(
     estimated_after = request_input_tokens(new_messages, budget_tools, llm=llm)
     # Leave room for request-only content when shortening the existing
     # summary can do so. The history limit remains the hard ceiling.
-    summary_target = max(1, token_limit - REQUEST_INPUT_HEADROOM_TOKENS)
+    headroom = REQUEST_INPUT_HEADROOM_TOKENS if request_headroom_tokens is None else request_headroom_tokens
+    summary_target = max(1, token_limit - headroom)
     for summary_limit in (4_000, 2_000):
         if estimated_after <= summary_target or len(bounded_summary) <= summary_limit:
             continue

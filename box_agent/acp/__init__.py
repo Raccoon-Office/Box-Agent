@@ -90,6 +90,7 @@ from box_agent.acp.stdio_compat import stdio_streams_largebuf
 from box_agent.acp.request_state import RequestStateStore
 from box_agent.agent import (
     Agent,
+    InitialContextTransition,
     goal_autopilot_prompt,
     goal_autopilot_progress_signature,
     goal_payload,
@@ -2850,6 +2851,7 @@ class BoxACPAgent:
                 log.warn("connector/context_unavailable", session_id=session_id,
                          error_type=type(exc).__name__)
                 host_connector_status = _UNAVAILABLE_CONNECTOR_STATUS
+        pending_llm = None
         requested_llm_binding = _normalize_llm_binding(prompt_meta)
         if requested_llm_binding is not None and requested_llm_binding != state.llm_binding:
             if state.turn_active:
@@ -2866,23 +2868,32 @@ class BoxACPAgent:
                 requested_context_window,
                 requested_max_output_tokens,
             )
-            state.session_llm.bind(requested_llm)
-            state.session_llm.context_window = requested_context_window
-            state.session_llm.max_output_tokens = requested_max_output_tokens
-            state.session_llm.set_auto_model_candidates(
-                requested_llm_binding.get("autoRouting", {}).get("models", [])
-            )
-            state.agent.token_limit = requested_token_limit
-            state.llm_binding = requested_llm_binding
-            log.info(
-                "session/model_binding",
-                session_id=session_id,
-                source=requested_llm_binding["source"],
-                model=requested_llm_binding["model"],
-                context_window=requested_context_window,
-                max_tokens=requested_max_output_tokens,
-                context_token_limit=requested_token_limit,
-            )
+            candidates = requested_llm_binding.get("autoRouting", {}).get("models", [])
+
+            def apply_model_binding() -> None:
+                state.session_llm.bind(requested_llm)
+                state.session_llm.context_window = requested_context_window
+                state.session_llm.max_output_tokens = requested_max_output_tokens
+                state.session_llm.set_auto_model_candidates(candidates)
+                state.agent.token_limit = requested_token_limit
+                state.llm_binding = requested_llm_binding
+                log.info(
+                    "session/model_binding",
+                    session_id=session_id,
+                    source=requested_llm_binding["source"],
+                    model=requested_llm_binding["model"],
+                    context_window=requested_context_window,
+                    max_tokens=requested_max_output_tokens,
+                    context_token_limit=requested_token_limit,
+                )
+
+            if requested_token_limit < state.agent.token_limit:
+                pending_llm = SessionBoundLLM(requested_llm)
+                pending_llm.context_window = requested_context_window
+                pending_llm.max_output_tokens = requested_max_output_tokens
+                pending_llm.set_auto_model_candidates(candidates)
+            else:
+                apply_model_binding()
         if state.turn_counter == 0 and not state.continuation_applied:
             raw_continuation = prompt_meta.get("session_continuation") or prompt_meta.get(
                 "sessionContinuation"
@@ -3018,6 +3029,31 @@ class BoxACPAgent:
                 turn_id=turn_id,
                 title=state.upstream_title,
                 call_kind="context_summary",
+            )
+        initial_context_transition = None
+        pending_summary_llm = None
+        if pending_llm is not None:
+            pending_llm.set_request_context(
+                session_id=billing_session_id, turn_id=turn_id, title=state.upstream_title,
+                client_info=self._client_info,
+            )
+            pending_summary_llm = self._summary_llm_for_session(
+                session_llm=pending_llm,
+                session_id=billing_session_id,
+                title=state.upstream_title,
+                client_info=self._client_info,
+                required_input_tokens=requested_token_limit,
+            )
+
+            def commit_model_switch() -> None:
+                apply_model_binding()
+                state.summary_llm = pending_summary_llm
+
+            initial_context_transition = InitialContextTransition(
+                token_limit=requested_token_limit,
+                previous_token_limit=state.agent.token_limit,
+                summary_llm=state.summary_llm or state.session_llm,
+                commit=commit_model_switch,
             )
         if state.memory_extractor is not None and hasattr(state.memory_extractor, "set_turn_id"):
             state.memory_extractor.set_turn_id(turn_id)
@@ -3289,6 +3325,9 @@ class BoxACPAgent:
                     explicitly_selected_skill_names=explicitly_selected_skill_names,
                     ui_language=ui_language,
                     clear_prompt_grants=False,
+                    pending_llm=pending_llm,
+                    pending_summary_llm=pending_summary_llm,
+                    initial_context_transition=initial_context_transition,
                 )
                 while (
                     auto_enabled
@@ -4520,6 +4559,9 @@ class BoxACPAgent:
         ui_language: str = "zh",
         clear_prompt_grants: bool = True,
         message_display: MessageDisplay | None = None,
+        pending_llm: SessionBoundLLM | None = None,
+        pending_summary_llm: SessionBoundLLM | None = None,
+        initial_context_transition: InitialContextTransition | None = None,
     ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
         message_display = message_display or MessageDisplay()
@@ -4977,12 +5019,14 @@ class BoxACPAgent:
 
             task.add_done_callback(_clear_finished_task)
 
-        llm: Any = _ActionHintNormalizingLLM(agent.llm)
+        llm: Any = _ActionHintNormalizingLLM(pending_llm or agent.llm)
         if state.follow_up_suggestions_enabled:
             llm = _FollowUpSuggestionsExtractingLLM(llm)
 
         run_options = run_handle.build_run_options(
             llm=llm,
+            summary_llm=pending_summary_llm or state.summary_llm,
+            initial_context_transition=initial_context_transition,
             logger=None,  # ACP uses its own logging via the connection
             permission_negotiator=negotiator,
             hooks=self._hooks,

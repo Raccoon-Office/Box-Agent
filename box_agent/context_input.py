@@ -12,6 +12,7 @@ from .kernel.context_engine import (
     _fallback_context_estimate, context_text_counter,
     request_input_tokens, skill_reference_budget_chars,
 )
+from .kernel.context_types import InitialContextTransition
 from .schema import Message
 from .llm.capabilities import bound_context_token_limit
 from .connector_context import restore_connector_status
@@ -40,6 +41,7 @@ class PreparedContext:
     reader_required: bool = False
     image_context: dict[str, Any] | None = None
     image_notices: tuple[str, ...] = ()
+    required_reference_tokens: int = 0
 
 
 class DefaultContextEngine:
@@ -51,11 +53,14 @@ class DefaultContextEngine:
 
     def __init__(self, *, system_prompt_projector: Callable[
         [str, str | tuple[str, ...]], str,
-    ] = effective_system_prompt, image_context=None, llm=None, thinking_enabled=False) -> None:
+    ] = effective_system_prompt, image_context=None, llm=None, thinking_enabled=False,
+        initial_context_transition: InitialContextTransition | None = None,
+    ) -> None:
         self._system_prompt_projector = system_prompt_projector
         self.image_context = image_context
         self.llm = llm
         self.thinking_enabled = thinking_enabled
+        self.initial_context_transition = initial_context_transition
         self._memory_lookup = None
         self.references: SkillReferenceContext | None = None
         self.prepared_tools: PreparedTools | None = None
@@ -88,11 +93,18 @@ class DefaultContextEngine:
             self.image_context.mark_response(message)
 
     def prepare_summary(self, messages: list[Message], llm: Any) -> list[Message]:
+        return self._prepare_summary(messages, llm, preview=False)
+
+    def preview_summary(self, messages: list[Message], llm: Any) -> list[Message]:
+        return self._prepare_summary(messages, llm, preview=True)
+
+    def _prepare_summary(self, messages: list[Message], llm: Any, *, preview: bool) -> list[Message]:
         messages = restore_connector_status(messages)
         if self.image_context is None or not self.image_context.images:
             return messages
-        projection = self.image_context.prepare(messages, llm=llm, purpose="summary")
-        if self.image_context.session_log is not None:
+        prepare = self.image_context.preview if preview else self.image_context.prepare
+        projection = prepare(messages, llm=llm, purpose="summary")
+        if not preview and self.image_context.session_log is not None:
             self.image_context.session_log.append("request/context", {"imageContext": projection.manifest})
             self.image_context.session_log.flush()
         if projection.blocked_reason:
@@ -193,15 +205,19 @@ class DefaultContextEngine:
             _log.info("context/prepare duration_ms=%.3f unique_skills=%d validation_timeouts=%d",
                       (perf_counter() - started) * 1000, len(names), int(getattr(validation, "timed_out", False)))
 
+    async def apreview_request(self, messages: list[Message], **arguments: Any) -> PreparedContext:
+        return await self.aprepare_request(messages, defer_image_changes=True, **arguments)
+
     def prepare_request(
         self, messages: list[Message], *, prepared_tools: PreparedTools,
         token_limit: int, output_tokens: int = 0,
         extra_messages: tuple[Message, ...] = (),
         transient_message: Message | None = None, transient_tokens: int = 0,
+        defer_image_changes: bool = False,
     ) -> PreparedContext:
         arguments = dict(prepared_tools=prepared_tools, token_limit=token_limit, output_tokens=output_tokens,
                          extra_messages=extra_messages, transient_message=transient_message,
-                         transient_tokens=transient_tokens)
+                         transient_tokens=transient_tokens, defer_image_changes=defer_image_changes)
         runtime = self.references.runtime if self.references is not None else None
         validate = getattr(runtime, "validate_references", None)
         validation = getattr(runtime, "_reference_validation", None)
@@ -215,6 +231,7 @@ class DefaultContextEngine:
         token_limit: int, output_tokens: int = 0,
         extra_messages: tuple[Message, ...] = (),
         transient_message: Message | None = None, transient_tokens: int = 0,
+        defer_image_changes: bool = False,
     ) -> PreparedContext:
         """Project ordinary reference material using the offered tools unchanged."""
         token_limit = bound_context_token_limit(self.llm, token_limit)
@@ -249,6 +266,7 @@ class DefaultContextEngine:
         blocked_reason = None
         budget_blocked = False
         reader_required = False
+        required_reference_tokens = 0
         on_committed = None
         on_response = None
         full_request = ([*context_messages, transient_message]
@@ -270,6 +288,7 @@ class DefaultContextEngine:
             blocked_reason = projection.blocked_reason
             budget_blocked = projection.budget_blocked
             reader_required = projection.reader_required
+            required_reference_tokens = projection.required_reference_tokens
             on_committed = projection.on_committed
             on_response = projection.on_response
             self._request_reference_tokens = projection.input_tokens
@@ -301,18 +320,29 @@ class DefaultContextEngine:
                              if transient_message is not None else context_messages)
         image_projection = None
         if self.image_context is not None:
-            image_projection = self.image_context.prepare(
+            prepare_images = self.image_context.preview if defer_image_changes else self.image_context.prepare
+            image_projection = prepare_images(
                 provider_messages, llm=self.llm, tools=list(prepared_tools.definitions),
                 thinking_enabled=self.thinking_enabled,
             )
             provider_messages = image_projection.messages
             if image_projection.blocked_reason:
                 blocked_reason = image_projection.blocked_reason
-                budget_blocked = False
+                budget_blocked = defer_image_changes
             elif (not blocked_reason and request_input_tokens(provider_messages, prepared_tools.definitions, llm=self.llm)
                   + self._transient_reserve_tokens > token_limit):
                 blocked_reason = "Model input exceeds the safe context budget. Compact context before retrying."
                 budget_blocked = True
+            if image_projection.on_committed is not None:
+                commit_images = image_projection.on_committed
+                commit_references = on_committed
+
+                def commit_projection() -> None:
+                    if commit_references is not None:
+                        commit_references()
+                    commit_images()
+
+                on_committed = commit_projection
             if blocked_reason:
                 on_committed = on_response = None
         return PreparedContext(
@@ -324,4 +354,5 @@ class DefaultContextEngine:
             reader_required,
             image_projection.manifest if image_projection else None,
             image_projection.notices if image_projection else (),
+            required_reference_tokens,
         )

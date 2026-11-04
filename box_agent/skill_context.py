@@ -138,6 +138,7 @@ class ReferenceProjection:
     budget_blocked: bool = False
     on_response: Callable[[], None] | None = None
     reader_required: bool = False
+    required_reference_tokens: int = 0
 
 
 class SkillReferenceContext:
@@ -393,6 +394,7 @@ class SkillReferenceContext:
         diagnostics = [notice for name, notice in self.runtime.restore_diagnostics.items() if name in read_names]
         references: list[dict[str, Any]] = []
         required_notice = ""
+        required_reference_tokens = 0
         blocked_reason = None
         staged_deliveries: list[tuple[Any, dict[str, Any], str]] = []
         staged_snapshots: list[tuple[dict[str, Any], str]] = []
@@ -531,6 +533,7 @@ class SkillReferenceContext:
                     notice_cost = required_cost
                 if required_notice and required_notice not in notice:
                     blocked_reason = "Selected Skill material and its reading instructions cannot fit the context budget. Compact context or reduce the selection before retrying."
+                    required_reference_tokens = (self.reference_overhead_chars + required_cost + 3) // 4
                     notice = ""
                 if notice:
                     projected[user_index] = append_reference(target, notice)
@@ -546,7 +549,8 @@ class SkillReferenceContext:
             self._host_visible = {}
             return ReferenceProjection(list(messages), diagnostics=tuple(diagnostics),
                                        blocked_reason=blocked_reason,
-                                       budget_blocked=user_index is not None)
+                                       budget_blocked=user_index is not None,
+                                       required_reference_tokens=required_reference_tokens)
         for ref, text in staged_snapshots:
             ref.update(self._store_reference(text))
         delivered_count = 0

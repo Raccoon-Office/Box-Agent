@@ -16,6 +16,16 @@ metadata. See [Image context](IMAGE_CONTEXT.md) for the complete contract.
 
 Before sending a summary request, Box-Agent estimates the complete projected request, including the appended summary instruction and images, against the summary client's safe input budget: `90% × (context window − actual output reservation)`, with the output reservation capped at 8,192 tokens. If the client does not declare its window or output reservation, the session's input budget remains the fallback. Both ordinary and forced compaction apply this check. An over-budget summary skips the provider call and uses the local bounded fallback; the rebuilt main request is then checked against the main model's budget before sending.
 
+When an ACP prompt selects a model with a smaller safe input budget, Box-Agent
+prepares the full request against the target model before changing the session
+binding. If the request exceeds the budget, the previous session's summary
+route compacts the history with room for request assembly and any required
+Skill reading notice. Box-Agent then prepares the complete target request
+again. A failed check returns `MODEL_SWITCH_CONTEXT_PREPARATION_FAILED` and
+keeps the previous binding, original history and submitted user message with
+its attachments. The target model receives the request only after it passes
+this check.
+
 ## Request lifecycle
 
 ```text

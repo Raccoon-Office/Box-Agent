@@ -10,6 +10,16 @@ from ..tools.base import Tool
 
 
 @dataclass(frozen=True, slots=True)
+class InitialContextTransition:
+    """Commit a new context limit only after its first request fits."""
+
+    token_limit: int
+    previous_token_limit: int
+    summary_llm: Any
+    commit: Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
 class CompactionInput:
     """Resolved run inputs; an engine commits no SessionLog state itself.
 
@@ -34,6 +44,7 @@ class CompactionInput:
     estimate_tools: dict[str, Any] | None = None
     summary_input_token_limit: int | None = None
     summary_projector: Callable[[list[Message], Any], list[Message]] | None = None
+    request_headroom_tokens: int | None = None
 
 
 @dataclass(frozen=True)

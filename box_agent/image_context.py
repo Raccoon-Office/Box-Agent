@@ -6,12 +6,12 @@ bytes, the SessionLog owns recovery, and this controller owns retention only.
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass
+from copy import copy, deepcopy
+from dataclasses import dataclass, replace
 import inspect
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .config import ImageContextConfig
@@ -27,6 +27,7 @@ class ImageProjection:
     input_tokens: int = 0
     blocked_reason: str | None = None
     notices: tuple[str, ...] = ()
+    on_committed: Callable[[], None] | None = None
 
 
 class ImageContext:
@@ -125,6 +126,22 @@ class ImageContext:
     def _notice(ref: dict[str, Any], reason: str) -> str:
         return (f"[Image {ref['imageId']} ({ref.get('source', 'unknown')}) was not delivered "
                 f"to the model: {reason}. Do not assume its contents were seen.]")
+
+    def preview(self, messages: list[Message], **options: Any) -> ImageProjection:
+        """Prepare against isolated retention state until the request is accepted."""
+        staged = copy(self)
+        staged.session_log = None
+        staged.images = deepcopy(self.images)
+        staged._notices = dict(self._notices)
+        projection = staged.prepare(messages, **options)
+
+        def commit() -> None:
+            self.images[:] = staged.images
+            self._notices = staged._notices
+            self._selected = staged._selected
+            self._notice_ids = staged._notice_ids
+
+        return replace(projection, on_committed=commit)
 
     def prepare(self, messages: list[Message], *, llm: Any = None, tools: Any = None,
                 thinking_enabled: bool = False, purpose: str = "main") -> ImageProjection:

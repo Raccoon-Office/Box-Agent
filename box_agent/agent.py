@@ -45,6 +45,7 @@ from .image_context import ImageContext
 from .llm import LLMClient
 from .logger import AgentLogger
 from .project_context import WORKSPACE_STATEMENT_PREFIX
+from .kernel.context_types import InitialContextTransition
 from .kernel.ports import KernelServices
 from .injections import InjectionManager
 from .runtime import run_agent_loop
@@ -114,6 +115,7 @@ class AgentRunOptions:
     kernel_services: KernelServices | None = None
     run_control: Any | None = None
     plugins: tuple[Any, ...] = ()
+    initial_context_transition: InitialContextTransition | None = None
 
 
 @dataclass
@@ -1259,6 +1261,7 @@ class Agent:
 
         from .context_input import DefaultContextEngine
 
+        transition = effective_options.initial_context_transition
         run_arguments = dict(
             llm=effective_options.llm,
             summary_llm=effective_options.summary_llm,
@@ -1269,7 +1272,7 @@ class Agent:
             max_tool_calls=effective_options.max_tool_calls,
             max_delegated_tool_calls=effective_options.max_delegated_tool_calls,
             web_search_total_limit=effective_options.web_search_total_limit,
-            token_limit=self.token_limit,
+            token_limit=transition.token_limit if transition else self.token_limit,
             is_cancelled=effective_options.is_cancelled,
             run_control=effective_options.run_control,
             logger=effective_options.logger,
@@ -1308,7 +1311,8 @@ class Agent:
             context_engine=DefaultContextEngine(system_prompt_projector=self._project_system_prompt,
                                                 image_context=self.image_context,
                                                 llm=effective_options.llm,
-                                                thinking_enabled=self.thinking_enabled),
+                                                thinking_enabled=self.thinking_enabled,
+                                                initial_context_transition=transition),
             current_turn_text=effective_options.current_turn_text,
             context_resource_ledger=self.context_resource_ledger,
             context_resource_dedup_enabled=self.context_resource_dedup_enabled,
