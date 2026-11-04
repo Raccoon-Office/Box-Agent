@@ -9127,7 +9127,8 @@ async def test_user_mcp_host_credential_binding_keeps_secret_out_of_result(tmp_p
     cleared = await agent.extMethod("mcp/credential/clear", {
         "credentialRef": "user-mcp:sample", "target": {"owner": "user", "name": "sample"},
     })
-    assert cleared == {"success": True, "affectedServers": ["sample"]}
+    # No server is resolved yet, so cleanup must not invalidate a connection.
+    assert cleared == {"success": True, "affectedServers": []}
     assert mcp_loader._mcp_runtime_credentials["user-mcp:sample"]["Authorization"] == "Bearer connector-secret"
     await agent.extMethod("mcp/credential/clear", {"credentialRef": "user-mcp:sample"})
     assert not mcp_loader._mcp_runtime_credentials

@@ -925,6 +925,88 @@ def test_equal_credential_refs_keep_owner_headers_and_versions_isolated(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["connector", "system", "user"])
+@pytest.mark.parametrize("load_mode", ["cold", "reconnect"])
+async def test_user_credential_clear_only_retires_user_owned_handshake(
+    monkeypatch, tmp_path, isolated_connector_runtime, owner, load_mode,
+):
+    import asyncio
+    from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
+    from tests.test_mcp_tool_search import FakeMCPTool
+
+    user = Path(mcp_loader._mcp_config_path)
+    config = {"url": "https://user.test/mcp"}
+    reference = "user-mcp:shared"
+    _write(user, {"shared": config})
+    monkeypatch.setattr(mcp_loader, "_mcp_server_definitions", resolve_mcp_sources((McpConfigSource("user", user),)).servers)
+    mcp_loader.set_mcp_runtime_credential(reference, {"Authorization": "Bearer user-test"}, target={"owner": "user", "name": "shared", "config": config})
+    if owner != "user":
+        protected = tmp_path / f"{owner}.json"
+        protected_config = {"url": "https://protected.test/mcp"}
+        if owner == "connector":
+            protected_config.update({"_connectorId": "example", "credentialRef": reference})
+            mcp_loader.set_mcp_runtime_credential(reference, {"Authorization": "Bearer connector-test"})
+        _write(protected, {"shared": protected_config})
+        monkeypatch.setenv(f"BOX_AGENT_{owner.upper()}_MCP_CONFIG_PATH", str(protected))
+
+    catalog = MCPToolCatalog()
+    monkeypatch.setattr(mcp_loader, "get_mcp_tool_catalog", lambda: catalog)
+    started, release = asyncio.Event(), asyncio.Event()
+    closed = []
+
+    async def connect(conn):
+        started.set()
+        await release.wait()
+        conn.tools = [FakeMCPTool("shared_tool", "shared")]
+        return True
+
+    async def disconnect(conn):
+        closed.append(conn.name)
+        conn.tools = []
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", connect)
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "disconnect", disconnect)
+    loading = asyncio.create_task(
+        mcp_loader.load_mcp_tools_async(str(user)) if load_mode == "cold"
+        else mcp_loader.reconnect_mcp_server("shared")
+    )
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        assert mcp_loader._mcp_server_definitions["shared"].owner == owner
+        affected = mcp_loader.clear_mcp_runtime_credential(reference, target={"owner": "user", "name": "shared"})
+        assert ("user", reference) not in mcp_loader._mcp_runtime_credentials
+        assert reference not in mcp_loader._mcp_credential_targets
+        if owner == "connector":
+            assert mcp_loader._mcp_runtime_credentials[reference] == {"Authorization": "Bearer connector-test"}
+        release.set()
+        result = await asyncio.wait_for(loading, 2)
+        if owner == "user":
+            assert affected == ["shared"]
+            assert closed == ["shared"]
+            assert catalog.snapshot() == ()
+            assert mcp_loader._mcp_connections == []
+            if load_mode == "cold":
+                assert result == []
+            else:
+                assert result["superseded"]
+        else:
+            assert affected == []
+            assert closed == []
+            assert [entry.model_name for entry in catalog.snapshot()] == ["shared_tool"]
+            assert len(mcp_loader._mcp_connections) == 1
+            assert mcp_loader._mcp_status["shared"].state == "connected"
+            if load_mode == "cold":
+                assert [tool.name for tool in result] == ["shared_tool"]
+            else:
+                assert result["success"]
+        assert not mcp_loader._mcp_loading
+    finally:
+        release.set()
+        await asyncio.gather(loading, return_exceptions=True)
+        await mcp_loader.cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
 async def test_cold_start_build_failure_is_limited_to_that_server(monkeypatch, isolated_connector_runtime):
     from unittest.mock import AsyncMock
     from box_agent.tools.mcp_tool_catalog import MCPToolCatalog
