@@ -448,18 +448,18 @@ async def test_settings_change_during_discovery_is_detected_by_next_request(tmp_
 
     _, loader, _, engine = make_context(tmp_path)
     await prepare(engine)
-    original = loader_module._read_disabled_skill_names
+    original = loader_module._read_skill_settings
     edited = False
 
     def read_settings(path):
         nonlocal edited
-        names = original(path)
+        settings = original(path)
         if not edited:
             edited = True
             path.write_text('{"disabledSkillNames":["demo"]}')
-        return names
+        return settings
 
-    monkeypatch.setattr(loader_module, "_read_disabled_skill_names", read_settings)
+    monkeypatch.setattr(loader_module, "_read_skill_settings", read_settings)
     await asyncio.to_thread(loader.discover_skills)
     assert loader.get_skill("demo") is not None
     request = await prepare(engine)

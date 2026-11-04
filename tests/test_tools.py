@@ -634,6 +634,13 @@ async def test_search_files_blocks_recursive_search_from_user_home(tmp_path, mon
     workspace.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    scans = []
+
+    def unexpected_scan(*_args, **_kwargs):
+        scans.append(True)
+        raise AssertionError("The broad-home guard must run before any recursive scan")
+
+    monkeypatch.setattr(SearchFilesTool, "_search_sync", unexpected_scan)
 
     result = await SearchFilesTool(workspace_dir=str(workspace)).execute(
         pattern="*.txt",
@@ -645,7 +652,9 @@ async def test_search_files_blocks_recursive_search_from_user_home(tmp_path, mon
     assert result.error.startswith("BROAD_HOME_SEARCH_BLOCKED:")
     assert "Use the project directory or the location named by the user" in result.error
     assert "Do not retry the same scope with another tool" in result.error
+    assert result.content == ""
     assert result.permission_request is None
+    assert scans == []
 
 
 @pytest.mark.asyncio
