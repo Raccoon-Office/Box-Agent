@@ -101,6 +101,27 @@ def test_private_bash_spawn_diagnostics_are_suppressed(caplog):
     assert "SYNTHETIC_ORDINARY_COMMAND" in caplog.text
 
 
+def test_private_mcp_adapter_exception_does_not_log_tool_result(caplog):
+    from box_agent.tools.mcp_result_hooks import adapt_mcp_result_context, bind_mcp_result_adapter
+
+    class FailingAdapter:
+        def result_context(self, *, server_name, remote_name, arguments, structured_content):
+            raise ValueError(structured_content["result"])
+
+    caplog.set_level(logging.DEBUG, logger="box_agent.tools.mcp_result_hooks")
+
+    def invoke(value):
+        with bind_mcp_result_adapter(FailingAdapter()):
+            assert adapt_mcp_result_context(server_name="fixture", remote_name="fixture",
+                                            arguments={}, structured_content={"result": value}) is None
+
+    with private_payload_scope():
+        invoke("SYNTHETIC_PRIVATE_RESULT")
+    assert "SYNTHETIC_PRIVATE_RESULT" not in caplog.text
+    invoke("SYNTHETIC_ORDINARY_RESULT")
+    assert "SYNTHETIC_ORDINARY_RESULT" in caplog.text
+
+
 def test_bootstrap_path_and_epoch_are_redacted_from_parent_config_display():
     value = {"memory_desktop": {"bootstrap_file": "/private/fixture/bootstrap.json", "identity_epoch": "private-epoch"}}
     displayed = _config_display_value(value, ["agent"])

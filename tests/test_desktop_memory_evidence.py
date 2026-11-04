@@ -194,6 +194,29 @@ def test_suspect_tool_strings_are_omitted_whole_before_view_hashing(log, sample)
     assert any(event["data"].get("result", {}).get("content") == sample for event in log.events)
 
 
+@pytest.mark.parametrize("arguments,result,call_coverage,result_coverage", [
+    ({"command": "DB_PASSWORD=SYNTHETIC_SECRET check"}, "passed", "excerpt", "full"),
+    ({"command": "check"}, "API_KEY=SYNTHETIC_SECRET", "full", "excerpt"),
+    ({"image": "data:image/png;base64,QUJDRA=="}, "passed", "excerpt", "full"),
+    ({"command": "check"}, "passed", "full", "full"),
+])
+def test_filtered_tool_views_are_not_described_as_complete(log, arguments, result, call_coverage, result_coverage):
+    cursor = EvidenceCursor.begin(log)
+    log.append("user/message", {"content": "question", "source": "user"})
+    log.append("tool/call", {"callId": "call", "name": "fixture", "arguments": arguments})
+    log.append("tool/result", {"message": {"tool_call_id": "call"}, "result": {
+        "success": True, "content": result, "error": None}})
+    log.append("assistant/message", {"message": {"content": "answer"}})
+    log.append("turn/end", {"reason": {"kind": "completed"}})
+    bundle = capture(cursor, log)
+    views = {view["source_ref"]["event_type"]: view for view in bundle["views"]}
+    for kind, expected in (("tool/call", call_coverage), ("tool/result", result_coverage)):
+        view = views[kind]
+        assert view["source_ref"]["coverage"] == expected
+        assert view["source_ref"]["view_spec"]["excerpt_limit"] == (4096 if expected == "excerpt" else None)
+        assert view["source_ref"]["visible_sha256"] == hashlib.sha256(view["text"].encode()).hexdigest()
+
+
 def test_prefixed_nested_credential_fields_are_filtered_without_losing_safe_results():
     from box_agent.desktop_memory.evidence import _redact
     value = {"env": {"DB_PASSWORD": "SYNTHETIC_DB", "AWS_SECRET_ACCESS_KEY": "SYNTHETIC_AWS"},

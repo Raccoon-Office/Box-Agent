@@ -170,12 +170,14 @@ class EvidenceCursor:
                                       "content": result.get("content"), "error": result.get("error")}, call_id)])
         views = []
         for event, payload, call_id in selected:
-            text = _json(_redact(payload))
+            filtered = _redact(payload)
+            text = _json(filtered)
             encoded = text.encode("utf-8")
             truncated = len(encoded) > EXCERPT_BYTES
             if truncated:
                 text = encoded[:EXCERPT_BYTES].decode("utf-8", errors="ignore")
-            coverage = "excerpt" if truncated or event["type"] == "user/message" and event["data"].get("content") != user else "full"
+            coverage = "excerpt" if (truncated or filtered != payload
+                                     or event["type"] == "user/message" and event["data"].get("content") != user) else "full"
             ref = {"evidence_id": "ev:" + _hash(_json([event_id, event["seq"], _hash(text)])),
                    "source_id": self.source_id, "session_id": session_id,
                    "event_seqs": [event["seq"]], "event_type": event["type"], "call_id": call_id,
