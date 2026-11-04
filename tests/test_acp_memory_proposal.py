@@ -126,21 +126,41 @@ async def test_memory_proposal_list_waits_off_event_loop(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_session_recall_waits_off_event_loop(tmp_path: Path):
+@pytest.mark.parametrize("cached", [True, False])
+async def test_session_recall_completes_before_memory_transaction_releases(tmp_path: Path, cached):
     agent, mgr = _make_agent(tmp_path)
     mgr.write_context("- project memory", topic="project")
+    mgr.write_core("- cached preference")
+    expected = mgr.recall() if cached else ""
+    mgr.write_core("- updated preference")
+    transaction_acquired = threading.Event()
+    release_transaction = threading.Event()
 
-    session = await _run_while_memory_transaction_is_held(
-        mgr,
-        agent.newSession(
-            SimpleNamespace(
-                cwd=str(tmp_path),
-                field_meta={"session_mode": "general"},
-            )
-        ),
-    )
+    def hold_transaction() -> None:
+        with mgr.context_transaction():
+            transaction_acquired.set()
+            assert release_transaction.wait(timeout=10.0)
 
-    assert session.sessionId in agent._sessions
+    holder = asyncio.create_task(asyncio.to_thread(hold_transaction))
+    try:
+        assert await asyncio.to_thread(transaction_acquired.wait, 2.0)
+        session = await asyncio.wait_for(
+            agent.newSession(SimpleNamespace(
+                cwd=str(tmp_path), field_meta={"session_mode": "general"},
+            )),
+            timeout=3.0,
+        )
+        assert not release_transaction.is_set()
+        assert not holder.done()
+        prompt = agent._sessions[session.sessionId].agent.system_prompt
+        assert "updated preference" not in prompt
+        if cached:
+            assert expected in prompt
+        else:
+            assert "--- MEMORY START ---" not in prompt
+    finally:
+        release_transaction.set()
+        await asyncio.wait_for(holder, timeout=2.0)
 
 
 @pytest.mark.asyncio

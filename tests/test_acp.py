@@ -1158,6 +1158,59 @@ async def test_acp_event_send_timeout_remains_terminal(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["startup", "refreshed", "empty"])
+async def test_session_creation_uses_cached_memory_while_busy_then_refreshes(tmp_path, cache_state):
+    import threading
+
+    memory = MemoryManager(memory_dir=str(tmp_path / "memory"))
+    memory.write_core("- user prefers Chinese")
+    memory.write_context("- project uses uv", topic="project")
+    if cache_state == "startup":
+        memory = MemoryManager(memory_dir=str(tmp_path / "memory"))
+    elif cache_state == "refreshed":
+        memory.recall()
+    memory.write_core("- user prefers English")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory_extraction=False),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system", memory_manager=memory)
+    entered, release = threading.Event(), threading.Event()
+
+    def hold_maintenance_lock():
+        with memory.context_transaction():
+            entered.set()
+            assert release.wait(5)
+
+    maintenance = asyncio.create_task(asyncio.to_thread(hold_maintenance_lock))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        session = await asyncio.wait_for(agent.newSession(
+            SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}),
+        ), timeout=2)
+        assert not release.is_set()
+        prompt = agent._sessions[session.sessionId].agent.system_prompt
+        assert "user prefers English" not in prompt
+        if cache_state == "empty":
+            assert "--- MEMORY START ---" not in prompt
+        else:
+            assert "user prefers Chinese" in prompt
+            assert "`project`" in prompt
+    finally:
+        release.set()
+        await asyncio.wait_for(maintenance, 2)
+
+    session = await asyncio.wait_for(agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}),
+    ), timeout=2)
+    prompt = agent._sessions[session.sessionId].agent.system_prompt
+    assert "user prefers English" in prompt
+    assert "user prefers Chinese" not in prompt
+    assert "`project`" in prompt
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("slow_operation", ["scan", "read"])
 async def test_slow_skill_validation_keeps_other_acp_updates_and_control_responsive(
     tmp_path, monkeypatch, slow_operation,
@@ -9074,7 +9127,8 @@ async def test_user_mcp_host_credential_binding_keeps_secret_out_of_result(tmp_p
     cleared = await agent.extMethod("mcp/credential/clear", {
         "credentialRef": "user-mcp:sample", "target": {"owner": "user", "name": "sample"},
     })
-    assert cleared == {"success": True, "affectedServers": ["sample"]}
+    # No server is resolved yet, so cleanup must not invalidate a connection.
+    assert cleared == {"success": True, "affectedServers": []}
     assert mcp_loader._mcp_runtime_credentials["user-mcp:sample"]["Authorization"] == "Bearer connector-secret"
     await agent.extMethod("mcp/credential/clear", {"credentialRef": "user-mcp:sample"})
     assert not mcp_loader._mcp_runtime_credentials

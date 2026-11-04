@@ -2280,7 +2280,9 @@ def clear_mcp_runtime_credential(credential_ref: str, *, target: dict | None = N
                 or normalized_ref != f"user-mcp:{target['name']}"):
             raise ValueError("credentialRef must match a user target")
         _mcp_credential_targets.pop(normalized_ref, None)
-        affected = [target["name"]]
+        # Stale user credentials must not retire a same-name protected connection.
+        definition = _mcp_server_definitions.get(target["name"])
+        affected = [target["name"]] if definition is not None and definition.owner == "user" else []
     else:
         affected = [
             name for name, definition in _mcp_server_definitions.items()
