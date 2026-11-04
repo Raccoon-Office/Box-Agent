@@ -283,8 +283,8 @@ and the summary request.
 ACP model bindings may override both values with the selected model's
 `contextWindow` and `maxTokens`. The Agent derives its input limit when the
 session is created and recomputes it whenever the binding changes between
-turns. Missing binding capabilities fall back to `config.yaml`, which remains
-the capability source for user-configured model presets.
+turns. When the binding omits a capability, the Agent uses the applicable
+profile, client, catalog, or `config.yaml` values.
 
 Automatic routing also checks each candidate's input budget before ranking it.
 When the output limit is known, it uses the same `derive_context_token_limit`
@@ -381,7 +381,7 @@ When usage has a request snapshot for the same route, the runtime starts with me
 
 The standard client estimates text at one token per two UTF-8 bytes, rounded up, with the legacy character/byte estimate as a floor. This offline approximation can overestimate or underestimate actual usage. Custom clients may provide `estimate_text_tokens(text)`. Custom clients without a synchronous counter still use the byte bound. Low-level estimates without a client retain the legacy heuristic. Images are estimated separately. Skill overlays use the same counter as the final request. Compaction tries to shorten the existing summary to leave room for request assembly, then the final request is checked against the full input budget.
 
-The run budget is capped by the active client's known context window and matching catalog entry, after reserving its actual output cap. ACP takes the smallest known window from the binding, resolved profile/client, and matching catalog entry. A binding for a different model without any known window is rejected locally instead of inheriting another model's global window. Profile output limits are retained when host metadata omits them. These checks depend on accurate capability declarations; a service that silently lowers its own limit cannot be detected from local configuration alone.
+The run budget is capped by the active client's known window and matching catalog entry after reserving its output cap. ACP uses the binding's explicit `contextWindow` when present and sets that window on the selected model's entry in the session catalog, even if the entry omitted it. Otherwise it uses the smallest known window from the applicable profile/client, matching catalog entry, and startup configuration. A binding for a different model without any known window is rejected locally. Profile output limits are retained when host metadata omits them. These checks depend on accurate capability declarations. Detecting a silent reduction in the service's limit requires evidence from the service.
 
 ### Compacted message layout
 

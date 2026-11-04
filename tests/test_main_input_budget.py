@@ -199,7 +199,8 @@ async def test_new_tool_schema_after_usage_is_compacted_then_blocked_locally():
 
 
 @pytest.mark.parametrize("binding,client_window,expected", [
-    ({"source": "builtin", "model": "other", "contextWindow": 40_000}, 8_000, 8_000),
+    ({"source": "builtin", "model": "other", "contextWindow": 40_000}, 8_000, 40_000),
+    ({"source": "builtin", "model": "configured", "contextWindow": 80_000}, 40_000, 80_000),
     ({"source": "profile", "model": "other"}, 8_000, 8_000),
     ({"source": "builtin", "model": "other", "autoRouting": {"models": [
         {"model": "other", "contextWindow": 8_000},
@@ -207,7 +208,7 @@ async def test_new_tool_schema_after_usage_is_compacted_then_blocked_locally():
     (None, None, 40_000),
     (None, 80_000, 40_000),
 ])
-def test_active_model_capacity_takes_precedence_over_larger_defaults(binding, client_window, expected):
+def test_acp_prefers_explicit_model_window_and_falls_back_to_known_capacity(binding, client_window, expected):
     host = SimpleNamespace(
         _config=SimpleNamespace(llm=SimpleNamespace(model="configured", context_window=40_000,
                                                    max_output_tokens=1_000)),

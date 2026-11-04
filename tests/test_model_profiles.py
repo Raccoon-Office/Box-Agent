@@ -247,6 +247,76 @@ async def test_acp_profile_session_enables_cua_images_for_matching_config(tmp_pa
         await fallback.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("catalog_window", [1_000_000, 180_000, None])
+async def test_acp_profile_session_sends_prompt_within_explicit_window(
+    tmp_path, monkeypatch, catalog_window,
+):
+    from box_agent.acp import BoxACPAgent
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from box_agent.schema import LLMResponse, StreamEvent
+    from tests.test_acp import DummyConn
+
+    registry = tmp_path / "model-profiles.json"
+    _write_registry(registry)
+    monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
+    # The local estimate exceeds 72,000 tokens and fits the declared budget.
+    user_text = "龘 " * 38_000 + "继续"
+    main_requests = []
+
+    async def stream(client, messages, tools=None, **kwargs):
+        if kwargs.get("call_kind") != "context_summary":
+            main_requests.append((client.context_window, messages[-1].content))
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(client, messages=None, tools=None, **kwargs):
+        return LLMResponse(content='{"continue": false}', finish_reason="stop")
+
+    monkeypatch.setattr(LLMClient, "generate_stream", stream)
+    monkeypatch.setattr(LLMClient, "generate", generate)
+    config = Config(
+        llm=LLMConfig(api_key="test-key", context_window=180_000),
+        agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False, max_steps=1),
+        tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
+    )
+    fallback = _fallback_client()
+    adapter = BoxACPAgent(DummyConn(), config, fallback, [], "system")
+    state = None
+    try:
+        session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+            "llm_binding": {
+                "source": "profile", "version": 2, "profileId": "hosted",
+                "profileRevision": "rev-hosted", "routingMode": "auto",
+                "model": "hosted-default", "contextWindow": 1_000_000, "maxTokens": 100_000,
+                "autoRouting": {"models": [{
+                    "model": "hosted-default", "tags": ["general"], "abilityLevel": 3,
+                    **({"contextWindow": catalog_window} if catalog_window is not None else {}),
+                    "maxTokens": 100_000,
+                }, {
+                    "model": "small-summary", "tags": ["summary"], "abilityLevel": 3,
+                    "contextWindow": 180_000, "maxTokens": 100_000,
+                }]},
+            },
+        }))
+        state = adapter._sessions[session.sessionId]
+        assert state.agent.token_limit == 810_000
+        assert state.session_llm.auto_model_candidates[1]["contextWindow"] == 180_000
+        result = await adapter.prompt(SimpleNamespace(
+            sessionId=session.sessionId, prompt=[{"text": user_text}], field_meta={},
+        ))
+        assert result.stopReason == "end_turn"
+        assert len(main_requests) == 1
+        window, content = main_requests[0]
+        assert window == 1_000_000
+        assert content.startswith(user_text)
+    finally:
+        await adapter.aclose()
+        if state is not None:
+            await state.agent.llm.aclose()
+        await fallback.aclose()
+
+
 def test_profile_id_must_match_revision(tmp_path, monkeypatch):
     registry = tmp_path / "model-profiles.json"
     _write_registry(registry)

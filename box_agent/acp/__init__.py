@@ -568,6 +568,12 @@ def _normalize_llm_binding(meta: Any) -> dict[str, Any] | None:
             raw.get("autoRouting", raw.get("auto_routing"))
         )
         if auto_routing is not None:
+            if raw_context_window is not None:
+                # Route and budget the selected model with the same session window.
+                for candidate in auto_routing["models"]:
+                    if candidate["model"] == model:
+                        candidate["contextWindow"] = raw_context_window
+                        break
             binding["autoRouting"] = auto_routing
     return binding
 
@@ -1405,31 +1411,30 @@ class BoxACPAgent:
         config: Config | None = None,
         llm: Any | None = None,
     ) -> tuple[int, int]:
-        """Resolve active-model capabilities with config fallback."""
+        """Use the binding's explicit window or resolve a known model fallback."""
 
         config = config if config is not None else self._config
-        windows = []
-        if binding is None or (
-            binding.get("source") == "builtin"
-            and binding.get("model") in {config.llm.model, getattr(self._llm, "model", None)}
-        ):
-            windows.append(config.llm.context_window)
-        for window in ((binding or {}).get("contextWindow"), getattr(llm, "context_window", None)):
+        binding = binding or {}
+        context_window = binding.get("contextWindow")
+        if context_window is None:
+            model = binding.get("model")
+            configured_models = {config.llm.model, getattr(self._llm, "model", None)}
+            windows = []
+            if model is None or (binding.get("source") == "builtin" and model in configured_models):
+                windows.append(config.llm.context_window)
+            window = getattr(llm, "context_window", None)
             if type(window) is int and window > 0:
                 windows.append(window)
-        for candidate in (binding or {}).get("autoRouting", {}).get("models", ()):
-            if candidate.get("model") == (binding or {}).get("model"):
-                window = candidate.get("contextWindow")
-                if type(window) is int and window > 0:
-                    windows.append(window)
-        if not windows:
-            model = (binding or {}).get("model")
-            if model is not None and model not in {config.llm.model, getattr(self._llm, "model", None)}:
+            for candidate in binding.get("autoRouting", {}).get("models", ()):
+                if candidate.get("model") == model:
+                    window = candidate.get("contextWindow")
+                    if type(window) is int and window > 0:
+                        windows.append(window)
+            if not windows and model not in configured_models:
                 raise ValueError("llm_binding.contextWindow is required for the selected model")
-            windows.append(config.llm.context_window)
-        context_window = min(windows)
+            context_window = min(windows, default=config.llm.context_window)
         output_limits = [value for value in (
-            (binding or {}).get("maxTokens"), getattr(llm, "max_output_tokens", None),
+            binding.get("maxTokens"), getattr(llm, "max_output_tokens", None),
         ) if type(value) is int and value > 0]
         max_output_tokens = max(output_limits) if output_limits else config.llm.max_output_tokens
         return context_window, max_output_tokens
