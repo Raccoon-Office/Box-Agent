@@ -252,6 +252,8 @@ class Skill:
     user_enabled: bool = True
     unavailable_reason: Optional[str] = None
     unavailable_code: Optional[str] = None
+    # Author-facing label; namespace/alias changes must not change this value.
+    display_name: Optional[str] = None
 
     @property
     def user_visible(self) -> bool:
@@ -304,6 +306,7 @@ All files and references in this skill are relative to this directory.
         """Structured metadata for officev3 / ACP _meta payloads."""
         return {
             "name": self.name,
+            "displayName": self.display_name or self.name,
             "description": self.description,
             "source": self.source,
             "ownerId": self.owner_id,
@@ -947,6 +950,13 @@ class SkillLoader:
             skill_dir = skill_path.parent
             processed_content = self._process_skill_paths(skill_content, skill_dir)
 
+            display_name = frontmatter.get("displayName")
+            if (not isinstance(display_name, str) or not display_name.strip()
+                    or len(display_name.strip()) > 256
+                    or any(ord(char) < 32 or ord(char) == 127 or char in "\x85\u2028\u2029"
+                           for char in display_name)):
+                display_name = frontmatter["name"]
+
             raw_keywords = frontmatter.get("keywords")
             if isinstance(raw_keywords, str):
                 keywords_list = [k.strip() for k in re.split(r"[,，\s]+", raw_keywords) if k.strip()]
@@ -993,6 +1003,7 @@ class SkillLoader:
 
             return Skill(
                 name=frontmatter["name"],
+                display_name=display_name.strip(),
                 description=frontmatter["description"],
                 content=processed_content,
                 instruction_digest=self._instruction_digest(raw_content),
