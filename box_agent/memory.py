@@ -598,6 +598,7 @@ class MemoryManager:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.dedup_jaccard_threshold = dedup_jaccard_threshold
         self._context_transaction_lock = threading.RLock()
+        self._recall_cache = ""
 
         # v2 is an overlay, not a migration.  New context/experience writes go
         # here; old context files remain untouched and are searched only as a
@@ -611,7 +612,7 @@ class MemoryManager:
 
         self._ensure_v2_state()
         self._topic_store.ensure_index()
-        self.refresh_memory_summary()
+        self.recall()
         self._correction_curator = None
 
     @contextmanager
@@ -1502,19 +1503,26 @@ class MemoryManager:
 
     # ── Recall (system prompt injection) ────────────────────────
 
-    @_serialized_context
     def recall(self, **_kwargs) -> str:
         """Build a memory block for system-prompt injection.
 
         Injects MEMORY.md (core) plus the lightweight ``memory_summary.md``
         routing guide. Full context entries remain on demand via
-        ``memory_search``.
+        ``memory_search``. Reuse the last complete block (or empty memory) while
+        context memory is busy or unreadable so session creation does not wait
+        for maintenance or fail on a recall error.
         """
-        core = self.read_core()
-        summary = self.read_memory_summary()
-        if not core and not summary:
-            return ""
-        return self.build_memory_block(core, memory_summary=summary)
+        if not self._context_transaction_lock.acquire(blocking=False):
+            return self._recall_cache
+        try:
+            core = self.read_core()
+            summary = self.read_memory_summary()
+            self._recall_cache = self.build_memory_block(core, memory_summary=summary)
+        except Exception:
+            logger.exception("Memory recall failed; using last complete recall or empty memory")
+        finally:
+            self._context_transaction_lock.release()
+        return self._recall_cache
 
     # ── OpenClaw import ─────────────────────────────────────────
 
