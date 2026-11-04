@@ -73,6 +73,7 @@ class RequestUsageSnapshot:
     route: str
     history: tuple[str, ...]
     tools: dict[str, str]
+    request_only: tuple[str, ...] = ()
 
 
 class TokenUsage(BaseModel):

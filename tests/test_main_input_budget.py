@@ -12,7 +12,9 @@ from openai import AsyncOpenAI
 from box_agent.acp import BoxACPAgent
 from box_agent.config import derive_context_token_limit
 from box_agent.events import DoneEvent, ErrorEvent, StopReason, SummarizationEvent
-from box_agent.kernel.context_engine import _SUMMARY_REQUEST
+from box_agent.kernel.context_engine import (
+    _SUMMARY_REQUEST, _fallback_context_estimate, capture_request_usage, request_input_tokens,
+)
 from box_agent.llm import LLMClient, SessionBoundLLM
 from box_agent.retry import RetryConfig
 from box_agent.runtime import run_agent_loop
@@ -144,6 +146,114 @@ async def test_underestimated_unicode_user_input_is_blocked_without_provider_cal
     assert any(isinstance(event, ErrorEvent) for event in events)
     assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR for event in events)
     assert any(message.role == "user" and message.content == original for message in messages)
+
+
+@pytest.mark.parametrize("change", ["same", "removed", "duplicate", "text", "role", "image"])
+def test_measured_request_counts_only_new_occurrences_of_appended_content(change):
+    llm = SimpleNamespace(
+        model="model", provider="openai", api_base="https://budget.invalid/v1",
+        estimate_text_tokens=lambda text: (len(text.encode("utf-8")) + 1) // 2,
+    )
+    history = [Message(role="system", content="system"), Message(role="user", content="task")]
+    overlay = Message(role="user", source="runtime", content="memory " * 100)
+    if change == "image":
+        overlay.content = [{"type": "input_image", "data": "AAAA", "width": 64, "height": 64}]
+    usage = TokenUsage(prompt_tokens=1_000, completion_tokens=10, total_tokens=1_010)
+    usage._request_snapshot = capture_request_usage([*history, overlay], len(history), [], llm)
+    response = Message(role="assistant", content="answer", usage=usage)
+    current = [overlay.model_copy(deep=True)]
+    added = []
+    if change == "removed":
+        current = []
+    elif change == "duplicate":
+        current.append(overlay.model_copy(deep=True))
+        added = [current[-1]]
+    elif change == "text":
+        current[0].content = "changed memory " * 100
+        added = current
+    elif change == "role":
+        current[0].role = "system"
+        added = current
+    elif change == "image":
+        current[0].content[0]["data"] = "BBBB"
+        added = current
+
+    estimate = request_input_tokens([*history, response, *current], {}, llm=llm)
+    assert estimate == 1_010 + (_fallback_context_estimate(added, {}, llm=llm) if added else 0)
+
+
+@pytest.mark.parametrize("snapshot_mode", ["missing", "different-route"])
+def test_unmatched_usage_still_checks_the_full_request_with_appended_content(snapshot_mode):
+    llm = SimpleNamespace(
+        model="model", provider="openai", api_base="https://budget.invalid/v1",
+        estimate_text_tokens=lambda text: (len(text.encode("utf-8")) + 1) // 2,
+    )
+    history = [Message(role="system", content="system"), Message(role="user", content="龘 " * 5_000)]
+    overlay = Message(role="user", source="runtime", content="memory " * 100)
+    usage = TokenUsage(prompt_tokens=1_000, completion_tokens=10, total_tokens=1_010)
+    if snapshot_mode == "different-route":
+        usage._request_snapshot = capture_request_usage([*history, overlay], len(history), [], llm)
+        llm.model = "other-model"
+    messages = [*history, Message(role="assistant", content="answer", usage=usage), overlay]
+
+    estimate = request_input_tokens(messages, {}, llm=llm)
+    assert estimate == _fallback_context_estimate(messages, {}, llm=llm)
+    assert estimate > 10_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("large_result", [False, True])
+async def test_repeated_memory_does_not_compact_fitting_requests_but_new_overflow_does(large_result):
+    class ReadTool(Tool):
+        name = "read_data"
+        description = "Read data."
+        parameters = {"type": "object", "properties": {"page": {"type": "integer"}}, "required": ["page"]}
+
+        async def execute(self, page):
+            return ToolResult(success=True, content="龘 " * 5_000 if large_result else "read complete")
+
+    class Provider:
+        estimate_text_tokens = LLMClient.estimate_text_tokens
+
+        def __init__(self):
+            self.main_requests = []
+
+        async def generate_stream(self, messages, **kwargs):
+            if kwargs.get("call_kind") == "context_summary":
+                yield StreamEvent(type="text", delta="<summary>Continue the task.</summary>")
+                yield StreamEvent(type="finish", finish_reason="stop")
+                return
+            self.main_requests.append(list(messages))
+            if len(self.main_requests) < 3:
+                yield StreamEvent(
+                    type="finish", finish_reason="tool_calls",
+                    tool_calls=[ToolCall(id=f"read-{len(self.main_requests)}", type="function",
+                                         function=FunctionCall(name="read_data", arguments={"page": len(self.main_requests)}))],
+                    usage=TokenUsage(prompt_tokens=2_300, completion_tokens=30, total_tokens=2_330),
+                )
+            else:
+                yield StreamEvent(type="text", delta="done")
+                yield StreamEvent(type="finish", finish_reason="stop")
+
+    provider = Provider()
+    memory_text = "saved memory " * 230
+    memory = SimpleNamespace(auto_match_context=lambda query: [{"text": memory_text}])
+    events = [event async for event in run_agent_loop(
+        llm=provider, tools={"read_data": ReadTool()}, memory_manager=memory,
+        messages=[Message(role="system", content="system"), Message(role="user", content="task")],
+        token_limit=3_000, max_steps=3,
+    )]
+    if large_result:
+        assert any(isinstance(event, SummarizationEvent) for event in events)
+        assert not any("龘 " * 5_000 in str(message.content)
+                       for request in provider.main_requests[1:] for message in request)
+    else:
+        assert len(provider.main_requests) == 3, [
+            event for event in events if isinstance(event, (ErrorEvent, DoneEvent))
+        ]
+        assert all(sum(memory_text in str(message.content) for message in request) == 1
+                   for request in provider.main_requests)
+        assert not any(isinstance(event, (SummarizationEvent, ErrorEvent)) for event in events)
 
 
 @pytest.mark.asyncio

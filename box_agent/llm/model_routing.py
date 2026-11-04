@@ -547,6 +547,12 @@ def resolve_model_client(
         }
     try:
         client = clone_for_model(target_model, max_output_tokens=target_limit)
+        selected_window = _positive_int((selected or {}).get("contextWindow"))
+        if selected_window is not None:
+            try:
+                client.context_window = selected_window
+            except AttributeError as exc:
+                raise ValueError("selected model context window could not be bound") from exc
         record(
             "bound", diagnostic,
             actual_model=_clean_model_name(getattr(client, "model", "")),

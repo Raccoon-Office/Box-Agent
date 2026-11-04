@@ -526,6 +526,108 @@ def test_routing_reserves_the_inherited_output_limit_when_the_catalog_omits_it()
         resolve_model_client(llm, task="hello", estimated_input_tokens=721, max_output_tokens_cap=800)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_model", [False, True])
+@pytest.mark.parametrize("reference_repetitions", [100, 5_000])
+async def test_routed_child_checks_full_input_against_its_selected_model_window(
+    reference_repetitions, same_model, monkeypatch,
+):
+    import asyncio
+
+    from box_agent import runtime
+    from box_agent.events import DoneEvent, ErrorEvent, StopReason
+    from box_agent.llm import SessionBoundLLM
+    from box_agent.schema import Message
+    from box_agent.tools.sub_agent_tool import SubAgentTool
+    from tests.test_main_input_budget import wire_llm
+
+    loop_events = []
+    run_agent_loop = runtime.run_agent_loop
+
+    async def record_loop(**kwargs):
+        async for event in run_agent_loop(**kwargs):
+            loop_events.append(event)
+            yield event
+
+    monkeypatch.setattr(runtime, "run_agent_loop", record_loop)
+    async with wire_llm(context_window=100_000) as (base, requests):
+        parent = SessionBoundLLM(base)
+        selected_model = base.model if same_model else "small-model"
+        parent.set_auto_model_candidates([{
+            "model": selected_model, "tags": ["general"], "abilityLevel": 3,
+            "contextWindow": 8_000, "maxTokens": 1_000,
+        }])
+        tool = SubAgentTool(llm=parent, parent_tools={}, artifact_detection_enabled=False)
+        child, routing = tool._resolve_task_llm(task="hello", strategy="general_loop")
+        reference = "Reference: " + "龘 " * reference_repetitions
+        queue = asyncio.Queue()
+        result = await tool._run_general_loop(
+            llm=child,
+            messages=[Message(role="system", content=reference), Message(role="user", content="hello")],
+            child_tools={}, max_steps=1, max_tool_calls=None,
+            diagnostic={"strategy": "general_loop"}, queue=queue,
+            parent_tool_call_id="test-child", task_preview="hello",
+            sub_agent_id="routed-child", title="routed child",
+        )
+        assert routing["input_token_budget"] == 6_300
+        assert child.context_window == 8_000
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait().event)
+        if reference_repetitions == 5_000:
+            assert requests == []
+            assert any(isinstance(event, ErrorEvent)
+                       and event.error_code == "CONTEXT_INPUT_BUDGET_EXCEEDED" for event in events)
+            assert any(isinstance(event, DoneEvent) and event.stop_reason == StopReason.ERROR
+                       for event in loop_events)
+        else:
+            assert result.success
+            assert not any(isinstance(event, ErrorEvent) for event in events)
+            assert len(requests) == 1
+            assert requests[0]["model"] == selected_model
+            assert requests[0]["messages"][0]["content"] == reference
+        assert parent.context_window == 100_000
+        assert parent.model == "budget-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_model", [False, True])
+async def test_routing_without_a_catalog_window_preserves_the_cloned_client_capacity(same_model):
+    from box_agent.llm import SessionBoundLLM
+    from tests.test_main_input_budget import wire_llm
+
+    async with wire_llm(context_window=100_000) as (base, requests):
+        parent = SessionBoundLLM(base)
+        parent.set_auto_model_candidates([{
+            "model": base.model if same_model else "other-model",
+            "tags": ["general"], "abilityLevel": 3, "maxTokens": 1_000,
+        }])
+        child, routing = resolve_model_client(parent, task="hello")
+        assert child.context_window == (100_000 if same_model else None)
+        assert routing["context_capacity"] == "unknown"
+        assert parent.context_window == 100_000
+        assert requests == []
+
+
+def test_capacity_checked_routing_rejects_a_client_that_cannot_bind_its_window(monkeypatch):
+    class ReadOnlyClient:
+        __slots__ = ()
+        model = "small-model"
+        max_output_tokens = 1_000
+        context_window = None
+
+    parent = _DummyLLM("automatic")
+    parent.auto_model_candidates = [{
+        "model": "small-model", "tags": ["general"], "abilityLevel": 3,
+        "contextWindow": 8_000, "maxTokens": 1_000,
+    }]
+    monkeypatch.setattr(parent, "for_model", lambda *args, **kwargs: ReadOnlyClient())
+    with pytest.raises(ValueError, match="AUTO_MODEL_BINDING_FAILED"):
+        resolve_model_client(parent, task="hello")
+    assert parent.context_window == 180_000
+    assert parent.model == "model-automatic"
+
+
 @pytest.mark.parametrize("failure", ["unavailable", "raises"])
 def test_capacity_checked_routing_does_not_fall_back_to_the_original_client_on_binding_failure(monkeypatch, failure):
     llm = _DummyLLM("small")

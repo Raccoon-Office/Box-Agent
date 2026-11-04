@@ -62,6 +62,7 @@ from .context_engine import (
     _is_compaction_metadata,
     _validate_transient_followup_result,
     capture_request_usage,
+    request_input_tokens,
 )
 from .ports import KernelServices
 from .tool_messages import ToolMessageCommitter, session_log_messages
@@ -1102,7 +1103,7 @@ async def _run_agent_loop_impl(
             return False
         return not cancelled()
 
-    async def compact_context(history_token_limit, *, force=False, estimate_tools=None):
+    async def compact_context(history_token_limit, *, force=False, estimate_tools=None, skip_check=False):
         """Apply one compaction through the same durable surface/event path."""
         nonlocal api_total_tokens, api_prompt_tokens, summary_failure_cooldown_steps
         # Context may project effective rules before estimation and summary.
@@ -1132,6 +1133,7 @@ async def _run_agent_loop_impl(
             allow_llm_summary=summary_failure_cooldown_steps == 0,
             before_summary=before_summary,
             force=force, estimate_tools=estimate_tools,
+            skip_check=skip_check,
             summary_input_token_limit=token_limit,
             summary_projector=getattr(context_engine, "prepare_summary", None),
         ))
@@ -1474,6 +1476,12 @@ async def _run_agent_loop_impl(
                 compaction_limit,
                 force=force_compaction,
                 estimate_tools=budget_tools_by_name,
+                # Matched usage may already contain request-only content. A
+                # fitting full request must not reserve that content again
+                # when comparing history against its smaller sub-budget.
+                skip_check=(not projection.blocked_reason and request_input_tokens(
+                    projection.messages, budget_tools_by_name, llm=llm,
+                ) <= token_limit),
             )
             context_compacted = result.messages is not None
             if summarization_event is not None:

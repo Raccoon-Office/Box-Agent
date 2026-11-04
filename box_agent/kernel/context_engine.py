@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+from collections import Counter
 from typing import Any, Callable, Final
 
 from ..cache_fingerprint import sha256_fingerprint
@@ -530,6 +531,11 @@ def _message_fingerprint(message: Message) -> str:
     return hashlib.sha256(_summary_message_text(message).encode("utf-8")).hexdigest()
 
 
+def _request_only_fingerprint(message: Message) -> str:
+    # Budget serialization omits image data; reuse requires the actual content.
+    return sha256_fingerprint((_message_fingerprint(message), message.content))
+
+
 def capture_request_usage(
     messages: list[Message], history_length: int, tools: list[Tool], llm: Any,
 ) -> RequestUsageSnapshot | None:
@@ -539,6 +545,7 @@ def capture_request_usage(
         route=_usage_route(llm),
         history=tuple(_message_fingerprint(message) for message in messages[:history_length]),
         tools={tool.name: sha256_fingerprint(tool.to_openai_schema()) for tool in tools},
+        request_only=tuple(_request_only_fingerprint(message) for message in messages[history_length:]),
     )
 
 
@@ -569,12 +576,23 @@ def _estimate_context_from_latest_response(
             changed_messages.extend(messages[index + 1 :])
             if not (usage.output_tokens or usage.completion_tokens):
                 changed_messages.insert(0, messages[index])
+            # Usage already includes the previous request's appended content.
+            # Reuse each measured occurrence at most once, charging new copies
+            # and changed content without subtracting guessed token counts.
+            measured_request_only = Counter(snapshot.request_only)
+            unmeasured_messages = []
+            for message in changed_messages:
+                fingerprint = _request_only_fingerprint(message)
+                if measured_request_only[fingerprint]:
+                    measured_request_only[fingerprint] -= 1
+                else:
+                    unmeasured_messages.append(message)
             changed_tools = {
                 name: tool for name, tool in (tools or {}).items()
                 if snapshot.tools.get(name) != sha256_fingerprint(tool.to_openai_schema())
             }
-            delta = (_fallback_context_estimate(changed_messages, changed_tools, llm=llm)
-                     if changed_messages or changed_tools else 0)
+            delta = (_fallback_context_estimate(unmeasured_messages, changed_tools, llm=llm)
+                     if unmeasured_messages or changed_tools else 0)
             return usage.context_tokens + delta, "usage"
         fallback = _fallback_context_estimate(messages, tools, llm=llm)
         if snapshot is not None:

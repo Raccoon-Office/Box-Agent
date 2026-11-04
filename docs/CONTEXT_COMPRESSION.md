@@ -301,6 +301,8 @@ does not establish capacity safety. Known-capacity diagnostics include
 estimates and do not replace the full-request accounting and compaction below.
 If a capacity-checked model cannot be bound, `AUTO_MODEL_BINDING_FAILED` stops
 the call instead of silently inheriting the previous, unverified client budget.
+The resolved client also receives the selected candidate's known context window,
+so child loops apply that model's limit to the complete request after assembly.
 
 ### Explaining a model-routing decision
 
@@ -377,7 +379,9 @@ input_tokens
 + output_tokens
 ```
 
-When usage has a request snapshot for the same route, the runtime starts with measured usage and adds estimates for new or changed messages and new or changed offered tool schemas. Removed material is left in the baseline until the next provider response updates it. Snapshots are kept in memory. Without a usable snapshot the runtime estimates the complete request, retaining unpaired usage from older sessions and low-level callers as a protective floor.
+When usage has a request snapshot for the same route, the runtime starts with measured usage and adds estimates for new or changed messages and new or changed offered tool schemas. Appended request-only messages are fingerprinted too: each unchanged occurrence already covered by usage is counted once; additional copies or changed content are charged. Removed material is left in the baseline until the next provider response updates it. Snapshots are kept in memory. Without a usable snapshot the runtime estimates the complete request, retaining unpaired usage from older sessions and low-level callers as a protective floor.
+
+When the fully assembled request fits the input budget, the default compactor skips its history-only threshold check. This prevents reserving appended content a second time against a usage baseline that already includes it. A blocked or oversized request still goes through bounded compaction and full-request rechecking.
 
 The standard client estimates text at one token per two UTF-8 bytes, rounded up, with the legacy character/byte estimate as a floor. This offline approximation can overestimate or underestimate actual usage. Custom clients may provide `estimate_text_tokens(text)`. Custom clients without a synchronous counter still use the byte bound. Low-level estimates without a client retain the legacy heuristic. Images are estimated separately. Skill overlays use the same counter as the final request. Compaction tries to shorten the existing summary to leave room for request assembly, then the final request is checked against the full input budget.
 
