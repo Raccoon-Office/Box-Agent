@@ -23,9 +23,12 @@ _FILTER = _SDKFilter()
 @contextmanager
 def private_payload_scope():
     """Suppress unsafe SDK diagnostics only inside a capability's async scope."""
-    # Core diagnostics can include raw response tails outside AgentLogger.
-    names = {"box_agent.core", "httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2", "httpcore.proxy",
-             "openai._base_client", "anthropic._base_client"}
+    # Core diagnostics and Bash logs can contain raw model/tool payloads.
+    names = {
+        "box_agent.core", "box_agent.tools.bash_tool", "httpx", "httpcore.connection",
+        "httpcore.http11", "httpcore.http2", "httpcore.proxy",
+        "openai._base_client", "anthropic._base_client",
+    }
     for name in tuple(logging.Logger.manager.loggerDict):
         if name.startswith(("openai.", "anthropic.", "httpcore.", "box_agent.llm.")):
             names.add(name)

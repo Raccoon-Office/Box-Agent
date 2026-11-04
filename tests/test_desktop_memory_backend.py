@@ -596,7 +596,7 @@ async def test_durable_unknown_qa_receipt_is_preserved_without_agent_retry(host)
 
 
 @pytest.mark.parametrize("operation", ["qa", "qa/evidence", "turn/close", "visibility/revoke"])
-@pytest.mark.parametrize("code", ["TURN_REVOKED", "AUTH_REQUIRED"])
+@pytest.mark.parametrize("code", ["TURN_REVOKED", "AUTH_REQUIRED", "MEMORY_SESSION_RETIRED"])
 async def test_old_background_rejection_only_revokes_the_matching_turn(host, operation, code):
     manager = backend(host)
     try:
@@ -768,19 +768,20 @@ async def test_real_tool_result_and_qa_credentials_never_reach_host_handoff(tmp_
         log.close()
 
 
-async def test_authentication_revocation_clears_preload_and_core_qualification(host):
+@pytest.mark.parametrize("code", ["AUTH_REQUIRED", "MEMORY_SESSION_RETIRED"])
+async def test_authentication_revocation_clears_preload_and_core_qualification(host, code):
     manager = backend(host)
 
     async def denied(operation, payload):
         if operation == "search":
             return httpx.Response(403, json={"protocol": 2, "identity_epoch": host.bootstrap["identity_epoch"], "ok": False,
-                                            "error": {"code": "AUTH_REQUIRED"}})
+                                            "error": {"code": code}})
 
     try:
         engine, history = await start_turn(manager)
         await qualify(manager, engine, history)
         host.before = denied
-        with pytest.raises(MemoryProxyError, match="AUTH_REQUIRED"):
+        with pytest.raises(MemoryProxyError, match=code):
             await manager.search_memory("query")
         assert manager.current_scope is None and manager._preload(16000) == ""
         with pytest.raises(MemoryProxyError, match="CORE_READ_REQUIRED"):
@@ -993,7 +994,7 @@ async def test_desktop_acp_trace_does_not_persist_private_qa(tmp_path, monkeypat
         await process.aclose()
 
 
-@pytest.mark.parametrize("code", ["AUTH_REQUIRED", "IDENTITY_CHANGED", "MEMORY_DISABLED"])
+@pytest.mark.parametrize("code", ["AUTH_REQUIRED", "IDENTITY_CHANGED", "MEMORY_DISABLED", "MEMORY_SESSION_RETIRED"])
 async def test_revocation_removes_preload_from_next_model_request(tmp_path, host, code):
     from copy import deepcopy
 

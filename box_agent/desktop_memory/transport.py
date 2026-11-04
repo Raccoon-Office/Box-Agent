@@ -256,7 +256,10 @@ class MemoryHostTransport:
             # wait_for also supports the repository's Python 3.10 floor.
             return await asyncio.wait_for(send(), timeout=spec.timeout if timeout is None else timeout)
         except MemoryProxyError as error:
-            if self.on_revoked is not None and error.code in {"AUTH_REQUIRED", "IDENTITY_CHANGED", "SESSION_REVOKED", "TURN_REVOKED", "MEMORY_DISABLED"}:
+            if self.on_revoked is not None and error.code in {
+                "AUTH_REQUIRED", "IDENTITY_CHANGED", "SESSION_REVOKED", "MEMORY_SESSION_RETIRED",
+                "TURN_REVOKED", "MEMORY_DISABLED",
+            }:
                 self.on_revoked(error.code, payload)
             raise
         except asyncio.CancelledError:

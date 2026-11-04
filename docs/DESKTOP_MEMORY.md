@@ -38,6 +38,8 @@ Injection diagnostics contain IDs and character counts, never text. Unknown mode
 
 The private diagnostic scope also suppresses raw core-loop diagnostics, including suspected-truncation response tails. Ordinary core diagnostics outside that async scope retain their configured behavior.
 
+Bash diagnostics can contain command text and are suppressed in the private scope as well. A Host `MEMORY_SESSION_RETIRED` rejection clears the session's preload and read qualifications. The Host also uses that code when an Experience job's source session is retired; since the response does not distinguish the two cases, this rejection conservatively clears memory for the current turn. After a full batch of three Experience claims, the producer schedules a bounded delayed scan even when every claim returned a job; unknown outcomes still stop advancement.
+
 ## Verification boundary
 
 Focused checks: `uv run pytest tests/test_desktop_memory_launch.py tests/test_desktop_memory_attempts.py tests/test_desktop_memory_backend.py tests/test_desktop_memory_transport.py tests/test_desktop_memory_visibility.py tests/test_desktop_memory_evidence.py tests/test_desktop_memory_experience.py tests/test_desktop_memory_windows_files.py tests/test_cli_config.py -q`.

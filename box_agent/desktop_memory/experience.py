@@ -103,7 +103,6 @@ class ExperienceRuntime:
         try:
             async with slot:
                 # Release the shared slot between bounded scans.
-                more_pages = False
                 for page in range(3):
                     if self.closed:
                         return
@@ -111,11 +110,9 @@ class ExperienceRuntime:
                     job = result.get("job")
                     if not isinstance(job, dict):
                         if result.get("more"):
-                            more_pages = True
                             await asyncio.sleep(0.1 * (2 ** page))
                             continue
                         return
-                    more_pages = False
                     if job.get("pipeline_version") != _PIPELINE_VERSION:
                         _log.warning("memory operation=experience reason=unsupported_pipeline")
                         return
@@ -182,7 +179,9 @@ class ExperienceRuntime:
                         _log.warning("memory operation=experience reason=stage_budget")
                         return
                 _log.info("memory operation=experience reason=page_budget")
-                return more_pages
+                # The last claim may have returned a job without indicating
+                # whether further jobs remain. Continue after every full batch.
+                return True
         except asyncio.CancelledError:
             raise
         except Exception as error:

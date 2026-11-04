@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 
 import pytest
 
@@ -71,6 +72,33 @@ async def test_private_scope_isolated_between_concurrent_tasks_and_resets_on_exc
         assert not private_payloads()
 
     await asyncio.gather(private(), ordinary())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell command")
+async def test_private_bash_truncation_does_not_log_command(tmp_path, caplog):
+    from box_agent.tools.bash_tool import BashTool
+
+    caplog.set_level(logging.WARNING, logger="box_agent.tools.bash_tool")
+    tool = BashTool(workspace_dir=str(tmp_path))
+    command = "printf 'SYNTHETIC_PRIVATE_COMMAND'; printf 'x%.0s' {1..60000}"
+    with private_payload_scope():
+        result = await tool.execute(command=command)
+    assert result.success
+    assert "SYNTHETIC_PRIVATE_COMMAND" not in caplog.text
+
+    result = await tool.execute(command=command)
+    assert result.success
+    assert "SYNTHETIC_PRIVATE_COMMAND" in caplog.text
+
+
+def test_private_bash_spawn_diagnostics_are_suppressed(caplog):
+    logger = logging.getLogger("box_agent.tools.bash_tool")
+    caplog.set_level(logging.INFO, logger=logger.name)
+    with private_payload_scope():
+        logger.info("bash/spawn shell=powershell cmd=%r", "SYNTHETIC_PRIVATE_COMMAND")
+    assert "SYNTHETIC_PRIVATE_COMMAND" not in caplog.text
+    logger.info("bash/spawn shell=powershell cmd=%r", "SYNTHETIC_ORDINARY_COMMAND")
+    assert "SYNTHETIC_ORDINARY_COMMAND" in caplog.text
 
 
 def test_bootstrap_path_and_epoch_are_redacted_from_parent_config_display():

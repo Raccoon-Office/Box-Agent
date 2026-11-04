@@ -163,6 +163,36 @@ async def test_continuation_claims_fourth_page_without_a_new_turn(monkeypatch):
         runtime.close()
 
 
+async def test_continuation_processes_fourth_ready_job_without_a_new_turn(monkeypatch):
+    tasks, completed = set(), []
+    done = asyncio.Event()
+
+    class QueuedTransport:
+        async def request(self, operation, payload):
+            if payload["action"] == "claim":
+                if len(completed) == 4:
+                    return {"job": None}
+                return {"job": {"event_id": str(len(completed)), "lease_token": "lease",
+                                "pipeline_version": "desktop-experience-v2", "frozen": True}}
+            if payload["action"] == "advance":
+                completed.append(payload["event_id"])
+                if len(completed) == 4:
+                    done.set()
+                return {"state": "COMMITTED"}
+            return {}
+
+    monkeypatch.setattr("box_agent.desktop_memory.experience._PAGE_RETRY_DELAY", 0.001)
+    runtime = ExperienceRuntime(QueuedTransport())
+    try:
+        runtime.schedule("delivery", Model(), 100000, tasks)
+        await asyncio.wait_for(done.wait(), 2)
+        await finish(tasks)
+        assert completed == ["0", "1", "2", "3"]
+        assert runtime._continuation is None
+    finally:
+        runtime.close()
+
+
 async def test_new_turn_replaces_pending_continuation_without_duplicate_scans(monkeypatch):
     transport, model, tasks = Transport(), Model(), set()
     pages = 0
