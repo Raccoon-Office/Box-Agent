@@ -99,6 +99,14 @@ class FixtureLLM:
         users = "\n".join(str(message.content) for message in messages if message.role == "user")
         has_results = any(message.role == "tool" for message in messages)
         mode = scenario.get()
+        if mode == "input_context":
+            record_lifecycle("model_input", messages=[message.model_dump(mode="json") for message in messages])
+            if not has_results:
+                yield StreamEvent(type="text", delta="CONTEXT_READY")
+                await asyncio.sleep(0.5)
+                yield StreamEvent(type="finish", finish_reason="tool_use",
+                                  tool_calls=[call("fixture_count", {"n": 1}, 0)])
+                return
         if "fixture-leaf" in users and not has_results:
             name = "fixture_nested" if mode == "nested" else "fixture_count"
             leaf = int(re.search(r"fixture-leaf (\d+)", users)[1])
@@ -317,7 +325,9 @@ def main():
 
     install_fixture(acp, root)
     config = Config(
-        llm=LLMConfig(api_key="synthetic-test-key", model="desktop-fixture"),
+        # Protocol fixtures include complete large snapshots plus supplements.
+        # Declare a model window that fits them; production budget checks stay on.
+        llm=LLMConfig(api_key="synthetic-test-key", model="desktop-fixture", context_window=1_000_000),
         agent=AgentConfig(workspace_dir=str(root / "profile/workspaces"), max_steps=5,
                           enable_memory=False, enable_memory_extraction=False,
                           memory_maintainer_enabled=False, memory_promotion_proposal_enabled=False),

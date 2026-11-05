@@ -189,6 +189,7 @@ from box_agent.session_log import SessionLog, run_session_io
 from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import import_continuation_images, parse_session_continuation
 from box_agent.session_history import prompt_fingerprint, revision_request, revise_agent_history
+from box_agent.input_context import normalize_input_context, original_request, project_input_context
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -2603,6 +2604,7 @@ class BoxACPAgent:
     ) -> PromptResponse:
         self._require_accepting_requests()
         params = PromptRequest(session_id=session_id, prompt=prompt, field_meta=meta or None)
+        context = normalize_input_context(meta)
         if any(session_id in handles for handles in self._session_bindings_in_progress.values()):
             raise _session_busy_error(session_id, rebinding=True)
         state = self._sessions.get(session_id)
@@ -2653,12 +2655,18 @@ class BoxACPAgent:
             turn_id = _meta_string(meta, "turn_id", "turnId")
             if log_store is not None and turn_id:
                 if log_store.has_turn_binding(turn_id):
+                    binding = next(event["data"] for event in log_store.events
+                                   if event["type"] == "turn/binding" and event["data"].get("turn_id") == turn_id)
+                    if binding.get("prompt_fingerprint") != prompt_fingerprint(params.prompt, context):
+                        raise ValueError("TURN_IDEMPOTENCY_CONFLICT")
                     raise ValueError("TURN_ALREADY_ACCEPTED")
                 log_store.append("turn/binding", {
                     "turn_id": turn_id,
-                    "prompt_fingerprint": prompt_fingerprint(params.prompt),
+                    "prompt_fingerprint": prompt_fingerprint(params.prompt, context),
                 })
                 log_store.flush()
+            if log_store is not None and context:
+                log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
             return await self._prompt_for_session(params, session_id, state)
         except Exception as exc:
             if edit is not None:
@@ -2686,7 +2694,7 @@ class BoxACPAgent:
             return revision_request(
                 list(log_store.events), target_turn_id=edit["target_turn_id"], turn_id=turn_id,
                 expected_revision_id=edit["expected_revision_id"],
-                fingerprint=prompt_fingerprint(params.prompt),
+                fingerprint=prompt_fingerprint(params.prompt, normalize_input_context(params.field_meta)),
             )
         checked_revision()
         if log_store.has_turn_binding(turn_id):
@@ -2761,16 +2769,19 @@ class BoxACPAgent:
         state.wrap_up_requested = False
         prompt_images = _prompt_image_blocks(params.prompt)
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
+        prompt_meta = getattr(params, "field_meta", None) or {}
+        context = normalize_input_context(prompt_meta)
+        request_text = original_request(user_text, context)
         # Judge the language on the user's own words, before host prefixes are added.
-        hints = turn_hints(user_text)
-        plan_detection_text = _latest_user_request_for_plan_detection(user_text)
+        hints = turn_hints(request_text)
+        plan_detection_text = (request_text if "input_context" in context
+                               else _latest_user_request_for_plan_detection(user_text))
         source_binding_text = (
             _user_source_text_for_binding(user_text)
-            if not state.source_text.strip()
+            if "input_context" not in context and not state.source_text.strip()
             else plan_detection_text
         )
         _bind_user_source_text(state, source_binding_text)
-        prompt_meta = getattr(params, "field_meta", None) or {}
         if not state.utility_session:
             selected_connector_ids = _connector_ids_from_meta(prompt_meta)
             if selected_connector_ids is not None:
@@ -2797,7 +2808,7 @@ class BoxACPAgent:
                 f"{user_text}"
             )
         # Host-only language guidance must not influence semantic skill routing.
-        skill_selection_text = user_text
+        skill_selection_text = request_text if "input_context" in context else user_text
         if (
             user_decision_response is not None
             and user_decision_response["decision_kind"] == "presentation_mode"
@@ -3235,6 +3246,7 @@ class BoxACPAgent:
         state.preloaded_skill_attributions.clear()
         self._sync_cache_fingerprint_context(state)
 
+        user_text = project_input_context(user_text, context)
         if image_attachment_context:
             user_text = f"{user_text}\n\n{image_attachment_context.text}"
         attachment_images = image_attachment_context.image_content if image_attachment_context else None
@@ -3770,16 +3782,26 @@ class BoxACPAgent:
                 return {"error": "empty_text"}
             if not state.turn_active:
                 return {"error": "no_active_turn"}
+            try:
+                context = normalize_input_context(params.get("_meta"))
+            except ValueError as exc:
+                return {"error": str(exc)}
             # Idempotency: a host retrying after a lost/timed-out response with the
             # same injectionId must not enqueue (or re-run) the instruction twice.
             # Covers both still-pending and already-consumed items within the turn.
-            if not state.inject_queue.submit({"id": injection_id, "content": text}):
+            try:
+                submitted = state.inject_queue.submit({"id": injection_id, "content": text, "input_context": context or None})
+            except ValueError as exc:
+                return {"error": str(exc)}
+            if not submitted:
                 log.info(
                     "session/inject_dedup",
                     session_id=session_id,
                     injection_id=injection_id,
                 )
                 return {"ok": True, "injectionId": injection_id, "deduplicated": True}
+            if context and state.agent.session_log is not None:
+                state.agent.session_log.append("input/context", {"injection_id": injection_id, **context}, ignorable=True)
             log.info(
                 "session/inject",
                 session_id=session_id,
