@@ -28,6 +28,16 @@ def _isolated_user_state(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("HOME", str(test_home))
 
 
+@pytest.fixture
+def isolated_plugin_profile(monkeypatch, tmp_path):
+    """Keep plugin state and owned caches together, independent of host overrides."""
+    profile = tmp_path / "home"
+    monkeypatch.setenv("BOX_AGENT_HOME", str(profile))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(profile / "browsers"))
+    monkeypatch.setenv("BOX_AGENT_SKILL_TOOLS_ROOT", str(profile / "skill-tools"))
+    return profile
+
+
 @pytest.fixture(autouse=True)
 def _disable_session_trace_unless_test_enables_it(monkeypatch):
     """Keep ordinary tests from writing durable diagnostics into the real home."""

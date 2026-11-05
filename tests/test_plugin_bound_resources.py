@@ -27,8 +27,7 @@ def _configuration():
 
 
 @pytest.fixture
-def package(tmp_path, monkeypatch):
-    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "home"))
+def package(tmp_path, monkeypatch, isolated_plugin_profile):
     monkeypatch.delenv(ACTIVATION_ENV, raising=False)
     monkeypatch.delenv("BOX_AGENT_DISABLE_PLUGINS", raising=False)
     root = tmp_path / "package"

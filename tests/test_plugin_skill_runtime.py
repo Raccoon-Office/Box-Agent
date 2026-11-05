@@ -32,8 +32,7 @@ def configuration(**overrides):
 
 
 @pytest.fixture
-def installed(tmp_path, monkeypatch):
-    monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path / "home"))
+def installed(tmp_path, monkeypatch, isolated_plugin_profile):
     monkeypatch.delenv(ACTIVATION_ENV, raising=False)
     monkeypatch.delenv("BOX_AGENT_DISABLE_PLUGINS", raising=False)
     root = tmp_path / "package"
@@ -546,6 +545,32 @@ def test_acp_startup_confirms_text_only_plugin_when_bash_is_disabled(installed, 
     assert confirmed.skills
     assert installed.activation_status()["activation"]["status"] == "active"
     assert installed.activation_status()["runtime"]["healthy"] is True
+
+
+def test_plugin_startup_isolates_inherited_host_caches(tmp_path, monkeypatch, request):
+    from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+    from box_agent.plugins.skill_sources import confirm_acp_plugin_startup
+
+    foreign_browser = tmp_path / "host-browser-cache"
+    foreign_tools = tmp_path / "host-skill-tools"
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(foreign_browser))
+    monkeypatch.setenv("BOX_AGENT_SKILL_TOOLS_ROOT", str(foreign_tools))
+    # Request the fixture after the host overrides exist, as they do in CI.
+    service = request.getfixturevalue("installed")
+    candidate = service.prepare_apply(service.activation_status()["profile_revision"], "host-cache")
+    monkeypatch.setenv(ACTIVATION_ENV, candidate["activation_id"])
+    config = Config(llm=LLMConfig(api_key="fixture"), tools=ToolsConfig(), agent=AgentConfig())
+    plan = load_plugin_skill_plan(config)
+    loader = SkillLoader(sources=[], **plan.loader_arguments())
+    loader.discover_skills()
+
+    confirmed = confirm_acp_plugin_startup(config, loader, [], object())
+
+    assert confirmed.skills
+    assert service.activation_status()["activation"]["status"] == "active"
+    assert service.activation_status()["runtime"]["healthy"] is True
+    assert not foreign_browser.exists()
+    assert not foreign_tools.exists()
 
 
 def test_active_plugin_missing_tool_environment_degrades_without_stopping_host(installed, monkeypatch):
