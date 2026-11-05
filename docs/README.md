@@ -40,6 +40,8 @@ contracts.
 Start with the [ACP integration index](INTEGRATION.md), then open the specific
 wire contract:
 
+- [Structured input and selection policy](integration/acp-sdk-0.12.md#2a输入事实与-agent-职责): `input_context`,
+  `selection_context`, `database_context`, projection and idempotency.
 - [Host progress events](integration/host-progress-events.md): sub-agent, plan,
   todo, goal, and other structured tool activity.
 - [Artifact protocol](ARTIFACT_PROTOCOL.md): generated file discovery and host
