@@ -200,7 +200,7 @@ env -u ELECTRON_RUN_AS_NODE -u RACCOON_PLUGIN_DEVELOPER_TOOLS \
 
 ## 8. 真实客户端和模型验收
 
-先安装自己的插件，不必安装 PPT。新 profile 没有 PPT 是预期，因为 PPT 已作为独立插件分发；若另做 PPT 回归，按 `plugins/ppt/README.md` 准备完整依赖。
+先安装自己的插件，不必安装独立 PPT 插件。新 profile 仍保留八个内置 PPT 兼容入口；看到这些入口不代表独立 PPT 插件已安装或激活。若另做独立 PPT 插件回归，按 `plugins/ppt/README.md` 准备完整依赖，并按开发指南第 8 节核对别名绑定与真实启动确认。
 
 | 编号 | 操作 | 必须观察到的结果 |
 | --- | --- | --- |
