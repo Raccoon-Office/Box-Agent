@@ -35,9 +35,14 @@ MANIFEST_PATH = SKILLS_DIR / "_manifest.json"
 # invisible to ordinary sessions. Marketplace installation copies those skills
 # into ~/.box-agent/skills/, where the user source is discovered independently
 # of this builtin whitelist.
-# PPT is delivered through plugins/ppt and activated by an external instance.
-# Its eight legacy resource directories remain on disk for migration only;
-# none of their names belongs in this active builtin allowlist.
+# Keep existing PPT entry points available to core-only upgrades. An active
+# plugin generation takes ownership through its aliases; copying or installing
+# a separate package alone must not remove an existing capability.
+PLUGIN_COMPATIBILITY_SKILL_NAMES: frozenset[str] = frozenset(
+    {"pptx", "ppt-fast", *(
+        f"sn-ppt-{name}" for name in ("entry", "tools", "story", "standard", "dazzle", "doctor")
+    )}
+)
 BUILTIN_SKILL_NAMES: frozenset[str] = frozenset(
     {
         "browser-use",
@@ -55,7 +60,7 @@ BUILTIN_SKILL_NAMES: frozenset[str] = frozenset(
         "scheduled-task",
         "xlsx",
     }
-)
+) | PLUGIN_COMPATIBILITY_SKILL_NAMES
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
@@ -173,6 +178,7 @@ def main() -> int:
         "schema_version": 1,
         "box_agent_version": _read_box_agent_version(),
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "plugin_compatibility_names": sorted(PLUGIN_COMPATIBILITY_SKILL_NAMES),
         "skills": [],
     }
     for name, rel in entries:

@@ -20,9 +20,10 @@ package, containing the eight PPT Skills, exporters, fonts, and notices.
 Its dependency-free HTML page supports Schema-validated JSON configuration and
 an informational view for a parameter-free plugin. Copy the directory, change
 its package and Skill identities, and follow its README before installing it.
-The example and this guide ship with the source distribution; the wheel and
-standalone runtime contain the host implementation, while PPT remains a
-separate plugin artifact.
+The example and this guide ship with the source distribution. The wheel and
+standalone runtime contain the host implementation and builtin PPT compatibility
+resources; the independent PPT plugin remains a separate distribution artifact.
+Upgrading the core does not install or activate that external package.
 
 The installer copies a package into a content-addressed, read-only directory.
 The digest covers resource names, executable flags, and bytes, including the
@@ -39,9 +40,47 @@ distribution ZIP files outside the managed package store first.
   the same public alias. Disabling an instance keeps its aliases unavailable;
   old builtin or user resources with those names cannot reappear.
 
-The builtin manifest no longer activates the eight PPT resources. Their old
-source files remain for migration/reference, but ordinary discovery ignores
-them. The plugin package is distributed separately from the core runtime.
+## Migrating an existing builtin capability
+
+The builtin manifest retains `pptx`, `ppt-fast`, `sn-ppt-entry`, `sn-ppt-story`,
+`sn-ppt-standard`, `sn-ppt-dazzle`, `sn-ppt-tools`, and `sn-ppt-doctor` as a
+compatibility path. A core-only upgrade with an empty plugin store must retain
+these entry points and their resources. Package authoring, installation, and
+candidate preparation alone do not complete a migration.
+
+A complete PPT migration installs the fixed external package, prepares its host
+dependencies, exposes all eight contributions, binds all eight legacy names
+using the [PPT alias mapping](../plugins/ppt/README.md), and confirms activation
+through a real host restart. A deployment with partial or no aliases is
+coexistence: only the bound names are replaced, and unbound builtin entry points
+remain available. Namespaced plugin entries can coexist with those builtins.
+
+| Deployment or startup state | Expected PPT entry points |
+| --- | --- |
+| New core install, or core-only upgrade; empty plugin store | All eight builtin compatibility entries remain discoverable and callable, subject to ordinary Skill preferences and access checks. |
+| External package installed, configuration saved, or candidate prepared; not activated | The previous active state remains in use; a previously builtin-only deployment keeps its builtin entries. |
+| Full eight-name migration confirmed by the host | The active plugin owns all eight public names; the builtin copies are hidden. |
+| Partial/no alias deployment confirmed by the host | Bound names use the plugin; unbound builtin names remain. This is not a complete PPT migration. |
+| Candidate fails validation or startup | Retain the prior active snapshot, including the builtin path if no external generation was previously active. |
+| Instance disabled and applied | Its aliases remain unavailable as tombstones; do not reveal same-name builtin or user resources. |
+| Active snapshot is readable, but package verification or runtime loading fails | Keep its known aliases suppressed and report the plugin failure; unbound builtin capabilities remain available. |
+| Plugin state cannot be read reliably | Suppress the host manifest's `plugin_compatibility_names` conservatively and report the failure. Unknown alias ownership is not evidence of a fresh install. |
+| Explicit safe mode: `BOX_AGENT_DISABLE_PLUGINS=1` | Bypass external state/packages and intentionally restore builtin compatibility entries, subject to ordinary Skill preferences and access checks. Do not rewrite plugin state or claim successful migration. |
+
+`plugin_compatibility_names` belongs to the generated **host builtin manifest**,
+not `plugin.yaml`. It lists builtin fallback names to suppress only when plugin
+state cannot be trusted; the current list is the eight PPT names above. A
+readable snapshot supplies its own exact alias ownership instead. If the host
+compatibility catalog itself cannot be verified, repair the host runtime rather
+than treating it as an empty list and silently restoring old capabilities.
+
+The platform owns delivery of the external package and dependencies and must
+verify the actual core/client artifacts across these states. Preserve the
+compatibility resources and public discovery entries until the supported
+upgrade paths provide and activate the replacement. A successful authoring
+check, an installable package, or a documented manual migration does not justify
+removing an existing default capability. Keep the compatibility resources
+maintained while they remain a supported path.
 
 The protected PPT image-manifest synchronizer follows each exposed `pptx`
 entry contribution, including namespaced entries without public aliases. Its
@@ -92,7 +131,8 @@ An installation request includes `instance_id`, `package_path`, `enabled`,
 `request_id`, optional `config`, `expose`, and `aliases`. Updating an existing
 instance requires `expected_revision`. Alias keys are public names; values are
 contribution IDs from that package. Use the PPT README's complete alias mapping
-when migrating the old PPT entry points.
+when migrating all old PPT entry points; partial bindings preserve coexistence
+as described above.
 
 An import request provides `config_path`, `expected_profile_revision`, and
 `request_id`; `initialize_only: true` rejects an already configured profile.
@@ -127,10 +167,15 @@ reply or application restart instead of inferring success from elapsed time.
 
 Set `BOX_AGENT_DISABLE_PLUGINS=1` before starting the host to enter safe mode.
 This bypasses external resource loading even when plugin state is corrupt.
+It explicitly restores the builtin compatibility path; ordinary Skill usage
+preferences and permissions still apply. Safe mode does not alter saved or
+active plugin state and is not confirmation that an external plugin works.
 Management remains a separate process. A package-content error can be handled
 by disabling its instance; structurally corrupted state returns `config_corrupt`
-and must be recovered from a known backup. Do not silently rewrite corrupted
-state or replay interrupted business operations.
+and must be recovered from a known backup. In normal mode, unreadable state
+keeps the host-declared compatibility names unavailable instead of silently
+falling back to builtin PPT. Do not silently rewrite corrupted state or replay
+interrupted business operations.
 
 Restoring a task after a Skill becomes unavailable retains the historical
 conversation and reports the unavailable capability in the next request.
@@ -146,7 +191,8 @@ readable; they are not rewritten to invent missing operator information.
 The active process reads frozen Skill bodies and configuration. Source changes
 are rejected rather than hot-loaded. Package verification failures isolate
 external Skills and report an unhealthy plugin runtime; normal host capabilities
-remain available. Managed resources are protected by the existing file/shell
+remain available except for aliases and compatibility names suppressed by the
+failure rules above. Managed resources are protected by the existing file/shell
 write guards. These guards and read-only files are not an OS sandbox for hostile
 code. Phase one accepts trusted internal packages.
 

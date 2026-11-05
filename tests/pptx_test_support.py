@@ -18,7 +18,7 @@ def ppt_plugin_loader(settings_path: Path):
     """Compose the real package with explicit compatibility aliases for tests.
 
     Installation/immutability is covered separately by package tests. Content
-    contract tests read package sources instead of inactive builtin copies.
+    contract tests read plugin sources instead of the core-upgrade compatibility copies.
     """
     from box_agent.plugins.manifest import load_manifest
     from box_agent.plugins.skill_sources import build_skill_plan

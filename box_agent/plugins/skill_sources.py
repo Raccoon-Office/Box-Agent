@@ -23,6 +23,7 @@ from ..tools.skill_loader import RESERVED_BUILTIN_SKILL_NAMES, Skill, SkillLoade
 log = logging.getLogger(__name__)
 ACTIVATION_ENV = "BOX_AGENT_PLUGIN_ACTIVATION_ID"
 _REFERENCE = re.compile(r"\{\{skill:([a-z0-9_]+)\}\}")
+_BUILTIN_MANIFEST = Path(__file__).resolve().parents[1] / "skills" / "_manifest.json"
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,25 @@ def plugin_settings_service(config: Any = None):
     return PluginSettingsService(root, target_id=target_id, profile_id=profile_id)
 
 
+def _builtin_compatibility_names() -> frozenset[str]:
+    """Read host-owned migration names without trusting a broken plugin store."""
+    from .manifest import PluginError
+
+    try:
+        manifest = json.loads(_BUILTIN_MANIFEST.read_text(encoding="utf-8"))
+        names = manifest["plugin_compatibility_names"]
+        builtins = {item["name"] for item in manifest["skills"]}
+        if (not isinstance(names, list) or any(not isinstance(name, str) for name in names)
+                or len(set(names)) != len(names) or not set(names) <= builtins
+                or set(names) & RESERVED_BUILTIN_SKILL_NAMES):
+            raise ValueError("Invalid builtin plugin compatibility names")
+        return frozenset(names)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        # An empty fallback would silently re-enable migrated capabilities.
+        raise PluginError("builtin_manifest_invalid",
+                          "Cannot verify builtin compatibility catalog; repair the host runtime") from error
+
+
 def load_plugin_skill_plan(config: Any) -> PluginSkillPlan:
     """Freeze this Config's plugin generation before assembling any sessions."""
     cached = getattr(config, "_plugin_skill_plan", None)
@@ -180,8 +200,10 @@ def load_plugin_skill_plan(config: Any) -> PluginSkillPlan:
     service = plugin_settings_service(config)
     activation_id = os.environ.get(ACTIVATION_ENV) or None
     snapshot: dict[str, Any] = {}
+    snapshot_loaded = False
     try:
         snapshot = service.get_snapshot(activation_id=activation_id)
+        snapshot_loaded = True
         for item in snapshot.get("instances", {}).values():
             if item.get("enabled"):
                 service.packages.load(item["package_digest"], verify=True)
@@ -195,6 +217,11 @@ def load_plugin_skill_plan(config: Any) -> PluginSkillPlan:
         names = frozenset(alias for item in (instances.values() if isinstance(instances, dict) else ())
                           if isinstance(item, dict) and isinstance(item.get("aliases"), dict)
                           for alias in item["aliases"] if isinstance(alias, str))
+        if not snapshot_loaded:
+            # Unknown ownership is not evidence that a migration never happened.
+            # Keep compatibility copies hidden until state is repaired or the
+            # operator explicitly chooses safe mode; other core Skills remain.
+            names |= _builtin_compatibility_names()
         plan = PluginSkillPlan(str(snapshot.get("generation") or ""), replaced_names=names,
                                errors=({"code": "PLUGIN_LOAD_FAILED", "message": str(error)},))
     config._plugin_skill_plan = plan
