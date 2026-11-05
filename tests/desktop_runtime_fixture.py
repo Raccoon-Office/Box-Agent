@@ -293,6 +293,16 @@ def install_fixture(acp, root):
                 block_binding.reset(token)
 
         async def aclose(self):
+            if os.environ.get("BOX_AGENT_DESKTOP_TEST_HOLD_SHUTDOWN") == "1":
+                # Keep the real server's signal handlers installed until the
+                # transport test has delivered its concurrent shutdown signal.
+                (root / "shutdown-waiting").touch()
+
+                async def wait_for_release():
+                    while not (root / "shutdown-release").exists():
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_for_release(), 10)
             states = list(self._sessions.values())
             await super().aclose()
             record_lifecycle("adapter_closed", remaining_sessions=len(self._sessions),

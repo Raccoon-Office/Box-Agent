@@ -375,10 +375,12 @@ async def test_desktop_fixture_exits_after_transport_failure(mode, shutdown):
     workspace.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="desktop-transport-", dir=workspace) as directory:
         root = Path(directory)
+        hold_shutdown = mode == "oversized_stdin" and shutdown == "sigterm"
         probe = AcpHostProbe(
             command=[sys.executable, "-m", "tests.desktop_runtime_fixture"], cwd=root,
             env={"BOX_AGENT_DESKTOP_TEST_ROOT": str(root), "BOX_AGENT_HOME": str(root / "profile"),
-                 "PYTHONUTF8": "1"}, timeout_s=20,
+                 "PYTHONUTF8": "1",
+                 "BOX_AGENT_DESKTOP_TEST_HOLD_SHUTDOWN": "1" if hold_shutdown else "0"}, timeout_s=20,
         )
         await probe.start()
         process = probe._proc
@@ -394,17 +396,22 @@ async def test_desktop_fixture_exits_after_transport_failure(mode, shutdown):
                     "jsonrpc": "2.0", "id": 900, "method": "session/prompt",
                     "params": {"sessionId": session, "prompt": [{"type": "text", "text": text}]},
                 })
-            if mode == "stdout_pressure":
-                async def wait_for_backpressure():
-                    while not (root / "stdout-paused").exists():
+            marker = "shutdown-waiting" if hold_shutdown else "stdout-paused"
+            if hold_shutdown or mode == "stdout_pressure":
+                async def wait_for_transport_state():
+                    while not (root / marker).exists():
                         assert process.returncode is None
                         await asyncio.sleep(0.01)
 
-                await asyncio.wait_for(wait_for_backpressure(), 5)
+                await asyncio.wait_for(wait_for_transport_state(), 5)
             if shutdown == "eof":
                 process.stdin.close()
             elif process.returncode is None:
                 process.send_signal(signal.SIGTERM)
+            if hold_shutdown:
+                # Oversized input already initiates shutdown. Deliver SIGTERM
+                # before cleanup removes its handler, not during interpreter exit.
+                (root / "shutdown-release").touch()
 
             # Process.wait() also waits for buffered stdout to drain. Observe
             # OS exit without consuming stdout or sending fallback signals.
@@ -421,6 +428,8 @@ async def test_desktop_fixture_exits_after_transport_failure(mode, shutdown):
             }]
             assert sum(r["event"] == "llm_closed" for r in records) == 1
         finally:
+            if hold_shutdown:
+                (root / "shutdown-release").touch()
             # Release buffered pipe data only after the natural-exit assertion.
             drain = asyncio.create_task(process.stdout.read())
             try:
