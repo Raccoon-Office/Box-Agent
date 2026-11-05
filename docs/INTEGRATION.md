@@ -16,6 +16,7 @@ SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
 
 | 协议                  | 方向        | 入口                                  | 文档                                                             | 用途                                                                              |
 | --------------------- | ----------- | ------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| **Structured Input** | 前端 → 后端 | `session/prompt._meta` + `_inject._meta` | [ACP SDK 0.12 对接](integration/acp-sdk-0.12.md#2a输入事实与-agent-职责) | 结构化输入事实、选区策略、数据库上下文及幂等边界 |
 | **Action Hint**       | 后端 → 前端 | 模型 markdown 围栏块                  | [ACTION_HINT_PROTOCOL.md](./ACTION_HINT_PROTOCOL.md)             | 模型在合适场景输出 `action_hint` 块，前端解析为可点击设置入口                     |
 | **Memory Match**      | 后端 → 前端 | `update_tool_call.rawOutput`          | [MEMORY_MATCH_PROTOCOL.md](./MEMORY_MATCH_PROTOCOL.md)           | 宿主展示本轮 `memory_search` 或后端自动匹配到的上下文记忆                         |
 | **Memory Proposal**   | 双向        | `session/memory_proposal` + extension methods | [MEMORY_PROPOSAL_PROTOCOL.md](./MEMORY_PROPOSAL_PROTOCOL.md) | 记忆晋升提案的 push、list、apply 流程 |
