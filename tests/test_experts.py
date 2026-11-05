@@ -1,3 +1,6 @@
+
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +27,8 @@ class DummyConn:
     def __init__(self):
         self.updates = []
 
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
+        payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
 
 
@@ -153,8 +157,8 @@ async def test_acp_session_injects_expert_prompt_and_returns_meta(tmp_path) -> N
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "session_mode": "general",
@@ -165,7 +169,7 @@ async def test_acp_session_injects_expert_prompt_and_returns_meta(tmp_path) -> N
                     "defaultSkills": ["pptx"],
                 },
             },
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -184,8 +188,8 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base system")
 
-    expert_session = await agent.newSession(
-        SimpleNamespace(
+    expert_session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "session_mode": "general",
@@ -195,22 +199,22 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
                     "defaultSkills": ["pptx"],
                 },
             },
-        )
+        ))
     )
     expert_state = agent._sessions[expert_session.sessionId]
     assert "## Expert Profile" in expert_state.agent.system_prompt
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=expert_session.sessionId,
             prompt=[{"text": "普通下一轮，不再传 expert meta"}],
             field_meta={},
-        )
+        ))
     )
     assert "## Expert Profile" in expert_state.agent.system_prompt
 
-    team_session = await agent.newSession(
-        SimpleNamespace(
+    team_session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "session_mode": "general",
@@ -221,22 +225,22 @@ async def test_acp_expert_context_is_session_scoped(tmp_path) -> None:
                     "members": [{"id": "designer", "name": "设计专家"}],
                 },
             },
-        )
+        ))
     )
     team_state = agent._sessions[team_session.sessionId]
     assert "## Expert Team" in team_state.agent.system_prompt
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=team_session.sessionId,
             prompt=[{"text": "普通下一轮，不再传 expert_team meta"}],
             field_meta={},
-        )
+        ))
     )
     assert "## Expert Team" in team_state.agent.system_prompt
 
-    normal_session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    normal_session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"}))
     )
     normal_state = agent._sessions[normal_session.sessionId]
     assert normal_state.expert_context is None
@@ -281,8 +285,8 @@ async def test_acp_expert_explicit_selection_only_overrides_profile_block(
         skill_loader=skill_loader,
     )
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "execution_profile": "fast",
@@ -292,7 +296,7 @@ async def test_acp_expert_explicit_selection_only_overrides_profile_block(
                     "defaultSkills": [skill_name],
                 },
             },
-        )
+        ))
     )
 
     state = agent._sessions[session.sessionId]
@@ -303,9 +307,9 @@ async def test_acp_expert_explicit_selection_only_overrides_profile_block(
     if globally_disabled:
         assert skill_name not in state.skill_selector.matched_skill_names
 
-    await agent.prompt(SimpleNamespace(sessionId=session.sessionId,
+    await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId,
         prompt=[{"text": "Use the selected research method"}],
-        field_meta={"selected_skill_names": [skill_name]}))
+        field_meta={"selected_skill_names": [skill_name]})))
     assert (await get_skill.execute(skill_name)).success is not globally_disabled
     assert (await catalog.execute(query=skill_name)).raw_output["skills"][0]["available"] is not globally_disabled
     assert (skill_name in state.agent.skill_runtime.turn_deliveries) is not globally_disabled
@@ -339,7 +343,7 @@ async def test_acp_expert_can_use_uninstalled_recommended_skill_without_leaking_
         skill_loader=skill_loader,
     )
 
-    normal_session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    normal_session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     normal_state = agent._sessions[normal_session.sessionId]
     normal_result = await normal_state.agent.tools["get_skill"].execute("expert-only-skill")
     assert normal_result.success is False
@@ -367,7 +371,7 @@ async def test_acp_expert_can_use_uninstalled_recommended_skill_without_leaking_
         if package_kind == "expert_team":
             meta = {"expert_team": {"id": "team", "name": "team",
                     "leader": {"id": "lead", "name": "lead"}, "members": [profile]}}
-    expert_session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta=meta))
+    expert_session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta=meta)))
     expert_state = agent._sessions[expert_session.sessionId]
     name = "package-only" if package_kind else "expert-only-skill"
     if package_kind != "expert_team":
@@ -382,7 +386,7 @@ async def test_acp_expert_can_use_uninstalled_recommended_skill_without_leaking_
     if package_kind:
         shared = await expert_state.agent.tools["get_skill"].execute("shared")
         assert shared.success and "PACKAGE_SHARED" in shared.content
-        later_session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        later_session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
         for state in (normal_state, agent._sessions[later_session.sessionId]):
             shared = await state.agent.tools["get_skill"].execute("shared")
             assert shared.success and "PACKAGE_SHARED" not in shared.content
@@ -399,8 +403,8 @@ async def test_acp_prompt_emits_expert_team_progress_without_internal_rules(tmp_
     conn = DummyConn()
     agent = BoxACPAgent(conn, config, DoneLLM(), [], "base system")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "session_mode": "general",
@@ -435,11 +439,11 @@ async def test_acp_prompt_emits_expert_team_progress_without_internal_rules(tmp_
                     "internalRules": ["这条内部规则不能出现在进度事件里"],
                 },
             },
-        )
+        ))
     )
 
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "写一份项目报告"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "写一份项目报告"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -561,13 +565,13 @@ async def test_expert_source_ignores_global_disable_but_obeys_fast_profile(tmp_p
         DummyConn(), config, DoneLLM(), [GetSkillTool(loader), ListSkillsTool(loader)],
         f"base system\n{SKILL_SLOT_SENTINEL}", skill_loader=loader,
     )
-    session = await agent.newSession(SimpleNamespace(
+    session = await agent.new_session(**acp_params(SimpleNamespace(
         cwd=str(tmp_path), field_meta={**meta, "execution_profile": "fast"},
-    ))
+    )))
     state = agent._sessions[session.sessionId]
     assert "research-synthesis" not in state.skill_selector.matched_skill_names
     for _ in range(2):
-        await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "继续完成任务"}]))
+        await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "继续完成任务"}])))
         for name in names[:2]:
             result = await state.agent.tools["get_skill"].execute(name)
             available = name == "pptx"
@@ -578,7 +582,7 @@ async def test_expert_source_ignores_global_disable_but_obeys_fast_profile(tmp_p
             assert catalog.success
             assert ('"available": true' in catalog.content) is available
         assert (await state.agent.tools["get_skill"].execute("unbound")).success
-    normal = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    normal = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     if disabled:
         for name in names:
             assert not (await agent._sessions[normal.sessionId].agent.tools["get_skill"].execute(name)).success
@@ -824,9 +828,9 @@ async def test_team_prefers_owning_package_binding_over_unbound_same_name(tmp_pa
                     tools=ToolsConfig(enable_mcp=False))
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [GetSkillTool(loader)],
                         SKILL_SLOT_SENTINEL, skill_loader=loader)
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         "expert_team": {"id": "team", "name": "Team", "leader": profiles[0], "members": profiles[1:]},
-    }))
+    })))
     scoped = agent._sessions[session.sessionId].skill_loader
     assert scoped.get_skill("pptx").skill_path == tmp_path / "bound/pptx/SKILL.md"
     assert scoped.get_bound_expert_resource("pptx", "scripts/sync_image_manifest_status.js") == (
@@ -891,15 +895,15 @@ async def test_lab_package_binding_selects_exact_key_and_team_inherits_snapshot(
                     tools=ToolsConfig(enable_mcp=False))
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [GetSkillTool(loader)],
                         SKILL_SLOT_SENTINEL, skill_loader=loader)
-    session = await agent.newSession(SimpleNamespace(
+    session = await agent.new_session(**acp_params(SimpleNamespace(
         cwd=str(tmp_path), field_meta={package_kind: profile},
-    ))
+    )))
     state = agent._sessions[session.sessionId]
     skill = state.skill_loader.get_skill("pptx")
     assert skill.source == "expert"
     assert skill.skill_path == package / "selected/SKILL.md"
     assert loader.get_skill("pptx").source == "builtin"
-    normal = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    normal = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     assert agent._sessions[normal.sessionId].skill_loader.get_skill("pptx").source == "builtin"
     if initial_failure:
         assert skill.broken

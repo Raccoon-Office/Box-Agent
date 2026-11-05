@@ -1,3 +1,5 @@
+
+from tests.acp_helpers import acp_params
 import json
 import logging
 from pathlib import Path
@@ -225,13 +227,13 @@ async def test_acp_profile_session_enables_cua_images_for_matching_config(tmp_pa
         tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
     )
     adapter = acp_module.BoxACPAgent(DummyConn(), config, fallback, [], "system")
-    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         "llm_binding": {
             "source": "profile", "version": 2, "profileId": "hosted",
             "profileRevision": "rev-hosted", "routingMode": "manual",
             "model": "hosted-default",
         },
-    }))
+    })))
     state = adapter._sessions[session.sessionId]
     try:
         llm = state.agent.llm
@@ -284,7 +286,7 @@ async def test_acp_profile_session_sends_prompt_within_explicit_window(
     adapter = BoxACPAgent(DummyConn(), config, fallback, [], "system")
     state = None
     try:
-        session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
             "llm_binding": {
                 "source": "profile", "version": 2, "profileId": "hosted",
                 "profileRevision": "rev-hosted", "routingMode": "auto",
@@ -298,13 +300,13 @@ async def test_acp_profile_session_sends_prompt_within_explicit_window(
                     "contextWindow": 180_000, "maxTokens": 100_000,
                 }]},
             },
-        }))
+        })))
         state = adapter._sessions[session.sessionId]
         assert state.agent.token_limit == 810_000
         assert state.session_llm.auto_model_candidates[1]["contextWindow"] == 180_000
-        result = await adapter.prompt(SimpleNamespace(
+        result = await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": user_text}], field_meta={},
-        ))
+        )))
         assert result.stopReason == "end_turn"
         assert len(main_requests) == 1
         window, content = main_requests[0]
@@ -455,15 +457,15 @@ async def test_old_acp_conversation_continues_when_model_revision_is_missing(
             "model": "chosen-model", "tags": ["general", "auto"], "abilityLevel": 3,
             "contextWindow": 180000, "maxTokens": 16000,
         }]}
-    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         "session_id": "old-chat",
         "llm_binding": binding,
-    }))
+    })))
     state = adapter._sessions[session.sessionId]
     try:
-        result = await adapter.prompt(SimpleNamespace(
+        result = await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "continue"}], field_meta={}
-        ))
+        )))
         assert result.stopReason == "end_turn"
         assert calls == [("https://hosted.example/v1", "chosen-model")]
         assert state.agent.messages[-1].content == "continued successfully"

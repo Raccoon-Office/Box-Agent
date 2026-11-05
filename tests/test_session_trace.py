@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.acp_helpers import acp_params
+
 import asyncio
 import json
 import os
@@ -473,7 +475,7 @@ async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
     monkeypatch,
 ):
     class DummyConn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             return None
 
     class DoneLLM:
@@ -505,20 +507,20 @@ async def test_acp_uses_upstream_session_id_without_changing_generated_acp_id(
         tools=ToolsConfig(enable_sub_agent=False),
     )
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={"session_id": "office-session-current", "session_mode": "general"},
-        )
+        ))
     )
 
     assert session.sessionId.startswith("sess-0-")
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "user input"}],
             field_meta={"turn_id": "turn-current"},
-        )
+        ))
     )
 
     trace_path = tmp_path / "traces" / "office-session-current.jsonl"

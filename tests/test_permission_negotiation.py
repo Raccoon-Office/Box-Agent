@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from acp.schema import RequestPermissionRequest
+
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -654,7 +656,8 @@ class TestACPConversationPermissionBroker:
             def __init__(self):
                 self.calls = 0
 
-            async def requestPermission(self, request):
+            async def request_permission(self, session_id, tool_call, options, **meta):
+                request = RequestPermissionRequest(session_id=session_id, tool_call=tool_call, options=options, field_meta=meta or None)
                 self.calls += 1
                 prompt_started.set()
                 await release_prompt.wait()
@@ -693,7 +696,8 @@ class TestACPConversationPermissionBroker:
             def __init__(self):
                 self.calls = 0
 
-            async def requestPermission(self, request):
+            async def request_permission(self, session_id, tool_call, options, **meta):
+                request = RequestPermissionRequest(session_id=session_id, tool_call=tool_call, options=options, field_meta=meta or None)
                 self.calls += 1
                 await asyncio.sleep(0)
                 return RequestPermissionResponse(
@@ -733,7 +737,8 @@ class TestACPConversationPermissionBroker:
             def __init__(self):
                 self.calls = 0
 
-            async def requestPermission(self, request):
+            async def request_permission(self, session_id, tool_call, options, **meta):
+                request = RequestPermissionRequest(session_id=session_id, tool_call=tool_call, options=options, field_meta=meta or None)
                 self.calls += 1
                 prompt_started.set()
                 try:

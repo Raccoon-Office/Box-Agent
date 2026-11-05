@@ -1,3 +1,6 @@
+
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
 import asyncio
 from copy import copy
 from types import SimpleNamespace
@@ -20,7 +23,8 @@ class _RecordingConn:
     def __init__(self) -> None:
         self.updates = []
 
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
+        payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
 
 
@@ -196,13 +200,13 @@ async def test_acp_strips_model_metadata_across_activity_and_emits_suggestions(
         [],
         "system",
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"follow_up_suggestions": True})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"follow_up_suggestions": True}))
     )
 
     assert agent._sessions[session.sessionId].follow_up_suggestions_enabled is True
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "做完了吗"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "做完了吗"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -250,23 +254,23 @@ async def test_acp_generates_suggestions_in_background_without_blocking_prompt(
         [],
         "system",
     )
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "follow_up_suggestions": True,
                 "session_id": "office-session-1",
                 "title": "React 版本查询",
             },
-        )
+        ))
     )
 
     response = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "React 最新版是多少"}],
             field_meta={"turn_id": "office-turn-1", "title": "React 版本查询"},
-        )
+        ))
     )
 
     assert response.stopReason == "end_turn"
@@ -322,29 +326,29 @@ async def test_acp_cancels_stale_background_suggestions_when_next_turn_starts(
         [],
         "system",
     )
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={"follow_up_suggestions": True, "session_id": "office-session-1"},
-        )
+        ))
     )
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "第一轮"}],
             field_meta={"turn_id": "office-turn-1"},
-        )
+        ))
     )
     first_task = agent._sessions[session.sessionId].follow_up_suggestions_task
     assert first_task is not None
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "第二轮"}],
             field_meta={"turn_id": "office-turn-2"},
-        )
+        ))
     )
     second_task = agent._sessions[session.sessionId].follow_up_suggestions_task
     assert second_task is not None
@@ -379,12 +383,12 @@ async def test_acp_does_not_mix_follow_up_suggestions_with_user_decision(tmp_pat
         [],
         "system",
     )
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"follow_up_suggestions": True})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"follow_up_suggestions": True}))
     )
 
     response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "制作演示文稿"}])
+        **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "制作演示文稿"}]))
     )
 
     assert response.stopReason == "end_turn"
@@ -399,10 +403,10 @@ async def test_acp_does_not_mix_follow_up_suggestions_with_user_decision(tmp_pat
     assert not any(output.get("type") == "follow_up_suggestions" for output in raw_outputs)
 
     resumed = await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "我不选这两个方案，改成六页并突出案例。"}],
-        )
+        ))
     )
 
     assert resumed.stopReason == "end_turn"

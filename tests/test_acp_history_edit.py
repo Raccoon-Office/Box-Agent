@@ -1,5 +1,8 @@
 """Edited branches must reach the model without any discarded future history."""
 
+from tests.acp_helpers import acp_params
+from acp.schema import PromptRequest, SessionNotification
+
 import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
@@ -14,7 +17,7 @@ from box_agent.session_history import prompt_fingerprint, revision_request, revi
 
 
 class Connection:
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
         pass
 
 
@@ -40,7 +43,7 @@ def request(session, text, turn_id, edit=None):
     meta = {"turn_id": turn_id}
     if edit is not None:
         meta["history_edit"] = edit
-    return SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}], field_meta=meta)
+    return PromptRequest(session_id=session.sessionId, prompt=[{"type": "text", "text": text}], field_meta=meta)
 
 
 def edit(target, revision="initial"):
@@ -52,13 +55,13 @@ async def test_edit_keeps_session_and_jsonl_and_survives_restart(tmp_path):
     llm = CaptureLLM()
     host = adapter(tmp_path, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "same-session"}))
-        await host.prompt(request(session, "kept-question", "t1"))
-        await host.prompt(request(session, "discarded-question", "t2"))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "same-session"})))
+        await host.prompt(**acp_params(request(session, "kept-question", "t1")))
+        await host.prompt(**acp_params(request(session, "discarded-question", "t2")))
         state = host._sessions[session.sessionId]
         log = state.agent.session_log
         original = log.path.read_bytes()
-        result = await host.prompt(request(session, "edited-question", "t3", edit("t2")))
+        result = await host.prompt(**acp_params(request(session, "edited-question", "t3", edit("t2"))))
         assert result.field_meta["history_revision_id"] == "t3"
         assert state.agent.session_log is log
         assert log.path.read_bytes().startswith(original)
@@ -66,9 +69,9 @@ async def test_edit_keeps_session_and_jsonl_and_survives_restart(tmp_path):
         assert len([e for e in log.events if e["type"] == "history/revise"]) == 1
         assert "kept-question" in str(llm.requests[-1])
         assert "discarded-question" not in str(llm.requests[-1])
-        resumed = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "same-session"}))
+        resumed = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "same-session"})))
         assert resumed.field_meta["history_revision_id"] == "t3"
-        await host.prompt(request(resumed, "follow-up", "t4"))
+        await host.prompt(**acp_params(request(resumed, "follow-up", "t4")))
         assert "edited-question" in str(llm.requests[-1])
         assert "discarded-question" not in str(llm.requests[-1])
     finally:
@@ -80,11 +83,11 @@ async def test_first_turn_and_repeated_edits_use_exact_prefix(tmp_path):
     llm = CaptureLLM()
     host = adapter(tmp_path, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "first"}))
-        await host.prompt(request(session, "old-first", "t1"))
-        await host.prompt(request(session, "new-first", "t2", edit("t1")))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "first"})))
+        await host.prompt(**acp_params(request(session, "old-first", "t1")))
+        await host.prompt(**acp_params(request(session, "new-first", "t2", edit("t1"))))
         assert [m.role for m in llm.requests[-1]] == ["system", "user"]
-        await host.prompt(request(session, "newer-first", "t3", edit("t2", "t2")))
+        await host.prompt(**acp_params(request(session, "newer-first", "t3", edit("t2", "t2"))))
         assert [m.role for m in llm.requests[-1]] == ["system", "user"]
         assert "new-first" not in str(llm.requests[-1])
         assert "newer-first" in str(llm.requests[-1])
@@ -97,20 +100,20 @@ async def test_edit_excludes_future_compaction_and_restores_goal_plan_todos(tmp_
     llm = CaptureLLM()
     host = adapter(tmp_path, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "compacted"}))
-        await host.prompt(request(session, "kept-question", "t1"))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "compacted"})))
+        await host.prompt(**acp_params(request(session, "kept-question", "t1")))
         state = host._sessions[session.sessionId]
         log = state.agent.session_log
         state.agent.set_goal("kept-goal")
         state.agent.pause_goal()
         kept_goal = log.replay().goal
-        await host.prompt(request(session, "discarded-question", "t2"))
+        await host.prompt(**acp_params(request(session, "discarded-question", "t2")))
         state.agent.set_goal("future-goal")
         log.append("plan/write", {"plan": None})
         log.append("todo/write", {"todos": []})
         log.replace_surface([Message(role="user", content="future-summary-of-discarded-question")], turn=2, step=1)
         state.agent.messages[:] = [state.agent.messages[0], *log.replay().messages]
-        await host.prompt(request(session, "edited-question", "t3", edit("t2")))
+        await host.prompt(**acp_params(request(session, "edited-question", "t3", edit("t2"))))
         assert "kept-question" in str(llm.requests[-1])
         assert "future-summary" not in str(llm.requests[-1])
         assert "discarded-question" not in str(llm.requests[-1])
@@ -125,8 +128,8 @@ async def test_invalid_edits_do_not_append_input_or_revise_history(tmp_path, kin
     llm = CaptureLLM()
     host = adapter(tmp_path, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "invalid"}))
-        await host.prompt(request(session, "original", "t1"))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "invalid"})))
+        await host.prompt(**acp_params(request(session, "original", "t1")))
         log = host._sessions[session.sessionId].agent.session_log
         before = log.path.read_bytes()
         revision = edit("foreign" if kind == "missing-anchor" else "t1", "stale" if kind == "stale-revision" else "initial")
@@ -136,7 +139,7 @@ async def test_invalid_edits_do_not_append_input_or_revise_history(tmp_path, kin
         if kind == "old-v2":
             req.field_meta = {"session_continuation": {"schema_version": "officev3-session-continuation/v2"}}
         with pytest.raises(RequestError, match="HISTORY"):
-            await host.prompt(req)
+            await host.prompt(**acp_params(req))
         assert log.path.read_bytes() == before
         assert len(llm.requests) == 1
     finally:
@@ -148,14 +151,14 @@ async def test_duplicate_edit_cannot_rewind_or_execute_twice(tmp_path):
     llm = CaptureLLM()
     host = adapter(tmp_path, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "dedupe"}))
-        await host.prompt(request(session, "old", "t1"))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "dedupe"})))
+        await host.prompt(**acp_params(request(session, "old", "t1")))
         req = request(session, "new", "t2", edit("t1"))
-        await host.prompt(req)
+        await host.prompt(**acp_params(req))
         log = host._sessions[session.sessionId].agent.session_log
         before = log.path.read_bytes()
         with pytest.raises(RequestError, match="TURN_ALREADY_ACCEPTED"):
-            await host.prompt(req)
+            await host.prompt(**acp_params(req))
         assert log.path.read_bytes() == before
         assert len(llm.requests) == 2
     finally:
@@ -177,10 +180,10 @@ async def test_edit_waits_for_old_prompt_to_stop(tmp_path):
     host = adapter(tmp_path, llm)
     old = None
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "running"}))
-        old = asyncio.create_task(host.prompt(request(session, "old-running", "t1")))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "running"})))
+        old = asyncio.create_task(host.prompt(**acp_params(request(session, "old-running", "t1"))))
         await asyncio.wait_for(started.wait(), 5)
-        await asyncio.wait_for(host.prompt(request(session, "new", "t2", edit("t1"))), 5)
+        await asyncio.wait_for(host.prompt(**acp_params(request(session, "new", "t2", edit("t1")))), 5)
         assert old.done()
         assert "old-running" not in str(llm.requests[-1])
         assert "new" in str(llm.requests[-1])
@@ -199,16 +202,16 @@ async def test_retry_after_revision_commit_and_restart_does_not_revise_twice(tmp
     llm = CaptureLLM()
     host = adapter(workspace, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(workspace), field_meta={"session_id": "retry"}))
-        await host.prompt(request(session, "old", "t1"))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"session_id": "retry"})))
+        await host.prompt(**acp_params(request(session, "old", "t1")))
         state = host._sessions[session.sessionId]
         req = request(session, "new", "t2", edit("t1"))
         revision = revision_request(list(state.agent.session_log.events), target_turn_id="t1",
                                     turn_id="t2", expected_revision_id="initial",
                                     fingerprint=prompt_fingerprint(req.prompt))
         await revise_agent_history(state.agent, revision)
-        resumed = await host.newSession(SimpleNamespace(cwd=str(workspace), field_meta={"session_id": "retry"}))
-        await host.prompt(request(resumed, "new", "t2", edit("t1")))
+        resumed = await host.new_session(**acp_params(SimpleNamespace(cwd=str(workspace), field_meta={"session_id": "retry"})))
+        await host.prompt(**acp_params(request(resumed, "new", "t2", edit("t1"))))
         events = host._sessions[resumed.sessionId].agent.session_log.events
         assert sum(e["type"] == "history/revise" for e in events) == 1
         messages = llm.requests[-1]
@@ -225,12 +228,12 @@ async def test_edit_error_reports_authoritative_revision_without_losing_history(
     llm = CaptureLLM()
     host = adapter(tmp_path, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "error-revision"}))
-        await host.prompt(request(session, "old", "t1"))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "error-revision"})))
+        await host.prompt(**acp_params(request(session, "old", "t1")))
         with pytest.raises(RequestError) as caught:
-            await host.prompt(request(session, "new", "t2", edit("missing")))
+            await host.prompt(**acp_params(request(session, "new", "t2", edit("missing"))))
         assert caught.value.data["history_revision_id"] == "initial"
-        await host.prompt(request(session, "follow-up", "t3"))
+        await host.prompt(**acp_params(request(session, "follow-up", "t3")))
         assert "old" in str(llm.requests[-1])
     finally:
         await host.aclose()
@@ -252,11 +255,11 @@ async def test_stop_during_edit_preparation_does_not_commit_or_execute(tmp_path,
     llm = CaptureLLM()
     host = adapter(tmp_path, llm)
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "stop-edit"}))
-        await host.prompt(request(session, "old", "t1"))
-        editing = asyncio.create_task(host.prompt(request(session, "new", "t2", edit("t1"))))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "stop-edit"})))
+        await host.prompt(**acp_params(request(session, "old", "t1")))
+        editing = asyncio.create_task(host.prompt(**acp_params(request(session, "new", "t2", edit("t1")))))
         await asyncio.wait_for(entered.wait(), 5)
-        await host.cancel(SimpleNamespace(sessionId=session.sessionId))
+        await host.cancel(**acp_params(SimpleNamespace(sessionId=session.sessionId)))
         release.set()
         with pytest.raises(RequestError, match="HISTORY_CANCELLED"):
             await editing
@@ -286,13 +289,13 @@ async def test_duplicate_edit_does_not_cancel_its_already_running_turn(tmp_path)
     host = adapter(tmp_path, llm)
     running = None
     try:
-        session = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "duplicate-running"}))
-        await host.prompt(request(session, "old", "t1"))
+        session = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "duplicate-running"})))
+        await host.prompt(**acp_params(request(session, "old", "t1")))
         req = request(session, "new-running", "t2", edit("t1"))
-        running = asyncio.create_task(host.prompt(req))
+        running = asyncio.create_task(host.prompt(**acp_params(req)))
         await asyncio.wait_for(entered.wait(), 5)
         with pytest.raises(RequestError, match="TURN_ALREADY_ACCEPTED"):
-            await host.prompt(req)
+            await host.prompt(**acp_params(req))
         assert not host._sessions[session.sessionId].cancelled
         assert not running.done()
         release.set()
@@ -313,11 +316,11 @@ async def test_edited_branch_copies_session_images_and_preserves_inference_age(t
     host = adapter(tmp_path, llm)
     encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     try:
-        original = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "image-source"}))
-        await host.prompt(SimpleNamespace(sessionId=original.sessionId, field_meta={}, prompt=[
+        original = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "image-source"})))
+        await host.prompt(**acp_params(SimpleNamespace(sessionId=original.sessionId, field_meta={}, prompt=[
             {"type": "text", "text": "Remember this image."},
             {"type": "image", "data": encoded, "mimeType": "image/png"},
-        ]))
+        ])))
         source_state = host._sessions[original.sessionId]
         source_log = source_state.agent.session_log
         projection = source_log.replay()
@@ -327,17 +330,17 @@ async def test_edited_branch_copies_session_images_and_preserves_inference_age(t
             await source_state.aclose()
             source_log.close()
             host._sessions.pop(original.sessionId)
-        branch = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "image-branch"}))
+        branch = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_id": "image-branch"})))
         seed = {
             "schema_version": "officev3-session-continuation/v1", "product_session_id": "image-branch",
             "reason": "history_edit", "truncated": False, "source_session_id": "image-source",
             "messages": [{"role": "user", "content": prior_user.content,
                           "image_refs": [{"imageId": image_ref["imageId"]}]}],
         }
-        await host.prompt(SimpleNamespace(
+        await host.prompt(**acp_params(SimpleNamespace(
             sessionId=branch.sessionId, prompt=[{"text": "Continue."}],
             field_meta={"turn_id": "branch-1", "session_continuation": seed},
-        ))
+        )))
         branch_log = host._sessions[branch.sessionId].agent.session_log
         assert branch_log.replay().model_round == projection.model_round + 1
         copied = branch_log.replay().images[0]
@@ -345,10 +348,10 @@ async def test_edited_branch_copies_session_images_and_preserves_inference_age(t
         assert (branch_log.path.parent / copied["contentRef"]).read_bytes()
         assert encoded not in branch_log.path.read_text()
         assert any(isinstance(message.content, list) for message in llm.requests[-1])
-        await host.prompt(request(branch, "Third inference.", "branch-2"))
+        await host.prompt(**acp_params(request(branch, "Third inference.", "branch-2")))
         assert any(isinstance(message.content, list) and any(block.get("type") == "input_image" for block in message.content)
                    for message in llm.requests[-1])
-        await host.prompt(request(branch, "Fourth inference.", "branch-3"))
+        await host.prompt(**acp_params(request(branch, "Fourth inference.", "branch-3")))
         assert not any(isinstance(message.content, list) and any(block.get("type") == "input_image" for block in message.content)
                        for message in llm.requests[-1])
         assert branch_log.replay().images[0]["evictionReason"] == "round_limit"
@@ -364,31 +367,31 @@ async def test_edit_restores_only_prefix_images_and_their_inference_age(tmp_path
     host = adapter(tmp_path, llm)
     encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     try:
-        session = await host.newSession(SimpleNamespace(
+        session = await host.new_session(**acp_params(SimpleNamespace(
             cwd=str(tmp_path), field_meta={"session_id": "image-revision"},
-        ))
+        )))
         for turn_id in ("t1", "t2"):
-            await host.prompt(SimpleNamespace(
+            await host.prompt(**acp_params(SimpleNamespace(
                 sessionId=session.sessionId, field_meta={"turn_id": turn_id},
                 prompt=[{"type": "text", "text": turn_id},
                         {"type": "image", "data": encoded, "mimeType": "image/png"}],
-            ))
+            )))
         log = host._sessions[session.sessionId].agent.session_log
         original_images = log.replay().images
         assert len(original_images) == 2
-        await host.prompt(request(session, "Replace the second turn.", "t3", edit("t2")))
+        await host.prompt(**acp_params(request(session, "Replace the second turn.", "t3", edit("t2"))))
         state = host._sessions[session.sessionId]
         assert [ref["imageId"] for ref in state.agent.image_context.images] == [original_images[0]["imageId"]]
         assert log.replay().model_round == 2
         assert len([block for message in llm.requests[-1] if isinstance(message.content, list)
                     for block in message.content if block.get("type") == "input_image"]) == 1
         if restart:
-            session = await host.newSession(SimpleNamespace(
+            session = await host.new_session(**acp_params(SimpleNamespace(
                 cwd=str(tmp_path), field_meta={"session_id": "image-revision"},
-            ))
-        await host.prompt(request(session, "Third accepted inference.", "t4"))
+            )))
+        await host.prompt(**acp_params(request(session, "Third accepted inference.", "t4")))
         assert any(isinstance(message.content, list) for message in llm.requests[-1])
-        await host.prompt(request(session, "Fourth accepted inference.", "t5"))
+        await host.prompt(**acp_params(request(session, "Fourth accepted inference.", "t5")))
         assert not any(isinstance(message.content, list) for message in llm.requests[-1])
     finally:
         await host.aclose()

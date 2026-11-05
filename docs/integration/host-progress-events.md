@@ -66,7 +66,7 @@ a refresh response of 401 instead asks the user to log in again. Neither case
 is retried automatically. A user-configured API key and non-hosted endpoint do
 not use this hosted-login preflight.
 
-Hosts may supply `_meta.client_info` during ACP initialize, session creation,
+Hosts may supply `_meta.host_client_info` during ACP initialize, session creation,
 or a lightweight LLM prompt. Supported fields are `name`, `platform`, `version`, `os_version`
 (or `osVersion`), `channel`, and `device_id` (or `deviceId`). On allowed model
 requests, `x-client-name` uses the host-supplied `name` after trimming whitespace;
@@ -303,7 +303,7 @@ Example:
 Host-to-agent control:
 
 - On `session/new` or `session/prompt`, pass `_meta.goal` as either a string objective or an object. Object shape supports `action`, `objective`, `status`, `evidence`, `progress`, `blockedReason`, and `completedBy`.
-- At runtime, call `extMethod("goal", { sessionId, action, ... })`. Supported actions are `get`, `set`, `pause`, `resume`, `complete`, `clear`, `progress`, and `block`.
+- At runtime, call `ext_method("goal", { sessionId, action, ... })`. Supported actions are `get`, `set`, `pause`, `resume`, `complete`, `clear`, `progress`, and `block`.
 - `action: "complete"` may include `evidence` and `completedBy`; model-driven completion through `goal_write` requires non-empty `evidence`.
 - `action: "block"` requires `blockedReason`.
 

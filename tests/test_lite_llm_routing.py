@@ -1,5 +1,7 @@
 """Lite LLM routing: fallback when unconfigured, separate client when present."""
 
+from tests.acp_helpers import acp_params
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,7 +60,7 @@ class _DummyLLM:
 
 
 class _DummyConn:
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
         pass
 
 
@@ -660,9 +662,9 @@ async def test_acp_session_with_large_context_can_prepare_its_bounded_compaction
         }]},
     }
     try:
-        session = await agent.newSession(SimpleNamespace(
+        session = await agent.new_session(**acp_params(SimpleNamespace(
             cwd=str(tmp_path), field_meta={"llm_binding": binding},
-        ))
+        )))
         state = agent._sessions[session.sessionId]
         assert state.agent.token_limit == 810_000
         assert state.summary_llm.model == "large"
@@ -708,16 +710,16 @@ def test_llm_client_for_model_preserves_endpoint_auth_and_default(tmp_path):
 async def test_conversation_sessions_bind_models_without_mutating_each_other(tmp_path):
     agent, main, _lite = _make_agent(tmp_path, lite=True)
 
-    first = await agent.newSession(
-        SimpleNamespace(
+    first = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {"source": "builtin", "model": "model-normal"}
             },
-        )
+        ))
     )
-    second = await agent.newSession(
-        SimpleNamespace(
+    second = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {
@@ -727,7 +729,7 @@ async def test_conversation_sessions_bind_models_without_mutating_each_other(tmp
                     "maxTokens": 16000,
                 }
             },
-        )
+        ))
     )
 
     first_state = agent._sessions[first.sessionId]
@@ -786,8 +788,8 @@ async def test_profile_bound_sessions_keep_distinct_endpoints(tmp_path, monkeypa
     monkeypatch.setenv("BOX_AGENT_MODEL_PROFILES_FILE", str(registry))
     agent, _main, _lite = _make_agent(tmp_path, lite=True)
 
-    first = await agent.newSession(
-        SimpleNamespace(
+    first = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {
@@ -799,10 +801,10 @@ async def test_profile_bound_sessions_keep_distinct_endpoints(tmp_path, monkeypa
                     "model": "model-a-selected",
                 }
             },
-        )
+        ))
     )
-    second = await agent.newSession(
-        SimpleNamespace(
+    second = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {
@@ -814,7 +816,7 @@ async def test_profile_bound_sessions_keep_distinct_endpoints(tmp_path, monkeypa
                     "model": "model-b-selected",
                 }
             },
-        )
+        ))
     )
 
     first_llm = agent._sessions[first.sessionId].session_llm
@@ -834,8 +836,8 @@ async def test_session_binding_rejects_invalid_max_tokens(tmp_path):
     agent, _main, _lite = _make_agent(tmp_path, lite=True)
 
     with pytest.raises(ValueError, match="llm_binding.maxTokens is invalid"):
-        await agent.newSession(
-            SimpleNamespace(
+        await agent.new_session(
+            **acp_params(SimpleNamespace(
                 cwd=str(tmp_path),
                 field_meta={
                     "llm_binding": {
@@ -844,12 +846,12 @@ async def test_session_binding_rejects_invalid_max_tokens(tmp_path):
                         "maxTokens": 0,
                     }
                 },
-            )
+            ))
         )
 
     with pytest.raises(ValueError, match="llm_binding.contextWindow is invalid"):
-        await agent.newSession(
-            SimpleNamespace(
+        await agent.new_session(
+            **acp_params(SimpleNamespace(
                 cwd=str(tmp_path),
                 field_meta={
                     "llm_binding": {
@@ -858,15 +860,15 @@ async def test_session_binding_rejects_invalid_max_tokens(tmp_path):
                         "contextWindow": 0,
                     }
                 },
-            )
+            ))
         )
 
     with pytest.raises(
         ValueError,
         match="llm_binding.maxTokens must be smaller than contextWindow",
     ):
-        await agent.newSession(
-            SimpleNamespace(
+        await agent.new_session(
+            **acp_params(SimpleNamespace(
                 cwd=str(tmp_path),
                 field_meta={
                     "llm_binding": {
@@ -876,15 +878,15 @@ async def test_session_binding_rejects_invalid_max_tokens(tmp_path):
                         "maxTokens": 16000,
                     }
                 },
-            )
+            ))
         )
 
 
 @pytest.mark.asyncio
 async def test_auto_session_exposes_allowlisted_models_to_sub_agent(tmp_path):
     agent, _main, _lite = _make_agent(tmp_path, lite=True)
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {
@@ -908,7 +910,7 @@ async def test_auto_session_exposes_allowlisted_models_to_sub_agent(tmp_path):
                     },
                 }
             },
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     sub_agent = state.agent.tools["sub_agent"]
@@ -921,13 +923,13 @@ async def test_auto_session_exposes_allowlisted_models_to_sub_agent(tmp_path):
 @pytest.mark.asyncio
 async def test_manual_session_keeps_sub_agent_on_parent_model(tmp_path):
     agent, _main, _lite = _make_agent(tmp_path, lite=True)
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {"source": "builtin", "model": "model-normal"}
             },
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
 
@@ -938,8 +940,8 @@ async def test_manual_session_keeps_sub_agent_on_parent_model(tmp_path):
 @pytest.mark.asyncio
 async def test_switching_to_manual_binding_clears_child_auto_routing(tmp_path):
     agent, _main, _lite = _make_agent(tmp_path, lite=True)
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {
@@ -956,19 +958,19 @@ async def test_switching_to_manual_binding_clears_child_auto_routing(tmp_path):
                     },
                 }
             },
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     assert len(state.session_llm.auto_model_candidates) == 1
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "manual now"}],
             field_meta={
                 "llm_binding": {"source": "builtin", "model": "model-normal"}
             },
-        )
+        ))
     )
 
     assert state.session_llm.auto_model_candidates == ()
@@ -977,20 +979,20 @@ async def test_switching_to_manual_binding_clears_child_auto_routing(tmp_path):
 @pytest.mark.asyncio
 async def test_session_switches_model_between_turns_without_recreating_agent(tmp_path):
     agent, main, _lite = _make_agent(tmp_path, lite=True)
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "llm_binding": {"source": "builtin", "model": "model-normal"}
             },
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     original_agent = state.agent
     original_session_llm = state.session_llm
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "hello"}],
             field_meta={
@@ -1001,7 +1003,7 @@ async def test_session_switches_model_between_turns_without_recreating_agent(tmp
                     "maxTokens": 16000,
                 }
             },
-        )
+        ))
     )
 
     assert agent._sessions[session.sessionId] is state
@@ -1194,9 +1196,9 @@ def test_config_lite_llm_max_output_tokens_rejects_ceiling(tmp_path):
 @pytest.mark.parametrize("purpose", ["title", "summary", "rewrite", "expert", "other"])
 async def test_host_default_routes_unbound_utilities_without_using_process_model(tmp_path, purpose):
     agent, main, _ = _make_agent(tmp_path, lite=True)
-    await agent.initialize(SimpleNamespace(field_meta={
+    await agent.initialize(**acp_params(SimpleNamespace(protocolVersion=1, field_meta={
         "llm_binding": {"source": "builtin", "model": "visible-model"},
-    }))
+    })))
     result = await agent._llm_prompt({"prompt": "hello", "_meta": {"purpose": purpose}})
     assert result["text"] == "reply-from-bound-visible-model"
     assert main.last_messages is None
@@ -1214,10 +1216,10 @@ async def test_host_default_auto_pool_is_used_by_titles_and_unbound_sessions(tmp
             {"model": "summary-model", "tags": ["summary", "fast"], "abilityLevel": 1},
         ]},
     }
-    await agent.initialize(SimpleNamespace(field_meta={"llm_binding": binding}))
+    await agent.initialize(**acp_params(SimpleNamespace(protocolVersion=1, field_meta={"llm_binding": binding})))
     result = await agent._llm_prompt({"prompt": "hello", "_meta": {"purpose": "title"}})
     assert result["text"] == "reply-from-bound-summary-model"
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     assert state.session_llm.model == "analysis-model"
     assert len(state.session_llm.auto_model_candidates) == 2
@@ -1233,13 +1235,13 @@ async def test_session_utilities_and_compaction_keep_their_model_after_default_c
     agent, main, _ = _make_agent(tmp_path, lite=True)
     monkeypatch.setenv("BOX_AGENT_HOME", str(tmp_path))
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
-    await agent.initialize(SimpleNamespace(field_meta={
+    await agent.initialize(**acp_params(SimpleNamespace(protocolVersion=1, field_meta={
         "llm_binding": {"source": "builtin", "model": "default-model"},
-    }))
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    })))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         "session_id": "original-session",
         "llm_binding": {"source": "builtin", "model": "session-model"},
-    }))
+    })))
     state = agent._sessions[session.sessionId]
     result = await agent._llm_prompt({"prompt": "title", "_meta": {
         "session_id": "original-session", "purpose": "title",
@@ -1273,9 +1275,9 @@ async def test_memory_bootstrap_waits_for_host_binding_and_starts_once(tmp_path,
 
     monkeypatch.setattr("box_agent.memory_maintainer.MemoryMaintainer", maintainer)
     assert agent._memory_bootstrap_task is None
-    await agent.initialize(SimpleNamespace(field_meta={
+    await agent.initialize(**acp_params(SimpleNamespace(protocolVersion=1, field_meta={
         "llm_binding": {"source": "builtin", "model": "visible-model"},
-    }))
+    })))
     await agent._memory_bootstrap_task
     agent._start_memory_bootstrap()
     memory.import_openclaw.assert_awaited_once()
@@ -1306,10 +1308,10 @@ async def test_memory_bootstrap_releases_its_profile_client_on_completion_or_shu
 
     agent._memory = SimpleNamespace(import_openclaw=import_memory)
     agent._config.agent.memory_maintainer_enabled = False
-    await agent.initialize(SimpleNamespace(field_meta={"llm_binding": {
+    await agent.initialize(**acp_params(SimpleNamespace(protocolVersion=1, field_meta={"llm_binding": {
         "source": "profile", "version": 2, "profileId": "profile",
         "profileRevision": "revision", "routingMode": "manual", "model": "visible-model",
-    }}))
+    }})))
     await started.wait()
     if not cancel:
         await agent._memory_bootstrap_task
@@ -1359,10 +1361,10 @@ async def test_manual_pool_cannot_switch_sessions_children_or_utilities(tmp_path
         ]},
     }
     try:
-        await agent.initialize(SimpleNamespace(field_meta={"llm_binding": binding}))
+        await agent.initialize(**acp_params(SimpleNamespace(protocolVersion=1, field_meta={"llm_binding": binding})))
         result = await agent._llm_prompt({"prompt": "summarize", "_meta": {"purpose": "title"}})
         assert result["text"] == "reply-from-bound-chosen-model"
-        session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
         state = agent._sessions[session.sessionId]
         assert state.session_llm.model == "chosen-model"
         assert state.session_llm.auto_model_candidates == ()
@@ -1373,15 +1375,15 @@ async def test_manual_pool_cannot_switch_sessions_children_or_utilities(tmp_path
 
         # First enable automatic routing, then reuse its pool with an explicit manual choice.
         auto = {**binding, "routingMode": "auto"}
-        await agent.prompt(SimpleNamespace(
+        await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "hello"}],
             field_meta={"llm_binding": auto},
-        ))
+        )))
         assert len(state.session_llm.auto_model_candidates) == 1
-        await agent.prompt(SimpleNamespace(
+        await agent.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "debug this complex code"}],
             field_meta={"llm_binding": binding},
-        ))
+        )))
         assert state.session_llm.model == "chosen-model"
         assert state.session_llm.auto_model_candidates == ()
         result = await agent._llm_prompt({

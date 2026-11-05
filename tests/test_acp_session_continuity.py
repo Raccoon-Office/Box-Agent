@@ -1,5 +1,7 @@
 """Host transitions keep conversation history and finished-run results usable."""
 
+from tests.acp_helpers import acp_params
+
 from types import SimpleNamespace
 
 import pytest
@@ -30,14 +32,14 @@ async def test_conversations_continue_after_host_transition(tmp_path, transition
         return BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
 
     async def bind(adapter, product):
-        return (await adapter.newSession(SimpleNamespace(
+        return (await adapter.new_session(**acp_params(SimpleNamespace(
             cwd=str(workspace), field_meta={"session_id": product},
-        ))).sessionId
+        )))).sessionId
 
     async def prompt(adapter, session_id, text):
-        result = await adapter.prompt(SimpleNamespace(
+        result = await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=session_id, prompt=[SimpleNamespace(type="text", text=text)], field_meta={},
-        ))
+        )))
         assert result.stopReason == "end_turn"
         return adapter._sessions[session_id].run_handle
 

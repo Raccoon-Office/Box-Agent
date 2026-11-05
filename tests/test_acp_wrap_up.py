@@ -1,5 +1,8 @@
 """Host time-budget notifications preserve task state and cancellation semantics."""
 
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -17,7 +20,8 @@ class Conn:
     def __init__(self):
         self.updates = []
 
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
+        payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
 
 
@@ -66,17 +70,17 @@ def make_agent(tmp_path):
 async def test_wrap_up_reaches_model_as_hidden_budget_and_keeps_unfinished_goal(tmp_path, goal_status):
     agent, model, conn = make_agent(tmp_path)
     meta = {"goal": {"objective": "Verify every deliverable", "status": "active"}} if goal_status else {}
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta=meta))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta=meta)))
     state = agent._sessions[session.sessionId]
-    pending = asyncio.create_task(agent.prompt(SimpleNamespace(
+    pending = asyncio.create_task(agent.prompt(**acp_params(SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "Finish the report"}],
         field_meta={"turn_id": "turn-1"},
-    )))
+    ))))
     try:
         await asyncio.wait_for(model.started.wait(), 5)
         params = {"sessionId": session.sessionId, "remainingSeconds": 600, "turnId": "turn-1"}
-        assert await agent.extMethod("request_wrap_up", params) == {"ok": True}
-        assert await agent.extMethod("request_wrap_up", params) == {"ok": True, "deduplicated": True}
+        assert await agent.ext_method("request_wrap_up", params) == {"ok": True}
+        assert await agent.ext_method("request_wrap_up", params) == {"ok": True, "deduplicated": True}
         if goal_status == "complete":
             state.agent.complete_goal(evidence=["fixture checks passed"], progress="Finished")
         model.release.set()
@@ -103,9 +107,9 @@ async def test_wrap_up_reaches_model_as_hidden_budget_and_keeps_unfinished_goal(
         else:
             assert response.stopReason == "end_turn"
             assert response.field_meta["completed"] is True
-            resumed = await agent.prompt(SimpleNamespace(
+            resumed = await agent.prompt(**acp_params(SimpleNamespace(
                 sessionId=session.sessionId, prompt=[{"text": "Continue"}],
-            ))
+            )))
             assert "wrapUp" not in resumed.field_meta
             assert not state.wrap_up_requested
     finally:
@@ -118,20 +122,20 @@ async def test_wrap_up_reaches_model_as_hidden_budget_and_keeps_unfinished_goal(
 async def test_wrap_up_validates_active_turn_and_deduplicates_without_touching_user_injections(tmp_path):
     agent, _, _ = make_agent(tmp_path)
     try:
-        session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
         state = agent._sessions[session.sessionId]
         params = {"sessionId": session.sessionId, "remainingSeconds": 600}
-        assert await agent.extMethod("request_wrap_up", params) == {"error": "no_active_turn"}
+        assert await agent.ext_method("request_wrap_up", params) == {"error": "no_active_turn"}
         state.turn_active = True
         state.current_turn_id = "current"
-        assert await agent.extMethod("request_wrap_up", {**params, "turnId": "old"}) == {"error": "turn_mismatch"}
+        assert await agent.ext_method("request_wrap_up", {**params, "turnId": "old"}) == {"error": "turn_mismatch"}
         for remaining in (None, True, 0, -1, 1.5, "600", 10801):
-            assert await agent.extMethod("request_wrap_up", {**params, "remainingSeconds": remaining}) == {"error": "invalid_remaining_seconds"}
+            assert await agent.ext_method("request_wrap_up", {**params, "remainingSeconds": remaining}) == {"error": "invalid_remaining_seconds"}
         assert not state.wrap_up_requested
         assert state.inject_queue.empty()
-        await agent.extMethod("inject", {"sessionId": session.sessionId, "text": "Keep the appendix", "injectionId": "user-1"})
-        assert await agent.extMethod("request_wrap_up", params) == {"ok": True}
-        assert await agent.extMethod("request_wrap_up", params) == {"ok": True, "deduplicated": True}
+        await agent.ext_method("inject", {"sessionId": session.sessionId, "text": "Keep the appendix", "injectionId": "user-1"})
+        assert await agent.ext_method("request_wrap_up", params) == {"ok": True}
+        assert await agent.ext_method("request_wrap_up", params) == {"ok": True, "deduplicated": True}
         history = []
         user = state.inject_queue.apply_next(history)[1]
         budget = state.inject_queue.apply_next(history)[1]

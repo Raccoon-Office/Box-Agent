@@ -1,4 +1,6 @@
 """Managed adapter assembly behavior, using deterministic local capabilities."""
+
+from tests.acp_helpers import acp_params
 from types import SimpleNamespace
 import pytest
 import box_agent.acp as acp
@@ -160,7 +162,7 @@ async def test_acp_uses_shared_preparation_and_managed_session(tmp_path, monkeyp
         resources.system_prompt += "\nASSEMBLY SENTINEL"
     monkeypatch.setattr(assembly, "prepare_prompt", prompt)
     adapter = acp.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    result = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"utility": True}))
+    result = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"utility": True})))
     state = adapter._sessions[result.sessionId]
     assert calls and calls[0].config is config
     assert "ASSEMBLY SENTINEL" in state.agent.system_prompt
@@ -196,7 +198,7 @@ async def test_acp_preparation_preserves_direct_prompt_and_tool_contract(tmp_pat
         return scratch
     monkeypatch.setattr(acp, "add_workspace_tools", workspace_tools)
     adapter = acp.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "BASE\n{SANDBOX_INFO}\n{FILE_DELIVERY_INFO}", memory_manager=memory)
-    result = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"utility": utility, "artifact_mode": artifact_mode}))
+    result = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"utility": utility, "artifact_mode": artifact_mode})))
     state = adapter._sessions[result.sessionId]
     resources = state.plugin_session.resources
     options = resources.context.options
@@ -231,9 +233,9 @@ async def test_acp_sessions_share_runtime_and_rebind_closes_only_old_session(tmp
     config = Config(llm=LLMConfig(api_key="test"), agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False), tools=ToolsConfig(enable_mcp=False, enable_skills=False))
     adapter = acp.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base")
     request = SimpleNamespace(cwd=None, field_meta={"utility": True, "session_id": "product-managed"})
-    first = await adapter.newSession(request)
+    first = await adapter.new_session(**acp_params(request))
     old = adapter._sessions[first.sessionId]
-    second = await adapter.newSession(request)
+    second = await adapter.new_session(**acp_params(request))
     current = adapter._sessions[second.sessionId]
     assert old._closed
     assert not current._closed
@@ -265,7 +267,7 @@ async def test_managed_session_keeps_connector_skill_grants_for_parent_and_child
         f"BASE\n{SKILL_SLOT_SENTINEL}", skill_loader=loader,
     )
     try:
-        response = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        response = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
         state = adapter._sessions[response.sessionId]
         skill_tool = state.agent.tools["get_skill"]
         catalog_tool = state.agent.tools["list_skills"]
@@ -279,10 +281,10 @@ async def test_managed_session_keeps_connector_skill_grants_for_parent_and_child
         assert "pkulaw" not in (catalog_update or "")
         assert "pkulaw" not in state.skill_selector.matched_skill_names
 
-        await adapter.prompt(SimpleNamespace(
+        await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=response.sessionId, prompt=[{"text": "pkulaw legal search"}],
             field_meta={"selected_connector_ids": ["pkulaw"]},
-        ))
+        )))
         assert state.connector_skill_grants == {"pkulaw"}
         visible = (await catalog_tool.execute(query="pkulaw")).raw_output["skills"]
         assert [row["name"] for row in visible] == ["pkulaw"]
@@ -352,7 +354,7 @@ async def test_acp_unavailable_skill_state_does_not_block_managed_session(tmp_pa
     monkeypatch.setattr(acp, "Agent", agent_factory)
     monkeypatch.setattr(assembly, "prepare_tools", tools)
     adapter = acp.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
-    result = await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"utility": True}))
+    result = await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"utility": True})))
     assert adapter._sessions[result.sessionId].plugin_session is not None
     assert closed == []
     await adapter.aclose()
@@ -377,7 +379,7 @@ async def test_acp_finish_failure_releases_unpublished_session(tmp_path, monkeyp
     monkeypatch.setattr(assembly, "finish_session", finish)
     adapter = acp.BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
     with pytest.raises(ValueError, match="session finalization failed"):
-        await adapter.newSession(SimpleNamespace(cwd=None, field_meta={"utility": True}))
+        await adapter.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"utility": True})))
     assert len(closed) == 1
     assert adapter._sessions == {}
     assert adapter._plugin_runtime._sessions == {}

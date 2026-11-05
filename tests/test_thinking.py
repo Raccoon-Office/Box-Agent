@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.acp_helpers import acp_params
+
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -1043,7 +1045,7 @@ async def test_run_agent_loop_forwards_thinking_flag():
 @pytest.mark.asyncio
 async def test_acp_new_session_reads_deep_think(tmp_path):
     class _Conn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             pass
 
     class _LLM:
@@ -1058,15 +1060,15 @@ async def test_acp_new_session_reads_deep_think(tmp_path):
     )
     agent = BoxACPAgent(_Conn(), config, _LLM(), [], "base")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={
                 "session_mode": "general",
                 "deep_think": True,
                 "execution_profile": "fast",
             },
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
     assert state.thinking_enabled is True
@@ -1077,7 +1079,7 @@ async def test_acp_new_session_reads_deep_think(tmp_path):
 @pytest.mark.asyncio
 async def test_acp_new_session_default_no_deep_think(tmp_path):
     class _Conn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             pass
 
     class _LLM:
@@ -1090,8 +1092,8 @@ async def test_acp_new_session_default_no_deep_think(tmp_path):
     )
     agent = BoxACPAgent(_Conn(), config, _LLM(), [], "base")
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"}))
     )
     state = agent._sessions[session.sessionId]
     assert state.thinking_enabled is False
@@ -1105,7 +1107,7 @@ async def test_acp_run_turn_uses_agent_facade_with_deep_think(tmp_path, monkeypa
     from box_agent.events import DoneEvent, StopReason
 
     class _Conn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             pass
 
     class _LLM:
@@ -1120,11 +1122,11 @@ async def test_acp_run_turn_uses_agent_facade_with_deep_think(tmp_path, monkeypa
     )
     agent = BoxACPAgent(_Conn(), config, _LLM(), [], "base")
 
-    session = await agent.newSession(
-        SimpleNamespace(
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(
             cwd=str(tmp_path),
             field_meta={"session_mode": "general", "deep_think": True},
-        )
+        ))
     )
     state = agent._sessions[session.sessionId]
 
@@ -1138,10 +1140,10 @@ async def test_acp_run_turn_uses_agent_facade_with_deep_think(tmp_path, monkeypa
     monkeypatch.setattr(state.agent, "run_events", fake_run_events)
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"type": "text", "text": "hi"}],
-        )
+        ))
     )
 
     options = captured["options"]

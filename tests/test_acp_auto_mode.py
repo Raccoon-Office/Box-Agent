@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
+
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +19,8 @@ class _DummyConn:
     def __init__(self):
         self.updates = []
 
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
+        payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
 
 
@@ -55,8 +59,8 @@ async def test_explicit_mode_uses_requested_prompt(tmp_path):
     llm = _TrackingLLM(mode_label="ppt_outline")
     agent, _ = _make_agent(tmp_path, llm)
 
-    session = await agent.newSession(
-        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "data_analysis"})
+    session = await agent.new_session(
+        **acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "data_analysis"}))
     )
     state = agent._sessions[session.sessionId]
     assert state.session_mode == "data_analysis"
@@ -64,7 +68,7 @@ async def test_explicit_mode_uses_requested_prompt(tmp_path):
     prompt = SimpleNamespace(
         sessionId=session.sessionId, prompt=[{"text": "show me a chart"}]
     )
-    await agent.prompt(prompt)
+    await agent.prompt(**acp_params(prompt))
 
     assert llm.generate_calls == 0, "session mode must not add one-shot LLM calls"
     assert state.session_mode == "data_analysis"
@@ -75,15 +79,15 @@ async def test_missing_mode_stays_general_without_extra_llm_call(tmp_path):
     llm = _TrackingLLM(mode_label="ppt_outline")
     agent, _ = _make_agent(tmp_path, llm)
 
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path)))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path))))
     state = agent._sessions[session.sessionId]
     assert state.session_mode is None
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "帮我做个 AI 主题的 PPT 大纲"}],
-        )
+        ))
     )
 
     assert llm.generate_calls == 0
@@ -97,11 +101,11 @@ async def test_missing_mode_never_auto_promotes_to_data_analysis(tmp_path):
     llm = _TrackingLLM(mode_label="data_analysis")
     agent, _ = _make_agent(tmp_path, llm)
 
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path)))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path))))
 
     for msg in ["分析第一个表格", "再看看第二份数据"]:
         await agent.prompt(
-            SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": msg}])
+            **acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": msg}]))
         )
 
     assert llm.generate_calls == 0

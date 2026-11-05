@@ -8,96 +8,94 @@ from types import SimpleNamespace
 import weakref
 
 import pytest
-from acp.connection import Connection
+from acp.connection import Connection as SDKConnection
 from acp.exceptions import RequestError
-from acp.task.dispatcher import DefaultMessageDispatcher
-from acp.task.queue import InMemoryMessageQueue
-from acp.task.supervisor import TaskSupervisor
 
-from box_agent.acp.request_state import RequestStateStore
+from box_agent.acp.stdio_compat import StdioTransport
+from box_agent.acp.request_state import release_received_frames
 
 
-class Payload:
+def Connection(*args, **kwargs):
+    connection = SDKConnection(*args, **kwargs)
+    release_received_frames(connection)
+    return connection
+
+
+class Payload(dict):
     def __init__(self):
-        self.content = bytearray(256 * 1024)
+        super().__init__(content="x" * (256 * 1024))
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "error"])
-def test_finished_request_does_not_keep_body_result_or_error_locals(outcome):
-    store = RequestStateStore()
+async def test_finished_sdk_request_releases_body_and_result_while_connection_idle(outcome):
+    incoming = asyncio.Queue()
+    sent = asyncio.Event()
+    refs = []
 
-    def finish():
-        body, response = Payload(), Payload()
-        refs = weakref.ref(body), weakref.ref(response)
-        record = store.begin_incoming("session/prompt", {"body": body})
-        if outcome == "success":
-            store.complete_incoming(record, {"response": response})
-        else:
-            try:
-                raise RuntimeError("request failed with locals in its traceback")
-            except RuntimeError as error:
-                store.fail_incoming(record, error)
-        return record, refs
+    class Transport:
+        async def receive(self):
+            return await incoming.get()
 
-    # Even if a diagnostic caller holds the record, it must not retain payloads.
-    record, refs = finish()
-    gc.collect()
-    assert all(ref() is None for ref in refs)
-    assert record.status == ("completed" if outcome == "success" else "failed")
+        async def send(self, message):
+            assert ("result" if outcome == "success" else "error") in message
+            sent.set()
+
+        async def close(self):
+            pass
+
+    async def handle(method, params, notification):
+        response = Payload()
+        refs.append(weakref.ref(response))
+        if outcome == "error":
+            raise RequestError(-32010, "request failed")
+        return response
+
+    body = Payload()
+    refs.append(weakref.ref(body))
+    connection = Connection(handle, Transport())
+    try:
+        incoming.put_nowait({"jsonrpc": "2.0", "id": 1, "method": "_echo", "params": body})
+        del body
+        await asyncio.wait_for(sent.wait(), 2)
+        await asyncio.sleep(0)
+        gc.collect()
+        assert all(ref() is None for ref in refs)
+    finally:
+        await asyncio.wait_for(connection.close(), 2)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("started", [False, True])
 async def test_cancelled_sdk_request_releases_body_without_completion_callback(started):
-    store = RequestStateStore()
-    supervisor = TaskSupervisor(source="request-state-test")
     entered = asyncio.Event()
 
-    async def request(message):
+    class Transport:
+        async def send(self, message):
+            pass
+
+        async def receive(self):
+            await asyncio.Event().wait()
+
+        async def close(self):
+            pass
+
+    async def request(method, params, notification):
         entered.set()
         await asyncio.Event().wait()
 
-    async def notification(message):
-        pass
-
-    dispatcher = DefaultMessageDispatcher(
-        queue=InMemoryMessageQueue(), supervisor=supervisor, store=store,
-        request_runner=request, notification_runner=notification,
-    )
+    connection = Connection(request, Transport(), listening=False)
     body = Payload()
     ref = weakref.ref(body)
-    try:
-        await dispatcher._dispatch_request({"method": "session/new", "params": body})
-        del body
-        if started:
-            await asyncio.wait_for(entered.wait(), 2)
-    finally:
-        # Call inline so the False case cancels before the child ever starts.
-        await supervisor.shutdown()
+    connection._process_message({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": body})
+    del body
+    if started:
+        await asyncio.wait_for(entered.wait(), 2)
+    await connection.close()
     assert entered.is_set() is started
     await asyncio.sleep(0)
     gc.collect()
     assert ref() is None
-
-
-@pytest.mark.asyncio
-async def test_host_reply_futures_survive_unrelated_incoming_requests():
-    store = RequestStateStore()
-    permission_a = store.register_outgoing(10, "session/request_permission")
-    permission_b = store.register_outgoing(11, "session/request_permission")
-    host_read = store.register_outgoing(12, "fs/read_text_file")
-    for _ in range(32):
-        store.complete_incoming(store.begin_incoming("session/prompt", {}), {"stopReason": "end_turn"})
-    assert not permission_a.done() and not permission_b.done() and not host_read.done()
-    store.resolve_outgoing(11, {"outcome": "selected", "session": "b"})
-    assert await permission_b == {"outcome": "selected", "session": "b"}
-    assert not permission_a.done()
-    store.reject_outgoing(12, RequestError(-32000, "host read failed"))
-    with pytest.raises(RequestError, match="host read failed"):
-        await host_read
-    store.reject_all_outgoing(ConnectionError("host disconnected"))
-    with pytest.raises(ConnectionError, match="host disconnected"):
-        await permission_a
 
 
 @pytest.mark.asyncio
@@ -117,8 +115,7 @@ async def test_sdk_delivers_response_and_error_before_releasing_request_payload(
         return {"sessionId": params["sessionId"], "content": params["content"]}
 
     reader = asyncio.StreamReader()
-    store = RequestStateStore()
-    connection = Connection(handle, Writer(), reader, state_store=store)
+    connection = Connection(handle, StdioTransport(reader, Writer()))
     try:
         for request_id, method in enumerate(["_echo", "_fail", "_echo"]):
             content = "response-body-" * 100
@@ -161,10 +158,7 @@ async def outgoing_connection():
 
     writer = Writer()
     reader = asyncio.StreamReader()
-    store = RequestStateStore()
-    connection = Connection(
-        handle, writer, reader, state_store=store, sender_factory=store.create_sender,
-    )
+    connection = Connection(handle, StdioTransport(reader, writer))
     connection.add_observer(lambda event: sent.put_nowait(event.message)
                             if event.direction.value == "outgoing" else None)
 
@@ -181,7 +175,7 @@ async def outgoing_connection():
 
     try:
         yield SimpleNamespace(
-            connection=connection, store=store, writer=writer, reader=reader,
+            connection=connection, writer=writer, reader=reader,
             writes=writes, sent=sent, drain_entered=drain_entered,
             drain_release=drain_release, reply=reply,
         )
@@ -201,6 +195,32 @@ async def outgoing_connection():
 
 
 @pytest.mark.asyncio
+async def test_host_reply_futures_survive_unrelated_incoming_requests():
+    async with outgoing_connection() as link:
+        requests = [asyncio.create_task(link.connection.send_request(method, {"sessionId": session}))
+                    for method, session in [("session/request_permission", "a"),
+                                            ("session/request_permission", "b"),
+                                            ("fs/read_text_file", "c")]]
+        wires = [await asyncio.wait_for(link.sent.get(), 2) for _ in requests]
+        for request_id in range(1000, 1032):
+            link.reader.feed_data((json.dumps({"jsonrpc": "2.0", "id": request_id,
+                "method": "_barrier", "params": {}}) + "\n").encode())
+        replies = [await asyncio.wait_for(link.sent.get(), 2) for _ in range(32)]
+        assert {reply["id"] for reply in replies} == set(range(1000, 1032))
+        assert all(not request.done() for request in requests)
+        await link.reply(wires[1]["id"], result={"session": "b"})
+        assert await requests[1] == {"session": "b"}
+        await link.reply(wires[2]["id"], error={"code": -32000, "message": "host read failed"})
+        with pytest.raises(RequestError, match="host read failed"):
+            await requests[2]
+        assert not requests[0].done()
+        link.reader.feed_eof()
+        with pytest.raises(ConnectionError):
+            await requests[0]
+        assert not link.connection._pending
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["sending", "reply"])
 @pytest.mark.parametrize("finish", ["cancel", "timeout"])
 async def test_abandoned_host_request_is_released_without_affecting_peer(phase, finish):
@@ -213,8 +233,8 @@ async def test_abandoned_host_request_is_released_without_affecting_peer(phase, 
             await asyncio.wait_for(link.drain_entered.wait(), 2)
         else:
             await asyncio.wait_for(link.sent.get(), 2)
-        abandoned_id = next(key for key in link.store._outgoing if key != peer_wire["id"])
-        abandoned_future = link.store._outgoing[abandoned_id].future
+        abandoned_id = next(key for key in link.connection._pending if key != peer_wire["id"])
+        abandoned_future = link.connection._pending[abandoned_id]
         if finish == "timeout":
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(request, .01)
@@ -224,7 +244,7 @@ async def test_abandoned_host_request_is_released_without_affecting_peer(phase, 
                 await request
         await asyncio.sleep(0)
         assert abandoned_future.cancelled()
-        assert set(link.store._outgoing) == {peer_wire["id"]}
+        assert set(link.connection._pending) == {peer_wire["id"]}
         assert not peer.done()
         link.drain_release.set()
         # Duplicate, late and unknown replies must not complete the live peer.
@@ -233,7 +253,7 @@ async def test_abandoned_host_request_is_released_without_affecting_peer(phase, 
             assert not peer.done()
         await link.reply(peer_wire["id"], result={"content": "peer result"})
         assert await peer == {"content": "peer result"}
-        assert not link.store._outgoing
+        assert not link.connection._pending
 
 
 @pytest.mark.asyncio
@@ -244,15 +264,15 @@ async def test_serialization_failure_releases_request_before_owner_task_finishes
         for _ in range(8):
             with pytest.raises(TypeError):
                 await link.connection.send_request("session/request_permission", {"bad": object()})
-            assert set(link.store._outgoing) == {peer_wire["id"]}
+            assert set(link.connection._pending) == {peer_wire["id"]}
         # A response ID may equal a live outgoing ID; it is a separate namespace.
         for message in (
             {"id": peer_wire["id"], "result": object()},
             {"method": "session/update", "params": object()},
         ):
             with pytest.raises(TypeError):
-                await link.connection._sender.send({"jsonrpc": "2.0", **message})
-            assert set(link.store._outgoing) == {peer_wire["id"]}
+                await link.connection._transport.send({"jsonrpc": "2.0", **message})
+            assert set(link.connection._pending) == {peer_wire["id"]}
         await link.reply(peer_wire["id"], result={"content": "still live"})
         assert await peer == {"content": "still live"}
 
@@ -263,7 +283,7 @@ async def test_transport_send_failure_releases_unawaited_host_reply():
         link.writer.failure = OSError("host pipe failed")
         with pytest.raises(OSError, match="host pipe failed"):
             await asyncio.wait_for(link.connection.send_request("session/request_permission", {}), 2)
-        assert not link.store._outgoing
+        assert not link.connection._pending
 
 
 @pytest.mark.asyncio
@@ -278,7 +298,7 @@ async def test_host_error_before_send_cancellation_does_not_leave_unretrieved_fu
             request = asyncio.create_task(link.connection.send_request("session/request_permission", {}))
             wire = await asyncio.wait_for(link.writes.get(), 2)
             await asyncio.wait_for(link.drain_entered.wait(), 2)
-            future = link.store._outgoing[wire["id"]].future
+            future = link.connection._pending[wire["id"]]
             settled = asyncio.Event()
             future.add_done_callback(lambda _: settled.set())
             link.reader.feed_data((json.dumps({"jsonrpc": "2.0", "id": wire["id"],
@@ -287,7 +307,7 @@ async def test_host_error_before_send_cancellation_does_not_leave_unretrieved_fu
             request.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await request
-            assert not link.store._outgoing
+            assert not link.connection._pending
             del future, request
         gc.collect()
         await asyncio.sleep(0)
@@ -305,7 +325,9 @@ async def test_shared_permission_rpc_stays_live_until_last_waiter_finishes(tmp_p
 
     async with outgoing_connection() as link:
         class Host:
-            async def requestPermission(self, params):
+            async def request_permission(self, session_id, tool_call, options, **meta):
+                from acp.schema import RequestPermissionRequest
+                params = RequestPermissionRequest(session_id=session_id, tool_call=tool_call, options=options, field_meta=meta or None)
                 result = await link.connection.send_request(
                     "session/request_permission", params.model_dump(mode="json", by_alias=True),
                 )
@@ -322,8 +344,8 @@ async def test_shared_permission_rpc_stays_live_until_last_waiter_finishes(tmp_p
         with pytest.raises(asyncio.CancelledError):
             await first
         assert not second.done()
-        assert list(link.store._outgoing) == [wire["id"]]
-        future = link.store._outgoing[wire["id"]].future
+        assert list(link.connection._pending) == [wire["id"]]
+        future = link.connection._pending[wire["id"]]
         if finish == "reply":
             await link.reply(wire["id"], result={"outcome": {"outcome": "selected", "optionId": "approve"}})
             assert await asyncio.wait_for(second, 2) is True
@@ -337,4 +359,4 @@ async def test_shared_permission_rpc_stays_live_until_last_waiter_finishes(tmp_p
             await asyncio.wait_for(settled.wait(), 2)
             assert future.cancelled()
             assert not grants.has_filesystem_dir_grant(tmp_path.resolve())
-        assert not link.store._outgoing
+        assert not link.connection._pending

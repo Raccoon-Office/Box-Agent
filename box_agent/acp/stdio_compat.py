@@ -1,27 +1,16 @@
-"""Local stdio bridge for ACP that lifts the StreamReader buffer ceiling.
+"""Bounded ACP stdio with host-disconnect and platform lifecycle handling.
 
-The upstream ``acp.stdio.stdio_streams()`` constructs ``asyncio.StreamReader()``
-without a ``limit`` argument, which defaults to 64 KiB. A single JSON-RPC frame
-on stdin that exceeds that (e.g. a ``session/prompt`` carrying base64-inlined
-images, a large pasted document, or a host that bundles extra context into
-``_meta``) causes ``readline()`` to raise ``asyncio.LimitOverrunError`` inside
-``Connection._receive_loop``. The loop only catches ``CancelledError`` and
-silently dies; every subsequent outgoing RPC is then rejected with
-``ConnectionError("Connection closed")`` and the session is unrecoverable.
-
-We replicate just the stdio helpers (``_WritePipeProtocol``,
-``_StdoutTransport``, ``_start_stdin_feeder``, plus the POSIX/Windows variants)
-from upstream and pass ``limit=_READ_LIMIT`` when constructing the reader.
-The reader also notifies the server when the protocol consumes stdin EOF or
-encounters a fatal read error, which stops the SDK receive loop.
-Everything else in ``acp`` — ``AgentSideConnection``, ``Connection``, the
-dispatcher, schemas — is still used unchanged.
+SDK 0.12.1 accepts a reader limit, but its default NDJSON transport joins
+unlimited readuntil chunks, so that limit is not a message-size ceiling.
+Use the SDK's message transport interface with bounded readline instead.
+The SDK continues to own JSON-RPC routing, requests and response correlation.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import platform
 import sys
@@ -35,6 +24,65 @@ from typing import cast
 # images. Keep an explicit ceiling, but leave enough room for large officev3
 # resume prompts so the ACP receive loop does not die before it can respond.
 _READ_LIMIT = 32 * 1024 * 1024
+
+
+class StdioTransport:
+    """Serialize frames without a connection-long payload or sender queue."""
+
+    def __init__(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        *, on_disconnect: Callable[[], None] | None = None,
+    ) -> None:
+        self._reader = reader
+        self._writer = writer
+        self._send_lock = asyncio.Lock()
+        self._closed = False
+        self._on_disconnect = on_disconnect
+
+    def _disconnect(self) -> None:
+        if self._on_disconnect is not None:
+            callback, self._on_disconnect = self._on_disconnect, None
+            callback()
+
+    async def send(self, message: dict) -> None:
+        # Serialization errors reject only this request; a broken pipe ends
+        # the connection. Keep each frame and drain under the same lock.
+        frame = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+        async with self._send_lock:
+            if self._closed:
+                raise ConnectionError("Transport closed")
+            try:
+                self._writer.write(frame)
+                await self._writer.drain()
+            except Exception:
+                self._disconnect()
+                raise
+
+    async def receive(self) -> dict | None:
+        try:
+            while True:
+                line = await self._reader.readline()
+                if not line:
+                    self._disconnect()
+                    return None
+                if not line.strip():
+                    continue
+                try:
+                    message = json.loads(line)
+                except (ValueError, UnicodeError):
+                    logging.exception("Error parsing JSON-RPC message")
+                    continue
+                if not isinstance(message, dict):
+                    raise ValueError("ACP frame must be a JSON object")
+                return message
+        except Exception:
+            self._disconnect()
+            raise
+
+    async def close(self) -> None:
+        self._closed = True
+        async with self._send_lock:
+            await self._writer.drain()
 
 
 class _StdioStreamReader(asyncio.StreamReader):
@@ -86,10 +134,14 @@ def _start_stdin_feeder(loop: asyncio.AbstractEventLoop, reader: asyncio.StreamR
     def blocking_read() -> None:
         try:
             while True:
-                data = sys.stdin.buffer.readline()
+                # Bound the feeder allocation too: a Windows pipe does not use
+                # asyncio's read transport or its buffer limit.
+                data = sys.stdin.buffer.readline(_READ_LIMIT + 1)
                 if not data:
                     break
                 loop.call_soon_threadsafe(reader.feed_data, data)
+                if len(data) > _READ_LIMIT and not data.endswith(b"\n"):
+                    break  # Let bounded readline report the oversized frame.
         finally:
             loop.call_soon_threadsafe(reader.feed_eof)
 
@@ -99,15 +151,15 @@ def _start_stdin_feeder(loop: asyncio.AbstractEventLoop, reader: asyncio.StreamR
 class _StdoutTransport(asyncio.BaseTransport):
     def __init__(self) -> None:
         self._is_closing = False
+        # run_acp_server redirects sys.stdout to stderr after constructing us.
+        # Keep protocol bytes on the original pipe, including on Windows.
+        self._stdout = sys.stdout.buffer
 
     def write(self, data: bytes) -> None:  # type: ignore[override]
         if self._is_closing:
-            return
-        try:
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-        except Exception:
-            logging.exception("Error writing to stdout")
+            raise ConnectionError("stdout closed")
+        self._stdout.write(data)
+        self._stdout.flush()
 
     def can_write_eof(self) -> bool:  # type: ignore[override]
         return False
@@ -118,7 +170,7 @@ class _StdoutTransport(asyncio.BaseTransport):
     def close(self) -> None:  # type: ignore[override]
         self._is_closing = True
         with contextlib.suppress(Exception):
-            sys.stdout.flush()
+            self._stdout.flush()
 
     def abort(self) -> None:  # type: ignore[override]
         self.close()
