@@ -36,6 +36,34 @@ Lab 的普通发送、历史编辑重发和 `_inject` 使用同一组 `_meta` �
 
 直接回归见 `tests/test_input_context.py`、`tests/test_message_injections.py` 和历史编辑测试。配套 Lab 的 `boxAgentSdk.spec.ts` 使用真实 SDK 子进程及受控模型，记录普通发送与运行中补充实际交给模型的消息；它证明合同贯通，不代替真实模型和原生界面验收。
 
+## 2B：已准备文件的 resource_link
+
+Lab 的普通发送和编辑重发保留用户 text 原文，另发标准 ACP `resource_link`
+（`uri`、`name`、`mimeType`、`size`，数据源名称/相对路径放在 `title`）。
+运行中 `_inject` 的 `resources` 使用同样的 link 对象列表，`text` 仍是用户原文。
+不再拼接宿主文件指导，也不把数据源清单裁成前 6 个文件。
+
+共享 `input_resources.py` 只接受当前会话工作区内、已存在且可读的普通文件。
+仅支持本机 `file:` URI，拒绝远程 authority、query/fragment、非法百分号/UTF-8 编码、
+父路径、跨工作区、符号链接逃逸、硬链接及非普通文件；同时检查既有 PermissionEngine。
+资源 URI 不触发下载，不授予新权限。文件工具实际读取时继续执行原访问检查。
+同一路径只投影一次；完整名称、规范路径、类型和大小进入有来源的 JSON 事实，
+资源名/内容不成为新指令。原图片 block/`image_attachment_paths` 通路保持，
+普通图片附件不再同时作为文件 link 触发另一条自动分析路径。
+
+校验发生在轮次绑定、历史回退和补充入队之前；失败返回
+`INVALID_INPUT_RESOURCE:<reason>`，不会占用该轮次/补充 ID，可在准备完成后重试。
+纯文件输入的默认分析请求由 Agent 生成。资源事实参与既有语义指纹和持久消息，
+因此补充去重、历史编辑和恢复仍使用同一套路径。协议最多 520 个 link，
+对应宿主原有 20 个上传附件和 500 个数据源选择；上传 100 MiB 限制仍由原准备入口执行。
+预检查不等于不可变文件快照；检查后删除、替换或访问权限变化仍由实际工具读错误处理。
+
+直接回归：`tests/test_input_resources.py` 覆盖编码、完整性、归属、权限、失败重试和历史保护。
+Lab 真实 SDK 子进程测试使用 9 个中文/空格/特殊字符同名文件与 1 个运行中补充，
+受控模型调用既有 `read_file`，核对 10 个随机 token 和数值总和；不是仅回显 URI。
+该测试的文件工具通过 `BOX_AGENT_DESKTOP_TEST_FILE_INPUTS=1` 显式启用，不影响生产配置。
+这只证明本地合同；云端上传、身份绑定及资源/产物传输仍属于 2C。
+
 ## 长驻进程约束
 
 `stdio_compat.StdioTransport` 实现 SDK 的消息级 transport，SDK 负责 JSON-RPC 路由和回包关联。

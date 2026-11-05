@@ -190,6 +190,7 @@ from box_agent.task_context import TaskContext, normalize_task_id
 from box_agent.session_continuation import import_continuation_images, parse_session_continuation
 from box_agent.session_history import prompt_fingerprint, revision_request, revise_agent_history
 from box_agent.input_context import normalize_input_context, original_request, project_input_context
+from box_agent.input_resources import normalize_file_inputs
 from box_agent.task_registry import (
     ArtifactLineage,
     begin_task,
@@ -2629,9 +2630,15 @@ class BoxACPAgent:
         edit = meta.get("history_edit")
         if state._history_edit_in_progress:
             raise _session_busy_error(session_id)
+        # Validate references before cancelling an edited turn, revising history,
+        # binding its ID, or running any tool. This synchronous preflight does not
+        # yield between session lookup and the existing request guards.
+        files = normalize_file_inputs(params.prompt, state.agent.workspace_dir, state.permission_engine)
+        if files:
+            context["files"] = files
         if edit is not None:
             try:
-                await self._revise_session_history(params, state, edit)
+                await self._revise_session_history(params, state, edit, context)
             except Exception as exc:
                 history = state.agent.session_log
                 raise RequestError(-32011, str(exc), {
@@ -2667,7 +2674,7 @@ class BoxACPAgent:
                 log_store.flush()
             if log_store is not None and context:
                 log_store.append("input/context", {"turn_id": turn_id, **context}, ignorable=True)
-            return await self._prompt_for_session(params, session_id, state)
+            return await self._prompt_for_session(params, session_id, state, context)
         except Exception as exc:
             if edit is not None:
                 history = state.agent.session_log
@@ -2682,7 +2689,7 @@ class BoxACPAgent:
                 finished.set_result(None)
 
     async def _revise_session_history(
-        self, params: PromptRequest, state: SessionState, edit: Any,
+        self, params: PromptRequest, state: SessionState, edit: Any, context: dict[str, Any],
     ) -> None:
         if not isinstance(edit, dict) or set(edit) != {"target_turn_id", "expected_revision_id"}:
             raise ValueError("INVALID_HISTORY_REVISION")
@@ -2694,7 +2701,7 @@ class BoxACPAgent:
             return revision_request(
                 list(log_store.events), target_turn_id=edit["target_turn_id"], turn_id=turn_id,
                 expected_revision_id=edit["expected_revision_id"],
-                fingerprint=prompt_fingerprint(params.prompt, normalize_input_context(params.field_meta)),
+                fingerprint=prompt_fingerprint(params.prompt, context),
             )
         checked_revision()
         if log_store.has_turn_binding(turn_id):
@@ -2751,7 +2758,7 @@ class BoxACPAgent:
             state._history_edit_in_progress = False
 
     async def _prompt_for_session(
-        self, params: PromptRequest, session_id: str, state: SessionState,
+        self, params: PromptRequest, session_id: str, state: SessionState, context: dict[str, Any],
     ) -> PromptResponse:
         self._config_for_session(state)
 
@@ -2768,9 +2775,12 @@ class BoxACPAgent:
         state.cancelled = False
         state.wrap_up_requested = False
         prompt_images = _prompt_image_blocks(params.prompt)
-        user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
+        user_text = "\n".join(
+            block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+            for block in params.prompt
+            if (block.get("type") if isinstance(block, dict) else getattr(block, "type", None)) == "text"
+        )
         prompt_meta = getattr(params, "field_meta", None) or {}
-        context = normalize_input_context(prompt_meta)
         request_text = original_request(user_text, context)
         # Judge the language on the user's own words, before host prefixes are added.
         hints = turn_hints(request_text)
@@ -3778,12 +3788,21 @@ class BoxACPAgent:
             state = self._sessions.get(session_id)
             if not state:
                 return {"error": "session_not_found"}
-            if not text:
+            if not isinstance(text, str) or (not text and not params.get("resources")):
                 return {"error": "empty_text"}
             if not state.turn_active:
                 return {"error": "no_active_turn"}
             try:
                 context = normalize_input_context(params.get("_meta"))
+                resources = params.get("resources", [])
+                if not isinstance(resources, list) or any(
+                    not isinstance(block, dict) or block.get("type") != "resource_link"
+                    for block in resources
+                ):
+                    raise ValueError("INVALID_INPUT_RESOURCE:invalid_blocks")
+                files = normalize_file_inputs(resources, state.agent.workspace_dir, state.permission_engine)
+                if files:
+                    context["files"] = files
             except ValueError as exc:
                 return {"error": str(exc)}
             # Idempotency: a host retrying after a lost/timed-out response with the
