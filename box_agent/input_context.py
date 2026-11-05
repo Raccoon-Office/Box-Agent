@@ -31,12 +31,18 @@ class _ReferencedConversations(_TextSource):
     sources: list[_ConversationSource] = Field(default_factory=list, max_length=3)
 
 
+class _TeamTask(_Facts):
+    # A complete task snapshot aggregates many resources, unlike a single excerpt.
+    # Preserve it like userRequest; ACP frame and model context budgets still apply.
+    text: str = Field(min_length=1)
+
+
 class _InputContext(_Facts):
     schemaVersion: Literal[1]
     userRequest: str
     appshot: _TextSource | None = None
     referencedConversations: _ReferencedConversations | None = None
-    teamTask: _TextSource | None = None
+    teamTask: _TeamTask | None = None
 
 
 class _DocumentSource(_Facts):

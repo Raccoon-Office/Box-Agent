@@ -325,7 +325,9 @@ def main():
 
     install_fixture(acp, root)
     config = Config(
-        llm=LLMConfig(api_key="synthetic-test-key", model="desktop-fixture"),
+        # Protocol fixtures include complete large snapshots plus supplements.
+        # Declare a model window that fits them; production budget checks stay on.
+        llm=LLMConfig(api_key="synthetic-test-key", model="desktop-fixture", context_window=1_000_000),
         agent=AgentConfig(workspace_dir=str(root / "profile/workspaces"), max_steps=5,
                           enable_memory=False, enable_memory_extraction=False,
                           memory_maintainer_enabled=False, memory_promotion_proposal_enabled=False),

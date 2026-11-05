@@ -77,6 +77,36 @@ def test_invalid_context_is_rejected(patch):
         normalize_input_context({**facts(), **patch})
 
 
+def test_aggregated_team_task_retains_all_resources_and_trailing_requirements():
+    resources = [f"resource-{index}-end".rjust(12_000, "x") for index in range(17)]
+    text = "\n\n".join([*resources, "Goal: full report", "Acceptance: cite every source", "Inputs: /work/data.csv"])
+    assert len(text) > 200_000
+    meta = {"input_context": {"schemaVersion": 1, "userRequest": "Start the task", "teamTask": {"text": text}}}
+    context = normalize_input_context(meta)
+    assert context["input_context"]["teamTask"]["text"] == text
+    projected = project_input_context("Start the task", context)
+    assert json.loads(projected.split("\n\n")[-1])["teamTask"]["text"] == text
+    prompt = [{"type": "text", "text": "Start the task"}]
+    previous = prompt_fingerprint(prompt, context)
+    meta["input_context"]["teamTask"]["text"] += "\nAcceptance changed"
+    assert prompt_fingerprint(prompt, normalize_input_context(meta)) != previous
+
+
+@pytest.mark.parametrize("name", ["appshot", "referencedConversations"])
+def test_individual_reference_text_still_has_a_200000_character_limit(name):
+    meta = {"input_context": {"schemaVersion": 1, "userRequest": "question", name: {"text": "x" * 200_000}}}
+    assert normalize_input_context(meta)["input_context"][name]["text"] == "x" * 200_000
+    meta["input_context"][name]["text"] += "x"
+    with pytest.raises(ValueError, match="INVALID_INPUT_CONTEXT:input_context"):
+        normalize_input_context(meta)
+
+
+@pytest.mark.parametrize("text", ["", 123, None])
+def test_team_task_still_requires_nonempty_string_text(text):
+    with pytest.raises(ValueError, match="INVALID_INPUT_CONTEXT:input_context"):
+        normalize_input_context({"input_context": {"schemaVersion": 1, "userRequest": "question", "teamTask": {"text": text}}})
+
+
 @pytest.mark.parametrize("path", ["/private/source.docx", "../source.docx", "docs/../../source.docx", "C:\\source.docx"])
 def test_selection_paths_cannot_claim_local_or_parent_files(path):
     meta = facts()
