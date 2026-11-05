@@ -1,8 +1,12 @@
 """Opt-in deterministic ACP server for a development desktop, never a release entry."""
 
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
+
 import asyncio
 from contextvars import ContextVar
 import json
+from importlib.metadata import version
 import os
 from pathlib import Path
 import re
@@ -198,10 +202,11 @@ def install_fixture(acp, root):
         def __getattr__(self, name):
             return getattr(self.wrapped, name)
 
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             if getattr(payload.update, "sessionUpdate", "") == "agent_message_chunk":
                 await asyncio.sleep({"slow": 0.01, "timeout": 1}.get(scenario.get(), 0))
-            return await self.wrapped.sessionUpdate(payload)
+            return await self.wrapped.session_update(**acp_params(payload))
 
     original = acp.BoxACPAgent
 
@@ -214,22 +219,24 @@ def install_fixture(acp, root):
             # process never loads credentials or contacts a real provider.
             return self._llm
 
-        async def extMethod(self, method, params):
+        async def ext_method(self, method, params):
+            if method == "fixture_host_request":
+                return await self._conn.ext_method(params["method"], params["params"])
             if method == "fixture_rpc_state":
-                store = self._conn._conn._state
+                connection = self._conn._conn
                 return {
-                    "incoming_records": len(store._incoming),
-                    "outgoing_requests": len(store._outgoing),
+                    "sdk_version": version("agent-client-protocol"),
+                    "host_client_name": self._client_info.name if self._client_info else None,
+                    "outgoing_requests": len(connection._pending),
                     "sessions": {state.upstream_session_id: {
                         "handle": handle,
                         "users": [str(message.content) for message in state.agent.messages
                                   if message.role == "user"],
                     } for handle, state in self._sessions.items()},
                 }
-            return await super().extMethod(method, params)
+            return await super().ext_method(method, params)
 
-        async def newSession(self, params):
-            meta = getattr(params, "field_meta", None) or {}
+        async def new_session(self, cwd, mcp_servers=None, additional_directories=None, **meta):
             should_block = bool(binding_phase and meta.get("fixture_block_binding"))
             if should_block and binding_phase == "close":
                 state = next(s for s in self._sessions.values()
@@ -243,7 +250,8 @@ def install_fixture(acp, root):
                 state.plugin_session.aclose = close
             token = block_binding.set(should_block)
             try:
-                return await super().newSession(params)
+                return await super().new_session(cwd=cwd, mcp_servers=mcp_servers,
+                    additional_directories=additional_directories, **meta)
             finally:
                 block_binding.reset(token)
 
@@ -260,21 +268,21 @@ def install_fixture(acp, root):
                     opening=len(self._plugin_runtime._opening),
                     plugin_sessions=len(self._plugin_runtime._sessions))
 
-        async def prompt(self, params):
+        async def prompt(self, session_id, prompt, **meta):
             text = " ".join(str(getattr(block, "text", block.get("text", "") if isinstance(block, dict) else ""))
-                            for block in params.prompt)
+                            for block in prompt)
             match = re.search(r"fixture:(\w+)", text)
             mode = match[1] if match else "normal"
             token = scenario.set(mode)
             calls_token = executions.set([])
             try:
-                return await super().prompt(params)
+                return await super().prompt(session_id=session_id, prompt=prompt, **meta)
             finally:
-                state = self._sessions.get(params.sessionId)
+                state = self._sessions.get(session_id)
                 handle = getattr(state, "_run_handle", None)
                 if handle is not None and not handle.is_active:
                     result = await handle.result()
-                    record = {"scenario": mode, "session_id": params.sessionId,
+                    record = {"scenario": mode, "session_id": session_id,
                               "status": result.status.value, "stop_reason": result.stop_reason,
                               "error": dict(result.error) if result.error else None,
                               "executions": executions.get()}

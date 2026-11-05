@@ -1,5 +1,7 @@
 """Auxiliary budgets are isolated from execution, routing, and durable memory."""
 
+
+
 from copy import copy
 from datetime import datetime, timezone
 import json
@@ -68,7 +70,7 @@ class BudgetLLM:
 ])
 async def test_known_lightweight_purposes_cap_only_their_own_request(purpose, expected):
     llm = BudgetLLM()
-    result = await _StubAgent(llm).extMethod(
+    result = await _StubAgent(llm).ext_method(
         "llm/prompt", {"prompt": "hello", "_meta": {"purpose": purpose}},
     )
     assert result["text"] == "done"
@@ -82,7 +84,7 @@ async def test_known_lightweight_purposes_cap_only_their_own_request(purpose, ex
 @pytest.mark.parametrize("size, expected", [(100, 8_192), (4_000, 16_384), (10_000, 100_000)])
 async def test_full_text_transforms_allow_longer_outputs_without_truncating_input(size, expected):
     llm = BudgetLLM()
-    result = await _StubAgent(llm).extMethod("llm/prompt", {
+    result = await _StubAgent(llm).ext_method("llm/prompt", {
         "prompt": "文" * size, "_meta": {"purpose": "voice_transcript_cleanup"},
     })
     assert result["text"] == "done"

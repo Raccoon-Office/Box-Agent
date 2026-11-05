@@ -34,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
-import platform
 import re
 import signal
 import sys
@@ -48,16 +47,12 @@ from uuid import uuid4, uuid5
 
 from acp import (
     PROTOCOL_VERSION,
-    AgentSideConnection,
-    CancelNotification,
-    InitializeRequest,
     InitializeResponse,
     NewSessionRequest,
     NewSessionResponse,
     PromptRequest,
     PromptResponse,
     RequestError,
-    session_notification,
     start_tool_call,
     text_block,
     tool_content,
@@ -65,7 +60,7 @@ from acp import (
     update_agent_thought,
     update_tool_call,
 )
-from pydantic import field_validator
+from acp.agent.connection import AgentSideConnection
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities, PromptCapabilities
 
 from box_agent import __version__
@@ -86,8 +81,8 @@ from box_agent.agent_runtime import (
 )
 from box_agent.agent_run import AgentRunHandle
 from box_agent.api import RunRequest, RunStatus
-from box_agent.acp.stdio_compat import stdio_streams_largebuf
-from box_agent.acp.request_state import RequestStateStore
+from box_agent.acp.stdio_compat import StdioTransport, stdio_streams_largebuf
+from box_agent.acp.request_state import release_received_frames
 from box_agent.agent import (
     Agent,
     InitialContextTransition,
@@ -261,26 +256,6 @@ from box_agent.user_paths import configured_box_agent_home, state_path
 # Keep stdlib logger for backward compat with existing log calls
 logger = logging.getLogger(__name__)
 _DEFAULT_AGENT_TITLE = "Box-Agent"
-
-try:
-    class InitializeRequestPatch(InitializeRequest):
-        @field_validator("protocolVersion", mode="before")
-        @classmethod
-        def normalize_protocol_version(cls, value: Any) -> int:
-            if isinstance(value, str):
-                try:
-                    return int(value.split(".")[0])
-                except Exception:
-                    return 1
-            if isinstance(value, (int, float)):
-                return int(value)
-            return 1
-
-    InitializeRequest = InitializeRequestPatch
-    InitializeRequest.model_rebuild(force=True)
-except Exception:  # pragma: no cover - defensive
-    logger.debug("ACP schema patch skipped")
-
 
 def _artifact_envelope(
     art: ArtifactEvent,
@@ -1731,19 +1706,21 @@ class BoxACPAgent:
 
         self._memory_bootstrap_task = asyncio.create_task(bootstrap(), name="memory-bootstrap")
 
-    async def initialize(self, params: InitializeRequest) -> InitializeResponse:
+    async def initialize(
+        self, protocol_version: int, client_capabilities: Any = None,
+        client_info: Implementation | None = None, **meta: Any,
+    ) -> InitializeResponse:
         log.info("initialize", message="ACP initialize request received")
-        meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
-            self._client_info = ClientInfo.from_meta(meta.get("client_info"))
+            self._client_info = ClientInfo.from_meta(meta.get("host_client_info"))
         self._default_llm_binding = _normalize_llm_binding(meta)
         self._start_memory_bootstrap()
         kwargs: dict[str, Any] = dict(
-            protocolVersion=PROTOCOL_VERSION,
-            agentCapabilities=AgentCapabilities(
-                loadSession=False, promptCapabilities=PromptCapabilities(image=True),
+            protocol_version=PROTOCOL_VERSION,
+            agent_capabilities=AgentCapabilities(
+                load_session=False, prompt_capabilities=PromptCapabilities(image=True),
             ),
-            agentInfo=Implementation(name="box-agent", title="Box-Agent", version=__version__),
+            agent_info=Implementation(name="box-agent", title="Box-Agent", version=__version__),
         )
         skills = self._skills_meta()
         if skills is not None:
@@ -1753,8 +1730,16 @@ class BoxACPAgent:
         log.info("initialize", message=f"Initialized box-agent v{__version__}, skills={len(skills) if skills else 0}")
         return resp
 
-    async def newSession(self, params: NewSessionRequest) -> NewSessionResponse:
+    async def new_session(
+        self, cwd: str, mcp_servers: list[Any] | None = None,
+        additional_directories: list[str] | None = None, **meta: Any,
+    ) -> NewSessionResponse:
         self._require_accepting_requests()
+        params = NewSessionRequest(
+            cwd=cwd or self._config.agent.workspace_dir or ".",
+            mcp_servers=mcp_servers or [], additional_directories=additional_directories,
+            field_meta=meta or None,
+        )
         task = asyncio.create_task(
             self._new_session_with_binding(params), name="acp-session-create",
         )
@@ -1836,7 +1821,7 @@ class BoxACPAgent:
         memory_meta = memory_meta if isinstance(memory_meta, dict) else {}
         client_info = self._client_info
         if isinstance(meta, dict):
-            client_info = ClientInfo.from_meta(meta.get("client_info")) or client_info
+            client_info = ClientInfo.from_meta(meta.get("host_client_info")) or client_info
             session_mode = meta.get("session_mode")
             deep_think = bool(meta.get("deep_think", False))
             execution_profile = normalize_execution_profile(
@@ -2097,7 +2082,7 @@ class BoxACPAgent:
             )
 
             async def _runtime_request(payload: dict[str, Any]) -> dict[str, Any]:
-                send_ext = getattr(self._conn, "ext_method", None) or getattr(self._conn, "extMethod", None)
+                send_ext = getattr(self._conn, "ext_method", None)
                 if send_ext is None:
                     return {"status": "unavailable"}
                 return await send_ext(RUNTIME_ENVIRONMENT_METHOD, {**payload, "sessionId": session_id})
@@ -2373,7 +2358,7 @@ class BoxACPAgent:
         tool_names = [t.name for t in tools]
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
 
-        kwargs: dict[str, Any] = {"sessionId": session_id}
+        kwargs: dict[str, Any] = {"session_id": session_id}
         response_meta: dict[str, Any] = {}
         response_meta["capabilities"] = {
             "session_continuation_versions": [1],
@@ -2613,26 +2598,25 @@ class BoxACPAgent:
             image_context_eligible=result.image_context_eligible,
         )
 
-    async def prompt(self, params: PromptRequest) -> PromptResponse:
+    async def prompt(
+        self, session_id: str, prompt: list[Any], **meta: Any,
+    ) -> PromptResponse:
         self._require_accepting_requests()
-        session_id = params.sessionId
+        params = PromptRequest(session_id=session_id, prompt=prompt, field_meta=meta or None)
         if any(session_id in handles for handles in self._session_bindings_in_progress.values()):
             raise _session_busy_error(session_id, rebinding=True)
         state = self._sessions.get(session_id)
         if not state:
             # Auto-create session if not found (compatibility with clients that skip newSession)
             log.warn("session/prompt", session_id=session_id, message="Session not found, auto-creating")
-            new_session = await self.newSession(
-                NewSessionRequest(
-                    cwd=self._config.agent.workspace_dir or ".",
-                    mcpServers=[],
-                )
+            new_session = await self.new_session(
+                cwd=self._config.agent.workspace_dir or ".", mcp_servers=[],
             )
-            session_id = new_session.sessionId  # use the NEW session id from here on
+            session_id = new_session.session_id  # use the NEW session id from here on
             state = self._sessions.get(session_id)
             if not state:
                 log.error("session/prompt", session_id=session_id, message="Failed to auto-create session")
-                return PromptResponse(stopReason="refusal")
+                return PromptResponse(stop_reason="refusal")
 
         meta = getattr(params, "field_meta", None) or {}
         continuation = meta.get("session_continuation") or meta.get("sessionContinuation")
@@ -2729,7 +2713,7 @@ class BoxACPAgent:
                 await asyncio.gather(suggestions, return_exceptions=True)
             state.follow_up_suggestions_task = None
             # Close mutable session browser resources before restoring durable facts.
-            await close_browser_session(params.sessionId)
+            await close_browser_session(params.session_id)
             for tool in state.agent.tools.values():
                 shutdown = getattr(tool, "shutdown_owned_sessions", None)
                 if callable(shutdown) and getattr(tool, "process_owner_id", ""):
@@ -3632,12 +3616,12 @@ class BoxACPAgent:
         # forget memory extractions that finish after this point are not
         # reflected. See box_agent.llm.token_meter.
         return PromptResponse(
-            stopReason=acp_stop_reason,
+            stop_reason=acp_stop_reason,
             field_meta=response_meta,
         )
 
-    async def cancel(self, params: CancelNotification) -> None:
-        state = self._sessions.get(params.sessionId)
+    async def cancel(self, session_id: str, **meta: Any) -> None:
+        state = self._sessions.get(session_id)
         if state:
             if state._history_edit_in_progress:
                 state._history_cancel_requested = True
@@ -3650,7 +3634,7 @@ class BoxACPAgent:
             pending_suggestions = state.follow_up_suggestions_task
             if pending_suggestions is not None and not pending_suggestions.done():
                 pending_suggestions.cancel()
-            log.info("session/cancel", session_id=params.sessionId, message="Cancel requested")
+            log.info("session/cancel", session_id=session_id, message="Cancel requested")
 
     def _apply_goal_action(self, agent: Agent, params: dict[str, Any]) -> dict[str, Any]:
         action = str(params.get("action") or "get").strip().lower()
@@ -3734,7 +3718,7 @@ class BoxACPAgent:
 
         return {"error": f"unknown_action: {action}"}
 
-    async def extMethod(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
         if method == "request_wrap_up":
             state = self._sessions.get(params.get("sessionId", ""))
@@ -4126,8 +4110,6 @@ class BoxACPAgent:
             injected += 1
         return injected
 
-    ext_method = extMethod
-
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/rewrites).
 
@@ -4150,7 +4132,7 @@ class BoxACPAgent:
         raw_meta = params.get("_meta")
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         client_info = (
-            ClientInfo.from_meta(meta.get("client_info"))
+            ClientInfo.from_meta(meta.get("host_client_info"))
             if isinstance(meta, dict)
             else None
         ) or getattr(self, "_client_info", None)
@@ -5618,7 +5600,7 @@ class BoxACPAgent:
     async def _send(self, session_id: str, update: Any) -> None:
         try:
             await asyncio.wait_for(
-                self._conn.sessionUpdate(session_notification(session_id, update)),
+                self._conn.session_update(session_id=session_id, update=update),
                 timeout=self._SESSION_UPDATE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as exc:
@@ -5626,7 +5608,7 @@ class BoxACPAgent:
                 "session/update_timeout",
                 session_id=session_id,
                 timeout_seconds=self._SESSION_UPDATE_TIMEOUT_SECONDS,
-                update_type=getattr(update, "sessionUpdate", type(update).__name__),
+                update_type=getattr(update, "session_update", type(update).__name__),
             )
             raise TimeoutError(
                 f"ACP session update timed out after {self._SESSION_UPDATE_TIMEOUT_SECONDS:g}s"
@@ -5639,9 +5621,7 @@ class BoxACPAgent:
     ) -> dict[str, Any]:
         """Search the host-owned Skill marketplace without exposing credentials."""
 
-        send_ext = getattr(self._conn, "ext_method", None) or getattr(
-            self._conn, "extMethod", None
-        )
+        send_ext = getattr(self._conn, "ext_method", None)
         if send_ext is None:
             return {"status": "unavailable"}
         request = {
@@ -5669,9 +5649,7 @@ class BoxACPAgent:
     ) -> dict[str, Any]:
         """Ask the authenticated host to install one confirmed market candidate."""
 
-        send_ext = getattr(self._conn, "ext_method", None) or getattr(
-            self._conn, "extMethod", None
-        )
+        send_ext = getattr(self._conn, "ext_method", None)
         if send_ext is None:
             return {"status": "unavailable"}
         request = {
@@ -5698,7 +5676,7 @@ class BoxACPAgent:
 class _PermissionNegotiator:
     """In-band permission negotiation via ACP ``session/request_permission`` reverse RPC.
 
-    Wraps the ACP ``AgentSideConnection.requestPermission()`` call with:
+    Wraps the ACP ``AgentSideConnection.request_permission()`` call with:
     - Grant-table deduplication for filesystem/memory escalation
     - One-shot, non-cached approval for safety confirmations
     - 120-second timeout (timeout treated as denial)
@@ -5821,36 +5799,30 @@ class _PermissionNegotiator:
         from acp.schema import (
             AllowedOutcome,
             PermissionOption,
-            RequestPermissionRequest,
-            ToolCall,
+            ToolCallUpdate,
         )
 
         reason = permission_request.get("reason", "")
         description = reason + (f": {path_hint}" if path_hint else "")
         temporary_supported = permission_request.get("temporary_supported", True) is not False
         persistent_supported = permission_request.get("persistent_supported", True) is not False
-        tool_call = ToolCall(
-            toolCallId=f"perm-{scope}-{requested_scope}",
-            rawInput=permission_request,
+        tool_call = ToolCallUpdate(
+            tool_call_id=f"perm-{scope}-{requested_scope}",
+            raw_input=permission_request,
         )
         options = []
         if temporary_supported:
-            options.append(PermissionOption(optionId="approve", name="仅本次允许", kind="allow_once"))
+            options.append(PermissionOption(option_id="approve", name="仅本次允许", kind="allow_once"))
         if persistent_supported:
             persistent_name = permission_request.get("persistent_label") or "始终允许"
             options.append(
                 PermissionOption(
-                    optionId="approve_session",
+                    option_id="approve_session",
                     name=str(persistent_name),
                     kind="allow_always",
                 )
             )
-        options.append(PermissionOption(optionId="reject", name="拒绝", kind="reject_once"))
-        request = RequestPermissionRequest(
-            sessionId=self._session_id,
-            toolCall=tool_call,
-            options=options,
-        )
+        options.append(PermissionOption(option_id="reject", name="拒绝", kind="reject_once"))
 
         log.info(
             "permission/request",
@@ -5861,7 +5833,9 @@ class _PermissionNegotiator:
 
         try:
             response = await asyncio.wait_for(
-                self._conn.requestPermission(request),
+                self._conn.request_permission(
+                    session_id=self._session_id, tool_call=tool_call, options=options,
+                ),
                 timeout=120.0,
             )
         except asyncio.TimeoutError:
@@ -5877,19 +5851,19 @@ class _PermissionNegotiator:
                 "permission/error",
                 scope=scope,
                 requested_scope=requested_scope,
-                message=f"requestPermission failed: {exc}",
+                message=f"request_permission failed: {exc}",
             )
             return False
 
         if isinstance(response.outcome, AllowedOutcome):
-            if response.outcome.optionId == "reject":
+            if response.outcome.option_id == "reject":
                 log.info(
                     "permission/denied",
                     scope=scope,
                     requested_scope=requested_scope,
                 )
                 return False
-            grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId)
+            grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.option_id)
             if grant_scope is None:
                 return False
             granted = self._store.apply_permission_grant(permission_request, grant_scope)
@@ -5969,16 +5943,12 @@ class _MemoryProposalNegotiator:
             message="Sending memory promotion proposals to host",
         )
 
-        # Resolve outbound extension dispatcher across framework versions.
-        # >= 0.6.x exposes ext_method; older releases exposed extMethod.
-        send_ext = getattr(self._conn, "ext_method", None) or getattr(
-            self._conn, "extMethod", None
-        )
+        send_ext = getattr(self._conn, "ext_method", None)
         if send_ext is None:
             log.warn(
                 "memory/proposal_error",
                 count=len(candidates),
-                message="conn exposes neither ext_method nor extMethod; "
+                message="conn does not expose ext_method; "
                 "host does not support session/memory_proposal",
             )
             return
@@ -6242,26 +6212,6 @@ async def run_acp_server(config: Config | None = None) -> None:
         sys.stdout = _real_stdout
         reader, writer = await stdio_streams_largebuf(on_eof=shutdown_event.set)
 
-        # Windows fix: the ACP dependency's _StdoutTransport.write() resolves
-        # sys.stdout.buffer dynamically at each call.  After re-guarding
-        # (sys.stdout = sys.stderr below), all protocol responses would be
-        # routed to stderr and the client would never receive them.
-        # Pin the real stdout buffer on the transport before re-guard.
-        if platform.system() == "Windows":
-            _stdout_buf = sys.stdout.buffer
-            _win_transport = writer.transport
-
-            def _pinned_write(data: bytes) -> None:
-                if _win_transport._is_closing:
-                    return
-                try:
-                    _stdout_buf.write(data)
-                    _stdout_buf.flush()
-                except Exception:
-                    logging.exception("Error writing to stdout")
-
-            _win_transport.write = _pinned_write  # type: ignore[method-assign]
-
         from box_agent.hooks import load_hooks
         _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
 
@@ -6275,11 +6225,11 @@ async def run_acp_server(config: Config | None = None) -> None:
             )
             return server_adapter
 
-        request_state = RequestStateStore()
         connection = AgentSideConnection(
-            create_adapter, writer, reader, state_store=request_state,
-            sender_factory=request_state.create_sender,
+            create_adapter, StdioTransport(reader, writer, on_disconnect=shutdown_event.set),
         )
+
+        release_received_frames(connection._conn)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         _stderr_print("✅ ACP protocol ready; MCP loading continues in background")

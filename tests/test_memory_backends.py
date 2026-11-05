@@ -1,5 +1,7 @@
 """记忆后端的协议、身份隔离和完整用户轮次回归。"""
 
+from tests.acp_helpers import acp_params
+
 import asyncio
 import hashlib
 import json
@@ -605,7 +607,7 @@ async def test_acp_cancel_stops_memory_preload_and_next_turn_recovers(tmp_path, 
     config.agent = backend_settings(tmp_path, enable_memory_extraction=False)
     llm = DoneLLM()
     host = BoxACPAgent(DummyConn(), config, llm, [], "system")
-    info = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    info = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = host._sessions[info.sessionId]
     original = state.memory_manager.load_context
     started, cleaned = asyncio.Event(), asyncio.Event()
@@ -619,19 +621,19 @@ async def test_acp_cancel_stops_memory_preload_and_next_turn_recovers(tmp_path, 
             cleaned.set()
 
     monkeypatch.setattr(state.memory_manager, "load_context", blocked_context)
-    prompt = asyncio.create_task(host.prompt(SimpleNamespace(
-        sessionId=info.sessionId, field_meta={}, prompt=[{"text": "取消本轮"}])))
+    prompt = asyncio.create_task(host.prompt(**acp_params(SimpleNamespace(
+        sessionId=info.sessionId, field_meta={}, prompt=[{"text": "取消本轮"}]))))
     try:
         await asyncio.wait_for(started.wait(), 1)
-        await host.cancel(SimpleNamespace(sessionId=info.sessionId))
+        await host.cancel(**acp_params(SimpleNamespace(sessionId=info.sessionId)))
         response = await asyncio.wait_for(asyncio.shield(prompt), 0.5)
         assert response.stopReason == "cancelled"
         assert cleaned.is_set()
         assert llm.calls == 0
         assert not [call for call in memory_http.calls if call[0].endswith("/save")]
         monkeypatch.setattr(state.memory_manager, "load_context", original)
-        response = await host.prompt(SimpleNamespace(
-            sessionId=info.sessionId, field_meta={}, prompt=[{"text": "恢复请求"}]))
+        response = await host.prompt(**acp_params(SimpleNamespace(
+            sessionId=info.sessionId, field_meta={}, prompt=[{"text": "恢复请求"}])))
         assert response.stopReason == "end_turn"
         assert llm.calls == 1
     finally:
@@ -685,12 +687,12 @@ async def test_acp_autopilot_saves_latest_user_request_with_session_identity(tmp
     config.agent.enable_memory_extraction = False
     host = BoxACPAgent(DummyConn(), config, GoalAutopilotCompleteLLM(), [], "system")
     try:
-        info = await host.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+        info = await host.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
             "session_mode": "general", "memory": {"tenant_id": "tenant-acp", "user_id": "user-acp"},
             "goal": {"objective": "完成请求", "status": "active"},
-        }))
-        response = await host.prompt(SimpleNamespace(sessionId=info.sessionId, field_meta={"ui_language": "zh"},
-            prompt=[{"text": "此前聊天：旧问题与旧回答\n当前用户问题：真实请求"}]))
+        })))
+        response = await host.prompt(**acp_params(SimpleNamespace(sessionId=info.sessionId, field_meta={"ui_language": "zh"},
+            prompt=[{"text": "此前聊天：旧问题与旧回答\n当前用户问题：真实请求"}])))
         assert response.stopReason == "end_turn"
         assert response.field_meta["goalAutopilot"]["continuations"] == 1
         state = host._sessions[info.sessionId]

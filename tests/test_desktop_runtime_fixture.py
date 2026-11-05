@@ -189,7 +189,6 @@ async def test_request_cleanup_preserves_interleaved_sessions_and_host_permissio
                 "sessionId": handles["a"], "text": "supplement-a", "injectionId": "a-1",
             }))["ok"]
             state = await probe.ext_request("fixture_rpc_state")
-            assert state["incoming_records"] == 0
             assert state["outgoing_requests"] == 2
             assert set(state["sessions"]) == {"a", "b", "c", "d"}
 
@@ -225,7 +224,6 @@ async def test_request_cleanup_preserves_interleaved_sessions_and_host_permissio
                 assert response["stopReason"] == "end_turn"
 
             state = await probe.ext_request("fixture_rpc_state")
-            assert state["incoming_records"] == state["outgoing_requests"] == 0
             assert len(state["sessions"]) == 4
             for product, session in state["sessions"].items():
                 assert session["handle"] == handles[product]

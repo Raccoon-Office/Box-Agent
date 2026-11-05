@@ -1,5 +1,7 @@
 """ACP cancellation interrupts provider waits without restarting shared runtime."""
 
+from tests.acp_helpers import acp_params
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -40,7 +42,7 @@ async def test_acp_cancel_wakes_stalled_model_and_keeps_sessions_usable(tmp_path
             yield StreamEvent(type="finish", finish_reason="stop")
 
     class Conn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             pass
 
     config = Config(
@@ -49,11 +51,11 @@ async def test_acp_cancel_wakes_stalled_model_and_keeps_sessions_usable(tmp_path
         tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
     )
     agent = BoxACPAgent(Conn(), config, Model(), [], "system")
-    first = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
-    second = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    first = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
+    second = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
 
     async def prompt(session_id):
-        return await agent.prompt(SimpleNamespace(sessionId=session_id, prompt=[{"text": "hello"}]))
+        return await agent.prompt(**acp_params(SimpleNamespace(sessionId=session_id, prompt=[{"text": "hello"}])))
 
     pending = asyncio.create_task(prompt(first.sessionId))
     other_pending = None
@@ -61,7 +63,7 @@ async def test_acp_cancel_wakes_stalled_model_and_keeps_sessions_usable(tmp_path
         await asyncio.wait_for(started.wait(), 2)
         other_pending = asyncio.create_task(prompt(second.sessionId))
         await asyncio.wait_for(other_started.wait(), 2)
-        await agent.cancel(SimpleNamespace(sessionId=first.sessionId))
+        await agent.cancel(**acp_params(SimpleNamespace(sessionId=first.sessionId)))
         response = await asyncio.wait_for(asyncio.shield(pending), 1)
         assert response.stopReason == "cancelled"
         assert closed.is_set()
@@ -122,7 +124,7 @@ async def test_acp_cancel_chunk_race_waits_for_http_cleanup(
         )
 
     class Conn:
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
             pass
 
     llm = LLMClient(
@@ -138,7 +140,7 @@ async def test_acp_cancel_chunk_race_waits_for_http_cleanup(
             tools=ToolsConfig(enable_sub_agent=False, enable_mcp=False),
         )
         agent = BoxACPAgent(Conn(), config, llm, [], "system")
-        session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+        session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
         agent._sessions[session.sessionId].follow_up_suggestions_enabled = suggestions_enabled
         real_wait = asyncio.wait
 
@@ -152,13 +154,13 @@ async def test_acp_cancel_chunk_race_waits_for_http_cleanup(
             # Complete the read before cancelling, so cleanup must traverse
             # suspended wrappers rather than propagate through a pending read.
             await real_wait(tasks, **kwargs)
-            await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
+            await agent.cancel(**acp_params(SimpleNamespace(sessionId=session.sessionId)))
             return await real_wait(tasks)
 
         monkeypatch.setattr(stream_controller.asyncio, "wait", complete_read_and_cancel)
-        pending = asyncio.create_task(agent.prompt(SimpleNamespace(
+        pending = asyncio.create_task(agent.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId, prompt=[{"text": "hello"}],
-        )))
+        ))))
         try:
             # Cold session/provider startup is separate from the cleanup deadline.
             await asyncio.wait_for(stream_started.wait(), 10)

@@ -1,5 +1,7 @@
 """Deliverable-language hint: only for clearly non-Chinese requests."""
 
+from tests.acp_helpers import acp_params
+
 import pytest
 
 from box_agent.turn_language import deliverable_language_hint, request_language, with_deliverable_language_hint
@@ -49,10 +51,10 @@ async def test_acp_prompt_places_hint_beside_the_user_request(tmp_path, text, hi
                     agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)), tools=ToolsConfig())
     llm = CaptureMessagesLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
 
-    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}],
-                                       field_meta={"ui_language": "zh"}))
+    await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}],
+                                       field_meta={"ui_language": "zh"})))
 
     [user_message] = [content for role, content in llm.calls[0] if role == "user"]
     assert user_message.startswith("[Host UI language: Chinese.")

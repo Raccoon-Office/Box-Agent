@@ -1,3 +1,5 @@
+
+from tests.acp_helpers import acp_params
 from types import SimpleNamespace
 
 import pytest
@@ -124,7 +126,7 @@ def test_scoped_client_info_does_not_leak_after_request_scope() -> None:
 
 
 class _DummyConn:
-    async def sessionUpdate(self, _payload) -> None:
+    async def session_update(self, session_id, update, **meta) -> None:
         return None
 
 
@@ -154,24 +156,24 @@ async def test_acp_session_inherits_client_info_from_initialize(tmp_path) -> Non
     llm = _ClientHeaderCaptureLLM()
     agent = BoxACPAgent(_DummyConn(), config, llm, [], "system")
     await agent.initialize(
-        SimpleNamespace(
-            field_meta={
-                "client_info": {
+        **acp_params(SimpleNamespace(
+            protocolVersion=1, field_meta={
+                "host_client_info": {
                     "name": "raccoon-ai",
                     "platform": "desktop-linux-arm64",
                     "version": "v0.21.1",
                 }
             }
-        )
+        ))
     )
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={})))
 
     await agent.prompt(
-        SimpleNamespace(
+        **acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{"text": "hello"}],
             field_meta={},
-        )
+        ))
     )
 
     assert llm.headers == {

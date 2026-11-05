@@ -1,5 +1,8 @@
 """Large history restoration must preserve state without blocking ACP control."""
 
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
+
 import asyncio
 import threading
 from pathlib import Path
@@ -20,7 +23,8 @@ class Connection:
     def __init__(self):
         self.updates = []
 
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
+        payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
         self.updates.append(payload)
 
 
@@ -175,7 +179,7 @@ async def test_acp_reuses_validated_history_and_refreshes_crash_repair(
     monkeypatch.setattr(SessionLog, "replay", replay)
     monkeypatch.setattr(SessionLog, "events", property(forbid_snapshot))
     try:
-        response = await host.newSession(request(tmp_path, "restore"))
+        response = await host.new_session(**acp_params(request(tmp_path, "restore")))
         state = host._sessions[response.sessionId]
         assert response.field_meta["history_revision_id"] == "initial"
         assert state.continuation_applied
@@ -194,10 +198,10 @@ async def test_acp_reuses_validated_history_and_refreshes_crash_repair(
             # Exercise the RPC's binding and response metadata independently
             # of the tool engine's separate history consumers.
             monkeypatch.setattr(host, "_run_turn", finish_turn)
-            result = await host.prompt(SimpleNamespace(
+            result = await host.prompt(**acp_params(SimpleNamespace(
                 sessionId=response.sessionId, prompt=[{"text": "follow-up"}],
                 field_meta={"turn_id": "next"},
-            ))
+            )))
             assert result.field_meta["history_revision_id"] == "initial"
     finally:
         await host.aclose()
@@ -210,7 +214,7 @@ async def test_slow_restore_keeps_control_responsive_and_owns_lock_until_worker_
     tmp_path, monkeypatch, host, phase, cancel,
 ):
     stored_session(tmp_path)
-    control = await host.newSession(request(tmp_path, "control"))
+    control = await host.new_session(**acp_params(request(tmp_path, "control")))
     entered, release = threading.Event(), threading.Event()
     original = (SessionLog.open_with_projection if phase == "open"
                 else SessionLog.prepare_resume_projection)
@@ -226,12 +230,12 @@ async def test_slow_restore_keeps_control_responsive_and_owns_lock_until_worker_
         monkeypatch.setattr(SessionLog, "open_with_projection", staticmethod(slow))
     else:
         monkeypatch.setattr(SessionLog, "prepare_resume_projection", slow)
-    pending = asyncio.create_task(host.newSession(request(tmp_path, "restore")))
+    pending = asyncio.create_task(host.new_session(**acp_params(request(tmp_path, "restore"))))
     closing = None
     try:
         assert await asyncio.to_thread(entered.wait, 2)
         await asyncio.wait_for(host._send(control.sessionId, update_agent_message(text_block("control"))), 0.5)
-        await asyncio.wait_for(host.cancel(SimpleNamespace(sessionId=control.sessionId)), 0.5)
+        await asyncio.wait_for(host.cancel(**acp_params(SimpleNamespace(sessionId=control.sessionId))), 0.5)
         assert host._conn.updates
         if cancel:
             pending.cancel()
@@ -242,7 +246,7 @@ async def test_slow_restore_keeps_control_responsive_and_owns_lock_until_worker_
             assert not pending.done()
             assert not closing.done()
             with pytest.raises(RequestError):
-                await host.newSession(request(tmp_path, "restore"))
+                await host.new_session(**acp_params(request(tmp_path, "restore")))
             with pytest.raises(SessionLogInUseError):
                 SessionLog.open(tmp_path / "profile" / "sessions", session_id="restore", cwd=tmp_path)
         release.set()
@@ -275,7 +279,7 @@ async def test_cancelled_failed_restore_releases_writer_for_retry(tmp_path, monk
         raise OSError("restore read failed")
 
     monkeypatch.setattr(SessionLog, "replay", fail_replay)
-    pending = asyncio.create_task(host.newSession(request(tmp_path, "restore")))
+    pending = asyncio.create_task(host.new_session(**acp_params(request(tmp_path, "restore"))))
     try:
         assert await asyncio.to_thread(entered.wait, 2)
         pending.cancel()
@@ -284,7 +288,7 @@ async def test_cancelled_failed_restore_releases_writer_for_retry(tmp_path, monk
         with pytest.raises(asyncio.CancelledError):
             await pending
         monkeypatch.setattr(SessionLog, "replay", original)
-        assert (await host.newSession(request(tmp_path, "restore"))).sessionId
+        assert (await host.new_session(**acp_params(request(tmp_path, "restore")))).sessionId
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)

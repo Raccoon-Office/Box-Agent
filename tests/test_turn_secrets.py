@@ -1,5 +1,7 @@
 """Credential notice: narrow detection, masked output, placed after the user's words."""
 
+from tests.acp_helpers import acp_params
+
 import pytest
 
 from box_agent.turn_hints import turn_hints, with_turn_hints
@@ -64,10 +66,10 @@ async def test_acp_prompt_places_credential_notice_after_the_request(tmp_path):
                     agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)), tools=ToolsConfig())
     llm = CaptureMessagesLLM()
     agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
-    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})))
     text = f"帮我看下这个 API key 格式对不对：{KEY}"
 
-    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}], field_meta={}))
+    await agent.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": text}], field_meta={})))
 
     [user_message] = [content for role, content in llm.calls[0] if role == "user"]
     assert user_message.startswith(text)

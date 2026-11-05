@@ -7,6 +7,9 @@ wire 格式，但底层共享 core/tool 行为仍可能一致。
 > ACP 入口：`box-agent-acp` 走 stdio JSON-RPC。
 > 公共扩展点：`session/new._meta`（一次性配置）、`session/prompt._meta`（每轮可变）、`update_tool_call.rawOutput`（结构化产物）。
 
+SDK 0.12.1 与配套 Lab 的接口、生命周期约束和回归矩阵见
+[ACP SDK 0.12 对接与验证](integration/acp-sdk-0.12.md)。
+
 ---
 
 ## 协议清单

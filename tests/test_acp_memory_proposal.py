@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.acp_helpers import acp_params
+
 import asyncio
 import threading
 from pathlib import Path
@@ -18,7 +20,7 @@ from tests.test_memory_promotion import _entry  # reuse helper
 
 
 class DummyConn:
-    async def sessionUpdate(self, payload):
+    async def session_update(self, session_id, update, **meta):
         pass
 
 
@@ -148,9 +150,9 @@ async def test_session_recall_only_reuses_unchanged_core_while_memory_is_busy(tm
     try:
         assert await asyncio.to_thread(transaction_acquired.wait, 2.0)
         session = await asyncio.wait_for(
-            agent.newSession(SimpleNamespace(
+            agent.new_session(**acp_params(SimpleNamespace(
                 cwd=str(tmp_path), field_meta={"session_mode": "general"},
-            )),
+            ))),
             timeout=3.0,
         )
         assert not release_transaction.is_set()
@@ -226,7 +228,7 @@ async def test_memory_proposal_list_include_plan_attaches_plan(
 
     monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_list", {"sessionId": "", "includePlan": True}
     )
 
@@ -258,7 +260,7 @@ async def test_memory_proposal_list_include_plan_default_off(
 
     monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
 
-    result = await agent.extMethod("memory_proposal_list", {"sessionId": ""})
+    result = await agent.ext_method("memory_proposal_list", {"sessionId": ""})
 
     assert "plan" not in result
     assert called is False
@@ -276,7 +278,7 @@ async def test_memory_proposal_list_include_plan_planner_failure_yields_no_plan(
 
     monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_list", {"sessionId": "", "includePlan": True}
     )
 
@@ -298,7 +300,7 @@ async def test_memory_proposal_list_include_plan_no_candidates_skips_planner(
 
     monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_list", {"sessionId": "", "includePlan": True}
     )
 
@@ -401,7 +403,7 @@ async def test_memory_proposal_apply_plan_apply_overwrites_core(tmp_path: Path):
     write_context_file(mgr.context_file, [a, b])
     mgr.write_core("- old core")
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",
@@ -430,7 +432,7 @@ async def test_memory_proposal_apply_plan_reject_marks_candidates(tmp_path: Path
     write_context_file(mgr.context_file, [a, b])
     mgr.write_core("- untouched core")
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",
@@ -461,7 +463,7 @@ async def test_memory_proposal_apply_plan_skip_is_noop(tmp_path: Path):
     mgr.write_core("- core stays")
     before = {e.id: e.core_status for e in mgr._read_context_entries()}
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",
@@ -486,7 +488,7 @@ async def test_memory_proposal_apply_plan_invalid_decision(tmp_path: Path):
     a = _entry("- A", hits=10)
     write_context_file(mgr.context_file, [a])
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",
@@ -506,7 +508,7 @@ async def test_memory_proposal_apply_plan_invalid_decision(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_memory_proposal_apply_plan_missing_consumed_ids(tmp_path: Path):
     agent, _ = _make_agent(tmp_path)
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",
@@ -528,7 +530,7 @@ async def test_memory_proposal_apply_plan_apply_with_empty_new_core(tmp_path: Pa
     a = _entry("- A", hits=10)
     write_context_file(mgr.context_file, [a])
 
-    result = await agent.extMethod(
+    result = await agent.ext_method(
         "memory_proposal_apply",
         {
             "sessionId": "",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+
+
 import asyncio
 from typing import Any
 
@@ -203,12 +205,12 @@ async def test_lightweight_cancellation_propagates():
 
 
 # ---------------------------------------------------------------------------
-# ACP extMethod integration
+# ACP ext_method integration
 # ---------------------------------------------------------------------------
 
 
 class _StubAgent:
-    """Bare BoxACPAgent surface for exercising extMethod without ACP wiring."""
+    """Bare BoxACPAgent surface for exercising ext_method without ACP wiring."""
 
     def __init__(self, llm: _FakeLLM):
         self._llm = llm
@@ -218,7 +220,7 @@ class _StubAgent:
     # Bind the real implementation as if it were a method on this stub.
     from box_agent.acp import BoxACPAgent
 
-    extMethod = BoxACPAgent.extMethod
+    ext_method = BoxACPAgent.ext_method
     _llm_prompt = BoxACPAgent._llm_prompt
     _llm_for_binding = BoxACPAgent._llm_for_binding
     _utility_llm_for_meta = BoxACPAgent._utility_llm_for_meta
@@ -232,7 +234,7 @@ async def test_extmethod_llm_prompt_success():
     )
     agent = _StubAgent(llm)
 
-    resp = await agent.extMethod(
+    resp = await agent.ext_method(
         "llm/prompt",
         {
             "prompt": "give me a title",
@@ -269,7 +271,7 @@ async def test_extmethod_title_prompt_caps_output_at_eight_thousand_tokens(monke
         fake_resolve_model_client,
     )
 
-    resp = await agent.extMethod(
+    resp = await agent.ext_method(
         "llm/prompt",
         {
             "prompt": "give me a title",
@@ -284,7 +286,7 @@ async def test_extmethod_title_prompt_caps_output_at_eight_thousand_tokens(monke
 @pytest.mark.asyncio
 async def test_extmethod_llm_prompt_empty_returns_error():
     agent = _StubAgent(_FakeLLM())
-    resp = await agent.extMethod("llm/prompt", {"prompt": ""})
+    resp = await agent.ext_method("llm/prompt", {"prompt": ""})
 
     assert "error" in resp
     assert resp["error"]["code"] == "invalid_args"
@@ -293,7 +295,7 @@ async def test_extmethod_llm_prompt_empty_returns_error():
 @pytest.mark.asyncio
 async def test_extmethod_llm_prompt_bad_timeout_returns_error():
     agent = _StubAgent(_FakeLLM())
-    resp = await agent.extMethod(
+    resp = await agent.ext_method(
         "llm/prompt", {"prompt": "hi", "timeoutMs": "not-a-number"}
     )
 
@@ -303,7 +305,7 @@ async def test_extmethod_llm_prompt_bad_timeout_returns_error():
 @pytest.mark.asyncio
 async def test_extmethod_llm_prompt_timeout_returns_error():
     agent = _StubAgent(_FakeLLM(delay=0.2))
-    resp = await agent.extMethod("llm/prompt", {"prompt": "hi", "timeoutMs": 10})
+    resp = await agent.ext_method("llm/prompt", {"prompt": "hi", "timeoutMs": 10})
 
     assert resp["error"]["code"] == "timeout"
 
@@ -314,7 +316,7 @@ async def test_extmethod_llm_prompt_content_filter_returns_code():
     can fall back to a neutral default (e.g. a generic title)."""
     blob = "Error code: 400 - {'error': {'code': 'content_filter', 'message': 'x'}}"
     agent = _StubAgent(_FakeLLM(raises=RuntimeError(blob)))
-    resp = await agent.extMethod(
+    resp = await agent.ext_method(
         "llm/prompt",
         {"prompt": "习明泽 怎么了", "_meta": {"purpose": "local_agent_title"}},
     )
@@ -332,6 +334,6 @@ async def test_extmethod_llm_prompt_does_not_create_session():
     agent = _StubAgent(llm)
     # _sessions isn't even attached to the stub — if the impl reached for it,
     # we'd get an AttributeError.
-    resp = await agent.extMethod("llm/prompt", {"prompt": "hi"})
+    resp = await agent.ext_method("llm/prompt", {"prompt": "hi"})
     assert resp.get("text") == "ok"
     assert not hasattr(agent, "_sessions")

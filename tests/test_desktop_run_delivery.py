@@ -1,4 +1,7 @@
 """Public desktop adapter paths exercise bounded shared delivery."""
+
+from tests.acp_helpers import acp_params
+from acp.schema import RequestPermissionRequest, SessionNotification
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,7 +36,7 @@ async def make_adapter(tmp_path, monkeypatch, kernel, conn, **limits):
                           enable_skills=False),
     )
     adapter = acp_module.BoxACPAgent(conn, config, DoneLLM(), [], "system")
-    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"}))
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})))
     request = SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
     return adapter, request
 
@@ -51,14 +54,15 @@ class BurstKernel:
 @pytest.mark.asyncio
 async def test_slow_acp_send_preserves_all_events_with_small_buffer(tmp_path, monkeypatch):
     class SlowConn(DummyConn):
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             await asyncio.sleep(0)
-            await super().sessionUpdate(payload)
+            await super().session_update(**acp_params(payload))
 
     conn = SlowConn()
     adapter, request = await make_adapter(tmp_path, monkeypatch, BurstKernel, conn, max_events=2)
     try:
-        response = await asyncio.wait_for(adapter.prompt(request), 5)
+        response = await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         assert response.stopReason == "end_turn"
         texts = [p.update.content.text for p in conn.updates
                  if getattr(p.update, "sessionUpdate", "") == "agent_message_chunk"]
@@ -77,7 +81,8 @@ async def test_acp_permission_reverse_request_settles_on_response_or_cancel(tmp_
     decisions = []
 
     class PermissionConn(DummyConn):
-        async def requestPermission(self, request):
+        async def request_permission(self, session_id, tool_call, options, **meta):
+            request = RequestPermissionRequest(session_id=session_id, tool_call=tool_call, options=options, field_meta=meta or None)
             assert request.sessionId
             asked.set()
             try:
@@ -95,11 +100,11 @@ async def test_acp_permission_reverse_request_settles_on_response_or_cancel(tmp_
             yield DoneEvent(stop_reason=StopReason.CANCELLED if cancel else StopReason.END_TURN, final_content="")
 
     adapter, request = await make_adapter(tmp_path, monkeypatch, PermissionKernel, PermissionConn(), max_events=1)
-    task = asyncio.create_task(adapter.prompt(request))
+    task = asyncio.create_task(adapter.prompt(**acp_params(request)))
     try:
         await asyncio.wait_for(asked.wait(), 5)
         if cancel:
-            await adapter.cancel(SimpleNamespace(sessionId=request.sessionId))
+            await adapter.cancel(**acp_params(SimpleNamespace(sessionId=request.sessionId)))
         else:
             released.set()
         response = await asyncio.wait_for(task, 5)
@@ -122,7 +127,7 @@ async def test_acp_oversized_delivery_raises_instead_of_normal_completion(tmp_pa
     adapter, request = await make_adapter(tmp_path, monkeypatch, LargeKernel, DummyConn(), max_bytes=512)
     try:
         with pytest.raises(EventTooLargeError):
-            await asyncio.wait_for(adapter.prompt(request), 5)
+            await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         handle = adapter._sessions[request.sessionId]._run_handle
         assert (await handle.result()).error["code"] == "RUN_EVENT_TOO_LARGE"
         assert not handle.is_active
@@ -135,18 +140,19 @@ async def test_acp_cancel_wakes_producer_while_host_send_is_blocked(tmp_path, mo
     sending, release = asyncio.Event(), asyncio.Event()
 
     class BlockedConn(DummyConn):
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             if getattr(payload.update, "sessionUpdate", "") == "agent_message_chunk":
                 sending.set()
                 await release.wait()
-            await super().sessionUpdate(payload)
+            await super().session_update(**acp_params(payload))
 
     adapter, request = await make_adapter(tmp_path, monkeypatch, BurstKernel, BlockedConn(), max_events=1)
-    task = asyncio.create_task(adapter.prompt(request))
+    task = asyncio.create_task(adapter.prompt(**acp_params(request)))
     try:
         await asyncio.wait_for(sending.wait(), 5)
         handle = adapter._sessions[request.sessionId]._run_handle
-        await adapter.cancel(SimpleNamespace(sessionId=request.sessionId))
+        await adapter.cancel(**acp_params(SimpleNamespace(sessionId=request.sessionId)))
         result = await asyncio.wait_for(handle.result(), 1)
         assert result.status == "cancelled"
         release.set()
@@ -163,15 +169,16 @@ async def test_acp_cancel_wakes_producer_while_host_send_is_blocked(tmp_path, mo
 async def test_acp_send_failure_does_not_return_normal_completion(tmp_path, monkeypatch):
     send_error = TimeoutError("simulated host send timeout")
     class FailedConn(DummyConn):
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             if getattr(payload.update, "sessionUpdate", "") == "agent_message_chunk":
                 raise send_error
-            await super().sessionUpdate(payload)
+            await super().session_update(**acp_params(payload))
 
     adapter, request = await make_adapter(tmp_path, monkeypatch, BurstKernel, FailedConn(), max_events=1)
     try:
         with pytest.raises(TimeoutError) as caught:
-            await asyncio.wait_for(adapter.prompt(request), 5)
+            await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         # Python 3.11 aliases asyncio.TimeoutError to the built-in class, so
         # _send wraps this error there; 3.10 propagates the original instance.
         if asyncio.TimeoutError is TimeoutError:
@@ -189,19 +196,20 @@ async def test_acp_blocked_send_times_out_and_stops_run(tmp_path, monkeypatch):
     send_cancelled = asyncio.Event()
 
     class BlockedConn(DummyConn):
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             if getattr(payload.update, "sessionUpdate", "") == "agent_message_chunk":
                 try:
                     await asyncio.Event().wait()
                 finally:
                     send_cancelled.set()
-            await super().sessionUpdate(payload)
+            await super().session_update(**acp_params(payload))
 
     adapter, request = await make_adapter(tmp_path, monkeypatch, BurstKernel, BlockedConn(), max_events=1)
     monkeypatch.setattr(adapter, "_SESSION_UPDATE_TIMEOUT_SECONDS", 0.05)
     try:
         with pytest.raises(TimeoutError, match="ACP session update timed out after 0.05s"):
-            await asyncio.wait_for(adapter.prompt(request), 5)
+            await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         assert send_cancelled.is_set()
         assert not adapter._sessions[request.sessionId]._run_handle.is_active
     finally:
@@ -235,7 +243,7 @@ async def test_acp_reports_post_done_cleanup_failure_and_can_run_again(
 
     adapter, request = await make_adapter(tmp_path, monkeypatch, CleanupKernel, DummyConn())
     try:
-        response = await asyncio.wait_for(adapter.prompt(request), 5)
+        response = await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         handle = adapter._sessions[request.sessionId]._run_handle
         assert cleanup_started.is_set()
         assert not handle.is_active
@@ -247,7 +255,7 @@ async def test_acp_reports_post_done_cleanup_failure_and_can_run_again(
         assert response.field_meta["lastStopReason"] == "error"
         assert response.field_meta["error"] == "post-Done cleanup failed"
 
-        recovered = await asyncio.wait_for(adapter.prompt(request), 5)
+        recovered = await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         assert recovered.stopReason == "end_turn"
         assert recovered.field_meta["ok"] is True
         assert recovered.field_meta["completed"] is True
@@ -279,7 +287,7 @@ async def test_acp_closes_pending_cleanup_and_preserves_terminal_reason(
 
     adapter, request = await make_adapter(tmp_path, monkeypatch, ClosingKernel, DummyConn())
     try:
-        response = await asyncio.wait_for(adapter.prompt(request), 5)
+        response = await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         assert cleanup_cancelled.is_set()
         assert not adapter._sessions[request.sessionId]._run_handle.is_active
         assert response.stopReason == acp_reason
@@ -298,7 +306,7 @@ async def test_acp_reports_missing_terminal_event_as_failure(tmp_path, monkeypat
 
     adapter, request = await make_adapter(tmp_path, monkeypatch, MissingDoneKernel, DummyConn())
     try:
-        response = await asyncio.wait_for(adapter.prompt(request), 5)
+        response = await asyncio.wait_for(adapter.prompt(**acp_params(request)), 5)
         assert response.field_meta["ok"] is False
         assert response.field_meta["completed"] is False
         assert response.field_meta["runStatus"] == "error"

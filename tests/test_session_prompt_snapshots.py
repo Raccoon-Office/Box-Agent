@@ -16,6 +16,8 @@ Regenerate after an intentional change with::
 
 from __future__ import annotations
 
+from tests.acp_helpers import acp_params
+
 import datetime as dt
 import os
 import re
@@ -438,7 +440,7 @@ async def test_skill_sourcing_rule_is_stated_once(tmp_path, marketplace):
                     tools=ToolsConfig(enable_mcp=False, enable_skills=False))
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], _template())
     meta = {"host_capabilities": {"skillhub_search": 1}} if marketplace else {}
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta=meta))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta=meta)))
     prompt = agent._sessions[session.sessionId].agent.system_prompt
 
     assert ("search_skillhub" in agent._sessions[session.sessionId].agent.tools) is marketplace
@@ -461,7 +463,7 @@ async def test_supplied_marketplace_tool_retains_source_and_denial_rules(tmp_pat
                     agent=AgentConfig(workspace_dir=str(tmp_path), enable_memory=False),
                     tools=ToolsConfig(enable_mcp=False, enable_skills=False))
     agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [SkillHubSearchTool(searcher)], _template())
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={}))
+    session = await agent.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={})))
     state = agent._sessions[session.sessionId]
     assert 'search_skillhub' in state.agent.tools
     assert state.agent.system_prompt.count('不得绕过用户已拒绝的安装授权') == 1

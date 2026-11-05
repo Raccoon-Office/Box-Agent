@@ -1,4 +1,7 @@
 """Producer receipts coexist with parallel scripts and version-checked host history."""
+
+from tests.acp_helpers import acp_params
+from acp.schema import SessionNotification
 import asyncio
 import base64
 import hashlib
@@ -332,7 +335,8 @@ def test_native_write_replaces_fifo_without_blocking_for_optional_evidence(tmp_p
 async def test_acp_wire_binds_actual_write_to_its_original_tool_and_turn(tmp_path):
     class Connection:
         updates = []
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             self.updates.append(payload.update)
     class Model:
         calls = 0
@@ -353,10 +357,10 @@ async def test_acp_wire_binds_actual_write_to_its_original_tool_and_turn(tmp_pat
                     tools=ToolsConfig(enable_sub_agent=False))
     conn = Connection()
     adapter = BoxACPAgent(conn, config, Model(), [], 'system')
-    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         'session_mode': 'code_agent', 'session_id': 'host-session',
-    }))
-    response = await adapter.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{'text': 'write'}], field_meta={}))
+    })))
+    response = await adapter.prompt(**acp_params(SimpleNamespace(sessionId=session.sessionId, prompt=[{'text': 'write'}], field_meta={})))
     assert response.field_meta['ok'] is True
     start = next(u for u in conn.updates if u.sessionUpdate == 'tool_call' and u.toolCallId == 'writer')
     finish = next(u for u in conn.updates if u.sessionUpdate == 'tool_call_update' and
@@ -395,7 +399,8 @@ async def test_acp_native_revisions_keep_delivery_policy_without_workspace_snaps
         def __init__(self):
             self.updates = []
 
-        async def sessionUpdate(self, payload):
+        async def session_update(self, session_id, update, **meta):
+            payload = SessionNotification(session_id=session_id, update=update, field_meta=meta or None)
             self.updates.append(payload.update)
 
     class Model:
@@ -430,20 +435,20 @@ async def test_acp_native_revisions_keep_delivery_policy_without_workspace_snaps
     )
     conn = Connection()
     adapter = BoxACPAgent(conn, config, Model(), [], 'system')
-    session = await adapter.newSession(SimpleNamespace(cwd=str(tmp_path), field_meta={
+    session = await adapter.new_session(**acp_params(SimpleNamespace(cwd=str(tmp_path), field_meta={
         'session_mode': 'code_agent', 'session_id': 'host-session',
-    }))
+    })))
     original_agent = adapter._sessions[session.sessionId].agent
     if tool_name == 'append_file':
         activated = await original_agent.tools['tool_search'].invoke({'tool_names': [tool_name]})
         assert activated.success
     for revision in (1, 2):
         offset = len(conn.updates)
-        response = await adapter.prompt(SimpleNamespace(
+        response = await adapter.prompt(**acp_params(SimpleNamespace(
             sessionId=session.sessionId,
             prompt=[{'text': 'revise the report'}],
             field_meta={'task_id': f'task-{revision}', 'turn_id': f'turn-{revision}'},
-        ))
+        )))
         assert response.field_meta['ok'] is True
         assert adapter._sessions[session.sessionId].agent is original_agent
         writes = [
